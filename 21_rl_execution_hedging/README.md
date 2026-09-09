@@ -41,7 +41,7 @@ This section presents execution as the cleanest institutional RL use case. It fr
 
 This section shows why market making is a natural RL problem: quoting decisions must continuously balance spread capture, inventory risk, and adverse selection. The classical Avellaneda-Stoikov benchmark gives readers a principled reference point, while the RL framing shows how adaptive quoting can respond to richer market states without fully specified analytical assumptions. The section works best as an illustration of learned inventory-aware behavior rather than a claim that the learned policy already dominates analytical baselines.
 
-- [`market_making_ppo`](03_market_making_ppo.ipynb) — Trains a PPO agent to choose a quote skew and a spread width against three reservation-price rules that already encode the inventory response, so the comparison asks what learning the response adds to writing it down. Fills arrive with a probability that falls with distance from the mid, which is where the spread-versus-fill-rate trade-off comes from.
+- [`market_making_ppo`](03_market_making_ppo.ipynb) — Trains a PPO agent to choose a quote skew and a spread width against three fixed rules. The environment centres every quote on the reservation price, the agent's and the rules' alike, so what the comparison isolates is what a learned skew and an adaptive spread width add to an inventory response that is already programmed in. Fills arrive with a probability that falls with distance from the mid, which is where the spread-versus-fill-rate trade-off comes from.
 
 ### 21.6 Application III: Deep Hedging for Derivatives
 

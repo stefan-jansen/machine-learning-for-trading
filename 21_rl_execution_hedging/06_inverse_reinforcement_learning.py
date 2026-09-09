@@ -1237,17 +1237,19 @@ maxent_top_feature, maxent_top_weight = maxent_sorted[0]
 feature_top_feature, feature_top_weight = feature_match_sorted[0]
 display(
     Markdown(f"""
-**Every fitted policy lands within a couple of standard errors of the expert.** Against it, on
-{N_EVALUATION_EPISODES} paired episodes:
+**Every fitted policy lands within a couple of standard errors of the expert on cost.** Against
+it, on {N_EVALUATION_EPISODES} paired episodes:
 
 {gap_lines}
 
-Read that as a fact about this demonstrator rather than about these methods. TWAP's action is
-the reference pace at every step, so a behaviour clone has one number to learn, and the states
-it visits while driving are the states the demonstrations already cover. Distribution shift -
-a clone's own errors carrying it into states the demonstrations never contained, where the
-next error is larger - is the characteristic failure of behaviour cloning, and on a constant
-demonstrator it has nothing to bite on. A harder expert is what would separate these columns.
+That is a comparison of costs and nothing more. In particular it does not show that the clones
+stayed inside the states the demonstrations covered. A clone that predicts a slightly different
+pace trades a slightly different quantity, which moves the inventory its next observation
+reports, so it can leave the demonstrated distribution however small the cost gap turns out to
+be; showing that it did not would take a measurement of state coverage, and this notebook does
+not make one. What can be said about the demonstrator is that it is nearly constant - the
+reference pace at every step, the conversion's maximum on the last - which leaves a clone
+little to get wrong and these columns little to separate.
 
 **An inferred reward is a statement about covariance, not about preference.** The
 maximum-entropy fit puts its largest coefficient on **{maxent_top_feature}**

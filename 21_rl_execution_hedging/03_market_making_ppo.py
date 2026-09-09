@@ -30,8 +30,11 @@
 # This notebook trains a PPO agent to make that trade-off by choosing, at each
 # step, how far to shift its quotes away from the mid price and how wide to make
 # them. It is compared against three fixed rules that already encode the
-# textbook inventory response, so the question the comparison answers is narrow
-# and answerable: does learning the response add anything to writing it down?
+# textbook inventory response. The environment applies that response to every
+# quote it prices, the agent's and the rules' alike, so what the comparison
+# isolates is narrow and answerable: what does a learned skew, and a spread
+# width that can change during the episode, add to an inventory response that is
+# already programmed in?
 #
 # ## Learning objectives
 #
@@ -735,19 +738,38 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# ## 7. The inventory response
+# ## 7. Which part of the inventory response is the policy's
 #
-# Pooling every evaluation episode shows how the quote centre moves with
-# inventory across the whole range the policy visits, rather than on the single
-# path above. The offset has to be read against the inventory held **when the
-# quote was posted**, not the position on the same row after the fills: the
-# latter is that inventory plus whatever the quote went on to trade, so plotting
-# against it would build part of the answer into the x-axis.
+# `compute_quotes` centres every quote on the reservation price, for the agent
+# and for the three fixed rules alike, so a quote centre that moves against
+# inventory is the environment doing what the reservation price says and not
+# evidence of anything learned. The agent's own contribution is the skew it adds
+# on top,
+#
+# $$\text{quote centre} - \text{reservation price}
+#   = a_{\text{skew}} \cdot \tfrac{1}{4}\, \sigma_t \, p_t$$
+#
+# which is zero whenever it picks the middle skew level. Both are plotted below:
+# the total offset, which is what the market sees, and the skew component, which
+# is the part a fixed rule would leave flat at zero.
+#
+# Either is read against the inventory held **when the quote was posted**, not
+# the position on the same row after the fills: the latter is that inventory
+# plus whatever the quote went on to trade, so plotting against it would build
+# part of the answer into the x-axis.
 
 # %%
 policy_df = pl.DataFrame(
     [
-        {"inventory": h["quote_inventory"], "quote_offset_bps": h["quote_offset_bps"]}
+        {
+            "inventory": h["quote_inventory"],
+            "quote_offset_bps": h["quote_offset_bps"],
+            # The skew the agent chose, in the same units: the quote centre
+            # measured from the reservation price the environment supplied.
+            "skew_bps": (h["quote_center"] - h["reservation_price"])
+            / max(h["mid_price"], 1e-6)
+            * 10_000,
+        }
         for run in results[RL_LABEL]
         for h in run["history"]
     ]
@@ -772,28 +794,45 @@ bin_labels = [
 ]
 
 offsets = policy_df["quote_offset_bps"].to_numpy()
+skews = policy_df["skew_bps"].to_numpy()
 grouped_df = pl.DataFrame(
     [
-        {"inv_bin": label, "quote_offset_bps": float(offsets[bin_ids == idx].mean())}
+        {
+            "inv_bin": label,
+            "quote_offset_bps": float(offsets[bin_ids == idx].mean()),
+            "skew_bps": float(skews[bin_ids == idx].mean()),
+        }
         for idx, label in enumerate(bin_labels)
         if np.any(bin_ids == idx)
     ]
 )
 
 # %%
-fig = go.Figure(
+fig = go.Figure()
+fig.add_trace(
     go.Bar(
         x=grouped_df["inv_bin"].to_list(),
         y=grouped_df["quote_offset_bps"].to_list(),
+        name="Total offset from the mid",
         marker_color=COLORS["blue"],
+    )
+)
+fig.add_trace(
+    go.Bar(
+        x=grouped_df["inv_bin"].to_list(),
+        y=grouped_df["skew_bps"].to_list(),
+        name="Skew the agent added",
+        marker_color=COLORS["amber"],
     )
 )
 fig.add_hline(y=0, line=dict(color=COLORS["neutral"], width=1, dash="dot"))
 fig.update_layout(
+    barmode="group",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     title=(
-        "Average quote-centre offset by inventory held when the quote was posted"
-        "<br><sup>Pooled across evaluation episodes; a downward offset shifts both quotes "
-        "below the mid</sup>"
+        "Quote offset by inventory, split into the reservation shift and the skew"
+        "<br><sup>Pooled across evaluation episodes. The environment centres every quote on "
+        "the reservation price; only the second series is the agent's choice</sup>"
     ),
     xaxis_title="Inventory bucket (units)",
     yaxis_title="Average quote centre offset (bps)",
@@ -801,7 +840,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "A bar per inventory bucket giving the average quote-centre offset in basis points for quotes posted while holding that inventory, pooled over the evaluation episodes, against a dotted line at zero offset.",
+    "Grouped bars per inventory bucket, pooled over the evaluation episodes. The first series is the total quote-centre offset from the mid in basis points for quotes posted while holding that inventory; the second is the skew the agent added on top of the environment's reservation price. A dotted line marks zero.",
 )
 
 # %% [markdown]
@@ -814,9 +853,13 @@ agreement = (
 )
 display(
     Markdown(f"""
-**The inventory response is the mechanism, and it is visible.** The learned policy shifts its
-quote centre with the position it is holding, which is the same response the reservation price
-writes down in closed form. It averages {ppo_summary["avg_trades"]:.0f} trades an episode against
+**Separate what the environment does from what the policy chose.** Every quote in this
+simulator, the agent's and the rules', is centred on the reservation price, so a quote centre
+that moves against inventory is the environment's arithmetic rather than a learned response.
+The second series in section 7 is the part the agent chose: a fixed rule would leave it at
+zero at every inventory level, so read it for how far the learned policy departs from one and
+whether that departure varies with the position it is holding. The learned policy averages
+{ppo_summary["avg_trades"]:.0f} trades an episode against
 {min(row["avg_trades"] for row in baseline_summary):.0f} to
 {max(row["avg_trades"] for row in baseline_summary):.0f} for the fixed rules, so it is quoting
 at a different point on the fill-rate curve rather than simply quoting less.
