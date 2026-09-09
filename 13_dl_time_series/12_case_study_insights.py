@@ -21,8 +21,8 @@
 # Every notebook in this chapter demonstrated an architecture on one split of one
 # panel, and each said in its own words that a single split cannot rank
 # architectures. This notebook is where the ranking question is actually asked. It
-# reads the registry - the stored results of walk-forward runs across the eight case
-# studies that carry deep-learning pipelines - and compares LSTM, NLinear, TSMixer,
+# reads the registry - the stored results of walk-forward runs on whichever case
+# studies carry deep-learning pipelines - and compares LSTM, NLinear, TSMixer,
 # TCN and PatchTST against each other and against the linear baseline of Chapter 11,
 # the gradient-boosted models of Chapter 12, and the tabular network TabM.
 #
@@ -241,7 +241,7 @@ avail_df = pl.DataFrame(avail_rows)
 avail_pivot = avail_df.pivot(index="short_name", on="architecture", values="ic").sort("short_name")
 print(
     "Highest-IC DL configuration per (case study × architecture) at the primary label "
-    "(blank = architecture not trained on this case study):"
+    "(blank = no run eligible for the comparison):"
 )
 avail_pivot.select(["short_name", *all_archs_sorted])
 
@@ -668,22 +668,29 @@ conformal_df.select(
 
 
 # %%
-def staggered_offsets(values: np.ndarray, tolerance: float = 0.04) -> list[int]:
-    """Vertical label offsets in points, cycling rather than accumulating.
+def label_placements(x: np.ndarray, y: np.ndarray) -> list[tuple[int, int, str]]:
+    """Offset in points and horizontal alignment for each point's label.
 
-    Points close together on the y-axis get their labels pushed apart. The offset
-    cycles through `LADDER` instead of growing by a fixed step each time, because an
-    accumulating offset puts the topmost label off the axes once six or seven points
-    fall inside one tolerance band.
+    Labels are placed to the right of their marker by default. Where a point sits
+    close to its vertical neighbour in both axes, the two alternate sides instead:
+    stacking them vertically collides once several case studies share a narrow
+    coverage band, and pushing each successive label further up walks the topmost
+    one off the axes.
     """
-    ladder = (4, 16, -12, 28)
-    offsets = [ladder[0]] * len(values)
-    last_value, rung = -np.inf, 0
-    for index in sorted(range(len(values)), key=lambda i: values[i]):
-        rung = (rung + 1) % len(ladder) if values[index] - last_value < tolerance else 0
-        offsets[index] = ladder[rung]
-        last_value = values[index]
-    return offsets
+    order = sorted(range(len(y)), key=lambda i: y[i])
+    y_span = float(np.ptp(y)) or 1.0
+    x_span = float(np.ptp(np.log10(x))) or 1.0
+    placements: list[tuple[int, int, str]] = [(8, 4, "left")] * len(y)
+    side = 0
+    for rank, index in enumerate(order):
+        if rank:
+            previous = order[rank - 1]
+            close = abs(y[index] - y[previous]) / y_span < 0.12 and (
+                abs(np.log10(x[index]) - np.log10(x[previous])) / x_span < 0.25
+            )
+            side = 1 - side if close else 0
+        placements[index] = (8, 4, "left") if side == 0 else (-8, 4, "right")
+    return placements
 
 
 # %% [markdown]
@@ -711,9 +718,10 @@ def plot_conformal_coverage(conformal_df: pl.DataFrame) -> plt.Figure:
         vmin=0.0,
         vmax=max(0.01, float(gap.max())),
     )
-    offsets = staggered_offsets(emp)
-    for i, n in enumerate(names):
-        ax.annotate(n, (width[i], emp[i]), textcoords="offset points", xytext=(7, offsets[i]))
+    for (dx, dy, ha), name, xv, yv in zip(
+        label_placements(width, emp), names, width, emp, strict=True
+    ):
+        ax.annotate(name, (xv, yv), textcoords="offset points", xytext=(dx, dy), ha=ha)
     ax.axhline(
         CONFORMAL_LEVEL,
         color=COLORS["neutral"],
@@ -721,7 +729,7 @@ def plot_conformal_coverage(conformal_df: pl.DataFrame) -> plt.Figure:
         label=f"Nominal {CONFORMAL_LEVEL:.0%}",
     )
     ax.set_xscale("log")
-    ax.margins(y=0.12)
+    ax.margins(x=0.25, y=0.12)
     ax.set_xlabel(
         "Mean interval width, as a fraction of the outcome standard deviation over the "
         "same rows (log scale)"
