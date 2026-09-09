@@ -18,7 +18,7 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Section Reference**: 25.7 (Operational Readiness)
+# **Section Reference**: 25.7 (Operational readiness)
 #
 # **Implementation Skills**:
 # - ml4t.live.safety: SafeBroker, LiveRiskConfig, RiskState, RiskLimitError
@@ -29,16 +29,16 @@
 # This notebook drives six of SafeBroker's risk controls into their
 # failure modes against a synthetic broker:
 #
-# 1. **Order Size Limits** — Max shares and max value per order
-# 2. **Position Limits** — Max value, shares, and total exposure
-# 3. **Rate Limiting** — Max orders per minute
-# 4. **Asset Restrictions** — Allowed/blocked asset lists
-# 5. **Kill Switch** — Emergency halt that persists across restarts
-# 6. **Shadow Mode** — VirtualPortfolio tracks fills without touching the broker
+# 1. **Order Size Limits**: Max shares and max value per order
+# 2. **Position Limits**: Max value, shares, and total exposure
+# 3. **Rate Limiting**: Max orders per minute
+# 4. **Asset Restrictions**: Allowed/blocked asset lists
+# 5. **Kill Switch**: Emergency halt that persists across restarts
+# 6. **Shadow Mode**: VirtualPortfolio tracks fills without touching the broker
 #
-# Three further controls - duplicate-order filtering, price-deviation checks,
-# and daily-loss monitoring - are available through `LiveRiskConfig` but are
-# not all re-demonstrated here. NB13 directly exercises the daily-loss
+# Three further controls, duplicate-order filtering, price-deviation checks
+# and daily-loss monitoring, are available through `LiveRiskConfig` and are
+# not demonstrated here. `13_runtime_safety_showcase` drives the daily-loss
 # kill-switch trip and stale-data rejection.
 #
 # **Why This Matters**:
@@ -65,7 +65,6 @@
 
 import logging
 import sys
-import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -88,7 +87,7 @@ logger = logging.getLogger(__name__)
 
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Production defaults; papermill injects overrides for CI
 RATE_LIMIT_PER_MINUTE = 3
 STATE_DIR = get_output_dir(25, "safety_risk_demo") / "temporary_state"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -278,33 +277,16 @@ class MockBroker(MockBrokerQueries):
 # %% [markdown]
 # ## 2. Demo Helper Function
 #
-# Helper to run async code and catch RiskLimitError for demo purposes.
-#
-# The helper prints the outcome of each attempted order so the notebook reads like an operator console: either
-# the request is allowed, or the control layer explains why it is blocked.
-
-
-# %%
-def run_async_demo(awaitable):
-    """Run one demo awaitable while suppressing only nest_asyncio deprecations."""
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            category=DeprecationWarning,
-            module=r"nest_asyncio(?:\..*)?",
-        )
-        return run_async(awaitable)
-
-
-# %% [markdown]
-# The outcome helper turns every expected allow or block decision into an executable assertion.
+# One helper runs every attempted order and prints its outcome, so the notebook reads like an
+# operator console: either the request is allowed, or the control layer explains why it is
+# blocked. Each expected allow or block becomes an executable assertion.
 
 
 # %%
 def run_demo(coro, expect_error: bool = False):
     """Run an async demo and fail the notebook on an unexpected outcome."""
     try:
-        result = run_async_demo(coro)
+        result = run_async(coro)
     except RiskLimitError as e:
         if not expect_error:
             raise AssertionError(f"Unexpected risk block: {e}") from e
@@ -317,12 +299,10 @@ def run_demo(coro, expect_error: bool = False):
 
 
 # %% [markdown]
-# **Finding**: The helper standardizes how each risk-control demo reports allowed versus blocked behavior, so
-# the notebook reads like a repeatable release checklist rather than a pile of ad hoc exceptions.
-#
-# **Trading implication**: Production risk gates should produce consistent operator-facing outcomes because
-# inconsistent error reporting makes real incidents harder to diagnose under time pressure.
-#
+# Every demo below reports its outcome through the same helper, so an allowed order and a
+# blocked one are distinguishable at a glance. A production risk layer needs the same property:
+# inconsistent error reporting is what makes a real incident hard to diagnose under time pressure.
+
 # %% [markdown]
 # ## 3. Demonstration: Order Size Limits
 #
@@ -340,7 +320,7 @@ print("=" * 70)
 state_file = _temporary_state_path()
 
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 
 config = LiveRiskConfig(
     execution_mode="paper",
@@ -379,12 +359,9 @@ run_demo(
 )
 
 # %% [markdown]
-# **Finding**: Order-size controls stop both oversized share counts and oversized notionals before the broker
-# sees them.
-#
-# **Trading implication**: The first line of defense in live trading is to make a single bad instruction too
-# small to become catastrophic.
-#
+# Order-size controls stop both an oversized share count and an oversized notional before the
+# broker sees the request, which is what keeps a single mistyped instruction too small to matter.
+
 # %% [markdown]
 # ## 4. Demonstration: Position Limits
 #
@@ -399,7 +376,7 @@ print("=" * 70)
 # Isolate the share cap by setting the dollar limits well above the attempted position.
 state_file = _temporary_state_path()
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 
 config = LiveRiskConfig(
     execution_mode="paper",
@@ -427,7 +404,7 @@ run_demo(
 # %%
 state_file = _temporary_state_path()
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 config = LiveRiskConfig(
     execution_mode="paper",
     max_position_value=10_000.0,
@@ -454,7 +431,7 @@ run_demo(
 # %%
 state_file = _temporary_state_path()
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 config = LiveRiskConfig(
     execution_mode="paper",
     max_position_value=20_000.0,
@@ -478,12 +455,11 @@ run_demo(
 )
 
 # %% [markdown]
-# **Finding**: Independent scenarios trigger the share, per-position value, and total-exposure gates without
-# an earlier control masking the intended rejection.
-#
-# **Trading implication**: Portfolio-level controls are necessary because many failures arrive as a sequence
-# of reasonable-looking orders that add up to unreasonable exposure.
-#
+# Each scenario above uses its own broker so the share cap, the per-position value cap and the
+# total-exposure cap each raise on their own account, with no earlier control masking the
+# rejection under test. Portfolio-level caps exist because a failure often arrives as a sequence
+# of individually reasonable orders that add up to an unreasonable position.
+
 # %% [markdown]
 # ## 5. Demonstration: Rate Limiting
 #
@@ -497,7 +473,7 @@ print("=" * 70)
 
 state_file = _temporary_state_path()
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 
 config = LiveRiskConfig(
     execution_mode="paper",
@@ -521,12 +497,10 @@ for i in range(5):
     )
 
 # %% [markdown]
-# **Finding**: The rate-limit demo shows that SafeBroker can reject a burst even when every order is otherwise
-# valid.
-#
-# **Trading implication**: Throughput limits protect the account from runaway loops, duplicate signal storms,
-# and broker bans caused by overly chatty execution code.
-#
+# The burst is rejected on the fourth order even though every order in it passes every other
+# check. A throughput cap is what stands between the account and a runaway loop, a duplicated
+# signal, or a broker rate-limit ban earned by chatty execution code.
+
 # %% [markdown]
 # ## 6. Demonstration: Asset Restrictions
 #
@@ -540,7 +514,7 @@ print("=" * 70)
 
 state_file = _temporary_state_path()
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 
 # Only allow specific ETFs
 config = LiveRiskConfig(
@@ -572,7 +546,7 @@ run_demo(
 print("\n--- Testing Blocked Assets ---")
 state_file = _temporary_state_path()
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 
 config = LiveRiskConfig(
     execution_mode="paper",
@@ -595,12 +569,10 @@ run_demo(
 )
 
 # %% [markdown]
-# **Finding**: Asset allowlists and blocklists create a hard boundary around what the strategy is permitted to
-# touch.
-#
-# **Trading implication**: Universe control is an operational safeguard, not just a research convenience,
-# because it prevents accidental routing into unsupported or explicitly banned instruments.
-#
+# The allowlist and the blocklist put a hard boundary around what the strategy may touch. That
+# boundary is an operational safeguard rather than a research convenience: it is what stops a
+# symbol-selection bug from routing an order into an unsupported or explicitly banned instrument.
+
 # %% [markdown]
 # ## 7. Demonstration: Kill Switch
 #
@@ -614,7 +586,7 @@ print("=" * 70)
 
 state_file = _temporary_state_path()
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 
 config = LiveRiskConfig(
     execution_mode="paper",
@@ -640,9 +612,8 @@ run_demo(
 )
 
 # %% [markdown]
-# Reconstruct `SafeBroker` from the same state file to confirm the kill
-# switch survives — the in-memory toggle is irrelevant if the latch
-# disappears on restart.
+# Reconstruct `SafeBroker` from the same state file. The in-memory toggle is
+# irrelevant if the latch does not come back with the new instance.
 
 # %%
 print("\n4. Checking state persistence...")
@@ -662,12 +633,10 @@ _ = run_demo(new_safe_broker.submit_order_async("AAPL", 10, OrderSide.BUY))
 new_safe_broker.close_persistence()
 
 # %% [markdown]
-# **Finding**: The kill switch persists across SafeBroker instances, so an emergency halt survives process
-# restarts instead of disappearing with the notebook kernel.
-#
-# **Trading implication**: Manual intervention has to outlive the current process, otherwise a restart can
-# unintentionally reactivate a strategy that was halted for a real risk event.
-#
+# The second `SafeBroker` reads the latch from the state file, so the halt outlives the process
+# that set it rather than disappearing with the kernel. A halt that did not outlive its process
+# would let a restart quietly reactivate a strategy that was stopped for a real risk event.
+
 # %% [markdown]
 # ## 8. Demonstration: Shadow Mode
 #
@@ -681,7 +650,7 @@ print("=" * 70)
 
 state_file = _temporary_state_path()
 broker = MockBroker()
-run_async_demo(broker.connect())
+run_async(broker.connect())
 
 config = LiveRiskConfig(
     shadow_mode=True,  # Enable shadow mode
@@ -710,16 +679,14 @@ else:
     print("   Real broker has NO position (correct - shadow mode)")
 
 print("\n4. Virtual portfolio account value:")
-value = run_async_demo(safe_broker.get_account_value_async())
+value = run_async(safe_broker.get_account_value_async())
 print(f"   Virtual account value: ${value:,.2f}")
 
 # %% [markdown]
-# **Finding**: Shadow mode updates the virtual portfolio while leaving the underlying broker flat. That makes
-# the execution path observable without changing real inventory.
-#
-# **Trading implication**: Shadow mode is the safest way to validate end-to-end routing logic before paper or
-# live trading because it exercises the controls without external side effects.
-#
+# Shadow mode updates the virtual portfolio while the underlying broker stays flat, so the whole
+# routing path is observable without any change to real inventory. That is what makes it the
+# first place to validate end-to-end routing, ahead of paper and well ahead of live.
+
 # %% [markdown]
 # ## 9. Demonstration: VirtualPortfolio Details
 #
@@ -811,12 +778,10 @@ STATE_DIR.rmdir()
 print(f"[OK] Cleaned {len(MANAGED_STATE_PATHS)} managed state and journal paths")
 
 # %% [markdown]
-# **Finding**: The virtual portfolio example makes cost-basis and partial-exit bookkeeping explicit instead of
-# treating them as hidden implementation details.
-#
-# **Trading implication**: Paper and shadow environments need realistic position accounting or they will mask
-# the exact state-management bugs that later damage live trading.
-#
+# The virtual portfolio carries cost basis and partial exits explicitly rather than leaving them
+# to an implementation detail. A shadow or paper environment without that accounting hides the
+# state-management bugs it exists to surface, and those are the bugs that cost money live.
+
 # %% [markdown]
 # ## Summary: Controls Exercised Above
 #
@@ -855,8 +820,8 @@ print(f"[OK] Cleaned {len(MANAGED_STATE_PATHS)} managed state and journal paths"
 #    controls are exercised above; the remaining duplicate-order, fat-finger,
 #    and drawdown gates are wired through the same `LiveRiskConfig` surface
 #    without being claimed as outputs of this notebook.
-# 2. **Configurable via LiveRiskConfig**: Every limit—order size, position
-#    exposure, rate caps, drawdown thresholds—is a parameter, not hard-coded
+# 2. **Configurable via LiveRiskConfig**: order size, position exposure, rate
+#    caps and drawdown thresholds are all parameters rather than hard-coded
 #    logic.
 # 3. **Kill switch persists across restarts**: Emergency halts survive process
 #    restarts and must be manually cleared, preventing accidental
@@ -865,5 +830,5 @@ print(f"[OK] Cleaned {len(MANAGED_STATE_PATHS)} managed state and journal paths"
 #    realistic cost-basis accounting without touching the broker, making it
 #    the safest first deployment step.
 #
-# **Next**: Combine these controls with the parity checks in `pipeline_verification` and then keep the
+# **Next**: Combine these controls with the parity checks in `08_pipeline_verification` and then keep the
 # same SafeBroker configuration when moving from shadow mode to paper trading.

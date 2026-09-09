@@ -17,7 +17,7 @@
 # # FX Pairs Deployment Loop
 #
 # **Chapter 25: Live Trading Systems**
-# **Section**: 25.6 (Pipeline Verification: Ensuring Technical Parity)
+# **Section Reference**: 25.6 (Ensuring technical parity through pipeline verification)
 #
 # **Docker image**: `ml4t` (requires IB TWS/Gateway running on host port 7497 with FX permissions)
 #
@@ -138,7 +138,7 @@ SUBMIT_PAPER_ORDERS = False  # explicit opt-in only; publication execution is dr
 #
 # A single TWS/Gateway session backs both data and execution. The notebook
 # fails loudly if the session is unreachable rather than degrading silently
-# — a deployment loop that hides its failure modes teaches the wrong lesson.
+# A deployment loop that hides its failure modes teaches the wrong lesson.
 
 # %%
 CHAPTER_DIR = get_chapter_dir(25)
@@ -286,7 +286,7 @@ if missing_contracts:
     print(f"  Missing: {', '.join(missing_contracts)}")
 
 # %% [markdown]
-# **Finding.** The qualification table above is the authoritative coverage
+# The qualification table above is the authoritative coverage
 # result for this run. Missing contracts remain visible and never enter the
 # live cross-section. This explicit gate keeps broker coverage from becoming
 # an unstated assumption.
@@ -606,10 +606,12 @@ assert (ib_audit_frame["raw_rows"] == ib_audit_frame["parsed_rows"]).all()
 assert ib_audit_frame["duplicate_dates"].sum() == 0
 
 
+# %% [markdown]
+# A daily bar labelled with today's date may still be forming, so only sessions strictly before
+# the current UTC date are kept. That makes the decision boundary conservative and the same on a
+# re-run at any hour.
+
 # %%
-# A daily bar labelled with today's date may still be forming. Use only
-# sessions strictly before the current UTC date for a conservative,
-# reproducible decision boundary.
 live_prices = live_prices.filter(pl.col("timestamp") < datetime.now(UTC).date())
 if len(live_prices) == 0:
     raise RuntimeError("IB returned no completed daily bars before the current UTC date")
@@ -636,7 +638,7 @@ print(f"Live bars: {live_prices.shape} across {n_pairs} pairs")
 
 # %% [markdown]
 # Compute the eight features on the live panel and isolate the latest
-# valid feature row per symbol — that row is the input to inference.
+# valid feature row per symbol, and that row is the input to inference.
 
 # %%
 live_panel = compute_features_daily(live_prices)
@@ -656,6 +658,10 @@ print(f"Latest valid feature rows: {latest_features.shape[0]} of {len(CASE_STUDY
 # top-ranked pairs; a production version would also short the bottom-K
 # (IB Forex supports shorts), but the demo keeps the long basket to
 # emphasize the deployment-mechanics learning objective.
+#
+# The filter on positive predicted returns comes before the top-K cut. In a sustained risk-off
+# cross-section every forecast can be negative, and a top-K taken without the filter would be a
+# basket of positions the model expects to lose money.
 
 # %%
 print("\n" + "=" * 70)
@@ -672,10 +678,6 @@ predictions = (
     .sort("pred_ret_1d", descending=True)
 )
 
-# Long-only basket: filter on positive predicted returns before taking the
-# top-K. In sustained risk-off regimes the cross-section can be entirely
-# negative; trading "the best of the worst" would short volatility for no
-# expected return.
 top_k = predictions.filter(pl.col("pred_ret_1d") > 0).head(TOP_K)
 print(f"\nTop-{TOP_K} predicted-return pairs (long basket):")
 print(top_k)

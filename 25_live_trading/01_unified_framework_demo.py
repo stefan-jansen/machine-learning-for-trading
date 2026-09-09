@@ -18,52 +18,69 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Section Reference**: 25.1 (Unified Framework Advantage)
+# The expensive failure in deploying a strategy is not a bad model. It is two implementations of the
+# same idea: one written for the backtester and one rewritten for the live path, differing in a
+# detail nobody noticed until money was on it. Every difference between them is a bug that the
+# backtest cannot find, because the backtest is not running the code that trades.
 #
-# **Implementation Skills**:
-# - ml4t.backtest: Strategy base class, Engine, DataFeed
-# - ml4t.live: LiveEngine, SafeBroker, LiveRiskConfig, VirtualPortfolio
-# - Core value proposition: zero code changes from backtest to live
+# The framework this chapter uses avoids that by construction: one `Strategy` class, two engines. This
+# notebook is the test of that claim rather than a statement of it. The same class runs through
+# `ml4t.backtest.Engine` and through `ml4t.live.LiveEngine` over the same bars, and the two signal
+# tapes are compared field by field. A mismatch is a framework defect, and the comparison is written
+# so it would say so.
 #
-# **Key Learning**:
-# This notebook demonstrates the fundamental value of the unified framework approach:
-# the **same Strategy class** produces **identical signals** whether running in backtest
-# mode or live mode. No code changes required.
+# **Learning Objectives**:
+# - Run one `Strategy` subclass through both engines without changing a line of it
+# - Compare two signal tapes field by field, and fail the comparison rather than describe it
+# - Say what a parity test on replayed bars establishes, and what it leaves untested
 #
-# **Why This Matters**:
-# - Eliminates "two pipelines" divergence bugs
-# - Confident deployment: what you backtest is what you trade
-# - Faster iteration: test ideas in backtest, deploy same code live
+# **Book Reference**: Chapter 25, Section 25.1 (The unified framework advantage)
 #
-# **Structure**:
-# 1. Define a simple momentum strategy (ONE implementation)
-# 2. Run in backtest mode (ml4t.backtest.Engine)
-# 3. Run in live mode with historical replay (ml4t.live.LiveEngine)
-# 4. Compare signals: prove they match perfectly
-#
-# **Learning Objectives**
-# - Verify that a single strategy class can run without code changes in both engines.
-# - Compare backtest and live-style signals on a shared historical data set.
-# - Interpret any mismatch as a technical-divergence problem rather than as a market problem.
-#
-# **Prerequisites**
-# - Familiarity with the `Strategy` interface and the distinction between backtest and live engines.
-# - Review Chapter 25.1, which motivates why technical parity matters more than demo complexity here.
+# **Prerequisites**: The `Strategy` interface, and the distinction between an engine that pulls bars
+# from history and one that receives them from a feed.
 
 # %% [markdown]
 # ## Setup
 #
-# The setup keeps the demo focused on parity. We are not trying to optimize a strategy here; we are trying to
-# prove that the same implementation survives the engine swap intact.
+# Everything below is arranged to make one thing vary. The strategy, the bars, the parameters and the
+# fill convention are held fixed across the two runs so that a difference in output has one candidate
+# explanation left, which is the engine.
 
 # %%
 """Verify backtest-to-live signal parity with a single strategy class."""
 
+import asyncio
+import logging
 import warnings
+from collections.abc import AsyncIterator
+from datetime import datetime
+from typing import Any
 
-warnings.filterwarnings("ignore")
+import matplotlib.pyplot as plt
+import pandas as pd
+import polars as pl
+from async_utils import run_async
 
-# %%
+# The broker adapters pull in websockets' legacy module, which deprecates itself on import. It
+# is the library's business rather than this notebook's and nothing in the result depends on it.
+# The other import-time deprecation, from nest_asyncio, is filtered inside `async_utils.run_async`
+# where the call that triggers it lives.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets\.legacy")
+
+from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, Strategy
+from ml4t.backtest.types import Order, OrderSide, OrderStatus, OrderType, Position
+from ml4t.live import (
+    LiveEngine,
+    VirtualPortfolio,
+)
+
+from data import load_etfs
+from utils.style import COLORS, add_message_title, show_with_alt
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 import asyncio
 import logging
 from collections.abc import AsyncIterator
@@ -93,10 +110,24 @@ logging.basicConfig(
 )
 
 # %% [markdown]
-# ## 1. Configuration
+# ## 1. Settings
 #
-# The configuration defines the exact parity experiment: same symbols, same dates, and same moving-average
-# parameters in both engines. If those inputs drift, signal comparison becomes meaningless.
+# Every one of these is held identical across the two runs, which is what makes the comparison a
+# test of the engines.
+#
+# `START_DATE` and `END_DATE` bound a year of daily bars, long enough for a 30-day average to warm
+# up and produce a handful of crossings.
+#
+# `FAST_MA` and `SLOW_MA` are the two averaging windows in sessions. Ten against thirty is a
+# conventional pairing and nothing here depends on it; the parity claim holds or fails at any
+# setting, which is the point.
+#
+# `MAX_SYMBOLS` caps how many of the three ETFs are loaded. Zero means all of them, and continuous
+# integration sets it lower to keep the run short. The strategy trades only SPY either way; the
+# other two are loaded so the data path carries more than one symbol.
+#
+# `INITIAL_CASH` sizes the account. It scales the printed portfolio values and changes nothing about
+# which signals fire, since the strategy trades a fixed hundred shares.
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
@@ -114,22 +145,17 @@ print(f"Symbols: {SYMBOLS}")
 print(f"Period: {START_DATE} to {END_DATE}")
 
 # %% [markdown]
-# **Finding:** The configuration printout defines the exact parity test: one symbol set, one date range, and
-# one pair of moving-average parameters. Changing any of those between modes would invalidate the comparison.
-
-# %% [markdown]
 # ## 2. Data Acquisition
 #
-# Download historical data for our demo. Both backtest and live (replay) will use the same data.
-#
-# The shared data set is the notebook's most important control variable. If both engines do not consume the
-# same bars, a later signal mismatch tells us nothing useful about the framework itself.
+# One load, one filter, one cleaning step, and both engines read the result. The shared tape is the
+# notebook's control variable: if the two engines saw different bars, a later signal mismatch would
+# say nothing about either of them.
 
 # %%
 print("Loading ETF data from canonical source...")
 etf_data = load_etfs()
 
-# Filter for our symbols and date range
+# Filter to the demo symbols and date range
 etf_filtered = etf_data.filter(
     (pl.col("symbol").is_in(SYMBOLS))
     & (pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
@@ -165,31 +191,26 @@ print(f"Loaded {len(raw_data):,} daily bars for {len(SYMBOLS)} symbols")
 close_prices = raw_data["Close"].ffill()
 
 # %% [markdown]
-# **Finding:** The data summary above confirms that both engines will see the same cleaned close-price history.
-# That shared tape is what turns the rest of the notebook into a genuine technical-parity test.
-
+# Both engines will read from `raw_data` and nothing else. Holding the tape fixed is what makes the
+# rest of the notebook a test of the engines rather than a comparison of two datasets.
 # %% [markdown]
-# ## 3. The Strategy: ONE Implementation
+# ## 3. One Strategy Implementation
 #
-# This is the **key insight**: we define the strategy ONCE. It works in both
-# ml4t.backtest.Engine AND ml4t.live.LiveEngine without modification.
+# A **dual moving average crossover**: buy when the shorter average rises above the longer one and
+# sell when it falls back below. The two averages summarise recent and less recent price, so a
+# crossing is the shorter horizon disagreeing with the longer one about direction.
 #
-# **Strategy Logic**: Simple Dual Moving Average Crossover
-# - Calculate 10-day and 30-day SMAs
-# - Buy when fast > slow (bullish crossover)
-# - Sell when fast < slow (bearish crossover)
-# - Track all signals for comparison
-#
-# The point of the strategy is not its alpha. It is intentionally plain so any difference between backtest and
-# live outputs is easy to trace to the framework rather than to model complexity.
+# The strategy is chosen for being uninteresting. Every line of it is visible below, it holds no
+# state a reader cannot follow, and it has no parameters worth tuning. That is what makes a later
+# difference between the two engines attributable to the engines.
 
 
 # %%
 class DualMAStrategy(Strategy):
-    """Simple dual moving average crossover strategy.
+    """Dual moving average crossover, written once for both engines.
 
-    This strategy works IDENTICALLY in backtest and live modes.
-    The on_data() method signature is the same for both engines.
+    Both engines call the same `on_data` with the same arguments, which is the
+    property the rest of the notebook tests rather than assumes.
 
     Attributes:
         fast_period: Fast MA lookback (default: 10)
@@ -214,9 +235,7 @@ class DualMAStrategy(Strategy):
         self.signal_log = []
 
     def on_data(self, timestamp: datetime, data: dict, context: dict, broker):
-        """Process each bar and generate signals.
-
-        CRITICAL: This method signature is IDENTICAL for backtest and live!
+        """Process one bar and emit a signal when the averages cross.
 
         Args:
             timestamp: Bar timestamp
@@ -273,10 +292,9 @@ class DualMAStrategy(Strategy):
 
 
 # %% [markdown]
-# ## 4. Backtest Mode: ml4t.backtest.Engine
+# ## 4. Backtest Mode
 #
-# First, run the strategy in backtest mode using `ml4t.backtest.Engine`. This creates the reference output
-# that the live-style replay must match if the unified-framework claim is actually true.
+# `ml4t.backtest.Engine` runs first and produces the reference tape the replay has to match.
 
 # %%
 # Prepare data for backtest engine (long format)
@@ -298,13 +316,11 @@ for date in raw_data.index:
 
 prices_df = pl.DataFrame(data_records)
 print(f"Prepared {len(prices_df):,} price records for backtest")
-
 # %% [markdown]
-# **Finding:** The prepared price-record count confirms that the backtest engine is consuming the same long
-# format tape the rest of the notebook expects.
-#
-# **Trading implication:** Technical parity starts with data-shape parity; if the bar stream changes across
-# engines, later signal mismatches are not diagnostically useful.
+# The engines take their bars in different shapes: the backtest reads a long frame of one row per
+# symbol and date, and the replay feed below yields one dict per bar. That difference is unavoidable
+# and it is exactly the seam a parity test has to cross. Both are built from `raw_data`, so a
+# mismatch downstream cannot be a difference in the prices themselves.
 #
 # %%
 # Create backtest components
@@ -332,24 +348,27 @@ print(f"Total return:      {results['total_return_pct']:.2f}%")
 print(f"Total trades:      {results['num_trades']}")
 print(f"Signals generated: {len(strategy_backtest.signal_log)}")
 
-# Store backtest signals for comparison
 backtest_signals = strategy_backtest.signal_log.copy()
 
 # %% [markdown]
-# **Finding:** The backtest run establishes the reference signal tape on the shared ETF history.
-#
-# **Trading implication:** If live mode later disagrees, the notebook can attribute the problem to engine or
-# wrapper behavior rather than to different market data.
-#
+# The signal count and the trade count differ, and the gap is worth reading rather than skipping. A
+# signal here is an order; a trade in the analyzer's sense is a completed round trip. The strategy
+# alternates buy and sell, so an odd number of signals means one position is still open when the data
+# runs out, and the trade count is one less than the number of entries. Any notebook that prints the
+# two next to each other owes the reader that sentence, because "orders went missing" is the other
+# reading.
+
 # %% [markdown]
-# ## 5. Live Mode Infrastructure
+# ## 5. What the Live Path Needs
 #
-# To run the same strategy in live mode, we need:
-# 1. A **simulated broker** (implements AsyncBrokerProtocol)
-# 2. A **historical replay feed** (implements DataFeedProtocol)
+# `LiveEngine` does not know where its bars come from or who fills its orders. It needs two objects:
+# something satisfying the broker protocol and something satisfying the feed protocol. Supplying a
+# simulated broker and a feed that replays history is what lets the live path be tested at all,
+# without a broker connection and outside market hours.
 #
-# These components enable us to demo live mode without requiring
-# a real broker connection or market hours.
+# Both are deliberately minimal. The broker fills every order immediately at the current close, and
+# the feed yields finished bars with no delay. Those choices remove execution and timing from the
+# comparison, which is the point here and the limitation stated at the end.
 
 
 # %%
@@ -563,24 +582,22 @@ class HistoricalReplayFeed:
 
 
 # %% [markdown]
-# ## 6. Live Mode: ml4t.live.LiveEngine
+# ## 6. Live Mode
 #
-# Now run the **same strategy** using `ml4t.live.LiveEngine` with historical replay. The point is not to
-# simulate latency perfectly, but to test whether the engine swap changes the trading logic.
+# The same strategy class, constructed fresh so it starts with no history, running through
+# `LiveEngine` over the same bars.
 
 
 # %%
 async def run_live_mode():
     """Run strategy in live mode with historical replay."""
-    # Create simulated broker
-    # NOTE: In production, wrap with SafeBroker for risk controls.
-    # Here we use the raw broker to demonstrate pure signal parity.
+    # The raw broker, not SafeBroker: risk controls could reject an order and turn a parity
+    # test into a test of the controls. 10_safety_risk_demo adds them.
     broker = SimulatedBroker(initial_cash=INITIAL_CASH)
 
     # Create historical replay feed
     feed = HistoricalReplayFeed(data=raw_data, symbols=SYMBOLS, broker=broker)
 
-    # Create strategy (SAME CLASS as backtest!)
     strategy_live = DualMAStrategy(symbol="SPY", fast_period=FAST_MA, slow_period=SLOW_MA)
 
     # Create LiveEngine
@@ -606,19 +623,18 @@ async def run_live_mode():
 
 # Run async live mode
 live_signals = run_async(run_live_mode())
-
 # %% [markdown]
-# **Finding:** The live replay consumes the same historical bars through `LiveEngine`, proving that the engine
-# swap does not require a second strategy implementation.
-#
-# **Trading implication:** Deployment confidence improves when the only moving part is the engine and not the
-# strategy logic itself.
-#
+# The engine logs a warning when the feed stops, and the run above shows it: `feed_terminated`,
+# `runtime degraded`, `auto recovery disabled`. That is correct behaviour and worth pausing on. In
+# production a feed that stops delivering is a fault, and an engine that carried on quietly would be
+# trading on stale prices. In a replay it is the last bar of the file. The engine cannot tell the two
+# apart, and neither can a monitoring rule built on that log line, which is one reason a replayed
+# live path is a parity test rather than a rehearsal.
 # %% [markdown]
-# ## 7. Signal Comparison: Proof of Parity
+# ## 7. The Comparison
 #
-# This is the notebook's decisive comparison: do backtest and live mode produce **identical** signals on the
-# same tape? Any mismatch here is a framework problem until proven otherwise.
+# Did the two engines produce the same signals on the same tape? Everything before this cell exists
+# to make that question answerable and the answer attributable.
 
 # %%
 print(f"Backtest signals: {len(backtest_signals)}")
@@ -689,19 +705,15 @@ if matches != len(backtest_signals):
 
 # Side-by-side comparison frame for the reader (engine-tagged rows).
 comparison.head(10)
-
 # %% [markdown]
-# **Finding:** The parity check reduces the framework claim to a falsifiable test: either the signals match
-# or they do not.
-#
-# **Trading implication:** Unified frameworks are only valuable if parity is demonstrated, not assumed from
-# shared class names or similar APIs.
-#
+# The comparison is the notebook's whole claim, and it is written to fail. An unequal signal count
+# raises before anything is compared field by field, and every field of every matched pair has to
+# agree. Nothing here reports a similarity score: the framework either produced the same tape twice
+# or it did not.
 # %% [markdown]
-# ## 8. Signal Log Details
+# ## 8. The Signal Logs
 #
-# The detailed signal logs give readers a human-readable audit trail after the high-level parity check. The
-# exact timestamps and moving averages are what make discrepancies debuggable.
+# The count and the field comparison say whether the tapes match. The logs say what the tapes are.
 
 
 # %%
@@ -732,44 +744,126 @@ live_log = _signals_to_frame(live_signals).head(5)
 live_log
 
 # %% [markdown]
-# **Finding:** The side-by-side signal logs make any mismatch inspectable at the timestamp level.
-#
-# **Trading implication:** Detailed logs are what let a team fix parity breaks quickly instead of arguing
-# from aggregate summaries after a deployment regression.
-#
+# The two logs are printed separately rather than merged so that a reader comparing them by eye is
+# doing the same thing the assertion above did mechanically. When a parity test fails, this is where
+# the failure becomes a date and a moving-average value rather than a count.
+
 # %% [markdown]
-# ## Summary
+# ## Where the Strategy Traded
 #
-# This notebook demonstrated the core value proposition of the unified framework:
+# The tables above show five signals of nine. The question they cannot answer is where the crossovers
+# fell across the year, which is a judgement about a shape: whether the strategy traded steadily or
+# clustered around a few reversals, and whether the two engines fired at the same moments or merely
+# the same number of times.
 #
-# | Mode | Engine | Strategy | Result |
-# |------|--------|----------|--------|
-# | Backtest | ml4t.backtest.Engine | DualMAStrategy | [OK] Signals logged |
-# | Live | ml4t.live.LiveEngine | **Same** DualMAStrategy | [OK] Identical signals |
-#
-# **Key Takeaways**:
-#
-# 1. **One Strategy Class**: The `DualMAStrategy` class is used unchanged in both modes
-# 2. **Same `on_data()` Signature**: `timestamp`, `data`, `context`, `broker` - identical
-# 3. **Signal Parity on This Tape**: Backtest and live signals matched exactly on the
-#    output-derived event sequence printed above. The demo does not cover execution latency,
-#    partial fills, or slippage - those are tested in NB07 (state
-#    machine), NB08 (full-pipeline parity), and NB12 (basket rebalance).
-# 4. **Scope of the Claim**: This notebook demonstrates that engine swap alone does not
-#    change strategy logic on the same historical daily ETF bars. The same-bar fills are a
-#    parity oracle, not a tradable performance estimate; broker-side divergence is
-#    out of scope here.
-#
-# **Next Steps**:
-# - `03_ib_paper_trading_demo.py`: Connect to Interactive Brokers for real paper trading
-# - `10_safety_risk_demo.py`: Explore SafeBroker's 8 layers of protection
-# - `08_pipeline_verification.py`: Systematic verification methodology
+# Drawing the year answers both. The two moving averages cross where the signals sit, and each
+# engine's markers are drawn separately: filled for the backtest, hollow rings on top for the live
+# replay. Every ring lands on a marker when the tapes agree, and a ring standing alone is a signal
+# one engine produced and the other did not.
 
 # %%
-parity = "perfect" if matches == len(backtest_signals) == len(live_signals) else "partial"
-print(f"Backtest final value: ${results['final_value']:,.2f}")
-print(f"Signal parity:        {parity} ({matches}/{len(backtest_signals)})")
+spy_close = close_prices["SPY"]
+fast_line = spy_close.rolling(FAST_MA).mean()
+slow_line = spy_close.rolling(SLOW_MA).mean()
+
+
+def _marker_series(signals: list[dict], side: str) -> tuple[list, list]:
+    """Return the timestamps and prices of one side's signals."""
+    picked = [s for s in signals if s["signal"] == side]
+    return [s["timestamp"] for s in picked], [s["price"] for s in picked]
+
+
+fig, ax = plt.subplots()
+ax.plot(
+    spy_close.index, spy_close.to_numpy(), color=COLORS["neutral"], linewidth=1, label="SPY close"
+)
+ax.plot(
+    fast_line.index,
+    fast_line.to_numpy(),
+    color=COLORS["blue"],
+    linewidth=1.2,
+    label=f"{FAST_MA}-day average",
+)
+ax.plot(
+    slow_line.index,
+    slow_line.to_numpy(),
+    color=COLORS["amber"],
+    linewidth=1.2,
+    label=f"{SLOW_MA}-day average",
+)
+
+for side, marker, color in [("BUY", "^", COLORS["positive"]), ("SELL", "v", COLORS["negative"])]:
+    bx, by = _marker_series(backtest_signals, side)
+    lx, ly = _marker_series(live_signals, side)
+    ax.scatter(bx, by, marker=marker, s=90, color=color, zorder=3, label=f"Backtest {side.lower()}")
+    ax.scatter(
+        lx,
+        ly,
+        marker="o",
+        s=170,
+        facecolors="none",
+        edgecolors=COLORS["slate"],
+        linewidths=1.2,
+        zorder=4,
+        label=f"Live {side.lower()}" if side == "BUY" else None,
+    )
+
+ax.set_xlabel("Date")
+ax.set_ylabel("SPY close (USD)")
+add_message_title(
+    ax,
+    (
+        "Both engines traded the same crossovers on the same days"
+        if matches == len(backtest_signals)
+        else "The two engines disagree about when to trade"
+    ),
+    subtitle="Filled markers are the backtest, hollow rings the live replay",
+)
+ax.legend(loc="lower right", fontsize=8)
+show_with_alt(
+    fig,
+    f"SPY close for {START_DATE} to {END_DATE} with its {FAST_MA}-day and {SLOW_MA}-day moving "
+    f"averages. {len(backtest_signals)} crossover signals are marked, buys pointing up and sells "
+    "pointing down, each with a hollow ring drawn from the live replay's own signal list. "
+    + (
+        "Every ring sits on a marker, so the two engines traded the same days at the same prices."
+        if matches == len(backtest_signals)
+        else f"{len(backtest_signals) - matches} of them do not coincide."
+    ),
+)
 
 # %% [markdown]
-# **Next**: Use `08_pipeline_verification.py` to formalize the same comparison as a regression test, then add
-# `SafeBroker` controls to the live path before moving toward paper trading.
+# ## Key Takeaways
+#
+# 1. **One class, two engines, and a test rather than a promise.** The value of the unified
+#    framework is that the code you backtested is the code that trades. That is a claim about a
+#    codebase, and the only thing that establishes it is a comparison that could have failed.
+# 2. **Compare the tape, not the summary.** Two runs can agree on final value and disagree about
+#    when they traded. The comparison here is field by field over every signal, and it asserts
+#    rather than describes: an unequal count raises before the rest of the cell runs.
+# 3. **A parity oracle is not a performance estimate.** Same-bar fills at the close are chosen to
+#    remove execution as a source of difference. They are not a claim that those prices were
+#    obtainable, and the returns printed here are not a backtest result anybody should quote.
+# 4. **Signals are not trades.** The strategy emits an order per crossover; the analyzer counts
+#    completed round trips. Two different numbers, both correct, and a reader owed the distinction.
+# 5. **A feed that ends is a fault in production and the end of the file in a replay.** The live
+#    engine logs the same warning either way. Anything that replays historical data through a live
+#    path inherits that ambiguity, and a monitoring rule that cannot tell them apart will page
+#    someone at the end of every backfill.
+#
+# **What this does not establish.** One symbol, one year of daily bars, one strategy. The replay
+# feed hands the engine a finished bar with no latency, no partial fills, no rejected orders and no
+# disconnections, so nothing here says the two engines agree once any of those exist. That is what
+# [`07_order_state_machine`](07_order_state_machine.ipynb),
+# [`08_pipeline_verification`](08_pipeline_verification.ipynb) and
+# [`12_ib_basket_rebalance_demo`](12_ib_basket_rebalance_demo.ipynb) are for. And parity is not
+# quality: two engines agreeing on a bad strategy agree exactly as well.
+#
+# **Next**: [`08_pipeline_verification`](08_pipeline_verification.ipynb) turns this comparison into
+# a regression test, and [`10_safety_risk_demo`](10_safety_risk_demo.ipynb) adds the broker-side
+# controls the live path here deliberately omits.
+
+# %%
+parity = "identical" if matches == len(backtest_signals) == len(live_signals) else "divergent"
+print(f"Backtest final value: ${results['final_value']:,.2f}")
+print(f"Signal tapes:         {parity} ({matches}/{len(backtest_signals)} fields match)")

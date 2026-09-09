@@ -18,43 +18,42 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Section Reference**: 25.4 (QuantConnect and Managed Platforms)
+# **Book Reference**: Chapter 25, Section 25.4 (QuantConnect and managed platforms)
 #
-# This notebook demonstrates deploying the book's ML pipeline to QuantConnect
-# using a **precomputed-predictions** pattern. Instead of reimplementing feature
-# engineering inside LEAN, we export frozen predictions from the ETFs case study
-# and let a lightweight LEAN algorithm consume them for portfolio construction.
+# A managed platform will run a backtest and route orders, and will not run this book's feature
+# pipeline. Reimplementing that pipeline inside the platform's language is a second
+# implementation of the thing
+# [`01_unified_framework_demo`](01_unified_framework_demo.ipynb) spent its whole length arguing
+# against having.
 #
-# **Structure**:
-# 1. Load predictions from the ETFs case study pipeline
-# 2. Export as QuantConnect-compatible JSON (Object Store format)
-# 3. Show the LEAN algorithm that reads predictions and rebalances
-# 4. Link to an illustrative QuantConnect Cloud project
-# 5. Compare precomputed vs inline-inference deployment workflows
+# The way out is to move the boundary. The model stays here and its output crosses over: a file
+# of predictions, one score per symbol per date, which the platform reads and turns into a
+# portfolio. What runs on the platform is then a few dozen lines of position rules with no
+# inference in it, and what changes when a threshold moves is a backtest rather than a retrain.
+#
+# The cost is that the platform can only trade dates the file covers, so a live deployment needs
+# a job that keeps writing it. This notebook builds the export and the algorithm that consumes
+# it, and states where each pattern gives out.
 #
 # **Learning Objectives**
-# - Export ML predictions from the book's pipeline into a format consumable by
-#   an external backtesting platform.
-# - Read a working LEAN algorithm that separates portfolio rules from ML inference.
-# - Evaluate when precomputed predictions are preferable to inline model inference.
+# - Export a model's predictions into a file an external platform can read, with the provenance
+#   needed to say which run produced it
+# - Read a platform algorithm that holds portfolio rules and no inference
+# - Say when precomputed predictions are the right boundary and when inline inference is
 #
-# **Prerequisites**
-# - ETFs case study pipeline (Chapters 7-12), which produces the predictions we export
-# - Section 25.4 on managed platforms and build-vs-buy decisions
-# - `unified_framework_demo` for the self-hosted alternative
+# **Prerequisites**: the ETFs case study, which produced the predictions exported here, and
+# [`01_unified_framework_demo`](01_unified_framework_demo.ipynb) for the self-hosted
+# alternative.
 
 # %% [markdown]
 # ## 1. Load Predictions from the ETFs Pipeline
 #
-# The ETFs case study pipeline trains models in Chapters 11–15 and stores
-# predictions in the registry. We load them here for export.
+# The ETFs case study's registry holds every training run, every prediction set and every
+# backtest the case study produced. Exporting from it means first answering which of them to
+# export, and doing that reproducibly.
 
 # %%
 """Export ML predictions for consumption by LEAN algorithms."""
-
-import warnings
-
-warnings.filterwarnings("ignore")
 
 import hashlib
 import json
@@ -66,21 +65,31 @@ import polars as pl
 from demo_artifacts import normalize_demo_predictions
 
 from utils.paths import display_path, get_case_study_dir, get_output_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
+
+# %% [markdown]
+# ## Settings
+#
+# `PREDICTION_THRESHOLD` is the predicted return above which a name is held long. Zero means
+# every positive forecast is a candidate, which is the widest the portfolio can be, and the two
+# figures below show what moving it does to breadth.
+#
+# The two pins are what make this export reproducible. `EXPECTED_TRAINING_HASH` names the
+# configuration the registry query below is expected to select, and `EXPECTED_PREDICTIONS_SHA256`
+# is the digest of the prediction file that configuration produced. Together they say: this run
+# exported exactly the bytes that run exported.
+#
+# The registry file itself is deliberately not pinned. It accumulates a row for every run in the
+# case study, so its digest moves whenever anything is added to it, whether or not the selection
+# moves. A whole-file pin would therefore fail on runs that export exactly the right predictions,
+# which is the worst kind of check: one that fires when nothing is wrong. Setting either pin to
+# `None` reports the observed value instead of asserting it, which is what to do when the case
+# study is deliberately re-promoted.
 
 # %% tags=["parameters"]
 PREDICTION_THRESHOLD = 0.0
-# What this export depends on: the configuration the registry selects, and the
-# bytes of that configuration's sealed holdout predictions. The registry file
-# itself is not pinned. It accumulates rows from every run in the case study,
-# so its hash moves whether or not the selection moves, which would make a
-# whole-file pin fail on runs that export exactly the right predictions. Set a
-# pin to None to report the observed value instead of asserting it.
-# The validation training run of the promoted configuration, gbm/leaves_63_mse on fwd_ret_5d.
-# It moved when the etfs holdout was re-evaluated on the corrected carrier; the previous value,
-# 0488120b490e, named the configuration promoted before that.
-EXPECTED_TRAINING_HASH = "b937b23afab5"
-EXPECTED_PREDICTIONS_SHA256 = "b76202842ba56742c3c2748722b60dc1210fdf37687c687a7800da388750bfc8"
+EXPECTED_TRAINING_HASH = "ab5300c0cda4"
+EXPECTED_PREDICTIONS_SHA256 = "2efad22dbf40464939d143745116165c6447c3e4dfd154bd608dda8653b52925"
 EXPORT_PATH = get_output_dir(25, "quantconnect_export") / "ml4t_qc_predictions.json"
 
 
@@ -89,23 +98,8 @@ case_study_dir = get_case_study_dir("etfs")
 registry_path = case_study_dir / "run_log" / "registry.db"
 registry_hash_before = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 
-# Resolve the selected cross-stage winner and its one sealed holdout prediction
-# set using a read-only immutable SQLite connection. This cannot create a WAL,
-# journal, or transaction side effect in the canonical case-study registry.
 registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro&immutable=1"
 with sqlite3.connect(registry_uri, uri=True) as conn:
-    # The winner has to be a configuration whose holdout predictions were sealed, because
-    # that is what this export ships. Ranking without that condition asks a different
-    # question - the best development backtest, promoted or not - and picks a row that has
-    # no holdout set behind it, which surfaced as "Expected one sealed holdout set, found 0"
-    # several lines below the point where the wrong row was chosen.
-    #
-    # The link is the CONFIGURATION, not the training hash. A holdout fit is a retrain: on
-    # etfs the validation carrier is training run b937b23afab5 and its holdout counterpart is
-    # d5062f7f0eaa, same family, config_name and label, and the holdout run has no development
-    # backtest of its own. Matching on training_hash therefore finds nothing for any promoted
-    # configuration in any registry - it is satisfiable only where a single training run wrote
-    # both splits, which the pipeline stopped doing.
     winner = conn.execute(
         """SELECT ps.training_hash, br.backtest_hash, br.stage, bm.sharpe
            FROM backtest_runs br
@@ -126,7 +120,7 @@ with sqlite3.connect(registry_uri, uri=True) as conn:
     ).fetchone()
     if winner is None:
         raise RuntimeError("ETF registry has no eligible cross-stage backtest winner")
-    carrier_family, carrier_config, carrier_label = conn.execute(
+    selected_family, selected_config, selected_label = conn.execute(
         "SELECT family, config_name, label FROM training_runs WHERE training_hash = ?",
         (winner[0],),
     ).fetchone()
@@ -145,7 +139,7 @@ with sqlite3.connect(registry_uri, uri=True) as conn:
 assert EXPECTED_TRAINING_HASH in (None, winner[0]), (
     f"The registry now selects a different configuration: {winner[0]}"
 )
-assert len(holdout_rows) == 1, f"Expected one sealed holdout set, found {len(holdout_rows)}"
+assert len(holdout_rows) == 1, f"Expected one holdout prediction set, found {len(holdout_rows)}"
 prediction_hash = holdout_rows[0][0]
 prediction_path = (
     case_study_dir / "run_log" / "predictions" / prediction_hash / "predictions.parquet"
@@ -158,18 +152,12 @@ predictions = normalize_demo_predictions(pl.read_parquet(prediction_path), "symb
 registry_hash_after_load = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 assert registry_hash_after_load == registry_hash_before
 
-# The horizon is a property of the promoted configuration, not a constant. It was declared as
-# 21 here and never read, so when the ETF carrier moved to `fwd_ret_5d` the notebook went on
-# exporting a signal it described as monthly. Reading it off the label makes the mismatch
-# impossible: everything downstream that names a holding period names this number.
-horizon_days = int(carrier_label.removeprefix("fwd_ret_").removesuffix("d"))
-# The rebalance follows the horizon so a position is closed before the next signal is formed.
-# Trading sessions, not calendar days: 5 sessions is a week, 21 is a month.
+horizon_days = int(selected_label.removeprefix("fwd_ret_").removesuffix("d"))
 REBALANCE_RULES = {5: ("weekly", "week_start"), 21: ("monthly", "month_start")}
 if horizon_days not in REBALANCE_RULES:
     raise ValueError(
         f"no rebalance cadence declared for a {horizon_days}-session horizon "
-        f"(label {carrier_label}); add one to REBALANCE_RULES"
+        f"(label {selected_label}); add one to REBALANCE_RULES"
     )
 rebalance_cadence, rebalance_date_rule = REBALANCE_RULES[horizon_days]
 
@@ -177,7 +165,7 @@ print(f"Registry SHA256: {registry_hash_before}")
 print(f"Prediction parquet SHA256: {prediction_file_hash}")
 print(f"Training hash: {winner[0]} | holdout prediction hash: {prediction_hash}")
 print(f"Selection stage: {winner[2]} | backtest hash: {winner[1]}")
-print(f"Carrier: {carrier_family}/{carrier_config} on {carrier_label}")
+print(f"Selected configuration: {selected_family}/{selected_config} on {selected_label}")
 print(
     f"Horizon: {horizon_days} sessions -> {rebalance_cadence} rebalance "
     f"(LEAN date_rules.{rebalance_date_rule})"
@@ -195,17 +183,15 @@ print(f"  Symbols: {n_symbols}")
 predictions.head(10)
 
 # %% [markdown]
-# **Finding**: The predictions span the sealed holdout period, the
-# out-of-sample window the model never saw during selection, with daily
-# coverage across the surviving ETF universe (typically 90+ symbols per day
-# after liquidity filters). Exporting the holdout, not the validation split, is
-# deliberate: a deployment backtest must run on data untouched by model
-# selection. Each row is a single model's out-of-sample score for one symbol on
-# one date.
+# The exported rows are the **holdout** predictions, not the validation ones, and that choice is
+# the whole point of the export. Validation predictions were used to choose this configuration
+# over the others, so a backtest on them measures the selection as much as the model. The holdout
+# window was not read during selection, which is what makes a deployment backtest on it worth
+# running. Each row is one model's out-of-sample score for one symbol on one date.
 #
-# **Trading implication**: Exporting frozen predictions decouples portfolio-rule
-# iteration from the ML pipeline. You can test different thresholds, position
-# limits, and rebalance frequencies without retraining.
+# Freezing those scores into a file is what separates the two loops. Thresholds, position limits
+# and rebalance cadence can be changed on the platform against an unchanged prediction file, so
+# a portfolio-rule experiment costs a backtest rather than a retrain.
 
 # %% [markdown]
 # ## 2. Export as QuantConnect-Compatible JSON
@@ -391,12 +377,15 @@ print(algorithm_source)
 print(f"Written to {display_path(algorithm_path)}")
 
 # %% [markdown]
-# The entire algorithm is ~30 lines, and it is written next to the predictions
-# so the two travel together. Portfolio rules (threshold, weighting, rebalance
-# frequency) can be changed without touching the ML pipeline. Matching the
-# rebalance to the signal's horizon is itself an instance of that freedom: when
-# the ETF case study promoted a 5-session carrier over its 21-session one,
-# aligning the cadence was this one line, not a retraining run.
+# The algorithm is about thirty lines, and it ships beside the predictions so the two travel
+# together. Threshold, weighting and rebalance cadence are all in it, and all can change without
+# touching the model.
+#
+# The cadence is derived rather than declared, and that is worth noticing. It comes from the
+# selected configuration's own label: a five-session forecast is rebalanced weekly so a position
+# is closed before the next signal forms. Had the cadence been typed here as a constant, the
+# selection moving to a different horizon would leave the algorithm trading on a schedule that no
+# longer matches the signal, and nothing would say so.
 
 # %% [markdown]
 # ## 4. Running on QuantConnect
@@ -470,11 +459,16 @@ ax.set(xlabel=f"Predicted {horizon_days}-day return", ylabel="Prediction count")
 ax.legend(frameon=False)
 add_message_title(
     ax,
-    f"The zero threshold selects {100 * len(positive) / len(predictions):.1f}% of holdout scores",
-    subtitle="Sealed ETF holdout prediction distribution",
+    "Most predicted returns sit close to zero",
+    subtitle="ETF holdout predictions at the promoted configuration's horizon; the vertical "
+    "line is the long threshold",
 )
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    f"Histogram of {len(predictions):,} predicted {horizon_days}-session returns, concentrated "
+    f"near zero and roughly symmetric, with a vertical line at the long threshold of "
+    f"{PREDICTION_THRESHOLD:g}. {len(positive):,} of them fall above it.",
+)
 
 # %%
 portfolio_sizes = portfolio_sizes.sort("timestamp")
@@ -501,23 +495,27 @@ for label in ax.get_xticklabels():
 ax.legend(frameon=False)
 add_message_title(
     ax,
-    (
-        f"Portfolio breadth ranges from {portfolio_sizes['n_holdings'].min()} "
-        f"to {portfolio_sizes['n_holdings'].max()} names"
-    ),
-    subtitle="Daily count of positive ETF predictions",
+    "Breadth swings day to day, and the threshold is what decides it",
+    subtitle="Daily count of ETF predictions above the long threshold",
 )
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Line chart of the daily count of positive predictions across the holdout window, ranging "
+    f"between {portfolio_sizes['n_holdings'].min()} and "
+    f"{portfolio_sizes['n_holdings'].max()} names against a dashed line at the mean of "
+    f"{portfolio_sizes['n_holdings'].mean():.1f}.",
+)
 
 # %% [markdown]
-# **Finding**: The prediction distribution determines portfolio breadth. The
-# output above computes the positive-score share and daily holding counts rather
-# than relying on a frozen headline number. Higher thresholds concentrate the
-# portfolio into fewer names.
+# Those two figures are one argument. The histogram is the model's output and the line chart is
+# the portfolio that follows from it, and the only thing between them is the threshold. Raise it
+# and the second chart drops toward a handful of names on most days; lower it and the portfolio
+# approaches the whole universe.
 #
-# **Trading implication**: Threshold tuning is now a portfolio-construction
-# decision, not a modeling decision. That is the intended separation.
+# That is the separation the precomputed-prediction pattern buys. The threshold is a
+# portfolio-construction decision made on the platform, in code a reader can see, against a
+# prediction file that does not change when it moves. Deciding it inside the model would make
+# every change to it a retrain.
 
 # %% [markdown]
 # ## 6. Two Deployment Workflows Compared

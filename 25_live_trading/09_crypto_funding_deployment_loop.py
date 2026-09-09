@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
@@ -16,10 +17,11 @@
 # %% [markdown]
 # # Crypto Funding Deployment Loop
 #
-# **Chapter 25: Live Trading Systems**
-# **Section**: 25.6 (Pipeline Verification: Ensuring Technical Parity)
+# **Book Reference**: Chapter 25, Section 25.6 (Ensuring technical parity through pipeline
+# verification)
 #
-# **Docker image**: `ml4t-gpu` (includes CUDA LightGBM and `python-okx`)
+# **Requires**: the `live` optional dependency group (`uv sync --extra live`), which supplies
+# `python-okx` for the data plane and `alpaca-py` for the execution plane.
 #
 # This notebook is the chapter's crypto deployment-loop demonstration. The
 # *Chapter 12* funding-rate case study trains on Binance-derived perpetuals;
@@ -56,8 +58,8 @@
 # **Cross-References**
 # - Chapter 12: Funding-rate case study (model training and registry)
 # - Chapter 7: Triple-barrier and direction labels
-# - Chapter 25.3: Alpaca integration and paper trading
-# - Chapter 25.6: Pipeline verification across venues
+# - Chapter 25.3: Integrating with Alpaca
+# - Chapter 25.6: Ensuring technical parity through pipeline verification
 # - Chapter 26: Repeated model serving and monitoring
 #
 # **Learning Objectives**
@@ -111,7 +113,7 @@ from sklearn.preprocessing import StandardScaler
 from data import load_crypto_perps, load_crypto_premium
 from utils.paths import display_path, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 logging.basicConfig(
     level=logging.INFO,
@@ -128,7 +130,7 @@ LEARNING_RATE = 0.05
 NUM_LEAVES = 31
 NUM_THREADS = 4
 SEED = 42
-TRAIN_DEVICE = "cuda"
+TRAIN_DEVICE = "cpu"  # deterministic CPU training; a reader reproduces the artifact bit for bit
 PROB_LONG_THRESHOLD = (
     0.30  # any non-trivial probability mass on P(up); soft for demo (production: ≥0.45)
 )
@@ -193,12 +195,18 @@ OKX_INSTRUMENT = {sym: f"{sym[:-4]}-USDT-SWAP" for sym in CASE_STUDY_UNIVERSE}
 # The demo carries an explicit eleven-pair mapping for its paper-execution rehearsal.
 
 
+# %% [markdown]
+# The mapping is written out rather than queried, and both halves of that choice matter. USD
+# pairs rather than USDT ones, because the paper account is funded in USD and a quote-currency
+# mismatch is a different instrument. And a fixed list rather than a live catalogue lookup,
+# because a venue's listings change and a notebook that silently tracked them would produce a
+# different universe on every run with nothing recording which one it used.
+#
+# The cost is that the list goes stale, which is the right cost to pay here: a stale mapping
+# fails visibly against a symbol the venue no longer lists, where a silent one changes the
+# strategy underneath the reader.
+
 # %%
-# Mapping from case-study perp symbol to Alpaca USD-quoted spot pair (eleven
-# mapped to a USD-quoted spot equivalent). We use USD pairs rather than USDT
-# pairs because the demo's paper account is funded in USD. Venue listings can
-# change, so this fixed mapping is an explicit teaching input rather than a
-# claim about the current complete Alpaca catalogue.
 ALPACA_USD_PAIR = {
     "AAVEUSDT": "AAVE/USD",
     "ADAUSDT": "ADA/USD",
@@ -262,7 +270,7 @@ print(f"Order submission:  {'ENABLED' if SUBMIT_PAPER_ORDERS else 'DISABLED (dry
 set_global_seeds(SEED)
 
 # %% [markdown]
-# **Finding.** Eight of the nineteen case-study perps are absent from the
+# Eight of the nineteen case-study perps are absent from the
 # demo's fixed Alpaca mapping. The strategy was researched on a universe chosen
 # for funding-data depth, while the execution rehearsal uses a narrower spot
 # universe. That declared gap illustrates the research/deployment alignment
@@ -670,7 +678,8 @@ X_train_scaled = scaler.transform(X_train)
 
 
 # %% [markdown]
-# LightGBM trains on CUDA with fixed seeds; the feature scaler is fit on the sealed training rows only.
+# LightGBM trains on the CPU with fixed seeds, and the feature scaler is fit on the training rows
+# alone so no validation or live row contributes to the mean and scale it applies.
 
 
 # %%
@@ -684,6 +693,8 @@ model = lgb.train(
         "num_leaves": NUM_LEAVES,
         "verbose": -1,
         "device_type": TRAIN_DEVICE,
+        "deterministic": True,
+        "force_col_wise": True,
         "num_threads": NUM_THREADS,
         "max_bin": 63,
         "seed": SEED,
@@ -698,9 +709,10 @@ print(f"Model trained: {NUM_BOOST_ROUND} rounds, {NUM_LEAVES} leaves")
 
 
 # %% [markdown]
-# Fixed seeds control LightGBM's statistical random choices, but CUDA histogram updates are not
-# bit-exact across runs. The production contract is the pinned GPU environment plus empirical prediction
-# stability; readers who require bitwise repeatability can use LightGBM's deterministic CPU settings.
+# `deterministic` and `force_col_wise` fix LightGBM's histogram construction order, so the same
+# inputs in the same pinned environment produce the same booster on a re-run. A different platform
+# or a differently compiled LightGBM can still differ, and a CUDA build differs between runs of
+# itself, so anything that crosses environments is verified by comparing predictions, not hashes.
 
 # %% [markdown]
 # The model, scaler, and feature order form one deployment artifact contract.
@@ -748,14 +760,14 @@ with open(metadata_path, "w") as f:
 print(f"Persisted artefacts to {display_path(ARTIFACTS_DIR)}")
 
 # %% [markdown]
-# **Finding.** The deployment artefact is a *separate fit* from the case
+# The deployment artefact is a *separate fit* from the case
 # study's research artefact. Same data, same labels, but a different feature
 # subset (the thirteen the live pipeline can compute) and a different code
 # path (this notebook's `compute_features_8h`, not
 # `case_studies/crypto_perps_funding/03_financial_features.py`). Hyperparameter
 # choices are inherited; trained weights are not. This separation is the
 # right architecture: research artefacts live in the registry; deployment
-# artefacts live under `25_live_trading/live_artifacts/`.
+# artefacts live under `25_live_trading/output/crypto_funding_deployment/`.
 
 # %% [markdown]
 # ## 4. Live Cross-Section from OKX
@@ -892,14 +904,14 @@ if live_funding_frames:
 
 
 # %% [markdown]
-# Funding observations are joined backward within each symbol, preventing a future funding timestamp
-# from informing an earlier bar.
+# Funding settles every eight hours and bars arrive far more often, so the two have to be aligned
+# before either can be a feature. The join is backward and per symbol: each bar takes the most
+# recent funding rate at or before its own timestamp, which is the only rate that existed when
+# that bar closed. A forward or nearest join would put a funding print into a bar that preceded
+# it, and the resulting feature would be a small, invisible piece of the future.
 
 
 # %%
-# Build a panel that aligns funding (8h cadence) with bar timestamps using a
-# backward asof join per symbol. The resulting `funding_rate` is the most
-# recent funding rate at or before each bar's timestamp.
 if len(live_funding) > 0:
     parts = []
     for sym in live_prices["symbol"].unique().to_list():
@@ -985,17 +997,14 @@ predictions = latest_features.select(["symbol", "timestamp", "close"]).with_colu
 )
 assert predictions.select(pl.struct(["symbol", "timestamp"]).n_unique()).item() == len(predictions)
 
-
 # %% [markdown]
-# When both directional thresholds fire, the larger tail probability determines the intent.
+# Both directional thresholds can fire at once, which happens whenever the flat probability is
+# small enough that the two tails together clear it. The intent then goes to whichever tail is
+# larger, so the position follows the model's own ranking of the two directions rather than the
+# order the conditions happen to be written in.
 
 
 # %%
-# Decide intent: long on strong P(up), short on strong P(down), else flat.
-# When both thresholds fire (possible whenever P(flat) is small), pick the
-# direction with the higher tail probability rather than the first branch
-# that matches. Otherwise a row with p_up=0.31, p_down=0.39, p_flat=0.30
-# would be tagged "long" despite P(down) being materially larger.
 predictions = predictions.with_columns(
     pl.when((pl.col("p_up") >= PROB_LONG_THRESHOLD) & (pl.col("p_up") >= pl.col("p_down")))
     .then(pl.lit("long"))
@@ -1033,14 +1042,22 @@ for intent in ["short", "flat", "long"]:
         marker_color=intent_colors[intent],
     )
 fig.update_layout(
-    title="Current live direction edges by active intent: "
-    + ", ".join(plot_predictions["intent"].unique(maintain_order=True)),
-    xaxis_title="P(up) - P(down) (probability)",
+    title="Intent follows class probability, not the size of the directional edge",
+    xaxis_title="P(up) minus P(down)",
     yaxis_title="Perpetual swap",
     barmode="stack",
     legend_title_text="Intent",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart of the directional edge, P(up) minus P(down), for each perpetual in "
+    "the live cross-section, sorted and coloured by the intent it produced. "
+    + ", ".join(
+        f"{intent}: {len(plot_predictions.filter(pl.col('intent') == intent))}"
+        for intent in ["short", "flat", "long"]
+    )
+    + ".",
+)
 
 # %% [markdown]
 # ## 6. Trade: Alpaca Paper Crypto
@@ -1169,7 +1186,7 @@ for r in exec_results:
     print(f"  {r['symbol']:<10} {r['intent']:<6} p_up={r['p_up']:.2f} → {r['status']:<20} {extra}")
 
 # %% [markdown]
-# **Finding.** The execution summary distinguishes flat intent, an absent
+# The execution summary distinguishes flat intent, an absent
 # mapping, an unsupported spot short, an intentional dry run, and a missing
 # credential. Each status has a different operator response. Publication mode
 # should contain no `submitted` record because order submission is disabled.
@@ -1179,7 +1196,7 @@ for r in exec_results:
 #
 # The run record is the per-cycle audit trail. It captures the model
 # fingerprint, the predict cross-section, and the execution disposition for
-# every symbol. Run JSONs are gitignored under `live_artifacts/` and
+# every symbol. Run JSONs are gitignored under the output directory and
 # accumulate as the deployment loop runs.
 
 # %%
