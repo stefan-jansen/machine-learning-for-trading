@@ -56,6 +56,9 @@
 # %%
 """HAR and rough volatility - multi-horizon volatility and the Hurst exponent."""
 
+import warnings
+
+import exchange_calendars as xcals
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -72,10 +75,17 @@ from ml4t.engineer.features.volatility import (
     rogers_satchell_volatility,
     yang_zhang_volatility,
 )
+from pandas.errors import PerformanceWarning
 from scipy import stats
 
 from data import load_etfs, load_nasdaq100_bars
 from utils.style import COLORS, FIGSIZE, show_with_alt
+
+# Building the exchange session index applies a date offset element by element, which pandas
+# reports as slow twenty times over. It is a speed notice about one calendar build.
+warnings.filterwarnings(
+    "ignore", category=PerformanceWarning, module="exchange_calendars.exchange_calendar"
+)
 
 # %% tags=["parameters"]
 START_DATE = "2006-01-01"
@@ -83,7 +93,7 @@ END_DATE = "2024-12-31"
 INTRADAY_SYMBOL = "AAPL"
 DAILY_SYMBOL = "SPY"
 MINIMUM_BARS_PER_SESSION = 360  # a full session is about 390 one-minute bars
-MAXIMUM_GAP_DAYS = 4  # calendar days an overnight return may span: a long weekend, no more
+EXCHANGE = "XNYS"  # the calendar that says which dates are sessions at all
 SESSIONS_PER_YEAR = 252
 ROLLING_WINDOW = 20  # sessions in every rolling average below: about one month
 
@@ -136,11 +146,14 @@ print(
 # open-to-close return in the variance sum for the same reason: without it the sum covers
 # one minute less than the session return it is compared against.
 #
-# And an overnight return is only an overnight return if the two sessions are adjacent on
-# the calendar. Bar counts cannot establish that, so the pair is filtered on the number of
-# calendar days between the two dates as well, and the longest surviving gap is printed
-# next to the session count. On a reduced test fixture, which keeps separated blocks of
-# sessions, a gap left unchecked can be weeks long.
+# And an overnight return is only an overnight return if the two rows are consecutive
+# sessions of the exchange. Bar counts cannot establish that, and neither can the number of
+# calendar days between the dates: a Monday-to-Wednesday pair is three days apart and still
+# contains all of Tuesday's trading if Tuesday is missing from the data. What settles it is
+# the exchange calendar, which says which dates are sessions independently of what the data
+# holds. Each pair is required to be one session apart on that calendar, which keeps
+# holiday weekends and drops a missing weekday. On a reduced test fixture, which keeps
+# separated blocks of sessions, an unchecked gap can be weeks long.
 
 # %%
 boundaries = (
@@ -166,29 +179,42 @@ variances = (
     .agg(minute_variance=pl.col("minute_return").pow(2).sum())
 )
 
+exchange_sessions = xcals.get_calendar(EXCHANGE).sessions_in_range(
+    minute_bars["date"].min(), minute_bars["date"].max()
+)
+session_numbers = pl.DataFrame(
+    {
+        "date": pl.Series("date", exchange_sessions).cast(pl.Date),
+        "session_number": np.arange(len(exchange_sessions), dtype=np.int64),
+    }
+)
+
 intraday = (
     boundaries.join(variances, on="date", how="left")
+    .join(session_numbers, on="date", how="inner")
+    .sort("date")
     .with_columns(
         previous_close=pl.col("session_close").shift(1),
         previous_bars=pl.col("bars").shift(1),
+        sessions_apart=pl.col("session_number") - pl.col("session_number").shift(1),
+        days_apart=(pl.col("date") - pl.col("date").shift(1)).dt.total_days(),
     )
     .with_columns(
         session_return=(pl.col("session_close") / pl.col("session_open")).log(),
         overnight_return=(pl.col("session_open") / pl.col("previous_close")).log(),
         close_to_close_return=(pl.col("session_close") / pl.col("previous_close")).log(),
     )
-    .with_columns(gap_days=(pl.col("date") - pl.col("date").shift(1)).dt.total_days())
     .filter(
         (pl.col("bars") >= MINIMUM_BARS_PER_SESSION)
         & (pl.col("previous_bars") >= MINIMUM_BARS_PER_SESSION)
-        & (pl.col("gap_days") <= MAXIMUM_GAP_DAYS)
+        & (pl.col("sessions_apart") == 1)
     )
     .drop_nulls()
-    .sort("date")
 )
 
 print(f"Sessions kept: {intraday.height:,} of {boundaries.height}")
-print(f"Longest gap between kept consecutive sessions: {intraday['gap_days'].max()} calendar days")
+print(f"Exchange sessions in the sample period: {len(exchange_sessions):,}")
+print(f"Longest calendar gap among the kept pairs: {intraday['days_apart'].max()} days")
 
 # %% [markdown]
 # ## The first trap: these prices are not adjusted
@@ -587,11 +613,15 @@ display(har.select(["timestamp", *HORIZONS, "target"]).tail(3))
 # this shape can have independent innovations. So overlap is a reason to check rather than
 # a proof of a problem.
 #
-# Three standard errors for the same coefficients are computed below. The textbook ones
-# assume homoscedastic, serially uncorrelated residuals. `HC3` relaxes only the first
-# assumption. **Newey-West** relaxes both, over a lag window set to the longest horizon in
-# the model, which is where any dependence the regressors' overlap could induce would
-# reach. Comparing them in that order separates what each relaxation contributes.
+# Four standard errors for the same coefficients are computed below, and the reason there
+# are four rather than two is that isolating one relaxation requires holding the other
+# estimator choices fixed. The textbook ones assume homoscedastic, serially uncorrelated
+# residuals. `HC3` relaxes the first assumption with a leverage adjustment. The last two
+# are the same **Newey-West** estimator run twice, once with a zero-lag window and once
+# over a window set to the longest horizon in the model, which is where any dependence the
+# regressors' overlap could induce would reach. Those two differ in the lag window and in
+# nothing else, so their ratio is what the lagged covariance terms contribute; `HC3`
+# against the textbook column is a separate reading of heteroscedasticity alone.
 
 # %%
 NEWEY_WEST_LAGS = max(HORIZONS.values())
@@ -610,34 +640,35 @@ target = har["target"].to_numpy()
 
 har_fit = fit_har(har)
 plain_fit = sm.OLS(target, design).fit()
-robust_fit = sm.OLS(target, design).fit(cov_type="HC3")
+leverage_fit = sm.OLS(target, design).fit(cov_type="HC3")
+zero_lag_fit = sm.OLS(target, design).fit(cov_type="HAC", cov_kwds={"maxlags": 0})
 
 display(
     pd.DataFrame(
         {
             "coefficient": har_fit.params,
             "standard error, textbook": plain_fit.bse,
-            "standard error, heteroscedasticity only": robust_fit.bse,
-            "standard error, Newey-West": har_fit.bse,
-            "ratio, heteroscedasticity only to textbook": robust_fit.bse / plain_fit.bse,
-            "ratio, Newey-West to heteroscedasticity only": har_fit.bse / robust_fit.bse,
+            "standard error, HC3": leverage_fit.bse,
+            "standard error, Newey-West at zero lags": zero_lag_fit.bse,
+            f"standard error, Newey-West at {NEWEY_WEST_LAGS} lags": har_fit.bse,
+            "ratio, HC3 to textbook": leverage_fit.bse / plain_fit.bse,
+            "ratio, the two Newey-West columns": har_fit.bse / zero_lag_fit.bse,
         }
     )
 )
 print(f"R-squared: {har_fit.rsquared:.4f}")
 
 # %% [markdown]
-# The two ratios split the widening into its parts. The first is what allowing for unequal
-# residual variance changes on its own. The second is what allowing for serial dependence
-# adds after that. Nothing about the coefficients changed; what changed is how much
-# confidence the fit reports in them.
+# Nothing about the coefficients changed. What changed is how much confidence the fit
+# reports in them, and the two ratio columns say where that change comes from.
 #
-# Read the two separately rather than the product. A first ratio well above one and a
-# second near one puts most of the widening in the heteroscedasticity term. Two ratios of
-# similar size would put it in both. What a second ratio near one does not say is that the
-# residuals are serially independent: Newey-West estimates the long-run variance of the
-# regressor-residual products over the lag window, so a ratio near one says that estimate
-# is close to the heteroscedasticity-only one and stops there.
+# The first ratio is heteroscedasticity, read on its own. The second is the lag window, read
+# with everything else held fixed. A second ratio near one says the lagged covariance terms
+# add little to the zero-lag version; it is a statement about the estimate, not about the
+# residuals, because what Newey-West sums over the window is the covariance of the
+# regressor-residual products rather than of the residuals themselves. Serially correlated
+# residuals whose products with these regressors happen to be close to uncorrelated would
+# produce the same ratio.
 #
 # The coefficients themselves are the reason to fit HAR rather than GARCH. Each one is the
 # weight the model puts on one horizon, so their relative sizes say which horizon is
@@ -1300,9 +1331,10 @@ print(
 #    coefficient is readable as the weight one horizon carries.
 # 3. **Overlapping regressors are a reason to widen the standard errors, not a proof the
 #    residuals are correlated.** A correctly specified model can have independent
-#    innovations despite rolling-average regressors. Report the textbook,
-#    heteroscedasticity-only and Newey-West standard errors side by side, which shows how
-#    much each relaxed assumption costs without claiming what the residuals do.
+#    innovations despite rolling-average regressors. To read what one relaxed assumption
+#    costs, change only that assumption: the same Newey-West estimator at zero lags and at
+#    the model's longest horizon differs in the window alone, which no comparison across two
+#    different covariance estimators can claim.
 # 4. **Two models forecasting differently-measured targets cannot be ranked by their
 #    errors.** Report the mean of each forecast next to the mean of the target, and read
 #    the correlation, which the level difference does not touch.
