@@ -122,7 +122,7 @@ CONFIG_NAME = "dml"
 NUISANCE_OVERRIDES = {}
 EXECUTION_TIER = "canonical"
 WORKSPACE = "experiments"
-MAX_SYMBOLS = 0
+PREVIEW_MAX_SYMBOLS = 0
 PREVIEW_MAX_SAMPLES = 0
 PREVIEW_N_FOLDS = 0
 PREVIEW_N_PLACEBO = 0
@@ -169,8 +169,8 @@ config_menu
 
 # %%
 preview_reductions = {}
-if MAX_SYMBOLS:
-    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
+if PREVIEW_MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(PREVIEW_MAX_SYMBOLS)
 if PREVIEW_MAX_SAMPLES:
     preview_reductions["max_samples"] = int(PREVIEW_MAX_SAMPLES)
 if PREVIEW_N_FOLDS:

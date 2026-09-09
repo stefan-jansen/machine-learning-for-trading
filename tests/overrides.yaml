@@ -3592,6 +3592,11 @@ case_studies/us_equities_panel/13b_ipca:
     PREVIEW_N_FACTORS: 2
   timeout: 300
 case_studies/us_equities_panel/14_causal_dml:
+  # MAX_SYMBOLS carries the PREVIEW_ prefix here. Without it, injected_parameters strips it on
+  # neither path: canonically_refused_parameters reads the notebook's canonical guard, whose test
+  # is the local `preview_reductions` aggregate rather than a declared parameter name, so the
+  # intersection with the parameters cell is empty. It reached a canonical run and raised
+  # "Canonical execution cannot declare preview reductions".
   # CV_FOLDS, MAX_SAMPLES and N_PLACEBO became PREVIEW_N_FOLDS,
   # PREVIEW_MAX_SAMPLES and PREVIEW_N_PLACEBO: the reduced fold count, sample
   # cap and placebo count are part of the preview identity now, not free knobs.
@@ -3600,7 +3605,7 @@ case_studies/us_equities_panel/14_causal_dml:
   # any n below 20 and the draws are spent on a verdict that cannot be reached. 20 is
   # the first reachable count; 24 leaves margin for draws that fail.
   parameters:
-    MAX_SYMBOLS: 5
+    PREVIEW_MAX_SYMBOLS: 5
     PREVIEW_N_FOLDS: 2
     PREVIEW_MAX_SAMPLES: 5000
     PREVIEW_N_PLACEBO: 25
