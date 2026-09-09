@@ -2307,18 +2307,18 @@ case_studies/fx_pairs/19_strategy_analysis:
 # to answer that first.
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
-    MAX_SYMBOLS: 5
-  timeout: 120
+    MAX_SYMBOLS: 12
+  timeout: 300
 case_studies/nasdaq100_microstructure/02_labels:
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 12
     START_DATE: '2000-01-01'
-  timeout: 120
+  timeout: 300
 case_studies/nasdaq100_microstructure/03_financial_features:
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 12
     START_DATE: '2000-01-01'
-  timeout: 120
+  timeout: 300
 case_studies/nasdaq100_microstructure/04_model_based_features:
   # MAX_SYMBOLS and START_DATE must match the consumers of this notebook's
   # temporal artifact (05_evaluation and 06-12, all MAX_SYMBOLS 5 from
@@ -2327,13 +2327,13 @@ case_studies/nasdaq100_microstructure/04_model_based_features:
   # covered none of fold 0 and validate_temporal_fold_coverage failed at 0.0%.
   long_running: true
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 12
     START_DATE: '2000-01-01'
-  timeout: 900
+  timeout: 1860
 case_studies/nasdaq100_microstructure/05_evaluation:
   parameters:
-    MAX_SYMBOLS: 5
-  timeout: 300
+    MAX_SYMBOLS: 12
+  timeout: 660
 case_studies/nasdaq100_microstructure/06_linear:
   parameters:
     # Declared here rather than left to the harness default of max_symbols alone.
@@ -2342,12 +2342,12 @@ case_studies/nasdaq100_microstructure/06_linear:
     # cutting the cross-section does not touch it. `folds` is the reduction that does.
     PREVIEW_REDUCTIONS:
       folds: [0]
-      max_symbols: 5
+      max_symbols: 12
       train_sample_frac: 0.02
   # Measured after the preview branch stopped re-resolving: slowest cell 211s (the fit),
   # planning 121s, 342s end to end. Timeout is per cell, so this is ~2.8x the slowest.
   tier: weekly
-  timeout: 600
+  timeout: 1260
 case_studies/nasdaq100_microstructure/07_gbm:
   parameters:
     # As 06_linear, plus the two axes a boosted fit adds: 20 trees instead of 500,
@@ -2357,11 +2357,11 @@ case_studies/nasdaq100_microstructure/07_gbm:
       checkpoint_interval: 10
       folds: [0]
       max_iterations: 20
-      max_symbols: 5
+      max_symbols: 12
       train_sample_frac: 0.02
   # Measured the same way: slowest cell 362s, planning 147s, 515s end to end.
   tier: weekly
-  timeout: 900
+  timeout: 1860
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
   # Converted onto the research boundary, so BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and
   # N_EPOCHS name nothing this notebook binds any more: the window and the batch come from the
@@ -2379,9 +2379,9 @@ case_studies/nasdaq100_microstructure/08_dl_nlinear:
     POPULATION_NAME: nasdaq100_microstructure-nlinear-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 12
       max_train_sequences: 2000
-  timeout: 600
+  timeout: 1260
 case_studies/nasdaq100_microstructure/09_dl_lstm:
   # Converted onto the research boundary, so BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and
   # N_EPOCHS name nothing this notebook binds any more: the window and the batch come from the
@@ -2399,9 +2399,9 @@ case_studies/nasdaq100_microstructure/09_dl_lstm:
     POPULATION_NAME: nasdaq100_microstructure-lstm_h64-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 12
       max_train_sequences: 2000
-  timeout: 600
+  timeout: 1260
 case_studies/nasdaq100_microstructure/10_dl_tcn:
   # Converted onto the research boundary, so BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and
   # N_EPOCHS name nothing this notebook binds any more: the window and the batch come from the
@@ -2419,9 +2419,9 @@ case_studies/nasdaq100_microstructure/10_dl_tcn:
     POPULATION_NAME: nasdaq100_microstructure-tcn-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 12
       max_train_sequences: 2000
-  timeout: 600
+  timeout: 1260
 case_studies/nasdaq100_microstructure/11_dl_patchtst:
   # Converted onto the research boundary alongside 08 through 10, so the same five names are
   # gone for the same reasons; see 08_dl_nlinear above.
@@ -2435,7 +2435,7 @@ case_studies/nasdaq100_microstructure/11_dl_patchtst:
     POPULATION_NAME: nasdaq100_microstructure-patchtst-preview
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 12
       max_train_sequences: 2000
       # The training cap bounded the fit and left the forward pass over validation
       # scaling with the panel, which is why this cell sat at its 600s budget while
@@ -2443,14 +2443,14 @@ case_studies/nasdaq100_microstructure/11_dl_patchtst:
       # and was scoring every one of them. Matched to the training cap, three orders
       # below the panel, and above the symbol count so the cross-section is intact.
       max_predict_sequences: 2000
-  timeout: 600
+  timeout: 1260
 case_studies/nasdaq100_microstructure/12_causal_dml:
   parameters:
     CV_FOLDS: 2
     MAX_SAMPLES: 900
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 12
     N_PLACEBO: 25
-  timeout: 120
+  timeout: 300
 case_studies/nasdaq100_microstructure/13_model_analysis:
   parameters:
     # The fixture publishes its populations under a `-fixture-` prefix rather than the case
