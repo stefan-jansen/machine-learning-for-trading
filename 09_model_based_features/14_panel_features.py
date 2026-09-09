@@ -370,8 +370,12 @@ for step in range(1, len(pair)):
 
 pair["position"] = position
 
-print(f"Sessions with a position open: {int((pair['position'] != 0).sum()):,}")
-print(f"Entries: {int((np.diff(pair['position'].to_numpy(), prepend=0) != 0).sum()):,}")
+held_positions = pair["position"].to_numpy()
+previous_positions = np.concatenate([[0], held_positions[:-1]])
+entries = int(((held_positions != previous_positions) & (held_positions != 0)).sum())
+
+print(f"Sessions with a position open: {int((held_positions != 0).sum()):,}")
+print(f"Entries, counting a reversal as a new one: {entries:,}")
 
 # %%
 fig, axes = plt.subplots(4, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
@@ -423,21 +427,29 @@ show_with_alt(
 # %% [markdown]
 # ## What the position would have returned
 #
-# The position is in a spread, so its profit is the change in the spread and not the difference
-# between two returns. Holding one unit of the dependent fund against `hedge_ratio` units of the
-# other, over one session, the profit in dollars is
+# What was held over session $t$ is one share of the dependent fund against $\beta_{t-1}$ shares
+# of the other, because $\beta_{t-1}$ is the ratio the filter had produced by the previous close.
+# Its profit in dollars is the two price changes weighted by those holdings:
 #
 # $$\Delta P_t - \beta_{t-1}\, \Delta Q_t$$
 #
-# and to express it as a return it is divided by what was committed to hold it, which is the
-# value of both legs. Dividing by one leg, or taking the difference of the two funds' returns
-# and calling it a spread return, silently sets the hedge ratio to one and reports the P&L of a
-# position nobody held.
+# and to express it as a return it is divided by what holding both legs committed, which is the
+# value of one share of the first plus $|\beta_{t-1}|$ shares of the second.
 #
-# Three limits, all of them structural rather than fixable here. No transaction costs and no
-# slippage are charged, and this strategy trades a spread that mean-reverts, which is the kind
-# most sensitive to both. The short leg is assumed available at no borrowing cost. And the pair
-# was chosen by looking at the same history, which the screening section takes up.
+# That is deliberately not the first difference of the `spread` column. The spread at $t$ is
+# defined with $\beta_t$, so differencing it mixes the session's price moves with the change in
+# the ratio itself, and a holder cannot rebalance at a ratio they only learn at that session's
+# close. The two agree only where the filtered ratio is flat.
+#
+# It is also not the difference of the two funds' returns. That quantity is the profit of equal
+# dollar amounts in the two legs, which is a hedge in money rather than in shares, and it uses no
+# estimated ratio at all. Which of the two a strategy wants is a choice; reporting one while
+# having estimated the other is not.
+#
+# Three limits, all structural rather than fixable here. No transaction costs and no slippage are
+# charged, and a spread strategy trades often enough to be sensitive to both. The short leg is
+# assumed available at no borrowing cost. And the pair was chosen by looking at the same history,
+# which the screening section takes up.
 
 # %%
 evaluated = pair.index >= pair.index[train_end]
@@ -471,11 +483,13 @@ display(
 # %% [markdown]
 # The entry count is the number to read, and it is the section's conclusion. A half-life of
 # months sets a window of about a year, a band that wide is crossed rarely, and the result is a
-# handful of entries over five years with a position open for more than half of them. That is not
+# position that opens a couple of times across the evaluated years and is then held for more than
+# half of their sessions. That is not
 # a mean-reversion strategy; it is a slow directional bet on a spread, which is what the
 # cointegration tests said would happen when they declined to find a stationary combination.
 #
-# The return is therefore not evidence about the method. It is one draw from three trades. The
+# The return is therefore not evidence about the method. It is one draw from as many trades as the
+# entry count reports. The
 # drawdown is the one figure here worth carrying: it is what a position of that duration exposed
 # a holder to while waiting for a reversion the spread had no mechanism to deliver.
 
@@ -895,8 +909,10 @@ show_with_alt(
 # 4. **A window length is a parameter and leaks like one.** The half-life that sizes the signal
 #    window is estimated on the first block only, because a length chosen from the whole sample
 #    is a leak that does not look like one.
-# 5. **A spread's profit is the change in the spread.** Taking the difference of the two funds'
-#    returns sets the hedge ratio to one and reports the P&L of a position nobody held.
+# 5. **Price the position that was held, not the column that was plotted.** The profit is the two
+#    price changes weighted by the previous session's holdings. Differencing a spread whose ratio
+#    moves adds the ratio's own change to it, and differencing the two funds' returns prices equal
+#    dollar amounts in each leg, which is a hedge in money and not the share ratio estimated.
 # 6. **Rank, percentile and z-score discard different things.** Ranks and percentiles throw away
 #    the distances between assets, which is what makes them robust and what makes them invent
 #    distinctions between assets that were nearly identical.

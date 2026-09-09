@@ -185,8 +185,10 @@ for entry in present:
         row[token] = sum(1 for name in columns if token in name)
     family_rows.append(row)
 
+family_rows.sort(key=lambda row: row["columns"], reverse=True)
+
 if family_rows:
-    families = pl.DataFrame(family_rows).sort("columns", descending=True)
+    families = pl.DataFrame(family_rows)
     display(families)
     print(
         f"Families present in at least one case study: {sum(1 for token in FAMILY_TOKENS if families[token].sum() > 0)} of {len(FAMILY_TOKENS)}"
@@ -227,9 +229,12 @@ if family_rows:
 # %% [markdown]
 # ## The same counts by family
 #
-# The grouped chart is the coverage question drawn: a family present in one market and absent in
-# eight is asset-specific, and one present everywhere is a technique the chapter can treat as
-# general. Neither reading says the feature worked anywhere.
+# The grouped chart is the naming coverage drawn: how many of the nine markets have a column whose
+# name carries each family's token. It is a picture of what was built and how it was named, and it
+# supports neither of the two conclusions a reader will reach for. A family appearing in one
+# market is not therefore asset-specific, since another market may have built it under a different
+# name or not built it for reasons of scope rather than fit. And a family appearing everywhere is
+# not therefore general, since nothing here says it predicted anything in any of them.
 
 # %%
 if family_rows:
@@ -302,10 +307,10 @@ if present:
 #    ambiguous between a family that is absent and a family that was named differently. The sample
 #    of names is what resolves a given case, and widening the token list until nothing is
 #    unmatched would remove the check rather than pass it.
-# 3. **Coverage across markets is uneven for reasons specific to each market**, not because some
-#    case studies are less complete. A frequency decomposition needs a series long and regular
-#    enough to have frequencies; a fractional difference needs a series with long memory to
-#    remove.
+# 3. **Uneven coverage is a fact about what was built and named, not about what suits a market.**
+#    A family missing from a market's schema may be absent, differently named, or out of that case
+#    study's scope, and a schema cannot separate the three. Deciding whether a technique suits a
+#    market takes the case study's own evaluation, not this table.
 # 4. **An absent artifact is a statement about this checkout.** These files are produced by
 #    pipeline runs and are not committed, so an empty inventory here means the stages have not
 #    run, and reading it as an absence of features is the mistake this notebook is arranged to
