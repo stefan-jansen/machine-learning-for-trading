@@ -704,11 +704,6 @@ alert_table
 
 # %%
 fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["dashboard_2x2"], constrained_layout=True)
-max_psi = float(feature_drift_df["psi"].max())
-psi_title = (
-    "Feature drift stays below watch" if max_psi < PSI_WATCH else "Feature drift crosses watch"
-)
-
 ax1 = axes[0, 0]
 colors = feature_drift_df["status"].map(
     {"OK": COLORS["blue"], "WATCH": COLORS["amber"], "ALERT": COLORS["negative"]}
@@ -716,7 +711,9 @@ colors = feature_drift_df["status"].map(
 ax1.bar(feature_drift_df["name"], feature_drift_df["psi"], color=colors)
 ax1.axhline(PSI_WATCH, color=COLORS["neutral"], linestyle="--", linewidth=1, label="Watch")
 ax1.axhline(PSI_ALERT, color=COLORS["negative"], linestyle=":", linewidth=1, label="Alert")
-add_message_title(ax1, psi_title)
+add_message_title(
+    ax1, "Population stability index by feature", subtitle="Watch and alert thresholds dashed"
+)
 ax1.set_ylabel("PSI")
 ax1.tick_params(axis="x", rotation=35)
 ax1.legend()
@@ -742,10 +739,11 @@ sns.histplot(
     alpha=0.55,
     ax=ax2,
 )
-score_title = (
-    "Scores shift from launch" if prediction_psi >= PSI_WATCH else "Scores hold their launch shape"
+add_message_title(
+    ax2,
+    "Prediction score density, launch against latest window",
+    subtitle=f"{LOOKBACK_DAYS} sessions each, shared bins",
 )
-add_message_title(ax2, score_title)
 ax2.set_xlabel("Score")
 ax2.legend(["Launch baseline", f"Latest {LOOKBACK_DAYS} sessions"])
 
@@ -754,9 +752,10 @@ ax3.plot(daily_metrics["timestamp"], daily_metrics[ROLLING_IC], color=COLORS["bl
 ax3.axhline(
     baseline_ic, color=COLORS["neutral"], linestyle="--", linewidth=1, label="Launch baseline"
 )
-ic_direction = "above" if daily_metrics[ROLLING_IC].iloc[-1] >= baseline_ic else "below"
 add_message_title(
-    ax3, f"Rolling IC ends {ic_direction} launch", subtitle=f"{LOOKBACK_DAYS}-session mean"
+    ax3,
+    "Rolling cross-sectional information coefficient",
+    subtitle=f"{LOOKBACK_DAYS}-session mean, launch baseline dashed",
 )
 ax3.set_ylabel("Cross-sectional IC")
 ax3.set_xlabel("Holdout date")
@@ -776,13 +775,10 @@ ax4.axhline(
     linewidth=1,
     label="Launch baseline",
 )
-hit_direction = (
-    "above" if daily_metrics[ROLLING_HIT_RATE].iloc[-1] >= baseline_hit_rate else "below"
-)
 add_message_title(
     ax4,
-    f"Hit rate ends {hit_direction} launch",
-    subtitle=f"{LOOKBACK_DAYS}-session mean",
+    "Rolling directional hit rate",
+    subtitle=f"{LOOKBACK_DAYS}-session mean, launch baseline dashed",
 )
 ax4.set_ylabel("Hit rate (%)")
 ax4.set_xlabel("Holdout date")
@@ -803,6 +799,18 @@ show_with_alt(
     "against its own launch baseline.",
 )
 
+
+# %% [markdown]
+# Read the panels against each other rather than one at a time. The top row asks whether the
+# distributions moved: the left panel says which inputs did, the right whether that reached the
+# model's output. The bottom row asks whether the model still works: the information coefficient
+# is the cross-sectional rank correlation between score and realized return, and the hit rate is
+# the share of names whose direction it got right.
+#
+# The two rows can disagree, and the disagreement is the useful part. Inputs moving while the
+# output sits still means the model was not leaning on those inputs. The output moving while
+# every monitored input looks stable is the alarming direction: whatever changed is not in the
+# set of features being watched.
 
 # %% [markdown]
 # ### Persist the dashboard's inputs
