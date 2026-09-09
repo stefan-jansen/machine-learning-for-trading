@@ -956,8 +956,11 @@ def plot_fidelity_comparison(
     real_tsne = combined_tsne[:n_viz]
     synth_tsne = combined_tsne[n_viz:]
 
-    # Create figure with aligned axes
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    # constrained_layout reserves room for the suptitle as part of solving the
+    # layout. tight_layout cannot: called after a suptitle placed above the axes
+    # it warns "The figure layout has changed to tight", and that warning lands
+    # in the output of every notebook that renders this figure.
+    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
 
     # Style constants for grayscale compatibility
     real_color = COLORS["blue"]
@@ -1021,8 +1024,7 @@ def plot_fidelity_comparison(
     axes[1].set_title("t-SNE Projection")
     axes[1].legend(loc="upper right", framealpha=0.9)
 
-    fig.suptitle(title, fontsize=14, fontweight="semibold", y=1.02)
-    plt.tight_layout()
+    fig.suptitle(title, fontsize=14, fontweight="semibold")
 
     return fig
 
