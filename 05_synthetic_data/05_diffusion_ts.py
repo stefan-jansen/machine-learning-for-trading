@@ -1670,8 +1670,8 @@ show_with_alt(
     "Four panels of ten overlaid paths each, sharing a vertical scale by column so the "
     "two rows can be compared directly: real daily returns on the top left with their "
     "cumulative sum on the top right, and the synthetic equivalents below them. Each "
-    "panel has a dashed line at zero, and the cumulative panels start every path at "
-    "zero and follow it across the window.",
+    "panel has a dashed line at zero, and the right-hand panels plot the running sum "
+    "of each window's returns across the window rather than the returns themselves.",
 )
 
 # %% [markdown]
