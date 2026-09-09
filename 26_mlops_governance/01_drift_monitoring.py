@@ -22,20 +22,29 @@
 # **Prerequisites**: Chapter 25 deployment verification and basic performance metrics.
 #
 # **Learning Objectives**:
-# - Compute PSI, K-S, and rolling diagnostics on the real `us_equities_panel` holdout window.
-# - Separate data-quality failures from genuine distribution change.
-# - Build a compact monitoring dashboard from stored feature and prediction artifacts.
+# - Measure how far a feature's distribution has moved since a model went live, using the
+#   population stability index and the two-sample Kolmogorov-Smirnov test.
+# - Tell a broken data feed apart from a genuine change in the market, by validating the
+#   incoming feature panel before any drift statistic is computed.
+# - Track whether a live model's predictions are still informative, by recomputing its rank
+#   correlation with realized returns over a rolling window.
+# - Assemble those measurements into one dashboard a desk can read before deciding whether
+#   to investigate, reduce exposure, or retrain.
 
 # %%
-"""Drift Monitoring on Real Case-Study Artifacts — compute PSI, K-S, and rolling diagnostics on the real holdout window."""
+"""Drift Monitoring on Real Case-Study Artifacts: distribution and performance drift on a real holdout window."""
 
 # %% [markdown]
 # ## Settings
 #
-# `CASE_STUDY_ID` and `PRIMARY_LABEL` name what is being monitored. The label is the one model in
-# this case study's registry with a holdout prediction set behind it. The linear models produced
-# validation predictions only, so monitoring them would mean calling a validation window a
-# holdout, which is the mislabelling this whole chapter exists to prevent.
+# `CASE_STUDY_ID` names the case study whose deployed model is being monitored.
+#
+# `LABEL` is the return the model predicts. Left unset it is read from the registry: whichever
+# label has a holdout prediction set on disk, preferring the case study's configured primary
+# label when more than one qualifies. It is read rather than typed because only a holdout
+# prediction set will do here, and which labels have one changes as a case study is rebuilt. A
+# validation prediction set covers the sessions the model was selected on, so monitoring one
+# would measure the window the model was chosen to fit and call the result drift.
 #
 # `REFERENCE_START` is the beginning of the distribution that everything is compared against.
 # Left unset, it is derived from the case study's own fold geometry rather than typed. A date
@@ -56,6 +65,10 @@
 # `KS_WATCH_PVALUE` is a significance level, and the Kolmogorov-Smirnov test does have a null.
 # Against tens of thousands of daily observations it will reject on differences too small to act
 # on, which is why it is read beside the stability index rather than instead of it.
+# `PSI_KS_FLOOR` is how the two are read together: a K-S rejection only raises a feature to watch
+# when the stability index has also moved off zero. Without a floor the test's sensitivity at this
+# sample size would put every feature on watch on almost every cycle, and a monitor that always
+# alerts is a monitor nobody reads.
 #
 # `IC_WATCH_DROP` and friends are absolute drops from the launch baseline for the information
 # coefficient and the hit rate, and relative increases for mean squared error. Absolute for the
@@ -64,12 +77,13 @@
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
-PRIMARY_LABEL = "fwd_ret_5d"
+LABEL = None
 REFERENCE_START = None
 LOOKBACK_DAYS = 63
 PSI_WATCH = 0.10
 PSI_ALERT = 0.25
 KS_WATCH_PVALUE = 0.05
+PSI_KS_FLOOR = 0.02
 IC_WATCH_DROP = 0.005
 IC_ALERT_DROP = 0.01
 MSE_WATCH_INCREASE = 0.05
@@ -97,9 +111,11 @@ from scipy import stats
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, format_pct_axis
+from utils.style import COLORS, FIGSIZE, add_message_title, format_pct_axis, show_with_alt
 
-warnings.filterwarnings("ignore")
+# Named, not blanket: a bare ignore would also hide the convergence and numerical
+# warnings a reader needs to see.
+warnings.filterwarnings("ignore", category=FutureWarning, module="seaborn")
 
 set_global_seeds(SEED)
 
@@ -122,16 +138,23 @@ print("=" * 60)
 # %% [markdown]
 # ## 1. Load the real monitoring boundary
 #
-# The notebook uses the actual holdout window from `setup.yaml`.
-# Features before the holdout act as the reference distribution; the latest
-# holdout window acts as the live production slice.
+# The *holdout* is the stretch of history a case study reserves and never reads while models
+# are being chosen. It is the closest thing an offline notebook has to live production data: the
+# model saw none of it, so its behaviour there is what its behaviour after deployment would look
+# like. Both ends of that window and the case study's primary label come from its own
+# `setup.yaml`, so the monitoring boundary is the one the case study declares rather than one
+# this notebook asserts.
 
 
 # %%
-def load_holdout_window(setup_path: Path) -> tuple[pd.Timestamp, pd.Timestamp]:
+def load_holdout_window(setup_path: Path) -> tuple[pd.Timestamp, pd.Timestamp, str]:
     setup = yaml.safe_load(setup_path.read_text())
     evaluation = setup["evaluation"]
-    return pd.Timestamp(evaluation["holdout_start"]), pd.Timestamp(evaluation["holdout_end"])
+    return (
+        pd.Timestamp(evaluation["holdout_start"]),
+        pd.Timestamp(evaluation["holdout_end"]),
+        str(setup["labels"]["primary"]),
+    )
 
 
 # %% [markdown]
@@ -140,33 +163,39 @@ def load_holdout_window(setup_path: Path) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 
 # %%
-def load_holdout_prediction_hash(registry_path: Path) -> tuple[str, str]:
-    """Locate the holdout prediction artifact for ``PRIMARY_LABEL``.
+def load_holdout_prediction_hash(registry_path: Path, preferred: str) -> tuple[str, str, str]:
+    """The label, prediction hash and model family of a holdout prediction set on disk.
 
-    Selects a materialized ``split='holdout'`` prediction set. Validation
-    predictions are never relabeled as holdout data.
+    Only a prediction set the registry records as ``split='holdout'`` qualifies, and only
+    one whose parquet has been written. Candidates are ordered so that *preferred* wins
+    when it has one, then by recency, so the notebook monitors the case study's primary
+    label wherever that label has been through the holdout.
     """
     query = """
-        SELECT ps.prediction_hash, tr.family
+        SELECT tr.label, ps.prediction_hash, tr.family
         FROM training_runs tr
         JOIN prediction_sets ps ON tr.training_hash = ps.training_hash
-        WHERE tr.label = ? {split_filter}
-        ORDER BY tr.created_at DESC
+        WHERE ps.split = 'holdout'
+        ORDER BY tr.label = ? DESC, tr.created_at DESC
     """
     pred_dir = registry_path.parent / "predictions"
     with sqlite3.connect(registry_path) as conn:
-        rows = conn.execute(
-            query.format(split_filter="AND ps.split = 'holdout'"), (PRIMARY_LABEL,)
-        ).fetchall()
-    for pred_hash, family in rows:
+        rows = conn.execute(query, (preferred,)).fetchall()
+    for label, pred_hash, family in rows:
         if (pred_dir / str(pred_hash) / "predictions.parquet").exists():
-            return str(pred_hash), str(family)
-    raise RuntimeError("No materialized holdout prediction artifact is available.")
+            return str(label), str(pred_hash), str(family)
+    raise RuntimeError(
+        f"{CASE_STUDY_ID} has no materialized holdout prediction set. Drift can only be "
+        "measured against sessions the model was scored on out of sample, and this case "
+        "study's holdout stage has not written one."
+    )
 
 
 # %%
-holdout_start, holdout_end = load_holdout_window(SETUP_PATH)
-holdout_run_hash, holdout_model_family = load_holdout_prediction_hash(REGISTRY_PATH)
+holdout_start, holdout_end, configured_primary_label = load_holdout_window(SETUP_PATH)
+monitored_label, holdout_run_hash, holdout_model_family = load_holdout_prediction_hash(
+    REGISTRY_PATH, LABEL or configured_primary_label
+)
 
 _pred_check_path = CASE_DIR / "run_log" / "predictions" / holdout_run_hash / "predictions.parquet"
 _pred_bounds = (
@@ -177,7 +206,7 @@ _pred_bounds = (
 )
 _pred_start, _pred_end = (pd.Timestamp(value) for value in _pred_bounds)
 _label_bounds = (
-    pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
+    pl.scan_parquet(CASE_DIR / "labels" / f"{monitored_label}.parquet")
     .filter(pl.col("timestamp").is_between(holdout_start.date(), holdout_end.date()))
     .select(pl.min("timestamp").alias("start"), pl.max("timestamp").alias("end"))
     .collect()
@@ -190,7 +219,7 @@ assert (_pred_start, _pred_end) == (_label_start, _label_end), (
 )
 
 print(f"Holdout window: {holdout_start.date()} to {holdout_end.date()}")
-print(f"Holdout prediction run: {holdout_run_hash} ({holdout_model_family}, {PRIMARY_LABEL})")
+print(f"Holdout prediction run: {holdout_run_hash} ({holdout_model_family}, {monitored_label})")
 
 
 # %% [markdown]
@@ -210,27 +239,28 @@ def validate_feature_data(features_df: pl.DataFrame, required_columns: list[str]
 
 
 # %% [markdown]
-# ### Resolve fitted feature state by evaluation window
+# ### Restrict the panel to the sessions the model was evaluated on
 #
-# `model_based.parquet` carries one row per stock-date and no `fold` column.
-# Stage 04 fits its transforms on a rolling refit schedule, so a date's value is
-# the same whichever fold later reads it - the artifact's own prose puts it as
-# "one value whichever fold later reads it".
+# A walk-forward split divides the history into folds: each fold fits on the sessions before
+# a cut-off and is scored on the sessions just after it, its *validation window*. Only those
+# windows and the holdout are sessions on which this model ever produced an out-of-sample
+# number, so they are the only sessions a drift measurement can be taken over. Everything
+# else in the file is a session the model trained on.
 #
-# A fold is therefore not something to select on, but the *date range* still is:
-# a drift measurement is only meaningful over sessions the model was actually
-# evaluated on, so the scan is restricted to the union of the walk-forward
-# validation windows and the holdout rather than to the whole file.
+# `model_based.parquet` carries one row per stock-date. Where it also carries a `fold`
+# column, the same stock-date appears once per fold with the value that fold's transform
+# produced, and the window and the fold have to be applied together; where it does not, the
+# date range alone selects the row.
 
 
 # %%
 def evaluation_spans() -> tuple[list[tuple[object, object]], tuple[object, object]]:
     """The validation windows and the holdout, as date ranges.
 
-    Read from `generate_cv_splits` rather than written down. A window stated as a
-    literal is a claim about the fixture's geometry that nothing checks, and it
-    silently becomes false: #819 restored this case study to 16 folds, which moves
-    every boundary the previous 15-fold geometry had.
+    Derived from `generate_cv_splits`, which is the same function the modelling
+    notebooks split on, rather than typed here. A boundary written as a literal is a
+    claim about the case study's fold geometry that nothing re-checks, and rebuilding
+    the case study with a different number of folds moves every one of them.
     """
     timeline = (
         pl.scan_parquet(CASE_DIR / "features" / "financial.parquet")
@@ -254,11 +284,11 @@ FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(MODEL_BASED_PATH).collect_schema
 def folds_by_coverage(path, windows: list[tuple]) -> list[object]:
     """Pair each evaluation window with the artifact fold that covers it, by date.
 
-    Never by fold id. `ml4t-diagnostic` 0.1.4 reversed what a fold number means, and a
-    legacy artifact was written under the older convention, so pairing a stored id with
-    a freshly generated one joins each date against the wrong vintage - invisibly, since
-    both ids exist and the join succeeds. Ordering both sides by date is the one pairing
-    that does not depend on which convention wrote the file.
+    A fold id is a label the writer chose, not a property of the data, and two tools can
+    number the same folds in opposite directions. Joining a stored id to a freshly
+    generated one then pairs each date with the wrong fitted state and still succeeds,
+    because both ids exist. Ordering both sides by the dates they cover is the pairing
+    that holds whatever numbering wrote the file.
     """
     coverage = (
         pl.scan_parquet(path)
@@ -284,35 +314,33 @@ def folds_by_coverage(path, windows: list[tuple]) -> list[object]:
 
 VALIDATION_SPANS, HOLDOUT_SPAN = evaluation_spans()
 EVALUATION_SPANS = [*VALIDATION_SPANS, HOLDOUT_SPAN]
-# Fold ids for the legacy path only. The holdout rows carry the artifact's highest fold,
-# fitted on pre-holdout observations alone.
+# Fold ids are resolved only where the artifact carries them.
 EVALUATION_FOLDS = (
     folds_by_coverage(MODEL_BASED_PATH, EVALUATION_SPANS)
     if FOLD_KEYED_ARTIFACT
     else [None] * len(EVALUATION_SPANS)
 )
-# Chosen by date, not by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
-# which end of the list holds the latest window is exactly the thing that moved.
+# By date, not by list position: which end of the list holds the latest window depends on
+# the numbering convention, and the dates do not.
 LAST_VALIDATION_SPAN = max(VALIDATION_SPANS)
 print(
     f"{len(VALIDATION_SPANS)} validation windows, "
     f"{min(VALIDATION_SPANS)[0]} to {LAST_VALIDATION_SPAN[1]}; holdout {HOLDOUT_SPAN[0]}"
 )
 
-if REFERENCE_START is None:
-    REFERENCE_START = str(LAST_VALIDATION_SPAN[0])
-print(f"Reference window starts {REFERENCE_START} (latest validation window)")
+reference_start = REFERENCE_START or str(LAST_VALIDATION_SPAN[0])
+print(f"Reference window starts {reference_start} (latest validation window)")
 
 
 # %%
 def window_terms(clipped: list[tuple]) -> list[pl.Expr]:
     """One predicate per evaluation window, to be OR-ed into a single filter.
 
-    Against a fold-free artifact a window is a date range and nothing else. Against a
-    fold-keyed one the same window also names the fold whose fitted state that range is
-    evaluated under, and the two must be applied together: those vintages hold different
-    values for the same stock-date, so a date range alone would return one row per fold
-    and no rule for choosing between them.
+    Where the artifact carries no fold column a window is a date range and nothing else.
+    Where it does, the same window also names the fold whose fitted state that range is
+    evaluated under, and the two are applied together: each fold holds its own value for
+    the same stock-date, so a date range alone returns one row per fold with no rule for
+    choosing between them.
     """
     if FOLD_KEYED_ARTIFACT:
         return [
@@ -393,7 +421,7 @@ def load_feature_panel(start: str, end: str, feature_columns: list[str]) -> pl.D
 def load_holdout_predictions(run_hash: str) -> pl.DataFrame:
     pred_path = CASE_DIR / "run_log" / "predictions" / run_hash / "predictions.parquet"
     lf = pl.scan_parquet(pred_path)
-    # Normalize legacy column names
+    # Prediction sets are written under either naming; accept both.
     cols = lf.collect_schema().names()
     renames = {}
     if "actual" in cols and "y_true" not in cols:
@@ -416,7 +444,7 @@ def load_holdout_predictions(run_hash: str) -> pl.DataFrame:
 
 # %%
 reference_features = load_feature_panel(
-    REFERENCE_START, str(holdout_start.date() - pd.Timedelta(days=1)), FEATURE_COLUMNS
+    reference_start, str(holdout_start.date() - pd.Timedelta(days=1)), FEATURE_COLUMNS
 )
 # Restrict the artifact to the configured holdout window.
 holdout_predictions = load_holdout_predictions(holdout_run_hash).filter(
@@ -444,10 +472,17 @@ print(f"Current feature rows:   {current_features.height:,}")
 # %% [markdown]
 # ## 3. Feature and prediction drift diagnostics
 #
-# The reference set is the last pre-holdout year. The current slice is the most
-# recent 63 trading days inside the holdout. PSI flags material shifts, while
-# the K-S test checks whether the two samples plausibly come from the same
-# distribution.
+# The reference set is the model's last validation window, which is the most recent stretch
+# of history it was scored on before going live. The current slice is the most recent
+# `LOOKBACK_DAYS` sessions inside the holdout.
+#
+# The two statistics answer different questions. The population stability index bins the
+# reference sample, counts how the current sample falls into the same bins, and sums a
+# weighted log ratio over them: it measures how far the distribution moved, in a unit with
+# no null distribution behind it. The two-sample Kolmogorov-Smirnov test takes the largest
+# gap between the two empirical cumulative distributions and returns the probability of
+# seeing a gap that large if both samples came from one distribution. So the index says how
+# much, and the test says whether the difference is larger than sampling noise.
 
 
 # %%
@@ -512,9 +547,9 @@ def summarize_feature_drift(
         current = to_numpy(current_frame, feature)
         psi, _ = compute_psi(reference, current)
         ks_stat, ks_pvalue = stats.ks_2samp(reference, current)
-        if psi >= 0.25:
+        if psi >= PSI_ALERT:
             status = "ALERT"
-        elif psi >= 0.10 or (psi >= 0.02 and ks_pvalue < KS_WATCH_PVALUE):
+        elif psi >= PSI_WATCH or (psi >= PSI_KS_FLOOR and ks_pvalue < KS_WATCH_PVALUE):
             status = "WATCH"
         else:
             status = "OK"
@@ -594,12 +629,16 @@ daily_metrics = (
     .to_pandas()
 )
 
+ROLLING_IC = f"rolling_ic_{LOOKBACK_DAYS}"
+ROLLING_HIT_RATE = f"rolling_hit_rate_{LOOKBACK_DAYS}"
+ROLLING_MSE = f"rolling_mse_{LOOKBACK_DAYS}"
+MIN_ROLLING_SESSIONS = LOOKBACK_DAYS // 3
+
 daily_metrics["timestamp"] = pd.to_datetime(daily_metrics["timestamp"])
-daily_metrics["rolling_ic_63"] = daily_metrics["ic"].rolling(LOOKBACK_DAYS, min_periods=21).mean()
-daily_metrics["rolling_hit_rate_63"] = (
-    daily_metrics["hit_rate"].rolling(LOOKBACK_DAYS, min_periods=21).mean()
-)
-daily_metrics["rolling_mse_63"] = daily_metrics["mse"].rolling(LOOKBACK_DAYS, min_periods=21).mean()
+for source, rolled in (("ic", ROLLING_IC), ("hit_rate", ROLLING_HIT_RATE), ("mse", ROLLING_MSE)):
+    daily_metrics[rolled] = (
+        daily_metrics[source].rolling(LOOKBACK_DAYS, min_periods=MIN_ROLLING_SESSIONS).mean()
+    )
 
 baseline_slice = daily_metrics.iloc[:LOOKBACK_DAYS]
 current_slice = daily_metrics.iloc[-LOOKBACK_DAYS:]
@@ -617,37 +656,37 @@ alert_rows = [
         "metric": "prediction_distribution",
         "baseline": 0.0,
         "current": prediction_psi,
-        "threshold": 0.10,
+        "threshold": PSI_WATCH,
         "status": "ALERT"
-        if prediction_psi >= 0.25
-        else ("WATCH" if prediction_psi >= 0.10 else "OK"),
+        if prediction_psi >= PSI_ALERT
+        else ("WATCH" if prediction_psi >= PSI_WATCH else "OK"),
     },
     {
-        "metric": "rolling_ic_63",
+        "metric": ROLLING_IC,
         "baseline": baseline_ic,
         "current": current_ic,
-        "threshold": baseline_ic - 0.01,
+        "threshold": baseline_ic - IC_ALERT_DROP,
         "status": "ALERT"
-        if current_ic < baseline_ic - 0.01
-        else ("WATCH" if current_ic < baseline_ic - 0.005 else "OK"),
+        if current_ic < baseline_ic - IC_ALERT_DROP
+        else ("WATCH" if current_ic < baseline_ic - IC_WATCH_DROP else "OK"),
     },
     {
-        "metric": "rolling_hit_rate_63",
+        "metric": ROLLING_HIT_RATE,
         "baseline": baseline_hit_rate,
         "current": current_hit_rate,
-        "threshold": baseline_hit_rate - 0.01,
+        "threshold": baseline_hit_rate - IC_ALERT_DROP,
         "status": "ALERT"
-        if current_hit_rate < baseline_hit_rate - 0.01
-        else ("WATCH" if current_hit_rate < baseline_hit_rate - 0.005 else "OK"),
+        if current_hit_rate < baseline_hit_rate - IC_ALERT_DROP
+        else ("WATCH" if current_hit_rate < baseline_hit_rate - IC_WATCH_DROP else "OK"),
     },
     {
-        "metric": "rolling_mse_63",
+        "metric": ROLLING_MSE,
         "baseline": baseline_mse,
         "current": current_mse,
-        "threshold": baseline_mse * 1.10,
+        "threshold": baseline_mse * (1 + MSE_ALERT_INCREASE),
         "status": "ALERT"
-        if current_mse > baseline_mse * 1.10
-        else ("WATCH" if current_mse > baseline_mse * 1.05 else "OK"),
+        if current_mse > baseline_mse * (1 + MSE_ALERT_INCREASE)
+        else ("WATCH" if current_mse > baseline_mse * (1 + MSE_WATCH_INCREASE) else "OK"),
     },
 ]
 
@@ -666,15 +705,17 @@ alert_table
 # %%
 fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["dashboard_2x2"], constrained_layout=True)
 max_psi = float(feature_drift_df["psi"].max())
-psi_title = "Feature drift stays below watch" if max_psi < 0.10 else "Feature drift crosses watch"
+psi_title = (
+    "Feature drift stays below watch" if max_psi < PSI_WATCH else "Feature drift crosses watch"
+)
 
 ax1 = axes[0, 0]
 colors = feature_drift_df["status"].map(
     {"OK": COLORS["blue"], "WATCH": COLORS["amber"], "ALERT": COLORS["negative"]}
 )
 ax1.bar(feature_drift_df["name"], feature_drift_df["psi"], color=colors)
-ax1.axhline(0.10, color=COLORS["neutral"], linestyle="--", linewidth=1, label="Watch")
-ax1.axhline(0.25, color=COLORS["negative"], linestyle=":", linewidth=1, label="Alert")
+ax1.axhline(PSI_WATCH, color=COLORS["neutral"], linestyle="--", linewidth=1, label="Watch")
+ax1.axhline(PSI_ALERT, color=COLORS["negative"], linestyle=":", linewidth=1, label="Alert")
 add_message_title(ax1, psi_title)
 ax1.set_ylabel("PSI")
 ax1.tick_params(axis="x", rotation=35)
@@ -701,19 +742,22 @@ sns.histplot(
     alpha=0.55,
     ax=ax2,
 )
-add_message_title(ax2, "Scores shift from launch")
+score_title = (
+    "Scores shift from launch" if prediction_psi >= PSI_WATCH else "Scores hold their launch shape"
+)
+add_message_title(ax2, score_title)
 ax2.set_xlabel("Score")
-ax2.legend(["Launch baseline", "Latest 63 sessions"])
+ax2.legend(["Launch baseline", f"Latest {LOOKBACK_DAYS} sessions"])
 
 ax3 = axes[1, 0]
-ax3.plot(
-    daily_metrics["timestamp"], daily_metrics["rolling_ic_63"], color=COLORS["blue"], linewidth=2
-)
+ax3.plot(daily_metrics["timestamp"], daily_metrics[ROLLING_IC], color=COLORS["blue"], linewidth=2)
 ax3.axhline(
     baseline_ic, color=COLORS["neutral"], linestyle="--", linewidth=1, label="Launch baseline"
 )
-ic_direction = "above" if daily_metrics["rolling_ic_63"].iloc[-1] >= baseline_ic else "below"
-add_message_title(ax3, f"Rolling IC ends {ic_direction} launch", subtitle="63-session mean")
+ic_direction = "above" if daily_metrics[ROLLING_IC].iloc[-1] >= baseline_ic else "below"
+add_message_title(
+    ax3, f"Rolling IC ends {ic_direction} launch", subtitle=f"{LOOKBACK_DAYS}-session mean"
+)
 ax3.set_ylabel("Cross-sectional IC")
 ax3.set_xlabel("Holdout date")
 ax3.legend()
@@ -721,7 +765,7 @@ ax3.legend()
 ax4 = axes[1, 1]
 ax4.plot(
     daily_metrics["timestamp"],
-    daily_metrics["rolling_hit_rate_63"],
+    daily_metrics[ROLLING_HIT_RATE],
     color=COLORS["copper"],
     linewidth=2,
 )
@@ -733,12 +777,12 @@ ax4.axhline(
     label="Launch baseline",
 )
 hit_direction = (
-    "above" if daily_metrics["rolling_hit_rate_63"].iloc[-1] >= baseline_hit_rate else "below"
+    "above" if daily_metrics[ROLLING_HIT_RATE].iloc[-1] >= baseline_hit_rate else "below"
 )
 add_message_title(
     ax4,
     f"Hit rate ends {hit_direction} launch",
-    subtitle="63-session mean",
+    subtitle=f"{LOOKBACK_DAYS}-session mean",
 )
 ax4.set_ylabel("Hit rate (%)")
 ax4.set_xlabel("Holdout date")
@@ -749,14 +793,22 @@ for axis in (ax3, ax4):
     axis.xaxis.set_major_locator(mdates.MonthLocator(interval=6))
     axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
 
-fig.show()
+show_with_alt(
+    fig,
+    "Four-panel monitoring dashboard. Top left: bar chart of the population stability index "
+    "for each monitored feature, with dashed watch and dotted alert reference lines. Top "
+    "right: overlaid density histograms of the launch-window and latest-window prediction "
+    "scores. Bottom left: the rolling information coefficient across the holdout, against a "
+    "dashed launch-baseline line. Bottom right: the rolling hit rate on the same dates, "
+    "against its own launch baseline.",
+)
 
 
 # %% [markdown]
-# ### Persist artifacts for the publication figure
+# ### Persist the dashboard's inputs
 #
-# The book-side script renders Figure 26.2 from these arrays so the publication
-# build does not re-execute the notebook.
+# The four panels above are drawn a second time, at print size, for Figure 26.2 in the book.
+# Writing their inputs out here is what lets that happen from stored arrays.
 
 # %%
 ARTIFACT_DIR = get_output_dir(26, "figure_26_2")
@@ -766,7 +818,7 @@ feature_drift_df[["name", "psi", "status"]].to_parquet(
 )
 np.save(ARTIFACT_DIR / "baseline_predictions.npy", baseline_predictions)
 np.save(ARTIFACT_DIR / "recent_predictions.npy", recent_predictions)
-daily_metrics[["timestamp", "rolling_ic_63", "rolling_hit_rate_63"]].to_parquet(
+daily_metrics[["timestamp", ROLLING_IC, ROLLING_HIT_RATE]].to_parquet(
     ARTIFACT_DIR / "daily_metrics.parquet", index=False
 )
 _ = (ARTIFACT_DIR / "scalars.json").write_text(
@@ -804,8 +856,28 @@ alert_table
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. PSI and K-S tests on the real holdout window separate genuine distribution change from data-quality issues when validation precedes drift measurement.
-# 2. Rolling IC and hit-rate diagnostics track whether model signal quality is degrading over time.
-# 3. The monitoring dashboard combines feature drift, output drift, and rolling performance into one review surface for operational decision-making.
+# 1. Validate the incoming feature panel before computing any drift statistic. A broken join or
+#    a null-filled column produces the same distribution shift a market regime change does, and
+#    the two call for opposite responses.
+# 2. Read the stability index and the Kolmogorov-Smirnov test together rather than either alone.
+#    The index has no null distribution, so its thresholds are conventions; the test has one and
+#    will reject on differences too small to act on at production sample sizes.
+# 3. Measure drift only over sessions the model was scored on out of sample. Comparing a live
+#    window against sessions the model trained on measures the training set, not the drift.
+# 4. Distribution drift and performance decay are separate measurements and can move
+#    independently. Track the input distributions, the output distribution and the rolling
+#    signal quality, and read the disagreements between them.
+#
+# **Known limitations**
+#
+# - A holdout window is a stand-in for live data. It is a single period on a single universe, so
+#   the thresholds that look reasonable here are not calibrated for another market.
+# - The stability index is computed on the reference sample's own bin edges. A feature whose
+#   support extends past the reference range piles into the outer bins, and the index understates
+#   how far that feature moved.
+# - Every statistic here compares two windows and says nothing about when in between the change
+#   happened. `02_online_drift_detection` covers detectors that answer that.
+# - The alert levels are a review trigger, not an action. What to do about a degraded status
+#   depends on which of the three causes produced it, and this notebook does not identify which.
 #
 # **Next**: See `02_online_drift_detection` for sequential drift detectors on the same validation streams.
