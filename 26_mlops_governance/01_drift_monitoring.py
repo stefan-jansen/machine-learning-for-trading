@@ -29,22 +29,51 @@
 # %%
 """Drift Monitoring on Real Case-Study Artifacts — compute PSI, K-S, and rolling diagnostics on the real holdout window."""
 
+# %% [markdown]
+# ## Settings
+#
+# `CASE_STUDY_ID` and `PRIMARY_LABEL` name what is being monitored. The label is the one model in
+# this case study's registry with a holdout prediction set behind it. The linear models produced
+# validation predictions only, so monitoring them would mean calling a validation window a
+# holdout, which is the mislabelling this whole chapter exists to prevent.
+#
+# `REFERENCE_START` is the beginning of the distribution that everything is compared against.
+# Left unset, it is derived from the case study's own fold geometry rather than typed. A date
+# typed here would be a claim about where a fold boundary falls, and fold boundaries move when a
+# case study is rebuilt: the same literal then lands wherever the new geometry puts it, silently,
+# with the notebook still reporting a reference window. Set it to a date string to pin one by
+# hand.
+#
+# `LOOKBACK_DAYS` is the width of both the baseline and the current window, in sessions. Sixty
+# three is a quarter, long enough for a rolling information coefficient to mean anything and
+# short enough to notice a change within a monitoring cycle.
+#
+# `PSI_WATCH` and `PSI_ALERT` are the population-stability thresholds. They are the conventional
+# pair and they are conventions, not estimates: the population stability index has no
+# distribution under a null hypothesis, so no threshold on it is a significance level. They rank
+# features by how far a distribution moved and say where to start looking.
+#
+# `KS_WATCH_PVALUE` is a significance level, and the Kolmogorov-Smirnov test does have a null.
+# Against tens of thousands of daily observations it will reject on differences too small to act
+# on, which is why it is read beside the stability index rather than instead of it.
+#
+# `IC_WATCH_DROP` and friends are absolute drops from the launch baseline for the information
+# coefficient and the hit rate, and relative increases for mean squared error. Absolute for the
+# first two because a coefficient near zero makes a relative change meaningless, relative for the
+# third because squared error has no natural scale.
+
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
-# Monitor the one model with a sealed-holdout prediction set in this case
-# study's registry: the GBM fwd_ret_5d run. The linear models produced only
-# cross-validation / validation predictions, never a holdout set, so monitoring
-# them would mean labelling a validation window as "holdout".
 PRIMARY_LABEL = "fwd_ret_5d"
-# Left unset so the reference window is derived from the fixture's own fold geometry.
-# "2015-01-01" stood here, which was not an independent choice: it sat one day inside
-# the then-final validation fold (2015-01-02..2015-12-30). #819 restored this case
-# study to 16 folds and moved every boundary, so a literal that used to land inside a
-# window now lands wherever the new geometry puts it. Set it to a date string to pin
-# the window by hand.
 REFERENCE_START = None
 LOOKBACK_DAYS = 63
-KS_WATCH_PVALUE = 0.05  # §26.3 K-S trigger
+PSI_WATCH = 0.10
+PSI_ALERT = 0.25
+KS_WATCH_PVALUE = 0.05
+IC_WATCH_DROP = 0.005
+IC_ALERT_DROP = 0.01
+MSE_WATCH_INCREASE = 0.05
+MSE_ALERT_INCREASE = 0.10
 SEED = 42
 
 # %%
@@ -93,7 +122,7 @@ print("=" * 60)
 # %% [markdown]
 # ## 1. Load the real monitoring boundary
 #
-# The notebook uses the actual sealed holdout window from `setup.yaml`.
+# The notebook uses the actual holdout window from `setup.yaml`.
 # Features before the holdout act as the reference distribution; the latest
 # holdout window acts as the live production slice.
 
@@ -107,12 +136,12 @@ def load_holdout_window(setup_path: Path) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 # %% [markdown]
 # ### Load the holdout prediction artifact
-# Find the content-addressed prediction hash for the sealed-holdout model run.
+# Find the content-addressed prediction hash for the holdout model run.
 
 
 # %%
 def load_holdout_prediction_hash(registry_path: Path) -> tuple[str, str]:
-    """Locate the sealed-holdout prediction artifact for ``PRIMARY_LABEL``.
+    """Locate the holdout prediction artifact for ``PRIMARY_LABEL``.
 
     Selects a materialized ``split='holdout'`` prediction set. Validation
     predictions are never relabeled as holdout data.
@@ -132,7 +161,7 @@ def load_holdout_prediction_hash(registry_path: Path) -> tuple[str, str]:
     for pred_hash, family in rows:
         if (pred_dir / str(pred_hash) / "predictions.parquet").exists():
             return str(pred_hash), str(family)
-    raise RuntimeError("No materialized sealed-holdout prediction artifact is available.")
+    raise RuntimeError("No materialized holdout prediction artifact is available.")
 
 
 # %%
@@ -191,12 +220,12 @@ def validate_feature_data(features_df: pl.DataFrame, required_columns: list[str]
 # A fold is therefore not something to select on, but the *date range* still is:
 # a drift measurement is only meaningful over sessions the model was actually
 # evaluated on, so the scan is restricted to the union of the walk-forward
-# validation windows and the sealed holdout rather than to the whole file.
+# validation windows and the holdout rather than to the whole file.
 
 
 # %%
 def evaluation_spans() -> tuple[list[tuple[object, object]], tuple[object, object]]:
-    """The validation windows and the sealed holdout, as date ranges.
+    """The validation windows and the holdout, as date ranges.
 
     Read from `generate_cv_splits` rather than written down. A window stated as a
     literal is a claim about the fixture's geometry that nothing checks, and it
@@ -218,12 +247,6 @@ def evaluation_spans() -> tuple[list[tuple[object, object]], tuple[object, objec
 
 
 MODEL_BASED_PATH = CASE_DIR / "features" / "model_based.parquet"
-# Which artifact vintage is on disk decides how a date's feature value is addressed, and
-# both are in circulation: stage 04 writes one row per stock-date, while a fixture built
-# before that conversion writes one row per (key, fold) with *genuinely different* values
-# per fold - measured on the published CI fixture, 22,576 of 22,890 rows disagree between
-# folds. So the fold column is not redundant there and cannot be collapsed away; where it
-# exists, each date must still be read from the fold that evaluated it.
 FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(MODEL_BASED_PATH).collect_schema().names()
 
 
@@ -276,9 +299,6 @@ print(
     f"{min(VALIDATION_SPANS)[0]} to {LAST_VALIDATION_SPAN[1]}; holdout {HOLDOUT_SPAN[0]}"
 )
 
-# The reference distribution is the most recent stretch the model was validated on
-# before the holdout was sealed, which is the latest validation window. Derived rather
-# than pinned, for the reason in the parameters cell.
 if REFERENCE_START is None:
     REFERENCE_START = str(LAST_VALIDATION_SPAN[0])
 print(f"Reference window starts {REFERENCE_START} (latest validation window)")
@@ -318,7 +338,7 @@ def load_temporal_panel(start_date: object, end_date: object, columns: list[str]
     ]
     if not clipped:
         raise ValueError(
-            f"No validation window and not the sealed holdout covers {start_date}..{end_date}; "
+            f"No validation window and not the holdout covers {start_date}..{end_date}; "
             "the requested range lies outside every window this model was evaluated on"
         )
     result = (
@@ -366,7 +386,7 @@ def load_feature_panel(start: str, end: str, feature_columns: list[str]) -> pl.D
 
 # %% [markdown]
 # ### Load holdout predictions
-# Read the content-addressed prediction parquet for the sealed-holdout run.
+# Read the content-addressed prediction parquet for the holdout run.
 
 
 # %%
@@ -398,7 +418,7 @@ def load_holdout_predictions(run_hash: str) -> pl.DataFrame:
 reference_features = load_feature_panel(
     REFERENCE_START, str(holdout_start.date() - pd.Timedelta(days=1)), FEATURE_COLUMNS
 )
-# Restrict the artifact to the configured sealed holdout window.
+# Restrict the artifact to the configured holdout window.
 holdout_predictions = load_holdout_predictions(holdout_run_hash).filter(
     (pl.col("timestamp") >= holdout_start.date()) & (pl.col("timestamp") <= holdout_end.date())
 )
@@ -437,12 +457,6 @@ def compute_psi(
     n_bins: int = 10,
     epsilon: float = 1e-6,
 ) -> tuple[float, np.ndarray]:
-    # Explicit bin edges avoid numpy 2.2.x histogram regression.
-    # Standard PSI defines bins from the reference distribution only — letting
-    # the current set stretch the range concentrates reference mass into fewer
-    # bins under genuine drift and reduces sensitivity. Outer ±inf edges
-    # capture current values that fall outside the reference range so
-    # regime shifts to new extremes amplify PSI rather than drop silently.
     inner = np.linspace(reference.min(), reference.max(), n_bins + 1)[1:-1]
     bin_edges = np.concatenate([[-np.inf], inner, [np.inf]])
     ref_counts, _ = np.histogram(reference, bins=bin_edges)
@@ -548,12 +562,14 @@ print(f"Prediction K-S p-value: {prediction_ks.pvalue:.4f}")
 
 
 # %% [markdown]
-# **Finding**: The feature with the largest PSI sets the headline distribution
-# move; the prediction-side PSI then confirms whether that input shift is
-# propagating into model output. Read the numbers directly from
-# `feature_drift_df` and the printed prediction PSI above — when the top feature
-# crosses the `0.10` WATCH bar (or `0.25` ALERT), the prediction PSI should
-# move in sympathy or the desk should look for an upstream pipeline cause.
+# Read the two together. The feature with the largest stability index says which input moved
+# most; the prediction-side index says whether that movement reached the model's output.
+#
+# The interesting case is when they disagree. A feature that crosses the watch threshold while
+# the prediction distribution sits still means the model was not leaning on that feature much,
+# which is worth knowing and is not an emergency. Predictions moving while every feature looks
+# stable is the alarming direction: the inputs the monitor watches are not the ones that changed,
+# and the cause is upstream of them.
 
 
 # %% [markdown]
@@ -774,18 +790,16 @@ alert_table
 
 
 # %% [markdown]
-# **Finding**: The alert table converts the diagnostics above into operating
-# state. Each row reports the launch baseline (first 63 holdout sessions), the
-# current 63-day window, and the threshold that separates OK / WATCH / ALERT.
-# IC and hit-rate use a 0.005 watch / 0.01 alert buffer relative to baseline;
-# MSE uses a 5% / 10% relative increase. The status column is the actionable
-# read — investigate any non-OK row before the next monitoring cycle.
-
-# %% [markdown]
-# **Trading implication**: This monitoring view is not a retraining trigger by
-# itself. It is the evidence package for the next decision: confirm data
-# integrity, isolate which distributions moved, and only then decide whether a
-# workflow like shadow testing or staged rollout is warranted.
+# The alert table turns the diagnostics into an operating state. Each row carries the launch
+# baseline, the current window, and the threshold between them, so a status is traceable to the
+# two numbers that produced it rather than being an opinion.
+#
+# What the table is not is a retraining trigger. A degraded status says something changed, and
+# the three candidate explanations - the data broke, the market moved, the model decayed - call
+# for different responses and are told apart by different evidence. Retraining on a broken feed
+# fits the model to the break. So this is the evidence package for a decision:
+# [`03_safe_model_rollout`](03_safe_model_rollout.ipynb) is where the decision is acted on, and
+# only after data integrity has been confirmed.
 
 # %% [markdown]
 # ## Key Takeaways
