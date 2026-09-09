@@ -582,11 +582,14 @@ print(f"  Observed-return leverage boundary: {max_observed_safe:.1%}")
 # %%
 rolling_window = int(ROLLING_WINDOW_YEARS * 252)
 rolling_window_years = ROLLING_WINDOW_YEARS
-if sp500_returns.height < 2 * rolling_window:
+# A window of W over N returns yields N - W + 1 estimates. The chart below is about how much
+# the fraction moves, so it needs enough of them to move over: a year's worth is the floor.
+rolling_estimates = sp500_returns.height - rolling_window + 1
+if rolling_estimates < 252:
     raise ValueError(
-        f"A {ROLLING_WINDOW_YEARS}-year rolling window needs at least "
-        f"{2 * rolling_window} returns to show any variation; the series has "
-        f"{sp500_returns.height}."
+        f"A {ROLLING_WINDOW_YEARS}-year window over {sp500_returns.height:,} returns leaves "
+        f"{rolling_estimates} rolling estimates, fewer than the 252 this chart needs to show "
+        "how the fraction moves. Shorten the window or extend the history."
     )
 
 # Rolling mean and std
