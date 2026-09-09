@@ -566,8 +566,8 @@ show_plotly_with_alt(
 # 2. **One-step-ahead is a horizon, not a parameter policy.** Filtering under fixed
 #    parameters and refitting on an expanding window are both causal and differ in cost and
 #    in whether the parameters follow the data. What is not causal is refitting on a window
-#    that includes the value being predicted, which is what an unqualified `apply` or a
-#    whole-sample fit does.
+#    that includes the value being predicted, which is what `apply(endog, refit=True)` on
+#    the prediction block, or a whole-sample fit, does.
 # 3. **An information criterion and an information coefficient measure different things on
 #    different blocks**, and a model can lead on one and not the other. Select on the
 #    criterion, which reads the training block, and report the coefficient.
