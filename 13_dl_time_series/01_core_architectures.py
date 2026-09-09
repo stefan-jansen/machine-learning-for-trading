@@ -972,12 +972,16 @@ show_with_alt(
 # things about the same lengthening.
 #
 # On the left, the recurrent network is slower than the fully connected one at every
-# length measured, which is the sequential cost: a longer window is more dependent steps
-# for it, where for the fully connected network it is one larger matrix multiplication
-# into a wider first layer. Read the levels rather than the slopes. Neither curve is
-# monotonic - a step is a few milliseconds and the measurement is a minimum over
-# repeated warmed-up steps, so kernel selection and occupancy move it between lengths by
-# more than the lengthening does.
+# length measured, and its cost climbs with the window while the fully connected one's
+# stays close to flat. That is the sequential cost: a longer window is more dependent
+# steps for the recurrent network, where for the fully connected network it is one
+# larger matrix multiplication into a wider first layer.
+#
+# Read the levels and the gap between the two curves rather than the exact slope of
+# either. A step here is a few milliseconds, and a minimum over repeated warmed-up steps
+# is still sensitive to what else the machine is doing - on a loaded machine the same
+# sweep produces a visibly noisier left panel, with the ordering intact and the
+# monotonicity gone.
 #
 # On the right, the two curves for each architecture separate rather than descend
 # together. A longer window gives the fully connected network more input slots and

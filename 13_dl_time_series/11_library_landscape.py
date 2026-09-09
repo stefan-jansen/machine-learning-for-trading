@@ -59,6 +59,14 @@ import time
 import warnings
 from datetime import datetime
 
+# pytorch_lightning emits this at import time, which `from darts...` below triggers, so
+# the filter has to be installed before the import rather than alongside the others.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*LeafSpec.*is deprecated",
+    module=r".*pytorch_lightning.*",
+)
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -91,11 +99,6 @@ logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
 logging.getLogger("lightning.pytorch").setLevel(logging.ERROR)
 logging.getLogger("darts").setLevel(logging.ERROR)
 logging.getLogger("transformers").setLevel(logging.ERROR)
-warnings.filterwarnings(
-    "ignore",
-    message=r".*LeafSpec.*is deprecated",
-    module=r".*pytorch_lightning.*",
-)
 
 # %% tags=["parameters"]
 SEED = 42
