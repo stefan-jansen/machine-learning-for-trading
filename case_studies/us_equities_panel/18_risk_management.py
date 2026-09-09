@@ -700,13 +700,12 @@ axes[0].set_ylabel("Validation Sharpe")
 axes[-1].legend(fontsize=8, frameon=False)
 add_message_title(
     axes[0],
-    "Loosening the control, against the book it was laid on",
+    "Validation Sharpe against each risk control's threshold",
     subtitle=(
         "Validation Sharpe against each control's own threshold, one line per label, with the "
         "unprotected strategy dashed"
     ),
 )
-fig.tight_layout()
 # The alt text counts rather than asserts: whether any line turns over is the question the sweep
 # exists to answer, and a panel described as peaking when it does not is a claim the data refutes.
 _peaks = (

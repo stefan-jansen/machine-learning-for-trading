@@ -622,10 +622,9 @@ axes[0].set_ylabel("Validation Sharpe")
 axes[1].legend(fontsize=8, frameon=False)
 add_message_title(
     axes[0],
-    "Where each fixed strategy stops paying for itself",
+    "Validation Sharpe against trading cost, by cost regime",
     subtitle="Validation Sharpe against cost, under a proportional and a per-share schedule",
 )
-fig.tight_layout()
 # The alt text reads the crossing from the frame rather than asserting one: a curve described as
 # crossing zero when it never does is a claim the data refutes, and where it crosses is the whole
 # question this notebook asks.

@@ -540,8 +540,10 @@ zero_line(axes[0])
 axes[1].set_ylim(bottom=0)
 add_message_title(
     axes[0],
-    "Read the cloud, not the point: several hundred candidates per column",
-    subtitle="Left, each candidate's mean daily IC; right, the half-width of its HAC interval",
+    "Mean daily IC and interval half-width, by label and family",
+    subtitle=(
+        "One point per candidate; read the height of a column's cloud rather than any single point"
+    ),
 )
 # The alt text counts rather than asserts: whether any family's cloud clears zero is a fact about
 # the frame, and a panel described as separating the families when it does not is a claim the data

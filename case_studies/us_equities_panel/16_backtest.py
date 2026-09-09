@@ -475,10 +475,9 @@ ax.set_xlim(-0.5, len(groups) - 0.5)
 ax.set_ylabel("Validation Sharpe")
 add_message_title(
     ax,
-    "What the plainest sizing rule was worth, before any cost",
-    subtitle="One point per complete equal-weight validation backtest",
+    "Validation Sharpe of the equal-weight backtests, by label and family",
+    subtitle="One point per complete equal-weight validation backtest, gross of costs",
 )
-fig.tight_layout()
 show_with_alt(
     fig,
     "A strip plot with one column per label and model family. Each point is one complete "

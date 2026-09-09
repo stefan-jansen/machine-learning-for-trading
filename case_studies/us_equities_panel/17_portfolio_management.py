@@ -534,11 +534,10 @@ ax.set_xlim(-0.5, len(allocator_order) - 0.5)
 ax.set_ylabel("Validation Sharpe")
 add_message_title(
     ax,
-    "What sizing was worth, on the strategies equal weight already liked",
+    "Validation Sharpe by allocator, for the shortlisted configurations",
     subtitle="One point per shortlisted configuration and allocator, coloured by label",
 )
 ax.legend(fontsize=8, frameon=False)
-fig.tight_layout()
 # The alt text counts rather than asserts: how many allocators clear zero anywhere is a fact about
 # the frame, and a panel described as beating the baseline when it does not is a claim the data
 # refutes.

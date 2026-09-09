@@ -60,7 +60,7 @@ from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     select_holdout_self_backtest,
 )
-from utils.style import COLORS, show_with_alt
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -587,7 +587,7 @@ for column, period in enumerate(("validation", "holdout")):
     summary[period] = (float(wealth[-1] - 1.0), float(drawdown.min()))
     axes[0, column].plot(returns["timestamp"], wealth - 1.0, color=COLORS["blue"])
     axes[0, column].axhline(0, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
-    axes[0, column].set_title(f"{period.title()} Cumulative Return")
+    axes[0, column].set_title(f"{period} cumulative return")
     axes[1, column].fill_between(
         returns["timestamp"],
         drawdown,
@@ -595,11 +595,14 @@ for column, period in enumerate(("validation", "holdout")):
         color=COLORS["negative"],
         alpha=0.35,
     )
-    axes[1, column].set_title(f"{period.title()} Drawdown")
+    axes[1, column].set_title(f"{period} drawdown")
 axes[0, 0].set_ylabel("Cumulative return")
 axes[1, 0].set_ylabel("Drawdown")
-fig.suptitle("Locked Strategy Across Validation and Holdout Windows")
-fig.tight_layout()
+add_message_title(
+    axes[0, 0],
+    "Cumulative return and drawdown, validation and holdout",
+    subtitle="Each column keeps its own dates; drawdown is measured from that window's own peak",
+)
 # The alt text reads the two end points and the two troughs from the frames rather than describing
 # a shape, so a window described as ending ahead when it does not is a claim the data refutes.
 _read = "; ".join(

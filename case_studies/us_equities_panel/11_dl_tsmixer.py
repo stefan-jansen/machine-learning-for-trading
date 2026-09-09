@@ -91,12 +91,14 @@
 import os
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
 from case_studies.research import open_study, plan_models
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
+from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -341,6 +343,75 @@ unscored = scored.filter(pl.col("ic_n_days").is_null() | (pl.col("ic_n_days") <=
 if not unscored.is_empty():
     raise RuntimeError(f"prediction sets scored no dates: {unscored.to_dicts()}")
 scored
+
+# %% [markdown]
+# ### Where more training stopped helping
+#
+# Each line traces one configuration's validation information coefficient as epochs are added to
+# it. This is the figure the checkpoint dimension exists to produce, and it separates two things a
+# single end-of-training number cannot.
+#
+# A line that rises and then falls has an interior optimum: the model was still learning, then
+# began fitting the training windows at the expense of the validation folds. That is the evidence about whether alternating
+# time and feature mixing over two blocks has more capacity than the number of eligible
+# windows supports.
+# A line that wanders around zero without trend never had anything to learn, and its highest point
+# is wherever the noise happened to peak. Both produce a respectable-looking maximum, which is why
+# the curve rather than the maximum is what to read.
+#
+# Nothing here selects a checkpoint. Every one of them is registered as its own candidate, and
+# which one a strategy would use is decided by validation backtest Sharpe in
+# [`16_backtest`](16_backtest.ipynb).
+
+# %%
+curves = scored.sort("config_name", "checkpoint_value")
+config_names = curves.get_column("config_name").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(config_names), categorical=True)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for index, config_name in enumerate(config_names):
+    series = curves.filter(pl.col("config_name") == config_name)
+    ax.plot(
+        series.get_column("checkpoint_value"),
+        series.get_column("ic_mean"),
+        marker="o",
+        markersize=4,
+        lw=1.4,
+        color=palette[index],
+        label=config_name,
+    )
+zero_line(ax)
+ax.set_xlabel("Training epochs")
+ax.set_ylabel("Mean validation IC")
+ax.legend(fontsize=8, frameon=False)
+add_message_title(
+    ax,
+    "Mean validation IC against training epoch",
+    subtitle="One line per configuration, over the epochs the schedule checkpoints at",
+)
+# The alt text counts rather than asserts: whether a curve turns over is the question the figure
+# exists to answer, and a line described as peaking when it does not is a claim the data refutes.
+_peaks = (
+    curves.group_by("config_name")
+    .agg(
+        peak=pl.col("checkpoint_value").sort_by("ic_mean", descending=True).first(),
+        first=pl.col("checkpoint_value").min(),
+        last=pl.col("checkpoint_value").max(),
+    )
+    .with_columns(
+        interior=pl.col("peak").is_between(pl.col("first"), pl.col("last"), closed="none")
+    )
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+show_with_alt(
+    fig,
+    "A line chart of mean validation information coefficient against training epoch, one line per "
+    "configuration, with a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} configurations reach their highest information coefficient "
+    "at an epoch that is neither the first nor the last, which is what an interior optimum looks "
+    "like on this chart.",
+)
 
 # %%
 coverage_rows = []

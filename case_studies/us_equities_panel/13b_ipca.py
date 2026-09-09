@@ -72,12 +72,14 @@
 import os
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
 from case_studies.research import open_study, plan_models
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
+from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -344,6 +346,68 @@ coverage_table
 # %%
 execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
+
+# %% [markdown]
+# ### How the ranking held across the walk-forward folds
+#
+# The headline information coefficient above is an average over the folds, and an average says
+# nothing about whether the folds agreed. Each fold is a different year of the market with a
+# different set of names quoting in it, so a factor model can rank the cross-section well in a few
+# of them and not at all in the rest and still show a respectable mean.
+#
+# The per-fold values come from the registry rather than from the raw predictions: each fold's
+# information coefficient is registered alongside the prediction set, so reading it back costs a
+# query rather than a 7.2-million-row load. Loadings here are a function of a stock's own
+# characteristics rather than fitted per name, so a fold whose cross-section is unlike the
+# training window's is the one to look at first.
+
+# %%
+fold_rows = []
+for run in execution.runs:
+    run_label = run.training.spec()["label"]
+    for prediction in run.predictions:
+        fold_rows.append(prediction.folds().with_columns(label=pl.lit(run_label)))
+folds_frame = pl.concat(fold_rows, how="vertical_relaxed").sort("label", "fold_id")
+
+fold_labels = folds_frame.get_column("label").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(fold_labels), categorical=True)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for index, fold_label in enumerate(fold_labels):
+    series = folds_frame.filter(pl.col("label") == fold_label)
+    ax.plot(
+        series.get_column("fold_id"),
+        series.get_column("ic"),
+        marker="o",
+        markersize=4,
+        lw=1.4,
+        color=palette[index],
+        label=fold_label,
+    )
+zero_line(ax)
+ax.set_xlabel("Walk-forward fold")
+ax.set_ylabel("Mean validation IC")
+ax.legend(fontsize=8, frameon=False)
+add_message_title(
+    ax,
+    "Mean validation IC by walk-forward fold",
+    subtitle="One line per declared label, over the folds the evaluation stage established",
+)
+# The alt text counts rather than asserts: how many folds land above zero is a fact about the
+# frame, and a line described as steady when it is not is a claim the data refutes.
+_signs = (
+    folds_frame.group_by("label").agg(above=(pl.col("ic") > 0).sum(), total=pl.len()).sort("label")
+)
+_sign_text = " and ".join(
+    f"{row['above']} of {row['total']} for {row['label']}" for row in _signs.iter_rows(named=True)
+)
+show_with_alt(
+    fig,
+    "A line chart of mean validation information coefficient against walk-forward fold, one line "
+    "per declared label, with a dashed line at zero. Counted from the underlying frame, the folds "
+    f"whose information coefficient is above zero are {_sign_text}.",
+)
 
 # %% [markdown]
 # ## 6. Naming the sets the later notebooks open

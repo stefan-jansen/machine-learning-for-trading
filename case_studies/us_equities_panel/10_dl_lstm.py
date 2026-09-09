@@ -375,7 +375,7 @@ ax.set_ylabel("Mean validation IC")
 ax.legend(fontsize=8, frameon=False)
 add_message_title(
     ax,
-    "Whether the recurrent network was still learning when training stopped",
+    "Mean validation IC against training epoch",
     subtitle="Out-of-sample information coefficient against epoch, one line per configuration",
 )
 # The alt text counts rather than asserts: whether a curve turns over is the question the figure

@@ -320,10 +320,9 @@ ax.set_xlabel("Estimated effect")
 ax.set_ylabel("Permuted draws")
 add_message_title(
     ax,
-    "Where the estimate sits once the treatment's timing is destroyed",
+    "Effect estimated from block-permuted treatments",
     subtitle="Block-permuted refits, with the observed effect marked",
 )
-fig.tight_layout()
 # The alt text counts rather than asserts. Whether the observed effect is extreme is the whole
 # question, so it is read off the draws instead of being described.
 _more_extreme = sum(abs(value) >= abs(observed_effect) for value in placebo_effects)

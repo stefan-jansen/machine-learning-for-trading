@@ -620,7 +620,7 @@ ax.set_ylabel("Mean validation IC")
 ax.legend(frameon=False, fontsize=7)
 add_message_title(
     ax,
-    "Where each weekly model stops learning and starts fitting the window",
+    "Mean validation IC against training epoch, weekly models",
     subtitle="Out-of-sample information coefficient against training epoch, one line per model",
 )
 # The alt text reads the frame rather than asserting a shape, so a panel described as turning
