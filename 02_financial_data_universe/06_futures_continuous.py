@@ -415,6 +415,66 @@ else:
 # rather than on their descriptions.
 
 
+# %% [markdown]
+# Counting sessions needs one more step, and it is the same point the notebook has already made
+# twice. These daily bars are keyed by UTC calendar date, and a CME session spans two of them:
+# the session that ends on Monday afternoon opens on Sunday evening, so the file carries a
+# Sunday-dated bar holding those few opening hours.
+#
+# Treating each date as a session would therefore count Sunday as a trading day, and five
+# "sessions" back from a Friday expiry would land on the preceding Sunday rather than the
+# preceding Friday - the exact error that counting calendar days makes, arrived at by a
+# different route. The Sunday bar is folded onto the Monday session it belongs to, and the cell
+# below shows the volume evidence that this is what it is.
+
+
+# %%
+def session_grid(individual_df: pl.DataFrame) -> pl.DataFrame:
+    """Number the trading sessions in the file and map each UTC date onto its session.
+
+    A Sunday-dated bar holds the opening hours of Monday's session, so it carries Monday's
+    session number rather than one of its own.
+    """
+    dates = individual_df.select(pl.col("timestamp").dt.date().alias("date")).unique().sort("date")
+    dates = dates.with_columns(
+        pl.when(pl.col("date").dt.weekday() == 7)
+        .then(pl.col("date").dt.offset_by("1d"))
+        .otherwise(pl.col("date"))
+        .alias("session_date")
+    )
+    numbering = (
+        dates.select("session_date")
+        .unique()
+        .sort("session_date")
+        .with_columns(pl.int_range(pl.len()).alias("session_no"))
+    )
+    return dates.join(numbering, on="session_date", how="left").select(
+        "date", "session_date", "session_no"
+    )
+
+
+# %%
+_grid = session_grid(es_individual)
+_by_weekday = (
+    es_individual.with_columns(pl.col("timestamp").dt.date().alias("date"))
+    .group_by("date")
+    .agg(pl.col("volume").sum().alias("volume"))
+    .with_columns(pl.col("date").dt.weekday().alias("weekday"))
+    .group_by("weekday")
+    .agg(pl.col("volume").median().alias("median_volume"), pl.len().alias("dates"))
+    .sort("weekday")
+)
+print(f"UTC dates in the file: {_grid.height}")
+print(f"Trading sessions once Sunday folds onto Monday: {_grid['session_no'].n_unique()}")
+print("Median volume per UTC date, by weekday (1 = Monday):")
+_by_weekday
+
+# %% [markdown]
+# A Sunday-dated bar carries a small fraction of a weekday's volume, which is what a few
+# evening hours look like beside a full session. It is not a quiet trading day; it is part of
+# the next one.
+
+
 # %%
 def identify_front_month_calendar(
     individual_df: pl.DataFrame,
@@ -432,12 +492,7 @@ def identify_front_month_calendar(
     an ES expiry is always a Friday and counting calendar days back from one lands on a
     weekend.
     """
-    sessions = (
-        individual_df.select(pl.col("timestamp").dt.date().alias("date"))
-        .unique()
-        .sort("date")
-        .with_columns(pl.int_range(pl.len()).alias("session_no"))
-    )
+    sessions = session_grid(individual_df)
 
     last_day = (
         scheduled_df.select("instrument_id", "last_trade")
@@ -530,11 +585,12 @@ _flagged = _flagged.with_columns(
 _disagreements = _flagged.filter(pl.col("differs"))
 if _disagreements.height:
     _episode_lengths = (
-        _disagreements.group_by("episode")
+        _disagreements.join(_grid.select("date", "session_date"), on="date", how="left")
+        .group_by("episode")
         .agg(
             pl.col("date").min().alias("from"),
             pl.col("date").max().alias("to"),
-            pl.len().alias("sessions"),
+            pl.col("session_date").n_unique().alias("sessions"),
         )
         .sort("from")
     )
@@ -548,11 +604,11 @@ else:
     print("The two methods never disagree on this history.")
 
 # %% [markdown]
-# **What the choice comes down to.** On ES the two methods land within a session of each other:
-# every disagreement episode is a single day, so the cost of picking one over the other is one
-# day of holding the other contract, a few times a year. That is a statement about a deeply
-# liquid index future whose volume crossover is sharp, not a general result - on a product
-# where liquidity migrates gradually the two would separate for much longer.
+# **What the choice comes down to.** On ES the two methods land within a session or two of each
+# other, so the cost of picking one over the other is a day or two of holding the other
+# contract, a few times a year. That is a statement about a deeply liquid index future whose
+# volume crossover is sharp, not a general result: on a product where liquidity migrates
+# gradually, the volume rule would drift away from any fixed schedule for much longer.
 #
 # The tradeoff is otherwise the familiar one. Volume rolling follows the liquidity, so the
 # series is always on the contract most people are actually trading, but its roll date is
@@ -834,11 +890,16 @@ es_continuous_ratio.select(
 # day**, which is what the individual daily bars already use, and it is worth being exact about
 # that because it is not the CME session.
 #
-# A CME session opens at 23:00 UTC and closes the following afternoon, so a UTC calendar day
-# holds the tail of one session and the opening hour of the next. The last hourly bar inside a
-# UTC day is therefore the 23:00 bar - the first hour of the *next* session, not the close of
-# the one that just ended. It is a UTC day close, and the cell below measures which hour it
-# lands on rather than taking either name on trust.
+# A CME equity-index session opens at 17:00 Chicago time and closes the following afternoon, so
+# a UTC calendar day holds the tail of one session and the start of the next. Chicago is six
+# hours behind UTC in winter and five in summer, so that 17:00 open is 23:00 UTC under central
+# standard time and 22:00 UTC under daylight saving. The last hourly bar inside a UTC day is
+# the 23:00 bar, which is the opening hour of the next session in winter and its second hour in
+# summer.
+#
+# Either way it belongs to the session that is starting, not to the one that just closed, so
+# calling it a session close would be wrong in both halves of the year. It is a UTC day close.
+# The cell below measures which hour it actually lands on rather than taking that on trust.
 #
 # Matching the vendor's daily convention is exactly what makes the comparison valid: both sides
 # are then the same object, and any difference is about roll logic. It is also the convention
@@ -866,7 +927,10 @@ _modal_last_hour = (
 )
 print("Last hourly bar inside a UTC calendar day, by hour of day:")
 print(_modal_last_hour.head(4))
-print("The 23:00 bar opens the next CME session; it does not close the one before it.")
+print(
+    "The 23:00 bar belongs to the session starting that evening, not to the one that closed \n"
+    "that afternoon, so it is a UTC day close rather than a session close."
+)
 
 # %%
 databento_daily = (
