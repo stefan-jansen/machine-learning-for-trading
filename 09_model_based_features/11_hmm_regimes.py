@@ -823,13 +823,15 @@ print(f"Ratio of the two: {joint / independent:.2f}")
 # labels co-occur *less* often than they would if they were unrelated.
 #
 # The classifier's -1 is worth naming precisely before that number is read: it is the
-# range-bound class, fired when the ADX and choppiness rules agree that price is going
-# nowhere, and it says nothing about direction. So the two labels being mutually exclusive
-# is what their definitions predict rather than a discovery: a stressed session is one with
-# large moves and a range-bound one is a session without them.
+# range-bound class, fired when the ADX and choppiness rules agree that price is not
+# trending. It says nothing about direction and nothing about the size of the moves, and a
+# choppy market can have large ones. The two labels therefore measure different properties,
+# and how far their overlap falls short of independence is a result about this sample
+# rather than something the definitions require. On another sample it could go the other
+# way.
 #
 # That is a reason to carry both rather than either. One says how large the moves are and
-# the other says whether they are going anywhere; a conditioning rule usually wants each
+# the other says whether they are trending; a conditioning rule usually wants each
 # separately, and a single label that has collapsed them into one is the thing to avoid.
 
 # %% [markdown]
