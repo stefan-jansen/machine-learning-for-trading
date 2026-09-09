@@ -79,6 +79,7 @@
 # %%
 """On-Chain Fundamentals: DeFi TVL as Alternative Data - source and analyze DeFi TVL for crypto trading signals."""
 
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
@@ -318,14 +319,16 @@ features.select("timestamp", "tvl_bn", "tvl_growth", "tvl_zscore", "tvl_regime")
 # %% [markdown]
 # ## 5. The forward return
 #
-# The quantity a signal has to predict is the return *after* it is observed. Shifting the
-# trailing return back by its own window turns it into the return over the days that follow each
-# date, which is the only construction that puts the signal before the outcome.
+# The quantity a signal has to predict is the return *after* it is observed. It is computed
+# directly from the price at the two ends of the forward window rather than by shifting the
+# trailing return: the trailing return is measured over the momentum window, and shifting it by
+# the forward horizon only coincides with the forward return while those two settings happen to
+# be equal.
 
 # %%
-tested = features.with_columns(forward_return=pl.col("eth_return").shift(-FORWARD_DAYS)).drop_nulls(
-    ["tvl_growth", "forward_return"]
-)
+tested = features.with_columns(
+    forward_return=pl.col("eth_price").shift(-FORWARD_DAYS) / pl.col("eth_price") - 1
+).drop_nulls(["tvl_growth", "forward_return"])
 
 print(f"Rows with both a signal and a forward return: {len(tested):,}")
 print(f"Signal dates: {tested['timestamp'].min()} to {tested['timestamp'].max()}")
@@ -346,23 +349,47 @@ by_regime = (
         pl.col("forward_return").mean().alias("mean_forward_return"),
         pl.col("forward_return").std().alias("std_forward_return"),
     )
-    .with_columns(
-        # Consecutive forward returns share all but one of their days, so the number of
-        # independent windows a bucket holds is its day count divided by the horizon.
-        independent_windows=(pl.col("days") / FORWARD_DAYS).round(1)
-    )
     .sort("mean_forward_return", descending=True)
 )
 by_regime
 
+# %% [markdown]
+# ### What those means are worth
+#
+# A mean needs a standard error, and the usual one divides by the square root of the row count.
+# That is wrong here twice over: consecutive rows share a forward window, and a regime's days are
+# not one contiguous block whose dependence a simple divisor could describe.
+#
+# The estimator that handles both is the same one the regression below uses. Regressing the
+# forward return on three regime indicators and no intercept recovers each regime's mean as a
+# coefficient, and a Newey-West covariance over the chronological daily sample gives each of them
+# a standard error that accounts for the overlap wherever it actually falls.
+
+# %%
+regimes = sorted(tested.drop_nulls("tvl_regime")["tvl_regime"].unique().to_list())
+labelled = tested.drop_nulls("tvl_regime").sort("timestamp")
+indicators = np.column_stack(
+    [(labelled["tvl_regime"] == regime).to_numpy().astype(float) for regime in regimes]
+)
+regime_fit = sm.OLS(labelled["forward_return"].to_numpy(), indicators).fit(
+    cov_type="HAC", cov_kwds={"maxlags": FORWARD_DAYS - 1}
+)
+regime_means = pl.DataFrame(
+    {
+        "tvl_regime": regimes,
+        "mean_forward_return": regime_fit.params,
+        "standard_error": regime_fit.bse,
+        "t_statistic": regime_fit.tvalues,
+    }
+).sort("mean_forward_return", descending=True)
+regime_means
+
 # %%
 fig = px.bar(
-    by_regime.to_pandas(),
+    regime_means.to_pandas(),
     x="tvl_regime",
     y="mean_forward_return",
-    error_y=by_regime.with_columns(
-        se=pl.col("std_forward_return") / (pl.col("independent_windows") ** 0.5)
-    )["se"].to_list(),
+    error_y="standard_error",
     title="The error bars are wider than the differences between the regimes",
     labels={
         "tvl_regime": f"TVL regime, {ZSCORE_DAYS}-day z-score",
@@ -373,16 +400,23 @@ fig = px.bar(
 fig.update_layout(height=400, yaxis_tickformat=".0%")
 show_plotly_with_alt(
     fig,
-    "Bar chart of the mean forward ether return in each of the three TVL regimes, with error "
-    "bars scaled by the number of independent windows in each bucket. Every error bar spans "
-    "zero and overlaps the other bars.",
+    "Bar chart of the mean forward ether return in each of the three TVL regimes, with "
+    "Newey-West standard errors as error bars. The two extreme regimes have error bars spanning "
+    "zero; the middle regime's mean is the furthest from zero of the three.",
 )
 
 # %% [markdown]
-# The error bars are what the table alone does not show. Each bucket holds a few hundred daily
-# rows and a handful of independent thirty-day windows, so the standard error of each mean is
-# larger than the distance between the means. Nothing in the ordering of those three bars can be
-# distinguished from the ordering three coin flips would produce.
+# The error bars are what the first table does not show. Once the overlap is priced in, the two
+# extreme regimes carry standard errors larger than their own means, so neither is
+# distinguishable from zero.
+#
+# The middle regime is the one whose interval clears zero, and that is the shape of the result
+# worth stopping on. A story in which TVL predicts returns would separate the two extremes and
+# leave the middle between them. This does the opposite: the neutral bucket, the one defined as
+# "no signal", is the one with the large negative mean. That is what a partition of ten
+# independent windows into three buckets produces when there is nothing to find, and it is why a
+# single statistic clearing a threshold is not the end of the reading. There are three
+# comparisons here, drawn from a sample with about ten independent observations in it.
 #
 # ### The same question as a regression
 #
@@ -427,15 +461,18 @@ print(f"Independent thirty-day windows in the sample: {len(tested) / FORWARD_DAY
 #    on growth or on a standardized level, never on the level itself.
 # 2. Show a composition against the true total. Four chains plotted against each other will
 #    always fill the chart, whatever share of the market they actually hold.
-# 3. A forward return sampled daily over a thirty-day horizon gives thirty overlapping
-#    observations of each window. The row count is not the sample size, and the number that
-#    matters is the row count divided by the horizon.
-# 4. Correct the test for that overlap before reading it. The Newey-West standard error is the
-#    standard correction and it needs a lag at least as long as the overlap; here it moves an
-#    already-weak statistic closer to zero.
-# 5. A regime table with three buckets and a few independent windows in each will always produce
-#    an ordering. Put the standard error on the chart and the ordering usually stops being
-#    interesting.
+# 3. Compute a forward return from the price at the two ends of the window. Shifting a trailing
+#    return only gives the forward return when the trailing window and the forward horizon are
+#    the same length, which makes the construction silently wrong the moment either is changed.
+# 4. A forward return sampled daily over a thirty-day horizon gives thirty overlapping views of
+#    each window, so the row count is not the sample size. Correct for that with a Newey-West
+#    covariance at a lag as long as the overlap, rather than by dividing the row count, which
+#    assumes a dependence structure the data need not have.
+# 5. A regime table with three buckets will always produce an ordering. Estimate the bucket means
+#    as coefficients on regime indicators under the same corrected covariance and put the
+#    standard errors on the chart. Then read the pattern as well as the statistics: a bucket
+#    defined as "no signal" coming out furthest from zero is what noise partitioned three ways
+#    looks like, whatever any one t-statistic says.
 # 6. The binding constraint on an alternative-data study is often not the alternative data. Here
 #    the free TVL history is eight years and the free price history is one, so the price feed
 #    decides what can be concluded.
