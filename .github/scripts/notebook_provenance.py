@@ -1537,30 +1537,41 @@ def _splice_alt(
 
     A computed alt renders as ``seg0 + value0 + seg1 + value1 + ...`` and only the values
     need a kernel to produce. They are already in the executed output, so a prose fix to an
-    f-string alt does not need one: find the values in the gaps between the OLD segments,
-    then rebuild around the NEW ones.
+    f-string alt does not need one: recover the values from between the OLD segments, then
+    rebuild around the NEW ones.
 
-    None when the two sources interpolate a different number of times - that is a change to
-    what the alt asserts about the data, not to its wording, and it needs the run.
+    Recovering them is where this can go wrong, and quietly. Scanning left to right for the
+    next segment takes the FIRST occurrence, which is not necessarily the delimiter: with
+    segments ``("IC ", ".")`` and carried ``"IC 0.031."``, the ``.`` matches inside the
+    number and the value is read as ``"0"``, leaving ``"031."`` to be appended after the new
+    prose. The output is corrupted and then stamped as current, which is worse than
+    refusing.
+
+    So the split is done by an anchored regex, both greedily and non-greedily, and accepted
+    only when the two agree. Anchoring the last segment to the end of the string is what
+    rejects the reading above; requiring the two passes to agree is what catches a genuinely
+    ambiguous alt, where more than one split is consistent with the source and there is no
+    way to tell which the notebook meant. Those need the run.
+
+    None whenever the values cannot be recovered unambiguously, or when the two sources
+    interpolate a different number of times - that is a change to what the alt asserts about
+    the data, not to its wording.
     """
     if len(old_segments) != len(new_segments):
         return None
-    values: list[str] = []
-    position = 0
-    for index, segment in enumerate(old_segments):
-        found = carried.find(segment, position)
-        if found < 0:
-            return None
-        if index:
-            values.append(carried[position:found])
-        elif found != 0:
-            return None  # the carried alt does not start where the source says it does
-        position = found + len(segment)
-    values.append(carried[position:])
+    if len(old_segments) == 1:
+        # No interpolation to preserve: the whole alt is prose.
+        return new_segments[0] if carried == old_segments[0] else None
+    body = "(.*?)".join(re.escape(segment) for segment in old_segments)
+    lazy = re.fullmatch(body, carried, re.DOTALL)
+    greedy = re.fullmatch("(.*)".join(re.escape(s) for s in old_segments), carried, re.DOTALL)
+    if lazy is None or greedy is None or lazy.groups() != greedy.groups():
+        return None
+    values = lazy.groups()
     rebuilt = new_segments[0]
-    for segment, value in zip(new_segments[1:], values[:-1], strict=True):
+    for segment, value in zip(new_segments[1:], values, strict=True):
         rebuilt += value + segment
-    return rebuilt + values[-1]
+    return rebuilt
 
 
 def _image_outputs(cell: dict) -> list[dict]:

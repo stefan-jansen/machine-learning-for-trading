@@ -223,7 +223,17 @@ def test_sync_alt_refuses_a_computed_alt_that_interpolates_differently(repo):
             "IC of 0.031 over 5 folds.",
             "Rank IC of 0.031 across 5 folds.",
         ),
-        (("Sharpe ",), ("Annualised Sharpe ",), "Sharpe 1.24", "Annualised Sharpe 1.24"),
+        # A single segment interpolates nothing, so the whole alt is prose and must match.
+        (("Sharpe 1.24",), ("Annualised Sharpe 1.24",), "Sharpe 1.24", "Annualised Sharpe 1.24"),
+        (("Sharpe ",), ("Annualised Sharpe ",), "Sharpe 1.24", None),
+        # Scanning left to right takes the FIRST occurrence of the delimiter, which here is
+        # the decimal point inside the value: the value reads as "0" and "031." is appended
+        # after the new prose, producing "IC 0 overall.031." and stamping it as current.
+        # Anchoring the last segment to the end of the string is what rejects that reading.
+        (("IC ", "."), ("IC ", " overall."), "IC 0.031.", "IC 0.031 overall."),
+        # More than one split is consistent with the source, so there is no telling which
+        # the notebook meant. Refused rather than guessed.
+        ((" ", " ", " "), ("x ", " y ", " z"), "a b c d", None),
         # One more gap to fill than there are values to fill it with.
         (("A ", " chart."), ("A ", " plot.", " Extra."), "A bar chart.", None),
         # The carried alt was not produced by these segments at all.
