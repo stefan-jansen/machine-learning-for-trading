@@ -1346,13 +1346,32 @@ clustering = {
     for name, paths in path_populations.items()
 }
 clustering_gbm_p95 = np.percentile(clustering["GBM"], 95)
-spy_clustering = clustering_statistic(spy_close)
+
+# SPY must be measured over the same window length. The statistic sums 20
+# autocorrelation estimates, each biased and noisy in proportion to 1/T, so its
+# value on 5030 returns is not comparable with a simulated path of N_STEPS.
+spy_windows = np.array(
+    [
+        clustering_statistic(spy_close[i : i + N_STEPS + 1])
+        for i in range(0, len(spy_close) - N_STEPS, N_STEPS)
+    ]
+)
+spy_clustering_median = float(np.median(spy_windows))
 
 print(f"Summed ACF of squared returns over lags 1-{CLUSTER_LAGS}, {N_PATHS} paths per model")
-print(f"SPY over the same statistic: {spy_clustering:.2f}\n")
+print(f"SPY, whole history ({len(spy_close) - 1} returns): {clustering_statistic(spy_close):.2f}")
+print(
+    f"SPY, {len(spy_windows)} non-overlapping {N_STEPS}-day windows: "
+    f"median {spy_clustering_median:.2f}, "
+    f"range {spy_windows.min():.2f} to {spy_windows.max():.2f}\n"
+)
 for name, values in clustering.items():
-    share = float((values > clustering_gbm_p95).mean())
-    print(f"  {name:15s} median {np.median(values):6.3f}   above GBM p95: {share:6.1%}")
+    above_null = float((values > clustering_gbm_p95).mean())
+    above_spy = float((values > spy_clustering_median).mean())
+    print(
+        f"  {name:15s} median {np.median(values):6.3f}   "
+        f"above GBM p95: {above_null:6.1%}   above SPY median: {above_spy:6.1%}"
+    )
 
 # %% [markdown]
 # **What the comparison establishes.** Three models generate excess kurtosis and
@@ -1374,7 +1393,16 @@ for name, values in clustering.items():
 # next. Heston and GARCH both clear the null on the large majority of paths,
 # which is what a mean-reverting variance process and a variance recursion are
 # for, and GARCH does so on every path and at roughly three times Heston's
-# median. Both remain well below SPY's own value on this statistic.
+# median.
+#
+# The comparison against SPY needs the same window length on both sides. The
+# statistic sums twenty autocorrelation estimates whose bias and variance both
+# scale with 1/T, so SPY's value over its whole history is larger than its value
+# over any `N_STEPS`-day slice of that history, and comparing the two would
+# manufacture a shortfall. Measured over non-overlapping windows of the
+# simulated length, GARCH's distribution is centered slightly **above** SPY's
+# median rather than short of it, and Heston's sits below. The nine SPY windows
+# also range widely enough that a single one is weak evidence about the series.
 #
 # So the two properties order the models differently. Jump-diffusion has the
 # heaviest tails and no clustering at all; GARCH has the most clustering and the
@@ -1846,9 +1874,11 @@ print(
 # 3. **Heston and GARCH capture both stylized facts; the jump model captures
 #    only one.** Measured against GBM as the null, jump-diffusion has the
 #    heaviest tails and no volatility clustering whatever, while Heston and
-#    GARCH clear the null on both properties, GARCH more strongly on each. What
-#    the runs do not support is any model here reaching SPY's own level: both
-#    remain well short of it on the clustering statistic.
+#    GARCH clear the null on both properties, GARCH more strongly on each. On
+#    clustering, compared against SPY over equal-length windows, GARCH is not
+#    short of the empirical level at all — its median sits above SPY's. Matching
+#    one statistic is not matching the series, which is the argument for the
+#    validation protocol the rest of the chapter builds.
 # 4. **Drift compensation** (jump-diffusion) and **full truncation** (Heston) are
 #    implementation details that change what is simulated, not stylistic choices;
 #    without the compensator the requested drift is not the realized drift, and
