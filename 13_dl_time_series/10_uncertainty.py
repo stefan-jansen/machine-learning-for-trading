@@ -136,9 +136,11 @@ print(
 #
 # NaN and infinite feature values are replaced with zero. The features are already
 # standardized returns and a NaN here means a missing observation at a series
-# boundary, so zero is the standardized mean rather than an invented value;
-# forward-filling would carry a value across a gap, which is a look-ahead in panel
-# data. The count is printed so a large number cannot pass unnoticed.
+# boundary, so zero is the standardized mean rather than an invented value.
+# Forward-filling within a symbol would be the other option and would not leak - it
+# only ever reads earlier observations - but it would present a stale value as a
+# current one, which for a trailing-return feature says the return was unchanged
+# rather than unknown. The count is printed so a large number cannot pass unnoticed.
 #
 # The rows are then put in one canonical order, by date and then symbol. The sequence
 # builder pools assets in whatever order the frame yields them, and that order is not
