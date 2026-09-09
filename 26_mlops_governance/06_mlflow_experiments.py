@@ -22,33 +22,52 @@
 # **Prerequisites**: Basic model evaluation, validation workflows, and Chapter 25 deployment verification.
 #
 # **Learning Objectives**:
-# - Inspect the content-addressed case-study registry — schema, hashing, and
-#   reproducibility manifests — as a minimum viable experiment tracker.
-# - Reconstruct a searchable run catalog from `training_runs`,
-#   `prediction_sets`, and `backtest_runs`.
-# - Log catalog rows into a local MLflow tracking store (a capped sample, for
-#   speed) and use `search_runs` to confirm ranking parity for the logged runs.
+# - Read a run log as an experiment tracker: what each row records, how a run is identified,
+#   and how a result is traced back to the files that produced it.
+# - Rebuild a searchable catalog of every model run from the tables the pipeline writes, and
+#   see from it what was tried and what has not been.
+# - Log the same catalog into MLflow and check that its queries return the same answers, so
+#   that what a tracker buys can be separated from what the discipline buys.
 #
-# This notebook connects two experiment-tracking approaches. The case-study
-# registry — a SQLite database backed by content-addressed artifact bundles —
-# already implements the run log requirements from Section 6.7: provenance,
-# configuration, metrics, artifacts, and decision gates.
+# An **experiment tracker** answers three questions after the fact: what was run, what came
+# out, and can it be reproduced. The case studies in this book already answer them, through a
+# SQLite database of runs beside a directory of content-addressed artifact bundles. This
+# notebook reads that registry first, because seeing the answers assembled by hand is what
+# makes clear which part MLflow automates.
 #
-# MLflow provides a standard API (`log_params`, `log_metrics`, `search_runs`)
-# that automates the same workflow. The notebook first explores the registry
-# directly, then logs its runs into a local MLflow store and verifies that
-# rankings are identical — showing that the governance value comes from the
-# underlying discipline, not the specific tool. Sharpe logging, lineage
-# manifests, and explicit stage transitions are discussed in §26.6 prose but
-# stay outside the scope of this demo notebook.
+# **Content-addressed** means a run's identifier is a hash of the specification that produced
+# it, so the same specification always yields the same identifier. That is what makes a run
+# log idempotent: re-running a pipeline either lands on the row that already exists or
+# produces a different hash, and there is no third case where two rows describe the same run.
 
 # %%
-"""Experiment Tracking with MLflow and the Case-Study Registry."""
+"""Experiment Tracking with MLflow and the Case-Study Registry: one catalog, read two ways."""
+
+# %% [markdown]
+# ## Settings
+#
+# `PRIMARY_LABEL` and `SECONDARY_LABEL` name the two return horizons whose runs the catalog
+# reads. A case study declares several, and reading two of them is enough to show that the
+# catalog groups by label rather than pooling across horizons.
+#
+# `MAX_MLFLOW_RUNS` caps how many catalog rows are logged into MLflow. Logging every run would
+# be the production behaviour and would make this notebook slow; the cap is why the sample is
+# constructed deliberately below rather than taken off the top.
+#
+# `PARITY_TOLERANCE` is how far apart the two systems' metrics may be. Both read the same
+# stored value, so anything above float noise means one of them is reporting a different run.
+#
+# `BACKTEST_PANEL_ROWS` and `HASH_PREFIX_CHARS` govern how much of the backtest table the
+# figure shows and how much of each hash labels a bar.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 PRIMARY_LABEL = "fwd_ret_1d"
 SECONDARY_LABEL = "fwd_ret_5d"
+MAX_MLFLOW_RUNS = 50
+PARITY_TOLERANCE = 1e-8
+BACKTEST_PANEL_ROWS = 6
+HASH_PREFIX_CHARS = 4
 
 # %%
 import json
@@ -57,14 +76,17 @@ import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import polars as pl
 from IPython.display import display
 
-warnings.filterwarnings("ignore")
-
 from utils.paths import get_case_study_dir, get_output_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
+
+# Named, not blanket: a bare ignore would also hide the convergence and numerical
+# warnings a reader needs to see.
+warnings.filterwarnings("ignore", category=FutureWarning, module="mlflow")
 
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 REGISTRY_PATH = CASE_DIR / "run_log" / "registry.db"
@@ -76,18 +98,20 @@ print("=" * 60)
 
 
 # %% [markdown]
-# ## 1. The case-study registry — schema and design
+# ## 1. What the registry records
 #
-# Section 6.7 defined five non-negotiable categories for a run log: provenance,
-# data and evaluation protocol, configuration, artifacts, and decision gates.
-# The case study pipeline (Chapters 11–16) implemented these requirements in a
-# three-level entity model:
+# A run log has to carry five things before it can answer the three questions above:
+# provenance, the data and evaluation protocol, the configuration, the artifacts, and the
+# decision gates that were applied. The case-study pipeline in Chapters 11 to 16 records them
+# across three levels, each one a stage of the same experiment:
 #
-# $$\text{training\_run} \to \text{prediction\_set} \to \text{backtest\_run}$$
+# $$\textrm{training run} \rightarrow \textrm{prediction set} \rightarrow \textrm{backtest run}$$
 #
-# Each level is identified by a deterministic hash of its canonical JSON spec.
-# The same config always produces the same hash, so re-running a pipeline
-# either overwrites the existing entry (idempotent) or confirms the result.
+# A training run is a fitted model under one configuration. A prediction set is what that
+# model produced on one split. A backtest run is what a strategy built from those predictions
+# did. Each level is identified by a hash of its own canonical specification, and each carries
+# the identifier of the level above it, so a Sharpe ratio at the bottom resolves to the exact
+# configuration and data at the top.
 
 # %%
 from case_studies.utils.registry import REGISTRY_SCHEMA_SQL, canonical_json, compute_hash
@@ -98,8 +122,14 @@ for line in REGISTRY_SCHEMA_SQL.strip().split("\n"):
     if stripped.startswith("CREATE TABLE") or stripped.startswith("CREATE INDEX"):
         print(f"  {stripped.split('(')[0]}")
 
+# %% [markdown]
+# ### The hash is the identifier
+#
+# Canonicalizing the specification before hashing is what makes the identifier stable: the
+# same settings serialize to the same bytes whatever order they were written in, so two runs
+# of the same experiment collide by design rather than accumulating as separate rows.
+
 # %%
-# Content-addressed hashing: same config → same run ID
 example_config = {
     "family": "gbm",
     "label": "fwd_ret_1d",
@@ -112,10 +142,10 @@ print(f"Hash:    {example_hash}")
 print(f"Stable:  {example_hash == compute_hash(canonical_json(example_config))}")
 
 # %% [markdown]
-# This is the same information MLflow stores in its tracking database — params,
-# metrics, artifact URIs, and run lineage. The sections below load the real
-# registry contents and then show how MLflow's standard API provides the same
-# queries.
+# MLflow's tracking database holds the same categories under different names: parameters,
+# metrics, artifact locations and run lineage. The difference is the interface, and the
+# sections below load the registry directly first so that the comparison in section 7 is
+# between two answers rather than between an answer and an assumption.
 
 
 # %% [markdown]
@@ -205,20 +235,30 @@ best_validation
 
 
 # %% [markdown]
-# **Finding**: This catalog is already enough to answer the first experiment
-# review question: which configurations were tried, and which ones actually
-# ranked highest on the validation metric?
+# The catalog answers the first question an experiment review asks: which configurations were
+# tried, and how did each one score.
+#
+# What it does not answer is which one to deploy, and the distinction is worth holding onto.
+# The information coefficient is the rank correlation between a model's scores and the
+# returns they predicted, so ordering by it says which model ranked the cross-section best -
+# a description of the predictions. This pipeline selects on validation backtest Sharpe
+# instead, because a model can rank well and still produce a portfolio nobody would hold once
+# turnover and costs are charged. The catalog ranks; the selection happens elsewhere.
 
 
 # %% [markdown]
-# ## 4. Backtest performance by model family
+# ## 4. What the predictions did as a portfolio
 #
-# The backtest metrics table captures simulation results for each
-# prediction set. These are the registry's equivalent of MLflow model-stage
-# evidence — showing whether a candidate's predictions translate to
-# tradeable performance. The registry value `stage='signal'` denotes the
-# equal-weight baseline, so this comparison excludes allocation, cost,
-# holdout, and risk-overlay variants.
+# The backtest tables carry what happened when a strategy was built from each prediction set,
+# which is the evidence the section above cannot supply. Reading it here is also how a
+# catalog reports a gap: a prediction set with no backtest row is a run that was fitted and
+# never evaluated as a strategy, and a tracker that only listed what exists would not show
+# that.
+#
+# The query is restricted to the equal-weight baseline, which the registry stores under
+# `stage='signal'`. Every other stage varies an allocator, a cost assumption or a risk overlay
+# on top of that baseline, and a comparison across stages is a comparison of overlays rather
+# than of models.
 
 
 # %%
@@ -250,11 +290,12 @@ backtest_pivot.head(10)
 
 
 # %% [markdown]
-# ## 5. Reproducibility manifest for one training run
+# ## 5. Trace one run back to its files
 #
-# Experiment tracking matters because it links the ranking result to a concrete
-# artifact bundle. The manifest below shows the files that make one run
-# reproducible.
+# This is the third question - can it be reproduced - and it is the one a metric in a table
+# cannot answer on its own. The manifest resolves one catalog row to the specification that
+# configured the fit and the predictions it produced, both addressed by the hashes the row
+# carries. A missing file here is what a reproducibility claim looks like when it fails.
 
 
 # %%
@@ -290,7 +331,8 @@ if (training_dir / "spec.json").exists():
     spec = json.loads((training_dir / "spec.json").read_text())
     print(f"Selected training run: {selected_training_hash}")
     print(f"Family: {spec.get('family')}, Config: {spec.get('config_name')}")
-    print(f"Label: {spec.get('label')}, Folds: {spec.get('n_folds')}")
+    print(f"Label: {spec.get('label')}, Seed: {spec.get('seed')}")
+    print(f"Identity version: {spec.get('identity_version')}, Tier: {spec.get('execution_tier')}")
     print(f"\nFull spec:\n{json.dumps(spec, indent=2)}")
 
 if (prediction_dir / "predictions.parquet").exists():
@@ -300,100 +342,99 @@ if (prediction_dir / "predictions.parquet").exists():
 
 
 # %% [markdown]
-# ## 6. Registry dashboard
+# ## 6. The catalog as a picture
 #
-# The dashboard summarizes the same signals a lightweight experiment tracker
-# would expose: validation ranking, run counts, and backtest performance.
+# Two things in the catalog are judged by shape rather than read off. How the runs within a
+# family are distributed says whether a family's best score sits inside a tight cluster or is
+# one outlier above a spread, which is the difference between a result and a lucky draw. And
+# the spread of baseline Sharpe across configurations says how much of the strategy's
+# performance was a choice rather than a property of the signal.
 
 
 # %%
 family_counts = run_catalog.groupby(["label", "family"]).size().reset_index(name="run_count")
 
 # %%
-fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["dashboard_2x2"])
-family_display = {
+FAMILY_DISPLAY = {
     "deep_learning": "deep learning",
     "latent_factors": "latent factors",
     "linear": "linear",
     "tabular_dl": "tabular DL",
     "gbm": "GBM",
 }
-label_display = {PRIMARY_LABEL: "1-day", SECONDARY_LABEL: "5-day"}
 
-ax1 = axes[0, 0]
-for family_name, frame in run_catalog.groupby("family"):
-    ax1.scatter(
-        range(len(frame)),
-        frame["ic_mean"],
-        alpha=0.6,
-        s=40,
-        label=family_display.get(family_name, family_name),
-        color=COLORS.get(family_name, COLORS["blue"]),
+
+def family_label(name: str) -> str:
+    return FAMILY_DISPLAY.get(name, name)
+
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h"], constrained_layout=True)
+
+# An empirical cumulative distribution rather than a strip plot: the families differ by an
+# order of magnitude in run count, and a cumulative curve compares their shapes without the
+# denser family covering the sparser one.
+ax1 = axes[0]
+family_order = run_catalog.groupby("family")["ic_mean"].median().sort_values().index.tolist()
+family_colors = dict(zip(family_order, ml4t_palette(len(family_order), categorical=True)))
+for family_name in family_order:
+    values = run_catalog.loc[run_catalog["family"] == family_name, "ic_mean"].sort_values()
+    share = np.arange(1, len(values) + 1) / len(values)
+    ax1.step(
+        values,
+        share,
+        where="post",
+        linewidth=2,
+        color=family_colors[family_name],
+        label=f"{family_label(family_name)} (n={len(values)})",
     )
-add_message_title(ax1, "IC varies widely across model families")
-ax1.set_xlabel("Run index")
-ax1.set_ylabel("Mean daily IC")
-ax1.legend(fontsize=6, ncol=2, frameon=False)
-
-ax2 = axes[0, 1]
-leader_plot = best_validation.sort_values("ic_mean")
-leader_labels = [
-    f"{family_display.get(row.family, row.family)} / {label_display.get(row.label, row.label)}"
-    for row in leader_plot.itertuples()
-]
-ax2.barh(leader_labels, leader_plot["ic_mean"], color=COLORS["amber"])
-add_message_title(ax2, "Every family-label slice has a leader")
-ax2.set_xlabel("Mean daily IC")
-ax2.tick_params(axis="y", labelsize=6)
-
-ax3 = axes[1, 0]
-count_matrix = family_counts.pivot(index="family", columns="label", values="run_count").fillna(0)
-count_matrix = count_matrix.reindex(columns=[PRIMARY_LABEL, SECONDARY_LABEL])
-ax3.imshow(count_matrix, cmap="Blues", aspect="auto")
-for row_idx in range(len(count_matrix.index)):
-    for col_idx in range(len(count_matrix.columns)):
-        value = int(count_matrix.iloc[row_idx, col_idx])
-        ax3.text(col_idx, row_idx, value, ha="center", va="center", fontsize=7)
-ax3.set_xticks(range(len(count_matrix.columns)), [label_display[label] for label in count_matrix])
-ax3.set_yticks(
-    range(len(count_matrix.index)),
-    [family_display.get(family, family) for family in count_matrix.index],
+zero_line(ax1, axis="x")
+ax1.set_ylim(0, 1.02)
+add_message_title(
+    ax1,
+    "Distribution of validation information coefficient by family",
+    subtitle="Share of a family's runs at or below each value",
 )
-ax3.tick_params(axis="y", labelsize=6)
-add_message_title(ax3, "Search effort concentrates in GBMs")
+ax1.set_xlabel("Mean daily IC")
+ax1.set_ylabel("Share of runs")
+ax1.legend(loc="lower right", fontsize=8, frameon=False)
 
-ax4 = axes[1, 1]
-if not backtest_pivot.empty and "sharpe" in backtest_pivot.columns:
-    top_bt = backtest_pivot.head(6).sort_values("sharpe")
-    n_bt = len(top_bt)
-    n_total = len(backtest_pivot)
-    labels = top_bt["config_name"] + " / " + top_bt["backtest_hash"].str[:4]
-    ax4.barh(labels, top_bt["sharpe"].fillna(0), color=COLORS["positive"])
-    title_suffix = f"top {n_bt} of {n_total}" if n_total > n_bt else f"n={n_bt} in registry"
-    add_message_title(
-        ax4,
-        "Equal-weight Sharpe varies widely",
-        subtitle=title_suffix,
+ax2 = axes[1]
+if backtest_pivot.empty or "sharpe" not in backtest_pivot.columns:
+    ax2.text(
+        0.5,
+        0.5,
+        "No baseline backtest rows in the registry\nfor the labels this notebook reads",
+        ha="center",
+        va="center",
+        transform=ax2.transAxes,
     )
-    ax4.set_xlabel("Sharpe Ratio")
-    ax4.tick_params(axis="y", labelsize=6)
-    if n_bt == 1:
-        ax4.text(
-            0.5,
-            0.95,
-            "Only 1 backtest tracked; the panel widens automatically as more runs land",
-            ha="center",
-            va="top",
-            transform=ax4.transAxes,
-            fontsize=8,
-            color="gray",
-        )
+    ax2.set_xticks([])
+    ax2.set_yticks([])
+    add_message_title(ax2, "Baseline backtest Sharpe by configuration")
 else:
-    ax4.text(0.5, 0.5, "No backtest data", ha="center", va="center")
-    add_message_title(ax4, "No equal-weight baseline results are available")
+    shown = backtest_pivot.head(BACKTEST_PANEL_ROWS).sort_values("sharpe")
+    ax2.barh(
+        shown["config_name"] + " / " + shown["backtest_hash"].str[:HASH_PREFIX_CHARS],
+        shown["sharpe"].fillna(0),
+        color=COLORS["positive"],
+    )
+    add_message_title(
+        ax2,
+        "Baseline backtest Sharpe by configuration",
+        subtitle=f"Highest first, at most {BACKTEST_PANEL_ROWS} configurations",
+    )
+    ax2.set_xlabel("Annualized Sharpe ratio")
+    ax2.tick_params(axis="y", labelsize=7)
 
-plt.tight_layout(h_pad=2.8, w_pad=2.4)
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels. Left: one step curve per model family giving the share of that family's "
+    "runs whose mean daily validation information coefficient is at or below each value, "
+    "against a dashed vertical line at zero, with the run count in each legend entry. "
+    "Right: a horizontal bar chart of baseline backtest Sharpe by configuration, or a note "
+    "that the registry holds no baseline backtest rows for these labels.",
+)
 
 
 # %% [markdown]
@@ -403,9 +444,9 @@ fig.show()
 best_validation[["training_hash", "family", "label", "config_name", "ic_mean"]]
 
 # %% [markdown]
-# **Finding**: `best_validation` reports the top configuration per `(family,
-# label)` slice; read the `ic_mean` column to see which family leads each
-# label, which is the question the registry exists to answer.
+# One row per family and label, holding the run with the highest mean daily validation IC in
+# that slice. Grouping before ranking is what keeps the table readable as the catalog grows:
+# an ungrouped ranking of every run tends to be one family's grid several times over.
 
 # %% [markdown]
 # ### Training run counts by family and label
@@ -414,10 +455,11 @@ best_validation[["training_hash", "family", "label", "config_name", "ic_mean"]]
 family_counts
 
 # %% [markdown]
-# **Finding**: `family_counts` is the experiment-budget view — how many
-# configurations a given family tried per label. Heavy concentration in one
-# family signals where the search effort went, which the governance log needs
-# to make auditable.
+# How many configurations each family was given, per label. This is the experiment budget,
+# and it is worth recording because a family that was tried a hundred ways and a family that
+# was tried twice are not comparable on their best score alone. The more configurations a
+# search covers, the higher its best score goes on noise, and a catalog that shows only the
+# leaders hides that entirely.
 
 # %% [markdown]
 # ### Selected run manifest
@@ -429,15 +471,25 @@ manifest
 # %% [markdown]
 # ## 7. MLflow experiment tracking
 #
-# The custom registry satisfies Section 6.7's run log requirements, but it
-# requires bespoke SQL queries and manual catalog reconstruction. MLflow
-# provides a standard API — `log_params`, `log_metrics`, `log_artifact`,
-# `search_runs` — that automates the same workflow. This section logs the
-# runs from the registry into a local MLflow store and shows that the
-# rankings are identical.
+# Everything above was assembled with SQL written for this schema. MLflow supplies the same
+# operations as a library - `log_params`, `log_metrics`, `log_artifact` and `search_runs` -
+# against a schema it owns, with a web interface over it.
+#
+# The catalog is logged into a local MLflow store below and then queried through its API. The
+# comparison at the end is the reason to do it: if both return the same runs in the same
+# order, then what the tracker supplies is the interface and the infrastructure, and the
+# properties that make either one trustworthy - deterministic hashing, a manifest that
+# resolves, a recorded specification - came from the pipeline that wrote the runs.
 
 # %%
+import logging
+
 import mlflow
+
+# MLflow logs schema creation and experiment creation at INFO, on its own logger, and those
+# lines land in the committed render as stderr. Raised by name to WARNING, so anything MLflow
+# reports as a problem still reaches the reader.
+logging.getLogger("mlflow").setLevel(logging.WARNING)
 
 print(f"MLflow {mlflow.__version__} available")
 
@@ -445,17 +497,16 @@ print(f"MLflow {mlflow.__version__} available")
 # %% [markdown]
 # ### Set up a local file-backed tracking store
 #
-# MLflow can write to a local directory — no server required. We use a chapter
-# output directory so the notebook writes to the correct location (not the
-# repo root).
+# MLflow writes to a local directory with no server, which is what makes it usable inside a
+# notebook. The store goes under the chapter's output directory so nothing is written beside
+# the source.
 
 # %%
 import shutil
 
 MLFLOW_DIR = get_output_dir(26, "mlflow_tracking")
-# Remove any stale store from a previously interrupted run before recreating;
-# otherwise search_runs can return runs from prior executions and the parity
-# check would silently include phantom rows.
+# A store left by an interrupted execution would return its runs from search_runs too, and
+# the parity check below would compare against rows this run never logged.
 shutil.rmtree(MLFLOW_DIR, ignore_errors=True)
 MLFLOW_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -468,17 +519,21 @@ print(f"Experiment   : {experiment.name} (id={experiment.experiment_id})")
 # %% [markdown]
 # ### Log catalog runs into MLflow
 #
-# The capped sample always includes every `(family, label)` leader, then fills
-# the remaining slots with the strongest other validation runs. Parameters come
-# from the registry columns; mean daily validation IC is the primary metric.
+# The sample is constructed rather than sliced. Every row that tops its family-label group
+# goes in first, and the remaining slots go to the highest-IC runs left over.
+#
+# The construction is what makes the check at the end mean something. Under a plain top-N
+# slice, a group whose best run sits outside the global top `MAX_MLFLOW_RUNS` reaches the
+# manual catalog and not MLflow, and the comparison then reports a difference the sampling
+# created.
 
 
 # %%
-def log_catalog_to_mlflow(catalog: pd.DataFrame, max_runs: int = 50) -> int:
-    """Log catalog rows as MLflow runs. Returns the count logged.
+def log_catalog_to_mlflow(catalog: pd.DataFrame, max_runs: int = MAX_MLFLOW_RUNS) -> int:
+    """Log catalog rows as MLflow runs, returning how many were logged.
 
-    Caps at `max_runs` to keep the demo fast — a real pipeline would log
-    incrementally as each training job completes.
+    A production pipeline logs one run as each training job finishes, so the cap exists
+    only to keep this notebook fast.
     """
     logged = 0
     for row in catalog.itertuples(index=False):
@@ -510,7 +565,7 @@ leaders = run_catalog[run_catalog["training_hash"].isin(leader_hashes)]
 remaining = run_catalog[~run_catalog["training_hash"].isin(leader_hashes)].sort_values(
     "ic_mean", ascending=False
 )
-catalog_sample = pd.concat([leaders, remaining], ignore_index=True).head(50)
+catalog_sample = pd.concat([leaders, remaining], ignore_index=True).head(MAX_MLFLOW_RUNS)
 assert leader_hashes.issubset(set(catalog_sample["training_hash"]))
 n_logged = log_catalog_to_mlflow(catalog_sample, max_runs=len(catalog_sample))
 assert n_logged == len(catalog_sample)
@@ -520,9 +575,10 @@ print(f"Logged {n_logged} runs into MLflow experiment '{CASE_STUDY_ID}'")
 # %% [markdown]
 # ### Query runs with `search_runs`
 #
-# `mlflow.search_runs` returns a pandas DataFrame with columns prefixed by
-# `params.` and `metrics.`. This is the MLflow equivalent of the manual
-# catalog queries in Section 3.
+# `search_runs` returns a DataFrame whose columns are prefixed by `params.` and `metrics.`,
+# reflecting how MLflow stores them: parameters are strings it does not interpret, metrics are
+# numbers it can order and filter by. That split is a modelling decision the caller makes at
+# logging time, and it decides what can be queried later.
 
 # %%
 all_runs = mlflow.search_runs(
@@ -542,10 +598,10 @@ all_runs[
 
 
 # %% [markdown]
-# ### Filter by family — GBM runs ranked by IC
+# ### Filter by family
 #
-# MLflow's `filter_string` parameter supports SQL-like predicates on params
-# and metrics, giving the same result as the grouped ranking in Section 3.
+# `filter_string` takes SQL-like predicates over the same parameters and metrics, which is the
+# operation the grouped ranking in section 3 performed with a `GROUP BY`.
 
 # %%
 gbm_runs = mlflow.search_runs(
@@ -567,11 +623,10 @@ gbm_runs[
 # %% [markdown]
 # ### Verify ranking parity with the manual catalog
 #
-# The whole point: MLflow's `search_runs` ordering must match the manual
-# catalog from Section 3. We compare the top run per family × label group.
-# The capped sample includes every group leader by construction, so parity must
-# cover the complete set rather than only the leaders that happen to rank in the
-# global top 50.
+# The comparison is an outer join on family and label, so a group present in one system and
+# absent from the other fails rather than being dropped. Both the identity of each group's
+# top run and its metric are checked, because agreeing on the number while disagreeing on
+# which run produced it is the more interesting failure.
 
 # %%
 mlflow_best = (
@@ -601,7 +656,9 @@ comparison = mlflow_best_compact.merge(
     suffixes=("_mlflow", "_manual"),
     indicator=True,
 )
-comparison["ic_match"] = (comparison["ic_mean_mlflow"] - comparison["ic_mean_manual"]).abs() < 1e-8
+comparison["ic_match"] = (
+    comparison["ic_mean_mlflow"] - comparison["ic_mean_manual"]
+).abs() < PARITY_TOLERANCE
 comparison["hash_match"] = comparison["training_hash_mlflow"] == comparison["training_hash_manual"]
 assert (comparison["_merge"] == "both").all()
 assert comparison[["ic_match", "hash_match"]].all().all()
@@ -609,16 +666,20 @@ print("Ranking parity check (MLflow vs manual catalog):")
 comparison
 
 # %% [markdown]
-# **Finding**: The capped sample contains every group leader, and the outer
-# parity check proves that MLflow and the registry agree on both leader identity
-# and mean daily validation IC for every `(family, label)` slice.
+# The assertions above are what make this a check: the notebook stops if any group is missing
+# from either side, or if the two disagree about which run tops it or by how much.
+#
+# What that establishes is that MLflow's query returns the catalog it was given. It is a test
+# of the logging and of the query, and it says nothing about whether the metric is the right
+# one to rank on - which section 3 already answered, and the answer was no.
 
 
 # %% [markdown]
 # ### Clean up
 #
-# Remove the tracking store. In production, the tracking store would persist —
-# either as a file directory or a remote server.
+# The tracking store was written under this chapter's output directory and is removed here. A
+# production store persists and is shared, which is most of what makes it a tracker rather
+# than a log file.
 
 # %%
 shutil.rmtree(MLFLOW_DIR, ignore_errors=True)
@@ -628,11 +689,35 @@ print(f"Cleaned up tracking store: {MLFLOW_DIR}")
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. The run log requirements from §6.7 — provenance, configuration, artifacts, metrics, and decision gates — are what make experiment tracking useful. The case-study registry implements them with SQLite + content-addressed bundles; MLflow implements them with a standard API and query interface.
-# 2. Both systems produce identical rankings on the same catalog because the governance value comes from the underlying discipline (deterministic hashing, reproducibility manifests, promotion gates), not the specific tool.
-# 3. Start with a simple registry while a team is small; migrate to MLflow, Weights & Biases, or Neptune when multi-user collaboration, a web UI, or CI/CD integration becomes load-bearing.
+# 1. An experiment tracker has to answer three questions - what was run, what came out, and
+#    can it be reproduced - and the third is the one a table of metrics cannot answer alone.
+#    A row that resolves to the specification and the artifacts is the difference between a
+#    record and a claim.
+# 2. Identify a run by a hash of its specification. That makes the log idempotent, so
+#    re-running a pipeline cannot produce two rows describing the same experiment, and it
+#    makes a configuration change visible as a new identifier rather than as an edit.
+# 3. Record the experiment budget, not only the results. A family tried a hundred ways and a
+#    family tried twice are not comparable on their best score, because the more
+#    configurations a search covers the higher its best score climbs on noise alone.
+# 4. Keep ranking separate from selection. Ordering the catalog by information coefficient
+#    says which model ranked the cross-section best; it is not what decides deployment, and a
+#    tracker that presents one ordering invites it to become the other.
+# 5. The tool supplies the interface and the infrastructure; the discipline supplies the
+#    trust. Deterministic identifiers, a manifest that resolves and a recorded specification
+#    are properties of the pipeline that writes the runs, and MLflow reproduces this catalog
+#    exactly because they were already there.
 #
-# **Next**: This is the final notebook of Chapter 26. The chapter prose closes
-# with the three-layer governance model — detection, response, automated
-# safety — which together with the supporting MLOps stack keep deployed
-# strategies auditable.
+# **Known limitations**
+#
+# - The parity check covers the runs that were logged, on one case study, with one metric. It
+#   establishes that the query returns the catalog it was given, not that either system is
+#   correctly configured for a catalog with a different shape.
+# - The tracking store here is local, single-user and deleted at the end. Multi-user
+#   collaboration, access control and a persistent web interface are most of what MLflow is
+#   chosen for, and none of them is exercised.
+# - The catalog reads two labels from one case study. A registry-wide view would also have to
+#   reconcile runs across case studies, which have their own registries.
+#
+# **Next**: This is the final notebook of Chapter 26. The chapter prose closes with the
+# three-layer governance model - detection, response, automated safety - which together with
+# the MLOps components in these notebooks keep a deployed strategy auditable.
