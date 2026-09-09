@@ -1882,19 +1882,55 @@ case_studies/etfs/11c_conditional_autoencoder:
       max_symbols: 6
   timeout: 900
 case_studies/etfs/11d_stochastic_discount_factor:
-  # Still skipped, but not for the reason it used to claim. The old skip_reason said
-  # "TEMPORARY: DL training (SDF) 300s timeout under trimmed test-data"; the timeout is not
-  # what fails it. It is the only latent member that loads the initial-release macro panel
+  # Un-skipped. It is the only latent member that loads the initial-release macro panel
   # config/setup.yaml declares (modeling.latent_factors.macro_context.source:
-  # alfred_initial_release), and that fixture does not exist in the test-data repo:
-  # data/macro/ ships fred_macro{,_raw,_dictionary,_raw_dictionary,_metadata}.parquet and no
-  # fred_macro_initial_release.parquet. Not gitignored - never built. So this cannot be
-  # un-skipped by any parameter choice until that fixture is built; filed as ml4t/agent-workspace#1035.
+  # alfred_initial_release), and that fixture did not exist - data/macro/ shipped
+  # fred_macro{,_raw,_dictionary,_raw_dictionary,_metadata}.parquet and no
+  # fred_macro_initial_release.parquet, never built rather than gitignored. Built by
+  # `data/macro/download_alfred.py` and committed to the test-data repo
+  # (ml4t/agent-workspace#1035). The panel starts 2010-11-22, which is where ALFRED's
+  # VIXCLS vintages start; the etfs fixture reaches back to 2007, so the macro context
+  # covers the later part of that window and not the whole of it.
   #
-  # 11c and 11e above ARE un-skipped: they do not read the macro panel, and their own
-  # blocker (#926) is worked around by pinning them to the primary label.
-  skip: true
-  skip_reason: 'no fred_macro_initial_release.parquet in the test-data repo; SDF is the one latent member that reads the declared initial-release macro panel (ml4t/agent-workspace#1035)'
+  # Reading fred_macro.parquet instead would be a look-ahead: that file is the finalized
+  # revised series, and this member is declared against the point-in-time vintage.
+  #
+  # LABELS, POPULATION_NAME and DEVICE for the same reasons as 11c and 11e above:
+  # ml4t/agent-workspace#926 leaves features/model_based.parquet carrying one fold
+  # geometry, a narrowed run cannot publish the canonical population, and the family is
+  # declared on cuda where the library refuses to substitute a device. The three epoch
+  # budgets are stated because preset_patches.py patches `n_epochs`, which this model does
+  # not read - its budgets are n_epochs_unc, n_epochs_moment and n_epochs_cond, so an
+  # unreduced run trains 256 + 64 + 1024 epochs.
+  #
+  # A fold reduction is what the seoa entry does not need and this one does. The two
+  # fixtures are not the same length: seoa spans 2017-2021 and etfs spans 2007-2025, so at
+  # the same width and the same epoch budgets this notebook walks about four times as many
+  # sessions, and it timed out at 1800s with all eight folds where seoa measures 537s. Two
+  # folds brings the walk back to seoa's size without touching the width, which the SDF
+  # conditioning network needs.
+  #
+  # Stated as `folds` inside PREVIEW_REDUCTIONS rather than as MAX_FOLDS. The translation
+  # from MAX_FOLDS runs on the preview path only, so the name reaches the canonical path
+  # untranslated, where papermill drops it and logs "Passed unknown parameter" - which is
+  # what `unusable_parameters` reports and what a silently unreduced run looks like.
+  parameters:
+    DEVICE: cpu
+    LABELS: ['fwd_ret_21d']
+    POPULATION_NAME: etfs-sdf-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 6
+      n_epochs_unc: 2
+      n_epochs_moment: 2
+      n_epochs_cond: 4
+  # Measured on this workstation at load 33-55 of 24 cores, which is where every number
+  # available for this notebook was taken: 1,167s with the two folds above, against a run
+  # that hit the 1800s cap with all eight. That is the loaded figure, not the idle one -
+  # the us_equities_panel/06_linear entry records the same shape, a notebook that fit in
+  # 120s idle, did not fit in 120s loaded, and passed at 300 - so the cap is the one-third
+  # line against the loaded measurement rather than against a quiet-machine guess.
+  timeout: 3600
 case_studies/etfs/11e_supervised_autoencoder:
   # Same restriction and the same reason as 11c above.
   parameters:

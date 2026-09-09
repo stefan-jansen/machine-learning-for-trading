@@ -69,10 +69,16 @@ Some Chapter 4 notebooks hit external APIs and need credentials or
 identification headers:
 
 - `EDGAR_IDENTITY` — SEC EDGAR mandates a `User-Agent` of the form
-  `"<Name> <email>"` (e.g. `"ML4T Research stefan@applied-ai.com"`).
-  Required by `02_sec_filing_explorer`, `03_sec_form4_insider_transactions`,
-  `04_sec_xbrl_fundamentals`, `10_institutional_holdings_13f`, and
-  `14_text_data_extraction`.
+  `"<Name> <email>"` and blocks placeholder addresses. It is free, needs no
+  account and no sign-up: put your own name and email on the `EDGAR_IDENTITY=`
+  line of the `.env` file in the repository root, before you start Jupyter.
+
+  Two notebooks in this chapter call EDGAR live and refuse to run without it:
+  `02_sec_filing_explorer` and `14_text_data_extraction`. The `form4_download.py`
+  script behind `03_sec_form4_insider_transactions` needs it too, at download
+  time. Everything else here — including `03` once its filings are on disk, plus
+  `04_sec_xbrl_fundamentals` and `10_institutional_holdings_13f` — reads
+  committed snapshots through the `data` loaders and never contacts the SEC.
 - `FRED_API_KEY` — only needed for live FRED downloads; the in-repo
   parquet snapshots used by `06_fred_macro_eda` and
   `07_macro_data_alignment` do not require it at notebook-execution time.

@@ -6,6 +6,13 @@ This guide explains how to execute notebooks, work with case studies, and experi
 
 ## Two Ways to Run
 
+Every command in this guide is typed at a terminal prompt **from the repository
+root** — the folder `git clone` created — on macOS or Linux in Terminal, on
+Windows in the WSL2 Ubuntu terminal, never in PowerShell. The one exception is
+marked: opening a Jupyter address is something you do in a web browser.
+[Before You Begin](installation.md#before-you-begin) covers opening a terminal
+on each platform.
+
 ### Option A: Docker (Recommended)
 
 Docker provides a consistent environment across all platforms with pre-built images on Docker Hub. After [installation](installation.md):
@@ -14,16 +21,20 @@ Docker provides a consistent environment across all platforms with pre-built ima
 # Pull the image (one time, ~12 GB on x86, ~3 GB on ARM64)
 docker compose pull ml4t
 
-# Start Jupyter Lab
+# Start Jupyter Lab. It keeps running and prints its log here; leave it running.
 docker compose up ml4t
-# Open http://localhost:8888
 
-# Run a notebook directly
+# Run a notebook directly, without Jupyter
 docker compose run --rm ml4t python 11_ml_pipeline/01_ols_inference.py
 
 # Run with GPU (deep learning chapters)
 docker compose --profile gpu run --rm ml4t-gpu python 13_dl_time_series/01_core_architectures.py
 ```
+
+With `docker compose up ml4t` running, open **http://localhost:8888** in your web
+browser — that is a browser address, not something to type at the terminal. On
+Windows, open it in your normal Windows browser even though the command ran
+inside Ubuntu; WSL2 forwards `localhost` for you.
 
 Docker covers **all** notebooks across all 27 chapters and 9 case studies, though a small
 subset requires a non-default profile such as `py312`, `benchmark`, or `rapids`.
@@ -46,16 +57,21 @@ subset requires a non-default profile such as `py312`, `benchmark`, or `rapids`.
 ```bash
 # Install uv (if not already installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
+# The installer puts uv in ~/.local/bin, which this shell does not know about
+# yet. Load it now, or `uv sync` below fails with "uv: command not found":
+source $HOME/.local/bin/env        # sh, bash, zsh;  env.fish for fish
 
 # Clone the repository
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git
 cd machine-learning-for-trading
 
-# Set up environment
+# Copy the environment template. The defaults work as they are — nothing in it
+# needs editing to start. Come back to it when a chapter asks for an API key.
 cp .env.example .env
-# Edit .env to add API keys (see data/README.md)
 
-# Install all dependencies
+# Install all dependencies. Twelve of them compile from source, so a C/C++
+# compiler and the Python headers must already be installed — see
+# docs/installation.md, "What you need before either path".
 uv sync
 
 # Run a notebook
@@ -113,6 +129,12 @@ Ubuntu terminal and open the address in your normal Windows browser.
 You do **not** need a separate terminal window for the Docker workflow — the
 Jupyter Lab terminal tile is where the commands below run.
 
+**Most notebooks need downloaded data, and opening one does not download it.** A
+notebook whose dataset is missing stops with a `DataNotFoundError` naming the
+download command for that dataset. Get the free datasets out of the way first —
+the bulk command is in [Data Requirements](#data-requirements) below, and it is
+the same command whether you run it in the Jupyter Lab terminal or in your own.
+
 ---
 
 ## Notebook Format
@@ -139,6 +161,21 @@ docker compose run --rm ml4t python 11_ml_pipeline/01_ols_inference.py
 to the working directory, so running from a chapter folder reports the datasets as missing even when
 they are downloaded. Setting `ML4T_DATA_PATH` to an absolute path removes the constraint, which is
 why the Jupyter Lab command above sets it.
+
+**A `.py` run on a desktop opens figure windows and waits for you to close them.**
+Matplotlib picks an interactive backend whenever a display is available, and
+`plt.show()` then blocks until the window is closed — so the command appears to
+hang, with no message, part-way through. Close each window to continue, or run it
+the way [Headless Execution](#headless-execution) below does and get no windows
+at all:
+
+```bash
+MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python 01_process_is_edge/factor_regimes.py
+```
+
+This does not affect Jupyter Lab, where figures render in the notebook, or the
+Docker path, which has no display and picks the non-interactive backend by
+itself.
 
 ---
 
@@ -519,7 +556,32 @@ python data/etfs/market/download.py
 python data/download_all.py --free-only
 ```
 
-Some datasets require API keys (set in `.env`):
+### Two `.env` lines you will meet before any API key
+
+Neither is a key and neither costs anything, but both stop a notebook dead when
+they are empty, and neither is mentioned anywhere in the install path.
+
+- **`EDGAR_IDENTITY`** — your own name and email, e.g.
+  `EDGAR_IDENTITY=Jane Doe jane@example.org`. The SEC mandates a real
+  `User-Agent` on every EDGAR request and blocks placeholder addresses, so there
+  is nothing to register for. Three notebooks call EDGAR live and refuse to run
+  without it — Ch04 `02_sec_filing_explorer` and `14_text_data_extraction`, and
+  Ch22 `01_sec_filing_pipeline` — as do the `form4_download.py` and
+  `filings_download.py` scripts. Every other SEC-derived notebook reads a
+  committed snapshot and needs nothing.
+- **`ML4T_DATA_PATH`** — leave it commented out. The default is this
+  repository's own `data/` folder and it is correct for every chapter. Set it
+  only if you keep the datasets on a separate drive.
+
+A `.env` edit reaches a notebook at the next kernel restart on the local path
+(**Kernel → Restart Kernel**, because `.env` is read once when the kernel
+starts). On the Docker path Compose reads `.env` when it creates the container,
+so stop Jupyter Lab (`Ctrl-C` in the terminal running it) and run
+`docker compose up ml4t` again. **`docker compose restart` is not enough** —
+verified: it restarts the existing container with the environment it was created
+with, and the old value is still there.
+
+Some datasets do require an API key (also set in `.env`):
 - **OANDA** (FX pairs): Free API key from [oanda.com](https://www.oanda.com/)
 - **NASDAQ Data Link** (US equities): Free API key from [data.nasdaq.com](https://data.nasdaq.com/)
 - **Databento** (CME futures): $125 free signup credit from [databento.com](https://databento.com/)
@@ -560,16 +622,20 @@ Every notebook has a **parameters cell** (`# %% tags=["parameters"]`) with produ
 
 ```bash
 # Run with reduced parameters (output goes to /dev/null)
-uv run papermill notebook.ipynb /dev/null \
+uv run papermill 11_ml_pipeline/01_ols_inference.ipynb /dev/null \
     --cwd . -k python3 \
     -p MAX_SYMBOLS 15 \
     -p N_EPOCHS 2
 
 # Or save the executed notebook
-uv run papermill notebook.ipynb output.ipynb \
+uv run papermill 11_ml_pipeline/01_ols_inference.ipynb /tmp/executed.ipynb \
     --cwd . -k python3 \
     -p MAX_SYMBOLS 15
 ```
+
+`--cwd .` sets the directory the notebook executes in. Keep it, and run the
+command from the repository root: the data loaders resolve `data/` against the
+working directory, so anywhere else reports the datasets as missing.
 
 ### Running via pytest (Recommended)
 
@@ -626,10 +692,11 @@ When the environment variable `ML4T_OUTPUT_DIR` is set (which `pytest` does auto
 
 ## Headless Execution
 
-For running notebooks without a display (e.g., on a server or in CI):
+For running notebooks without a display (e.g., on a server or in CI), set both
+renderer variables and run the `.py` from the repository root:
 
 ```bash
-MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python notebook.py
+MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python 11_ml_pipeline/01_ols_inference.py
 ```
 
 ---
@@ -647,6 +714,22 @@ cd 11_ml_pipeline && python 01_ols_inference.py
 # Right
 uv run python 11_ml_pipeline/01_ols_inference.py
 ```
+
+### "EDGAR_IDENTITY environment variable is not set"
+
+Put your own name and email on the `EDGAR_IDENTITY=` line of `.env` in the
+repository root. It is not an API key and there is nothing to sign up for — the
+SEC just requires a real `User-Agent` and blocks placeholder addresses. See
+[Two `.env` lines you will meet before any API key](#two-env-lines-you-will-meet-before-any-api-key)
+for which notebooks need it and when the change takes effect.
+
+### "DataNotFoundError" naming a dataset
+
+The dataset has not been downloaded. The exception carries the exact download
+command; run it from the repository root, in the Jupyter Lab terminal on the
+Docker path (**File → New → Terminal**, no `uv run` prefix) or in your own shell
+on the local path. [Data Requirements](#data-requirements) above has the bulk
+command for the free datasets.
 
 ### Missing prerequisite files
 

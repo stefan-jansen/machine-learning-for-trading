@@ -50,10 +50,12 @@
 #
 # ## Prerequisites
 #
-# This notebook reads live filings from EDGAR, which requires an identifying `User-Agent`:
+# This notebook reads live filings from EDGAR, which requires an identifying `User-Agent`. It is
+# not an API key and there is nothing to sign up for: put your own name and email on the
+# `EDGAR_IDENTITY` line of the `.env` file in the repository root, before you start Jupyter.
 #
-# ```bash
-# export EDGAR_IDENTITY="Jane Doe jane@example.org"
+# ```
+# EDGAR_IDENTITY=Jane Doe jane@example.org
 # ```
 #
 # ## Cross-References
@@ -168,10 +170,16 @@ FLAGS = re.IGNORECASE | re.MULTILINE | re.DOTALL
 identity = os.environ.get("EDGAR_IDENTITY")
 if not identity:
     raise RuntimeError(
-        "EDGAR_IDENTITY environment variable is not set. The SEC requires a "
-        "real User-Agent (name + email) for every EDGAR request and blocks "
-        "placeholder addresses. Set it before running this notebook, e.g. "
-        '`export EDGAR_IDENTITY="Jane Doe jane@example.org"`.'
+        "EDGAR_IDENTITY is not set. The SEC requires a real User-Agent - your "
+        "name and email - on every EDGAR request, and blocks placeholder "
+        "addresses. It is not an API key and there is nothing to sign up for.\n"
+        "Put your own name and email on the EDGAR_IDENTITY line of the .env "
+        "file in the repository root:\n"
+        "    EDGAR_IDENTITY=Jane Doe jane@example.org\n"
+        ".env is read once, when the process starts, so then restart this "
+        "notebook's kernel (Kernel -> Restart Kernel). On the Docker path, stop "
+        "Jupyter Lab and run `docker compose up ml4t` again - `docker compose "
+        "restart` keeps the environment the container was created with."
     )
 set_identity(identity)
 

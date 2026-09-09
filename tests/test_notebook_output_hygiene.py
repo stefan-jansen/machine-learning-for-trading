@@ -457,3 +457,29 @@ def test_an_untracked_notebook_is_not_committed_content() -> None:
         assert relative not in _empty_tag_offenders()
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_a_runners_transient_notebook_is_not_walked(tmp_path, monkeypatch) -> None:
+    """`nb-run.sh` writes `.<stem>.build.<pid>.ipynb` beside the notebook it runs and deletes it
+    on exit. The sweep must not pick one up: a concurrent run in the same directory deletes it
+    between the walk and the read, which on 2026-09-08 killed the sweep mid-way and left the
+    notebook it was actually running unsanitized while the run still exited 0."""
+    import sanitize_notebook_paths as snp
+
+    chapter = tmp_path / "08_financial_features"
+    chapter.mkdir()
+    real = chapter / "01_price_volume_features.ipynb"
+    real.write_text("{}", encoding="utf-8")
+    for transient in (
+        ".01_price_volume_features.build.1234.ipynb",
+        ".02_microstructure_features.papermill.5678.ipynb",
+    ):
+        (chapter / transient).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(snp, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(snp, "_ignored_notebooks", lambda: set())
+
+    walked = snp._iter_notebooks()
+
+    assert real in walked
+    assert not [p for p in walked if p.name.startswith(".")]

@@ -12,26 +12,26 @@ The chapter establishes the chapter's central claim: in trading, durable perform
 
 ## Sections
 
-### 1.1 Why Process Discipline Matters
+### 1.1 Why process discipline matters
 
 This section establishes the chapter's central claim: in trading, durable performance depends less on picking a sophisticated model than on maintaining a disciplined research process that can survive changing markets, noisy signals, and real-world frictions. It gives readers a usable vocabulary for market change, shows why recent shocks exposed fragile assumptions, and reframes ML for trading as an adaptation problem rather than a model-selection contest.
 
-### 1.2 Introducing the ML4T Workflow
+### 1.2 Introducing the ML4T workflow
 
 This section presents the book's core framework: a research-to-production workflow built on point-in-time-correct data infrastructure, explicit scoping rules, iterative feature and model development, realistic strategy design, deployment discipline, and ongoing monitoring. The key value for readers is that it turns trading research into a managed lifecycle with auditable artifacts, clear handoffs, and an explicit boundary between exploration and confirmation.
 
-### 1.3 Causal Inference and Generative AI in the Workflow
+### 1.3 Causal inference and generative AI in the workflow
 
 This section places two modern method families inside the workflow rather than treating them as standalone trends. Causal inference is framed as a way to sharpen mechanisms, assumptions, and diagnosis; generative AI is framed as a way to expand research and unstructured-data processing while also creating new risks such as leakage, hallucination, and workflow bloat. Readers should care because the section makes clear that new tools increase the value of discipline rather than replacing it.
 
-### 1.4 Market Regimes: Change Is the Constant
+### 1.4 Keeping up with changing market regimes
 
 This section turns non-stationarity into something operational. It shows how regime concepts can support explanation, robustness checks, and live monitoring, while insisting that regimes are primarily a risk lens rather than a reliable timing signal. The factor and macro examples make the idea concrete: regime methods are useful when they help identify adverse environments and connect them to predefined risk actions.
 
 - [`factor_regimes`](factor_regimes.ipynb) — Demonstrates unsupervised learning for market regime detection using Gaussian Mixture Models (GMM) on factor returns from the AQR Century of Factor Premia dataset.
 - [`macro_regimes`](macro_regimes.ipynb) — Demonstrates unsupervised learning for market regime detection using macroeconomic indicators from FRED, validated against S&P 500 volatility and drawdowns.
 
-### 1.5 In the Real World: Independent vs. Institutional
+### 1.5 Independent versus institutional workflows in the real world
 
 This section translates the workflow into real operating contexts. It explains how institutions benefit from built-in friction and review, while independent researchers must create their own governance through documentation, checkpoints, and explicit stop criteria. The practical payoff is strong: it helps readers see where solo practitioners are vulnerable, where they can still compete, and how reusable infrastructure compounds research quality over time.
 

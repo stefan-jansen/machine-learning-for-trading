@@ -248,6 +248,42 @@ class MockSearchClient:
 
 
 # ---------------------------------------------------------------------------
+# Source policy
+# ---------------------------------------------------------------------------
+
+
+def _host_matches(host: str, domain: str) -> bool:
+    """True when `host` is `domain` or a subdomain of it."""
+    domain = domain.lower().lstrip(".")
+    return host == domain or host.endswith(f".{domain}")
+
+
+def apply_domain_policy(
+    items: list[SearchResult],
+    *,
+    allowed: set[str] | None = None,
+    blocked: set[str] | None = None,
+) -> list[SearchResult]:
+    """Drop results whose host is outside `allowed`, or inside `blocked`.
+
+    Matching is on the registered domain and its subdomains, with a leading
+    ``www.`` removed, so ``reuters.com`` covers ``www.reuters.com`` and
+    ``uk.reuters.com``. An empty or absent set is no constraint: the blocklist
+    is applied first, then the allowlist.
+    """
+    keep: list[SearchResult] = []
+    for result in items:
+        host = (urlparse(result.url).hostname or "").lower().removeprefix("www.")
+        if blocked and any(_host_matches(host, domain) for domain in blocked):
+            continue
+        if allowed and not any(_host_matches(host, domain) for domain in allowed):
+            continue
+        keep.append(result)
+    return keep
+
+
+# ---------------------------------------------------------------------------
+# Tool execution logging
 # Tool execution logging
 # ---------------------------------------------------------------------------
 
@@ -265,23 +301,33 @@ class ToolExecution:
 
 
 class ToolExecutor:
-    """Wraps a SearchClient with execution logging and domain policy.
+    """Wraps a SearchClient with source policy and an execution log.
 
-    Provides an audit trail of every search call, independent of the
-    agent's own trace -- captures what *actually* executed.
+    The log records every call the agent made, independent of the agent's own
+    reasoning trace, so a run can be audited by what executed rather than by
+    what the model said it was doing.
+
+    ``allowed_domains`` and ``blocked_domains`` are applied to results after
+    retrieval: a host outside the allowlist, or inside the blocklist, is dropped
+    before the agent ever sees it, and the log entry records how many results
+    the policy removed.
     """
 
     def __init__(
-        self, search: SearchClient | None = None, allowed_domains: set[str] | None = None
+        self,
+        search: SearchClient | None = None,
+        allowed_domains: set[str] | None = None,
+        blocked_domains: set[str] | None = None,
     ) -> None:
         self.search = search
         self.allowed_domains = allowed_domains or set()
+        self.blocked_domains = blocked_domains or set()
         self.execution_log: list[ToolExecution] = []
 
     def execute_search(
         self, query: str, max_results: int = 5, cutoff_date: date | None = None
     ) -> list[SearchResult]:
-        """Execute a search call with logging."""
+        """Execute a search call, apply the source policy, and log the outcome."""
         if self.search is None:
             self.execution_log.append(
                 ToolExecution(
@@ -292,15 +338,22 @@ class ToolExecutor:
 
         start = time.perf_counter()
         try:
-            results = self.search.search(query, max_results, cutoff_date)
+            retrieved = self.search.search(query, max_results, cutoff_date)
+            results = apply_domain_policy(
+                retrieved, allowed=self.allowed_domains, blocked=self.blocked_domains
+            )
+            n_blocked = len(retrieved) - len(results)
             duration = (time.perf_counter() - start) * 1000
+            preview = f"{len(results)} results"
+            if n_blocked:
+                preview += f" ({n_blocked} blocked by source policy)"
             self.execution_log.append(
                 ToolExecution(
                     tool_name="search",
                     args={"query": query, "max_results": max_results},
                     status="success",
                     duration_ms=duration,
-                    result_preview=f"{len(results)} results",
+                    result_preview=preview,
                     provenance={"source": type(self.search).__name__},
                 )
             )

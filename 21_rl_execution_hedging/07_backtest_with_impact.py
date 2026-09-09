@@ -16,33 +16,54 @@
 # %% [markdown]
 # # Market Impact and Liquidity in Backtests
 #
-# **Execution environment**: local `uv run` on CPU.
+# **Chapter 21: Reinforcement Learning for Execution and Hedging**
 #
-# Market impact is not a fixed cost; it depends on how large an order is
-# relative to the liquidity available to absorb it. This notebook makes that
-# concrete on **real US equity data**: it runs the *same* momentum strategy
-# with the *same* dollar order across a spectrum of stocks from a mega-cap to a
-# micro-cap, so that one order goes from a small fraction of a day's volume to
-# more than a whole day's volume. The square-root impact model can have modest
-# effects on a liquid name and outsized effects on a thin one. This explains
-# why small-cap strategies that look good on paper may not scale, and motivates
-# the liquidity-aware execution policies of Section 21.4.
+# ## Purpose
 #
-# **Learning Objectives**:
-# - Express market impact as a function of order size relative to daily volume
-# - Compare how the same order erodes returns on liquid and thin stocks
-# - Quantify how often a profitable strategy flips to a loss once realistic
-#   impact is applied, by liquidity
-# - Understand why impact motivates adaptive execution (Section 21.4)
+# A backtest that charges a fixed number of basis points per trade is charging
+# for the spread and calling it the cost of trading. The larger part of the cost
+# of a real order is what the order itself does to the price, and that depends
+# not on the order's size in dollars but on its size relative to the volume
+# available to absorb it. The same order is a rounding error in one name and a
+# day's trading in another.
 #
-# **Book Reference**: Chapter 21, Sections 21.4 (Optimal Execution) and 21.8 (Sim-to-Real Gap)
+# This notebook makes the difference measurable rather than arguable. One
+# momentum strategy, one dollar book, run on real daily bars for five stocks
+# chosen across the liquidity range, under four strengths of a square-root
+# impact model. Then the same experiment across two cohorts of the whole
+# universe, to see how often the impact charge is the difference between a
+# profitable backtest and an unprofitable one.
 #
-# **Prerequisites**: `optimal_execution_ppo`.
+# ## Learning objectives
+#
+# After working through this notebook you will be able to:
+#
+# - Compute a name's participation rate - the size of an order against the
+#   volume that trades in a day - and explain why it, rather than the order's
+#   dollar value, determines what the order costs.
+# - Apply the square-root impact law in a backtest, and say which of its inputs
+#   have to be estimated before the evaluation period to keep the result honest.
+# - Select names for an experiment on evidence from a formation window only, and
+#   report what happened to the ones that later turned out to be unusable
+#   without letting that report change the selection.
+# - Measure how much of a strategy's paper return is left after a realistic
+#   impact charge, separately for a liquid cohort and a thin one.
+#
+# ## Book reference
+#
+# Sections 21.4, *Application I - Optimal trade execution*, and 21.8, *The
+# simulation-to-reality gap*.
+#
+# ## Prerequisites
+#
+# - `02_optimal_execution_ppo`, for implementation shortfall and the impact
+#   models an execution schedule is trying to manage.
+# - Daily US equity bars, read through `data.load_us_equities`.
+# - `ml4t.backtest`, for the engine, the broker and the impact models.
 
 # %%
 """Market Impact and Liquidity in Backtests - how the same order erodes returns differently across the liquidity spectrum."""
 
-import json
 import warnings
 from datetime import datetime
 from typing import Any
@@ -56,39 +77,67 @@ from ml4t.backtest.broker import Broker
 from ml4t.backtest.execution.impact import NoImpact, SquareRootImpact
 from plotly.subplots import make_subplots
 
+import utils  # noqa: F401  - sets the Plotly renderer so figures carry a static PNG
 from data import load_us_equities
-from utils.paths import REPO_ROOT, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-# %%
-OUTPUT_DIR = get_output_dir(21, "backtest_with_impact")
+# polars emits a repeating FutureWarning from its own deprecations here and it
+# says nothing about this run. Convergence, overflow and invalid-value warnings
+# stay visible: they report conditions the results depend on.
+warnings.filterwarnings("ignore", category=FutureWarning, module="polars")
 
 # %% tags=["parameters"]
 START_DATE = "2010-01-01"
 END_DATE = "2016-12-31"
-FORMATION_END_DATE = "2012-12-31"
-EVALUATION_START_DATE = "2013-01-01"
-LOOKBACK = 21
-BOOK_USD = 5_000_000
-IMPACT_COEFFICIENTS = [0.0, 0.1, 0.3, 0.6]
-GROSS_MIN = 0.3
-COHORT_SAMPLE = 60
+FORMATION_END_DATE = "2012-12-31"  # last day any selection or calibration may read
+EVALUATION_START_DATE = "2013-01-01"  # first day of every reported backtest
+LOOKBACK = 21  # sessions in the momentum signal, about one trading month
+BOOK_USD = 5_000_000  # dollar size of the order, held fixed across every name
+IMPACT_COEFFICIENTS = [0.0, 0.1, 0.3, 0.6]  # strengths of the square-root impact model
+GROSS_MIN = 0.3  # formation gross return a name must clear to enter the pool
+COHORT_SAMPLE = 60  # names drawn from each liquidity cohort
+MIN_FORMATION_OBS = 700  # sessions a name must have in the formation window
+LIQUID_MAX_PARTICIPATION = 0.10  # order below this share of daily volume is the liquid cohort
+THIN_MIN_PARTICIPATION = 1.0  # order above this share of daily volume is the thin cohort
 SEED = 42
-EXPORT_RESULTS = False
-
-# %%
-# Coerce papermill-injected strings ("true"/"false") to bool; no-op for native bools.
-EXPORT_RESULTS = str(EXPORT_RESULTS).strip().lower() in ("true", "1", "yes")
-
-# %% [markdown]
-# ## Configuration
 
 # %%
 set_global_seeds(SEED)
 rng = np.random.default_rng(SEED)
+
+# %% [markdown]
+# ### What the settings decide
+#
+# `BOOK_USD` is held fixed on purpose. Sizing each order to the name it trades
+# would remove the effect being measured: the whole point is that one order,
+# unchanged, is a different proposition depending on where it is sent.
+#
+# The two dates do the other half of the work. Everything that decides which
+# names enter the experiment, and everything the impact model needs calibrating,
+# is read from bars up to `FORMATION_END_DATE`. Every number reported comes from
+# bars on or after `EVALUATION_START_DATE`. Without that separation a name would
+# be chosen partly because of the returns it is about to be scored on.
+
+# %%
+display(
+    Markdown(f"""
+- **Order**: {BOOK_USD:,.0f} USD, the same in every name.
+- **Strategy**: long while {LOOKBACK}-session momentum is positive, flat otherwise.
+- **Formation window**: {START_DATE} to {FORMATION_END_DATE}, used for selection and for
+  each name's liquidity and volatility. A name needs {MIN_FORMATION_OBS} sessions in it.
+- **Evaluation window**: {EVALUATION_START_DATE} to {END_DATE}. Every reported return comes
+  from here.
+- **Impact strengths**: coefficients {", ".join(f"{c:g}" for c in IMPACT_COEFFICIENTS)}, where
+  zero switches the impact model off and each larger value is a stronger square-root
+  charge. Commission and slippage are charged at every level, including zero, so the
+  zero-impact run is a backtest with ordinary trading costs and no impact rather than a
+  costless one.
+- **Cohorts**: {COHORT_SAMPLE} names drawn from those whose order is under
+  {LIQUID_MAX_PARTICIPATION:.0%} of daily volume, and {COHORT_SAMPLE} from those whose order
+  is over {THIN_MIN_PARTICIPATION:.0%} of it.
+""")
+)
 
 # %% [markdown]
 # ## Load Real US Equity Data
@@ -149,7 +198,7 @@ def formation_statistics(prices: pl.DataFrame) -> pl.DataFrame:
             pl.col("daily_return").std().alias("ex_ante_volatility"),
             pl.len().alias("formation_obs"),
         )
-        .filter(pl.col("formation_obs") >= 700)
+        .filter(pl.col("formation_obs") >= MIN_FORMATION_OBS)
     )
 
 
@@ -195,7 +244,9 @@ def gross_momentum_return(prices: pl.DataFrame, lookback: int) -> pl.DataFrame:
 
 
 # %%
-formation_gross = gross_momentum_return(formation_prices, LOOKBACK).filter(pl.col("n_obs") >= 700)
+formation_gross = gross_momentum_return(formation_prices, LOOKBACK).filter(
+    pl.col("n_obs") >= MIN_FORMATION_OBS
+)
 evaluation_coverage = evaluation_prices.group_by("symbol").agg(pl.len().alias("evaluation_obs"))
 pool = (
     formation_gross.filter(pl.col("gross_return") > GROSS_MIN)
@@ -219,8 +270,8 @@ print(
 #
 # From the gross-profitable pool we pick one representative name at each of five
 # liquidity tiers, defined by percentiles of ex-ante dollar volume. Within each
-# tier we take the **median** gross-return name, not the best, so the spectrum
-# is representative rather than cherry-picked.
+# tier we take the **median** gross-return name, so each tier is represented by
+# a typical member of it rather than by its most flattering one.
 
 
 # %%
@@ -430,13 +481,15 @@ summary = spectrum_summary(spectrum_results)
 summary
 
 # %% [markdown]
-# ## How Often Does Impact Flip a Winner Into a Loser?
+# ## How often is impact the difference between a profit and a loss?
 #
-# A single spectrum is illustrative; the effect should hold across the whole
-# universe. We sample gross-profitable names from a liquid group (orders under
-# 10% of daily volume) and a thin group (orders over 100% of daily volume), run
-# each with no impact and with high impact, and count how many profitable names
-# turn into losers once impact is applied.
+# Five names are an illustration. The claim they are meant to support is about
+# the whole universe, so the same experiment runs over two cohorts drawn from
+# the formation pool: one where the order is a small share of a day's volume,
+# one where it is more than a day's volume. Each name is run twice, once with no
+# impact and once at the strongest coefficient, and the question asked of each
+# pair is whether a profit without the impact charge is still a profit once the
+# charge is applied. Both runs pay the same commission and slippage.
 
 
 # %%
@@ -448,6 +501,7 @@ def flip_rate(
     idx = sorted(rng.choice(candidates.height, size=take, replace=False).tolist())
     sample = candidates[idx]
     flips, n_valid, n_evaluable = 0, 0, 0
+    returns: list[dict[str, Any]] = []
     high_coef = max(IMPACT_COEFFICIENTS)
     for row in sample.iter_rows(named=True):
         stock_data = prices.filter(pl.col("symbol") == row["symbol"]).sort("timestamp")
@@ -468,6 +522,9 @@ def flip_rate(
             book_usd,
             row["ex_ante_volatility"],
         )
+        returns.append(
+            {"symbol": row["symbol"], "no_impact": no_impact, "high_impact": high_impact}
+        )
         if no_impact > 0:
             n_valid += 1
             flips += int(high_impact < 0)
@@ -478,27 +535,82 @@ def flip_rate(
         "n": n_valid,
         "flips": flips,
         "flip_rate": flips / n_valid if n_valid else float("nan"),
+        "returns": pl.DataFrame(returns),
     }
 
 
 # %%
 pool_part = pool.with_columns((BOOK_USD / pl.col("adv_usd")).alias("order_participation"))
-liquid_group = pool_part.filter(pl.col("order_participation") < 0.10)
-thin_group = pool_part.filter(pl.col("order_participation") > 1.0)
+liquid_group = pool_part.filter(pl.col("order_participation") < LIQUID_MAX_PARTICIPATION)
+thin_group = pool_part.filter(pl.col("order_participation") > THIN_MIN_PARTICIPATION)
 assert not liquid_group.is_empty(), "liquid_group is empty after participation filter"
 assert not thin_group.is_empty(), "thin_group is empty after participation filter"
 
 liquid_flip = flip_rate(evaluation_prices, liquid_group, BOOK_USD, COHORT_SAMPLE)
 thin_flip = flip_rate(evaluation_prices, thin_group, BOOK_USD, COHORT_SAMPLE)
-print(
-    f"Liquid names (order < 10% of ADV): {liquid_flip['flips']}/{liquid_flip['n']} "
-    f"evaluation winners flipped negative ({liquid_flip['flip_rate']:.0%}); "
-    f"later-data attrition {liquid_flip['attrition']}/{liquid_flip['sampled']}"
+display(
+    Markdown(f"""
+| Cohort | Sampled | Profitable without impact | Turned negative under impact | Share |
+|---|---|---|---|---|
+| Order under {LIQUID_MAX_PARTICIPATION:.0%} of daily volume | {liquid_flip["sampled"]} | {liquid_flip["n"]} | {liquid_flip["flips"]} | {liquid_flip["flip_rate"]:.0%} |
+| Order over {THIN_MIN_PARTICIPATION:.0%} of daily volume | {thin_flip["sampled"]} | {thin_flip["n"]} | {thin_flip["flips"]} | {thin_flip["flip_rate"]:.0%} |
+
+Names dropped for having too little data after {EVALUATION_START_DATE}:
+{liquid_flip["attrition"]} of {liquid_flip["sampled"]} in the liquid cohort and
+{thin_flip["attrition"]} of {thin_flip["sampled"]} in the thin one. That attrition is reported
+after selection and does not feed back into it.
+""")
 )
-print(
-    f"Thin names (order > 100% of ADV): {thin_flip['flips']}/{thin_flip['n']} "
-    f"evaluation winners flipped negative ({thin_flip['flip_rate']:.0%}); "
-    f"later-data attrition {thin_flip['attrition']}/{thin_flip['sampled']}"
+
+# %% [markdown]
+# ### The whole shift, not only the sign changes
+#
+# Counting sign changes throws away most of what the charge did. Each point
+# below is one sampled name: its return with the impact model switched off on
+# the horizontal axis, its return under the strongest charge on the vertical.
+# Both axes already include commission and slippage, so the vertical distance
+# below the diagonal is impact alone. A point on the diagonal was untouched by
+# the charge, and the lower-right quadrant holds the names that go from a profit
+# to a loss.
+
+# %%
+fig = go.Figure()
+for label, result, color in [
+    (f"Order under {LIQUID_MAX_PARTICIPATION:.0%} of daily volume", liquid_flip, COLORS["blue"]),
+    (f"Order over {THIN_MIN_PARTICIPATION:.0%} of daily volume", thin_flip, COLORS["copper"]),
+]:
+    fig.add_trace(
+        go.Scatter(
+            x=(result["returns"]["no_impact"] * 100).to_list(),
+            y=(result["returns"]["high_impact"] * 100).to_list(),
+            mode="markers",
+            name=label,
+            marker=dict(color=color, size=7, opacity=0.75),
+        )
+    )
+axis_span = [-100, 200]
+fig.add_trace(
+    go.Scatter(
+        x=axis_span,
+        y=axis_span,
+        mode="lines",
+        line=dict(color=COLORS["neutral"], width=1, dash="dash"),
+        name="no cost",
+        hoverinfo="skip",
+    )
+)
+fig.add_hline(y=0, line=dict(color=COLORS["neutral"], width=1, dash="dot"))
+fig.add_vline(x=0, line=dict(color=COLORS["neutral"], width=1, dash="dot"))
+fig.update_layout(
+    title="Return with and without the impact charge, one point per sampled name",
+    xaxis_title="Total return without impact (%)",
+    yaxis_title="Total return under the strongest impact charge (%)",
+    height=520,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+)
+show_plotly_with_alt(
+    fig,
+    "A scatter of one point per sampled name, its total return with the impact model switched off on the horizontal axis against its return under the strongest impact charge on the vertical, coloured by liquidity cohort. A dashed diagonal marks a charge of zero, and dotted lines mark zero on each axis.",
 )
 
 # %% [markdown]
@@ -520,10 +632,6 @@ IMPACT_STYLES = {
     0.3: dict(color=COLORS["amber"], dash="dot", symbol="diamond", name="Medium Impact"),
     0.6: dict(color=COLORS["negative"], dash="dashdot", symbol="x", name="High Impact"),
 }
-
-# %% [markdown]
-# Each impact coefficient receives a consistent line, marker, and hover label
-# so the left panel can be read without relying on color alone.
 
 
 # %%
@@ -549,11 +657,6 @@ def add_impact_return_traces(fig: go.Figure, spectrum_results: pl.DataFrame) -> 
         )
 
 
-# %% [markdown]
-# The completed two-panel figure pairs absolute net returns with the high-impact
-# erosion relative to the no-impact counterfactual.
-
-
 # %%
 def add_erosion_trace(fig: go.Figure, summary: pl.DataFrame) -> None:
     """Add the high-impact erosion trace to the right panel."""
@@ -573,9 +676,9 @@ def add_erosion_trace(fig: go.Figure, summary: pl.DataFrame) -> None:
 
 
 # %% [markdown]
-# The final assembly uses logarithmic participation axes so participation rates
-# that differ by orders of magnitude remain legible without implying a linear
-# relationship.
+# Both horizontal axes are logarithmic. The five names are chosen from
+# percentiles of daily volume, so their participation rates differ by orders of
+# magnitude and a linear axis would collapse the liquid end onto the origin.
 
 
 # %%
@@ -602,7 +705,7 @@ def plot_impact_spectrum(spectrum_results: pl.DataFrame, summary: pl.DataFrame) 
         col=1,
     )
     fig.update_layout(
-        title="The same order erodes a thin name far more than a liquid one",
+        title="Net return and impact erosion against order participation",
         height=420,
         width=1000,
     )
@@ -611,94 +714,66 @@ def plot_impact_spectrum(spectrum_results: pl.DataFrame, summary: pl.DataFrame) 
 
 # %%
 fig = plot_impact_spectrum(spectrum_results, summary)
-fig.show()
-
-# %%
-if EXPORT_RESULTS:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    spectrum_results.write_parquet(OUTPUT_DIR / "impact_spectrum.parquet")
-    summary.write_parquet(OUTPUT_DIR / "impact_summary.parquet")
-    flip_df = pl.DataFrame(
-        [
-            {"group": "liquid_lt_10pct_adv", **liquid_flip},
-            {"group": "thin_gt_100pct_adv", **thin_flip},
-        ]
-    )
-    flip_df.write_parquet(OUTPUT_DIR / "impact_flip_rates.parquet")
-    try:
-        rel = OUTPUT_DIR.relative_to(REPO_ROOT)
-    except ValueError:
-        rel = OUTPUT_DIR
-    print(f"Results saved to {rel}")
+show_plotly_with_alt(
+    fig,
+    "Two panels against order participation on a logarithmic axis. Left: net total return for each of the five selected names, one line per impact coefficient, with a dotted line at zero return. Right: the return erosion at the strongest impact coefficient for the same five names.",
+)
 
 # %% [markdown]
-# ## Key Findings
+# ## Key takeaways
 
 # %%
-mega = summary.sort("order_participation").row(0, named=True)
-micro = summary.sort("order_participation").row(-1, named=True)
-high = str(max(IMPACT_COEFFICIENTS))
-print("Same strategy and order, different liquidity exposure:")
-print(
-    f"  {mega['tier']:5s} {mega['symbol']:6s}: order {mega['order_participation'] * 100:.1f}% of ADV - "
-    f"no-impact {mega['0.0'] * 100:+.1f}%, high-impact {mega[high] * 100:+.1f}% "
-    f"(erosion {mega['erosion_high'] * 100:.0f} pp)"
-)
-print(
-    f"  {micro['tier']:5s} {micro['symbol']:6s}: order {micro['order_participation'] * 100:.0f}% of ADV - "
-    f"no-impact {micro['0.0'] * 100:+.1f}%, high-impact {micro[high] * 100:+.1f}% "
-    f"(erosion {micro['erosion_high'] * 100:.0f} pp)"
-)
-print(
-    f"\nUnder high impact, {thin_flip['flip_rate']:.0%} of thin-stock winners flip to losers, "
-    f"versus {liquid_flip['flip_rate']:.0%} of liquid-stock winners."
-)
+most_liquid = summary.sort("order_participation").row(0, named=True)
+thinnest = summary.sort("order_participation").row(-1, named=True)
+high_coefficient = str(max(IMPACT_COEFFICIENTS))
 
-# %%
 display(
-    Markdown(
-        f"""
-## Key Takeaways
+    Markdown(f"""
+**A dollar order has no size until you say what it is trading.** The same
+{BOOK_USD:,.0f} USD order is {most_liquid["order_participation"]:.1%} of a day's volume in
+`{most_liquid["symbol"]}` and {thinnest["order_participation"]:.0%} of it in
+`{thinnest["symbol"]}`. Run through the same strategy over the same period, the strongest
+impact charge takes {most_liquid["erosion_high"] * 100:.1f} percentage points off the first
+name's total return and {thinnest["erosion_high"] * 100:.1f} off the second. The strategy and
+the order are identical; what differs is the volume available to absorb the order, along with
+each name's own volatility and price path, which the impact model also reads.
 
-The same {BOOK_USD:,.0f} USD order is {mega["order_participation"]:.1%} of formation-period ADV for
-the most liquid selected name and {micro["order_participation"]:.0%} for the thinnest. Under the
-high-impact assumption, their evaluation-period return erosion is {mega["erosion_high"]:.1%} and
-{micro["erosion_high"]:.1%}, respectively. Impact is therefore relative to liquidity, not merely to
-the dollar order.
+**The charge decides the sign, not only the magnitude.** Of the {liquid_flip["n"]}
+liquid-cohort names profitable with the impact model switched off, {liquid_flip["flips"]} are
+unprofitable with it on ({liquid_flip["flip_rate"]:.0%}); of the {thin_flip["n"]} thin-cohort
+names, {thin_flip["flips"]} are ({thin_flip["flip_rate"]:.0%}). A backtest that omits impact is
+therefore not uniformly optimistic: how much it overstates depends on where the order is sent.
+The two cohorts differ in more than participation - volatility, turnover and realised path vary
+with them - so this measures the gap between the cohorts as constructed rather than isolating
+liquidity as its cause.
 
-Each formation cohort samples {thin_flip["sampled"]} names. Of these, {thin_flip["n"]} thin names
-and {liquid_flip["n"]} liquid names are no-impact winners during evaluation. High impact flips
-{thin_flip["flips"]} of those {thin_flip["n"]} thin winners ({thin_flip["flip_rate"]:.0%}) and
-{liquid_flip["flips"]} of those {liquid_flip["n"]} liquid winners
-({liquid_flip["flip_rate"]:.0%}) to negative evaluation returns. Later-data attrition is
-{thin_flip["attrition"]}/{thin_flip["sampled"]} in the thin sample and
-{liquid_flip["attrition"]}/{liquid_flip["sampled"]} in the liquid sample. Selection, liquidity,
-volatility, and random sampling are fixed before {EVALUATION_START_DATE}; later availability is
-reported after selection and does not alter those inputs.
+**Calibrate the cost model before the period it is applied to.** Each name's liquidity and
+volatility, and the screen that put it in the pool at all, come from bars ending
+{FORMATION_END_DATE}; every return reported comes from bars starting
+{EVALUATION_START_DATE}. Calibrating the impact model on the evaluation window would make the
+charge depend on the volume that turned out to be there, which is the one thing a trader
+placing the order does not know.
 
-A static schedule ignores how much available volume it consumes. Section 21.4 shows how execution
-policies can condition child-order timing and size on liquidity state.
+**This is what motivates an execution policy rather than a schedule.** The charge here is
+applied to a strategy that trades a whole book in one order because its signal changed. A
+policy that spreads the order over the session, and adjusts as the day's volume arrives, is
+paying a smaller participation rate for the same position - which is the problem
+`02_optimal_execution_ppo` and `04_crypto_execution_rl` take up.
 
-**Next**: See `optimal_execution_ppo` for adaptive execution in a calibrated simulator.
-"""
-    )
+### Known limitations
+
+- The impact model is a square-root law with a coefficient set by hand at four levels, not
+  estimated from executions. The comparison across those levels is a sensitivity analysis, and
+  none of the four is a claim about what this order would actually have cost.
+- The strategy holds one name at a time with the whole book, which is what makes the
+  participation rate large enough to see. A diversified book of the same size would spread the
+  same dollars over many names and face a different problem.
+- Volatility in the impact model is a single formation-window number per name, so the charge
+  does not rise in the periods when the market was actually harder to trade.
+- The cohorts are drawn once at a fixed seed from names that cleared a formation screen. They
+  describe those two groups of {COHORT_SAMPLE} names, not the universe.
+
+**Next**: chapter 22 leaves market microstructure for the text side of the research process,
+and builds a retrieval pipeline over filings.
+""")
 )
-
-# %% [markdown]
-# ## Reproducibility Record
-#
-# The final machine-readable record binds formation selection, later attrition,
-# executed results, and the output-derived figure claim for independent review.
-
-
-# %%
-completion_record = {
-    "formation_pool": pool.height,
-    "selected_symbols": spectrum["symbol"].to_list(),
-    "selected_evaluation_obs": spectrum["evaluation_obs"].to_list(),
-    "summary": summary.to_dicts(),
-    "liquid_flip": liquid_flip,
-    "thin_flip": thin_flip,
-    "figure_title": fig.layout.title.text,
-}
-print("COMPLETION_RECORD=" + json.dumps(completion_record, sort_keys=True, default=str))

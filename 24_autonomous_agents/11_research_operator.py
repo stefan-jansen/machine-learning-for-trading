@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -17,7 +18,7 @@
 #
 # **Docker image**: `ml4t`
 #
-# The forecasting workflows of NB04–NB09 hand the LLM a tightly typed action
+# The forecasting workflows of notebooks 04 to 09 hand the LLM a tightly typed action
 # surface, a `search` query and a `forecast` probability, and stop when the
 # agent returns a calibrated number. That surface is the right one when the
 # experiment space is bounded by the library author. Research-line iteration
@@ -59,7 +60,8 @@
 #   the operator is a thin loop, the skills carry methodology, and the
 #   libraries do the math.
 #
-# **Prerequisites**: NB04 (research agent), NB09 (evaluation framework),
+# **Prerequisites**: [`04_research_agent`](04_research_agent.ipynb) (the agent loop),
+# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) (evaluation),
 # Ch20 §20.9 (case-study next-step suggestions). Familiarity with the
 # `ml4t-diagnostic` API (`cross_sectional_ic_series`, `compute_ic_hac_stats`)
 # is helpful but not required. The agent's trace shows them in context.
@@ -67,32 +69,39 @@
 # This notebook re-displays saved traces by default. `RUN_LIVE = False` is the
 # publication path and makes no API calls or model-supplied shell calls.
 
-# %% Imports
+# %%
 """Replay (or run) one iteration of the ML4T Research Operator on ETFs §20.9."""
 
 from __future__ import annotations
 
 import json
-import warnings
-
-warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
+import re
 
 import matplotlib.pyplot as plt
 import polars as pl
 import research_operator as ro
 from IPython.display import Markdown, display
 
-# The operator lives next to this notebook as `research_operator.py`. When the
-# `ml4t-agent` library settles on a v1.0 shape this same code will move there
-# and the import will become `from ml4t.agent.operator import ResearchOperator`;
-# until then the chapter dir is self-contained. PYTHONPATH already covers
-# `code/24_autonomous_agents/`, so a direct import is sufficient.
 from utils.paths import get_chapter_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
+
+# %% [markdown]
+# ## Settings
+#
+# `RUN_LIVE` left at `False` replays the two captured operator runs and makes no API calls and
+# no model-supplied shell calls. `True` runs the operator live, which needs `OPENROUTER_API_KEY`
+# and executes whatever commands the model decides to issue; the security note below is about
+# that path and only that path.
+#
+# `PRICE_IN_PER_MTOK` and `PRICE_OUT_PER_MTOK` are the DeepSeek v4 Pro rates on OpenRouter as of
+# May 2026, in dollars per million tokens. They convert the recorded token counts into an
+# approximate cost. Model pricing moves faster than anything else in this chapter, so treat the
+# figure as an order of magnitude and change these two values rather than the arithmetic.
 
 # %% tags=["parameters"]
-SEED = 42
 RUN_LIVE = False
+PRICE_IN_PER_MTOK = 0.50
+PRICE_OUT_PER_MTOK = 1.50
 
 # %%
 NOTEBOOK_DIR = get_chapter_dir(24)
@@ -109,7 +118,7 @@ DEFAULT_TRACE = ETFS_TRACE
 # `read_skill`) make the standalone skills repo discoverable at runtime.
 # One (`done`) terminates the loop with a structured summary.
 
-# %% Print the tool surface
+# %%
 for schema in ro.TOOL_SCHEMAS:
     fn = schema["function"]
     desc = " ".join(fn["description"].split())
@@ -136,7 +145,7 @@ for schema in ro.TOOL_SCHEMAS:
 # If the library is missing, `list_skills`/`read_skill` return a clear hint
 # instead of failing. The rest of the notebook still runs.
 
-# %% Discover validation skills
+# %%
 res = ro.tool_list_skills(category="validation")
 if "error" in res:
     print(res["error"])
@@ -148,7 +157,7 @@ else:
             f"  {s['name']:32s} | library: {s['library'] or '(none)':18s} | {s['description'][:60]}"
         )
 
-# %% Read one in detail
+# %%
 out = ro.tool_read_skill("walk-forward-cv")
 if "error" in out:
     print(out["error"])
@@ -159,14 +168,15 @@ else:
 # %% [markdown]
 # ## The task
 #
-# The system prompt frames §20.9's literal suggestion plus the LSTM baseline
-# the chapter cites (validation Sharpe +0.92 [+0.40, +1.49], holdout Sharpe
-# +0.77 [-0.45, +2.17]). The agent is told that only the LSTM has a holdout
-# prediction set in the registry, and asked to choose between (a) limiting
-# comparison to validation or (b) retraining GBM/tabular_dl/CAE to produce
-# holdout predictions.
+# The system prompt hands the agent §20.9's suggestion verbatim, plus the baseline it has to
+# beat: the LSTM's validation and holdout Sharpe with their intervals, printed below as the
+# agent received them. It is also told the one fact that decides the shape of the experiment,
+# which is that only the LSTM has holdout predictions in the registry, and asked to choose
+# between comparing on validation alone and retraining three model families to produce holdout
+# predictions for the rest. Handing it the constraint and the choice rather than the answer is
+# what makes the decision it reaches worth reading.
 
-# %% Show the registered task description
+# %%
 print(ro.CASE_STUDY_TASKS["etfs"])
 
 # %% [markdown]
@@ -186,7 +196,7 @@ print(ro.CASE_STUDY_TASKS["etfs"])
 # filesystem and network. The trace-replay path (`RUN_LIVE = False`)
 # never executes model-supplied commands and is the only fully-safe option.
 
-# %% Choose mode
+# %%
 if not RUN_LIVE:
     trace_path = DEFAULT_TRACE
     print(f"Replaying saved trace: {trace_path.name}")
@@ -204,15 +214,83 @@ else:
     print(f"Trace saved to: {out_path}")
 
 # %% [markdown]
+# The numbers below are read out of the trace rather than transcribed into the notebook. The
+# operator's own comparison script printed a fixed block per model, and parsing that block is
+# what keeps this table and the captured run from drifting apart: a re-captured trace changes
+# the table, and a trace that no longer contains the block fails here instead of silently
+# showing yesterday's figures.
+
+
+# %%
+_METRIC_BLOCK = re.compile(
+    r"^\s*(?P<model>\S.*?):\s*\n"
+    r"\s*IC=(?P<ic>-?[\d.]+), IC_IR=(?P<ic_ir>-?[\d.]+), t\(HAC\)=(?P<t>-?[\d.]+), p=[\d.]+\s*\n"
+    r"\s*IC CI95=\[(?P<ic_lo>-?[\d.]+), (?P<ic_hi>-?[\d.]+)\], pct_pos=[\d.]+\s*\n"
+    r"\s*Sharpe=(?P<sharpe>-?[\d.]+), CI95=\[(?P<sr_lo>-?[\d.]+), (?P<sr_hi>-?[\d.]+)\], "
+    r"PSR p=(?P<psr>[\d.]+)\s*\n"
+    r"\s*MaxDD=(?P<mdd>-?[\d.]+),",
+    re.MULTILINE,
+)
+
+
+def _matched_comparison(trace: dict) -> tuple[str, dict[str, dict[str, float]]]:
+    """Return the header and blocks of the last run that scored both models together.
+
+    The operator scored several model sets during the session under different
+    allocation configurations. Only a set containing both the baseline and the
+    ensemble was scored under one allocation, so only that one is a comparison;
+    taking the last block per model across the whole trace would put Sharpe
+    figures from different allocators in the same table.
+    """
+    matched: tuple[str, dict[str, dict[str, float]]] | None = None
+    for entry in trace["trace"]:
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+        stdout = result.get("stdout_tail") or ""
+        blocks: dict[str, dict[str, float]] = {}
+        for match in _METRIC_BLOCK.finditer(stdout):
+            row = match.groupdict()
+            model = row.pop("model")
+            blocks[model] = {k: float(v) for k, v in row.items()}
+        has_pair = any(k.startswith("LSTM") for k in blocks) and any(
+            k.startswith("ENSEMBLE") for k in blocks
+        )
+        if has_pair:
+            header = next(
+                (line.strip() for line in stdout.splitlines() if line.startswith("===")),
+                "(allocation not recorded in the captured output)",
+            )
+            matched = (header, blocks)
+    if matched is None:
+        raise RuntimeError("the trace holds no run that scored both models under one allocation")
+    return matched
+
+
+# %%
+allocation_header, etf_blocks = _matched_comparison(result)
+baseline_key = next(k for k in etf_blocks if k.startswith("LSTM"))
+ensemble_key = next(k for k in etf_blocks if k.startswith("ENSEMBLE"))
+baseline, ensemble = etf_blocks[baseline_key], etf_blocks[ensemble_key]
+print(f"Comparison scored under: {allocation_header}")
+
+
+# %% [markdown]
 # ## Run summary
 
 
-# %% Headline metadata
-def _human_money(in_toks: int, out_toks: int) -> str:
-    # DeepSeek v4 Pro on OpenRouter (approx, May 2026): $0.50 / Mtok input,
-    # $1.50 / Mtok output. Adjust if you swap models.
-    cost = in_toks * 0.50 / 1e6 + out_toks * 1.50 / 1e6
-    return f"~${cost:.2f}"
+# %%
+def _run_cost(run: dict) -> float:
+    """Approximate what a run cost, at the rates declared in the parameters cell."""
+    cost = (
+        run["total_in_tokens"] * PRICE_IN_PER_MTOK + run["total_out_tokens"] * PRICE_OUT_PER_MTOK
+    ) / 1e6
+    return round(cost, 2)
+
+
+def _human_money(run: dict) -> str:
+    """Format `_run_cost` for a printed summary."""
+    return f"~${_run_cost(run):.2f}"
 
 
 print(f"model:          {result['model']}")
@@ -221,35 +299,44 @@ print(f"turns:          {result['iterations']}")
 print(f"tokens (in):    {result['total_in_tokens']:>12,}")
 print(f"tokens (out):   {result['total_out_tokens']:>12,}")
 print(f"elapsed:        {result['elapsed_s']:.0f}s")
-print(f"approx cost:    {_human_money(result['total_in_tokens'], result['total_out_tokens'])}")
-
+print(f"approx cost:    {_human_money(result)}")
 # %% [markdown]
-# The captured agent incorrectly described its validation-only result as a
-# holdout conclusion. The replay keeps the raw artifact on disk, while this
-# rendered summary limits the result and diagnosis to the evidence captured.
+# The agent's own closing summary describes this validation-window experiment as a holdout
+# conclusion, which it is not. The raw artifact keeps that text unchanged, because an audit
+# record that has been edited is not one. What follows states the same result within the
+# evidence the run actually produced, and the gap between the two is the reason a human still
+# reads the summary before anyone acts on it.
 
-# %% Final summary
+# %%
 display(
     Markdown(
-        "### Captured validation result\n\n"
-        "The z-score ensemble raises mean cross-sectional IC from 0.0521 to "
-        "0.0649 but lowers validation Sharpe from 0.922 to 0.562. Three ensemble "
-        "folds have negative IC, while the LSTM folds are positive in this trace. "
-        "That pattern is a diagnostic association, not an identified causal "
-        "mechanism. The experiment contains no ensemble holdout result."
+        "### What the captured run established\n\n"
+        "The z-score ensemble raises mean cross-sectional IC from "
+        f"{baseline['ic']:.4f} to {ensemble['ic']:.4f} and lowers validation Sharpe from "
+        f"{baseline['sharpe']:.3f} to {ensemble['sharpe']:.3f}. Several ensemble folds carry "
+        "negative IC where the baseline's stay positive. That is an association the run "
+        "observed, not a mechanism it isolated, and the experiment produced no ensemble "
+        "holdout result at all."
     )
 )
 
 # %% [markdown]
-# ## What the agent actually did (tool-call breakdown)
+# ## Where the Turns Went
 #
-# The trace records every tool invocation. Aggregate by tool to see how the
-# agent spent its budget. A typical operator session may spend 30–50%
-# inspection (`query_registry`, `read_file`, `read_parquet`), 15–25% skill
-# discovery, 25–40% iterating on a single experiment script (`write_file`,
-# `edit_file`, `run_bash`).
+# The trace records every tool call, so the histogram below is what the run actually spent
+# itself on rather than an impression of it. The shape is the thing to read: inspection of the
+# registry and the files, discovery and reading of skills, and then a loop of writing, editing
+# and running one experiment script. A run that is mostly reading has not got started; a run
+# that is mostly running has stopped checking what it produced.
+#
+# How much of that shape is the agent's is worth asking of any count like this. The counts are
+# the agent's choices made through a surface the operator built: ten tools and no others, one
+# skill per `read_skill` call so consulting five means five calls, and a bash tool general
+# enough that a whole experiment is one invocation of it. A different surface with the same
+# agent behind it draws a different histogram. What the counts support is a comparison between
+# runs on this surface, not a statement about how agents allocate effort in general.
 
-# %% Tool-call histogram
+# %%
 calls = [
     {"turn": e["turn"], "tool": e["name"]} for e in result["trace"] if e.get("type") == "tool_call"
 ]
@@ -267,18 +354,23 @@ ax.barh(
     color=COLORS["blue"],
 )
 ax.invert_yaxis()
-ax.set_xlabel("Tool Calls")
-ax.set_ylabel("Operator Tool")
+ax.bar_label(ax.containers[0], padding=3)
+ax.set_xlabel("Tool calls")
+ax.set_ylabel("Operator tool")
 add_message_title(
     ax,
-    "Execution and registry inspection dominate the operator trace",
+    "Running experiments and reading the registry take most of the turns",
     subtitle=f"{result['iterations']} turns in the pinned ETFs replay",
 )
-fig.tight_layout()
-fig.show()
-plt.show()
+show_with_alt(
+    fig,
+    f"Horizontal bar chart of tool-call counts across {int(hist['n_calls'].sum())} calls in "
+    f"{result['iterations']} turns, led by "
+    + ", ".join(f"{row['tool']} at {row['n_calls']}" for row in hist.head(3).iter_rows(named=True))
+    + ".",
+)
 
-# %% Skill reads (which SKILL.md files the agent consulted)
+# %%
 skill_reads = [
     e["args"].get("name_or_path")
     for e in result["trace"]
@@ -291,60 +383,81 @@ for s in skill_reads:
 # %% [markdown]
 # ## Result vs the §20.9 baseline
 #
-# The chapter quotes the highest-holdout-Sharpe LSTM with **validation Sharpe +0.92** and
-# **holdout Sharpe +0.77**. The agent ran the ensemble on the validation
-# window only (the cheaper "Path B"; the registry only has holdout
-# predictions for the LSTM, and retraining three families to produce holdout
-# predictions would have multiplied the wall-clock and cost by an order of
-# magnitude). It then matched the LSTM baseline's exact backtest
-# configuration (`score_weighted_top_k`, `top_k=20`, monthly cadence,
+# Chapter 20 ranks the case study's models on holdout Sharpe and puts an LSTM at the top. The
+# agent ran its ensemble on the validation window only, and said why: the registry holds
+# holdout predictions for the LSTM alone, and producing them for the other three families
+# means retraining all three, which costs an order of magnitude more than the experiment it
+# ran. It then matched the LSTM baseline's exact backtest
 # long-only) and computed IC + Sharpe with `ml4t.diagnostic.api`.
 
-# %% Comparison from the §20.9 baseline and the pinned operator trace
+# %%
 comparison = pl.DataFrame(
-    {
-        "model": ["LSTM_h64 (baseline)", "Ensemble (GBM+TabDL+CAE, z-avg)"],
-        "eval_basis": ["validation", "validation"],
-        "ic_mean": [0.0521, 0.0649],
-        "ic_hac_lag": [20, None],
-        "ic_t_hac": [2.3742, None],
-        "ic_ci_lo": [0.00906, None],
-        "ic_ci_hi": [0.09520, None],
-        "val_sharpe": [0.922, 0.562],
-        "val_sharpe_ci_lo": [0.37, -0.03],
-        "val_sharpe_ci_hi": [1.53, 1.25],
-        "psr_pvalue": [0.005, 0.042],
-        "max_drawdown": [-0.179, -0.367],
-    }
+    [
+        {
+            "model": name,
+            "eval_basis": "validation",
+            "ic_mean": row["ic"],
+            "ic_ir": row["ic_ir"],
+            "val_sharpe": row["sharpe"],
+            "val_sharpe_ci_lo": row["sr_lo"],
+            "val_sharpe_ci_hi": row["sr_hi"],
+            "psr_pvalue": row["psr"],
+            "max_drawdown": row["mdd"],
+        }
+        for name, row in etf_blocks.items()
+    ]
 )
+comparison
 
 # %% [markdown]
-# The LSTM uncertainty is the canonical record captured in the trace: a
-# 20-lag HAC adjustment for overlapping 21-day labels gives
-# $t=2.3742$ and a 95% interval of $[0.00906, 0.09520]$. The operator's
-# ensemble script used only five lags and did not preserve its daily IC
-# series, so the ensemble mean remains a descriptive replay result while its
-# HAC fields are left null. Reconstructing a 20-lag interval from the reported
-# mean and five-lag interval would invent information the trace does not carry.
+# The intervals in that table are Sharpe intervals from the backtest, and they are the run's
+# own. The IC column carries a separate uncertainty question the table does not show. The
+# operator's script computed its IC t statistics with a five-lag HAC adjustment while the labels
+# are 21-day forward returns, so consecutive observations overlap for twenty sessions and five
+# lags does not span that overlap. A HAC correction that stops short of the dependence it is
+# correcting for is not enough of one; how much it is out by is not something the run measures.
+#
+# The registry holds a 20-lag figure for the baseline, printed below beside the operator's, and
+# nothing in the trace holds a 20-lag figure for the ensemble. So the two models' IC
+# uncertainties cannot be compared with each other, and the point estimates are what the
+# comparison rests on.
+
+# %%
+registry_lstm = next(
+    row
+    for entry in result["trace"]
+    if entry.get("name") == "query_registry"
+    for row in (entry.get("result") or {}).get("rows", [])
+    if isinstance(row, dict)
+    and row.get("config_name") == "lstm_h64"
+    and row.get("split") == "validation"
+    and "ic_t_hac" in row
+)
+print(f"Registry LSTM, 20-lag HAC:  t = {registry_lstm['ic_t_hac']:.4f}")
+print(
+    f"                            95% CI [{registry_lstm['ic_ci_lo']:.5f}, "
+    f"{registry_lstm['ic_ci_hi']:.5f}]"
+)
+print(f"Operator script, 5-lag HAC: t = {baseline['t']:.4f}")
 
 # %% [markdown]
-# The paired panels separate rank correlation from portfolio performance.
-# Sharpe error bars reproduce the interval recorded in the pinned trace.
+# The two panels separate rank correlation from portfolio performance, which is the whole point
+# of the run. Sharpe error bars are the intervals the operator's script recorded.
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
-model_labels = ["LSTM", "Ensemble"]
+model_labels = [name.split(" (")[0].split("_")[0] for name in comparison["model"].to_list()]
 axes[0].bar(
     model_labels,
     comparison["ic_mean"].to_list(),
-    color=[COLORS["neutral"], COLORS["blue"]],
+    color=COLORS["blue"],
 )
-axes[0].set_ylabel("Mean Cross-Sectional IC")
+axes[0].set_ylabel("Mean cross-sectional IC")
 axes[0].set_ylim(bottom=0)
 axes[1].bar(
     model_labels,
     comparison["val_sharpe"].to_list(),
-    color=[COLORS["neutral"], COLORS["amber"]],
+    color=COLORS["amber"],
 )
 axes[1].errorbar(
     model_labels,
@@ -357,39 +470,52 @@ axes[1].errorbar(
     color=COLORS["neutral"],
     capsize=3,
 )
-axes[1].set_ylabel("Validation Sharpe Ratio")
+axes[1].set_ylabel("Validation Sharpe ratio")
+for ax in axes:
+    ax.tick_params(axis="x", labelrotation=30)
 add_message_title(
     axes[0],
-    "Higher ensemble IC does not translate into higher Sharpe",
-    subtitle="Pinned ETFs operator run; validation window only",
+    "The highest rank correlation is not the highest Sharpe",
+    subtitle="Validation window only; Sharpe bars carry the intervals the run recorded",
 )
-fig.tight_layout()
-fig.show()
-plt.show()
+show_with_alt(
+    fig,
+    f"Two bar charts over the same {comparison.height} models. On the left, mean "
+    f"cross-sectional IC, where the ensemble is higher at {ensemble['ic']:.4f} against the "
+    f"baseline's {baseline['ic']:.4f}. On the right, validation Sharpe ratio with confidence "
+    f"intervals, where the ensemble is {ensemble['sharpe']:.2f} against the baseline's "
+    f"{baseline['sharpe']:.2f} and its interval spans zero.",
+)
+
+# %%
+display(
+    Markdown(
+        f"**What the run found.** The ensemble reaches the higher rank correlation, "
+        f"{ensemble['ic']:.4f} against the baseline's {baseline['ic']:.4f}, and the "
+        f"lower Sharpe, {ensemble['sharpe']:.2f} "
+        f"against {baseline['sharpe']:.2f}, a difference of "
+        f"{ensemble['sharpe'] - baseline['sharpe']:+.2f}. Its Sharpe interval "
+        f"[{ensemble['sr_lo']:.2f}, {ensemble['sr_hi']:.2f}] spans zero; the baseline's does "
+        f"not."
+    )
+)
 
 # %% [markdown]
-# **Sharpe delta vs LSTM baseline: −0.36** (ensemble underperforms).
+# The agent's own diagnosis, recorded in the trace, is that the ensemble's per-fold IC swings
+# from negative to strongly positive while the baseline's stays positive and small, and that
+# the `score_weighted_top_k` allocator turns that instability into portfolio losses by sizing
+# positions on the score. That is an association the run observed rather than a mechanism it
+# isolated, and it arrives at the point Chapter 20 already makes: the family with the highest
+# isolated, and it arrives at the point Chapter 20 already makes: the family with the highest
+# rank correlation is not the family with the highest portfolio Sharpe, and the allocator is
+# where the two come apart. The operator was not told any of that.
 #
-# The ensemble achieves the **highest IC of any model** (0.0649 vs LSTM's
-# 0.0521), indicating better cross-sectional rank correlation. Its per-fold IC is
-# unstable: folds 0, 5, and 7 are negative (IC ≈ −0.03 to −0.08) while
-# folds 3–4 are very strong (IC ≈ 0.16–0.19). The LSTM's per-fold IC is
-# uniformly positive but smaller in magnitude. The `score_weighted_top_k`
-# allocator amplifies the negative-fold predictions, dragging Sharpe.
-#
-# This recovers the chapter's existing teaching point: *the family with the
-# highest rank correlation is not the family with the highest portfolio
-# Sharpe*, without the operator being told it.
-#
-# **Corrected evaluation-basis conclusion**: no improvement on the validation
-# window: the validation-window ensemble does not beat the validation-
-# window LSTM baseline (0.56 vs 0.92). A holdout claim for the ensemble
-# would require either holdout predictions for all three constituents or a
-# retrain of GBM / tabular_dl / CAE; both are an order of magnitude more
-# expensive than the validation-only experiment the operator actually ran.
-# The chapter's existing holdout-Sharpe ranking (LSTM 0.77) is unchanged by
-# this iteration. That is the §20.9 next-step suggestion faithfully
-# executed and concluded as a negative result.
+# **What the run does not establish.** This is a validation-window result and the chapter's
+# ranking is a holdout ranking, so it cannot displace it. Producing an ensemble holdout number
+# would need holdout predictions for all three constituents, which the registry does not have,
+# or a retrain of three model families, which costs an order of magnitude more than the
+# experiment the operator ran. The agent chose the cheap path, said so, and reported a negative
+# result rather than an improvement, which is the behaviour worth having.
 
 # %% [markdown]
 # ## Second case study: US firm characteristics, §20.9 mcap-quartile filter
@@ -402,11 +528,12 @@ plt.show()
 # > *Filter the universe to the top three quartiles by market capitalization
 # > and re-run to see how the Sharpe behaves under realistic capacity.*
 #
-# §20.1 flags that the highest-Sharpe long/short legs cluster in small-cap names
-# (validation Sharpe 4.27 [3.51, 5.15]; holdout Sharpe +2.48 [+0.67, +5.36]).
-# The hypothesis: removing the bottom mcap quartile materially erodes Sharpe.
+# §20.1 flags that this strategy's highest-Sharpe long and short legs both cluster in small-cap
+# names, on validation and on holdout alike, which makes its headline figure a claim about
+# stocks it may not be able to trade at size. The hypothesis: removing the bottom market-cap
+# quartile erodes the Sharpe materially.
 
-# %% Replay us_firms run
+# %%
 us_firms = json.loads(US_FIRMS_TRACE.read_text())
 
 print(f"model:          {us_firms['model']}")
@@ -415,7 +542,7 @@ print(f"turns:          {us_firms['iterations']}")
 print(f"tokens (in):    {us_firms['total_in_tokens']:>12,}")
 print(f"tokens (out):   {us_firms['total_out_tokens']:>12,}")
 print(f"elapsed:        {us_firms['elapsed_s']:.0f}s")
-print(f"approx cost:    {_human_money(us_firms['total_in_tokens'], us_firms['total_out_tokens'])}")
+print(f"approx cost:    {_human_money(us_firms)}")
 
 # %% [markdown]
 # The raw operator artifact remains unchanged for audit. Its interpretation
@@ -434,60 +561,102 @@ display(
     )
 )
 
-# %% Result table the agent reported
+# %% [markdown]
+# The agent's summary reports its comparison as a markdown table. Parsing that table is what
+# keeps the figures below tied to the capture: the operator's script printed its full results
+# past the end of the captured stdout, so the summary is the only complete record of them, and
+# retyping its numbers into the notebook would put a second copy beside the artifact with
+# nothing to keep the two in step.
+
+
+# %%
+def _summary_table(summary: str) -> dict[str, tuple[float, float]]:
+    """Read the agent's markdown results table as {metric: (baseline, filtered)}."""
+    parsed: dict[str, tuple[float, float]] = {}
+    for line in summary.splitlines():
+        cells = [c.replace("*", "").replace("\u2212", "-").strip() for c in line.split("|")]
+        if len(cells) < 5:
+            continue
+        numbers = [re.match(r"-?[\d,.]+", c) for c in cells[2:4]]
+        if all(numbers) and cells[1]:
+            parsed[cells[1]] = tuple(float(m.group().replace(",", "")) for m in numbers)
+    return parsed
+
+
+# %%
+us_metrics = _summary_table(us_firms["final_summary"])
 us_firms_comparison = pl.DataFrame(
-    {
-        "metric": [
-            "Sharpe",
-            "IC mean (HAC)",
-            "IC t (HAC)",
-            "IC IR",
-            "Max drawdown",
-            "Universe size",
-            "Turnover",
-        ],
-        "baseline_full_universe": [4.27, 0.074, 8.73, 1.02, -0.149, 2291, 1.77],
-        "top3_quartile_mcap": [2.24, 0.048, 5.77, 0.63, -0.521, 1718, 1.80],
-        "delta_pct": [-47.5, -35.1, -33.8, -38.2, -249.7, -25.0, +1.7],
-    }
+    [
+        {
+            "metric": metric,
+            "baseline_full_universe": before,
+            "top3_quartile_mcap": after,
+            "change_pct": round((after - before) / abs(before) * 100, 1) if before else None,
+        }
+        for metric, (before, after) in us_metrics.items()
+    ]
 )
-fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"])
-us_panels = [
-    ("Sharpe", 4.27, 2.24),
-    ("Mean IC", 0.074, 0.048),
-    ("Universe Size", 2291, 1718),
-]
-for ax, (metric, baseline, filtered) in zip(axes, us_panels, strict=True):
+us_firms_comparison
+
+# %%
+us_panels = ["Sharpe", "IC mean (HAC)", "Assets/period"]
+fig, axes = plt.subplots(len(us_panels), 1, figsize=FIGSIZE["grid_3x2"])
+for ax, metric in zip(axes, us_panels, strict=True):
+    before, after = us_metrics[metric]
     ax.barh(
-        ["Full", "Top 3 Quartiles"],
-        [baseline, filtered],
+        ["Full universe", "Top 3 quartiles"],
+        [before, after],
         color=[COLORS["neutral"], COLORS["blue"]],
     )
+    ax.bar_label(ax.containers[0], padding=3)
     ax.set_xlabel(metric)
     ax.set_xlim(left=0)
     ax.invert_yaxis()
 add_message_title(
     axes[0],
-    "The capacity screen cuts Sharpe and IC with the universe",
-    subtitle="Validation-only signal filter; no retraining and no impact-cost estimate",
+    "Dropping the smallest quartile takes the Sharpe with it",
+    subtitle="Validation-window signal filter; no retraining and no impact-cost estimate",
 )
-fig.tight_layout()
-fig.show()
-plt.show()
+show_with_alt(
+    fig,
+    "Three horizontal bar charts comparing the full universe against the top three market-cap "
+    "quartiles: "
+    + "; ".join(f"{m} falls from {us_metrics[m][0]:g} to {us_metrics[m][1]:g}" for m in us_panels)
+    + ".",
+)
+
+# %%
+display(
+    Markdown(
+        "**What the filter did.** Removing the smallest quartile takes "
+        f"{abs((us_metrics['Assets/period'][1] - us_metrics['Assets/period'][0]) / us_metrics['Assets/period'][0]):.0%}"
+        f" of the universe with it. Sharpe falls from {us_metrics['Sharpe'][0]:.2f} to "
+        f"{us_metrics['Sharpe'][1]:.2f}, mean IC from {us_metrics['IC mean (HAC)'][0]:.3f} to "
+        f"{us_metrics['IC mean (HAC)'][1]:.3f}, and maximum drawdown deepens from "
+        f"{us_metrics['Max Drawdown'][0]:.0%} to {us_metrics['Max Drawdown'][1]:.0%}. Turnover "
+        "barely moves."
+    )
+)
 
 # %% [markdown]
-# **Sharpe drops from 4.27 → 2.24 (−48%).** The validation result depends
-# materially on bottom-quartile small-cap names. This signal-level filter does
-# not estimate market impact, so it measures sensitivity to a capacity screen
-# rather than the return that a scalable implementation would realize. The
-# filtered validation Sharpe remains positive at 2.24 [1.55, 3.07].
+# The strategy's validation result depends materially on the names it is no longer allowed to
+# hold. That is the finding the §20.9 suggestion was fishing for, and it arrives with two
+# caveats the agent states and a reader should hold on to.
 #
-# IC falls from 0.074 to 0.048 as the universe shrinks. Lower breadth may
-# contribute, but this experiment also changes which firms remain and does not
-# isolate the mechanism. Max drawdown deepens from −15% to −52%; that movement
-# is descriptive, not proof that reduced diversification caused it. Turnover is
-# nearly unchanged because the experiment filters signals without retraining.
+# The filter is applied to signals, not to a retrained model, so nothing here says what a model
+# fitted on the larger-cap universe would find. And no market impact is estimated anywhere, so
+# this measures sensitivity to a capacity screen rather than the return a scalable
+# implementation would realize. Turnover barely moving is the tell: a signal filter does not
+# change how the portfolio is constructed, only which names are eligible.
 #
+# It is tempting to reach for the fundamental law here, and worth being careful about what it
+# says. It relates a portfolio's information ratio to the signal's IC and the number of
+# independent bets, so a smaller universe lowers the information ratio at a *fixed* IC. It does
+# not predict that IC itself falls, and it says nothing about drawdown. Both of those moved
+# here, and both are separate empirical outcomes: the filter did not only shrink the universe,
+# it changed which firms are in it, and this experiment does not separate the two.
+#
+# A natural follow-up the agent flagged: **retrain on the filtered universe**
 # A natural follow-up the agent flagged: **retrain on the filtered universe**
 # (rather than just signal-filter the existing predictions) to see whether
 # the model can find alpha in the larger-cap names that the original training
@@ -500,7 +669,7 @@ plt.show()
 # Only `RESEARCH_OPERATOR_CASE_STUDY` and the task configuration changed.
 # The two outcomes differ, and the operator records both.
 
-# %% Side-by-side run summary
+# %%
 runs = [
     {
         "case_study": "etfs",
@@ -509,9 +678,7 @@ runs = [
         "tokens_in": result["total_in_tokens"],
         "tokens_out": result["total_out_tokens"],
         "elapsed_s": result["elapsed_s"],
-        "cost_usd": round(
-            result["total_in_tokens"] * 0.5e-6 + result["total_out_tokens"] * 1.5e-6, 2
-        ),
+        "cost_usd": _run_cost(result),
         "headline": "no improvement (SR 0.92 → 0.56); diagnosed IC-vs-SR gap",
     },
     {
@@ -521,9 +688,7 @@ runs = [
         "tokens_in": us_firms["total_in_tokens"],
         "tokens_out": us_firms["total_out_tokens"],
         "elapsed_s": us_firms["elapsed_s"],
-        "cost_usd": round(
-            us_firms["total_in_tokens"] * 0.5e-6 + us_firms["total_out_tokens"] * 1.5e-6, 2
-        ),
+        "cost_usd": _run_cost(us_firms),
         "headline": "SR 4.27 → 2.24 (−48%); shows small-cap sensitivity",
     },
 ]
@@ -556,19 +721,32 @@ pl.DataFrame(runs)
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **One operator loop handles both case studies.** Only
-#    `RESEARCH_OPERATOR_CASE_STUDY` and the task configuration change. The
-#    skill repo supplies the methodology; the
-#    `ml4t-*` libraries do the math; the operator stays generic.
-# 2. **Negative results are first-class results.** The ETFs iteration
-#    reports validation-window Sharpe 0.56 vs the baseline's 0.92 and
-#    concludes "no improvement" rather than confabulating an upgrade. The
-#    `us_firm_characteristics` iteration quantifies a 48% Sharpe loss
-#    (4.27 → 2.24) under a capacity-oriented signal filter.
-# 3. **Match evaluation bases explicitly.** A validation-window experiment
-#    cannot displace a holdout-window ranking on its own; the captured
-#    table column `eval_basis` and the prose make that constraint visible
-#    instead of letting the comparison slide.
+# 1. **The operator is generic; the knowledge is not.** One loop handled both case studies, and
+#    only the task description changed. The skills carry the methodology, the libraries do the
+#    arithmetic, and neither is in the operator's prompt.
+# 2. **General tools beat an enumerated action space once the experiment space is open.** The
+#    forecasting agent earlier in this chapter had two actions because two were enough. A
+#    research follow-up is a small program, and pre-enumerating the programs worth writing
+#    across nine case studies is not a thing anyone can do.
+# 3. **Knowledge fetched on demand scales; knowledge in the prompt does not.** The agent listed
+#    the available skills, chose a handful, and read only those. The corpus can grow without
+#    the system prompt growing with it.
+# 4. **A negative result reported as a negative result is the behaviour to check for.** Both
+#    runs found less than they were looking for and said so. An agent that confabulates an
+#    improvement is worse than no agent, because its output looks like the thing you wanted.
+# 5. **Read the agent's own conclusion against its own evidence.** The ETFs summary describes a
+#    validation experiment as a holdout conclusion. The numbers in it are right and the claim
+#    on top of them is not, which is the shape of overclaiming that gets past every check but
+#    someone reading it.
+# 6. **The trace is the deliverable.** Every command, output and decision is on disk, which is
+#    what makes an autonomous run reviewable rather than merely repeatable.
+#
+# **Known limitations of what is built here.** Two runs, one model, two case studies: nothing
+# here says how often the operator produces something worth having. Neither experiment
+# retrained anything, so both measure sensitivity of an existing signal rather than what a
+# model fitted for the new setting would do. A live run executes model-supplied shell commands
+# at the host user's privileges, and the guardrails described above are conveniences rather
+# than a sandbox.
 #
 # **Reader follow-ups**:
 #
