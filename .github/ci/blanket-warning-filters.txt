@@ -67,7 +67,6 @@
 08_financial_features/07_event_studies.py
 08_financial_features/case_study_feature_summary.py
 10_text_feature_engineering/02_asset_embeddings.py
-10_text_feature_engineering/06_finbert_cross_dataset.py
 10_text_feature_engineering/07_news_return_signals.py
 10_text_feature_engineering/08_text_feature_evaluation.py
 10_text_feature_engineering/09_filing_text_signals.py

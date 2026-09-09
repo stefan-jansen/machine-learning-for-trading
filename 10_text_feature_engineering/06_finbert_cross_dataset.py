@@ -14,51 +14,65 @@
 # ---
 
 # %% [markdown]
-# # FinBERT Cross-Dataset Evaluation: Distribution Shift in Practice
+# # A model scored against labels that mean something else
 #
-# **Chapter 10: From Text to Features - The Transformer Breakthrough**
-# **Section Reference**: See Section 10.4 for Transformers and distribution shift
+# **Chapter 10: text feature engineering**
+# **Section reference**: Section 10.4
 #
 # **Docker image**: `ml4t-gpu`
 #
-# > **GPU recommended**: ProsusAI/finbert is run as inference over ~8K headlines.
-# > A GPU brings the notebook to ~1 minute end-to-end; on CPU it takes 5-10×
-# > longer. For GPU acceleration:
+# > **GPU recommended**: this runs FinBERT over roughly eight thousand headlines. A GPU takes
+# > about a minute end to end; a CPU takes several times that. For GPU acceleration:
 # > ```bash
 # > docker compose run --rm ml4t-gpu python 10_text_feature_engineering/06_finbert_cross_dataset.py
 # > ```
 #
-# ## Purpose
-# This notebook demonstrates distribution shift by evaluating ProsusAI/finbert
-# (trained on Financial PhraseBank) on the FinMarBa dataset. Both datasets use
-# the same labels (positive/negative/neutral), but differ in text domain:
-# - Financial PhraseBank: Carefully curated financial news sentences
-# - FinMarBa: Market-based sentiment from financial headlines
+# ## What this notebook is for
 #
-# This illustrates why same-label doesn't mean same-distribution.
+# A model that scores well on its own test split and badly on someone else's data is the
+# ordinary situation, and the useful skill is diagnosing which of several very different
+# causes is responsible. This notebook works one case through to the end.
 #
-# ## Learning Objectives
-# After completing this notebook, you will be able to:
-# - Understand the importance of out-of-sample evaluation
-# - Compare in-domain vs cross-domain model performance
-# - Interpret performance gaps as evidence of overfitting to training data
-# - Appreciate why domain-specific models may not generalize perfectly
+# `ProsusAI/finbert` is applied to FinMarBa, a corpus of financial headlines. Both carry
+# three labels called negative, neutral and positive, both are financial text, and the
+# accuracy that comes out is far below what the model reports on its own domain. The obvious
+# reading is that the model does not transfer.
+#
+# The obvious reading is wrong, and the dataset says so in a column the notebook loads and
+# then ignores. FinMarBa's label is not a judgment about the headline; it is the sign of what
+# the mentioned tickers did afterwards. The two corpora agree on three label *names* and
+# disagree about what the labels are *for*. So the number here measures how well a sentiment
+# reading anticipates a price move, which is a different question from whether the model
+# reads sentiment in a new domain - and a much harder one, taken up in
+# `07_news_return_signals`.
+#
+# ## Learning objectives
+#
+# After working through this notebook you will be able to:
+#
+# - Read a dataset's label definition from how the labels were produced, rather than from
+#   what they are called, and say when two datasets sharing label names share a task.
+# - Compare an accuracy against the majority-class rate before reading it as skill.
+# - Separate three causes of a cross-dataset drop that are routinely conflated: the text
+#   looks different, the labeling standard differs, or the target is a different quantity.
+# - Say what a confusion matrix shows about which way a model's errors run when its notion of
+#   the classes does not match the data's.
 #
 # ## Prerequisites
-# - Section 10.4 of the chapter (Transformers, distribution shift).
-# - HuggingFace `datasets` cache able to fetch `baptle/financial_headlines_market_based`
-#   (~8K rows, downloaded on first run).
 #
-# ## Related Notebooks
-# - `03_sentiment_evolution.py` - in-domain comparison on Financial PhraseBank.
-# - `04_bert_finetuning.py` - the fine-tuned baseline used for the in-domain reference value.
+# - Section 10.4 of the chapter.
+# - A Hugging Face `datasets` cache able to fetch `baptle/financial_headlines_market_based`,
+#   which downloads on first run.
+#
+# ## Related notebooks
+#
+# - `04_bert_finetuning.py` - fine-tuning the same checkpoint on its own domain
+# - `07_news_return_signals.py` - measuring what news sentiment is worth against returns
 
 # %%
-"""FinBERT Cross-Dataset Evaluation - measure distribution shift between Financial PhraseBank and FinMarBa."""
+"""Score FinBERT against market-derived labels and diagnose what the gap measures."""
 
-# 1. Setup and Configuration
 import os
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -70,11 +84,12 @@ from transformers import pipeline
 
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
-# Polars display configuration
-
+# The tokenizer's Rust parallelism forks after this process has already used threads, which
+# it warns about on every batch. One inference pass over eight thousand short headlines does
+# not need it.
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -89,18 +104,19 @@ print(f"Using device: {'GPU' if device == 0 else 'CPU'}")
 
 
 # %% [markdown]
-# ## 2. Load FinMarBa Dataset
+# ## The corpus, and where its labels come from
 #
-# FinMarBa (Financial Market-Based) is a 2025 dataset of financial headlines
-# labeled by actual market reactions, not human annotators. This provides
-# objective labels and true out-of-sample evaluation for FinBERT. The split we
-# load here delivers 8,142 headlines (the upstream dataset has been resized since
-# first release; the loader caps at 10,000 and takes whatever is available).
+# FinMarBa pairs financial headlines with the subsequent percentage move of the tickers each
+# one mentions. Its `Global Sentiment` column, which this notebook uses as the label, is the
+# sign of that move aggregated across the tickers - so a headline is "positive" when the
+# things it named went up, whatever the headline says.
 #
-# **Key differences from Financial PhraseBank:**
-# - Market-based labels (objective) vs human annotations (subjective)
-# - ~8K samples vs ~4.8K samples
-# - FinBERT (ProsusAI/finbert) was NOT trained on this data
+# That is a different labeling standard from Financial PhraseBank, where annotators read each
+# sentence and judged what it expressed. Both produce three classes with the same names. Only
+# one of them is a statement about the text.
+#
+# The upstream dataset has been resized since first release, so the loader asks for up to
+# `SAMPLE_SIZE` rows and takes what is available.
 
 
 # %%
@@ -167,22 +183,49 @@ def load_finmarba_dataset(sample_size: int = 10000) -> pl.DataFrame:
 
 
 df = load_finmarba_dataset(sample_size=SAMPLE_SIZE)
-print("\nLabel distribution:")
-print(df.group_by("label").len().sort("label"))
-
-# Map labels to text
 LABEL_MAP = {0: "negative", 1: "neutral", 2: "positive"}
 
+print("Label distribution:")
+print(df.group_by("label").len().sort("label"))
+
+majority_rate = df.group_by("label").len()["len"].max() / len(df)
+print(f"Majority-class rate: {majority_rate:.1%}")
+
 # %% [markdown]
-# ## 3. Load FinBERT Model
+# The majority rate is the number every accuracy below has to be read against. A classifier
+# that ignores the headline and always answers with the most common label scores that much,
+# so it is the zero point for skill on this data rather than the 33 percent that three
+# balanced classes would give.
+
+# %% [markdown]
+# ### What the label is made of
 #
-# We use ProsusAI/finbert, which was trained on Financial PhraseBank. This makes
-# the comparison meaningful: in-domain performance (Financial PhraseBank) vs
-# cross-domain performance (FinMarBa) with the SAME labels but DIFFERENT text
-# distributions.
+# The dataset ships the move it derived each label from. Printing a few rows beside their
+# labels is the whole argument of this notebook, and it takes one cell.
 
 # %%
-# Load FinBERT pipeline
+if "Pct_Change" in df.columns:
+    evidence = df.select(["text", "Pct_Change", "label"]).head(4)
+    for row in evidence.iter_rows(named=True):
+        print(f"{row['text'][:70]}")
+        print(f"    moves: {row['Pct_Change']}")
+        print(f"    label: {LABEL_MAP[row['label']]}\n")
+else:
+    print("This copy of the dataset does not carry Pct_Change; the label is still its sign.")
+
+# %% [markdown]
+# Read the second row if it is the one about the dollar slumping: a headline whose sentiment
+# any reader would call negative, labeled by two tickers that moved in opposite directions.
+# The label is arithmetic on those moves. Nothing about it is a claim about the sentence.
+
+# %% [markdown]
+# ## The model
+#
+# `ProsusAI/finbert` is a BERT fine-tuned on Financial PhraseBank for sentiment. It is
+# applied here with no further training, which is what makes the comparison clean: whatever
+# it produces is what it learned from annotator judgments, evaluated against price moves.
+
+# %%
 model_name = "ProsusAI/finbert"
 print(f"Loading {model_name}...")
 
@@ -227,50 +270,52 @@ predictions = get_finbert_predictions(texts)
 accuracy = accuracy_score(true_labels, predictions)
 f1 = f1_score(true_labels, predictions, average="macro")
 
-print("\n" + "=" * 60)
-print("FinBERT on FinMarBa (OUT-OF-SAMPLE)")
-print("=" * 60)
-print(f"Accuracy: {accuracy:.1%}")
+print(f"Accuracy: {accuracy:.1%}  (majority-class rate: {majority_rate:.1%})")
 print(f"F1 (macro): {f1:.3f}")
-print("=" * 60)
 
 # %% [markdown]
-# ## 5. Cross-Domain Measurement on FinMarBa
+# ## What that number is and is not
 #
-# This notebook measures **one** number: ProsusAI/finbert's zero-shot
-# accuracy / macro-F1 on FinMarBa. We report it as a cross-domain
-# generalization signal - the model was fine-tuned on Financial PhraseBank
-# (analyst reports) and is now evaluated on FinMarBa (Twitter/news headlines)
-# without further training.
+# The accuracy sits a little above the majority-class rate. Published figures for this
+# checkpoint on its own held-out PhraseBank split are far higher; this notebook does not
+# reproduce that measurement, so treat it as context from the literature rather than as an
+# in-notebook comparison.
 #
-# Araci (2019) reports ~87% accuracy / ~0.85 macro F1 for ProsusAI/finbert
-# on the held-out PhraseBank test split. This notebook does not reproduce
-# that in-domain measurement - running the same pipeline on PhraseBank
-# would require its own evaluation block. The cross-domain accuracy on
-# FinMarBa is the only measurement made here.
+# There are three different things a drop like this can mean, and they call for different
+# responses:
+#
+# 1. **The text is different.** Headlines are shorter and blunter than the analyst sentences
+#    the model was trained on. Real, and the fix is more training data from the new domain.
+# 2. **The labeling standard is different.** Two annotators can disagree about what counts as
+#    neutral. Real, and the fix is a shared annotation guide or a calibration step.
+# 3. **The target is a different quantity.** The labels answer another question entirely, and
+#    no amount of adaptation on the text side closes the gap because the model is not being
+#    asked what it was built to answer.
+#
+# The third is what is happening here, and the `Pct_Change` column above is the evidence. A
+# model that read the sentiment of every headline perfectly would still be wrong whenever a
+# gloomy headline preceded a rally. What this notebook measures is closer to the predictive
+# value of news sentiment for returns, which is `07_news_return_signals`' subject and which
+# nobody expects to be high.
 
 # %%
-print("\n" + "=" * 70)
-print("FinMarBa cross-domain accuracy for ProsusAI/finbert (zero-shot)")
-print("=" * 70)
-print(f"  Accuracy:    {accuracy:.1%}")
-print(f"  F1 (macro):  {f1:.3f}")
-print(f"  Test samples: {len(true_labels)}")
-print("=" * 70)
-print(
-    "Reference for context (not measured here): Araci (2019) reports ~87% "
-    "accuracy / ~0.85 macro F1 on Financial PhraseBank held-out test."
-)
+print(f"FinMarBa, zero-shot: accuracy {accuracy:.1%}, macro F1 {f1:.3f}, n={len(true_labels)}")
+print(f"Always answering the majority class: accuracy {majority_rate:.1%}")
+
+# %% [markdown]
+# The matrix says which way the errors run, which a single accuracy cannot. The row is what
+# the market did after the headline and the column is the model's reading of it, so an
+# off-diagonal cell is a case where the two disagreed - and the shape of that disagreement is
+# what tells you whether the model is confused or is answering a different question.
 
 # %%
-# Confusion matrix for FinMarBa
-fig, ax = plt.subplots(figsize=(6, 5))
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 labels = ["negative", "neutral", "positive"]
 
 cm = confusion_matrix(true_labels, predictions)
-im = ax.imshow(cm, cmap="Blues")
+ax.imshow(cm, cmap="Blues")
 
-# Add annotations; use light text on the dark high-count cells for legibility.
+# Light text on the dark high-count cells; the threshold is half the largest count.
 threshold = cm.max() / 2.0
 for i in range(3):
     for j in range(3):
@@ -280,71 +325,66 @@ for i in range(3):
             str(cm[i, j]),
             ha="center",
             va="center",
-            fontsize=10,
-            color="white" if cm[i, j] > threshold else "#0a1628",
+            fontsize=8,
+            color=COLORS["silver"] if cm[i, j] > threshold else COLORS["blue"],
         )
 
 ax.set_xticks(range(3))
 ax.set_yticks(range(3))
 ax.set_xticklabels(labels)
 ax.set_yticklabels(labels)
-ax.set_xlabel("Predicted")
-ax.set_ylabel("Actual")
-ax.set_title("ProsusAI/finbert transfers to FinMarBa without fine-tuning")
+ax.set_xlabel("Predicted by FinBERT from the headline")
+ax.set_ylabel("Labeled by the subsequent move")
+ax.set_title("Headline sentiment against the direction the market moved")
 
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# ## Key Takeaways
-#
-# ### Distribution Shift Explained
-# - **Same labels**: Both datasets use positive/negative/neutral
-# - **Different distributions**: Financial PhraseBank has carefully curated sentences;
-#   FinMarBa has market-reaction-based labels on headlines
-# - **Performance gap**: The difference reveals distribution shift, NOT label mismatch
-#
-# ### Why This Matters
-# 1. **Same labels ≠ same distribution**: Text style, length, and vocabulary differ
-# 2. **Domain adaptation limits**: Models trained on one corpus may not generalize
-# 3. **Market-based labels**: FinMarBa labels reflect actual market reactions, not
-#    human annotations-a different notion of "sentiment"
-#
-# ### Implications for Practitioners
-# - Always evaluate on held-out data from different sources when possible
-# - Distribution shift is common when applying pre-trained models to new data
-# - Consider fine-tuning on your target domain for best results
-
-# %%
-# Structured output
-print("=" * 70)
-print("KEY INSIGHTS")
-print("=" * 70)
-print("\nDataset: FinMarBa")
-print(f"Samples: {len(df)}")
-print("\nFinBERT Performance (ProsusAI/finbert, zero-shot):")
-print(f"  Accuracy:   {accuracy:.1%}")
-print(f"  F1 (macro): {f1:.3f}")
-print(
-    "\nReference for context (not measured in this notebook): "
-    "Araci (2019) reports ~87% accuracy / ~0.85 macro F1 on Financial "
-    "PhraseBank held-out test."
+show_with_alt(
+    fig,
+    "A three-by-three grid of counts, with the label derived from the market move down the "
+    "side and FinBERT's reading of the headline across the bottom. The counts are spread "
+    "widely rather than concentrated on the diagonal: every row puts substantial mass in more "
+    "than one column, and the largest column overall is the neutral one, which takes a large "
+    "share of the rows labeled negative and positive as well as the neutral row.",
 )
 
-# Save results
+# %% [markdown]
+# ## Key takeaways
+#
+# 1. **Read a label's definition from how it was produced.** Two datasets can agree on three
+#    class names and disagree about what the classes are for. Here one was produced by
+#    annotators reading sentences and the other by taking the sign of a price move, and the
+#    column that produced it ships with the data.
+# 2. **Compare an accuracy to the majority-class rate before calling it skill.** On three
+#    imbalanced classes the zero point is not a third; it is whatever always answering the
+#    most common label would score.
+# 3. **A cross-dataset drop has at least three causes and they need different responses.**
+#    Different text, a different labeling standard, or a different target quantity. Only the
+#    first two are addressed by adapting the model to the new domain; the third means the
+#    question changed and no amount of adaptation is the answer.
+# 4. **Naming the cause changes what you would do next.** Read as domain shift, this result
+#    argues for fine-tuning on headlines. Read correctly, it argues for deciding whether you
+#    want a model of what text says or a model of what prices do next, because they are
+#    different models and only one of them is trained here.
+# 5. **The confusion matrix carries the evidence a scalar cannot.** Which way the errors run
+#    distinguishes a model that is unsure from one that is answering a question nobody asked.
+
+# %%
 output_dir = get_chapter_dir(10) / "output" / "finbert_cross_dataset"
 output_dir.mkdir(parents=True, exist_ok=True)
 results_file = output_dir / "results.md"
 with open(results_file, "w") as f:
-    f.write("# FinBERT Cross-Dataset Evaluation Results\n\n")
-    f.write("## Performance on FinMarBa (Out-of-Sample)\n\n")
-    f.write(f"- **Accuracy**: {accuracy:.1%}\n")
-    f.write(f"- **F1 (macro)**: {f1:.3f}\n")
-    f.write(f"- **Samples**: {len(df):,}\n\n")
-    f.write("## Reference for context (not measured in this notebook)\n\n")
+    f.write("# FinBERT scored against market-derived labels\n\n")
+    f.write(f"- Headlines: {len(df):,}\n")
+    f.write(f"- Accuracy: {accuracy:.1%}\n")
+    f.write(f"- Macro F1: {f1:.3f}\n")
+    f.write(f"- Majority-class rate: {majority_rate:.1%}\n\n")
+    f.write("## What this measures\n\n")
     f.write(
-        "Araci (2019) reports ~87% accuracy / ~0.85 macro F1 for "
-        "ProsusAI/finbert on the held-out Financial PhraseBank test split.\n"
+        "FinMarBa's label is the sign of the subsequent move of the tickers a headline\n"
+        "names, not a judgment about the headline. So this is the agreement between a\n"
+        "sentiment reading and a price move, and not a measurement of how well the model\n"
+        "reads sentiment in a new text domain.\n"
     )
 
-print(f"\nResults saved to: {results_file}")
+# The path is printed relative to the repository so the render does not carry the absolute
+# path of whichever checkout produced it.
+print(f"Results saved to: {results_file.relative_to(get_chapter_dir(10).parent)}")
