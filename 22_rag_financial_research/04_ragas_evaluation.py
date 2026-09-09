@@ -461,14 +461,14 @@ for row in false_positives.iter_rows(named=True):
         f"False positive: {flagged.question}",
         f"  faithfulness {faithfulness(flagged)}",
         f"  answer:  {flagged.generated_answer}",
-        f"  context: {flagged.retrieved_chunks[0]['text']}",
-        f"  answer terms the context does not contain: {', '.join(missing)}",
     ]
+    report += [f"  context [{chunk['id']}]: {chunk['text']}" for chunk in flagged.retrieved_chunks]
+    report += [f"  answer terms the context does not contain: {', '.join(missing)}"]
 print("\n".join(report))
 
 # %% [markdown]
 # Where a false positive appears above, read the last line of it. The answer is
-# correct, cited, and drawn from the sentence printed directly beneath it, and
+# correct, cited, and drawn from the passages printed directly beneath it, and
 # the terms the metric could not find fall into four kinds:
 #
 # - the citation marker the answer was required to carry;
