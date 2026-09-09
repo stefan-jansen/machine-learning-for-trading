@@ -14,31 +14,42 @@
 # ---
 
 # %% [markdown]
-# # Time Series Foundation Models for Financial Forecasting
+# # Time series foundation models, applied to a panel they never saw
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook evaluates Time Series Foundation Models (TSFMs) on ETF return
-# prediction, testing the key question from recent literature:
+# Every model so far in this section was fitted on this ETF panel. A **time series
+# foundation model** is pretrained on a large, mostly non-financial corpus and asked
+# to forecast a new series with no fitting at all - the transfer story that reshaped
+# language and vision, applied to sequences of numbers.
 #
-# **Do pre-trained TSFMs transfer to finance zero-shot?**
+# Two are run here in that zero-shot mode: **Chronos** (Amazon), which quantises a
+# series into tokens and runs a T5 encoder-decoder over them, and **TinyTimeMixer**
+# (IBM Granite), a small mixing architecture in the family `06_tsmixer` builds. They
+# are scored against two models fitted on this panel: an LSTM and a penalised linear
+# map on the same context windows.
 #
-# **Models Evaluated**:
-# - **Chronos** (Amazon): T5-based tokenization, probabilistic forecasting
-# - **TTM** (IBM Granite): TinyTimeMixer, efficient MLP-based architecture
-# - **LSTM Baseline**: Task-specific training on domain data
-# - **Ridge Baseline**: Linear regression on flattened context windows
+# **What the comparison actually asks.** The zero-shot models forecast the context
+# series itself for `PREDICTION_LENGTH` steps, and the mean of that path is used as a
+# score for ranking funds. The label is a `LABEL_HORIZON`-session forward return, and
+# the two horizons are not tied together. So this is a probe of whether a zero-shot
+# forecast ranks assets usefully, not a calibrated forecast of the label - which is
+# why the results table below leaves MSE blank for those rows and reports only rank
+# IC.
 #
-# **Key References**:
-# - Rahimikia et al. (2025) survey: Zero-shot TSFMs fail on finance
-# - DELPHYNE (Ding et al., 2025): Negative transfer in finance
-# - Rasul et al. (2024) Lag-Llama: Probabilistic forecasting
+# **Learning objectives**:
+# - Run a pretrained forecaster with no fitting step and say exactly what it was given
+#   and what it returned.
+# - State what a rank-IC comparison between a forecast of one quantity and a label of
+#   another can and cannot establish.
+# - Name the design choices that bound this result - one feature, first-generation
+#   models, a fixed horizon, zero-shot only - and separate them from the published
+#   findings the notebook cites.
 #
-# **Learning Objectives**:
-# - Run zero-shot inference with Chronos and TinyTimeMixer
-# - Compare pre-trained foundation models against task-specific baselines
-# - Understand why the transfer gap exists for financial time series
-# - Use sktime's ChronosForecaster wrapper for univariate forecasting
+# **Key references**:
+# - Rahimikia et al. (2025): zero-shot TSFMs on financial series
+# - DELPHYNE (Ding et al., 2025): negative transfer from financial pretraining data
+# - Rasul et al. (2024), Lag-Llama: probabilistic forecasting
 #
 # **Book Reference**: Chapter 13, Section 13.6 (Alternative architectures and foundation models)
 #
@@ -46,8 +57,6 @@
 
 # %%
 """Time Series Foundation Models - evaluate zero-shot Chronos and TTM against task-specific baselines."""
-
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -63,17 +72,31 @@ from sklearn.preprocessing import StandardScaler
 from tsfm_public.models.tinytimemixer import TinyTimeMixerForPrediction
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+# %% [markdown]
+# Three of the settings below decide what the comparison is, rather than tuning it.
+#
+# `PREDICTION_LENGTH` is the horizon the zero-shot models forecast over. It is held
+# fixed and deliberately not tied to the label's horizon, because these models are
+# being used as a ranking signal rather than as a forecast of the label; the design
+# note further down says what that costs.
+#
+# `LABEL_HORIZON` is how many trading sessions pass between a decision date and the
+# day its label resolves. The ETF case study's primary label is a close-to-close
+# return over that many sessions, and the split drops every example within one horizon
+# of a boundary.
+#
+# `REQUIRE_FOUNDATION_MODELS` decides what happens when Chronos or TTM fails at
+# *runtime*: True raises, False leaves a null row in the results table. It does not
+# govern missing installs - both libraries are imported at module load, so they have
+# to be present either way.
 
 # %% tags=["parameters"]
 SEED = 42
 CONTEXT_LENGTH = 60
-# PREDICTION_LENGTH = 10 is held fixed across all zero-shot evaluations as a
-# directional-signal probe - see the design note below for why it does not
-# need to match the label horizon for this comparison.
 PREDICTION_LENGTH = 10
+LABEL_HORIZON = 21
 EPOCHS = 30
 BATCH_SIZE = 64
 LR = 0.001
@@ -82,10 +105,6 @@ MAX_TRAIN_SAMPLES = None
 MAX_VAL_SAMPLES = None
 MAX_TEST_SAMPLES = None
 CHRONOS_NUM_SAMPLES = 10
-# When True, a Chronos or TTM *runtime* (load/inference) failure raises rather
-# than producing a missing row in the results table. The chronos and
-# tsfm_public libraries are imported at module load, so they must be installed
-# regardless of this flag - it governs runtime failures, not missing installs.
 REQUIRE_FOUNDATION_MODELS = True
 
 # %%
@@ -101,9 +120,9 @@ print(f"Epochs: {EPOCHS}")
 # %% [markdown]
 # ## Data Loading
 #
-# We load ETF features and labels from the case study pipeline. For foundation
-# model evaluation we use univariate price-derived contexts (close returns)
-# alongside the multivariate feature set for the LSTM and Ridge baselines.
+# ETF features and labels from the case study pipeline. The foundation models read a
+# univariate context - one feature column - while the LSTM and ridge baselines read
+# the multivariate feature set.
 
 # %%
 mds = load_dl_dataset("etfs")
@@ -115,6 +134,16 @@ df = mds.dataset.drop_nulls(subset=FEATURE_COLS + [TARGET_COL])
 print(f"Features ({len(FEATURE_COLS)}): {FEATURE_COLS}")
 print(f"Target: {TARGET_COL}")
 print(f"Rows after dropna: {len(df):,}")
+per_date = df.group_by(mds.date_col).len().sort(mds.date_col)
+print(
+    f"{df[mds.date_col].min()} to {df[mds.date_col].max()}, "
+    f"{df[mds.entity_cols[0]].n_unique()} funds; funds per date "
+    f"{per_date['len'].min()} to {per_date['len'].max()}, median {per_date['len'].median():.0f}"
+)
+print(
+    f"Label {TARGET_COL}: mean {df[TARGET_COL].mean():+.5f}, "
+    f"standard deviation {df[TARGET_COL].std():.5f}"
+)
 
 # %% [markdown]
 # ## Prepare Univariate Contexts
@@ -193,27 +222,42 @@ print(f"Total samples: {len(contexts):,}")
 # %% [markdown]
 # ## Temporal Train/Test Split
 #
-# We use a simple 60/20/20 temporal split (consistent with other Ch13 notebooks)
-# rather than walk-forward CV, since foundation model inference is expensive
-# and the pedagogical focus is on zero-shot vs trained comparison.
+# A 60/20/20 split by date, the same shape the rest of this section uses, rather than
+# walk-forward validation: foundation model inference is expensive and the comparison
+# here is zero-shot against trained, not a claim about stability over time.
+#
+# The split has to be indexed by date and not by row. These samples are pooled across
+# assets, so a positional slice would cut through a cross-section and put the same day
+# on both sides of a boundary.
+#
+# It also needs a gap. The label is a close-to-close return over `LABEL_HORIZON`
+# trading sessions, so an example dated within that many sessions of a boundary has an
+# outcome resolved by days on the far side. Without the gap the LSTM would be fitted
+# on targets that resolve inside the validation stretch, and selected on targets that
+# resolve inside the test stretch. Those examples are dropped.
 
 # %%
-# Date-based 60/20/20 temporal split - sample-order indexing on asset-pooled
-# sequences would split cross-asset, not temporally.
 unique_dates = np.sort(np.unique(dates_arr))
-train_end_date = unique_dates[int(len(unique_dates) * 0.6)]
-val_end_date = unique_dates[int(len(unique_dates) * 0.8)]
+train_boundary_idx = int(len(unique_dates) * 0.6)
+val_boundary_idx = int(len(unique_dates) * 0.8)
+train_end_date = unique_dates[train_boundary_idx]
+val_end_date = unique_dates[val_boundary_idx]
+train_label_cutoff = unique_dates[train_boundary_idx - LABEL_HORIZON]
+val_label_cutoff = unique_dates[val_boundary_idx - LABEL_HORIZON]
 
-train_idx = np.where(dates_arr < train_end_date)[0].tolist()
-val_idx = np.where((dates_arr >= train_end_date) & (dates_arr < val_end_date))[0].tolist()
+train_idx = np.where(dates_arr < train_label_cutoff)[0].tolist()
+val_idx = np.where((dates_arr >= train_end_date) & (dates_arr < val_label_cutoff))[0].tolist()
 test_idx = np.where(dates_arr >= val_end_date)[0].tolist()
 
-# Optional dev-only caps (default None = use the full split). NOTE: these trailing
-# slices keep the LAST rows of an asset-pooled, symbol-ordered index, so a non-None
-# cap yields an arbitrary SUBSET OF SYMBOLS (and a possibly partial cross-section),
-# which makes the per-date IC depend on symbol ordering. They exist only for quick
-# local iteration; for a faithful subsample keep the most recent complete dates
-# instead (see the date-based trim in 07/08). The shipped run leaves them None.
+# %% [markdown]
+# The three sample caps below are for local iteration only and the shipped run leaves
+# them at `None`. They are worth understanding before using: they keep the *last* rows
+# of an index that is ordered by symbol and pooled across assets, so a non-`None` cap
+# returns an arbitrary subset of symbols and a possibly partial cross-section, which
+# makes the per-date IC depend on symbol ordering. `07_mamba_ssm` and
+# `08_cnn_image_encoding` show the alternative: trim to the most recent complete dates.
+
+# %%
 if MAX_TRAIN_SAMPLES and len(train_idx) > MAX_TRAIN_SAMPLES:
     train_idx = train_idx[-MAX_TRAIN_SAMPLES:]
 if MAX_VAL_SAMPLES and len(val_idx) > MAX_VAL_SAMPLES:
@@ -225,19 +269,34 @@ test_dates = dates_arr[test_idx]
 test_symbols = symbols_arr[test_idx]
 
 print(f"Train: {len(train_idx):,}, Val: {len(val_idx):,}, Test: {len(test_idx):,}")
+print(
+    f"Purged {LABEL_HORIZON} target dates before each boundary: "
+    f"validation starts {train_end_date}, test starts {val_end_date}"
+)
 
 
 # %% [markdown]
 # ### Cross-sectional IC helper
 #
-# Same per-date Spearman rank correlation used everywhere else in Chapter 13,
-# so the zero-shot foundation models are scored on the same yardstick as
-# the task-specific LSTM and Ridge baselines that follow.
+# The same per-date Spearman rank correlation used across this section, so the
+# zero-shot models are scored the same way as the LSTM and ridge baselines.
+#
+# A date's IC is undefined when a model predicts the same value for every fund on it:
+# the predicted ranks are all tied and there is nothing to correlate. The library
+# returns `NaN` for such a date, and polars treats `NaN` and null as different values,
+# so `drop_nulls` alone leaves it in place and one of them makes the whole mean `NaN`.
+# Both are filtered here, and the count of dates the mean was taken over is reported
+# with each score - a zero-shot model that produces a near-constant forecast is
+# exactly the case where ties are plausible.
 
 
 # %%
 def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
-    """Mean cross-sectional Spearman IC across dates."""
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    Returns the mean and the defined/total date counts. Filters both null and NaN,
+    since polars `drop_nulls` leaves NaN in place.
+    """
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "prediction": y_pred})
     ret_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "forward_return": y_true})
     ic_per_date = cross_sectional_ic_series(
@@ -248,8 +307,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
+    defined = ic_per_date.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+    mean_ic = float(defined["ic"].mean()) if defined.height else float("nan")
+    return {"ic": mean_ic, "n_defined": defined.height, "n_total": ic_per_date.height}
 
 
 # %% [markdown]
@@ -262,6 +322,7 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 # %%
 CHRONOS_SUCCESS = False
 chronos_ic = 0.0
+chronos_params = None
 
 try:
     model_size = "small"
@@ -269,8 +330,10 @@ try:
     chronos = ChronosPipeline.from_pretrained(
         f"amazon/chronos-t5-{model_size}",
         device_map=str(DEVICE),
-        torch_dtype=torch.float32,
+        dtype=torch.float32,
     )
+    chronos_params = sum(p.numel() for p in chronos.model.parameters())
+    print(f"Chronos-{model_size} parameters: {chronos_params:,}")
     contexts_test = [contexts[i] for i in test_idx]
     y_test_chronos = targets[test_idx]
     scores = []
@@ -284,9 +347,13 @@ try:
         )
         scores.extend(forecast.mean(dim=1).mean(dim=1).cpu().tolist())
     scores = np.array(scores)
-    chronos_ic = cross_sectional_ic_mean(y_test_chronos, scores, test_dates, test_symbols)
+    chronos_result = cross_sectional_ic_mean(y_test_chronos, scores, test_dates, test_symbols)
+    chronos_ic = chronos_result["ic"]
     CHRONOS_SUCCESS = True
-    print(f"Chronos IC: {chronos_ic:.4f}")
+    print(
+        f"Chronos IC: {chronos_ic:.4f} "
+        f"(defined on {chronos_result['n_defined']} of {chronos_result['n_total']} test dates)"
+    )
 except Exception as e:
     print(f"Chronos failed: {e}")
     if REQUIRE_FOUNDATION_MODELS:
@@ -302,6 +369,7 @@ except Exception as e:
 # %%
 TTM_SUCCESS = False
 ttm_ic = 0.0
+ttm_params = None
 _ttm_loaded = False
 
 try:
@@ -321,6 +389,8 @@ try:
         )
     ttm_context_len = ttm_context_len or 512
     ttm_pred_len = ttm_pred_len or 96
+    ttm_params = sum(p.numel() for p in ttm.parameters())
+    print(f"TTM parameters: {ttm_params:,}")
     print(f"TTM context_length: {ttm_context_len}, prediction_length: {ttm_pred_len}")
     _ttm_loaded = True
 except Exception as e:
@@ -361,9 +431,13 @@ if _ttm_loaded:
             scores.extend(mean_forecast.cpu().tolist())
 
         scores = np.array(scores)
-        ttm_ic = cross_sectional_ic_mean(y_test_ttm, scores, test_dates, test_symbols)
+        ttm_result = cross_sectional_ic_mean(y_test_ttm, scores, test_dates, test_symbols)
+        ttm_ic = ttm_result["ic"]
         TTM_SUCCESS = True
-        print(f"TTM IC: {ttm_ic:.4f}")
+        print(
+            f"TTM IC: {ttm_ic:.4f} "
+            f"(defined on {ttm_result['n_defined']} of {ttm_result['n_total']} test dates)"
+        )
     except Exception as e:
         print(f"TTM inference failed: {e}")
         if REQUIRE_FOUNDATION_MODELS:
@@ -372,9 +446,12 @@ if _ttm_loaded:
 # %% [markdown]
 # ## LSTM Baseline (Task-Specific Training)
 #
-# We train a small LSTM from scratch on the ETF data. This is the critical
-# comparison: does task-specific training on domain data outperform a
-# foundation model that has seen millions of general time series?
+# A small LSTM trained from scratch on this panel. It is the comparison that gives the
+# zero-shot scores a scale: a few tens of thousands of weights fitted on the data at
+# hand, against tens of millions fitted on a corpus that does not include it. Note
+# that it also reads the full multivariate feature set, where the zero-shot models
+# read one column, so the two differ in what they see as well as in how they were
+# fitted.
 
 
 # %%
@@ -417,11 +494,13 @@ with torch.no_grad():
         y_pred_lstm_chunks.append(lstm(X_test_t).cpu().numpy())
     y_pred_lstm = np.concatenate(y_pred_lstm_chunks)
 
-lstm_ic = cross_sectional_ic_mean(y_test_lstm, y_pred_lstm, test_dates, test_symbols)
+lstm_result = cross_sectional_ic_mean(y_test_lstm, y_pred_lstm, test_dates, test_symbols)
+lstm_ic = lstm_result["ic"]
 lstm_mse = np.mean((y_pred_lstm - y_test_lstm) ** 2)
 print("\nLSTM Test Results:")
 print(f"  MSE: {lstm_mse:.6f}")
-print(f"  Spearman IC: {lstm_ic:.4f}")
+print(f"  Spearman IC: {lstm_ic:.4f}", end="")
+print(f"  (defined on {lstm_result['n_defined']} of {lstm_result['n_total']} test dates)")
 
 # %% [markdown]
 # ## Ridge Baseline
@@ -444,11 +523,13 @@ ridge.fit(X_train_scaled, y_train_ridge)
 y_pred_ridge = ridge.predict(X_test_scaled)
 
 ridge_mse = np.mean((y_pred_ridge - y_test_ridge) ** 2)
-ridge_ic = cross_sectional_ic_mean(y_test_ridge, y_pred_ridge, test_dates, test_symbols)
+ridge_result = cross_sectional_ic_mean(y_test_ridge, y_pred_ridge, test_dates, test_symbols)
+ridge_ic = ridge_result["ic"]
 
 print("Ridge Test Results:")
 print(f"  MSE: {ridge_mse:.6f}")
-print(f"  Spearman IC: {ridge_ic:.4f}")
+print(f"  Spearman IC: {ridge_ic:.4f}", end="")
+print(f"  (defined on {ridge_result['n_defined']} of {ridge_result['n_total']} test dates)")
 
 # %% [markdown]
 # ## Results Comparison
@@ -456,13 +537,28 @@ print(f"  Spearman IC: {ridge_ic:.4f}")
 # Comparing zero-shot foundation models against task-specific baselines
 # trained on domain data.
 
+
+# %% [markdown]
+# The parameter counts below are counted on the objects in memory rather than quoted
+# from a model card, so they are the sizes actually used. A zero-shot row whose model
+# failed to load has no count to report.
+#
+# MSE is left blank for the zero-shot rows on purpose. Those models forecast the
+# context series over `PREDICTION_LENGTH` steps, and the mean of that path is used as
+# a ranking score; a squared error between that path's mean and a
+# `LABEL_HORIZON`-session forward return would be comparing two different quantities.
+
+
 # %%
-# Approximate parameter counts for context
+def _fmt_params(n):
+    return f"{n:,}" if n is not None else "not loaded"
+
+
 PARAM_COUNTS = {
-    "Chronos (Zero-Shot)": "~20M (small)",
-    "TTM (Zero-Shot)": "~1-5M",
+    "Chronos (Zero-Shot)": _fmt_params(chronos_params),
+    "TTM (Zero-Shot)": _fmt_params(ttm_params),
     "LSTM (Task-Specific)": f"{lstm_params:,}",
-    "Ridge (Task-Specific)": f"{CONTEXT_LENGTH}",
+    "Ridge (Task-Specific)": f"{ridge.coef_.size + 1:,}",
 }
 
 rows = []
@@ -487,63 +583,68 @@ for name, ic_val, mse_val, model_type, available in [
             "Parameters": PARAM_COUNTS[name],
         }
     )
-# MSE is left null for the zero-shot rows: those models forecast the raw
-# context feature (returns) over a fixed 10-step horizon and the mean
-# forecast is used as a directional signal, not a calibrated forecast of
-# the label, so a single per-row MSE against the label has no clean meaning.
 
 results_df = pl.DataFrame(rows)
 results_df
 
 # %% [markdown]
-# **Interpretation** (conditional on at least one zero-shot model running
-# successfully - failed rows above show `null` IC and are excluded from this
-# claim). In the tested zero-shot setup, the foundation models produce
-# near-zero or negative cross-sectional IC on ETF forward returns, while
-# even a small task-specific LSTM trained on domain data substantially
-# outperforms them. The result is consistent with Rahimikia et al. (2025)
-# and reflects a distributional mismatch between general pretraining
-# corpora and financial returns under the specific design used here:
-# first-generation Chronos and TTM applied to a single feature column with
-# a fixed 10-step forecast averaged into a directional score. It is not a
-# blanket claim that every TSFM underperforms specialized baselines -
-# multivariate / covariate-aware second-generation models (Chronos-2,
-# Moirai-MoE) and the adaptation modes below are out of scope here.
+# **What was measured, and what it is a measurement of.** The table reports one
+# number per model - the mean cross-sectional rank IC on one test split - and the
+# sentence below it is computed from those numbers rather than typed in. MSE is blank
+# for the zero-shot rows on purpose: those models forecast the context series over a
+# fixed horizon that is not the label's, so a squared error against the label would be
+# comparing two different quantities.
 #
-# **Important context**:
+# **Four design choices bound what this can say**, and each of them is a place where
+# published work does something else:
 #
-# - **Chronos v1**: This notebook uses first-generation Chronos (univariate-only,
-#   T5-based). The text discusses second-generation models (Chronos-2 with group
-#   attention, Moirai-MoE with sparse routing) that support multivariate inputs
-#   and exogenous covariates
-# - **Adaptation modes**: Zero-shot (shown here) is only one of four deployment
-#   modes. In-context learning, parameter-efficient fine-tuning (LoRA), and
-#   test-time ensembling can substantially narrow the gap -- see Section 13.6
-#   for the full taxonomy
-# - **Risk vs. return forecasting**: The negative results above apply to
-#   *return prediction*. For volatility and VaR forecasting, where targets
-#   exhibit stronger transferable structure, fine-tuned TSFMs show credible
-#   promise (Section 13.6)
+# - **One feature.** The zero-shot models see a single column, because
+#   first-generation Chronos and TTM are univariate. The LSTM and ridge baselines see
+#   the multivariate feature set. That difference alone could produce the gap.
+# - **First-generation models.** Chronos-2 and Moirai-MoE accept multivariate inputs
+#   and exogenous covariates; neither is run here.
+# - **Zero-shot only.** In-context learning, parameter-efficient fine-tuning and
+#   test-time ensembling are the other deployment modes, and the cited literature
+#   reports them narrowing the gap.
+# - **Return prediction.** The published negative results concentrate on returns.
+#   Volatility and value-at-risk targets carry more transferable structure - trend,
+#   clustering, mean reversion - and fine-tuned models do better on them.
+#
+# So the honest reading is that this configuration of these models does not rank ETFs
+# usefully here, which is consistent with Rahimikia et al. (2025), and that a general
+# claim about foundation models on financial data is not something one split of one
+# panel with one feature can support.
 
 # %%
-_foundation = [("Chronos", chronos_ic, CHRONOS_SUCCESS), ("TTM", ttm_ic, TTM_SUCCESS)]
-_fnd = ", ".join(f"{n} {v:+.4f}" for n, v, ok in _foundation if ok)
+_zero_shot = [("Chronos", chronos_ic) for ok in [CHRONOS_SUCCESS] if ok] + [
+    ("TTM", ttm_ic) for ok in [TTM_SUCCESS] if ok
+]
+_fitted = [("LSTM", lstm_ic), ("Ridge", ridge_ic)]
+_worst_fitted = min(v for _, v in _fitted)
+_best_zero_shot = max((v for _, v in _zero_shot), default=float("-nan"))
+_separated = bool(_zero_shot) and _worst_fitted > _best_zero_shot
 display(
     Markdown(
-        f"On this run the zero-shot foundation models score {_fnd} - at or below zero - "
-        f"while the task-specific baselines are positive (LSTM {lstm_ic:+.4f}, Ridge "
-        f"{ridge_ic:+.4f}). The Ridge baseline is deterministic; the LSTM is GPU-trained "
-        f"with fixed seeds so its IC drifts slightly across runs, but the ordering - "
-        f"domain-trained baselines above zero-shot foundation models - is the reproducible "
-        f"conclusion here."
+        "On this run the zero-shot models score "
+        + ", ".join(f"{n} {v:+.4f}" for n, v in _zero_shot)
+        + ", and the models fitted on this panel score "
+        + ", ".join(f"{n} {v:+.4f}" for n, v in _fitted)
+        + ". Every fitted model is above every zero-shot one." * _separated
+        + " The two groups overlap on this run, so the ordering below is not clean."
+        * (not _separated)
+        + " The ridge fit is deterministic; the LSTM is GPU-trained with fixed seeds and"
+        " its IC moves slightly between runs, so read the separation rather than the"
+        " decimals."
     )
 )
 
 # %% [markdown]
-# ## Visualization
+# ## Two figures
 #
-# The IC comparison is the headline; the LSTM prediction scatter shows *why* even
-# the winning baseline earns only a modest IC.
+# The first puts every model's rank IC on one axis. The second looks at what the
+# best-scoring fitted model is actually producing: a scatter of its predictions
+# against the outcomes, with the printed ratio of the two standard deviations, which
+# is the number that says how much of the label's spread the predictions span.
 
 # %%
 available_rows = [r for r in rows if r["Spearman IC"] is not None]
@@ -559,13 +660,24 @@ ax.set_xlabel("Spearman IC (test)")
 ax.axvline(0, color=COLORS["neutral"], linestyle="--", alpha=0.7)
 add_message_title(
     ax,
-    "Domain-trained baselines rank positively; zero-shot foundation models do not",
-    subtitle="Cross-sectional Spearman IC, ETF forward returns (amber = task-specific, navy = zero-shot)",
+    "Mean cross-sectional Spearman IC by model",
+    subtitle="ETF forward returns, one test split (amber = fitted on this panel, navy = zero-shot)",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A horizontal bar chart of mean cross-sectional Spearman IC, one bar per model, "
+    "with a dashed vertical line at zero. Bars for the models fitted on this panel "
+    "are amber and the zero-shot bars are navy.",
+)
 
 # %%
 sample_n = min(500, len(y_test_lstm))
+spread_ratio = float(np.std(y_pred_lstm) / np.std(y_test_lstm))
+print(
+    f"LSTM prediction spread / outcome spread: {spread_ratio:.3f} "
+    f"(standard deviations {np.std(y_pred_lstm):.5f} and {np.std(y_test_lstm):.5f})"
+)
+
 fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
 ax.scatter(y_test_lstm[:sample_n], y_pred_lstm[:sample_n], alpha=0.3, s=10, color=COLORS["amber"])
 ax.set_xlabel("Actual forward return")
@@ -573,10 +685,18 @@ ax.set_ylabel("Predicted return")
 ax.axline((0, 0), slope=1, color=COLORS["neutral"], linestyle="--", alpha=0.5)
 add_message_title(
     ax,
-    "The LSTM's predictions compress toward zero",
-    subtitle=f"LSTM test IC = {lstm_ic:.3f}, {sample_n} sampled test points; dashed line = perfect calibration",
+    "LSTM predictions against the outcomes they were predicting",
+    subtitle=(
+        f"{sample_n} sampled test points; the dashed line is where a perfectly "
+        f"calibrated prediction would lie"
+    ),
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A scatter of predicted return against actual forward return for a sample of test "
+    "points, with a dashed diagonal marking perfect calibration. The vertical extent "
+    "of the cloud against its horizontal extent is the spread ratio printed above.",
+)
 
 # %% [markdown]
 # ## Why Zero-Shot Fails on Finance
@@ -602,62 +722,49 @@ fig.show()
 # models (Chronos-2, Moirai-MoE) and the efficiency frontier.
 
 # %% [markdown]
-# ## sktime ChronosForecaster
+# ## The same model through sktime
 #
-# The sktime library provides a `ChronosForecaster` wrapper that integrates
-# Amazon's Chronos model into the sktime forecasting API. This gives access
-# to Chronos through a familiar `fit`/`predict` interface with proper
-# temporal handling.
+# Chronos is called directly above. sktime also wraps it as a `ChronosForecaster`,
+# which puts it behind the same `fit`/`predict` interface as every other forecaster in
+# that library - the practical value being that a Chronos run and a classical run
+# become interchangeable in a pipeline rather than two separate scripts.
+# `11_library_landscape` is where that interface is used.
 #
-# **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` - and ray does not yet support Python 3.14
-# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
-# Once ray adds 3.14 wheels, install via `uv pip install neuralforecast`
-# and uncomment the demo below.
-
-# %%
-# from sktime.forecasting.chronos import ChronosForecaster
-#
-# from data import load_etfs
-#
-# # Load SPY univariate series for demonstration
-# spy = load_etfs(symbols=["SPY"]).sort("timestamp")
-# spy_pd = spy.select(["timestamp", "close"]).to_pandas().set_index("timestamp")["close"]
-#
-# # Train/test split
-# split = int(len(spy_pd) * 0.8)
-# y_train_sk = spy_pd.iloc[:split]
-#
-# # Fit and predict
-# forecaster = ChronosForecaster(
-#     model_path="amazon/chronos-t5-small",
-#     config={"num_samples": CHRONOS_NUM_SAMPLES},
-# )
-# forecaster.fit(y_train_sk, fh=list(range(1, PREDICTION_LENGTH + 1)))
-# y_pred_sk = forecaster.predict()
-#
-# print(f"sktime ChronosForecaster: predicted {len(y_pred_sk)} steps")
-# print(y_pred_sk)
+# It is not demonstrated here because it cannot be run in this environment: sktime's
+# neural forecasters pull in `neuralforecast`, which requires `ray`, and ray has no
+# Python 3.14 wheels ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
+# Once those exist, `uv pip install neuralforecast` makes
+# `sktime.forecasting.chronos.ChronosForecaster` importable, and it takes the model
+# path and a `num_samples` config the same way the pipeline above does.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Zero-shot TSFMs underperform on finance**: Pre-trained models like
-#    Chronos and TTM produce near-zero or negative IC on ETF return prediction
-#    in this notebook and in Rahimikia et al. (2025)
-# 2. **Task-specific training adds signal**: a small 2-layer LSTM trained on
-#    domain data achieves a higher IC than the zero-shot foundation models here
-# 3. **Negative transfer is documented**: DELPHYNE shows that adding
-#    financial data to the pre-training mix can hurt benchmark performance
-# 4. **Fine-tuning is the active research direction**: adapter layers and
-#    LoRA on financial data require labelled domain data, which reintroduces
-#    the data and supervision constraints of the task-specific paradigm
-# 5. **Baselines matter**: Ridge regression on raw context windows provides
-#    a non-trivial baseline, reinforcing the "Are Transformers Effective"
-#    message from Section 13.4
+# 1. **Check what the pretrained model is being asked to forecast.** These models
+#    forecast the context series, and the label is a forward return over a different
+#    horizon. Turning a forecast path into a ranking score is a modelling decision
+#    made here, not something the model provides, and it is the first thing to state
+#    when reporting a zero-shot result.
+# 2. **The parameter counts are read off the loaded objects.** Model cards round, and
+#    the count that matters is the one in memory. Chronos-t5-small carries far more
+#    weight than either fitted baseline, which is worth seeing next to the scores.
+# 3. **The comparison is not like-for-like, and saying so is part of the result.**
+#    One side sees one feature and no fitting; the other sees eight features and is
+#    fitted on this panel. Any gap has at least those two explanations before it has
+#    an architectural one.
+# 4. **Pretraining is its own leakage channel.** A standard temporal split governs
+#    what the model was *fitted* on here, and says nothing about what it was
+#    *pretrained* on. If a pretraining corpus overlaps the evaluation period, a
+#    zero-shot claim is compromised in a way no split can detect.
+# 5. **Negative transfer is a documented finding, not an inference from this run.**
+#    DELPHYNE reports that adding financial data to a pretraining mix can hurt
+#    general benchmark performance while still failing on finance. Nothing here
+#    tests that; it is context for why the zero-shot result is not surprising.
 #
-# **Next**: See `10_uncertainty` for quantifying prediction uncertainty
-# with MC Dropout and Deep Ensembles.
+# **Known limitations.** One chronological split of one ETF panel, one label horizon,
+# one seed, one univariate context feature, zero-shot only, and first-generation
+# models. The ridge fit is deterministic; the LSTM is GPU-trained and its IC moves
+# slightly between runs on the same software and GPU.
 #
-# **Book**: Section 13.6 discusses foundation models alongside the broader
-# toolkit of non-attention architectures.
+# **Next**: `10_uncertainty` stops asking which point forecast is best and asks what a
+# model can say about how sure it is.
