@@ -959,7 +959,12 @@ overall
 best_proxy_row = overall.row(0, named=True)
 proxy_mrr = dict(zip(overall["method"], overall["avg_mrr"], strict=True))
 proxy_precision = dict(zip(overall["method"], overall["avg_precision"], strict=True))
-precision_ceiling = 3 / TOP_K
+# A query with fewer labels than TOP_K cannot fill the cut, and one with more
+# labels than TOP_K cannot exceed 1. Average the per-query ceiling rather than
+# assuming three labels against a cut of ten.
+precision_ceiling = float(
+    np.mean([min(len(relevant), TOP_K) / TOP_K for _, _, relevant in TEST_QUERIES])
+)
 display(
     Markdown(f"""
 The highest agreement with the label rule is **{best_proxy_row["method"]}** at an MRR of
@@ -969,8 +974,9 @@ The highest agreement with the label rule is **{best_proxy_row["method"]}** at a
 The dense retriever on its own reaches {proxy_mrr["Semantic"]:.3f}.
 
 Every precision figure in the table above is against a ceiling of
-{precision_ceiling:.2f}, not 1: {best_proxy_row["method"]} at
-{proxy_precision[best_proxy_row["method"]]:.2f} is
+{precision_ceiling:.2f} rather than 1, because a query carries at most
+{max(len(relevant) for _, _, relevant in TEST_QUERIES)} labels against a cut of {TOP_K}:
+{best_proxy_row["method"]} at {proxy_precision[best_proxy_row["method"]]:.2f} is
 {proxy_precision[best_proxy_row["method"]] / precision_ceiling:.0%} of what is reachable.
 The next section is about why the ordering here should not be read as a ranking of
 retrievers.
@@ -1045,6 +1051,15 @@ hits_by_method = dict(
 )
 rerank_hits = hits_by_method["Hybrid + Rerank"]
 fusion_hits = hits_by_method["Hybrid (RRF)"]
+if rerank_hits > fusion_hits:
+    rerank_vs_fusion = "it finds more of them, and the MRR above says it ranks them lower"
+elif rerank_hits < fusion_hits:
+    rerank_vs_fusion = "it finds fewer of them, and ranks those it finds lower"
+else:
+    rerank_vs_fusion = (
+        f"it finds the same number, so the whole of the MRR difference is the ordering "
+        f"inside the top {TOP_K}"
+    )
 conceptual_bm25 = float(
     by_type.filter((pl.col("method") == "BM25") & (pl.col("query_type") == "conceptual"))[
         "avg_mrr"
@@ -1074,8 +1089,8 @@ showing through.
 
 What the reranker does is visible in the recall column rather than in MRR. It retrieves
 **{rerank_hits}** of the {total_labels} labelled documents inside the top {TOP_K} against the
-fusion's **{fusion_hits}** - it finds more of them and puts them lower, which is what a
-reordering by a different notion of relevance looks like when it is scored by this one.
+fusion's **{fusion_hits}**: {rerank_vs_fusion}. Reordering by one notion of relevance and
+scoring by another separates the two columns like this whenever the two notions differ.
 """)
 )
 
