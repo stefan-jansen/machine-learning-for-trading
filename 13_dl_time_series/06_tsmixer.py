@@ -479,9 +479,10 @@ print(f"  (defined on {ridge_ic_result['n_defined']} of {ridge_ic_result['n_tota
 # the squared error.
 #
 # The ridge regression is the comparison that decides anything. It sees the same window
-# flattened into one vector and fits a penalised linear map, which is exactly the
-# single dense layer over $TF$ inputs that the alternating design was built to avoid.
-# Whatever the mixing structure is worth has to appear as a difference from that.
+# flattened into one vector and fits a penalised linear map straight to the label: $TF$
+# coefficients, no hidden representation, and no notion that one axis is time and the
+# other is features. Whatever the alternating structure is worth has to appear as a
+# difference from that.
 
 # %%
 model_names = ["TSMixer", "Ridge"]
@@ -573,5 +574,6 @@ show_plotly_with_alt(
 # algorithms and a fixed cuBLAS workspace make repeated execution reproduce on the same
 # software and GPU; another environment will differ in the final decimals.
 #
-# **Next**: `07_mamba_ssm` keeps the linear-time cost but recovers a recurrent state,
-# which is the one thing both mixing and attention gave up.
+# **Next**: `07_mamba_ssm` recovers a recurrent state, which both mixing and attention
+# gave up, and scales linearly in the sequence length - where this mixer's
+# `Linear(T, T)` costs $T^2$ per feature and attention costs $T^2$ outright.
