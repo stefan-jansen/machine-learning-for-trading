@@ -214,7 +214,6 @@ def test_a_long_subtitle_does_not_widen_the_figure():
             "schedule and its configured five-session purge gap"
         ),
     )
-    fig.tight_layout()
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     subtitle = next(
@@ -225,6 +224,36 @@ def test_a_long_subtitle_does_not_widen_the_figure():
     assert "\n" in subtitle.get_text(), "a subtitle this long has to wrap"
     assert subtitle.get_window_extent(renderer).x1 <= fig.bbox.x1 + 1, (
         "the subtitle runs past the figure, so bbox='tight' widens the canvas to fit it"
+    )
+    plt.close(fig)
+
+
+def test_the_source_note_does_not_land_on_the_x_axis_label():
+    """`figure.text` is not a laid-out artist, so constrained layout reserved nothing.
+
+    All four figures of 18_transaction_costs/01_cost_taxonomy shipped with the source
+    note drawn on top of the x-axis label and, where the ticks were rotated, on top of
+    those too.
+    """
+    fig, ax = plt.subplots(figsize=(5.833, 3.0))
+    ax.plot([0, 1], [0, 1])
+    ax.set_xlabel("Gross alpha (bps/year)")
+    add_message_title(
+        ax,
+        "Net alpha against gross alpha",
+        source="Scenario assumptions stated above; not a market sample",
+    )
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    note = next(
+        child
+        for child in fig.get_children()
+        if getattr(child, "get_text", None) and "Scenario assumptions" in str(child.get_text())
+    )
+    note_box = note.get_window_extent(renderer)
+    label_box = ax.xaxis.get_label().get_window_extent(renderer)
+    assert note_box.y1 <= label_box.y0 + 1, (
+        "the source note overlaps the x-axis label, so both are unreadable"
     )
     plt.close(fig)
 

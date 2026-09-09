@@ -460,7 +460,6 @@ limit = 1.08 * max(
 )
 
 for ax, column, estimator, color in plot_specs:
-    metrics = metric_rows[estimator]
     ax.scatter(
         nq_validation["quoted_bps"],
         nq_validation[column],
@@ -473,18 +472,20 @@ for ax, column, estimator, color in plot_specs:
     ax.set_ylim(0, limit)
     ax.set_xlabel("Quoted close spread (bps)")
     ax.set_ylabel("Estimated spread (bps)")
-    direction = "above" if metrics["bias_bps"] > 0 else "below"
     add_message_title(
         ax,
-        f"{estimator} symbol medians sit {direction} the quoted spread",
-        subtitle="One point per symbol; the dashed line is exact agreement",
+        f"{estimator} estimate against quoted spread, one point per symbol",
+        subtitle="NASDAQ-100 minute panel; the dashed line is exact agreement, both panels "
+        "on the same limits",
     )
 
 show_with_alt(
     fig,
-    "Two scatter panels of estimated against quoted spread, one point per symbol, sharing axes. "
-    "Corwin-Schultz points cluster near the low-spread corner slightly above the 45-degree line; "
-    "Roll points sit far above it, an order of magnitude away from exact agreement.",
+    "Two stacked scatter panels of estimated against quoted spread, one point per symbol, on "
+    "identical axes with a dashed diagonal marking exact agreement. Every quoted spread is "
+    "compressed against the vertical axis, so both clouds hug the left edge and sit well above "
+    "the diagonal; the Roll cloud reaches several times higher up the axis than the "
+    "Corwin-Schultz one.",
 )
 
 # %% [markdown]
@@ -513,6 +514,7 @@ def keep_top_symbols(df: pl.DataFrame, symbol_col: str) -> pl.DataFrame:
         .agg(pl.col("volume").mean())
         .sort("volume", descending=True)
         .head(MAX_SYMBOLS)[symbol_col]
+        .to_list()
     )
     return df.filter(pl.col(symbol_col).is_in(top))
 
@@ -576,7 +578,7 @@ datasets["CME Futures"] = (
 # %%
 fx = load_fx_pairs(frequency="daily")
 if MAX_SYMBOLS > 0:
-    fx_symbols = fx["symbol"].unique().sort().head(MAX_SYMBOLS)
+    fx_symbols = fx["symbol"].unique().sort().head(MAX_SYMBOLS).to_list()
     fx = fx.filter(pl.col("symbol").is_in(fx_symbols))
 datasets["FX Pairs"] = fx
 
@@ -745,7 +747,7 @@ ax.set_xlabel("Estimated relative spread (bps)")
 ax.set_ylabel("")
 add_message_title(
     ax,
-    "Estimator choice changes cross-asset spread levels",
+    "Corwin-Schultz and Roll median spread estimates by market",
     subtitle="20-session windows on daily liquid samples; lines connect paired medians",
 )
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2)
@@ -770,15 +772,17 @@ ax_zero.set_xlim(0, 1)
 ax_zero.set_xlabel("Share of sessions the estimator returned zero")
 add_message_title(
     ax_zero,
-    "On the equity panels the estimate is zero most of the time",
+    "Share of sessions each estimator returned zero, by market",
     subtitle="A zero means the window's volatility hid the spread, not that the spread was zero",
 )
 show_with_alt(
     fig,
     "Upper panel: one row per market with a circle for the Corwin-Schultz median, a square for "
-    "the Roll median, and a line joining them; Roll sits to the right on every row. Lower panel: "
-    "paired horizontal bars of how often each estimator returned zero, near the full width for "
-    "Corwin-Schultz on the two equity panels and far lower elsewhere.",
+    "the Roll median, and a line joining them; Roll sits to the right on every row, sometimes "
+    "by the width of the panel. Lower panel: paired horizontal bars of how often each "
+    "estimator returned zero. The Corwin-Schultz bar is near the full width on the ETF and "
+    "S&P 500 rows and shorter on each remaining market, while the Roll bars are all much the "
+    "same length.",
 )
 
 # %% [markdown]
@@ -997,7 +1001,7 @@ ax_rate.set_ylabel("Share of sessions with an estimate")
 ax_rate.set_ylim(bottom=0)
 add_message_title(
     ax_rate,
-    "The share of sessions producing any estimate barely moves with VIX",
+    "Share of sessions with a positive estimate, by VIX quartile",
     subtitle="A session with no estimate is one where volatility swamped the high-low range",
 )
 
@@ -1008,15 +1012,16 @@ ax_level.set_xlabel("Full-sample VIX quartile")
 ax_level.set_ylabel("Mean estimate when positive (bps)")
 add_message_title(
     ax_level,
-    "On the sessions that do produce one, the estimate more than doubles",
+    "Mean estimate on the sessions that produce one, by VIX quartile",
     subtitle="ETF daily panel; quartile boundaries set on the whole VIX history",
 )
 show_with_alt(
     fig,
-    "Two stacked bar panels across the four VIX quartiles. The upper panel, the share of sessions "
-    "on which Corwin-Schultz returns a positive estimate, is close to flat across all four. The "
-    "lower panel, the mean estimate on those sessions, rises steadily and is more than twice as "
-    "large in the most stressed quartile as in the calmest.",
+    "Two stacked bar panels across the four VIX quartiles. The upper panel, the share of "
+    "sessions on which Corwin-Schultz returns a positive estimate, stays inside a narrow band "
+    "with no trend across the quartiles - its shortest bar is the second quartile, not the "
+    "calmest. The lower panel, the mean estimate on those sessions, climbs from one quartile "
+    "to the next and more than doubles between the calmest and the most stressed.",
 )
 
 # %% [markdown]
@@ -1052,7 +1057,7 @@ ax_spread.plot(
 ax_spread.set_ylabel("Mean CS estimate (bps)")
 add_message_title(
     ax_spread,
-    "The estimate spikes in the same weeks the VIX does",
+    "Daily mean Corwin-Schultz estimate and the VIX, ETF panel",
     subtitle="Cross-sectional mean across the ETF panel, one point per session",
 )
 
@@ -1064,8 +1069,9 @@ ax_vix.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 show_with_alt(
     fig,
     "Two stacked time series over the ETF sample: the daily cross-sectional mean Corwin-Schultz "
-    "estimate above, the VIX below, on a shared date axis. Both are quiet for long stretches and "
-    "spike together in the same episodes.",
+    "estimate above, the VIX below, on a shared date axis. Both are quiet for long stretches "
+    "and become active in the same episodes, though each series has its tallest spike in a "
+    "different year.",
 )
 
 # %% tags=["results"]

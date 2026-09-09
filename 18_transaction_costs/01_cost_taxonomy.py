@@ -297,14 +297,15 @@ for val, label in [(6, "$1M"), (7, "$10M"), (8, "$100M"), (9, "$1B")]:
 
 add_message_title(
     ax,
-    "Dollar turnover differs by market and observation window",
+    "Average daily dollar turnover by market",
     subtitle="Instrument-level mean daily turnover; distributions shown on a log scale",
     source="ML4T datasets; each market retains its source coverage window",
 )
-fig.subplots_adjust(bottom=0.24)
 show_with_alt(
     fig,
-    "Violin plots of average daily dollar turnover per instrument, one violin per market, on a log scale. CME futures sit highest and US equities lowest, with each market spanning two to three orders of magnitude.",
+    "Violin plots of average daily dollar turnover per instrument, one violin per market, on "
+    "a log scale. CME futures sit highest and tightest, US equities lowest and by far the "
+    "widest; the markets in between overlap heavily.",
 )
 
 # %% tags=["results"]
@@ -618,13 +619,16 @@ colorbar = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3])
 colorbar.ax.set_yticklabels(["Commission", "Spread", "Impact", "Commission + Spread"])
 add_message_title(
     ax,
-    "The largest cost component changes with trade size and scenario",
+    "Largest cost component and total one-way cost by market and trade size",
     subtitle="Color shows the largest component or tie; labels show total one-way cost in bps",
     source="Illustrative parameters displayed above; square-root impact model",
 )
 show_with_alt(
     fig,
-    "A grid of markets by order size, each cell colored by which cost component is largest and labelled with the total one-way cost in basis points. Impact takes over only in the least liquid market at the largest sizes.",
+    "A grid of markets by trade size, each cell colored by whichever cost component is "
+    "largest and labelled with the total one-way cost in basis points. Commission or spread "
+    "dominates the small sizes everywhere; impact takes the largest sizes in three of the "
+    "markets, and the labelled totals climb fastest along the least liquid row.",
 )
 
 # %% [markdown]
@@ -822,7 +826,7 @@ for row_idx in range(len(turnover_labels)):
 fig.colorbar(im, ax=ax, label="Breakeven annual alpha (%)")
 add_message_title(
     ax,
-    "Turnover multiplies even modest one-way trading costs",
+    "Breakeven gross annual alpha by turnover and one-way cost",
     subtitle="Breakeven gross alpha under explicit turnover and cost scenarios",
     source="Scenario grid computed from the breakeven formula above",
 )
@@ -893,7 +897,7 @@ ax.set_ylabel("Net Alpha (bps/year)")
 ax.legend(loc="upper left")
 add_message_title(
     ax,
-    "Borrow cost raises the gross-alpha hurdle for long-short portfolios",
+    "Net alpha against gross alpha, one line per borrow rate",
     subtitle="Net of trading-cost drag and of borrow charged on the short half of the book",
     source="Borrow-rate scenarios and portfolio assumptions stated above; not a market sample",
 )

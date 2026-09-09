@@ -60,10 +60,7 @@
 # %%
 """Reinforcement Learning for Trade Execution - tabular Q-learning on real NASDAQ-100 liquidity."""
 
-import warnings
 from collections import defaultdict
-
-warnings.filterwarnings("ignore")
 
 import numpy as np
 import plotly.graph_objects as go
@@ -74,12 +71,14 @@ from plotly.subplots import make_subplots
 import utils  # noqa: F401
 from data import load_nasdaq100_bars
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# Real AlgoSeek NASDAQ-100 minute bars define the execution environment. The parent order is
+# scheduled within a single session across a fifteen-minute grid; the policy is trained on the
+# earlier sessions and evaluated on the later ones.
 
 # %% tags=["parameters"]
-# Real AlgoSeek NASDAQ-100 minute bars define the execution environment. The
-# parent order is scheduled within a single session across a 15-minute grid;
-# the policy is trained on the earlier sessions and evaluated on the later ones.
 PRIMARY_SYMBOL = "AAPL"
 TAQ_START_DATE = "2021-10-01"
 TAQ_END_DATE = "2021-12-31"
@@ -96,12 +95,14 @@ ALPHA = 0.30  # learning rate
 EPSILON_START = 0.5  # exploration rate (linearly decayed to 0)
 SEED = 42
 
+# %% [markdown]
+# Actions are multipliers on the VWAP base slice, the volume-proportional rate. The neutral
+# multiplier reproduces VWAP exactly, so VWAP lies inside the policy class and the agent can only
+# improve on it by conditioning on real-time state - the lagged-regime adaptation
+# f(spread, volatility) discussed in Section 18.5.
+
 # %%
 set_global_seeds(SEED)
-# Actions are multipliers on the VWAP base slice (the volume-proportional rate).
-# A multiplier of 1.0 reproduces VWAP exactly, so VWAP lies inside the policy
-# class and the agent can only improve on it by conditioning on real-time state -
-# the lagged-regime adaptation f(spread, volatility) discussed in Section 18.5.
 ACTIONS = np.array([0.5, 0.75, 1.0, 1.3, 1.6])
 
 # %% [markdown]
@@ -114,9 +115,10 @@ ACTIONS = np.array([0.5, 0.75, 1.0, 1.3, 1.6])
 # finite-horizon Markov decision process:
 #
 # - **State** $s_t = (\text{time remaining}, \text{inventory remaining}, \text{spread}_{t-1}\text{ regime}, \text{volatility}_{t-1}\text{ regime})$
-# - **Action** $a_t \in \{0.5,\ 0.75,\ 1.0,\ 1.3,\ 1.6\}$ - a multiplier on the VWAP base slice ($1.0$ = trade exactly the VWAP rate this interval)
+# - **Action** $a_t \in \mathcal{A}$ - a multiplier on the VWAP base slice, drawn from the ladder `ACTIONS` set in the parameters cell; its neutral rung trades exactly the VWAP rate this interval
 # - **Reward** $r_t = -\big[\,c_t\,(q_t/Q) + \lambda\,(\bar I_t/Q)\,\sigma_t\,\big]$ - negative execution cost on the fill plus a linear exposure penalty on average inventory $\bar I_t$ carried while the interval unfolds
-# - **Liquidity rule** - realized fills cannot exceed 25% of interval volume
+# - **Liquidity rule** - realized fills cannot exceed the `MAX_PARTICIPATION` share of
+#   interval volume
 # - **Terminal rule** - unfilled inventory after the close pays an explicit shortfall penalty
 #
 # The score combines two quantities every execution desk trades off: market
@@ -257,9 +259,9 @@ print(f"Measured ADV: {adv:,.0f} shares")
 print(f"Parent order target: {order_shares:,} shares ({ORDER_PCT_ADV:.0%} of ADV)")
 
 # %% [markdown]
-# **Finding**: The parent order is a tenth of a training-window day's volume
-# scheduled inside a single session, so under a flat trajectory it targets roughly 10% of average
-# interval volume. Realized fills remain subject to the 25% participation cap.
+# **Finding**: The parent order is the fraction of a training-window day's volume printed
+# above, scheduled inside a single session, so under a flat trajectory it targets roughly that
+# same share of average interval volume. Realized fills remain subject to the participation cap.
 
 # %%
 # Visualize the real microstructure regimes the policy will condition on.
@@ -301,14 +303,19 @@ fig.add_scatter(
 )
 fig.update_xaxes(title_text=f"Interval ({INTERVAL_MINUTES}-min, 0 = 09:30)")
 fig.update_yaxes(title_text="Shares", row=1, col=1)
-fig.update_yaxes(title_text="bps", row=1, col=2)
-fig.update_yaxes(title_text="bps", row=1, col=3)
 fig.update_layout(
-    title="Liquidity, Spreads, and Volatility All Peak Near the Open",
+    title="Mean volume, spread and realized volatility by intraday interval",
     height=380,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three panels over the intraday interval grid. Mean volume is a U-shaped bar series, "
+    "tallest in the first interval, falling through the middle of the session and rising again "
+    "into the close. Mean spread and mean realized volatility both fall steeply away from the "
+    "first interval, stay flat and low across the middle of the session, and tick up in the "
+    "final interval.",
+)
 
 # %% [markdown]
 # **Finding**: The three regimes pull in different directions. Volume is U-shaped
@@ -426,7 +433,7 @@ def encode_state(t: int, remaining: float, spread_bps: float, vol_bps: float) ->
 # that request through the real interval, observes the realized cost and exposure,
 # and
 # updates $Q(s,a) \leftarrow Q(s,a) + \alpha\,[\,r + \max_{a'} Q(s',a') - Q(s,a)\,]$.
-# Each request is metered as volume arrives and cannot exceed 25% of realized
+# Each request is metered as volume arrives and cannot exceed the capped share of realized
 # interval volume. The final interval requests any residual, but the same cap
 # applies; remaining inventory pays the explicit terminal shortfall penalty.
 
@@ -485,11 +492,9 @@ def run_episode(sess: dict, q_table: dict, epsilon: float, learn: bool) -> tuple
                     t + 1, remaining, sess["spread_bps"][t], sess["vol_bps"][t]
                 )
                 if t + 1 == N_BUCKETS - 1:
-                    # Terminal next state - the residual request uses the final
-                    # action slot, so bootstrap from that action's value rather
-                    # than the max over phantom unvisited actions (which would
-                    # zero out the terminal shortfall cost in the value
-                    # function).
+                    # Terminal next state: bootstrap from the final action slot's
+                    # value, not the max over phantom unvisited actions, which would
+                    # zero out the terminal shortfall cost in the value function.
                     target = reward + q_table[next_state][len(ACTIONS) - 1]
                 else:
                     target = reward + np.max(q_table[next_state])
@@ -552,7 +557,7 @@ vwap_shares = shares_from_weights(mean_volume, order_shares)
 
 
 # %% [markdown]
-# A static schedule defines a target cumulative trajectory. If the 25% cap prevents
+# A static schedule defines a target cumulative trajectory. If the participation cap prevents
 # a target fill, the missed quantity carries forward. The close requests all remaining
 # inventory, but the cap still applies and any residual becomes explicit shortfall.
 
@@ -579,7 +584,7 @@ def execute_static_schedule(target_shares: np.ndarray, sess: dict) -> np.ndarray
 #
 # We run all three policies on the test sessions and compare the execution,
 # exposure, and shortfall score. The Q-policy acts greedily; the baselines apply
-# their fixed target trajectories. All three pass through the same 25% fill cap,
+# their fixed target trajectories. All three pass through the same fill cap,
 # carry missed target quantity forward, and pay the same terminal shortfall
 # penalty. Differences therefore reflect when each policy requests liquidity.
 
@@ -697,12 +702,18 @@ for strat in ["RL", "TWAP", "VWAP"]:
     vals = eval_df.filter(pl.col("strategy") == strat)["score_bps"].to_list()
     fig.add_box(y=vals, name=strat, marker_color=colors[strat], boxmean=True)
 fig.update_layout(
-    title=f"{summary['strategy'][0]} Has the Lowest Mean Held-Out Execution Score",
+    title="Held-out execution score by policy",
     xaxis_title="Policy",
     yaxis_title="Execution, exposure, and shortfall score (bps)",
     height=450,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three box plots of the per-session held-out execution score, one per policy, with a dashed "
+    "mean line inside each box. The reinforcement-learning box sits lowest and is the narrowest; "
+    "the TWAP box sits highest and is the widest; VWAP falls between them. Each policy has one "
+    "high outlier well above its whisker.",
+)
 
 # %% [markdown]
 # The marginal distributions show dispersion, while the paired counts above answer
@@ -729,13 +740,19 @@ fig.add_bar(
     x=strategies, y=shortfall_means, name="Shortfall penalty", marker_color=COLORS["copper"]
 )
 fig.update_layout(
-    title="Execution Scores Separate Trading, Exposure, and Shortfall Costs",
+    title="Mean execution score by policy, split into its three components",
     xaxis_title="Policy",
     yaxis_title="Mean cost (bps)",
     barmode="stack",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Stacked bars of mean cost per policy, split into execution cost, exposure proxy and "
+    "shortfall penalty. The exposure proxy is by far the tallest segment in every bar and is "
+    "what separates the policies; the execution-cost base is nearly identical across all three, "
+    "and the shortfall penalty is a thin cap on each.",
+)
 
 # %%
 display(
@@ -756,7 +773,7 @@ display(
 # Because the Q-table is tabular, we can compare calm and volatile decisions while
 # holding time, inventory, and spread regime fixed. This matched-state diagnostic
 # avoids attributing a different time or inventory distribution to volatility. A
-# multiplier above 1.0 trades faster than the VWAP base slice; below 1.0 holds back.
+# multiplier above the neutral rung trades faster than the VWAP base slice; below it holds back.
 
 
 # %%

@@ -24,7 +24,7 @@
 # 1. **Volume Participation Concept**: Why institutions limit market footprint
 # 2. **VolumeParticipationLimit API**: Parameters and behavior
 # 3. **Partial Fills Over Multiple Bars**: Large orders split automatically
-# 4. **Participation Rate Comparison**: 5%, 10%, 25% limits
+# 4. **Participation Rate Comparison**: a conservative, a standard and an aggressive cap
 # 5. **Real-World Scenario**: Large order with volume constraints
 # 6. **Integration with Impact Models**: Full execution realism
 #
@@ -60,13 +60,15 @@ from plotly.subplots import make_subplots
 
 from data import load_nasdaq100_bars
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# A parent order is released against a real intraday sequence of (volume, price) intervals built
+# from AlgoSeek NASDAQ-100 minute bars. The participation cap is applied to each interval's
+# *actual* traded volume, so completion time and realized price come entirely from real
+# liquidity - there are no synthetic volume curves anywhere in this notebook.
 
 # %% tags=["parameters"]
-# A parent order is released against a real intraday sequence of (volume, price)
-# intervals built from AlgoSeek NASDAQ-100 minute bars. The participation cap is
-# applied to each interval's *actual* traded volume, so completion time and
-# realized price come entirely from real liquidity - no synthetic volume curves.
 EXEC_SYMBOLS = ["AAPL", "MSFT", "AMZN", "GOOGL", "META"]  # liquid NASDAQ-100 names
 PRIMARY_SYMBOL = "AAPL"  # symbol whose real sessions drive the execution walk
 TAQ_START_DATE = "2021-10-01"
@@ -88,19 +90,18 @@ set_global_seeds(SEED)
 #
 # ### The Problem
 #
-# | Order Size | % of Daily Volume | Expected Impact |
-# |------------|-------------------|-----------------|
-# | 10,000 shares | 1% | Minimal |
-# | 100,000 shares | 10% | Moderate |
-# | 500,000 shares | 50% | Severe |
+# Impact scales with how much of the day's volume the order asks for. An order worth a low
+# single-digit percentage of daily volume is absorbed with little trace. One approaching a tenth
+# of it moves the price against the desk as it works. One approaching half the day's volume
+# cannot be filled at anything near the arrival price.
 #
 # ### Industry Practice
 #
-# Institutional desks typically limit participation to **5-20% of volume**:
-# - **5%**: Very conservative (stealth execution)
-# - **10%**: Standard (balanced impact/speed)
-# - **20%**: Aggressive (urgent execution)
-# - **25%+**: Only for very liquid names or urgent situations
+# Institutional desks cap participation somewhere in the low-to-mid tens of percent, and the
+# choice is a speed-versus-impact trade. A stealth cap minimizes footprint and accepts a long
+# horizon; a standard cap balances the two; an aggressive cap finishes quickly and pays for it,
+# and is reserved for very liquid names or urgent situations. The three caps this notebook
+# compares are set in the parameters cell and labelled on every figure below.
 
 # %%
 # Demonstrate the VolumeParticipationLimit API
@@ -409,23 +410,28 @@ for i, (rate, df) in enumerate(results.items()):
 fig.update_xaxes(title_text="Executed interval (count)")
 fig.update_yaxes(title_text="Parent order filled (%)", range=[0, 105])
 fig.update_layout(
-    title="Higher participation caps shorten the completion horizon",
+    title="Cumulative parent-order fill by executed interval, one panel per cap",
     height=400,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three side-by-side line charts of cumulative parent-order fill against executed interval, "
+    "one panel per participation cap. Every curve climbs from the origin to the dashed "
+    "completion line at the top, and the horizontal extent each panel needs shrinks by roughly "
+    "an order of magnitude as the cap loosens from left to right.",
+)
 
 # %%
 summary = {row["participation_limit"]: row for row in comparison_df.iter_rows(named=True)}
+clearing = ", ".join(
+    f"{row['intervals_to_complete']} intervals ({row['sessions_to_complete']} sessions) "
+    f"at a {row['participation_limit']:.0%} cap"
+    for row in comparison_df.iter_rows(named=True)
+)
 display(
     Markdown(
-        "**Finding**: The calibrated half-ADV order clears in "
-        f"{summary[0.05]['intervals_to_complete']} intervals "
-        f"({summary[0.05]['sessions_to_complete']} sessions) at a 5% cap, "
-        f"{summary[0.10]['intervals_to_complete']} intervals "
-        f"({summary[0.10]['sessions_to_complete']} sessions) at 10%, and "
-        f"{summary[0.25]['intervals_to_complete']} intervals "
-        f"({summary[0.25]['sessions_to_complete']} sessions) at 25%. "
+        f"**Finding**: The calibrated half-ADV order clears in {clearing}. "
         "The faster schedule consumes more of each interval's liquidity and "
         "therefore accepts more market-impact risk per fill."
     )
@@ -451,12 +457,14 @@ for rate, df in results.items():
     print(f"  Avg participation:      {df['participation'].mean():.1%}")
 
 # %%
+realized = ", ".join(
+    f"${row['vwap']:.2f} at a {row['participation_limit']:.0%} cap"
+    for row in comparison_df.iter_rows(named=True)
+)
 display(
     Markdown(
-        "**Finding**: Realized VWAP differs across caps "
-        f"(${summary[0.05]['vwap']:.2f} at 5%, ${summary[0.10]['vwap']:.2f} at 10%, "
-        f"and ${summary[0.25]['vwap']:.2f} at 25%) because the schedules span "
-        "different market-price windows. This timing or drift risk is distinct "
+        f"**Finding**: Realized VWAP differs across caps ({realized}) because the schedules "
+        "span different market-price windows. This timing or drift risk is distinct "
         "from the participation footprint measured within each interval."
     )
 )
@@ -527,11 +535,20 @@ fig.update_yaxes(title_text="Price ($)", row=2, col=1)
 fig.update_yaxes(title_text="Participation (%)", row=2, col=2)
 
 fig.update_layout(
-    title="Tighter caps extend the horizon and spread fills across liquidity",
+    title="Fill, fill size, execution price and participation, by interval",
     height=600,
     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four panels comparing the three participation caps. Cumulative fill: the loosest cap "
+    "reaches the dashed completion line in a short burst while the tightest one climbs almost "
+    "linearly over several times as many intervals. Fill size per interval: the loosest cap "
+    "takes large fills early that decay quickly, while the tightest cap's fills stay small and "
+    "even across the whole horizon. Execution price path: the traded price wanders inside a "
+    "narrow band with no trend. Participation rate: each schedule holds a flat horizontal line "
+    "at its own cap, with only isolated points below it.",
+)
 
 # %% [markdown]
 # **Finding**: The execution timeline makes the trade-off visible. Conservative
@@ -602,15 +619,9 @@ print(f"   Total cost:         ${notional + impact_cost:,.2f}")
 # %% [markdown]
 # ## Part 6: Minimum Volume Gate
 #
-# VolumeParticipationLimit includes a `min_volume` parameter that prevents
-# execution on low-volume bars:
-#
-# ```python
-# limit = VolumeParticipationLimit(
-#     max_participation=0.10,
-#     min_volume=5000,  # Don't execute if bar volume < 5,000
-# )
-# ```
+# `VolumeParticipationLimit` also takes a `min_volume` floor, which suppresses execution
+# entirely on any bar whose realized volume falls below it. The cell below sets both parameters
+# and reports which bars the floor blocks.
 #
 # **Use Cases:**
 # - Avoid executing during illiquid periods (lunch hour)
@@ -664,13 +675,19 @@ fig.add_bar(
     marker_color=COLORS["blue"],
 )
 fig.update_layout(
-    title="The minimum-volume gate blocks fills below 5,000 shares",
+    title="Permitted fill by realized bar volume, with and without a floor",
     barmode="group",
     xaxis_title="Realized bar volume (shares)",
     xaxis_type="category",
     yaxis_title="Permitted fill (shares)",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bar chart of permitted fill against realized bar volume, with one bar for the "
+    "ungated rule and one for the minimum-volume rule at each volume. On the two thinnest bars "
+    "only the ungated rule fills at all; from the threshold volume upward the two rules permit "
+    "the same fill, and both flatten at the same ceiling on the deepest bar.",
+)
 
 # %% [markdown]
 # **Finding**: A minimum-volume gate is a second layer of execution discipline.
@@ -684,16 +701,16 @@ fig.show()
 #
 # 1. **Purpose**: Enforce realistic execution by limiting fills to a % of volume
 # 2. **Partial Fills**: Large orders automatically split across multiple bars
-# 3. **Broker Integration**: `_partial_orders` dict tracks remaining quantities
+# 3. **Broker Integration**: the broker tracks each parent order's remaining quantity
+#    internally and releases it across subsequent bars
 #
 # ### Parameter Guidelines
 #
-# | Parameter | Typical Value | Use Case |
-# |-----------|---------------|----------|
-# | `max_participation=0.05` | 5% | Stealth execution, minimize impact |
-# | `max_participation=0.10` | 10% | Standard institutional |
-# | `max_participation=0.25` | 25% | Urgent execution |
-# | `min_volume=5000` | 5K+ | Block illiquid periods |
+# `max_participation` is the speed-versus-impact dial: the stealth setting minimizes footprint
+# and accepts the longest horizon, the standard setting is the institutional default, and the
+# aggressive setting is for urgent orders in liquid names. The three settings compared above are
+# in the parameters cell and labelled on each figure. `min_volume` is separate - it blocks
+# illiquid periods outright rather than sizing into them.
 #
 # ### Combining with Impact Models
 #

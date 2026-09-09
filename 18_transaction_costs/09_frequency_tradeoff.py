@@ -57,11 +57,13 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
+
+# %% [markdown]
+# The historical illustration uses one fixed ETF universe and four cadences. The cost, decay and
+# persistence-cost sections are descriptive scenarios.
 
 # %% tags=["parameters"]
-# The historical illustration uses one fixed ETF universe and four cadences.
-# The cost, decay, and persistence-cost sections are descriptive scenarios.
 SEED = 42
 ETF_SYMBOLS = ["SPY", "QQQ", "IWM", "XLF", "EEM", "XLE", "XLU", "FXI"]
 GROSS_START_DATE = "2019-01-01"
@@ -164,7 +166,7 @@ pl.DataFrame(
 # Rather than assume turnover per cadence, we measure it in a historical illustration. We
 # equal-weight the top-ranked subset by lagged trailing momentum within a fixed ETF universe and
 # compare several cadences on provider-adjusted closes. The universe and sample are fixed teaching
-# inputs, not a point-in-time membership screen or sealed holdout. The comparison is descriptive
+# inputs, not a point-in-time membership screen or an untouched holdout. The comparison is descriptive
 # and does not estimate a production-optimal cadence. Between scheduled rebalances, realized asset
 # returns drift the portfolio weights; the next turnover charge compares the new target with those
 # pre-trade drifted weights.
@@ -283,7 +285,7 @@ display(
         f"""monthly cadence and {_daily["annual_turnover"]:.1f}x at daily cadence. Its gross """
         f"""Sharpe is {_monthly["gross_sharpe"]:.2f} monthly and """
         f"""{_daily["gross_sharpe"]:.2f} daily. These are descriptive full-sample estimates, """
-        """not sealed-holdout performance."""
+        """not performance on an untouched holdout."""
     )
 )
 
@@ -486,6 +488,7 @@ for col in [1, 2]:
             line_dash="dash",
             line_color=COLORS["neutral"],
             annotation_text="Illustrative hurdle",
+            annotation_position="top left",
             row=1,
             col=col,
         )
@@ -495,8 +498,8 @@ for col in [1, 2]:
 
 fig.update_layout(
     title=(
-        "Faster rebalancing compounds signal degradation and trading costs"
-        f"<br><sup>Fixed {len(ETF_SYMBOLS)}-ETF illustration, {GROSS_START_DATE} to "
+        "Gross and net Sharpe by rebalancing cadence, two friction scenarios"
+        f"<br><sup>Fixed ETF illustration, {GROSS_START_DATE} to "
         f"{GROSS_END_DATE}; {MOMENTUM_LOOKBACK}-day signal lagged one close</sup>"
     ),
     yaxis_title="Sharpe Ratio",
@@ -507,13 +510,27 @@ fig.update_layout(
 )
 fig.update_xaxes(title_text="Rebalancing cadence")
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels sharing a vertical Sharpe axis, one per friction scenario, each with a dashed "
+    "gross line and a solid net line over the four cadences from monthly to daily. Both lines "
+    "fall from left to right in both panels, the net line faster than the gross one, so the gap "
+    "between them is widest at the daily end. The two panels are almost indistinguishable from "
+    "one another. A dashed horizontal reference line marks the illustrative hurdle, and the net "
+    "line crosses below it between the weekly and daily points.",
+)
 
 # %% [markdown]
 # **Finding**: The gap between the gross (dashed) and net (solid) lines is the cost
 # drag, and it widens toward daily cadence in this sample. Even before costs, the
 # gross line slopes down as cadence accelerates, so the two effects reinforce rather
 # than offset. This full-period comparison is descriptive, not a holdout ranking.
+#
+# The two panels are nearly identical, and that is worth reading rather than skipping: the
+# high- and medium-friction stacks differ by half a basis point per round trip, which at this
+# strategy's turnover is far too little to separate the net lines. What moves the Sharpe here is
+# the cadence, not the cost assumption. The stacks have to differ by more than that before the
+# choice between them changes an answer.
 
 # %% [markdown]
 # ## 6. Cost Erosion Analysis
@@ -544,7 +561,7 @@ fig.add_trace(
 )
 fig.update_layout(
     title=(
-        "Trading costs widen the gross-to-net return gap at faster cadences"
+        "Gross and net annual return by rebalancing frequency"
         "<br><sup>High-friction scenario; costs charged on each observed rebalance</sup>"
     ),
     yaxis_title="Annual Return (%)",
@@ -554,7 +571,12 @@ fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
     margin=dict(t=105),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Paired bars of gross and net annual return at each of the four rebalancing frequencies. "
+    "Both bars shorten from monthly through daily, and the net bar falls further than the gross "
+    "one, so the pair is closest at monthly cadence and furthest apart at daily.",
+)
 
 # %% [markdown]
 # ## 7. Frequency Choice Under Signal Decay
@@ -675,7 +697,7 @@ for index, costs in enumerate([HIGH_FRICTION_COSTS, LOW_FRICTION_COSTS]):
     )
 fig.update_layout(
     title=(
-        "Faster signal decay shifts the scenario-preferred cadence upward"
+        "Scenario-preferred cadence against assumed signal decay"
         f"<br><sup>Hypothetical gross Sharpe {SCENARIO_GROSS_SHARPE:.1f} and "
         f"{SCENARIO_ANNUAL_VOL:.0%} volatility; historical turnover inputs</sup>"
     ),
@@ -686,7 +708,13 @@ fig.update_layout(
     margin=dict(t=110),
 )
 fig.update_yaxes(categoryorder="array", categoryarray=freq_order)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A step plot of the preferred cadence against assumed daily signal decay, one line per "
+    "friction scenario, on a categorical cadence axis. The low-friction line sits on the daily "
+    "category across the whole decay range. The high-friction line starts one category below it "
+    "at the slowest decay and joins it at the second decay point, staying there afterwards.",
+)
 
 # %% [markdown]
 # **Finding**: The crossover is conditional on the stated decay, gross Sharpe, volatility, cost,
@@ -740,7 +768,7 @@ fig = go.Figure(
 )
 fig.update_layout(
     title=(
-        "Persistence lifts the teaching score while cost pressure lowers it"
+        "Teaching score over signal persistence and cost pressure"
         "<br><sup>Illustrative proxy only; not a calibrated alpha-to-go estimate</sup>"
     ),
     xaxis_title="Signal Persistence (φ)",
@@ -748,7 +776,13 @@ fig.update_layout(
     height=500,
     margin=dict(t=105),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap of the score over signal persistence on the horizontal axis and cost pressure on "
+    "the vertical, shaded on a logarithmic colour scale. The surface is pale over most of the "
+    "grid and darkens sharply into the bottom-right corner, where persistence is highest and "
+    "cost pressure lowest; the darkening runs almost entirely along the persistence axis.",
+)
 
 # %% [markdown]
 # **Interpretation**: The score is highest at high persistence and low cost pressure, in the
@@ -779,7 +813,7 @@ signals = signals.with_columns(
 
 # %%
 fig = go.Figure()
-rank_colors = [COLORS["blue"], COLORS["amber"], COLORS["slate"], COLORS["copper"]]
+rank_colors = ml4t_palette(4, categorical=True)
 for row, color in zip(signals.sort("raw_rank").iter_rows(named=True), rank_colors, strict=True):
     fig.add_trace(
         go.Scatter(
@@ -796,7 +830,7 @@ for row, color in zip(signals.sort("raw_rank").iter_rows(named=True), rank_color
     )
 fig.update_layout(
     title=(
-        "Persistence and cost assumptions can reverse a raw-signal ranking"
+        "Signal rank by raw IC and by the persistence-cost score"
         "<br><sup>Illustrative inputs; the score is not a measured cost-adjusted IC</sup>"
     ),
     xaxis_title="Ranking basis",
@@ -806,7 +840,14 @@ fig.update_layout(
     showlegend=False,
     margin=dict(t=105, l=125, r=145),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A slope chart with one line per signal running between two ranking columns, raw IC on the "
+    "left and the persistence-cost score on the right, with rank one at the top and every line "
+    "labelled at both ends. The lines cross heavily: the signal ranked first on raw IC falls to "
+    "last, the one ranked last rises to second, and the two remaining signals swap places by one "
+    "rank each.",
+)
 
 # %% [markdown]
 # **Interpretation**: In these hypothetical inputs, short-horizon momentum starts with the highest
@@ -863,7 +904,7 @@ display(
 2. **The historical cadence comparison is descriptive**: in the fixed {GROSS_START_DATE} to
    {GROSS_END_DATE} sample,
    monthly net Sharpe is {_monthly_high["net_sharpe"]:.2f} versus
-   {_daily_high["net_sharpe"]:.2f} daily under the high-friction stack. No sealed holdout or
+   {_daily_high["net_sharpe"]:.2f} daily under the high-friction stack. No untouched holdout or
    production-optimal cadence is claimed.
 
 3. **Cost labels are scenarios, not trader estimates**: each stack is a transparent parameterization
