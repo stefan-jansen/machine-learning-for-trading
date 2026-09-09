@@ -39,9 +39,10 @@
 #
 # **Evaluation contract**: the loading map is fit before the temporal split.
 # At each evaluation decision, the current return and its projected factor are
-# observable; only then is the next factor premium forecast. The 1,433-day
-# evaluation is a teaching demonstration, not a sealed final holdout or a
-# model-selection set. The pre-specified forecast model uses $\kappa=10$.
+# observable; only then is the next factor premium forecast. The evaluation window is a
+# teaching demonstration: it is neither a holdout kept untouched for a final measurement
+# nor a set used to choose between models. The pre-specified forecast model uses
+# $\kappa=10$.
 #
 # **Universe limitation**: the source is a curated present-day ETF set, so the
 # panel is suitable for method exposition but not a survivorship-free historical
@@ -71,7 +72,14 @@ from scipy.linalg import eigh
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_palette, zero_line
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    ml4t_palette,
+    show_with_alt,
+    zero_line,
+)
 
 # %% tags=["parameters"]
 N_FACTORS = 5
@@ -260,24 +268,41 @@ reconstruction_shares = [result["reconstruction_share"] for result in stage1_res
 projector_distances = [result["projector_distance"] for result in stage1_results]
 positions = np.arange(len(KAPPAS))
 
-fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True, constrained_layout=True)
 axes[0].plot(positions, pricing_shares, marker="o", color=COLORS["blue"])
 axes[0].set_ylabel("Training mean fit")
-add_message_title(axes[0], "Pricing weight improves representation of the training mean")
+add_message_title(axes[0], "Training mean fit against pricing weight")
 axes[1].plot(positions, reconstruction_shares, marker="o", color=COLORS["amber"])
 axes[1].set_ylabel("Evaluation reconstruction share")
 axes[1].set_xlabel("Pricing weight kappa")
 axes[1].set_xticks(positions, kappa_labels)
-add_message_title(axes[1], "Evaluation reconstruction stays nearly flat across pricing weights")
-plt.show()
+add_message_title(axes[1], "Evaluation reconstruction share against pricing weight")
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a horizontal axis of pricing weight kappa, drawn at "
+    "equal spacing rather than to scale. The upper plots how well the fitted factors "
+    "represent the training mean; the lower plots the share of evaluation variance they "
+    "reconstruct. Both vertical axes are auto-scaled to their own data, so the lower "
+    "panel magnifies a range of well under one percentage point.",
+)
+print(
+    f"Evaluation reconstruction share ranges {min(reconstruction_shares):.4f} to "
+    f"{max(reconstruction_shares):.4f} across the kappa grid; training mean fit ranges "
+    f"{min(pricing_shares):.4f} to {max(pricing_shares):.4f}"
+)
 
-fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
 ax.plot(positions, projector_distances, marker="o", color=COLORS["copper"])
 ax.set_ylabel("Projector distance")
 ax.set_xlabel("Pricing weight kappa")
 ax.set_xticks(positions, kappa_labels)
-add_message_title(ax, "Only large weights materially rotate the PCA loading space")
-plt.show()
+add_message_title(ax, "Projector distance from the unweighted loading space")
+show_with_alt(
+    fig,
+    "A marked line of projector distance against pricing weight kappa, with kappa at "
+    "equal spacing rather than to scale. The distance measures how far the fitted "
+    "loading subspace has rotated away from the one fitted at kappa of zero.",
+)
 
 # %% [markdown]
 # ## 4. Stage 2: update before forecasting
@@ -451,19 +476,26 @@ ci_low = np.array([result["ci_low"] for result in forecast_results])
 ci_high = np.array([result["ci_high"] for result in forecast_results])
 colors = ml4t_palette(len(names), categorical=True)
 
-fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True, constrained_layout=True)
 axes[0].scatter(names, mse_ratios, color=colors, s=55)
 zero_line(axes[0], at=1.0)
 axes[0].set_ylabel("MSE ratio vs zero")
 axes[0].set_ylim(min(mse_ratios.min() - 0.004, 0.98), max(mse_ratios.max() + 0.004, 1.01))
-add_message_title(axes[0], "AR(1) delivers the only material reduction in zero-return MSE")
+add_message_title(axes[0], "Test MSE relative to the zero-return forecast")
 errors = np.vstack([mean_ics - ci_low, ci_high - mean_ics])
 axes[1].errorbar(names, mean_ics, yerr=errors, fmt="o", color=COLORS["blue"], capsize=4)
 zero_line(axes[1])
 axes[1].set_ylabel("Mean rank IC")
 axes[1].set_xlabel("Walk-forward Stage 2 forecaster")
-add_message_title(axes[1], "Rank IC remains small after serial-correlation adjustment")
-plt.show()
+add_message_title(axes[1], "Mean rank IC with its HAC interval")
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a horizontal axis of Stage 2 forecaster. The upper "
+    "marks each forecaster's test MSE as a ratio to the zero-return forecast, against a "
+    "dashed line at one, on an axis spanning roughly two percentage points either side. "
+    "The lower plots each forecaster's mean rank IC as a point with a HAC interval, "
+    "against a dashed line at zero.",
+)
 
 # %% [markdown]
 # ## 6. Takeaways
@@ -478,8 +510,9 @@ plt.show()
 #    complete training histories removes thousands of pre-inception pseudo-zeros.
 # 4. **Walk-forward timing uses current information once.** Each observed factor
 #    updates history before the following day's premium is forecast.
-# 5. **Daily prediction remains modest and forecaster-specific.** AR(1) reduces
-#    zero-return MSE by about 1.1% and has a small positive HAC rank IC. The
-#    expanding mean essentially ties the benchmark with a 0.05% reduction, and
-#    EWMA underperforms. This curated universe cannot support a survivorship-free
-#    strategy claim.
+# 5. **Which Stage 2 forecaster you pick changes the answer, and the figure above is
+#    where that is read.** The MSE panel is on an axis spanning a couple of percentage
+#    points either side of the benchmark, so a visible gap there is a small effect; the
+#    IC panel's intervals are what say whether an apparent ordering is larger than the
+#    uncertainty around it. Whatever the run shows, this universe is curated and cannot
+#    support a survivorship-free strategy claim.
