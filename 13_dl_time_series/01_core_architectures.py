@@ -1004,11 +1004,14 @@ show_with_alt(
 #    training curve alone cannot distinguish a network that is learning from one that
 #    is memorising, and both look like progress. The second curve costs one forward
 #    pass per epoch.
-# 3. **Purge the windows that straddle a split boundary.** A window of length $L$
-#    predicting $H$ days ahead reaches $L + H - 1$ positions forward, so the last
-#    $L + H - 1$ windows before any boundary contain data from the far side of it.
-#    Nothing warns about this: the model trains, the score is computed, and it is
-#    quietly optimistic.
+# 3. **Place each example by the date of its target, and embargo the horizon.** The
+#    boundary that decides an example's partition is the one its target falls on, not
+#    the one its window starts on. An input window reaching back across a boundary is
+#    not leakage - at decision time the model has that history. What leaks is a
+#    training target resolved by days the model is later scored on, so training stops
+#    `HORIZON` days short of the first validation target. Nothing warns about either
+#    choice: the model trains, the score is computed, and a wrong one is quietly
+#    optimistic.
 # 4. **Time one step, not the whole run.** Total training time on shared hardware
 #    measures the neighbours as much as the architecture. A warmed-up, repeated,
 #    minimum-of-many single step is comparable between architectures and stable enough

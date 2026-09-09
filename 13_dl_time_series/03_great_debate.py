@@ -554,17 +554,22 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## Does any of them use the ordering?
 #
-# A model that reads a sequence should get worse when the sequence stops being one.
-# The diagnostic is to take each test input window, shuffle its days into a random
-# order, and score the model again. The model's weights do not change; only the
-# arrangement of what it is shown does. A model whose error jumps was relying on which
-# day came when. A model whose error barely moves was reading the window as an
-# unordered bag of numbers, whatever its architecture suggests.
+# A model that reads a sequence should behave differently when the sequence stops
+# being one. The diagnostic is to take each test input window, shuffle its days into a
+# random order, and run the model again. The model's weights do not change; only the
+# arrangement of what it is shown does.
+#
+# Two things are measured, because the error alone cannot answer the question. The
+# error says whether the shuffle cost anything on average; the distance between the
+# two sets of predictions says whether the model's output moved at all. Predictions
+# can move a long way and leave the average squared error where it was, so a model
+# whose error barely changes has not thereby been shown to ignore order. Only a model
+# whose *predictions* barely move has been.
 #
 # This is the test that made the original critique sharp. Zeng and co-authors found
-# that shuffling hurt the linear models substantially and the Transformers hardly at
-# all on their benchmarks - so the attention layers, whose entire justification is
-# modelling relations between positions, were not using position.
+# that shuffling cost the Transformers very little on their benchmarks, while the
+# linear models suffered - evidence against attention layers whose entire
+# justification is modelling relations between positions.
 #
 # The same diagnostic is run here, on a different kind of series, and its outcome has
 # to be read against that difference. Those benchmarks are electricity load and

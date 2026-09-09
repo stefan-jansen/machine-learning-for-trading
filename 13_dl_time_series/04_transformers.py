@@ -18,10 +18,12 @@
 #
 # **Docker image**: `ml4t-gpu`
 #
-# `03_great_debate` left a Transformer that was not reading position. Attention
-# compares every token to every other and has no built-in notion of order, so what a
-# token *is* decides what attention can find. The vanilla design makes one day one
-# token, which gives attention 60 nearly interchangeable scalars to relate.
+# `03_great_debate` measured a Transformer whose predictions barely moved when the
+# days inside each input window were shuffled, while the linear models' predictions
+# moved by more than their own size - on that test set it was not using the ordering.
+# Attention compares every token to every other and has no built-in notion of order,
+# so what a token *is* decides what attention can find. The vanilla design makes one
+# day one token, which gives attention 60 nearly interchangeable scalars to relate.
 #
 # Both architectures here answer that by changing the token. **PatchTST** makes a token
 # a short run of consecutive days, so each one carries a piece of local shape rather
