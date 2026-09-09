@@ -33,7 +33,7 @@
 # - Train with a cost-aware pooled Sharpe loss on realized portfolio returns
 # - Compare VLSTM to the plain LSTM baseline (`11_dl_portfolio_allocation`) and heuristic allocators
 #
-# **Book Reference**: Chapter 17, Section 17.8 (Deep Learning for Portfolio Construction)
+# **Book Reference**: Chapter 17, Section 17.8 (Deep learning for portfolio construction)
 #
 # **Prerequisites**: `11_dl_portfolio_allocation`
 

@@ -29,8 +29,8 @@
 # - Run walk-forward backtests comparing HRP to shrinkage MVO and to heuristic allocators, and
 #   read the ranking against the assets-to-observations ratio that decides when HRP helps
 #
-# **Book Reference**: Chapter 17, Section 17.6 (Optimizing for Stability with Hierarchical Risk
-# Parity)
+# **Book Reference**: Chapter 17, Section 17.6 (Optimizing for stability with Hierarchical
+# Risk Parity)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, ETF price data
 

@@ -37,7 +37,7 @@
 # - Compare strategy performance against benchmarks (alpha, beta, IR)
 # - Perform event analysis during market stress periods
 #
-# **Book Reference**: Chapter 17, Section 17.3 (Portfolio Evaluation Metrics)
+# **Book Reference**: Chapter 17, Section 17.3 (Portfolio evaluation metrics)
 #
 # **Prerequisites**: The ETF case study (`case_studies/etfs/`) must have been run
 # to produce `run_log/backtest/<hash>/daily_returns.parquet`.

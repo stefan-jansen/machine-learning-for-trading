@@ -36,7 +36,7 @@
 # - Compare against equal-weight and inverse-volatility baselines
 # - Assess cost sensitivity of the learned allocator
 #
-# **Book Reference**: Chapter 17, Section 17.8 (Deep Learning for Portfolio Construction)
+# **Book Reference**: Chapter 17, Section 17.8 (Deep learning for portfolio construction)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, `09_allocator_comparison`
 

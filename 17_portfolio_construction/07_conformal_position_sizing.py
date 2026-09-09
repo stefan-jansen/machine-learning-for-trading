@@ -33,7 +33,7 @@
 #   allocations on the same prediction panel
 # - Identify when uncertainty-based sizing helps versus hurts
 #
-# **Book Reference**: Chapter 17, Section 17.4 (Defining Baseline Allocators)
+# **Book Reference**: Chapter 17, Section 17.4 (Defining baseline allocators)
 #
 # **Prerequisites**: `02_mean_variance_optimization`; conformal prediction from
 # Chapter 11 (`06_conformal_prediction`); registered GBM predictions for the

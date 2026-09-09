@@ -28,8 +28,8 @@
 # - Evaluate methods on Sharpe, drawdown, turnover, and stability
 # - Understand when allocation choice matters vs when signal dominates
 #
-# **Book Reference**: Chapter 17, Section 17.4 (Defining Baseline Allocators) and Section 17.7
-# (Comparing Allocator Performance)
+# **Book Reference**: Chapter 17, Section 17.4 (Defining baseline allocators) and Section 17.7
+# (Comparing allocator performance)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, `06_hierarchical_risk_parity`
 # %% [markdown]

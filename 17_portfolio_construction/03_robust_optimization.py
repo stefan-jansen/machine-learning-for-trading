@@ -42,7 +42,7 @@
 # - Check whether an allocation fitted to a training drawdown actually has a shallow one later.
 #
 # ## Book reference
-# Chapter 17, Section 17.5 (Mean-Variance Optimization and the Markowitz Curse).
+# Chapter 17, Section 17.5 (Mean-variance optimization and the Markowitz curse).
 #
 # ## Prerequisites
 #

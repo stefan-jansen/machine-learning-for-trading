@@ -33,7 +33,7 @@
 #   (equal weight, inverse volatility)
 # - Evaluate performance across crisis vs calm regimes
 #
-# **Book Reference**: Chapter 17, Section 17.8 (Deep Learning for Portfolio Construction)
+# **Book Reference**: Chapter 17, Section 17.8 (Deep learning for portfolio construction)
 #
 # **Prerequisites**: `11_dl_portfolio_allocation` (differentiable Sharpe concept)
 

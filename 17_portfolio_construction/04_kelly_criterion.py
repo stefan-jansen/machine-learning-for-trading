@@ -42,7 +42,7 @@
 #   be acted on.
 #
 # ## Book reference
-# Chapter 17, Section 17.4 (Defining Baseline Allocators).
+# Chapter 17, Section 17.4 (Defining baseline allocators).
 #
 # ## Prerequisites
 #

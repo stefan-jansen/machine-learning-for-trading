@@ -27,7 +27,7 @@
 # - Compare frozen test-period risk, return, and concentration
 # - Reconcile a vectorized allocation with execution-aware daily targets
 #
-# **Book Reference**: Chapter 17, Section 17.7 (Comparing Allocator Performance)
+# **Book Reference**: Chapter 17, Section 17.7 (Comparing allocator performance)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, `03_robust_optimization`
 

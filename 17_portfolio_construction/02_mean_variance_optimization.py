@@ -42,7 +42,7 @@
 #   against baselines that estimate less.
 #
 # ## Book reference
-# Chapter 17, Section 17.5 (Mean-Variance Optimization and the Markowitz Curse).
+# Chapter 17, Section 17.5 (Mean-variance optimization and the Markowitz curse).
 #
 # ## Prerequisites
 #
