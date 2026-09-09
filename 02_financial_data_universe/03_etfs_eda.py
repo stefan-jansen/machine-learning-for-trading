@@ -31,7 +31,7 @@
 #   panel and dictionary agree symbol-for-symbol.
 # - Check OHLC invariants and null rates, and compare liquidity across the nine groups.
 #
-# **Book reference**: §2.2 ("The Asset-Class Market Data Landscape" — ETPs).
+# **Book reference**: §2.2, "The asset-class market data landscape" - the ETP part of it.
 #
 # **Prerequisites**: `data` package on `PYTHONPATH`; ETF parquet present at
 # `ML4T_DATA_PATH/etfs/market/`. Run `python data/etfs/market/download.py` if missing.
@@ -46,7 +46,7 @@ from ml4t.data.etfs import ETFDataManager
 from data import load_etfs
 from utils.data_quality import check_ohlc_invariants
 from utils.paths import REPO_ROOT
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -55,8 +55,8 @@ MAX_SYMBOLS = 0  # 0 = all
 # %% [markdown]
 # ## 1. Load and inspect
 #
-# The ETF universe is stored as a single Parquet file of daily OHLCV data for
-# **100 ETFs** spanning the major asset classes.
+# The ETF universe is stored as a single Parquet file of daily OHLCV data spanning the major
+# asset classes. The load below reports how many symbols and how many rows that comes to.
 
 # %%
 etfs = load_etfs()
@@ -123,11 +123,11 @@ partial.select(["symbol", "start", "end", "rows"]).sort("start")
 # %% [markdown]
 # ### The universe grows and then plateaus
 #
-# Counting how many ETFs have data available at each year-end tells a very different
-# story from the equities panel in `01_us_equities_eda`. There, the count rose for
-# fifty years and then *fell* — the signature of a data-collection artifact, not a
-# market. Here it rises to 100 and stays there: a curated universe, held fixed, with
-# new products phased in as they launch.
+# Counting how many ETFs have data available at each year-end tells a different story from
+# the equities panel in `01_us_equities_eda`. There the count rose for decades and then fell,
+# which is the signature of a collection that started recording exits partway through. Here it
+# rises and then holds flat, because the universe was chosen once and every member is still
+# quoted; the climb is new products reaching their launch date, not the universe changing.
 
 # %%
 years = list(range(full_start.year, full_end.year + 1))
@@ -147,13 +147,18 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title="ETFs with data available, by year-end (rises to 100, then holds)",
+    title="The universe fills up and then holds, where the equities panel fell away",
     xaxis_title="Year",
     yaxis_title="ETFs available",
     yaxis_range=[0, 105],
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A line counting how many ETFs have data available at each year-end. It climbs steadily "
+    "through the first decade as new products launch, reaches the full universe, and then "
+    "runs flat to the end of the panel with no decline.",
+)
 
 # %% [markdown]
 # ## 3. The nine groups
@@ -198,12 +203,17 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="ETFs per group (nine groups, 100 ETFs)",
+    title="The groups are uneven, and every symbol belongs to exactly one",
     xaxis_title="ETFs",
     yaxis=dict(autorange="reversed"),
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A horizontal bar chart of how many ETFs each group holds, sorted from largest to "
+    "smallest, with the count written at the end of each bar. The largest group holds "
+    "several times what the smallest does.",
+)
 
 # %% [markdown]
 # ## 4. Data quality
@@ -237,11 +247,16 @@ print(
 )
 
 # %% [markdown]
-# The handful of violations are `high < close` or `low > close` after price adjustment.
-# The same cumulative split/dividend ratio is applied to all four price fields, but
-# small per-field rounding can break invariants that the raw quotes satisfied. At about
-# a sixth of a percent of rows they are immaterial for return and feature calculations,
-# but worth knowing about before computing intraday-range statistics.
+# The count above is the union: rows breaking any one of the five ordering invariants, where
+# the table above it reports each invariant separately. Both are worth having, because a
+# single figure hides which invariant broke.
+#
+# The two that break are `high < close` and `low > close`, and the cause is the adjustment
+# rather than the quotes. Yahoo applies the same cumulative split and dividend ratio to all
+# four price fields, and rounding each one separately can push a close a fraction above the
+# high that contained it. At this rate the rows are immaterial for returns and features, and
+# they are not immaterial for anything computed from the intraday range, which is why the
+# rate is reported rather than the rows being dropped.
 
 # %% [markdown]
 # ## 5. Liquidity across the groups
@@ -272,13 +287,18 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="Average daily volume by group (log scale)",
-    xaxis_title="Shares/day",
+    title="Volume spans more than an order of magnitude across the groups",
+    xaxis_title="Shares/day (log scale)",
     xaxis_type="log",
     yaxis=dict(autorange="reversed"),
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A horizontal bar chart of average daily share volume by group on a logarithmic axis. "
+    "The broad US equity group sits at the far right and the currency group at the far "
+    "left, with the rest spread between them.",
+)
 
 # %% [markdown]
 # ## 6. Price levels
@@ -310,7 +330,7 @@ print(f"SPY via loader: {spy.shape}")
 
 # %%
 configured = sum(len(group["symbols"]) for group in etf_mgr.config.tickers.values())
-print(f"ETFDataManager loaded from {config_path}")
+print(f"ETFDataManager loaded from {config_path.relative_to(REPO_ROOT)}")
 print(f"  Provider:           {etf_mgr.config.provider}")
 print(f"  Date range:         {etf_mgr.config.start} to {etf_mgr.config.end}")
 print(f"  Configured symbols: {configured} across {len(etf_mgr.config.tickers)} groups")
@@ -318,34 +338,31 @@ print(f"  Configured symbols: {configured} across {len(etf_mgr.config.tickers)} 
 # %% [markdown]
 # ## Key takeaways
 #
-# **What this notebook does.** It establishes what is in the ETF file — how many ETFs,
-# over what window, grouped how — and confirms the price panel and the group dictionary
-# describe the same 100 symbols.
+# - **Ask which convention a `close` column follows before computing a return.** Here it is
+#   already split- and dividend-adjusted, so no further adjustment is needed. The equities
+#   panel in `01_us_equities_eda` ships raw and adjusted side by side under different names,
+#   so the column called `close` means a different thing in each file.
+# - **A universe that fills and holds was chosen; one that rises and falls was collected.**
+#   The same year-by-year count that exposed a collection artifact in the equities panel
+#   confirms the opposite here, and the shape of the curve is what distinguishes them.
+# - **Check the panel against the dictionary that built it, both ways.** Symbols in the
+#   config with no prices, and prices with no group, are different failures with different
+#   causes, and a single count of matches hides both.
+# - **Report the rate of an invariant break, and say which invariant broke.** A union count
+#   tells you something is wrong; the per-check table tells you it is the adjustment rounding
+#   two fields against each other rather than a corrupted quote. Only the second answers
+#   whether the rows are safe for what you are about to compute.
+# - **A spread in liquidity is a constraint on the strategy, not a footnote about the data.**
+#   The groups here differ by more than an order of magnitude in daily volume, so a rotation
+#   that can trade one bucket at negligible cost cannot assume the same fills in another.
 #
-# **What it finds.**
+# **Known limitations.** The universe is fixed and every member is still quoted, so this panel
+# says nothing about ETF closures - a real ETF universe does lose members, and a backtest that
+# selects from this pool inherits the survivorship its construction removed. Volume is in
+# shares rather than notional, so it is not comparable across price levels without converting.
+# And the group classification comes from the download config, which is a choice made by this
+# repository rather than a standard taxonomy.
 #
-# 1. **Pre-adjusted prices.** The `close` column is the split- and dividend-adjusted
-#    close; return calculations need no further adjustment.
-# 2. **Coverage.** 100 ETFs, daily, `2006-01-03` to `2025-12-31` (5,031 trading days).
-#    59 span the full window; 41 start later as new products launched. None end early.
-# 3. **A curated universe, not a collection artifact.** The available-ETF count rises to
-#    100 and plateaus — the inverse of the equities panel's rise-and-fall.
-# 4. **Nine groups, 100 ETFs.** The universe config classifies every symbol; the panel
-#    and config agree symbol-for-symbol, with no members in one and not the other.
-# 5. **Mostly clean.** Zero nulls, 158 zero-volume rows, and 760 OHLC violations
-#    (0.16% of rows) from post-adjustment rounding — immaterial for returns and features.
-# 6. **Liquidity spans an order of magnitude.** Broad US equity averages ~25M
-#    shares/day and the currency bucket ~0.6M — a ~41× spread that later chapters must
-#    respect when modeling transaction costs.
-#
-# **What it means.** This is a clean, curated, survivorship-*aware* panel: unlike the
-# equities panel, the universe is fixed and every symbol is still quoted, so there is no
-# hidden exit record to reconstruct. The work in Chapter 6 filters this 100-ETF pool
-# into the trading universe the rotation case study uses.
-#
-# ### Next steps
-#
-# - **`13_data_quality_framework`**: systematic data-quality checks across the datasets.
-# - **`15_survivorship_bias_detection`**: survivorship and selection bias in the equity
-#   panel — the contrast to the clean ETF universe shown here.
-# - **Chapter 6**: universe construction over this 100-ETF candidate pool.
+# **Next**: `13_data_quality_framework` runs systematic checks across these datasets, and
+# `15_survivorship_bias_detection` works the equity panel this one is the contrast to.
+# Chapter 6 constructs a trading universe from this candidate pool.
