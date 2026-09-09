@@ -1077,18 +1077,25 @@ show_plotly_with_alt(
 # checkpoint outputs, which this notebook does not do.
 #
 # What the plateau cannot tell you, the per-strategy numbers above do, and they are the
-# ones to read. The real-versus-synthetic correlation across strategies is close to
-# zero, so knowing a strategy's real tail risk tells you almost nothing about its
-# synthetic one; the median per-strategy error is several times the aggregate; and the
-# share of strategies the model overstates is close to half. Those three facts are one
-# fact: the aggregate error is small because roughly half the strategies are overstated
-# and half understated, and the two halves cancel. The scatter panels show the same
-# thing - points spread on both sides of the 45-degree line rather than tracking it.
+# ones to read. The median per-strategy relative error is several times the aggregate
+# error, so individual strategies are matched far worse than the headline suggests. The
+# share of strategies the model overstates is close to half, which is what makes the two
+# consistent: the aggregate is small because overstated and understated strategies
+# cancel in the average, not because the strategies themselves are close.
+#
+# The correlations printed alongside are near zero. Read them for what they are - Pearson
+# correlation measures linear association in this sample, so a value near zero says the
+# synthetic tail risk does not rise and fall linearly with the real one across
+# strategies. It is not proof that no relationship of any shape exists; establishing that
+# would need a rank or dependence measure this notebook does not compute. The claim the
+# evidence supports is about agreement, and the median error is what carries it. The
+# scatter panels show the same thing: points spread on both sides of the 45-degree line
+# rather than tracking it.
 #
 # This is the notebook's most transferable lesson, and it is not specific to Tail-GAN.
-# An aggregate computed across units can look tolerable while carrying no information
-# about any single unit. If the intended use is per-strategy - sizing one book, stressing
-# one desk - the aggregate is the wrong number to have been reassured by.
+# Accuracy in an aggregate computed across units does not establish accuracy for any
+# single unit. If the intended use is per-strategy - sizing one book, stressing one desk -
+# the aggregate is the wrong number to have been reassured by.
 
 # %% [markdown]
 # ## 16. Results Summary
