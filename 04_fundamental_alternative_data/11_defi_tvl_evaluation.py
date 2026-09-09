@@ -306,14 +306,21 @@ audit = pl.DataFrame(
     {
         "check": [
             "history in years",
-            "missing days",
+            "days absent from the history",
             "missing values",
             f"daily moves above {EXTREME_DAILY_MOVE:.0%}, whole history",
             f"daily moves above {EXTREME_DAILY_MOVE:.0%}, since {MODERN_ERA_START}",
         ],
         "result": [
             f"{(tvl['timestamp'].max() - tvl['timestamp'].min()).days / 365.25:.1f}",
-            str(int((gaps["gap_days"] > 1).sum())),
+            str(
+                int(
+                    gaps.select(
+                        (pl.col("gap_days") - 1).filter(pl.col("gap_days") > 1).sum()
+                    ).item()
+                    or 0
+                )
+            ),
             str(tvl["tvl_usd"].null_count()),
             str(int((moves["daily_change"].abs() > EXTREME_DAILY_MOVE).sum())),
             str(int((modern["daily_change"].abs() > EXTREME_DAILY_MOVE).sum())),
@@ -419,14 +426,16 @@ legal_review
 
 # %%
 def break_even_alpha(aum: float) -> dict:
-    """The gross annual return, in basis points, that covers the cost of carrying the feed."""
+    """Two bars: the return that covers the cost, and the one that returns a multiple of it."""
     annual_cost = DATA_FEES + (INTEGRATION_HOURS + MAINTENANCE_HOURS) * HOURLY_RATE
     capital = aum * ALLOCATION_SHARE
+    cost_recovery = annual_cost / capital * 10_000
     return {
         "aum_usd": int(aum),
         "annual_cost_usd": int(annual_cost),
         "capital_informed_usd": int(capital),
-        "break_even_bps": round(annual_cost * TARGET_RETURN_ON_COST / capital * 10_000, 1),
+        "cost_recovery_bps": round(cost_recovery, 1),
+        "target_bps": round(cost_recovery * TARGET_RETURN_ON_COST, 1),
     }
 
 
@@ -434,10 +443,15 @@ costs = pl.DataFrame([break_even_alpha(aum) for aum in (10e6, 50e6, 500e6, 5e9)]
 costs
 
 # %% [markdown]
-# The cost is the same whatever the fund's size, so the bar the signal has to clear falls with
-# capital. That is the general shape of an alternative-data decision and it is why the same
-# dataset is worth buying at one firm and not at another: the question is never whether a signal
-# is real, but whether it is real and large enough for the capital it would inform.
+# The two columns are different bars and both are worth having. **Cost recovery** is the return
+# at which the signal pays for itself and nothing more. **Target** is that multiplied by the
+# return a research budget expects on what it funds, which is the bar a project has to clear to be
+# worth starting rather than merely worth continuing.
+#
+# The cost is the same whatever the fund's size, so both bars fall with capital. That is the
+# general shape of an alternative-data decision and it is why the same dataset is worth buying at
+# one firm and not at another: the question is never whether a signal is real, but whether it is
+# real and large enough for the capital it would inform.
 #
 # Here the first year carries the integration hours as well, so a second year is cheaper. What
 # the table does not include is the opportunity cost of the research time, which is usually the
@@ -462,8 +476,8 @@ verdict = pl.DataFrame(
             f"implausible move since {MODERN_ERA_START}",
             "Public on-chain state; no material non-public information; attribution requested",
             f"${(INTEGRATION_HOURS + MAINTENANCE_HOURS) * HOURLY_RATE:,} a year in engineering, "
-            f"no data fees; break-even from "
-            f"{costs['break_even_bps'].min():.1f} to {costs['break_even_bps'].max():.1f} bps",
+            f"no data fees; cost recovery from "
+            f"{costs['cost_recovery_bps'].min():.1f} to {costs['cost_recovery_bps'].max():.1f} bps",
         ],
         "outcome": [
             "Unproven on this sample",
@@ -504,6 +518,7 @@ verdict
 # 6. A restated series with no vintage archive cannot support a backtest, however clean it is. The
 #    fix is to start snapshotting, which is cheap and only pays off later, and the decision in the
 #    meantime is to wait rather than to proceed carefully.
-# 7. The break-even return falls with the capital a signal would inform, so the same dataset is a
-#    reasonable purchase at one firm and not at another. The question is never whether a signal is
-#    real on its own.
+# 7. Separate the return that recovers the cost from the return a budget requires on what it
+#    funds. Both fall with the capital a signal would inform, which is why the same dataset is a
+#    reasonable purchase at one firm and not at another, and why the question is never whether a
+#    signal is real on its own.
