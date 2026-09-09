@@ -818,9 +818,9 @@ print(f"Windows per cluster after it: {np.bincount(index_labels[n_train_windows:
 #   selects, and nothing else. They are conditional statistics of the index.
 # - The columns marked **holding only here** describe one rule: hold the index while the label
 #   says this regime, hold cash otherwise, over every session in the evaluated block. Cash
-#   sessions contribute a zero return and a flat stretch of the equity curve, which is why the
-#   annualised figures here are smaller than the conditional ones and the drawdown is a
-#   drawdown someone could have taken. No costs and no slippage are charged.
+#   sessions contribute a zero return and a flat stretch of the equity curve, so the mean is
+#   pulled toward zero from whichever side it was on, and the drawdown is one someone could have
+#   taken. No costs and no slippage are charged.
 #
 # Compounding only the sessions inside a regime, which is the easier thing to write, splices
 # out the gaps and produces a drawdown belonging to no position anyone could hold.
@@ -869,10 +869,15 @@ display(pd.DataFrame(regime_rows).set_index("regime").T)
 # downstream notebooks use: the two regimes are not two draws from one distribution that
 # differ only in spread.
 #
-# The two rules are what a reader would actually be choosing between, and neither is the
-# index. Each holds it for part of the block and cash for the rest, so both annualise to less
-# than the conditional figure above them, and the difference between the two rules is the only
-# comparison in the table where the same sessions are on both sides.
+# The two rules are what a reader would actually be choosing between, and neither is the index.
+# Each holds it for part of the block and cash for the rest, so each mean is the conditional
+# mean scaled by the fraction of sessions invested: nearer zero, not necessarily smaller, and a
+# negative conditional mean comes out higher. The volatility of a rule is not a scaled
+# conditional volatility at all, because switching between an invested session and a cash one is
+# itself variation; whichever direction it moves in this table is a fact about this sample.
+#
+# The difference between the two rules is the only comparison here where the same sessions are
+# on both sides of it.
 
 # %% [markdown]
 # ## The distance between the two clusters' returns
