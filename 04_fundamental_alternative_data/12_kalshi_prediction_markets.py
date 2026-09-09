@@ -88,6 +88,12 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # read as the probability of the event. The tick is a cent, which sets the resolution of that
 # probability at one percentage point.
 #
+# **What this feed carries is the bid, not a mid or a trade.** The downloader takes
+# `yes_bid` - the highest price anyone is currently offering to pay for the YES side - so every
+# price below is a lower bound on what the market thinks, short by whatever the spread is. On a
+# liquid contract that is a cent; on the contracts here, where days pass without a trade, it can
+# be a great deal more, and nothing in the file says how much.
+#
 # | Property | Value |
 # |----------|-------|
 # | Regulator | Commodity Futures Trading Commission |
@@ -214,25 +220,42 @@ summary
 # in threshold order gives the market's implied survival function for the rate: the probability of
 # exceeding each level.
 #
-# That structure carries a constraint. A higher threshold is harder to exceed, so its probability
-# can never be greater than a lower threshold's. The check is cheap and it is the closest thing
-# this data has to an arbitrage condition.
+# That structure carries an ordering. A higher threshold is harder to exceed, so the market's
+# probability for it cannot exceed a lower threshold's.
+#
+# Checking that ordering on these prices is a **diagnostic and not an arbitrage test**, because
+# the prices are bids. Two contracts with different spreads can show a higher threshold bid above
+# a lower one without anything being tradeable: an arbitrage needs the higher threshold's bid
+# compared against the lower threshold's ask, and net of fees. What a violation here does say is
+# that the two quotes are stale relative to each other, which on a market this thin is the more
+# likely explanation and is worth knowing before either price is used.
+
+# %% [markdown]
+# The downloader is configured for six Kalshi series and only the rate series uses the
+# meeting-and-threshold ticker shape, so the ladder is built from the contracts whose ticker
+# matches that shape rather than from everything loaded. A contract from another series reaches
+# the notebook as an unparsed row rather than as a crash or, worse, as a threshold read off the
+# wrong part of its name.
 
 # %%
+THRESHOLD_TICKER = r"^KXFED-(?<meeting>[0-9]{2}[A-Z]{3})-T(?<threshold>[0-9]+(?:\.[0-9]+)?)$"
+
 ladder = (
-    kalshi.with_columns(
-        meeting=pl.col("symbol").str.split("-").list.get(1),
-        threshold=pl.col("symbol").str.split("-T").list.last().cast(pl.Float64),
-    )
-    .filter(pl.col("timestamp") == pl.col("timestamp").max())
+    kalshi.filter(pl.col("timestamp") == pl.col("timestamp").max())
+    .with_columns(parsed=pl.col("symbol").str.extract_groups(THRESHOLD_TICKER))
+    .unnest("parsed")
+    .drop_nulls("meeting")
+    .with_columns(pl.col("threshold").cast(pl.Float64))
     .select("meeting", "threshold", "symbol", probability="close")
     .sort("meeting", "threshold")
 )
+print(f"Contracts loaded: {kalshi['symbol'].n_unique()}")
+print(f"Of those, rate-threshold contracts: {ladder['symbol'].n_unique()}")
 violations = ladder.with_columns(rises=pl.col("probability").diff().over("meeting") > 0).filter(
     pl.col("rises")
 )
 print(f"Meetings with a threshold ladder: {ladder['meeting'].n_unique()}")
-print(f"Places where a higher threshold is priced above a lower one: {len(violations)}")
+print(f"Places where a higher threshold's bid exceeds a lower threshold's: {len(violations)}")
 ladder
 
 # %%
@@ -259,8 +282,9 @@ show_plotly_with_alt(
 
 # %% [markdown]
 # The curve falls fastest between the thresholds the market thinks are live, which is where the
-# distribution has its mass. The difference between two adjacent points is the probability the
-# rate lands between those two levels, so the ladder gives the density as well as the tail.
+# distribution has its mass. The difference between two adjacent points is roughly the
+# probability the rate lands between those two levels - roughly, because each point is a bid and
+# the difference of two bids carries both spreads.
 
 # %% [markdown]
 # ## 5. How the probabilities moved
@@ -408,10 +432,13 @@ print(f"Wrote {len(features):,} rows to {output_file}")
 #
 # 1. A binary contract's price is a probability with no model between the two, which is what makes
 #    a prediction market worth reading: every other forecast in a pipeline has to be calibrated,
-#    and this one is quoted.
-# 2. A ladder of thresholds on the same event is a distribution, and it carries a constraint worth
-#    checking: a higher threshold can never be priced above a lower one. It is the only arbitrage
-#    relation this data has and it costs one line.
+#    and this one is quoted. Check which price the feed carries, though. This one is the highest
+#    standing bid for the YES side, so it is short of the market's view by a spread that a thin
+#    book can make large.
+# 2. A ladder of thresholds on the same event is a distribution, and its ordering is worth
+#    checking: a higher threshold's probability cannot exceed a lower one's. On bid prices that is
+#    a staleness diagnostic rather than an arbitrage test, since an arbitrage compares a bid
+#    against an ask.
 # 3. Separate the bars that traded from the bars that were carried. A carried quote still holds
 #    information, but a statistic computed over both is measuring quote revisions, and a feature
 #    named for volume or for intraday range is measuring the carry.
