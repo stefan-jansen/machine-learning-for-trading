@@ -163,12 +163,15 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## 3. Premium Index Data
 #
-# The premium index measures the spread between perpetual futures and spot prices:
+# The premium index measures how far the perpetual is trading from the underlying index. It is
+# often described as the simple relative difference between the two prices, and that
+# description is close enough to build intuition on but wrong in a way that matters later:
+# Binance computes it from the *impact bid and ask* against the price index, with a term that
+# is zero whenever the index sits between them. The exact definition and its consequence are in
+# the data-quality section below.
 #
-# **Premium = (Perpetual Price - Spot Price) / Spot Price**
-#
-# - Positive premium: Futures above spot (bullish sentiment)
-# - Negative premium: Futures below spot (bearish sentiment)
+# - Positive premium: the perpetual is bid above the index, and longs pay shorts
+# - Negative premium: the perpetual is offered below it, and shorts pay longs
 #
 # ### Units
 #
