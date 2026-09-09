@@ -61,7 +61,11 @@ from case_studies.research import (
 )
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
-from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
+from case_studies.utils.backtest_presets import (
+    build_backtest_spec,
+    serializable_backtest_spec,
+    traded_universe_declaration,
+)
 from case_studies.utils.backtest_runner import (
     normalize_prediction_columns,
     run_backtest,
@@ -159,6 +163,17 @@ prices = load_backtest_prices_for(
     CASE_STUDY_ID, BACKTEST_LABEL, split="validation", max_symbols=MAX_SYMBOLS
 )
 n_assets = prices["symbol"].n_unique()
+
+# `MAX_SYMBOLS` reduces the price panel, and until the run says so in its own specification
+# that reduction did not reach `backtest_hash`: a reduced run and the full run over the same
+# predictions hashed alike, so the second was served the first's result and the reduction
+# bought nothing (ml4t/agent-workspace#911). Declaring it here, before anything is hashed,
+# gives a reduced run an identity of its own; `run_backtest` checks the panel against the
+# declaration and narrows the predictions to it, so the sweep ranks the cross-section this
+# says it ranks and `n_assets` above describes that same set. A full run declares nothing and
+# is byte-identical to before.
+TRADED_UNIVERSE = traded_universe_declaration(prices) if MAX_SYMBOLS else None
+
 # Called unconditionally, because the call is the feasibility check: it raises when no
 # declared k fits `n_assets`. It used to sit in the `else` of `if TOP_K:`, so a papermill
 # TOP_K skipped the check as well as the default it was there to supply. At MAX_SYMBOLS: 3
@@ -177,6 +192,7 @@ strategy_spec = build_backtest_spec(
     CASE_STUDY_ID,
     bt_config,
     prices=prices,
+    traded_universe=TRADED_UNIVERSE,
     prediction_hash="plumbing_test",
     initial_cash=bt_config.initial_cash,
     chapter="ch16",
@@ -348,6 +364,7 @@ def _planned_backtests(pred_row):
             CASE_STUDY_ID,
             bt_config,
             prices=prices,
+            traded_universe=TRADED_UNIVERSE,
             prediction_hash=pred_hash,
             initial_cash=bt_config.initial_cash,
             chapter="ch16",

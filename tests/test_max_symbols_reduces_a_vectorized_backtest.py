@@ -7,15 +7,23 @@ a preview taken at a reduced `MAX_SYMBOLS` was the production sweep at the
 production cost per backtest: measured on us_firm_characteristics/11_backtest,
 32 backtests at 300 symbols and at 3,708 agreed in every column to six decimals.
 
-Both ways of acting on it are wrong here, and each was tried. Narrowing the
-predictions to the panel makes the traded universe decide the portfolio without
-entering the backtest identity - the caller hashes its specification before this
-module sees the run, so a reduced preview would be served the full-universe
-result. Refusing the run stops a preview that is legitimately configured this
-way: the CI `us_firm_characteristics` fixture holds a 5-symbol panel against
-20-symbol predictions, and refusing took four notebooks down. What closes it is
-the caller declaring the universe it trades, before it hashes, which is a
-notebook change.
+Two ways of acting on it inside the runner are wrong, and each was tried.
+Narrowing the predictions to the panel unasked makes the traded universe decide
+the portfolio without entering the backtest identity - the caller hashes its
+specification before this module sees the run, so a reduced preview would be
+served the full-universe result. Refusing the run stops a preview that is
+legitimately configured this way: the CI `us_firm_characteristics` fixture holds
+a 5-symbol panel against 20-symbol predictions, and refusing took four notebooks
+down.
+
+What closes it is the caller declaring the universe it trades, before it hashes.
+`traded_universe_declaration` builds that declaration from the panel and
+`build_backtest_spec(traded_universe=...)` puts it in `strategy.signal`, which is
+hashed whole; `apply_traded_universe` reads it back in the runner, checks the
+panel against it, and narrows the predictions to it. A caller that declares
+nothing gets the old behaviour in every respect, which is what leaves every
+registered backtest at the identity it was written under - the first two groups
+of tests below hold both halves of that.
 """
 
 from __future__ import annotations
@@ -221,3 +229,222 @@ def test_a_sweep_over_one_prediction_set_says_it_once(capsys) -> None:
                 _predictions(), _prices(["A", "B"]), case_study="swept", label="fwd_ret_1m"
             )
     assert capsys.readouterr().out.count("cannot price") == 1
+
+
+# ---------------------------------------------------------------------------
+# The declaration: what a reduced run says about itself, and what that changes.
+# ---------------------------------------------------------------------------
+
+
+def _declaration(symbols: list[str]) -> dict:
+    from case_studies.utils.backtest_presets import traded_universe_declaration
+
+    return traded_universe_declaration(_prices(symbols))
+
+
+def _declared_spec(symbols: list[str]) -> dict:
+    from copy import deepcopy
+
+    spec = deepcopy(SPEC)
+    spec["strategy"]["signal"]["traded_universe"] = _declaration(symbols)
+    return spec
+
+
+def test_a_declared_universe_narrows_the_run_to_the_panel(monkeypatch) -> None:
+    """The reduction reduces: two names priced, two names traded, not four."""
+    import warnings as _warnings
+    from copy import deepcopy
+
+    import case_studies.utils.backtest_runner as br
+
+    spec = _declared_spec(["A", "C"])
+    captured: dict = {}
+    monkeypatch.setattr(br, "get_backtest_config", lambda _: object())
+    monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kw: args[2])
+    monkeypatch.setattr(br, "substitute_continuous_return_for_classification", lambda p, *_: p)
+    import case_studies.utils.conformal as conformal
+
+    monkeypatch.setattr(conformal, "ensure_conformal_calibration_identity", lambda s: s)
+
+    def fake_vectorized(**kw):
+        captured.update(kw)
+        return {
+            "daily_returns": pl.DataFrame(
+                {"timestamp": [datetime(2024, 1, 1)], "daily_return": [0.0]}
+            ),
+            "metrics": {"sharpe": 0.0},
+        }
+
+    monkeypatch.setattr(br, "_run_vectorized", fake_vectorized)
+    with _warnings.catch_warnings():
+        # And the warning goes quiet, because the panel now does bound the run. Leaving it
+        # would tell the reader a reduced run is inert at exactly the point it stopped being.
+        _warnings.simplefilter("error", UserWarning)
+        br.run_backtest(
+            "us_firm_characteristics",
+            "pred1",
+            deepcopy(spec),
+            prices=_prices(["A", "C"]),
+            predictions=_predictions(),
+            register=False,
+        )
+    assert captured["predictions"]["symbol"].to_list() == ["A", "C"]
+
+
+def test_a_reduced_run_does_not_hash_like_the_full_run() -> None:
+    """The identity half. Without this the reduced run is served the full run's result."""
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    full = backtest_hash_from_parts("pred1", SPEC)
+    reduced = backtest_hash_from_parts("pred1", _declared_spec(["A", "C"]))
+    assert full != reduced
+
+
+def test_two_universes_of_the_same_size_do_not_hash_alike() -> None:
+    """A symbol count is not a universe: {A, C} and {A, D} are different portfolios."""
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    assert _declaration(["A", "C"])["n_symbols"] == _declaration(["A", "D"])["n_symbols"] == 2
+    assert backtest_hash_from_parts("pred1", _declared_spec(["A", "C"])) != (
+        backtest_hash_from_parts("pred1", _declared_spec(["A", "D"]))
+    )
+
+
+def test_a_full_run_hashes_exactly_as_it_did_before() -> None:
+    """The compatibility half, and the reason the key is emitted only on request.
+
+    `build_backtest_spec(traded_universe=None)` must produce the spec it produced before the
+    parameter existed, or all 21,117 registered backtests re-key and every sweep recomputes
+    from scratch.
+    """
+    from copy import deepcopy
+
+    import case_studies.utils.backtest_loaders as bl
+    from case_studies.utils.backtest_presets import build_backtest_spec
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    config = bl.get_backtest_config("us_firm_characteristics")
+    prices = _prices(["A", "B", "C", "D"])
+    kwargs = dict(
+        prices=prices,
+        prediction_hash="pred1",
+        initial_cash=100_000.0,
+        signal={"method": "equal_weight_top_k", "top_k": 2, "long_short": False},
+        label=config.primary_label,
+    )
+    without = build_backtest_spec("us_firm_characteristics", config, **deepcopy(kwargs))
+    explicit_none = build_backtest_spec(
+        "us_firm_characteristics", config, traded_universe=None, **deepcopy(kwargs)
+    )
+    declared = build_backtest_spec(
+        "us_firm_characteristics",
+        config,
+        traded_universe=_declaration(["A", "C"]),
+        **deepcopy(kwargs),
+    )
+    assert "traded_universe" not in without["strategy"]["signal"]
+    assert backtest_hash_from_parts("pred1", without) == backtest_hash_from_parts(
+        "pred1", explicit_none
+    )
+    assert backtest_hash_from_parts("pred1", without) != backtest_hash_from_parts("pred1", declared)
+
+
+def test_a_panel_that_is_not_the_declared_universe_stops_the_run() -> None:
+    """The declaration is checked against the panel, not trusted.
+
+    Registering a portfolio under an identity that describes a different one is the failure
+    the key exists to prevent, so a spec and a panel that disagree is a refusal.
+    """
+    from case_studies.utils.backtest_runner import apply_traded_universe
+
+    signal = {"traded_universe": _declaration(["A", "C"])}
+    with pytest.raises(ValueError, match="not the universe this spec declares"):
+        apply_traded_universe(
+            _predictions(), _prices(["A", "D"]), signal, case_study="us_firm_characteristics"
+        )
+
+
+def test_no_declaration_leaves_the_predictions_alone() -> None:
+    from case_studies.utils.backtest_runner import apply_traded_universe
+
+    for signal in ({}, None, {"method": "equal_weight_top_k"}):
+        out = apply_traded_universe(
+            _predictions(), _prices(["A", "C"]), signal, case_study="us_firm_characteristics"
+        )
+        assert out["symbol"].to_list() == ["A", "B", "C", "D"]
+
+
+def test_every_notebook_that_reduces_its_panel_declares_what_it_trades() -> None:
+    """The fleet-wide statement, so a new backtest notebook cannot reintroduce this.
+
+    A notebook that passes `MAX_SYMBOLS` to a price loader and then hashes a specification
+    has to say which universe that specification is for. Reading the source rather than
+    keeping a list is what stops this going stale silently.
+    """
+    import re
+    from pathlib import Path
+
+    from utils.paths import REPO_ROOT
+
+    missing = []
+    for path in sorted((Path(REPO_ROOT) / "case_studies").glob("*/[0-9]*.py")):
+        text = path.read_text()
+        if "max_symbols=MAX_SYMBOLS" not in text or "build_backtest_spec(" not in text:
+            continue
+        n_calls = len(re.findall(r"build_backtest_spec\(", text))
+        n_declared = len(re.findall(r"traded_universe=", text))
+        if n_declared < n_calls:
+            missing.append(f"{path.parent.name}/{path.stem}: {n_declared} of {n_calls} calls")
+    assert not missing, (
+        "backtest specs built from a reducible panel with no universe declared: " + str(missing)
+    )
+
+
+def test_the_reduced_and_the_full_run_now_disagree(monkeypatch) -> None:
+    """The isolating measurement this issue was left open for.
+
+    Its recorded reproduction backtested predictions that were themselves produced at the
+    reduced width, so it could not separate `MAX_SYMBOLS` reducing the backtest from the
+    predictions already being narrow. Here one prediction set over four names is backtested
+    twice through the real vectorized path: once against the full panel and once against a
+    two-name panel the spec declares. `top_k=2` picks A and B from the full cross-section
+    and C and D from the declared one, so the two runs hold different portfolios and report
+    different returns - which is what `MAX_SYMBOLS` was supposed to do and did not.
+    """
+    from copy import deepcopy
+
+    import case_studies.utils.backtest_runner as br
+    import case_studies.utils.conformal as conformal
+
+    monkeypatch.setattr(br, "get_backtest_config", lambda _: object())
+    monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kw: args[2])
+    monkeypatch.setattr(conformal, "ensure_conformal_calibration_identity", lambda s: s)
+    monkeypatch.setattr(br, "substitute_continuous_return_for_classification", lambda p, *_: p)
+
+    def run(spec, panel):
+        return br.run_backtest(
+            "us_firm_characteristics",
+            "pred1",
+            deepcopy(spec),
+            prices=_prices(panel),
+            predictions=_predictions(),
+            label="fwd_ret_21d",
+            register=False,
+        )
+
+    full = run(SPEC, ["A", "B", "C", "D"])
+    reduced = run(_declared_spec(["C", "D"]), ["C", "D"])
+
+    full_ret = full.daily_returns["daily_return"].to_list()
+    reduced_ret = reduced.daily_returns["daily_return"].to_list()
+    # y_true is 0.1/0.2 for A/B against 0.3/0.4 for C/D, so the two portfolios cannot agree.
+    assert full_ret != reduced_ret, (full_ret, reduced_ret)
+    assert sorted(full.weights["symbol"].to_list()) == ["A", "B"]
+    assert sorted(reduced.weights["symbol"].to_list()) == ["C", "D"]
+    # `register=False` returns no hash, so the identity half is stated on the specs the two
+    # runs were built from - the same pair the caller hashes before deciding what to skip.
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    assert backtest_hash_from_parts("pred1", SPEC) != backtest_hash_from_parts(
+        "pred1", _declared_spec(["C", "D"])
+    )

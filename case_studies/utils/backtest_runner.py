@@ -1241,6 +1241,65 @@ def _restore_ruin_nans(metrics: dict) -> dict:
 _UNPRICED_UNIVERSE_REPORTED: set[tuple[str, str, int, int]] = set()
 
 
+def apply_traded_universe(
+    predictions: pl.DataFrame,
+    prices: pl.DataFrame,
+    signal_config: dict | None,
+    *,
+    case_study: str,
+) -> pl.DataFrame:
+    """Narrow *predictions* to the universe the spec says this run trades.
+
+    Returns them unchanged when ``signal_config`` declares no ``traded_universe``,
+    which is every full run and every spec written before the key existed.
+
+    A declaration is a claim about the panel, so it is checked against the panel
+    rather than trusted: the digest here and the one the caller hashed both cover
+    the sorted symbol list, so a panel that is not the one the caller declared stops
+    the run instead of registering a result under an identity that describes a
+    different portfolio. That is the whole point of the key - a reduced run must not
+    be able to hash like the full run over the same predictions
+    (ml4t/agent-workspace#911).
+
+    The narrowing itself is what makes ``MAX_SYMBOLS`` reduce on the vectorized path,
+    where ``gross_ret = weight * y_true`` is computed from the predictions and never
+    consults ``prices``. On the engine path it is close to a no-op, because an
+    unpriced name could not fill there anyway; doing it in both places keeps
+    ``n_assets`` - which the notebooks read off the panel to decide which ``top_k``
+    schemes are feasible - describing the cross-section the sweep actually ranks.
+    """
+    from case_studies.utils.backtest_presets import traded_universe_declaration
+
+    declared = (signal_config or {}).get("traded_universe")
+    if not declared:
+        return predictions
+    if "symbol" not in prices.columns:
+        raise ValueError(
+            f"{case_study}: the spec declares a traded universe but the price panel has no "
+            f"'symbol' column; got columns={list(prices.columns)}"
+        )
+    panel = traded_universe_declaration(prices)
+    if panel["digest"] != declared.get("digest"):
+        raise ValueError(
+            f"{case_study}: the price panel is not the universe this spec declares. "
+            f"Declared {declared.get('n_symbols')} symbols "
+            f"(digest {declared.get('digest')}), panel holds {panel['n_symbols']} "
+            f"(digest {panel['digest']}). The declaration is part of backtest_hash, so "
+            "running against a different panel would register this portfolio under "
+            "another one's identity."
+        )
+    universe = prices.select("symbol").unique()
+    if universe["symbol"].dtype != predictions["symbol"].dtype:
+        universe = _align_symbol_dtype(
+            predictions,
+            universe,
+            case_study=case_study,
+            target_side="predictions",
+            other_side="price panel",
+        )
+    return predictions.join(universe, on="symbol", how="semi")
+
+
 def warn_if_the_panel_does_not_bound_the_universe(
     predictions: pl.DataFrame, prices: pl.DataFrame, *, case_study: str, label: str
 ) -> None:
@@ -1468,13 +1527,26 @@ def run_backtest(
         prediction_hash=prediction_hash,
     )
 
+    # The universe the spec says this run trades, when it says one. This is what makes a
+    # reduced run a different identity from the full run over the same predictions, and
+    # what makes the reduction reduce on the vectorized path (ml4t/agent-workspace#911).
+    # The sp500_options HTM path is excluded for the same reason as the warning below:
+    # its `prices` frame and its predictions are not indexed by the same kind of symbol.
+    _symbol_indexed_alike = not (case_study == "sp500_options" and label == "ret_to_expiry")
+    if _symbol_indexed_alike:
+        predictions = apply_traded_universe(
+            predictions, prices, strategy.get("signal") or {}, case_study=case_study
+        )
+
     # A price panel that does not cover the predictions does not reduce a
     # vectorized run, it just makes the parameter read as if it did - see
-    # `warn_if_the_panel_does_not_bound_the_universe`. The sp500_options HTM path
-    # is excluded because its `prices` frame and its predictions are not indexed
-    # by the same kind of symbol.
-    if strategy.get("rebalance", {}).get("mode") == "vectorized" and not (
-        case_study == "sp500_options" and label == "ret_to_expiry"
+    # `warn_if_the_panel_does_not_bound_the_universe`. Silent once the spec declares
+    # the universe, because the narrowing above has then already made the panel bound
+    # the run; what is left to warn about is a caller that reduced and did not declare.
+    if (
+        strategy.get("rebalance", {}).get("mode") == "vectorized"
+        and _symbol_indexed_alike
+        and not (strategy.get("signal") or {}).get("traded_universe")
     ):
         warn_if_the_panel_does_not_bound_the_universe(
             predictions, prices, case_study=case_study, label=label

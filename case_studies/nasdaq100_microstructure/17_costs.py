@@ -83,6 +83,7 @@ from case_studies.utils.backtest_presets import (
     ensure_backtest_spec,
     set_backtest_costs_bps,
     strategy_view,
+    traded_universe_declaration,
 )
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.notebook_contracts import excluded_families
@@ -668,6 +669,12 @@ def run_cadence_cost_backtest(
         initial_cash=bt_config.initial_cash,
         chapter="ch18",
         label=LABEL,
+        # `MAX_SYMBOLS` reduced `cadence_prices` and, until the run said so in its own
+        # specification, that reduction did not reach `backtest_hash`: a reduced run and the
+        # full run over the same predictions hashed alike (ml4t/agent-workspace#911). Built
+        # from the panel this spec is being built against, which is the one `run_backtest`
+        # is handed below. A full run declares nothing and hashes as it did before.
+        traded_universe=(traded_universe_declaration(cadence_prices) if MAX_SYMBOLS else None),
         # The universe travels with the spec, not just with the query above. A row registered
         # without it reads as full-universe to every later reader - including section 4's
         # full-versus-screened query and `derived_tables_off_canonical_universe` - so the

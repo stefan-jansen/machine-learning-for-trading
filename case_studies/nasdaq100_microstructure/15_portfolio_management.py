@@ -61,7 +61,10 @@ from case_studies.utils.backtest_loaders import (
     load_backtest_prices_for,
     warmup_periods_for,
 )
-from case_studies.utils.backtest_presets import build_backtest_spec
+from case_studies.utils.backtest_presets import (
+    build_backtest_spec,
+    traded_universe_declaration,
+)
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.notebook_contracts import excluded_families
 from case_studies.utils.registry import read_predictions, resolve_best_predictions
@@ -159,6 +162,17 @@ prices = load_backtest_prices_for(
 )
 n_assets = prices["symbol"].n_unique()
 print(f"Prices: {len(prices):,} rows, {n_assets} assets")
+
+# `MAX_SYMBOLS` reduces the price panel, and until the run says so in its own specification
+# that reduction did not reach `backtest_hash`: a reduced run and the full run over the same
+# predictions hashed alike, so the second was served the first's result and the reduction
+# bought nothing (ml4t/agent-workspace#911). Declaring it here, before anything is hashed,
+# gives a reduced run an identity of its own; `run_backtest` checks the panel against the
+# declaration and narrows the predictions to it, so the sweep ranks the cross-section this
+# says it ranks and `n_assets` above describes that same set. A full run declares nothing and
+# is byte-identical to before.
+TRADED_UNIVERSE = traded_universe_declaration(prices) if MAX_SYMBOLS else None
+
 
 # %% [markdown]
 # ## 2. Allocation Sweep
@@ -290,6 +304,7 @@ def run_alloc_backtest(pred_hash, source, top_k, alloc, predictions, state):
         CASE_STUDY_ID,
         bt_config,
         prices=prices,
+        traded_universe=TRADED_UNIVERSE,
         prediction_hash=pred_hash,
         initial_cash=bt_config.initial_cash,
         chapter="ch17",
