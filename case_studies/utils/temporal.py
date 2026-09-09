@@ -283,10 +283,12 @@ def arima_one_step_forecast(fitted: Any, y_prefix: np.ndarray) -> np.ndarray:
     and the check that it stayed correct, not a reimplementation of the filter.
 
     Two neighbouring calls are wrong in ways that no assertion over the output frame can see.
-    ``apply(endog)`` defaults to ``refit=True`` and re-estimates on the array it is given, which
-    in a walk-forward feature means every emitted value was fitted on the block it is emitted
-    over. ``forecast(h)`` continues past the end of the data instead of filtering across it, so
-    it returns *h* values for an *n*-row prefix and lines up with nothing.
+    ``apply(endog, refit=True)`` re-estimates on the array it is given, which in a walk-forward
+    feature means every emitted value was fitted on the block it is emitted over. ``forecast(h)``
+    continues past the end of the data instead of filtering across it, so it returns *h* values
+    for an *n*-row prefix and lines up with nothing. In the locked ``statsmodels`` 0.14.6 the
+    default is ``refit=False``, which is the safe one - this paragraph previously said the
+    opposite, and the reason it matters is the next one, not the default.
 
     The parameter comparison is not decoration. ``refit=False`` is a keyword whose name is the
     only thing asserting the behaviour, and a default that changed upstream would otherwise
