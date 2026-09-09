@@ -415,6 +415,13 @@ CONFIDENCE_LEVELS = [0.95, 0.99]
 conditional = garch.conditional_volatility
 mean_return = garch.params["mu"]
 
+# The historical count uses each session's own conditional volatility. The number a risk
+# system would carry today is a forecast for the NEXT session, which is a different
+# quantity: the last conditional value estimates the session that has already ended.
+next_session = garch.forecast(horizon=1, reindex=False)
+forecast_mean = float(next_session.mean.iloc[-1, 0])
+forecast_volatility = float(np.sqrt(next_session.variance.iloc[-1, 0]))
+
 backtest = pd.DataFrame(
     [
         {
@@ -425,13 +432,15 @@ backtest = pd.DataFrame(
                     returns.loc[conditional.index] < mean_return + conditional * norm.ppf(1 - level)
                 ).mean()
             ),
-            "one-session value at risk, percent": mean_return
-            + conditional.iloc[-1] * norm.ppf(1 - level),
+            "next-session value at risk, percent": forecast_mean
+            + forecast_volatility * norm.ppf(1 - level),
         }
         for level in CONFIDENCE_LEVELS
     ]
 )
 display(backtest)
+print(f"Conditional volatility of the session just ended: {conditional.iloc[-1]:.4f} percent")
+print(f"One-step forecast for the next session:           {forecast_volatility:.4f} percent")
 
 # %% [markdown]
 # The observed rates come out above what each level promised, and by more at the tighter
@@ -674,28 +683,44 @@ show_with_alt(
 # holding it separates almost nothing. What varies across symbols and over time is the
 # *level* of the conditional volatility, which is the column to keep.
 #
-# The boundary at one is a different matter, and the panel reaches it. At persistence one
-# the fitted variance has no long-run average: the model's own unconditional volatility is
-# undefined, the half-life is infinite, and the estimate wanders rather than returning
-# anywhere. The two counts printed above say how many fits sit within a hundredth of that
-# boundary and how many are on it. A symbol in the second group needs its fit looked at
-# before its conditional volatility is used as a feature, because the quantity the feature
-# is estimating does not exist under the parameters it was fitted with.
+# The boundary at one is a different matter, and the panel reaches it. Be precise about what
+# fails there. The conditional variance recursion is still well defined: given a starting
+# value it produces one number per session, and a one-step forecast from it is finite. What
+# stops existing is the *unconditional* variance, $\omega/(1-\alpha-\beta)$, the level the
+# recursion would settle at if nothing further happened. At persistence one there is no such
+# level: a shock is never forgotten, the half-life is infinite, and the estimate wanders
+# instead of reverting.
+#
+# So a fit on that boundary does not invalidate the conditional volatility column. What it
+# invalidates is every statement about a long-run level, including the long-run volatility
+# in the table earlier in this notebook, and any forecast far enough ahead that mean
+# reversion is doing the work.
 
 # %% [markdown]
 # ## The features this notebook produces
 #
-# | Column | What it is | Causal |
+# | Column | What it is | Where the timing guarantee holds |
 # |---|---|---|
-# | conditional volatility | the model's estimate for each session, filtered under parameters fitted earlier | yes |
-# | standardized residual | the return divided by that session's estimate | yes |
-# | volatility percentile rank | where the current estimate sits in a trailing window | yes |
-# | volatility of volatility | how unstable the estimate itself has been | yes |
-# | persistence | a per-symbol parameter, not a per-session column | fitted on the training block |
+# | filtered conditional volatility | the recursion run forward under parameters fitted on the training block | on the held-out block only |
+# | standardized residual | the return divided by that session's estimate | wherever the estimate dividing it does |
+# | volatility percentile rank | where the current estimate sits in a trailing window | throughout |
+# | volatility of volatility | how unstable the estimate itself has been | throughout |
+# | persistence | a fitted parameter, one per symbol, not a per-session column | on a block after the one it was fitted on |
 #
-# The whole-sample fit's conditional volatility is deliberately not on the list. Every one
-# of its values was produced by parameters estimated from the entire series, including the
-# part that came after it.
+# The right-hand column is the one to read, because "causal" is a property of a value's
+# position rather than of the construction that produced it. The filtered series carries the
+# guarantee only where its parameters preceded it, which is the block after the training
+# split; inside the training block the same values were produced by parameters estimated
+# partly from them. The standardized residuals plotted earlier come from the whole-sample
+# fit and are a diagnostic rather than a feature, and the panel's persistence is estimated
+# over each symbol's entire history and is descriptive for the same reason. The cell below
+# marks the part of the filtered series that carries the guarantee.
+
+# %%
+held_out = np.zeros(len(returns), dtype=bool)
+held_out[split:] = True
+print(f"Filtered sessions with the timing guarantee: {held_out.sum():,} of {len(returns):,}")
+print(f"Their conditional volatility: mean {walk_forward[held_out].mean():.4f} percent per session")
 
 # %% [markdown]
 # ## Key takeaways
