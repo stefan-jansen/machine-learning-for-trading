@@ -506,7 +506,9 @@ if embeddings_2d is not None:
 #    unsupervised method that ranks by similarity alone conflates the two.
 # 2. **One vector per word, whatever it meant.** `Apple` the company and `apple` the fruit are
 #    averaged into a single point, and so are `charge` the fee and `charge` the accusation.
-#    Nothing downstream can recover a distinction the representation has already averaged out.
+#    The vector alone cannot say which sense an occurrence carries, so a downstream model has
+#    to read the surrounding words to tell them apart - which is what the contextual models
+#    below do by construction rather than as a repair.
 # 3. **Nothing to say about a word it never saw.** A ticker that listed last month, a term of
 #    art absent from the corpus, and any typo are out of vocabulary and have no vector at all,
 #    not a poor one.
