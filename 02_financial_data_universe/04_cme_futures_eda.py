@@ -366,9 +366,11 @@ for row in invariants.iter_rows(named=True):
 # ## Key takeaways
 #
 # - **A futures product is not a series.** Product, contract and continuous series are three
-#   different things, and a price history exists only at the third. Everything downstream
-#   reads the continuous front month; anything that needs to know which contract a price
-#   came from has to go back to `instrument_id`.
+#   different things. Each contract has its own observed price history and stops at expiry;
+#   the continuous series is built by joining successive contracts into one long history that
+#   no single instrument ever traded. Everything downstream reads the continuous front month,
+#   and anything that needs to know which contract a price came from goes back to
+#   `instrument_id`.
 # - **Continuous series are constructed, and the construction is a choice.** The unbroken
 #   line here is the result of splicing at a volume roll. A different roll rule produces a
 #   different history from the same contracts, which is why the adjustment method is a
@@ -383,8 +385,10 @@ for row in invariants.iter_rows(named=True):
 #   is this repository's, not the exchange's, and the notebook now fails with a readable
 #   message if the loader returns a product the map has never heard of.
 #
-# **Known limitations.** OHLC invariants are checked on one product's continuous series, not
-# across the universe; `13_data_quality_framework` runs them systematically. The continuous
+# **Known limitations.** OHLC invariants are checked on one product's continuous series rather
+# than across the universe, and no notebook in this chapter checks them across the CME panel -
+# `13_data_quality_framework` demonstrates the validation methods on US equities, so the
+# technique transfers and the coverage does not. The continuous
 # series here are unadjusted, so a return computed across a roll includes the price gap
 # between two contracts rather than a market move. And hourly bars are stamped in UTC, which
 # is not the grid any of these products trades on - `05_futures_session_aggregation` is what
