@@ -177,10 +177,11 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "A box plot with one box per sector ETF, showing the distribution of its daily "
-    "returns in percent, with outliers hidden and a dashed line at zero. The width of "
-    "each box is that sector's interquartile range, so the boxes can be compared "
-    "against each other for scale.",
+    "A vertical box plot with one box per sector ETF along the horizontal axis and "
+    "daily return in percent on the vertical, with outliers hidden and a dashed line "
+    "at zero. The height of each box is that sector's interquartile range and the "
+    "whiskers give its wider central spread, so the boxes can be compared against each "
+    "other for scale.",
 )
 
 # %% [markdown]
@@ -266,18 +267,24 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "A bar chart of the share of variance each principal component explains, with a "
-    "line over it giving the running cumulative share. Both axes are in percent, and "
-    "the components are ordered from largest to smallest.",
+    "A bar chart with component number on the horizontal axis and share of variance "
+    "explained, in percent, on the vertical. Each bar is one component's own share, "
+    "ordered from largest to smallest, and a line over the bars gives the running "
+    "cumulative share.",
 )
 
 # %% [markdown]
 # **Reading it**: the height of the first bar against the rest is the question. One
 # component carrying most of the variance is what a market factor looks like in a
 # sector panel - the sectors move together, and how much they move together is the
-# first bar. Where the cumulative line flattens is where the remaining components stop
-# adding structure and start describing noise. The printed shares above the chart are
-# the numbers; the shape is what the figure is for.
+# first bar.
+#
+# Where the cumulative line flattens, each further component is adding little to the
+# variance already accounted for, and the "elbow" is a retention heuristic built on
+# that. It is a heuristic and not a finding: a component explaining little variance can
+# still carry systematic structure, and variance explained says nothing about whether a
+# direction is priced or predictive. Nothing in this notebook tests either. The printed
+# shares above the chart are the numbers; the shape is what the figure is for.
 
 # %% [markdown]
 # ## 4. Loadings Interpretation
