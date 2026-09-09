@@ -475,9 +475,9 @@ show_with_alt(
 #
 # It is worth being clear about what that does not establish. These are the most widely held
 # stocks in the sample, so they co-occur with almost everything, and a method that placed all
-# frequent items together for no other reason would produce the same picture. The benchmark
-# below is the test that separates those, because predicting a masked holding requires the
-# geometry to distinguish among stocks rather than merely group the popular ones.
+# frequent items together for no other reason would produce the same picture. Separating
+# those two explanations needs a baseline that is itself popularity-driven, which the
+# benchmark below adds alongside the uniform-random one.
 
 # %% [markdown]
 # ## Managed Portfolio Benchmark: Masked Asset Prediction
@@ -551,6 +551,10 @@ def predict_masked_asset(portfolio: list, mask_position: int, model, window: int
 class HitRecord:
     """Record of a single masked asset prediction outcome."""
 
+    # The index of the portfolio this came from. Positions drawn from one portfolio share its
+    # context, so they are not independent and anything resampling them has to resample
+    # portfolios rather than positions.
+    portfolio: int
     bucket: str  # Position range label
     hit1: int  # 1 if rank <= 1, else 0
     hit5: int  # 1 if rank <= 5, else 0
@@ -592,7 +596,7 @@ def evaluate_benchmark(
 
     np.random.seed(SEED)
 
-    for portfolio in portfolios:
+    for portfolio_index, portfolio in enumerate(portfolios):
         for start, end in position_ranges:
             label = f"pos_{start + 1}-{end}"
 
@@ -621,6 +625,7 @@ def evaluate_benchmark(
                     rank = pred_cusips.index(true_asset) + 1
                     hit_records.append(
                         HitRecord(
+                            portfolio=portfolio_index,
                             bucket=label,
                             hit1=int(rank <= 1),
                             hit5=int(rank <= 5),
@@ -629,7 +634,16 @@ def evaluate_benchmark(
                         )
                     )
                 else:
-                    hit_records.append(HitRecord(bucket=label, hit1=0, hit5=0, hit10=0, rr=0.0))
+                    hit_records.append(
+                        HitRecord(
+                            portfolio=portfolio_index,
+                            bucket=label,
+                            hit1=0,
+                            hit5=0,
+                            hit10=0,
+                            rr=0.0,
+                        )
+                    )
 
     # Aggregate metrics from raw records
     results = {}
@@ -693,7 +707,7 @@ random_hits1 = 1 / vocab_size
 random_hits5 = 5 / vocab_size
 random_hits10 = 10 / vocab_size
 
-print(f"\nVocabulary size: {vocab_size:,} stocks")
+print(f"Vocabulary size: {vocab_size:,} stocks")
 print("\nRandom baseline (analytical):")
 print(f"  Hits@1:  {random_hits1:.4%} (= 1/{vocab_size:,})")
 print(f"  Hits@5:  {random_hits5:.4%} (= 5/{vocab_size:,})")
@@ -706,6 +720,30 @@ print(f"  Hits@10: {random_hits10:.4%} (= 10/{vocab_size:,})")
 
 
 # %%
+def bootstrap_by_portfolio(
+    records: list, n_iterations: int = 1000, alpha: float = 0.025
+) -> tuple[float, float]:
+    """Percentile interval for the Hits@5 rate, resampling portfolios rather than positions.
+
+    Each portfolio contributes many masked positions drawn from one holdings list with
+    overlapping context windows, so those outcomes move together. Resampling positions would
+    treat them as independent and return an interval narrower than the sampling variation
+    warrants. Resampling whole portfolios keeps each one's positions together.
+    """
+    by_portfolio: dict[int, list[int]] = {}
+    for record in records:
+        by_portfolio.setdefault(record.portfolio, []).append(record.hit5)
+
+    groups = list(by_portfolio.values())
+    rng = np.random.default_rng(SEED)
+    means = []
+    for _ in range(n_iterations):
+        drawn = rng.integers(0, len(groups), len(groups))
+        pooled = [hit for index in drawn for hit in groups[index]]
+        means.append(np.mean(pooled))
+    return float(np.percentile(means, alpha * 100)), float(np.percentile(means, (1 - alpha) * 100))
+
+
 def bootstrap_metrics(
     hit_records: list[HitRecord], n_iterations: int = 1000, confidence: float = 0.95
 ) -> dict:
@@ -738,25 +776,17 @@ def bootstrap_metrics(
         if not records:
             continue
 
-        # Extract raw hit5 indicators (actual per-sample outcomes)
         hits5_indicators = np.array([r.hit5 for r in records])
         n = len(hits5_indicators)
 
-        # Bootstrap resampling on raw indicators
-        boot_means = []
-        for _ in range(n_iterations):
-            sample_idx = np.random.choice(n, size=n, replace=True)
-            boot_means.append(np.mean(hits5_indicators[sample_idx]))
-
-        # Compute percentile CI
-        lower = np.percentile(boot_means, alpha * 100)
-        upper = np.percentile(boot_means, (1 - alpha) * 100)
+        lower, upper = bootstrap_by_portfolio(records, n_iterations=n_iterations, alpha=alpha)
 
         bootstrap_stats[label] = {
             "mean": np.mean(hits5_indicators),
             "ci_lower": lower,
             "ci_upper": upper,
             "n": n,
+            "n_portfolios": len({r.portfolio for r in records}),
         }
 
     return bootstrap_stats
@@ -784,9 +814,14 @@ for label, stats in boot_stats.items():
 # three rates would weight a bucket of four thousand the same as one of twelve thousand and
 # report something no set of trials produced.
 #
-# Its confidence interval has to be bootstrapped on the pooled indicators for the same
-# reason. Averaging the three buckets' interval endpoints yields a pair of numbers with no
-# coverage property at all - it is not an interval for the pooled rate, or for anything else.
+# Its confidence interval has to be bootstrapped on the pooled outcomes for the same reason.
+# Averaging the three buckets' interval endpoints yields a pair of numbers with no coverage
+# property at all - it is not an interval for the pooled rate, or for anything else.
+#
+# The resampling unit is the portfolio, not the masked position. Each portfolio supplies up
+# to a hundred positions per bucket, drawn from one holdings list with overlapping context
+# windows, so those outcomes rise and fall together. Resampling positions would treat them as
+# independent and return an interval narrower than the sampling variation warrants.
 #
 # The pooled figure is the one to quote and the least informative one here. It is dominated by
 # the two large deep-position buckets, where the task is hardest, so it understates what the
@@ -796,23 +831,57 @@ for label, stats in boot_stats.items():
 # %%
 pooled_hits5 = np.array([r.hit5 for r in hit_records])
 pooled_rate = pooled_hits5.mean()
-
-rng = np.random.default_rng(SEED)
-pooled_boot = np.array(
-    [
-        pooled_hits5[rng.integers(0, len(pooled_hits5), len(pooled_hits5))].mean()
-        for _ in range(CONFIG["benchmark"]["bootstrap_iterations"])
-    ]
+pooled_lower, pooled_upper = bootstrap_by_portfolio(
+    hit_records, n_iterations=CONFIG["benchmark"]["bootstrap_iterations"]
 )
-pooled_lower, pooled_upper = np.percentile(pooled_boot, [2.5, 97.5])
 
-print(f"Masked positions scored: {len(pooled_hits5):,}")
+print(
+    f"Masked positions scored: {len(pooled_hits5):,} "
+    f"from {len({r.portfolio for r in hit_records}):,} portfolios"
+)
 print(f"Pooled Hits@5: {pooled_rate:.1%} [95% CI: {pooled_lower:.1%} - {pooled_upper:.1%}]")
 print(f"Random baseline Hits@5: {random_hits5:.4%}")
 print(
     f"Improvement over random: {pooled_rate / random_hits5:.0f}x "
     f"[95% CI: {pooled_lower / random_hits5:.0f}x - {pooled_upper / random_hits5:.0f}x]"
 )
+
+# %% [markdown]
+# ### The baseline that actually competes
+#
+# Beating a uniform draw over eleven thousand stocks is not evidence of much. The claim worth
+# testing is that the embeddings learned which stocks go together, and the rival explanation
+# is that they learned which stocks are common - so the baseline has to be a predictor that
+# only knows popularity.
+#
+# It is the simplest thing possible: ignore the portfolio entirely and always answer with the
+# five most widely held stocks in the sample. Scored on exactly the masked positions the
+# model was scored on.
+
+# %%
+most_popular = sorted(occurrence_counts, key=occurrence_counts.get, reverse=True)[:10]
+popular_top5, popular_top10 = set(most_popular[:5]), set(most_popular)
+
+popularity_hits5, popularity_hits10 = [], []
+for portfolio in sentences:
+    for start, end in POSITION_RANGES:
+        for i in range(start, min(end, len(portfolio))):
+            if portfolio[i] in model.wv:
+                popularity_hits5.append(int(portfolio[i] in popular_top5))
+                popularity_hits10.append(int(portfolio[i] in popular_top10))
+
+popularity_rate5 = float(np.mean(popularity_hits5)) if popularity_hits5 else 0.0
+popularity_rate10 = float(np.mean(popularity_hits10)) if popularity_hits10 else 0.0
+
+print(f"Always answering the five most-held stocks: Hits@5 = {popularity_rate5:.1%}")
+print(f"Always answering the ten most-held stocks:  Hits@10 = {popularity_rate10:.1%}")
+print(f"The embeddings, pooled over the same buckets: Hits@5 = {pooled_rate:.1%}")
+
+# %% [markdown]
+# The popularity predictor is far better than a uniform draw and far worse than the
+# embeddings, which is what the comparison was for. Whatever the model has learned, it is not
+# only that some stocks are common - it uses the rest of the portfolio, because a rule that
+# cannot see the portfolio does much worse on the same positions.
 
 # %%
 # Visualize benchmark results
@@ -1000,6 +1069,10 @@ results_artifact = {
         }
         for label, stats in boot_stats.items()
     },
+    "popularity_baseline": {
+        "hits5": popularity_rate5,
+        "hits10": popularity_rate10,
+    },
     "pooled_hits5": {
         "point_estimate": float(pooled_rate),
         "ci_lower_95": float(pooled_lower),
@@ -1050,7 +1123,8 @@ with open(results_file, "w") as f:
         f"- Pooled Hits@5: {pooled_rate:.1%} "
         f"[95% CI: {pooled_lower:.1%} - {pooled_upper:.1%}], over {len(pooled_hits5):,} positions\n"
         f"- **Improvement over random: {pooled_rate / random_hits5:.0f}x** "
-        f"[95% CI: {pooled_lower / random_hits5:.0f}x - {pooled_upper / random_hits5:.0f}x]\n\n"
+        f"[95% CI: {pooled_lower / random_hits5:.0f}x - {pooled_upper / random_hits5:.0f}x]\n"
+        f"- Always answering the five most-held stocks: Hits@5 = {popularity_rate5:.1%}\n\n"
     )
     f.write("## Key Insight\n")
     f.write("Word2Vec on portfolio data learns stock representations that capture\n")
