@@ -66,16 +66,18 @@ from utils.style import COLORS, show_plotly_with_alt
 # price floor tells them apart without needing a separate instrument-type field. Raise it for
 # a higher-priced index, lower it for a cheaper one.
 #
-# `CALENDAR_ROLL_DAYS_BEFORE` is how far ahead of a contract's last trading day the calendar
-# method switches to the next one. Five business days is the conservative end of the range
-# used for equity index futures.
+# `CALENDAR_ROLL_SESSIONS_BEFORE` is how far ahead of a contract's last trading day the
+# calendar method switches to the next one, counted in **trading sessions** rather than
+# calendar days. Five sessions is the conservative end of the range used for equity index
+# futures, and the unit matters here: every ES expiry is a Friday, so five calendar days before
+# one lands on the preceding Sunday and pushes the switch out to the Monday.
 #
 # Both are declared here so Papermill can override them for CI, and so that nothing further
 # down repeats the value as a default.
 
 # %% tags=["parameters"]
 MIN_OUTRIGHT_PRICE = 500.0
-CALENDAR_ROLL_DAYS_BEFORE = 5
+CALENDAR_ROLL_SESSIONS_BEFORE = 5
 
 # %% [markdown]
 # ## 1. Understanding the Data
@@ -417,26 +419,39 @@ else:
 def identify_front_month_calendar(
     individual_df: pl.DataFrame,
     scheduled_df: pl.DataFrame,
-    roll_days_before: int = CALENDAR_ROLL_DAYS_BEFORE,
+    roll_sessions_before: int = CALENDAR_ROLL_SESSIONS_BEFORE,
     min_outright_price: float = MIN_OUTRIGHT_PRICE,
 ) -> pl.DataFrame:
-    """Pick each day's front contract as the nearest one still more than N days from expiry.
+    """Pick each day's front contract as the nearest one still more than N sessions from expiry.
 
     ``scheduled_df`` must hold only contracts whose last trading day is a real expiry. A thin
     listing that merely stopped printing would otherwise be treated as an expiring front month
     and pull the series onto it for a few days.
+
+    The offset counts trading sessions taken from the data rather than calendar days, because
+    an ES expiry is always a Friday and counting calendar days back from one lands on a
+    weekend.
     """
-    last_day = scheduled_df.select(
-        "instrument_id",
-        (pl.col("last_trade") - pl.duration(days=roll_days_before)).alias("roll_out"),
-        pl.col("last_trade"),
+    sessions = (
+        individual_df.select(pl.col("timestamp").dt.date().alias("date"))
+        .unique()
+        .sort("date")
+        .with_columns(pl.int_range(pl.len()).alias("session_no"))
+    )
+
+    last_day = (
+        scheduled_df.select("instrument_id", "last_trade")
+        .join(sessions, left_on="last_trade", right_on="date", how="inner")
+        .with_columns((pl.col("session_no") - roll_sessions_before).alias("roll_out_session"))
+        .select("instrument_id", "last_trade", "roll_out_session")
     )
 
     candidates = (
         individual_df.filter(pl.col("close") >= min_outright_price)
         .with_columns(pl.col("timestamp").dt.date().alias("date"))
+        .join(sessions, on="date", how="inner")
         .join(last_day, on="instrument_id", how="inner")
-        .filter(pl.col("date") < pl.col("roll_out"))
+        .filter(pl.col("session_no") < pl.col("roll_out_session"))
     )
 
     front = (
@@ -470,52 +485,80 @@ both = volume_front_daily.join(
 )
 agree = both.filter(pl.col("front_instrument_id") == pl.col("calendar_front"))
 
+_uncovered = volume_front_daily.join(calendar_front.select("date"), on="date", how="anti")
+
 print(f"Volume-based rolls:   {len(roll_dates)}")
-print(f"Calendar-based rolls: {calendar_rolls.height - 1}")
+print(f"Calendar-based rolls: {calendar_rolls.height}")
 print(
     f"Days the two methods hold the same contract: {agree.height} of {both.height} "
     f"({100 * agree.height / both.height:.1f}%)"
 )
+if _uncovered.height:
+    print(
+        f"Days the calendar method cannot cover: {_uncovered.height} "
+        f"({_uncovered['date'].min()} to {_uncovered['date'].max()})"
+    )
 
 # %% [markdown]
 # ### Volume against calendar
 #
-# The two methods select the same contract on most days and differ in a band around each roll.
-# The table below reports how wide that band is, which is the number the choice between them
-# actually turns on.
+# The two methods select the same contract on almost every day and differ only around the
+# rolls. How long each disagreement lasts is the number the choice between them turns on, so
+# the episodes are measured rather than described.
+#
+# The comparison also stops short of the end of the sample, and the count above says by how
+# much. The nearest contract when the download ends has not expired, so its last observed print
+# is the day the data stops rather than an expiry, and it fails the third-Friday test the
+# scheduled set is built from. A production pipeline reads expirations from the exchange
+# calendar and has no such gap. A notebook working from price history alone cannot know the
+# expiry of a contract that is still trading, and reporting the excluded days is the honest
+# alternative to letting an inner join swallow them.
+
+# %% [markdown]
+# Episodes are numbered on the complete ordered comparison frame rather than on the disagreeing
+# rows alone. Numbering them by the gaps between disagreement dates would split any episode
+# spanning a weekend or a holiday into two, and report the roll disagreement as lasting half as
+# long as it really does.
 
 # %%
-_disagreements = both.filter(pl.col("front_instrument_id") != pl.col("calendar_front"))
+_flagged = both.sort("date").with_columns(
+    (pl.col("front_instrument_id") != pl.col("calendar_front")).alias("differs")
+)
+_flagged = _flagged.with_columns(
+    (pl.col("differs") & ~pl.col("differs").shift(1).fill_null(False)).cum_sum().alias("episode")
+)
+_disagreements = _flagged.filter(pl.col("differs"))
 if _disagreements.height:
-    _runs = _disagreements.sort("date").with_columns(
-        ((pl.col("date") - pl.col("date").shift(1)).dt.total_days().fill_null(999) > 1)
-        .cum_sum()
-        .alias("episode")
-    )
     _episode_lengths = (
-        _runs.group_by("episode")
+        _disagreements.group_by("episode")
         .agg(
             pl.col("date").min().alias("from"),
             pl.col("date").max().alias("to"),
-            pl.len().alias("days"),
+            pl.len().alias("sessions"),
         )
         .sort("from")
     )
     print(f"Disagreement episodes: {_episode_lengths.height}")
     print(
-        f"Length in trading days: median {_episode_lengths['days'].median():.0f}, "
-        f"max {_episode_lengths['days'].max()}"
+        f"Length in trading sessions: median {_episode_lengths['sessions'].median():.0f}, "
+        f"max {_episode_lengths['sessions'].max()}"
     )
     _episode_lengths.tail(10)
 else:
     print("The two methods never disagree on this history.")
 
 # %% [markdown]
-# **What the choice comes down to.** Volume rolling follows the liquidity, so the constructed
-# series is always on the contract most people are actually trading, but its roll date is only
-# known after the fact and moves with the market. Calendar rolling fixes the date in advance
-# and can be reproduced by anyone with an expiry schedule, at the cost of holding a contract
-# through a stretch where the next one is already the more liquid of the two.
+# **What the choice comes down to.** On ES the two methods land within a session of each other:
+# every disagreement episode is a single day, so the cost of picking one over the other is one
+# day of holding the other contract, a few times a year. That is a statement about a deeply
+# liquid index future whose volume crossover is sharp, not a general result - on a product
+# where liquidity migrates gradually the two would separate for much longer.
+#
+# The tradeoff is otherwise the familiar one. Volume rolling follows the liquidity, so the
+# series is always on the contract most people are actually trading, but its roll date is
+# known only after the fact and moves with the market. Calendar rolling fixes the date in
+# advance and anyone with an expiry schedule can reproduce it, at the cost of holding a
+# contract through a stretch where the next one is already the more liquid of the two.
 #
 # The rest of the notebook uses volume-based detection, because the validation section holds our series against a
 # vendor series built the same way and comparing like with like is the point of that section.
@@ -767,8 +810,10 @@ print("  every historical price moves by the same proportion, so percentage retu
 # reason the choice matters. Panama moves the start of the history by a fixed number of index
 # points; that was a large fraction of the index in 2016 and would be a small one today. Ratio
 # moves it by a fixed proportion, which is the same fraction whenever it is applied. Neither is
-# a correction of the other - they preserve different things, and the table at the end of the notebook says which
-# to reach for.
+# a correction of the other - they preserve different things, and the table at the end of the
+# notebook says which to reach for.
+
+# %%
 es_continuous_ratio.select(
     "timestamp", "close", "adj_close", "cumulative_ratio", "instrument_id"
 ).head(10)
@@ -779,15 +824,26 @@ es_continuous_ratio.select(
 # The test of a construction is whether it reproduces one built independently. Databento ships
 # a pre-built continuous series for ES, also volume-rolled, so ours can be held against it.
 #
-# **The two frames do not have the same bar length.** The loading section measured it: the individual
-# contracts arrive as daily bars stamped at midnight UTC, the vendor's continuous series as
-# hourly bars. Joining them on `timestamp` therefore matches our whole trading day against the
-# vendor's midnight hour - the first hour of a CME session that runs until the following
-# afternoon. The comparison would run, print a plausible-looking difference, and be measuring
-# the wrong thing.
+# **The two frames do not have the same bar length.** The loading section measured it: the
+# individual contracts arrive as daily bars stamped at midnight UTC, the vendor's continuous
+# series as hourly bars. Joining them on `timestamp` matches our whole day against the vendor's
+# midnight hour alone. The comparison would run, print a plausible-looking difference, and be
+# measuring the wrong thing.
 #
-# So the vendor's series is aggregated to the same daily grid first, and the two are compared
-# on their session closes.
+# So the vendor's hours are collapsed to a daily grid first. **The grid is the UTC calendar
+# day**, which is what the individual daily bars already use, and it is worth being exact about
+# that because it is not the CME session.
+#
+# A CME session opens at 23:00 UTC and closes the following afternoon, so a UTC calendar day
+# holds the tail of one session and the opening hour of the next. The last hourly bar inside a
+# UTC day is therefore the 23:00 bar - the first hour of the *next* session, not the close of
+# the one that just ended. It is a UTC day close, and the cell below measures which hour it
+# lands on rather than taking either name on trust.
+#
+# Matching the vendor's daily convention is exactly what makes the comparison valid: both sides
+# are then the same object, and any difference is about roll logic. It is also the convention
+# `05_futures_session_aggregation` exists to replace, because a UTC calendar day splits a
+# trading session in the middle and is the wrong grid for anything downstream.
 
 # %%
 es_databento = load_cme_futures(products=["ES"], tenors=[0], frequency="hourly", continuous=True)
@@ -796,12 +852,29 @@ describe_bars(es_databento, "vendor continuous ES")
 es_databento.head()
 
 # %%
+_day_edges = (
+    es_databento.with_columns(pl.col("timestamp").dt.date().alias("date"))
+    .sort("timestamp")
+    .group_by("date")
+    .agg(pl.col("timestamp").last().alias("last_bar"))
+)
+_modal_last_hour = (
+    _day_edges.select(pl.col("last_bar").dt.time().alias("hour"))
+    .group_by("hour")
+    .agg(pl.len().alias("days"))
+    .sort("days", descending=True)
+)
+print("Last hourly bar inside a UTC calendar day, by hour of day:")
+print(_modal_last_hour.head(4))
+print("The 23:00 bar opens the next CME session; it does not close the one before it.")
+
+# %%
 databento_daily = (
     es_databento.with_columns(pl.col("timestamp").dt.date().alias("date"))
     .group_by("date")
     .agg(
         pl.col("close").sort_by("timestamp").first().alias("first_hour_close"),
-        pl.col("close").sort_by("timestamp").last().alias("session_close"),
+        pl.col("close").sort_by("timestamp").last().alias("utc_day_close"),
         pl.len().alias("hours"),
     )
     .sort("date")
@@ -814,14 +887,14 @@ ours_daily = es_continuous_raw.select(
 )
 
 comparison = ours_daily.join(databento_daily, on="date", how="inner").with_columns(
-    (pl.col("our_close") - pl.col("session_close")).alias("diff"),
+    (pl.col("our_close") - pl.col("utc_day_close")).alias("diff"),
     (pl.col("our_close") - pl.col("first_hour_close")).alias("diff_vs_first_hour"),
 )
 
 print(f"Days compared: {len(comparison):,}")
 for label, col in [
     ("against the vendor's first hour", "diff_vs_first_hour"),
-    ("against the vendor's session close", "diff"),
+    ("against the vendor's UTC day close", "diff"),
 ]:
     series = comparison[col]
     print(
@@ -916,7 +989,7 @@ print(
 # %%
 comparison.with_columns(pl.col("diff").abs().alias("abs_diff")).sort(
     "abs_diff", descending=True
-).head(10).select("date", "instrument_id", "our_close", "session_close", "diff")
+).head(10).select("date", "instrument_id", "our_close", "utc_day_close", "diff")
 
 # %% [markdown]
 # ### The size of the handover gap is not constant
@@ -939,7 +1012,7 @@ gap_by_year = (
         pl.len().alias("days_apart"),
         pl.col("diff").abs().mean().alias("mean_gap_points"),
         pl.col("diff").abs().max().alias("max_gap_points"),
-        pl.col("session_close").mean().alias("index_level"),
+        pl.col("utc_day_close").mean().alias("index_level"),
     )
     .with_columns(
         (10_000 * pl.col("mean_gap_points") / pl.col("index_level")).alias("mean_gap_bps")
@@ -994,7 +1067,7 @@ fig.add_trace(
 fig.add_trace(
     go.Scatter(
         x=comp_pd["date"],
-        y=comp_pd["session_close"],
+        y=comp_pd["utc_day_close"],
         name="Databento",
         line=dict(color=COLORS["amber"], width=1.2, dash="dot"),
     ),
