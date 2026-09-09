@@ -179,7 +179,7 @@ PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sens
 CANONICAL_UNIVERSE = get_universe_filters_for(CASE_STUDY_ID)[0]
 
 
-def _on_canonical_universe(frame: pl.DataFrame) -> pl.DataFrame:
+def _on_canonical_universe(frame: pl.DataFrame, stage: str = "upstream") -> pl.DataFrame:
     """Drop runs selected under a universe this case study does not treat as canonical.
 
     `None` means the case study pins no universe, and then every run qualifies - the filter
@@ -188,13 +188,17 @@ def _on_canonical_universe(frame: pl.DataFrame) -> pl.DataFrame:
     """
     if CANONICAL_UNIVERSE is None:
         return frame
-    # An empty resolver result carries no columns at all, so reading `spec_json` off it raises
-    # `ColumnNotFoundError: "spec_json" not found`, which names a column rather than the absence
-    # that produced it. Measured 2026-09-09 on the smoke chain: 14_backtest had registered
-    # nothing and this notebook reported a schema problem. The stage-empty case is diagnosed
-    # below, on the assembled frame, where it can say which stage is missing.
+    # An empty resolver result carries no columns at all, so reading `spec_json` off it raised
+    # `ColumnNotFoundError: "spec_json" not found`, naming a column rather than the absence that
+    # produced it. Returning the empty frame is NOT the fix: it made this notebook exit 0 having
+    # registered nothing, which is the same absence wearing a success. Measured 2026-09-09 on the
+    # smoke chain - 202 signal backtests registered, none carrying `universe_filter`, and this
+    # notebook reported no error at all.
     if frame.is_empty():
-        return frame
+        raise RuntimeError(
+            f"no {stage} backtests are registered for {CASE_STUDY_ID}, so there is nothing "
+            "to price. Run 14_backtest through 16_risk_management against this registry first."
+        )
     keep = [
         strategy_view(json.loads(spec)).get("signal", {}).get("universe_filter")
         == CANONICAL_UNIVERSE
@@ -219,7 +223,8 @@ def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
                 _on_canonical_universe(
                     resolve_best_backtest_runs(
                         CASE_STUDY_ID, LABEL, split="validation", stage=stage, top_n=1_000_000
-                    )
+                    ),
+                    stage,
                 ),
             )
             for stage in PRE_COST_STAGES

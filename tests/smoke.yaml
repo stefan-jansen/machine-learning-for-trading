@@ -1430,7 +1430,12 @@ case_studies/nasdaq100_microstructure/14_backtest:
     EXECUTION_TIER: preview
     LABEL: fwd_ret_15m
     MAX_SYMBOLS: 12
-    TOP_N_PREDICTIONS: 3
+    # Two predictions over twelve schemes, not three over seventy-five. Measured 2026-09-09: the
+    # unreduced grid is 225 backtests at roughly 5.8 s each, which is 21 minutes and a production
+    # cost rather than a smoke one. The panel length is not the lever here and there is no date
+    # parameter to turn - `backtest.sweep.signal_nasdaq100` is what multiplies.
+    TOP_N_PREDICTIONS: 2
+    MAX_ENTRY_SCHEMES: 12
   writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
   headroom_gb: 12
 
