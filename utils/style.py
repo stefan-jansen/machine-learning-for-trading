@@ -611,6 +611,16 @@ def _register_plotly_template() -> None:
     # without each notebook having to opt in (matplotlib gets this via
     # matplotlibrc; this is the Plotly equivalent).
     pio.templates.default = "ml4t"
+    # A Plotly figure reaches a reader as a static PNG, so the renderer has to be one
+    # that puts `image/png` in the mime bundle. The default is environment-dependent
+    # and is empty in the py312 container image: there, `show_plotly_with_alt` emitted
+    # only `application/vnd.plotly.v1+json`, so the figure carried no image, the alt
+    # text reached nobody, and nothing failed - the run exited 0 and the alt-text check
+    # saw no image to complain about. Pinning it here makes the render the same
+    # wherever the notebook runs. An explicit choice made before importing this module
+    # is left alone.
+    if not pio.renderers.default:
+        pio.renderers.default = "plotly_mimetype+png"
 
 
 # Auto-register Plotly template on import
