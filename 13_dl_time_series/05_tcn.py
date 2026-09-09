@@ -23,18 +23,19 @@
 # convolution, which reads the whole window in parallel like the fully connected
 # network but, unlike it, respects the ordering of the days.
 #
-# A plain convolution has two problems for forecasting. It looks in both directions
-# from each position, which on a time axis means reading the future; and its reach is
-# the width of its filter, so covering sixty days would take a very wide filter or very
-# many layers. A **temporal convolutional network** fixes both. It pads only on the
-# left, so an output at day $t$ can be a function of days up to $t$ and no later - a
-# *causal* convolution. And it multiplies the gap between the positions each filter
-# reads by two at every layer - a *dilation* - so the reach grows geometrically with
-# depth rather than linearly.
+# A plain convolution has two problems for forecasting. Its filter reads in both
+# directions from each position, so the output at day $t$ mixes in days after $t$; and
+# its reach is the width of that filter, so covering sixty days would take a very wide
+# filter or very many layers. A **temporal convolutional network** answers both. Its
+# convolution is *causal* - the output at day $t$ is a function of days up to $t$ and
+# no later - which is what makes every position a legitimate forecast for its own date.
+# And it multiplies the gap between the positions each filter reads by two at every
+# layer - a *dilation* - so the reach grows geometrically with depth rather than
+# linearly.
 #
 # **Learning objectives**:
-# - Build a causal convolution and say exactly which inputs each output can see, so
-#   that "no look-ahead" is a property of the padding rather than a hope.
+# - Build a causal convolution and check which inputs each output can actually see,
+#   rather than trusting the word "causal" in the class name.
 # - Stack dilated blocks so the receptive field - the span of input one output depends
 #   on - covers the whole window, and compute that span rather than assuming it.
 # - Explain what a residual connection is doing in a stack this deep, and why the block
@@ -228,8 +229,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 # The TCN consists of stacked causal convolution blocks with exponentially
 # increasing dilation factors. Each block uses:
 #
-# 1. **Causal padding**: Left-pad the input so the convolution only sees past
-#    and present timesteps, never the future
+# 1. **Causal padding**: pad both ends by $(k-1)d$ and drop the right-hand
+#    overhang, which is identical to padding only on the left - the output at $t$
+#    depends on inputs up to $t$ and no later, and the sequence keeps its length
 # 2. **Dilated convolutions**: Dilation factors of 1, 2, 4, 8 give an
 #    exponentially growing receptive field
 # 3. **Residual connections**: Enable training deeper networks
@@ -246,9 +248,10 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 # %%
 class CausalConv1d(nn.Module):
-    """1D convolution with causal (left) padding.
+    """1D convolution whose output at time t depends only on inputs at times <= t.
 
-    Ensures the output at time t depends only on inputs at times <= t.
+    ``nn.Conv1d`` pads both ends, so the right-hand overhang is dropped; the result
+    is identical to padding only on the left, and the sequence keeps its length.
     """
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int):
@@ -530,11 +533,14 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **Causality here is a property of the padding, and it is checkable.** Padding only
-#    on the left and trimming the right-hand overhang means an output at day $t$ is a
-#    function of days up to $t$ and no later. That is worth stating as a mechanism
-#    rather than an intention: a symmetric `padding=` on the same layer would read the
-#    future, produce no error, and score better.
+# 1. **Causality is a property of the trim, and it is checkable.** `nn.Conv1d` pads
+#    both ends, so dropping the last $(k-1)d$ outputs is what leaves the output at day
+#    $t$ a function of days up to $t$ and no later; differentiate an output position
+#    with respect to the inputs to confirm that, rather than trusting the argument
+#    name. It is not what keeps the target out of the input - the window does that,
+#    because every day in the window precedes the target date and the head reads only
+#    the final position. Causality is what would make each intermediate position a
+#    forecast for its own date, and this notebook uses only the last.
 # 2. **Doubling the dilation each layer buys reach geometrically.** Stacking blocks
 #    whose dilation doubles makes the receptive field grow like $2^{\text{layers}}$
 #    rather than linearly, which is how four blocks reach across the whole window.
