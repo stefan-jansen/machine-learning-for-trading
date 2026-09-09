@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -19,34 +20,49 @@
 #
 # **Chapter 22: RAG for Financial Research** (Section 22.4)
 #
-# This notebook compares local embedding models for financial document retrieval:
+# Two open-weight embedding models index the same 10-K passages and answer the
+# same fifteen queries, and the notebook asks which retrieves better. The
+# interesting part is not the answer. It is that the evaluation this notebook
+# can run without human annotators is too weak to give one, and the notebook
+# measures how weak rather than asserting a ranking on top of it.
 #
-# 1. **General open-weight embeddings** - BGE-large and MiniLM
-# 2. **Optional managed candidates** - OpenAI and Voyage AI when explicitly enabled
+# The models are BGE-large and MiniLM, both pinned to a revision and run
+# locally. OpenAI and Voyage AI candidates are wired up and stay off unless
+# both `USE_LOCAL_MODELS_ONLY` is cleared and the corresponding key is set, so
+# the shipped run costs nothing and contacts nothing.
 #
-# **Learning Objectives**:
-# - Compare open-weight embedding models on the same financial corpus.
-# - Measure how query type changes agreement with a lexical relevance proxy.
-# - Use local evaluation rather than published benchmarks as the deployment decision rule.
+# **Learning objectives**
 #
-# **Prerequisites**:
-# - SP100 10-K filings (`data/equities/fundamentals/10k/sp100/`)
-# - `sentence-transformers` for open-source models
-# - OpenAI API key (`OPENAI_API_KEY`) for text-embedding-3 models (optional)
-# - Voyage AI API key (`VOYAGE_API_KEY`) for voyage-finance-2 (optional)
+# After working through this notebook you will be able to:
 #
-# ## Evaluation Framing
-# - Scores measure agreement with lexical proxy labels, not human relevance.
-# - Rankings should be treated as corpus-specific, not universal.
-# - FinE5 is discussed as a commercial candidate, not misrepresented as downloadable weights.
-# - Query-type slices (technical/risk/general) often show different leading models.
-# - Deployment decisions should combine retrieval quality, latency, and cost.
+# - Build a retrieval evaluation from an unlabelled corpus, and say which part
+#   of it is a measurement and which part is an assumption.
+# - Read a Precision@k or MRR difference back into the number of documents it
+#   represents, and decide whether that number supports a ranking.
+# - Say what a lexical-overlap relevance proxy can and cannot detect, from the
+#   size of the candidate pool its labels are drawn out of.
+# - Run two pinned open-weight embedding models over the same corpus and query
+#   set, on a GPU, with no managed API in the loop.
+#
+# **Prerequisites**
+#
+# - The SP100 10-K corpus, read through `data.load_sec_filings`. Note what
+#   [`01_sec_filing_pipeline`](01_sec_filing_pipeline.ipynb) establishes about
+#   it: for most of the corpus the stored text is a window taken around the
+#   filing's first mention of suppliers, not the annual report. The passages
+#   below inherit that, and so does every score in this notebook.
+# - `sentence-transformers`, and a CUDA GPU. `REQUIRE_GPU` refuses a CPU run
+#   rather than producing numbers an hour later that nobody compares against.
+# - Optional: `OPENAI_API_KEY`, `VOYAGE_API_KEY`.
+#
+# **Book reference**: Section 22.4, which discusses domain embeddings, the
+# FinMTEB benchmark, and Matryoshka embedding compression.
 
 # %% [markdown]
-# ## Setup and Imports
+# ## Setup
 #
-# The setup fixes query and document budgets so later model rankings reflect the
-# embedding choice rather than changes in the evaluation workload.
+# The query and document budgets are fixed here so that a later change in the
+# ranking is a change in the embedding and not a change in the workload.
 
 # %%
 """Domain-Specific Embeddings - Compare embedding models for financial retrieval."""
@@ -55,6 +71,7 @@ import hashlib
 import json
 import os
 import warnings
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -69,11 +86,12 @@ from plotly.subplots import make_subplots
 # ML4T configuration
 from data import load_sec_filings
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_palette
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
-MAX_QUERIES = 0
-MAX_DOCUMENTS = 0
+MAX_QUERIES = 0  # 0 means every query in FINANCIAL_QUERIES below
+MAX_DOCUMENTS = 0  # 0 means DEFAULT_DOCUMENT_CAP
+DEFAULT_DOCUMENT_CAP = 200  # passages to keep; the corpus is smaller, so it does not bind
 USE_LOCAL_MODELS_ONLY = True
 REQUIRE_GPU = True
 SEED = 42
@@ -95,25 +113,31 @@ if REQUIRE_GPU and not torch.cuda.is_available():
 EMBEDDING_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Embedding device: {EMBEDDING_DEVICE}")
 
-# %%
-# MAX_QUERIES is the cap; the actual N_QUERIES is set below after the
-# FINANCIAL_QUERIES list is constructed so the print reflects what the
-# evaluation actually runs.
-N_DOCUMENTS = MAX_DOCUMENTS if MAX_DOCUMENTS > 0 else 200
+# %% [markdown]
+# `MAX_QUERIES` and `MAX_DOCUMENTS` are caps, not counts: zero means the
+# notebook uses everything the corpus and the query list produce, subject to
+# `DEFAULT_DOCUMENT_CAP`. The actual counts are printed where each is built,
+# because a cap that never binds says nothing about what ran.
 
-print(f"MAX_QUERIES cap: {MAX_QUERIES if MAX_QUERIES > 0 else 'no cap (use all queries)'}")
-print(f"Number of documents: {N_DOCUMENTS}")
+# %%
+DOCUMENT_CAP = MAX_DOCUMENTS if MAX_DOCUMENTS > 0 else DEFAULT_DOCUMENT_CAP
+print(f"Query cap:    {MAX_QUERIES if MAX_QUERIES > 0 else 'none'}")
+print(f"Document cap: {DOCUMENT_CAP}")
 
 # %% [markdown]
-# ## 1. Financial Document Corpus
+# ## 1. The passages being retrieved over
 #
-# We load real 10-K filing text from the SP100 corpus and chunk it into
-# retrieval-ready passages. This gives the embedding comparison genuine
-# financial language density rather than synthetic snippets.
+# Eight symbols, their most recent 10-K each, cut into passages of two
+# sentences. The text is real filing prose rather than synthetic snippets,
+# which is what makes the vocabulary worth embedding - and per
+# [`01_sec_filing_pipeline`](01_sec_filing_pipeline.ipynb), most of it is the
+# part of each filing that discusses suppliers. A query about supply chains
+# has more to match here than a query about, say, revenue recognition, and the
+# scores below carry that.
 #
-# **Interpretation**: The initial query and document counts define the workload.
-# That result matters because model differences may concentrate in the most
-# technical slices of the corpus.
+# The corpus identity is checked against a pinned hash before anything is
+# embedded, so a corpus that has been regenerated stops the run instead of
+# quietly changing every number in it.
 
 
 # %%
@@ -137,7 +161,6 @@ if INPUT_SHA256 != EXPECTED_INPUT_SHA256:
 print(f"Input SHA-256: {INPUT_SHA256}")
 
 # %%
-# Load real 10-K filing text from SP100 corpus via the canonical loader.
 SAMPLE_SYMBOLS = ["AAPL", "MSFT", "AMZN", "JPM", "JNJ", "XOM", "BA", "ADBE"]
 filings_df = (
     load_sec_filings(form_type="10-K", universe="sp100", symbols=SAMPLE_SYMBOLS)
@@ -152,51 +175,55 @@ for row in filings_df.iter_rows(named=True):
     text = row["text"]
     if not text or len(text) < 200:
         continue
-    # Chunk into ~300-char passages on sentence boundaries
+    # Two sentences per passage, on the "*. *" boundary, skipping fragments.
     sentences = [s.strip() for s in text.replace("\n", " ").split(". ") if len(s.strip()) > 40]
     for j in range(0, len(sentences) - 1, 2):
         chunk = ". ".join(sentences[j : j + 2]) + "."
         if 80 < len(chunk) < 600:
             chunks.append(f"[{symbol}] {chunk}")
 
-print(f"Chunked {len(chunks)} passages from {len(SAMPLE_SYMBOLS)} symbols")
+# Sample down to the cap only if the chunking produced more than it. Sampling
+# when it did not would permute the corpus and change nothing else, which is a
+# step that looks like a decision and is not one.
+if len(chunks) > DOCUMENT_CAP:
+    rng = np.random.default_rng(SEED)
+    keep = sorted(rng.choice(len(chunks), size=DOCUMENT_CAP, replace=False))
+    FINANCIAL_DOCUMENTS = [chunks[i] for i in keep]
+else:
+    FINANCIAL_DOCUMENTS = list(chunks)
 
-# Sample a manageable corpus
-N_DOCS = min(N_DOCUMENTS, len(chunks))
-rng = np.random.default_rng(SEED)
-indices = rng.choice(len(chunks), size=N_DOCS, replace=False)
-FINANCIAL_DOCUMENTS = [chunks[i] for i in sorted(indices)]
 FINANCIAL_DOCUMENT_IDS = [
     hashlib.sha256(document.encode()).hexdigest() for document in FINANCIAL_DOCUMENTS
 ]
 CORPUS_SHA256 = hashlib.sha256("\n".join(FINANCIAL_DOCUMENT_IDS).encode()).hexdigest()
 
-print(f"Document corpus size: {len(FINANCIAL_DOCUMENTS)} documents")
+print(f"Chunked {len(chunks)} passages from {len(SAMPLE_SYMBOLS)} symbols")
+print(f"Kept {len(FINANCIAL_DOCUMENTS)} against a cap of {DOCUMENT_CAP}")
+print(f"Passages per symbol: {dict(sorted(Counter(d[1 : d.index(']')] for d in chunks).items()))}")
 print(f"Selected corpus SHA-256: {CORPUS_SHA256}")
 assert FINANCIAL_DOCUMENTS, "The filing slice did not produce any retrieval documents."
 assert len(set(FINANCIAL_DOCUMENT_IDS)) == len(FINANCIAL_DOCUMENT_IDS)
 
 # %% [markdown]
-# **Interpretation**: The corpus-size print confirms that every embedding model
-# is being judged on the same financial document base before any metrics are
-# compared.
-#
+# Every model below sees exactly this list, in this order, so a difference in
+# score is a difference in the embedding.
+
 # %%
-# Queries grounded in real 10-K filing topics across our SP100 symbols
 FINANCIAL_QUERIES = [
-    # Technical queries (domain embeddings should excel)
+    # Product, IP and compliance language.
     ("What competitive threats does the company face from low-cost competitors?", "technical"),
     ("How does the company protect its intellectual property?", "technical"),
     ("What are the company's key product development strategies?", "technical"),
     ("Describe the company's approach to hardware and software integration", "technical"),
     ("What regulatory compliance requirements affect operations?", "technical"),
-    # Risk-focused queries
+    # Risk-factor language. The first of these asks about the topic the corpus
+    # was cut on, which is worth remembering when reading the risk slice.
     ("What are the main risks to the company's supply chain?", "risk"),
     ("How does the company manage concentration risk in its customer base?", "risk"),
     ("What cybersecurity risks does the company disclose?", "risk"),
     ("How do currency fluctuations affect international operations?", "risk"),
     ("What legal proceedings or litigation risks exist?", "risk"),
-    # General business queries (generic embeddings may suffice)
+    # Broad business language, with no term of art to key on.
     ("How large is the company's workforce?", "general"),
     ("What markets does the company operate in?", "general"),
     ("How does the company distribute its products?", "general"),
@@ -219,9 +246,9 @@ print(f"Query-set SHA-256: {QUERY_SHA256}")
 queries_df.group_by("query_type").len()
 
 # %% [markdown]
-# **Interpretation**: The query mix spans technical, risk, and general language.
-# That prevents a single average score from hiding where finance-specific
-# embeddings actually change retrieval quality.
+# Five queries in each of three registers. Five is small, and the by-slice
+# numbers later have to be read as five queries rather than as a property of
+# the register - a point section 5 returns to with the counts.
 
 # %% [markdown]
 # ## 2. Embedding Model Implementations
@@ -278,8 +305,8 @@ def get_openai_embeddings(texts: list, model: str = "text-embedding-3-small") ->
 # Domain-specific embedding candidate for technical queries involving WACC,
 # EBITDA, basis points, and other financial terminology.
 #
-# **Interpretation**: This is the notebook's main domain-adapted candidate. The
-# result tells us whether specialized financial vocabulary is worth paying for.
+# It stays off in the shipped run. Where a key is present, it is the one
+# candidate here that was trained on financial text rather than adapted to it.
 
 
 # %%
@@ -357,12 +384,9 @@ def get_sentence_transformer_embeddings(
 # %% [markdown]
 # ## 3. Generate Embeddings for Comparison
 #
-# We embed both documents and queries with each model to compute
-# lexical-proxy agreement metrics.
-#
-# **Interpretation**: This stage turns dependency availability into a practical
-# model menu. The result should be read as a deployment comparison, not only a
-# pure algorithm benchmark.
+# Documents and queries go through each model in turn. BGE-large takes a query
+# prefix and MiniLM does not, which is a property of how each was trained and
+# is applied here rather than left to the reader.
 
 # %%
 print("=== Generating Document Embeddings ===\n")
@@ -417,12 +441,9 @@ print("Models in run:", [m[0] for m in MODELS])
 # %% [markdown]
 # ### Embed the corpus and query set
 #
-# Every candidate model sees the same documents and queries so the comparison
-# isolates the embedding choice rather than corpus drift.
-#
-# **Interpretation**: The model list print shows which candidates survived the
-# environment checks. That keeps later rankings honest about what was actually run.
-#
+# Every candidate sees the same documents and queries, so a difference in score
+# is a difference in the embedding. The print above names the candidates that
+# survived the environment checks, which is what the scores below are of.
 
 # %%
 for model_name, embed_fn in MODELS:
@@ -446,28 +467,32 @@ if missing_local_models:
     raise RuntimeError(f"Missing required local embedding results: {missing_local_models}")
 
 # %% [markdown]
-# **Interpretation**: Missing API keys only narrow the candidate set. The
-# evaluation remains valid because every surviving model is still measured on the
-# same corpus and query mix.
+# A missing key narrows the candidate set and changes nothing else. The two
+# local models are required, and their absence raises rather than shrinking the
+# comparison to one model without saying so.
 
 # %% [markdown]
-# ## 4. Retrieval Quality Evaluation
+# ## 4. Scoring the retrieval, and what the score is against
 #
-# We measure retrieval quality using:
-# - **Cosine similarity** between query and document embeddings
-# - **Precision@k** for the top-k retrieved documents
-# - **Mean Reciprocal Rank (MRR)** for ranking quality
+# Retrieval quality is a comparison against a set of documents someone decided
+# were the right answers. Nobody has annotated this corpus, so this notebook
+# builds that set out of term overlap and then measures agreement with it:
 #
-# Since we do not have human relevance labels, we use a lexical proxy:
-# documents containing query key terms are considered relevant.
-# These metrics test agreement with that proxy and cannot establish deployment
-# quality or a universal model ranking.
+# - **Cosine similarity** ranks documents against a query.
+# - **Precision@k** counts how many of the top k are in the proxy set.
+# - **Mean reciprocal rank** records how early the first one appears.
+#
+# The proxy is the weak part, and the section that builds it measures how
+# weak before any model is scored against it. Read every
+# number after this point as agreement with a term-overlap rule, not as
+# retrieval quality.
 
 # %% [markdown]
-# ### Cosine Similarity
+# ### Cosine similarity
 #
-# Standard similarity metric for comparing embedding vectors. We compute
-# the full query-document similarity matrix for batch evaluation.
+# One matrix of query-document similarities per model. Both models already
+# return unit vectors, so the normalization below is a guard rather than a
+# transformation.
 
 
 # %%
@@ -482,44 +507,51 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 # %% [markdown]
-# ### Lexical-Proxy Labels
+# ### The proxy labels, and the pool they are drawn from
 #
-# Since we lack human-annotated relevance judgments, we generate proxy labels
-# via term overlap. The three documents with the highest positive overlap are
-# proxy-relevant. This deliberately favors literal term coverage, so the result
-# is a diagnostic fixture rather than an independent relevance set.
+# Drop the stopwords from a query, count how many of the remaining terms appear
+# in each document, and call the three highest-scoring documents relevant.
+#
+# Two properties of that rule decide how to read everything below. The first is
+# that it favours literal term coverage, so it rewards a retriever for lexical
+# matching and cannot reward one for understanding a paraphrase - which is the
+# thing an embedding is supposed to add. The second is measured in the cell
+# below: the three labelled documents are picked out of however many have
+# any overlap at all, and when that pool is large the three are close to
+# arbitrary.
 
 
 # %%
-def get_relevance_labels(query: str, documents: list[str], document_ids: list[str]) -> list[bool]:
-    """
-    Generate pseudo-relevance labels based on term overlap.
+STOPWORDS = {
+    "what",
+    "is",
+    "the",
+    "how",
+    "are",
+    "does",
+    "explain",
+    "a",
+    "an",
+    "and",
+    "or",
+    "of",
+    "to",
+    "in",
+    "for",
+    "has",
+    "have",
+    "been",
+}
 
-    A document is "relevant" if it contains key terms from the query.
-    This is a proxy for true relevance in the absence of human labels.
+
+def get_relevance_labels(query: str, documents: list[str], document_ids: list[str]) -> list[bool]:
+    """Label the three documents with the highest query-term overlap as relevant.
+
+    Ties break on the document id, so the label set does not depend on corpus
+    order. Documents with no overlap are never labelled, so a query matching
+    fewer than three documents gets fewer than three positives.
     """
-    # Extract key terms (simple approach - remove stopwords)
-    stopwords = {
-        "what",
-        "is",
-        "the",
-        "how",
-        "are",
-        "does",
-        "explain",
-        "a",
-        "an",
-        "and",
-        "or",
-        "of",
-        "to",
-        "in",
-        "for",
-        "has",
-        "have",
-        "been",
-    }
-    query_terms = [w.lower().strip("?.,") for w in query.split() if w.lower() not in stopwords]
+    query_terms = [w.lower().strip("?.,") for w in query.split() if w.lower() not in STOPWORDS]
 
     if len(documents) != len(document_ids):
         raise ValueError("documents and document_ids must have the same length")
@@ -535,11 +567,45 @@ for query, _query_type in FINANCIAL_QUERIES:
         raise ValueError(f"No lexical-proxy positive document for query: {query}")
 
 
+# %%
+def overlap_pool_size(query: str, documents: list[str]) -> int:
+    """Count documents with any query-term overlap - the pool the labels come from."""
+    terms = [w.lower().strip("?.,") for w in query.split() if w.lower() not in STOPWORDS]
+    return sum(1 for doc in documents if any(term in doc.lower() for term in terms))
+
+
+proxy_pool = pl.DataFrame(
+    {
+        "query_type": [t for _, t in FINANCIAL_QUERIES],
+        "query": [q[:44] for q, _ in FINANCIAL_QUERIES],
+        "pool": [overlap_pool_size(q, FINANCIAL_DOCUMENTS) for q, _ in FINANCIAL_QUERIES],
+        "labelled": [
+            sum(get_relevance_labels(q, FINANCIAL_DOCUMENTS, FINANCIAL_DOCUMENT_IDS))
+            for q, _ in FINANCIAL_QUERIES
+        ],
+    }
+).sort("pool", descending=True)
+proxy_pool
+
+# %% [markdown]
+# The `pool` column is the number of documents with any term overlap at all,
+# and `labelled` is how many of them the rule calls relevant. Where the pool
+# runs into the hundreds against a corpus of a couple of hundred passages, the
+# rule is choosing three documents out of a near-tie, and a retriever that
+# misses all three has not necessarily retrieved anything worse.
+#
+# That is the ceiling on what this notebook can conclude, and it is stated
+# before the scores rather than after them.
+
+
 # %% [markdown]
 # ### Precision@k
 #
-# Measures the fraction of the top-k retrieved documents that match the lexical
-# proxy. It is interpretable as fixture agreement, not human-rated relevance.
+# The share of the top k retrieved documents that carry a proxy label. Its
+# ceiling is not 1 for every k: with at most three labelled documents per
+# query, Precision@5 cannot exceed three in five however good the retrieval
+# is, so P@3 and P@5 are not on the same scale and a fall between them is
+# arithmetic rather than a decline.
 
 
 # %%
@@ -566,10 +632,11 @@ def compute_precision_at_k(
 
 
 # %% [markdown]
-# ### Mean Reciprocal Rank (MRR)
+# ### Mean reciprocal rank
 #
-# Measures how early the first proxy-positive document appears. MRR = 1 means
-# the first result matches the lexical proxy for every query.
+# One over the rank of the first labelled document, averaged over queries. It
+# reaches 1 when every query puts a labelled document first, and it does not
+# have the k-dependent ceiling Precision@k has.
 
 
 # %%
@@ -623,16 +690,14 @@ results_df = pl.DataFrame(results)
 print(f"Evaluated {len(results)} query-model combinations")
 
 # %% [markdown]
-# **Interpretation**: The retrieval loop applies Precision@k and MRR to a
-# controlled lexical-proxy workload. Human judgments remain necessary before
-# reading the scores as deployment quality.
+# Thirty rows: two models against fifteen queries, each scored against the same
+# labels.
 
 # %% [markdown]
-# ## 5. Results Analysis
+# ## 5. Results
 #
-# Compare models across query types to understand where their rankings agree
-# with the lexical proxy. If no model produced embeddings the
-# notebook fails loudly here rather than silently substituting fake metrics.
+# Two aggregates, then the count behind them. The count is the part that
+# decides whether the aggregates support anything.
 
 # %%
 if len(results) == 0:
@@ -658,9 +723,7 @@ print("=== Model Comparison (Overall) ===\n")
 model_summary
 
 # %% [markdown]
-# **Interpretation**: The overall ranking provides a starting point, but the
-# aggregate hides important query-type differences. The by-type breakdown below
-# reveals how much the diagnostic changes by query type.
+# Read `avg_p@5` against a ceiling of three in five, not against one.
 
 # %%
 # Aggregate by model and query type
@@ -677,210 +740,192 @@ print("\n=== Model Comparison by Query Type ===\n")
 type_summary
 
 # %% [markdown]
-# **Interpretation**: The query-type breakdown shows whether one aggregate hides
-# different lexical-proxy behavior across the analyst workload.
+# ### The same difference, counted in documents
 #
-# %% [markdown]
-# ## 6. Visualization: Model Performance Comparison
-#
-# The chart below converts aggregate metrics into a workload view, showing when
-# query slices change lexical-proxy agreement across candidate models.
+# A percentage difference between two models over fifteen queries is a small
+# number of documents wearing a large-looking number. Convert it back before
+# reading it as a ranking.
 
 # %%
-# Create comparison visualization
-if len(model_summary) > 0:
-    fig = make_subplots(
-        rows=1,
-        cols=2,
-        subplot_titles=("Precision@3 by Model", "MRR by Query Type"),
-        horizontal_spacing=0.15,
-    )
-
-    # Bar chart: Overall P@3
-    models = model_summary["model"].to_list()
-    p_at_3 = model_summary["avg_p@3"].to_list()
-
-    fig.add_trace(
-        go.Bar(
-            x=models,
-            y=p_at_3,
-            marker_color=COLORS["blue"],
-            text=[f"{v:.1%}" for v in p_at_3],
-            textposition="outside",
-            showlegend=False,
-        ),
-        row=1,
-        col=1,
-    )
-
-# %% [markdown]
-# ### Add the query-type bars
-#
-# The grouped bars show where technical or risk-heavy queries change the
-# relative ordering of candidate embedding models.
-#
-
-# %%
-if len(model_summary) > 0:
-    query_types = type_summary["query_type"].unique().to_list()
-    query_colors = dict(zip(query_types, ml4t_palette(len(query_types)), strict=True))
-    for qtype in query_types:
-        subset = type_summary.filter(pl.col("query_type") == qtype)
-        fig.add_trace(
-            go.Bar(
-                name=qtype,
-                x=subset["model"].to_list(),
-                y=subset["avg_mrr"].to_list(),
-                text=[f"{v:.2f}" for v in subset["avg_mrr"].to_list()],
-                textposition="outside",
-                marker_color=query_colors[qtype],
-            ),
-            row=1,
-            col=2,
+top3_hits = (
+    results_df.with_columns((pl.col("precision_at_3") * 3).round().cast(pl.Int64).alias("hits"))
+    .group_by("model")
+    .agg(pl.col("hits").sum().alias("top3_hits"))
+    .sort("top3_hits", descending=True)
+)
+available = int(
+    sum(
+        min(
+            sum(get_relevance_labels(q, FINANCIAL_DOCUMENTS, FINANCIAL_DOCUMENT_IDS)),
+            3,
         )
-
-    fig.update_layout(
-        title=(
-            f"{model_summary['model'][0]} leads on lexical-proxy MRR; query slices still disagree"
-        ),
-        height=440,
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="center", x=0.5),
-        margin=dict(t=110, b=85),
+        for q, _ in FINANCIAL_QUERIES
     )
+)
+lead, trail = top3_hits.row(0, named=True), top3_hits.row(-1, named=True)
 
-    fig.update_yaxes(title_text="Lexical-proxy Precision@3", range=[0, 1], row=1, col=1)
-    fig.update_yaxes(title_text="Lexical-proxy MRR", range=[0, 1], row=1, col=2)
+display(
+    Markdown(f"""
+Across all {N_QUERIES} queries there are **{available}** proxy-labelled documents that could
+be retrieved into a top-3. `{lead["model"]}` retrieves **{lead["top3_hits"]}** of them and
+`{trail["model"]}` retrieves **{trail["top3_hits"]}**.
 
-    fig.show()
-
-# %% [markdown]
-# **Interpretation**: Read the chart as a workload comparison, not a global
-# quality benchmark. A model that agrees most on technical queries may still be unnecessary
-# if the production workload is mostly general-language news retrieval.
-
-# %% [markdown]
-# ## 7. Key Insights
-#
-# ### What changes between models
-#
-# A model's *aggregate* MRR can hide a meaningful split across query types.
-# The query-type breakdown above is the part that drives a deployment
-# decision: a model that leads overall but trails on the analyst's most
-# common workload is the wrong default.
-#
-# ### When domain specialization is likely to matter most
-#
-# - Technical terminology such as WACC, basis points, and ASC 606 can expose
-#   differences between generic and domain-adapted candidates.
-# - Risk-factor language with consistent patterns (concentration risk,
-#   counterparty exposure, CFTC/SEC compliance verbiage).
-#
-# ### When a generic open-source model is enough
-#
-# - General business queries with broad vocabulary.
-# - Workloads dominated by short news-style passages.
-# - Cost-sensitive deployments where a paid embedding API does not deliver a
-#   material gain on human-rated relevance.
-
-# %%
-# Summary statistics
-print("=== Domain Embedding Comparison Summary ===\n")
-
-if len(model_summary) >= 2:
-    best_model = model_summary.row(0, named=True)
-    baseline_model = model_summary.row(-1, named=True)
-
-    print(f"Highest lexical-proxy agreement: {best_model['model']}")
-    print(f"  - Precision@3: {best_model['avg_p@3']:.1%}")
-    print(f"  - MRR: {best_model['avg_mrr']:.3f}")
-
-    print(f"\nComparison model: {baseline_model['model']}")
-    print(f"  - Precision@3: {baseline_model['avg_p@3']:.1%}")
-    print(f"  - MRR: {baseline_model['avg_mrr']:.3f}")
-
-    relative_p3_improvement_pct = (
-        (best_model["avg_p@3"] - baseline_model["avg_p@3"])
-        / max(baseline_model["avg_p@3"], 0.01)
-        * 100
-    )
-    relative_mrr_improvement_pct = (
-        (best_model["avg_mrr"] - baseline_model["avg_mrr"])
-        / max(baseline_model["avg_mrr"], 0.01)
-        * 100
-    )
-    print(f"\nRelative Precision@3 improvement: {relative_p3_improvement_pct:.1f}%")
-    print(f"Relative MRR improvement:         {relative_mrr_improvement_pct:.1f}%")
-else:
-    print("Insufficient models for comparison")
-    print(f"Models available: {list(document_embeddings.keys())}")
-
-# %% [markdown]
-# **Interpretation**: The summary statistics compress the diagnostic comparison.
-# They show lexical-proxy agreement, not the value of a more expensive stack.
-#
-# %%
-# External benchmark context (qualitative)
-print("\n=== External Benchmark Context ===")
-print(
-    """
-External finance benchmarks are useful for candidate selection, but local
-benchmarking on your own filing corpus and query set should determine the
-final model choice.
-"""
+The gap is **{lead["top3_hits"] - trail["top3_hits"]}** document. Expressed as a ratio of the
+two Precision@3 averages the same gap reads as a double-digit percentage, which is why the
+count is printed next to it: nothing about a corpus of {len(FINANCIAL_DOCUMENTS)} passages and
+{N_QUERIES} queries distinguishes these two models, and a run on a different eight symbols
+could order them the other way.
+"""),
 )
 
 # %% [markdown]
-# ## 8. Practical Recommendations
+# ## 6. The comparison as a chart
 #
-# ### Model Selection Guide
-#
-# Use a repeatable ranking process rather than fixed recommendations:
-# 1. Evaluate all candidates on the same corpus snapshot.
-# 2. Report Recall@k, MRR, latency, and cost.
-# 3. Choose defaults by deployment constraints, not by single benchmark rank.
-#
-# ### Quantization Considerations
-#
-# Many embedding APIs support reduced dimensions; quantify the recall/latency
-# trade-off on this workload before adopting compression settings.
-#
-# **Interpretation**: The final summary should drive a deployment rule, not a
-# universal best model. The result suggests choosing the cheapest model that still
-# clears the query types analysts actually submit.
-
-# %% [markdown]
-# ## Key Takeaways
-#
-# The exact findings below are generated from this run so they cannot drift
-# from the executed output.
+# Left, the overall Precision@3. Right, MRR split by query register. Both
+# axes run to 1 so the bars are read against the scale the metric can reach,
+# not against each other.
 
 # %%
-slice_winners = (
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("Precision@3, all queries", "MRR by query register"),
+    horizontal_spacing=0.15,
+)
+fig.add_trace(
+    go.Bar(
+        x=model_summary["model"].to_list(),
+        y=model_summary["avg_p@3"].to_list(),
+        marker_color=COLORS["blue"],
+        text=[f"{v:.1%}" for v in model_summary["avg_p@3"].to_list()],
+        textposition="outside",
+        showlegend=False,
+    ),
+    row=1,
+    col=1,
+)
+
+query_types = sorted(type_summary["query_type"].unique().to_list())
+query_colors = dict(zip(query_types, ml4t_palette(len(query_types), categorical=True), strict=True))
+for qtype in query_types:
+    subset = type_summary.filter(pl.col("query_type") == qtype).sort("model")
+    fig.add_trace(
+        go.Bar(
+            name=qtype,
+            x=subset["model"].to_list(),
+            y=subset["avg_mrr"].to_list(),
+            text=[f"{v:.2f}" for v in subset["avg_mrr"].to_list()],
+            textposition="outside",
+            marker_color=query_colors[qtype],
+        ),
+        row=1,
+        col=2,
+    )
+
+fig.update_layout(
+    title="Lexical-proxy agreement by model, overall and by query register",
+    height=440,
+    showlegend=True,
+    legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="center", x=0.5),
+    margin=dict(t=110, b=85),
+)
+fig.update_yaxes(title_text="Precision@3", range=[0, 1], row=1, col=1)
+fig.update_yaxes(title_text="MRR", range=[0, 1], row=1, col=2)
+show_plotly_with_alt(
+    fig,
+    "Two bar panels, both on a scale running from zero to one. Left: Precision@3 for the two "
+    "models, with bars around a fifth of the way up the axis and near enough the same height "
+    "as each other. Right: mean reciprocal rank split into three query registers for each "
+    "model. Within bge-large the risk register stands highest, technical next and general "
+    "lowest by a wide margin; minilm repeats that order at lower values, except on the "
+    "general register, where minilm stands slightly above bge-large.",
+)
+
+# %% [markdown]
+# Each right-hand bar averages five queries, so the ordering within a register
+# rests on a handful of documents. The registers are there to show that one
+# aggregate can hide a reversal, not to rank the models per register.
+
+# %% [markdown]
+# ## 7. What this evaluation can and cannot decide
+#
+# ### What it decides
+#
+# It decides that the pipeline works: two models with different dimensions load
+# from pinned revisions, embed the same corpus on the same device, and produce
+# rankings that a metric can be computed over. That is worth having before any
+# model is chosen, because it is the part a reader has to rebuild for their own
+# corpus.
+#
+# ### What it does not decide
+#
+# It does not decide which model to deploy. The evidence against that is in
+# the document counts above and in the pool column of the proxy section: the
+# models are separated by
+# one document, and the labels they are scored against are three documents drawn
+# out of a pool that runs to most of the corpus for the broadest queries.
+#
+# ### What would decide it
+#
+# Human relevance judgments on a query set drawn from the questions analysts
+# actually ask, sized so that a difference between two models is more than one
+# document. Latency and cost measured on the same workload, because an embedding
+# that retrieves marginally better and costs ten times more is not better. And a
+# corpus cut the way production will cut it: this one is a supplier window,
+# and the first section says why that matters.
+
+# %%
+best_model = model_summary.row(0, named=True)
+baseline_model = model_summary.row(-1, named=True)
+
+print("=== Lexical-proxy agreement, this run ===\n")
+for row in model_summary.iter_rows(named=True):
+    print(
+        f"{row['model']:<12} P@1 {row['avg_p@1']:.3f}  P@3 {row['avg_p@3']:.3f}  "
+        f"P@5 {row['avg_p@5']:.3f} (ceiling 0.600)  MRR {row['avg_mrr']:.3f}"
+    )
+
+# %% [markdown]
+# ## Key takeaways
+#
+# Every number below is read out of this run rather than written into the text.
+
+# %%
+slice_leaders = (
     type_summary.sort(["query_type", "avg_mrr", "model"], descending=[False, True, False])
     .group_by("query_type", maintain_order=True)
     .first()
 )
-winner_text = ", ".join(
-    f"{row['query_type']}: {row['model']} ({row['avg_mrr']:.2f})"
-    for row in slice_winners.iter_rows(named=True)
+leader_text = ", ".join(
+    f"{row['query_type']}: {row['model']} at {row['avg_mrr']:.2f}"
+    for row in slice_leaders.iter_rows(named=True)
 )
+widest_pool = proxy_pool.row(0, named=True)
+narrowest_pool = proxy_pool.row(-1, named=True)
+
 display(
     Markdown(
         f"""
-1. **Aggregate lexical-proxy agreement differs by model.** `{best_model["model"]}`
-   leads this run with Precision@3 of {best_model["avg_p@3"]:.1%} and MRR of
-   {best_model["avg_mrr"]:.3f}, versus {baseline_model["avg_p@3"]:.1%} and
-   {baseline_model["avg_mrr"]:.3f} for `{baseline_model["model"]}`.
-2. **Query slices do not share one winner.** The highest lexical-proxy MRR by
-   slice is {winner_text}. Workload composition therefore matters.
-3. **The local comparison is reproducible.** Pinned BGE-large and MiniLM
-   revisions run on the same corpus and GPU without paid API calls.
-4. **Domain-adapted APIs are optional candidates.** Voyage and OpenAI models
-   activate only when local-only mode is disabled and credentials are present.
-5. **Human relevance judgments remain the deployment gate.** These scores use
-   lexical proxy labels and exercise the evaluation pipeline; they do not
-   certify which model is best for analysts.
+1. **The two models are separated by one document.** `{lead["model"]}` puts
+   {lead["top3_hits"]} proxy-labelled documents into a top-3 and `{trail["model"]}` puts
+   {trail["top3_hits"]}, out of {available} available. The Precision@3 averages -
+   {best_model["avg_p@3"]:.1%} against {baseline_model["avg_p@3"]:.1%} - are the same fact in
+   a form that looks larger than it is.
+2. **The labels are drawn out of a pool the retriever cannot be blamed for missing.** The
+   broadest query, "{widest_pool["query"]}", has {widest_pool["pool"]} of
+   {len(FINANCIAL_DOCUMENTS)} passages with some term overlap and gets
+   {widest_pool["labelled"]} labels; the narrowest, "{narrowest_pool["query"]}", has
+   {narrowest_pool["pool"]}. A rule that picks three out of {widest_pool["pool"]} near-ties is
+   not a relevance judgment.
+3. **Precision@5 has a lower ceiling than Precision@3.** With three labels per query it
+   cannot exceed three in five, so a P@5 below a P@3 is arithmetic rather than a decline in
+   retrieval.
+4. **The registers do not agree on an ordering.** Highest MRR by register:
+   {leader_text}. Each of those averages five queries, which is enough to show that one
+   aggregate can hide a reversal and not enough to say which model owns a register.
+5. **The run is reproducible and costs nothing.** Pinned BGE-large and MiniLM revisions, a
+   hashed corpus and query set, one GPU, no managed API. That is what makes it worth
+   rebuilding against labels that mean something.
 """
     )
 )
@@ -900,9 +945,6 @@ completion_record = {
 print(f"COMPLETION_RECORD={json.dumps(completion_record, sort_keys=True)}")
 
 # %% [markdown]
-#
-# **Next**: See [`03_hybrid_retrieval`](03_hybrid_retrieval.ipynb) for combining embeddings with BM25
-# keyword search via Reciprocal Rank Fusion and evaluating the combined ranking.
-#
-# **Book Reference**: Section 22.4 discusses domain embeddings, the FinMTEB
-# benchmark, and Matryoshka embedding compression.
+# **Next**: [`03_hybrid_retrieval`](03_hybrid_retrieval.ipynb) combines these
+# embeddings with BM25 keyword search through reciprocal rank fusion, and scores
+# the combined ranking against the same kind of proxy.
