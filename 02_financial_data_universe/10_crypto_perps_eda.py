@@ -246,7 +246,11 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "A histogram of the eight-hourly premium index in percent, with a vertical line at zero and the horizontal axis clipped to plus or minus two percent. The mass is a narrow peak close to zero, slightly to its positive side. An annotation at the left edge names how far the tail runs beyond the clipped range.",
+    f"A histogram of the eight-hourly premium index in percent, with a vertical line at zero "
+    f"and the horizontal axis clipped to plus or minus {PREMIUM_AXIS_PCT} percent. The mass is "
+    f"a single narrow spike centred on zero, taller than its neighbours, tapering within about "
+    f"a fifth of a percent in both directions. An annotation at the top left names how far the "
+    f"negative tail runs beyond the clipped range.",
 )
 
 # %% [markdown]
@@ -300,12 +304,12 @@ print(
 )
 
 # %% [markdown]
-# Fourteen percent of the observations sit on a value that a smooth distribution at this
-# resolution would essentially never produce. They are not rounding, and they are not the
-# perpetual and spot happening to agree to the eighth decimal place.
+# Fourteen percent of the observations sit on a value that a continuous distribution at this
+# resolution would essentially never produce. Whatever they are, they are not draws from the
+# same process as the other eighty-six percent.
 #
-# The bars they sit in settle it. If the premium were genuinely zero for the whole eight-hour
-# period, the open, high and low of that bar should be at or near zero too.
+# The next two cells narrow down what they might be. Neither settles it, and the section says
+# where the evidence stops.
 
 # %%
 _shape = _zero_rows.select(
@@ -327,13 +331,18 @@ print(f"Symbols affected: {_zero_rows['symbol'].n_unique()} of {premium['symbol'
 print(f"Spanning {_zero_rows['timestamp'].min()} to {_zero_rows['timestamp'].max()}")
 
 # %% [markdown]
-# So it is not a whole bar written as blank: fewer than one percent of the affected rows have
-# all four fields at zero. The close specifically is set to a value the bar's own high and low
-# say it never visited.
+# It is not a whole bar written as blank: fewer than one percent of the affected rows have all
+# four fields at zero, so whatever produces the zero acts on the close and mostly leaves the
+# other three alone.
 #
-# One more cut separates a data-capture practice from a market property. A property of the
-# basis would come and go with market conditions. A capture practice that is being improved
-# would decline steadily as the exchange's plumbing matures.
+# Note what this does *not* establish. A bar whose premium crossed zero during the period can
+# legitimately close at zero with a non-zero high and low, so a non-zero range is not proof
+# that the close is fabricated. It only rules out the simplest explanation, that the row is a
+# blank record.
+#
+# One more cut. A property of the basis would come and go with market conditions. A capture or
+# publication practice being tidied up would decline steadily as the exchange's plumbing
+# matures.
 
 # %%
 zero_by_year = (
@@ -350,22 +359,33 @@ zero_by_year
 # into a price column, not a price.
 #
 # The rate falls monotonically, year after year, from a quarter of all observations to under a
-# tenth. Nothing about the perpetual-spot basis improves on a schedule like that. A capture or
-# publication practice being tidied up over six years does, and that is the reading the trend
-# supports.
+# tenth, and it is a decline rather than a disappearance - the most recent full year still
+# carries the pattern on roughly one observation in twelve, across all nineteen symbols.
 #
-# It is a decline and not a disappearance: the most recent full year still carries the pattern
-# on roughly one observation in twelve, and every one of the nineteen symbols is affected. So
-# it cannot be dismissed as an early-history artifact that later data has outgrown.
+# ### What this establishes, and what it does not
 #
-# **This is why the null count passed.** The absence is encoded as a number the schema accepts,
-# so every completeness check written against nulls reports the file as complete - here, and in
-# anything downstream that inherited the same check.
+# **Established.** The exact zeros are far too frequent to be draws from the same continuous
+# process as the rest of the column, at a storage resolution where landing on zero should be
+# vanishingly rare. They are not blank bars. Their frequency falls steadily over six years,
+# which is the shape of a changing practice rather than of a market condition.
 #
-# What follows for the case study in `case_studies/crypto_perps_funding/` is that a premium of
-# exactly zero has to be treated as unknown rather than as a basis of zero. The two are opposite
-# instructions to a strategy that trades the basis: one says stand aside, the other says the
-# spread has closed.
+# **Not established.** That a zero means the value is missing. Nothing measured here reveals
+# what the exchange writes when it has no premium to publish, whether the zeros originate at
+# the exchange, in the download, or in the eight-hour resampling, or whether some of them are
+# genuine. Settling that needs the index definition or the source encoding, neither of which is
+# in this file. The pattern is strong enough to make it a question that has to be answered
+# before the column is used as a signal; it is not itself the answer.
+#
+# **What follows regardless.** The null count above is not a completeness check for this
+# column. Whatever the zeros mean, a check written as `is_null()` will report this file
+# complete, and so will any downstream check that inherited that shape. A consumer that needs
+# to know about them has to test for the value, not for the absence.
+#
+# For a strategy that trades the basis, the two possible readings are opposite instructions:
+# "the spread has closed" against "we do not know what the spread is". One observation in seven
+# is affected, so which reading is correct is worth establishing before the column is used,
+# rather than after. That is a question for whoever owns the download path, and it is filed as
+# `ml4t/agent-workspace#1108`.
 
 # %% [markdown]
 # ### Gaps in the hourly grid
@@ -389,9 +409,9 @@ gaps_by_symbol = (
     .agg(
         pl.len().alias("gaps"),
         pl.col("hours_since_previous").max().alias("longest_gap_hours"),
-        pl.col("hours_since_previous").sum().alias("total_missing_hours"),
+        (pl.col("hours_since_previous") - 1).sum().alias("missing_hours"),
     )
-    .sort("total_missing_hours", descending=True)
+    .sort("missing_hours", descending=True)
 )
 
 print(f"Symbols with at least one gap: {gaps_by_symbol.height} of {ohlcv['symbol'].n_unique()}")
@@ -424,8 +444,18 @@ print(f"Ratio of the two publication frequencies: 1 in {len(ohlcv) / len(premium
 # first as a data-quality finding would describe the calendar rather than the data.
 #
 # **What downstream work needs is the premium in force at each hour**, which is the most recent
-# one published at or before that hour. That is an as-of join, and it is point-in-time correct
-# by construction: it never reaches forward to a value that had not been published yet.
+# one that was actually available at that hour. Those are different things, and the difference
+# is a look-ahead bug waiting to happen.
+#
+# Binance stamps each bar with the time it **opened**. A premium bar stamped midnight covers
+# midnight to eight, so its close is not known until eight - and joining it to hourly rows from
+# midnight onward hands the notebook eight hours of the future. The case study states the same
+# convention and corrects for it the same way
+# (`case_studies/crypto_perps_funding/02_labels.py`, section B).
+#
+# So the premium timestamps are advanced by one bar length first. After that shift a row's
+# timestamp is the moment its close became available, and an as-of join on it is point-in-time
+# correct rather than merely looking it.
 #
 # Both frames are sorted by symbol and then timestamp, which is what an as-of join within
 # groups requires. `check_sortedness=False` asserts that rather than asking polars to verify
@@ -433,12 +463,20 @@ print(f"Ratio of the two publication frequencies: 1 in {len(ohlcv) / len(premium
 # effect on every run and the warning lands in the rendered notebook.
 
 # %%
+PREMIUM_BAR_HOURS = 8
+
+premium_available = premium.with_columns(
+    (pl.col("timestamp") + pl.duration(hours=PREMIUM_BAR_HOURS)).alias("timestamp"),
+    pl.col("timestamp").alias("premium_bar_opened"),
+).sort(["symbol", "timestamp"])
+
 combined = ohlcv.sort(["symbol", "timestamp"]).join_asof(
-    premium.sort(["symbol", "timestamp"]),
+    premium_available,
     on="timestamp",
     by="symbol",
     strategy="backward",
     check_sortedness=False,
+    suffix="_premium",
 )
 
 missing_premium = combined.filter(pl.col("premium_index_close").is_null()).height
@@ -446,6 +484,54 @@ print(
     f"As-of join leaves {missing_premium:,} of {len(combined):,} hourly bars without a premium "
     f"({100 * missing_premium / len(combined):.2f}%)"
 )
+
+# %% [markdown]
+# That count alone would be a poor coverage check, and it is worth saying why rather than
+# quoting it as a result. A backward as-of join with no tolerance matches every hour after a
+# symbol's first publication to *something*. If the exchange skipped a settlement, the join
+# does not report a gap; it silently carries the previous value across it. Zero unmatched rows
+# is therefore consistent with complete data and with a file full of holes.
+#
+# What distinguishes them is staleness. A premium published on an eight-hour grid should never
+# be more than eight hours old at the moment it is read.
+
+# %%
+staleness = combined.drop_nulls("premium_index_close").with_columns(
+    (pl.col("timestamp") - pl.col("premium_bar_opened")).dt.total_hours().alias("premium_age_hours")
+)
+_stale = staleness.filter(pl.col("premium_age_hours") > 2 * PREMIUM_BAR_HOURS)
+
+print(
+    f"Premium age when read: median {staleness['premium_age_hours'].median():.0f}h, "
+    f"max {staleness['premium_age_hours'].max():.0f}h"
+)
+print(
+    f"Hourly bars reading a premium more than two settlement periods old: {_stale.height:,} "
+    f"({100 * _stale.height / staleness.height:.2f}%)"
+)
+if _stale.height:
+    print(
+        _stale.group_by("symbol")
+        .agg(pl.len().alias("bars"), pl.col("premium_age_hours").max().alias("worst_age_hours"))
+        .sort("bars", descending=True)
+        .head(10)
+    )
+
+# %% [markdown]
+# The staleness check finds what the match count could not. Almost every hourly bar matched
+# something, and a fraction of a percent of them matched a premium that was days or weeks out
+# of date - one symbol reading a value more than two months old, and a shorter outage that
+# most of the universe shares on the same dates.
+#
+# Both are interior gaps in the premium file: settlements the index skipped while the contract
+# went on trading. The case study's `02_labels.py` names the same property from the other side,
+# noting that the index is absent at some settlements where the contract traded and that the
+# two are therefore not the same set of rows.
+#
+# The lesson generalises past this file. An as-of join never fails, so it never reports a gap;
+# it reports the last thing it found. Any coverage claim built on its null count is a claim
+# about whether the series ever started, not about whether it kept going. What detects a gap is
+# comparing the age of the match against the schedule the source publishes on.
 
 # %% [markdown]
 # What remains unmatched is a different kind of absence from the one the exact join reported,
@@ -494,25 +580,30 @@ else:
 # 4. **A cross-frequency exact join reports the calendar, not the data.** OHLCV is hourly and
 #    the premium index is eight-hourly, so an exact-timestamp join matches one bar in eight -
 #    and that fraction is the ratio of the publication frequencies, not a coverage problem.
-#    The number to compute instead is the as-of join, which carries the premium in force at
-#    each hour and is point-in-time correct by construction.
 #
-# 5. **The gap check covers every symbol**, because the thin and recently listed contracts are
+# 5. **An as-of join needs two corrections before it means anything.** Binance stamps a bar
+#    with the time it *opened*, so joining on the raw timestamp hands each hour a premium that
+#    was not known for another eight; the premium clock is advanced by one bar length first.
+#    And an as-of join never fails - it returns the last value it found - so its null count
+#    says only whether the series ever started. Measuring the age of each match against the
+#    publication grid is what finds the interior gaps, and it finds one symbol reading a
+#    premium more than two months stale.
+#
+# 6. **The gap check covers every symbol**, because the thin and recently listed contracts are
 #    the reason it exists. BTC is the most liquid and longest-listed of the nineteen, so a
 #    check confined to it samples the contract with least to find and reports that as the
 #    dataset's condition.
 #
-# 6. **A file with no nulls is not a complete file.** Fourteen percent of premium closes are
-#    exactly zero, on a quantity stored to eight decimals with a spread three orders of
-#    magnitude wider - a value a smooth distribution would essentially never produce. The same
-#    bars have non-zero highs and lows, and fewer than one percent have all four fields at
-#    zero, so the index moved through the period and then "closed" where it never traded. The
-#    rate declines monotonically year by year, which is what a capture practice being tidied up
-#    looks like and not what a market property looks like. Absence encoded as a number the
-#    schema accepts is why the null check reports the file complete. Downstream, a zero premium
-#    has to mean unknown rather than a basis of zero.
+# 7. **A null count is not a completeness check.** Fourteen percent of premium closes are
+#    exactly zero, on a quantity stored to eight decimals whose spread is three orders of
+#    magnitude wider - far too frequent to be draws from the same continuous process as the
+#    rest of the column. Fewer than one percent are blank bars, and the rate declines
+#    monotonically over six years, which is the shape of a changing practice rather than a
+#    market condition. What the zeros encode is not settled here and needs the index definition
+#    or the download path. What is settled is that no `is_null()` check can see them, so a
+#    consumer has to test for the value rather than for absence.
 #
-# 7. **These are raw exchange bars, so the OHLC relations are exact.** The check reports the
+# 8. **These are raw exchange bars, so the OHLC relations are exact.** The check reports the
 #    number of bars outside each bound rather than a percentage against a tolerance, because on
 #    unadjusted data there is no rounding for a tolerance to absorb.
 #
