@@ -115,13 +115,13 @@ def _delete_holdout_generation(case_dir, prediction_hash):
 # and a hash written down in one and read in the other agrees only until the sweep is
 # rebuilt.
 #
-# Nothing about the holdout enters this choice. The carrier is the validation rank-1, and
-# it was fixed before this notebook ran.
+# Nothing about the holdout enters this choice. The selected configuration is the validation
+# rank-1, and it was fixed before this notebook ran.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
 print(
-    f"Carrier: {carrier['val_backtest_hash']}  stage={carrier['val_stage']}  "
+    f"Selected configuration: {carrier['val_backtest_hash']}  stage={carrier['val_stage']}  "
     f"family={carrier['family']}  config={carrier['config_name']}  "
     f"label={carrier['label']}"
 )
@@ -131,10 +131,10 @@ print(
 print(f"  fitted by training run {carrier['training_hash']}")
 
 # %% [markdown]
-# The checkpoint is part of the configuration. This family publishes a prediction set per
-# boosting iteration on a declared schedule, and the carrier's prediction set names one of
-# them - so refitting without it would produce a model at the end of training rather than
-# the one that was ranked.
+# The checkpoint is part of the configuration. This family publishes a prediction set per boosting
+# iteration on a declared schedule, and the selected configuration's prediction set names one of
+# them - so refitting without it would produce a model at the end of training rather than the one
+# that was ranked.
 
 # %%
 validation_prediction = study.results.open(carrier["val_prediction_hash"])
@@ -211,11 +211,11 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 # is not the same as free: every configuration evaluated on it is another look at a period
 # the case study reports as unseen, and two evaluated quietly would make that report false.
 #
-# So the check below is on the carrier rather than on the notebook, and it has exactly two
-# outcomes. With the carrier unchanged this is an idempotent replay: the derivation is
-# deterministic and the training identity covers it, so the same identity comes back and
-# the fit is served from the registry. With the carrier changed it refuses, names both
-# configurations, and stops.
+# So the check below is on the selected configuration rather than on the notebook, and it has
+# exactly two outcomes. With the selected configuration unchanged this is an idempotent replay: the
+# derivation is deterministic and the training identity covers it, so the same identity comes back
+# and the fit is served from the registry. With the selected configuration changed it refuses,
+# names both configurations, and stops.
 #
 # `REPLACE_HOLDOUT` is the only way past that, and it is a replacement rather than an
 # addition: the superseded generation's rows are deleted, so the registry never holds two

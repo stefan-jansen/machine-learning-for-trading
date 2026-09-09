@@ -67,7 +67,6 @@ class CryptoExecutionEnv(gym.Env):
 
         # Extract data for this symbol
         symbol_data = market_data.filter(pl.col("symbol") == symbol).sort("timestamp")
-        self.market_data = symbol_data.to_numpy()
         self.timestamps = symbol_data["timestamp"].to_numpy()
         self.prices = symbol_data["open"].to_numpy()
         self.volumes = symbol_data["observed_volume"].to_numpy()
@@ -86,6 +85,10 @@ class CryptoExecutionEnv(gym.Env):
         self.action_space = spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32)
 
         self.reset()
+
+    def market_state(self) -> CryptoMarketState:
+        """The bar the next call to :meth:`step` will execute against."""
+        return self._get_market_state(self.start_idx + self.step_idx)
 
     def _get_market_state(self, idx: int) -> CryptoMarketState:
         """Get market state at given index."""
@@ -126,7 +129,7 @@ class CryptoExecutionEnv(gym.Env):
 
     def _get_obs(self) -> np.ndarray:
         """Construct observation vector."""
-        market = self._get_market_state(self.start_idx + self.step_idx)
+        market = self.market_state()
 
         inventory_ratio = self.remaining_shares / self.total_shares
         time_ratio = (self.horizon - self.step_idx) / self.horizon
@@ -169,11 +172,9 @@ class CryptoExecutionEnv(gym.Env):
     def max_trade_size(self, market: CryptoMarketState) -> float:
         """Largest executable size, capped by both schedule and liquidity.
 
-        The cap binds on the final step too. Exempting it let the agent unwind
-        any residual in one trade regardless of available volume, which both
-        understated impact and made the forced-liquidation branch in ``step``
-        unreachable -- so the notebook's forced-liquidation diagnostic could
-        only ever report zero.
+        The liquidity cap binds on the final step as well as every other one, so
+        a residual the policy has not sold by then cannot be unwound in one
+        trade regardless of the volume available.
         """
         schedule_cap = self.pace_max_multiplier * self.reference_trade_size()
         liquidity_cap = self.max_participation_rate * market.volume
@@ -182,9 +183,7 @@ class CryptoExecutionEnv(gym.Env):
     def action_to_target_shares(
         self, action: np.ndarray | float, market: CryptoMarketState | None = None
     ) -> float:
-        current_market = (
-            self._get_market_state(self.start_idx + self.step_idx) if market is None else market
-        )
+        current_market = self.market_state() if market is None else market
         action_frac = self._coerce_action_fraction(action)
         multiplier = self.pace_min_multiplier + action_frac * (
             self.pace_max_multiplier - self.pace_min_multiplier
@@ -218,9 +217,9 @@ class CryptoExecutionEnv(gym.Env):
         square-root impact would make splitting artificially cheap.
         """
         participation_rate = (shares_to_sell + concurrent_shares) / (market.volume + 1e-8)
-        # Square-root-plus-linear, matching the model the notebook documents.
-        # The linear term was written as participation_rate**2, which made
-        # impact grow quadratically and overstated forced-liquidation cost.
+        # Square-root plus linear: the marginal cost of trading more in one bar
+        # rises with participation, and does so without limit only in the linear
+        # term.
         market_impact = self.impact_coefficient * (
             np.sqrt(max(participation_rate, 0.0)) + participation_rate
         )
@@ -241,7 +240,7 @@ class CryptoExecutionEnv(gym.Env):
         return float(self.schedule_penalty * notional * deviation_ratio**2)
 
     def step(self, action: np.ndarray | float):
-        market = self._get_market_state(self.start_idx + self.step_idx)
+        market = self.market_state()
         # Capture both schedule quantities before inventory is reduced, so the
         # history row describes the trade that was actually executed. Computing
         # them after the fact could even report a cap below `shares_sold`.
@@ -276,11 +275,11 @@ class CryptoExecutionEnv(gym.Env):
             self.remaining_shares = 0.0
         self.total_cost += shortfall + forced_shortfall
 
-        # Inventory risk prices the exposure actually carried past this bar.
-        # A forced remainder is liquidated against this same bar, so it is never
-        # carried and must not be charged: otherwise the terminal reward depends
-        # on how the final order splits between the policy leg and the forced
-        # leg even though exposure and execution cost are identical either way.
+        # Inventory risk prices the exposure carried past this bar. A forced
+        # remainder is liquidated against this same bar, so it is never carried
+        # and is not charged; otherwise the terminal reward would depend on how
+        # the final order splits between the two legs, which changes neither the
+        # exposure nor the execution cost.
         carried_shares = max(self.remaining_shares - forced_shares, 0.0)
         risk_penalty = (
             0.0 if carried_shares <= 0 else self._inventory_risk_penalty(market, carried_shares)
@@ -290,12 +289,9 @@ class CryptoExecutionEnv(gym.Env):
         if forced_shares > 0:
             self.remaining_shares = 0.0
 
-        # One history row per bar. The forced leg used to be a second row on the
-        # final bar, which every consumer then had to remember to collapse -- the
-        # trajectory figure plotted it as a fictitious extra hour and the
-        # last-bar volume column read the involuntary remainder alone. Recording
-        # the bar once, with the forced quantity as its own field, removes the
-        # trap instead of patching each reader.
+        # One history row per bar, with the forced quantity as its own field, so
+        # `shares_sold` always means the whole bar and no reader has to collapse
+        # two rows for the final hour.
         self.execution_history.append(
             {
                 "step": self.step_idx,

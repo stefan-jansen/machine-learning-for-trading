@@ -654,7 +654,7 @@ if us_equities is not None:
     axes[1].set_title("Winsorized Returns (1st/99th)")
     axes[1].set_xlabel("Daily Return")
 
-    fig.suptitle("Winsorization clips the 1st/99th-percentile tails, leaving the bulk unchanged")
+    fig.suptitle("Winsorization clips the 1st/99th tails and leaves the bulk unchanged")
     fig.tight_layout()
     fig.show()
 

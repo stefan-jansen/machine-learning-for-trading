@@ -269,6 +269,23 @@ When data is missing, loaders raise `DataNotFoundError` with download instructio
 
 ## API Keys
 
+None of these are needed to start. `cp .env.example .env` and the free datasets
+in the table above download as they are; come back here when a chapter asks for
+a source that needs one.
+
+### No sign-up at all
+
+| Provider | Variable          | What to put there            |
+| -------- | ----------------- | ---------------------------- |
+| SEC      | `EDGAR_IDENTITY`  | Your own name and email      |
+
+The SEC mandates a real `User-Agent` on every EDGAR request and blocks
+placeholder addresses, so this is not a key and there is nothing to register
+for - `EDGAR_IDENTITY=Jane Doe jane@example.org` in `.env` is the whole step.
+Ch04 NB02 and NB14, Ch22 NB01, and the `form4_download.py` and
+`filings_download.py` scripts refuse to run while it is empty. Every other
+SEC-derived dataset here is a committed snapshot and needs nothing.
+
 ### Free API Keys
 
 | Provider         | Variable         | Sign Up                                           |
@@ -285,10 +302,11 @@ When data is missing, loaders raise `DataNotFoundError` with download instructio
 
 ### Configuration
 
-Create `.env` in repository root:
+Fill in the lines you need in the `.env` you copied from `.env.example`:
 
 ```bash
-ML4T_DATA_PATH=/path/to/your/data
+# No sign-up - your own name and email
+EDGAR_IDENTITY=Jane Doe jane@example.org
 
 # Free API keys
 FRED_API_KEY=your-fred-key
@@ -298,6 +316,16 @@ OANDA_API_KEY=your-oanda-key
 # Paid
 DATABENTO_API_KEY=db-your-key
 ```
+
+Leave `ML4T_DATA_PATH` commented out unless you keep the datasets on a separate
+drive. The default is this repository's own `data/` folder and it is correct for
+every chapter.
+
+On the local `uv` path, `.env` reaches a notebook because importing `utils`
+loads it; a value you change there takes effect at the next kernel restart. On
+the Docker path Compose reads `.env` when it *creates* the container, so stop
+Jupyter Lab and run `docker compose up ml4t` again. `docker compose restart`
+does not pick up the new value.
 
 ---
 

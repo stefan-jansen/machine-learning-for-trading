@@ -142,23 +142,24 @@ pool_size = pl.DataFrame(
 # numbers with nothing behind them. The cause was not a bad computation - it was that this
 # notebook never called for one, while `etfs`, `fx_pairs` and `us_firm_characteristics` all do.
 #
-# `compute_and_register` refreshes the whole table rather than one row, so it can never report
-# a stale leader. `populate_paired_metrics` writes one row per comparison kind, including
-# `val_rank1_self` - the carrier's validation series against its own holdout replay, which is
-# the paired form of the val-to-holdout question and the only honest way to ask it. Comparing
-# two point estimates is not that question: the holdout is a shorter window, so the difference
-# carries sampling error the point estimates do not show.
+# `compute_and_register` refreshes the whole table rather than one row, so it can never report a
+# stale leader. `populate_paired_metrics` writes one row per comparison kind, including
+# `val_rank1_self` - the selected configuration's validation series against its own holdout replay,
+# which is the paired form of the val-to-holdout question and the only honest way to ask it.
+# Comparing two point estimates is not that question: the holdout is a shorter window, so the
+# difference carries sampling error the point estimates do not show.
 #
-# The carrier is resolved here rather than further down because `populate_paired_metrics` needs
-# it. Omitting it does not fail - it falls back to ranking the registry on raw Sharpe, which on
-# this registry names `latent_factors`/`sdf` on `fwd_ret_21d`, while the canonical resolver names
-# `gbm`/`leaves_31_mse` on `fwd_ret_5d`. The paired rows would then compare a strategy the
-# chapter does not report, under headings that say they describe the one it does. That is the
-# same disagreement documented below for the holdout lookup, reaching a different table.
+# The selected configuration is resolved here rather than further down because
+# `populate_paired_metrics` needs it. Omitting it does not fail - it falls back to ranking the
+# registry on raw Sharpe, which on this registry names `latent_factors`/`sdf` on `fwd_ret_21d`,
+# while the canonical resolver names `gbm`/`leaves_31_mse` on `fwd_ret_5d`. The paired rows would
+# then compare a strategy the chapter does not report, under headings that say they describe the
+# one it does. That is the same disagreement documented below for the holdout lookup, reaching a
+# different table.
 #
 # `replace_all=True` makes the call a snapshot rather than an insert. Registration is an upsert
 # keyed on the pair, so it cannot remove rows a previous selection wrote; without the prune, the
-# raw-Sharpe pairs would survive alongside the carrier's.
+# raw-Sharpe pairs would survive alongside the selected configuration's.
 #
 # `prediction_hashes` scopes the cohorts to this notebook's own pool. On this registry it changes
 # nothing - the cohorts are already a strict subset of the pool, because it was rebuilt from empty
@@ -255,13 +256,13 @@ fig.show()
 # The re-ranking is the reason to prefer the resolver. A Sharpe computed over a configuration's own
 # available history is not comparable across configurations that priced different spans, and
 # ranking the raw column silently rewards whichever candidate had the most forgiving window. The
-# resolver also refuses a carrier that is insolvent rather than reporting it.
+# resolver also refuses a selected configuration that is insolvent rather than reporting it.
 #
 # It matters here beyond correctness of the ranking. `17_holdout_predictions` and
-# `18_holdout_backtest` resolve the carrier the same way, so a second selection rule in this
-# notebook would ask `select_holdout_self_backtest` for the holdout replay of a configuration
-# those notebooks never ran. The answer would be `None`, and this notebook would report the
-# holdout as not produced while it sat in the registry.
+# `18_holdout_backtest` resolve it the same way, so a second selection rule
+# in this notebook would ask `select_holdout_self_backtest` for the holdout replay of a
+# configuration those notebooks never ran. The answer would be `None`, and this notebook would
+# report the holdout as not produced while it sat in the registry.
 #
 # The prediction checkpoint is part of the identity either way: two rows from the same trained
 # model at different checkpoints are different configurations, and a holdout matched on the
@@ -273,7 +274,7 @@ selected = next(
 )
 if selected is None:
     raise RuntimeError(
-        f"the resolved carrier {carrier['val_backtest_hash']} ({carrier['family']}/"
+        f"the resolved configuration {carrier['val_backtest_hash']} ({carrier['family']}/"
         f"{carrier['config_name']}, {carrier['label']}, stage {carrier['val_stage']}) is not in "
         "this notebook's pool. The pool and the shared resolver are reading the same registry, so "
         "they disagree about which stages are selected from, and the holdout notebooks followed "
@@ -303,11 +304,12 @@ pl.DataFrame(
 # %% [markdown]
 # ## What friction costs this configuration
 #
-# The cost grid was run on the single carrier this case study ships - the same one selected above,
-# resolved across labels and priced with its risk overlay in place - holding the model, sizing,
-# risk rules and contract specification fixed and varying only the all-in cost assumption.
+# The cost grid was run on the single configuration this case study ships - the same one selected
+# above, resolved across labels and priced with its risk overlay in place - holding the model,
+# sizing, risk rules and contract specification fixed and varying only the all-in cost assumption.
 # Commission and slippage each take half of the quoted figure. One curve, not one per horizon:
-# there is one strategy, so the label the carrier does not sit on has no cost rows at all.
+# there is one strategy, so the label the selected configuration does not sit on has no cost rows
+# at all.
 
 # %%
 if EXECUTION_TIER == "canonical":

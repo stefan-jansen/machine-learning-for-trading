@@ -42,6 +42,7 @@ import pytest
 from tests.pm_helpers import (
     STAGE_RE,
     get_overrides,
+    gpu_skip_reason,
     resolved_registry_path,
     run_notebook,
     stage_sort_key,
@@ -506,14 +507,9 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
             "~/ml4t/artifacts and which no CI runner and no fresh worktree has"
         )
 
-    if overrides.get("gpu"):
-        try:
-            import torch
-
-            if not torch.cuda.is_available():
-                pytest.skip("GPU required but not available")
-        except ImportError:
-            pytest.skip("torch not installed")
+    reason = gpu_skip_reason(overrides)
+    if reason:
+        pytest.skip(reason)
 
     # --- Parameters ---
     # Start with quick defaults, then retain notebook-specific reduced settings.

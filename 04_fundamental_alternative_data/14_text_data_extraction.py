@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -17,943 +18,501 @@
 #
 # **Chapter 4: Fundamental and Alternative Data**
 # **Docker image**: `ml4t`
-# **Section Reference**: See Section 4.5 for text dataset engineering concepts
+# **Section Reference**: Section 4.5 (Using Text Data for NLP Features)
 #
 # ## Purpose
 #
-# Corporate filings contain valuable information locked in unstructured text. This notebook
-# demonstrates how to extract and structure high-value text blocks (MD&A, Risk Factors) from
-# 10-K and 10-Q filings, creating clean datasets ready for NLP analysis in later chapters.
+# An annual report is a quarter of a million characters of which a model wants perhaps a
+# twentieth. The Securities and Exchange Commission prescribes what a 10-K must contain and
+# numbers the parts, so the document has a structure; what it does not have is markup that a
+# parser can rely on, because the numbering appears in the table of contents, in cross-references
+# inside the narrative, and again as the actual section heading, in whatever typography the filer
+# chose.
+#
+# Getting from a filing to a section, reliably, over thousands of documents, is the whole job of
+# this notebook. Everything downstream in the book - sentiment scoring, topic models, embeddings -
+# assumes that job was done properly, and the failure mode is silent: an extractor that returns
+# the table of contents entry instead of the section returns a plausible-looking short string.
 #
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Navigate SEC EDGAR filing structure
-# - Extract specific sections from 10-K/10-Q filings (MD&A, Risk Factors)
-# - Clean and normalize extracted text
-# - Create point-in-time correct text datasets
-# - Prepare data for downstream NLP analysis
+#
+# - Name the items of a 10-K a research pipeline usually wants, and say where the same content
+#   sits in a 10-Q.
+# - Strip HTML from a filing without destroying the paragraph boundaries a later stage needs.
+# - Locate a section's boundaries when its item number appears many times in the document, and
+#   explain why the first match is the wrong one.
+# - Check an extraction for the two failures it can have - returning nothing, and running past
+#   the section's end - and report the rate rather than assuming success.
+# - Measure how much of a section changed between two consecutive filings, which is the input to
+#   the change-detection signals in Chapter 10.
+#
+# ## Prerequisites
+#
+# This notebook reads live filings from EDGAR, which requires an identifying `User-Agent`. It is
+# not an API key and there is nothing to sign up for: put your own name and email on the
+# `EDGAR_IDENTITY` line of the `.env` file in the repository root, before you start Jupyter.
+#
+# ```
+# EDGAR_IDENTITY=Jane Doe jane@example.org
+# ```
 #
 # ## Cross-References
 #
-# - **Upstream**: SEC EDGAR filings via `02_sec_filing_explorer.py`
-# - **Downstream**: Chapter 10 `08_text_feature_evaluation.py` (NLP feature engineering)
-# - **Related**: `02_sec_filing_explorer.py` (filing access)
+# - **Related**: [`02_sec_filing_explorer`](02_sec_filing_explorer.ipynb) (reaching filings through the library)
+# - **Downstream**: `10_text_feature_engineering/09_filing_text_signals.py` (signals built on filing text)
 #
 # ## Key Concepts
 #
-# - **10-K**: Annual report with comprehensive company information
-# - **10-Q**: Quarterly report with interim financial information
-# - **MD&A**: Management's Discussion and Analysis of Financial Condition
-# - **Risk Factors**: Required disclosure of material risks
-# - **Item Numbers**: Standard sections in SEC filings (Item 7 = MD&A)
+# - **10-K**: the annual report, filed once a year and the most complete narrative disclosure.
+# - **10-Q**: the quarterly report, shorter, and with the same content under different item
+#   numbers.
+# - **Item 1A, Risk Factors**: the risks management is required to disclose. The largest narrative
+#   block in a modern filing and the most mined.
+# - **Item 7, Management's Discussion and Analysis**: management's account of the period's
+#   results, in its own words.
+# - **Accession number**: the identifier the SEC assigns to a filing. Unique, permanent, and the
+#   right primary key for a text dataset.
 
 # %%
 """Text Data Extraction - extract and structure high-value text blocks from SEC filings for NLP analysis."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
 import os
 import re
-from datetime import datetime
-from pathlib import Path
+import warnings
 
-import numpy as np
-import plotly.graph_objects as go
+# EdgarTools re-exports three legacy HTML helpers and each one raises a DeprecationWarning as it
+# is imported. They are the same three every time and say nothing about the filings.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="edgar")
+
+import plotly.express as px
 import polars as pl
 from bs4 import BeautifulSoup
 from edgar import Company, set_identity
 
-# Importing utils.style registers and activates the ML4T Plotly template
-# (house palette, fonts, gridlines) so figures inherit the book style.
-from utils.style import COLORS
+from utils.paths import get_output_dir
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# The company and form choose which filings are read. Two consecutive filings of the same form
+# are fetched, because the second is what makes the change measurement in Part 6 possible; one
+# filing alone can be extracted from but not compared.
 
 # %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
-EDGAR_TICKER = "AAPL"
-EDGAR_FORM = "10-K"
-
-# %% [markdown]
-# ## 1. SEC Filing Structure
-#
-# 10-K filings follow a standard structure:
-#
-# | Item | Section | Content |
-# |------|---------|---------|
-# | Item 1 | Business | Company description and operations |
-# | Item 1A | Risk Factors | Material risks to the business |
-# | Item 7 | MD&A | Management's analysis of financial condition |
-# | Item 7A | Quantitative Disclosures | Market risk exposures |
-# | Item 8 | Financial Statements | Audited financials |
-#
-# The most valuable sections for NLP analysis:
-# - **Item 1A (Risk Factors)**: Sentiment, risk themes, changes over time
-# - **Item 7 (MD&A)**: Management's perspective on performance
+TICKER = "AAPL"  # any filer with a long 10-K history works here
+FORM = "10-K"  # switch to "10-Q" to exercise the quarterly item numbering
+N_FILINGS = 2  # consecutive filings to read, most recent first
+MIN_SECTION_WORDS = 100  # an extraction shorter than this is treated as a failure
+MAX_SECTION_WORDS = 50_000  # and one longer than this as having run past its boundary
 
 # %%
-# Define section patterns for extraction
-# Note: 10-K and 10-Q have different item numbers for the same content
-# 10-K: MD&A = Item 7, Risk Factors = Item 1A
-# 10-Q: MD&A = Item 2 (Part I), Risk Factors = Item 1A (Part II, if updated)
-
-SECTION_PATTERNS_10K = {
-    "risk_factors": {
-        # Line-anchored patterns to avoid Table of Contents matches
-        "start_patterns": [
-            r"^\s*ITEM\s*1A\.?\s*[-–—]?\s*RISK\s*FACTORS",
-            r"^\s*Item\s*1A\.?\s*[-–—]?\s*Risk\s*Factors",
-        ],
-        "end_patterns": [
-            r"^\s*ITEM\s*1B\b",
-            r"^\s*ITEM\s*2\b",
-            r"^\s*Item\s*1B\b",
-            r"^\s*Item\s*2\b",
-        ],
-        "item_number": "1A",
-    },
-    "mda": {
-        # Handle both straight and curly apostrophes: ' (U+0027) and ' (U+2019)
-        "start_patterns": [
-            r"^\s*ITEM\s*7\.?\s*[-–—]?\s*MANAGEMENT(?:'|\u2019)?S?\s*DISCUSSION",
-            r"^\s*Item\s*7\.?\s*[-–—]?\s*Management(?:'|\u2019)?s?\s*Discussion",
-        ],
-        "end_patterns": [
-            r"^\s*ITEM\s*7A\b",
-            r"^\s*ITEM\s*8\b",
-            r"^\s*Item\s*7A\b",
-            r"^\s*Item\s*8\b",
-        ],
-        "item_number": "7",
-    },
-    "business": {
-        "start_patterns": [
-            r"^\s*ITEM\s*1\.?\s*[-–—]?\s*BUSINESS",
-            r"^\s*Item\s*1\.?\s*[-–—]?\s*Business",
-        ],
-        "end_patterns": [
-            r"^\s*ITEM\s*1A\b",
-            r"^\s*ITEM\s*2\b",
-            r"^\s*Item\s*1A\b",
-            r"^\s*Item\s*2\b",
-        ],
-        "item_number": "1",
-    },
-}
-
-# 10-Q patterns differ from 10-K
-SECTION_PATTERNS_10Q = {
-    "risk_factors": {
-        # In 10-Q, risk factor updates appear in Part II, Item 1A
-        # Line-anchored patterns with MULTILINE support (handled in extract_section)
-        "start_patterns": [
-            r"^\s*ITEM\s*1A\.?\s*[-–—]?\s*RISK\s*FACTORS",
-            r"^\s*Item\s*1A\.?\s*[-–—]?\s*Risk\s*Factors",
-        ],
-        "end_patterns": [
-            r"^\s*ITEM\s*1B\b",
-            r"^\s*ITEM\s*2\b",
-            r"^\s*Item\s*2\b",
-        ],
-        "item_number": "1A",
-        # For 10-Q risk factors, prefer matches after PART II
-        "require_after": r"PART\s*II",
-    },
-    "mda": {
-        # In 10-Q, MD&A is Part I, Item 2 (NOT Item 7)
-        # Handle both straight and curly apostrophes
-        "start_patterns": [
-            r"^\s*ITEM\s*2\.?\s*[-–—]?\s*MANAGEMENT(?:'|\u2019)?S?\s*DISCUSSION",
-            r"^\s*Item\s*2\.?\s*[-–—]?\s*Management(?:'|\u2019)?s?\s*Discussion",
-        ],
-        "end_patterns": [
-            r"^\s*ITEM\s*3\b",
-            r"^\s*Item\s*3\b",
-        ],
-        "item_number": "2",
-    },
-}
-
-# Default to 10-K patterns (backward compatible)
-SECTION_PATTERNS = SECTION_PATTERNS_10K
-
-
-def get_patterns_for_form(form_type: str) -> dict:
-    """Get appropriate section patterns based on filing type."""
-    form_type_upper = form_type.upper() if form_type else "10-K"
-    if "10-Q" in form_type_upper:
-        return SECTION_PATTERNS_10Q
-    return SECTION_PATTERNS_10K
-
+OUTPUT_DIR = get_output_dir(4, "sec_text")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
-# ## 2. Text Cleaning Functions
+# ## 1. What a filing is made of
 #
-# Raw SEC filings contain HTML, special characters, and formatting that must be cleaned.
+# A 10-K is a numbered sequence of items whose meaning is fixed by regulation. Three of them carry
+# almost all the narrative a research pipeline wants.
+#
+# | Item | Section | What it holds |
+# |------|---------|---------------|
+# | 1 | Business | What the company does, its segments and its markets |
+# | 1A | Risk Factors | The risks management is required to disclose |
+# | 7 | Management's Discussion and Analysis | Management's account of the period's results |
+# | 7A | Quantitative and Qualitative Disclosures | Market risk exposures |
+# | 8 | Financial Statements | The audited financials |
+#
+# The numbering is **form-specific**, and this is the single most common source of a silently
+# empty extraction. In a 10-Q, management's discussion is Item 2 of Part I, not Item 7, and the
+# risk factors, if updated at all, are Item 1A of Part II. An extractor that hardcodes the 10-K
+# numbers returns nothing on a 10-Q and says nothing about why.
+
+# %%
+SECTIONS = {
+    "10-K": {
+        "business": {
+            "starts": [r"^\s*ITEM\s*1\.?\s*[-–—]?\s*BUSINESS"],
+            "ends": [r"^\s*ITEM\s*1A\b", r"^\s*ITEM\s*2\b"],
+        },
+        "risk_factors": {
+            "starts": [r"^\s*ITEM\s*1A\.?\s*[-–—]?\s*RISK\s*FACTORS"],
+            "ends": [r"^\s*ITEM\s*1B\b", r"^\s*ITEM\s*2\b"],
+        },
+        "mda": {
+            # Filers use both the straight and the curly apostrophe in "Management's".
+            "starts": [r"^\s*ITEM\s*7\.?\s*[-–—]?\s*MANAGEMENT(?:'|’)?S?\s*DISCUSSION"],
+            "ends": [r"^\s*ITEM\s*7A\b", r"^\s*ITEM\s*8\b"],
+        },
+    },
+    "10-Q": {
+        "risk_factors": {
+            "starts": [r"^\s*ITEM\s*1A\.?\s*[-–—]?\s*RISK\s*FACTORS"],
+            "ends": [r"^\s*ITEM\s*1B\b", r"^\s*ITEM\s*2\b"],
+            "after": r"PART\s*II",
+        },
+        "mda": {
+            "starts": [r"^\s*ITEM\s*2\.?\s*[-–—]?\s*MANAGEMENT(?:'|’)?S?\s*DISCUSSION"],
+            "ends": [r"^\s*ITEM\s*3\b"],
+        },
+    },
+}
+FLAGS = re.IGNORECASE | re.MULTILINE | re.DOTALL
+
+# %% [markdown]
+# ## 2. The filings
+#
+# EDGAR requires every request to identify its sender, and rejects placeholder addresses. The
+# fetch is read-only and rate-limited by the library.
+
+# %%
+identity = os.environ.get("EDGAR_IDENTITY")
+if not identity:
+    raise RuntimeError(
+        "EDGAR_IDENTITY is not set. The SEC requires a real User-Agent - your "
+        "name and email - on every EDGAR request, and blocks placeholder "
+        "addresses. It is not an API key and there is nothing to sign up for.\n"
+        "Put your own name and email on the EDGAR_IDENTITY line of the .env "
+        "file in the repository root:\n"
+        "    EDGAR_IDENTITY=Jane Doe jane@example.org\n"
+        ".env is read once, when the process starts, so then restart this "
+        "notebook's kernel (Kernel -> Restart Kernel). On the Docker path, stop "
+        "Jupyter Lab and run `docker compose up ml4t` again - `docker compose "
+        "restart` keeps the environment the container was created with."
+    )
+set_identity(identity)
+
+# `amendments=False` keeps 10-K/A out of the list. An amendment covers a period the original
+# already covered and often omits the narrative items entirely, so a pair drawn without this
+# filter can be two filings of the same period presented as consecutive ones.
+filings = Company(TICKER).get_filings(form=FORM, amendments=False)[:N_FILINGS]
+documents = [
+    {
+        "cik": filing.cik,
+        "company_name": filing.company,
+        "accession_no": filing.accession_no,
+        "form": filing.form,
+        "filing_date": filing.filing_date,
+        "accepted_at": filing.acceptance_datetime,
+        "period_end": filing.period_of_report,
+        "text": filing.text(),
+    }
+    for filing in filings
+]
+
+pl.DataFrame(
+    [
+        {
+            "accession_no": d["accession_no"],
+            "filing_date": d["filing_date"],
+            "period_end": d["period_end"],
+            "characters": len(d["text"]),
+        }
+        for d in documents
+    ]
+)
+
+# %% [markdown]
+# The acceptance timestamp is worth carrying alongside the filing date. A filing accepted after
+# the close is public that evening and tradeable the next morning, and a strategy that acts on the
+# filing date alone is a few hours early on every after-hours submission.
+
+# %% [markdown]
+# ## 3. Cleaning
+#
+# `filing.text()` already returns text rather than markup, but a pipeline that fetches documents
+# directly gets HTML, so the conversion belongs here. The one thing to preserve is the paragraph
+# boundary: a converter that joins everything with spaces destroys the unit that the change
+# detection in Part 6 compares.
 
 
 # %%
-def clean_html(html_text: str, drop_tables: bool = False) -> str:
-    """Remove HTML tags and convert to plain text while preserving paragraph boundaries."""
-    if not html_text:
+def html_to_text(html: str, drop_tables: bool = False) -> str:
+    """Convert filing HTML to text, keeping one newline per block element."""
+    if not html:
         return ""
-
-    soup = BeautifulSoup(html_text, "html.parser")
-
-    # Remove script and style elements
-    for script in soup(["script", "style"]):
-        script.decompose()
-
-    # Optionally remove tables (embedded financial tables in narrative sections)
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup(["script", "style"]):
+        element.decompose()
     if drop_tables:
+        # Financial tables inside a narrative section are numbers, not prose; dropping them is
+        # right for sentiment work and wrong for anything reading the figures.
         for table in soup.find_all("table"):
             table.decompose()
-
-    # Preserve paragraph boundaries by using newline separator
-    text = soup.get_text(separator="\n")
-
-    return text
+    return soup.get_text(separator="\n")
 
 
-# %%
 def clean_text(text: str) -> str:
-    """
-    Clean extracted text while preserving paragraph breaks.
-
-    Removes common filing artifacts and normalizes whitespace without
-    flattening everything into a single line (preserves paragraph structure
-    for downstream chunking and change detection).
-    """
+    """Remove filing furniture and normalize whitespace without flattening paragraphs."""
     if not text:
         return ""
-
-    # Normalize line endings
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-    # Remove common filing artifacts (line-anchored for safety)
+    # Page furniture, anchored to whole lines so a mention inside a sentence survives.
     text = re.sub(r"(?im)^\s*table of contents\s*$", "", text)
     text = re.sub(r"(?im)^\s*page\s+\d+\s*$", "", text)
     text = re.sub(r"(?im)^\s*\d+\s*of\s*\d+\s*$", "", text)
-
-    # Remove URLs
     text = re.sub(r"https?://\S+", "", text)
-
-    # Remove excessive special characters but keep newlines
     text = re.sub(r"[_=\-]{3,}", " ", text)
     text = re.sub(r"[•●◦▪]", " ", text)
-
-    # Normalize spaces within each line, but preserve line breaks
     text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n"))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
-    # Collapse excessive blank lines to paragraph breaks
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-
-    return text
-
-
-# %%
-def normalize_for_analysis(text: str) -> str:
-    """
-    Normalize text for NLP analysis.
-
-    Converts to lowercase, removes numbers (optional),
-    and standardizes formatting.
-    """
-    if not text:
-        return ""
-
-    # Convert to lowercase
-    text = text.lower()
-
-    # Standardize common abbreviations
-    text = re.sub(r"\bu\.s\.?\b", "united states", text)
-    text = re.sub(r"\be\.g\.?\b", "for example", text)
-    text = re.sub(r"\bi\.e\.?\b", "that is", text)
-
-    # Remove possessive 's
-    text = re.sub(r"'s\b", "", text)
-
-    # Remove numbers (optional - depends on use case)
-    # text = re.sub(r"\d+", "", text)
-
-    return text
-
-
-# Test cleaning
-sample_html = """
-<p>ITEM 1A. RISK FACTORS</p>
-<p>The following risks could <b>materially</b> affect our business:</p>
-<p>• Competition may increase</p>
-<p>• Economic conditions may deteriorate</p>
-<p>Page 15 of 120</p>
-<p>Table of Contents</p>
-"""
-
-cleaned = clean_text(clean_html(sample_html))
-print("Sample cleaning:")
-print(f"Original HTML length: {len(sample_html)}")
-print(f"Cleaned text: {cleaned}")
 
 # %% [markdown]
-# ## 3. Section Extraction
+# ## 4. Finding a section
+#
+# The naive approach is to search for the item heading and take everything to the next one. It
+# fails on the first line of every filing, because the item heading appears in the table of
+# contents before it appears as a section, and it appears again wherever the narrative
+# cross-references another item.
+#
+# Counting the matches in a real document is the quickest way to see the size of the problem.
+
+# %%
+first = documents[0]
+for section, config in SECTIONS[FORM].items():
+    matches = [
+        m.start()
+        for pattern in config["starts"]
+        for m in re.finditer(pattern, first["text"], FLAGS)
+    ]
+    print(f"{section}: {len(matches)} places match the heading pattern")
+
+# %% [markdown]
+# Every section matches in more than one place, and only one of those places is the section. What
+# separates them is **span**: a table of contents entry is followed by the next contents entry a
+# line or two later, while the real heading is followed by the whole section before the next item
+# begins. Taking the candidate with the longest span to its own end pattern picks the section
+# without needing to know where the table of contents ends, and it keeps working on a filer whose
+# contents page is formatted differently.
 
 
 # %%
-def extract_section(text: str, section_name: str, patterns: dict = None) -> str | None:
-    """
-    Extract a specific section from a 10-K/10-Q filing using anchored item boundaries.
+def extract_section(text: str, section: str, form: str) -> str | None:
+    """The longest span between this section's heading and the item that follows it."""
+    config = SECTIONS[form][section]
 
-    Robust to TOC duplicates by finding all start_pattern matches and
-    picking the candidate (start, end) span with the most content
-    between it and the next end_pattern. Inline references inside
-    narrative text are filtered out by the same span-length test -
-    they don't have a matching end-pattern Item N+1 immediately after.
+    # A 10-Q's risk factors live in Part II, and Part I has an Item 1A of its own meaning
+    # something else. Where a section declares a marker, the search starts after it.
+    offset, haystack = 0, text
+    if marker := config.get("after"):
+        if found := re.search(marker, text, FLAGS):
+            offset, haystack = found.start(), text[found.start() :]
 
-    Parameters
-    ----------
-    text : str
-        Full filing text
-    section_name : str
-        Name of section to extract (e.g., 'risk_factors', 'mda')
-    patterns : dict
-        Custom patterns, or use SECTION_PATTERNS
-
-    Returns
-    -------
-    str or None
-        Extracted section text, or None if no candidate has substantive content.
-    """
-    if not text:
-        return None
-
-    if patterns is None:
-        patterns = SECTION_PATTERNS
-
-    if section_name not in patterns:
-        raise ValueError(f"Unknown section: {section_name}")
-
-    config = patterns[section_name]
-    flags = re.IGNORECASE | re.MULTILINE | re.DOTALL
-
-    # Some patterns may require matching after a specific marker
-    # (e.g., PART II for 10-Q risk factors).
-    offset = 0
-    search_text = text
-    require_after = config.get("require_after")
-    if require_after:
-        after_match = re.search(require_after, search_text, flags)
-        if after_match:
-            offset = after_match.start()
-            search_text = search_text[after_match.start() :]
-
-    # Collect every candidate start position from every start pattern.
-    starts: list[int] = []
-    for pattern in config["start_patterns"]:
-        starts.extend(offset + m.end() for m in re.finditer(pattern, search_text, flags))
+    starts = sorted(
+        {
+            offset + m.end()
+            for pattern in config["starts"]
+            for m in re.finditer(pattern, haystack, FLAGS)
+        }
+    )
     if not starts:
         return None
-    starts = sorted(set(starts))
 
-    # For each candidate start, find the next end_pattern match and
-    # measure the span. The real section beats every TOC entry on
-    # span length because TOC entries are followed by the next TOC
-    # entry within a few dozen characters.
-    best_span: tuple[int, int] | None = None
-    for start_pos in starts:
-        end_pos = len(text)
-        for end_pattern in config["end_patterns"]:
-            end_match = re.search(end_pattern, text[start_pos:], flags)
-            if end_match:
-                end_pos = start_pos + end_match.start()
+    best = None
+    for start in starts:
+        end = len(text)
+        for pattern in config["ends"]:
+            if found := re.search(pattern, text[start:], FLAGS):
+                end = start + found.start()
                 break
-        span = end_pos - start_pos
-        if best_span is None or span > (best_span[1] - best_span[0]):
-            best_span = (start_pos, end_pos)
+        if best is None or (end - start) > (best[1] - best[0]):
+            best = (start, end)
+    return clean_text(text[best[0] : best[1]])
 
-    if best_span is None or (best_span[1] - best_span[0]) < 200:
-        return None
-
-    return clean_text(text[best_span[0] : best_span[1]])
-
-
-# Create sample 10-K text for demonstration
-sample_10k = """
-FORM 10-K
-ANNUAL REPORT
-
-Table of Contents
-
-PART I
-
-ITEM 1. BUSINESS
-
-Our company is a leading provider of technology solutions for enterprise
-customers worldwide. We design, manufacture, and support a portfolio of
-hardware, software, and cloud services that help organizations modernize
-their data infrastructure.
-
-We operate across three reportable segments — Cloud Platform, Enterprise
-Software, and Professional Services — and sell directly through a global
-sales force as well as a network of channel partners. Our customers span
-financial services, healthcare, public sector, and manufacturing.
-
-Recent strategic initiatives include expanding our hyperscale data center
-footprint, deepening integrations with leading public cloud providers,
-and broadening our generative-AI product portfolio.
-
-ITEM 1A. RISK FACTORS
-
-An investment in our securities involves a high degree of risk.
-You should carefully consider the following risk factors:
-
-COMPETITION RISKS
-We face significant competition from larger companies with more resources.
-New entrants may disrupt our market position.
-
-ECONOMIC RISKS
-Economic downturns could reduce customer spending on our products.
-Currency fluctuations may impact our international revenue.
-
-REGULATORY RISKS
-Changes in regulations could increase our compliance costs.
-Data privacy laws continue to evolve across jurisdictions.
-
-ITEM 1B. UNRESOLVED STAFF COMMENTS
-
-None.
-
-ITEM 2. PROPERTIES
-
-We lease our headquarters in San Francisco, California.
-
-PART II
-
-ITEM 7. MANAGEMENT'S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION
-
-Overview
-The past year has been transformative for our company.
-Revenue increased 25% driven by strong product adoption.
-
-Results of Operations
-Our gross margin improved to 72% from 68% in the prior year.
-Operating expenses remained well controlled.
-
-Liquidity and Capital Resources
-We ended the year with $500 million in cash.
-We believe current resources are sufficient for operations.
-
-ITEM 7A. QUANTITATIVE AND QUALITATIVE DISCLOSURES ABOUT MARKET RISK
-
-We are exposed to interest rate and foreign currency risks.
-
-ITEM 8. FINANCIAL STATEMENTS
-"""
-
-for section in ["business", "risk_factors", "mda"]:
-    extracted = extract_section(sample_10k, section)
-    if extracted:
-        preview = extracted[:200] + "..." if len(extracted) > 200 else extracted
-        print(f"{section.upper()} ({len(extracted)} chars):")
-        print(preview)
-        print()
 
 # %% [markdown]
-# ## 4. Building a Text Dataset
-
+# ## 5. The dataset, and whether the extraction worked
+#
+# One row per filing and section, keyed on the accession number. The word count is what the
+# quality check reads: an extraction can fail by returning nothing, by returning a fragment - the
+# table of contents entry, if the span rule went wrong - or by running past its own end and
+# swallowing the next item.
 
 # %%
-_DEFAULT_SECTIONS = ("risk_factors", "mda")
-
-
-def create_text_dataset(
-    filings: list[dict], sections: list[str] = _DEFAULT_SECTIONS
-) -> pl.DataFrame:
-    """
-    Create a structured dataset from multiple filings.
-
-    Parameters
-    ----------
-    filings : list of dict
-        Each dict should contain:
-        - cik: Company CIK
-        - company_name: Company name
-        - accession_no: EDGAR accession number (stable filing identifier)
-        - filing_date: Filing date
-        - accepted_at: SEC acceptance timestamp (for intraday PIT)
-        - period_end: Reporting period end date
-        - filing_type: 10-K, 10-Q, etc.
-        - text: Raw filing text
-    sections : list of str
-        Sections to extract
-
-    Returns
-    -------
-    pl.DataFrame
-        Structured text dataset with PIT-correct schema
-
-    Note
-    ----
-    Automatically uses correct section patterns based on filing_type (10-K vs 10-Q).
-    In 10-Q, MD&A is Item 2 (not Item 7 as in 10-K).
-    """
-    records = []
-
-    for filing in filings:
-        filing_type = filing.get("filing_type", "10-K")
-        base_record = {
-            "cik": filing.get("cik"),
-            "company_name": filing.get("company_name"),
-            # Stable filing identifier (prefer over cik + filing_date)
-            "accession_no": filing.get("accession_no"),
-            "filing_type": filing_type,
-            # PIT timestamps
-            "filing_date": filing.get("filing_date"),
-            "accepted_at": filing.get("accepted_at"),  # Intraday PIT
-            "period_end": filing.get("period_end"),
-        }
-
-        text = filing.get("text", "")
-
-        # Use form-type-aware patterns
-        patterns = get_patterns_for_form(filing_type)
-
-        for section in sections:
-            # Skip sections not defined for this form type
-            if section not in patterns:
-                continue
-
-            extracted = extract_section(text, section, patterns)
-
-            record = {
-                **base_record,
-                "section": section,
-                "text": extracted or "",
-                "text_length": len(extracted) if extracted else 0,
-                "word_count": len(extracted.split()) if extracted else 0,
-            }
-            records.append(record)
-
-    return pl.DataFrame(records)
-
-
-# Create sample filings with PIT-correct schema
-sample_filings = [
+records = [
     {
-        "cik": "0000320193",
-        "company_name": "Apple Inc.",
-        "accession_no": "0000320193-24-000081",
-        "filing_date": datetime(2024, 10, 31),
-        "accepted_at": datetime(2024, 10, 31, 16, 35, 12),  # SEC acceptance timestamp
-        "period_end": datetime(2024, 9, 28),
-        "filing_type": "10-K",
-        "text": sample_10k,
-    },
-    {
-        "cik": "0000789019",
-        "company_name": "Microsoft Corporation",
-        "accession_no": "0000789019-24-000042",
-        "filing_date": datetime(2024, 7, 30),
-        "accepted_at": datetime(2024, 7, 30, 16, 5, 45),
-        "period_end": datetime(2024, 6, 30),
-        "filing_type": "10-K",
-        "text": sample_10k,  # Using same sample for demo
-    },
+        "cik": document["cik"],
+        "company_name": document["company_name"],
+        "accession_no": document["accession_no"],
+        "form": document["form"],
+        "filing_date": document["filing_date"],
+        "accepted_at": document["accepted_at"],
+        "period_end": document["period_end"],
+        "section": section,
+        "text": extracted or "",
+        "word_count": len(extracted.split()) if extracted else 0,
+    }
+    for document in documents
+    for section in SECTIONS[FORM]
+    for extracted in [extract_section(document["text"], section, FORM)]
 ]
-
-text_dataset = create_text_dataset(sample_filings)
-text_dataset
-
-# %% [markdown]
-# ## 5. Text Statistics and Quality Checks
-
-
-# %%
-def calculate_text_statistics(text: str) -> dict:
-    """Calculate statistics about extracted text."""
-    if not text:
-        return {
-            "word_count": 0,
-            "sentence_count": 0,
-            "avg_word_length": 0,
-            "avg_sentence_length": 0,
-            "unique_words": 0,
-            "lexical_diversity": 0,
-        }
-
-    words = text.lower().split()
-    sentences = re.split(r"[.!?]+", text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-
-    word_count = len(words)
-    unique_words = len(set(words))
-
-    return {
-        "word_count": word_count,
-        "sentence_count": len(sentences),
-        "avg_word_length": np.mean([len(w) for w in words]) if words else 0,
-        "avg_sentence_length": word_count / len(sentences) if sentences else 0,
-        "unique_words": unique_words,
-        "lexical_diversity": unique_words / word_count if word_count > 0 else 0,
-    }
-
-
-# %% [markdown]
-# ### Quality Check Extraction
-# Flag potential issues: missing sections, truncated extractions, or boundary contamination.
-
-
-# %%
-def quality_check_extraction(df: pl.DataFrame, min_words: int = 100) -> pl.DataFrame:
-    """
-    Check quality of extracted text.
-
-    Flags potential issues:
-    - Missing (extraction returned nothing)
-    - Too short (extraction may have failed partially)
-    - Too long (may have captured extra sections)
-    - Boundary leak (captured content from next section)
-    """
-    # Add quality flags - NOTE: order matters! Check missing first since 0 < min_words
-    result = df.with_columns(
-        [
-            pl.when(pl.col("word_count") == 0)
-            .then(pl.lit("missing"))
-            .when(pl.col("word_count") < min_words)
-            .then(pl.lit("too_short"))
-            .when(pl.col("word_count") > 50000)
-            .then(pl.lit("suspiciously_long"))
-            .otherwise(pl.lit("ok"))
-            .alias("quality_flag")
-        ]
-    )
-
-    # Check for boundary contamination (e.g., "Item 8" appearing in MD&A)
-    # This indicates the end boundary wasn't properly detected
-    result = result.with_columns(
-        pl.when((pl.col("section") == "mda") & pl.col("text").str.contains(r"(?i)\bITEM\s*8\b"))
-        .then(pl.lit(True))
-        .when(
-            (pl.col("section") == "risk_factors")
-            & pl.col("text").str.contains(r"(?i)\bITEM\s*2\b.*\bPROPERTIES\b")
-        )
-        .then(pl.lit(True))
-        .otherwise(pl.lit(False))
-        .alias("possible_boundary_leak")
-    )
-
-    return result
-
-
-text_dataset_checked = quality_check_extraction(text_dataset)
-text_dataset_checked.select(["company_name", "section", "word_count", "quality_flag"])
-
-# %%
-sample_text = text_dataset.filter(
-    (pl.col("section") == "risk_factors") & (pl.col("word_count") > 0)
-)["text"][0]
-
-stats = calculate_text_statistics(sample_text)
-print("Text Statistics (Risk Factors section):")
-for k, v in stats.items():
-    print(f"  {k}: {v:.2f}" if isinstance(v, float) else f"  {k}: {v}")
-
-# %% [markdown]
-# ## 6. Change Analysis Over Time
-#
-# Track how MD&A and Risk Factors change between filings.
-
-
-# %%
-def calculate_text_similarity(text1: str, text2: str) -> dict:
-    """
-    Calculate similarity between two text documents.
-
-    Uses simple word overlap metrics (Jaccard similarity).
-    For production, consider using TF-IDF or embeddings.
-    """
-    if not text1 or not text2:
-        return {"jaccard": 0, "word_overlap_pct": 0}
-
-    words1 = set(text1.lower().split())
-    words2 = set(text2.lower().split())
-
-    intersection = words1 & words2
-    union = words1 | words2
-
-    jaccard = len(intersection) / len(union) if union else 0
-    overlap_pct = len(intersection) / len(words1) if words1 else 0
-
-    return {
-        "jaccard_similarity": jaccard,
-        "word_overlap_pct": overlap_pct,
-        "new_words": len(words2 - words1),
-        "removed_words": len(words1 - words2),
-    }
-
-
-# %%
-def extract_new_risk_factors(old_text: str, new_text: str) -> list[str]:
-    """
-    Identify potentially new risk factors by finding new paragraphs.
-
-    Simple heuristic: paragraphs in new filing not present in old.
-    """
-    if not old_text or not new_text:
-        return []
-
-    # Split into paragraphs
-    old_paragraphs = set(p.strip().lower() for p in old_text.split("\n\n") if len(p.strip()) > 50)
-    new_paragraphs = [p.strip() for p in new_text.split("\n\n") if len(p.strip()) > 50]
-
-    new_risks = []
-    for para in new_paragraphs:
-        # Check if paragraph is substantially new (low similarity to all old paragraphs)
-        para_lower = para.lower()
-        if para_lower not in old_paragraphs:
-            # Simple check - could be improved with fuzzy matching
-            new_risks.append(para[:200] + "..." if len(para) > 200 else para)
-
-    return new_risks[:5]  # Return top 5 new items
-
-
-# %%
-# Simulate two versions of risk factors
-old_risks = """
-COMPETITION RISKS
-We face significant competition from larger companies.
-
-ECONOMIC RISKS
-Economic downturns could reduce customer spending.
-"""
-
-new_risks = """
-COMPETITION RISKS
-We face significant competition from larger companies with more resources.
-
-ECONOMIC RISKS
-Economic downturns could reduce customer spending.
-
-AI TECHNOLOGY RISKS
-Rapid advances in artificial intelligence may disrupt our business model.
-We may need to make significant investments to remain competitive.
-
-CYBERSECURITY RISKS
-We face increasing threats from sophisticated cyber attacks.
-"""
-
-similarity = calculate_text_similarity(old_risks, new_risks)
-print("Similarity Metrics:")
-for k, v in similarity.items():
-    print(f"  {k}: {v:.3f}" if isinstance(v, float) else f"  {k}: {v}")
-
-new_items = extract_new_risk_factors(old_risks, new_risks)
-print(f"\nNew Risk Factors Identified: {len(new_items)}")
-for i, item in enumerate(new_items, 1):
-    print(f"  {i}. {item[:100]}...")
-
-# %% [markdown]
-# ## 7. Saving the Dataset
-
-
-# %%
-def save_text_dataset(df: pl.DataFrame, output_path: str, format: str = "parquet") -> None:
-    """
-    Save text dataset to file.
-
-    Parameters
-    ----------
-    df : pl.DataFrame
-        Text dataset
-    output_path : str
-        Output file path
-    format : str
-        'parquet' or 'csv'
-    """
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if format == "parquet":
-        df.write_parquet(path)
-    elif format == "csv":
-        df.write_csv(path)
-    else:
-        raise ValueError(f"Unknown format: {format}")
-
-    print(f"Saved {len(df)} records to {path}")
-
-
-# %%
-# Example save (commented out to avoid file creation in demo)
-# save_text_dataset(text_dataset, "/tmp/sec_text_data.parquet")
-print("\nTo save dataset:")
-print("  save_text_dataset(text_dataset, 'data/sec_text_data.parquet')")
-
-# %% [markdown]
-# ## 8. End-to-End Run Against a Live EDGAR Filing
-#
-# The previous sections developed the extraction pipeline against an
-# inline sample 10-K. The same helpers run unchanged against a real
-# filing: `edgartools` fetches the latest AAPL 10-K from EDGAR, our
-# `extract_section` + `clean_text` + `calculate_text_statistics`
-# helpers process it, and the resulting per-section summary mirrors
-# what the synthetic example produced earlier in the notebook.
-#
-# The SEC requires a real User-Agent identity for every request and
-# blocks placeholder addresses. Set `EDGAR_IDENTITY` in your environment
-# to `"Your Name your.email@domain.com"` before running this section:
-#
-# ```bash
-# export EDGAR_IDENTITY="Jane Doe jane@example.org"
-# ```
-#
-# The fetch is read-only, rate-limited by edgartools, and typically
-# completes in 1-3 seconds.
-
-# %%
-edgar_identity = os.environ.get("EDGAR_IDENTITY")
-if not edgar_identity:
-    raise RuntimeError(
-        "EDGAR_IDENTITY environment variable is not set. The SEC requires a "
-        "real User-Agent (name + email) for every EDGAR request and blocks "
-        "placeholder addresses. Set it before running this section, e.g. "
-        '`export EDGAR_IDENTITY="Jane Doe jane@example.org"`.'
-    )
-set_identity(edgar_identity)
-
-company = Company(EDGAR_TICKER)
-latest_filing = company.get_filings(form=EDGAR_FORM).latest()
-print(
-    f"{EDGAR_TICKER} {EDGAR_FORM}: accession {latest_filing.accession_no}, filed {latest_filing.filing_date}"
+dataset = pl.DataFrame(records).with_columns(
+    quality=pl.when(pl.col("word_count") == 0)
+    .then(pl.lit("nothing extracted"))
+    .when(pl.col("word_count") < MIN_SECTION_WORDS)
+    .then(pl.lit("too short"))
+    .when(pl.col("word_count") > MAX_SECTION_WORDS)
+    .then(pl.lit("ran past the boundary"))
+    .otherwise(pl.lit("ok")),
+    # A section that swallowed the next item carries that item's heading inside it.
+    boundary_leak=pl.when(pl.col("section") == "mda")
+    .then(pl.col("text").str.contains(r"(?im)^\s*ITEM\s*8\b"))
+    .when(pl.col("section") == "risk_factors")
+    .then(pl.col("text").str.contains(r"(?im)^\s*ITEM\s*1B\b"))
+    .otherwise(False),
 )
 
-# %% [markdown]
-# Fetch the filing text and run the section extractor with the
-# form-aware patterns. The two highest-value sections (Risk Factors
-# and MD&A) come back as plain strings - ready for `clean_text`,
-# tokenization, or downstream NLP feature engineering.
-
-# %%
-real_text = latest_filing.text()
-form_patterns = get_patterns_for_form(EDGAR_FORM)
-
-real_risk = extract_section(real_text, "risk_factors", form_patterns)
-real_mda = extract_section(real_text, "mda", form_patterns)
-real_business = extract_section(real_text, "business", form_patterns)
-
-real_stats = pl.DataFrame(
-    [
-        {
-            "section": name,
-            "extracted": text is not None,
-            "char_count": len(text) if text else 0,
-            "word_count": calculate_text_statistics(text)["word_count"] if text else 0,
-        }
-        for name, text in [
-            ("business", real_business),
-            ("risk_factors", real_risk),
-            ("mda", real_mda),
-        ]
-    ]
-)
-real_stats
+print(f"Extractions attempted: {len(dataset)}")
+print(f"Extractions the quality check passed: {(dataset['quality'] == 'ok').sum()}")
+print(f"Extractions carrying the next item's heading: {int(dataset['boundary_leak'].sum())}")
+dataset.select("accession_no", "filing_date", "section", "word_count", "quality", "boundary_leak")
 
 # %% [markdown]
-# A successful run shows non-zero word counts on each row - the same
-# pipeline that produced the synthetic-text statistics in Section 5
-# works against a current SEC filing without code changes. From here,
-# the cleaned strings feed directly into the NLP feature pipeline in
-# Chapter 10.
-#
-# Charting the per-section word counts makes the relative text budget
-# explicit: the Risk Factors block dwarfs Business and MD&A. Modern 10-K
-# risk sections have ballooned into the single largest narrative block,
-# which is exactly why they are the most-mined section for sentiment and
-# change-detection signals downstream.
+# Reporting the rate rather than eyeballing one extraction is the point. Over two filings it is a
+# formality; over a corpus of thousands it is the only way to know that a formatting change at one
+# filer has not silently emptied a column, and the same three columns scale unchanged.
 
 # %%
-# Section labels for display (item numbers depend on form type; keep generic).
-_SECTION_LABELS = {
-    "business": "Business",
-    "risk_factors": "Risk Factors",
-    "mda": "MD&A",
-}
-
-chart_df = real_stats.sort("word_count", descending=True)
-labels = [_SECTION_LABELS.get(s, s) for s in chart_df["section"].to_list()]
-counts = chart_df["word_count"].to_list()
-
-# Emphasise the largest section in amber; the rest provide context in blue.
-bar_colors = [COLORS["amber"] if i == 0 else COLORS["blue"] for i in range(len(labels))]
-
-fig = go.Figure(
-    go.Bar(
-        x=counts,
-        y=labels,
-        orientation="h",
-        marker_color=bar_colors,
-        text=[f"{c:,}" for c in counts],
-        textposition="outside",
-        cliponaxis=False,
-    )
+latest_sections = dataset.filter(pl.col("accession_no") == documents[0]["accession_no"]).sort(
+    "word_count", descending=True
 )
+labels = {"business": "Business", "risk_factors": "Risk Factors", "mda": "MD&A"}
+fig = px.bar(
+    latest_sections.with_columns(label=pl.col("section").replace(labels)).to_pandas(),
+    x="word_count",
+    y="label",
+    orientation="h",
+    title="Risk factors are several times longer than any other narrative section",
+    labels={"word_count": "Words extracted", "label": ""},
+    color_discrete_sequence=[COLORS["blue"]],
+    text="word_count",
+)
+fig.update_traces(textposition="outside", cliponaxis=False)
 fig.update_layout(
-    title=dict(
-        text=f"Risk Factors Dominate the Text Volume in {EDGAR_TICKER}'s Latest {EDGAR_FORM}"
-        f"<br><sup>Extracted words per high-value section, accession "
-        f"{latest_filing.accession_no}</sup>",
-    ),
-    xaxis_title="Extracted Words (count)",
-    xaxis=dict(range=[0, max(counts) * 1.15]),  # headroom for outside data labels
-    yaxis_title="",
-    yaxis=dict(autorange="reversed"),  # largest section at the top
-    margin=dict(l=110, r=40, t=70, b=55),
-    height=360,
+    height=320,
+    yaxis=dict(autorange="reversed"),
+    xaxis_range=[0, float(latest_sections["word_count"].max()) * 1.18],
+    margin=dict(l=120, r=60),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart of the words extracted from each narrative section of the most recent "
+    "filing. The risk factors bar is several times longer than the other two, which are of "
+    "similar length to each other.",
+)
 
 # %% [markdown]
-# ## 9. Key Takeaways
+# The proportions are why risk factors are the most mined section in the corpus. They are also why
+# the section is hard to use: a block that long changes a little every year for reasons that have
+# nothing to do with the business, so the signal is in what changed rather than in what it says.
+
+# %% [markdown]
+# ## 6. What changed between the two filings
 #
-# ### Text Extraction Best Practices
+# The same section from two consecutive filings can be compared directly. Two measurements are
+# worth having and they answer different questions. **Jaccard similarity** over the vocabulary
+# says how much of the language is shared, which is a measure of drift. The **paragraphs present
+# in the new filing and absent from the old** are the additions, and those are the ones that name
+# a risk management decided to start disclosing.
+
+
+# %%
+def vocabulary_overlap(old: str, new: str) -> dict:
+    """Shared vocabulary between two documents, and what each has that the other does not."""
+    old_words, new_words = set(old.lower().split()), set(new.lower().split())
+    union = old_words | new_words
+    return {
+        "jaccard_similarity": len(old_words & new_words) / len(union) if union else 0.0,
+        "words_only_in_new": len(new_words - old_words),
+        "words_only_in_old": len(old_words - new_words),
+    }
+
+
+def added_paragraphs(old: str, new: str, min_characters: int = 200) -> list[str]:
+    """Paragraphs of the new document that do not appear verbatim in the old one."""
+    old_paragraphs = {p.strip().lower() for p in old.split("\n\n")}
+    return [
+        paragraph.strip()
+        for paragraph in new.split("\n\n")
+        if len(paragraph.strip()) >= min_characters
+        and paragraph.strip().lower() not in old_paragraphs
+    ]
+
+
+# %%
+CHANGE_SECTION = "risk_factors"
+newer, older = documents[0]["accession_no"], documents[1]["accession_no"]
+comparable = dataset.filter(
+    (pl.col("section") == CHANGE_SECTION)
+    & (pl.col("quality") == "ok")
+    & ~pl.col("boundary_leak")
+    & pl.col("accession_no").is_in([older, newer])
+)
+
+# An extraction the quality check rejected must not enter the comparison. An empty older section
+# scores zero similarity and marks every paragraph of the newer one as an addition, which reads
+# as a company rewriting its risk factors rather than as a failed extraction.
+if comparable.height < 2:
+    additions = []
+    print(f"Both filings' {CHANGE_SECTION} did not pass the quality check; no comparison made.")
+else:
+    texts = {row["accession_no"]: row["text"] for row in comparable.iter_rows(named=True)}
+    overlap = vocabulary_overlap(texts[older], texts[newer])
+    additions = added_paragraphs(texts[older], texts[newer])
+    print(f"Comparing {CHANGE_SECTION} between {older} and {newer}")
+    for name, value in overlap.items():
+        print(f"  {name}: {value:.3f}" if isinstance(value, float) else f"  {name}: {value}")
+    print(f"  paragraphs in the newer filing that are not verbatim in the older: {len(additions)}")
+
+# %% [markdown]
+# A high vocabulary overlap with a substantial number of changed paragraphs is the normal result,
+# and it is why the vocabulary measure alone is a poor change detector: a filer can rewrite a
+# paragraph entirely without introducing a single new word.
 #
-# 1. **Use line-anchored regex patterns for section boundaries**
-#    - Item numbers are standardized (Item 1A, Item 7)
-#    - But formatting varies - need multiple patterns with `^` anchoring
-#    - Skip Table of Contents matches by searching after TOC marker
+# The paragraph comparison is exact rather than fuzzy, so a single reworded clause makes a
+# paragraph count as new. That over-reports for a change-detection signal and under-reports
+# nothing, which is the safer direction for a screen a human reads; a production version scores
+# similarity between paragraphs rather than testing them for equality.
+
+# %%
+for i, paragraph in enumerate(additions[:3], 1):
+    print(f"--- changed paragraph {i} ---")
+    print(paragraph[:400] + ("..." if len(paragraph) > 400 else ""))
+    print()
+
+# %% [markdown]
+# ## 7. Saving the dataset
 #
-# 2. **Clean thoroughly but preserve paragraph structure**
-#    - Remove HTML tags and filing artifacts
-#    - Normalize whitespace *within* lines, but keep paragraph breaks
-#    - Paragraph structure enables change detection over time
+# Parquet, keyed on the accession number, with the timestamps and the section name beside the
+# text. The raw filing text is deliberately not stored alongside it: it is reproducible from the
+# accession number, and it is twenty times the size.
+
+# %%
+output_file = OUTPUT_DIR / "sec_filing_sections.parquet"
+dataset.write_parquet(output_file)
+print(f"Wrote {len(dataset)} rows to {output_file}")
+pl.read_parquet(output_file).select("accession_no", "section", "word_count", "quality")
+
+# %% [markdown]
+# ## Key Takeaways
 #
-# 3. **Validate extraction quality**
-#    - Check text length (too short = extraction failed)
-#    - Check for boundary leaks (e.g., "Item 8" in MD&A)
-#    - Track quality metrics for iterative rule refinement
-#
-# 4. **Track point-in-time with stable identifiers**
-#    - Use **accession number** as primary key (not cik + filing_date)
-#    - Use **accepted_at** for intraday PIT correctness
-#    - Keep both filing_date and period_end for different query patterns
-#
-# 5. **Store efficiently with audit trail**
-#    - Parquet format for large datasets
-#    - Include metadata (CIK, accession, timestamps, section)
-#    - Consider storing both raw and cleaned text for reproducibility
-#
-# ### Most Valuable Sections
-#
-# | Section | Alpha Use Case |
-# |---------|----------------|
-# | **Risk Factors (1A)** | Sentiment analysis, risk themes, change detection |
-# | **MD&A (Item 7)** | Management sentiment, outlook changes |
-# | **Business (Item 1)** | Competitive position, strategy changes |
-#
-# ### Forward Reference
-#
-# This structured text dataset is the input for NLP techniques covered in later chapters:
-# - Sentiment scoring (positive/negative language)
-# - Topic modeling (identify themes)
-# - Named entity recognition (extract companies, products)
-# - Text embeddings (semantic similarity)
+# 1. The item numbers are form-specific. Management's discussion is Item 7 of a 10-K and Item 2 of
+#    a 10-Q's Part I, so an extractor built for one silently returns nothing on the other. Select
+#    the pattern set from the form type rather than defaulting to it.
+# 2. An item heading appears several times in a filing - in the table of contents, in
+#    cross-references, and once as the section. The first match is almost never the right one, and
+#    the span to the next item is what distinguishes them: a contents entry runs a line, a section
+#    runs thousands.
+# 3. Preserve paragraph boundaries through the cleaning. They are the unit a change detector
+#    compares, and a converter that joins blocks with spaces destroys them irrecoverably.
+# 4. Report the extraction rate, not an example. The failure is silent - a plausible short string
+#    where a section should be - and the only thing that catches it at corpus scale is counting
+#    the empty, the short, and the ones carrying the next item's heading.
+# 5. Key the dataset on the accession number and carry the acceptance timestamp. A company and a
+#    date do not identify a filing when an amendment exists, and a filing accepted after the close
+#    is not tradeable until the next session.
+# 6. Vocabulary overlap and changed paragraphs measure different things. A filer can rewrite a
+#    paragraph without adding a word, so a signal built on vocabulary alone misses exactly the
+#    rewrites that matter.

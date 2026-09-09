@@ -82,14 +82,14 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 # and a hash written down in one and read in the other agrees only until the sweep is
 # rebuilt.
 #
-# Nothing about the holdout enters this choice. The carrier is the cross-stage validation
-# rank-1, resolved across every declared label rather than per label, and it was fixed before
-# this notebook ran. Which stage it comes from is printed below rather than asserted here.
+# Nothing about the holdout enters this choice. The selected configuration is the cross-stage
+# validation rank-1, resolved across every declared label rather than per label, and it was fixed
+# before this notebook ran. Which stage it comes from is printed below rather than asserted here.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
 print(
-    f"Carrier: {carrier['val_backtest_hash']}  stage={carrier['val_stage']}  "
+    f"Selected configuration: {carrier['val_backtest_hash']}  stage={carrier['val_stage']}  "
     f"family={carrier['family']}  config={carrier['config_name']}  "
     f"label={carrier['label']}"
 )
@@ -100,10 +100,10 @@ print(f"  fitted by training run {carrier['training_hash']}")
 
 # %% [markdown]
 # The checkpoint is part of the configuration. Where a family publishes a prediction set per
-# checkpoint on a declared schedule, the carrier's prediction set names one of them, and
-# refitting without it would produce a model at the end of training rather than the one that
-# was ranked. A family with no checkpoint dimension stores NULL in both columns and carries
-# that NULL through unchanged.
+# checkpoint on a declared schedule, the selected configuration's prediction set names one of them,
+# and refitting without it would produce a model at the end of training rather than the one that
+# was ranked. A family with no checkpoint dimension stores NULL in both columns and carries that
+# NULL through unchanged.
 
 # %%
 validation_prediction = study.results.open(carrier["val_prediction_hash"])
@@ -189,16 +189,16 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 # fold is not one of the validation folds. A run that came back with the validation training
 # hash would mean the refit did not happen, so that is checked rather than assumed.
 #
-# **The window carries one configuration, and this notebook has no way past that.** The check
-# below is on the carrier rather than on the notebook, and it has exactly two outcomes. With
-# the carrier unchanged this is an idempotent replay: the derivation is deterministic and the
-# training identity covers it, so the same identity comes back and the fit is served from the
-# registry, which is why re-running the notebook is free and safe. With the carrier changed it
-# refuses, names both configurations, and stops.
+# **The window carries one configuration, and this notebook has no way past that.** The check below
+# is on the selected configuration rather than on the notebook, and it has exactly two outcomes.
+# With the selected configuration unchanged this is an idempotent replay: the derivation is
+# deterministic and the training identity covers it, so the same identity comes back and the fit is
+# served from the registry, which is why re-running the notebook is free and safe. With the
+# selected configuration changed it refuses, names both configurations, and stops.
 #
 # It refuses rather than offering a replacement switch, and the reason is that a replacement
 # would not be one. Deleting the earlier generation's rows does not undo having observed its
-# result: the selection that produced the new carrier may have been informed by the old
+# result: the selection that produced the new configuration may have been informed by the old
 # holdout number, and no deletion reaches that. A switch here would let the case study take a
 # second look at the window while leaving a registry that shows only one, which is the
 # specific thing that would make the out-of-sample claim false rather than merely weak.
@@ -332,7 +332,7 @@ for row in registered_holdout_generations(CASE_DIR):
 # per configuration that gets here. What it does remove is the specific circularity of scoring
 # a validation-fitted model on the period meant to judge it.
 #
-# Re-running this notebook is free: the same carrier re-derives the same training identity and
+# Re-running this notebook is free: the same configuration re-derives the same training identity and
 # the fit is served from the registry. Evaluating a DIFFERENT configuration is not, and is
 # refused here. If a later pass finds the selection was wrong, that is a question for the
 # registry's lifecycle, which records that a second look was taken - not something to settle by

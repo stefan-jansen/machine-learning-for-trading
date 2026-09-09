@@ -113,19 +113,19 @@ def _delete_holdout_generation(case_dir, prediction_hash):
 # rather than passing it along is deliberate: the two notebooks must agree by construction,
 # and a hash written down in one and read in the other agrees only until the sweep is rebuilt.
 #
-# Nothing about the holdout enters this choice. The carrier is the cross-stage validation
-# rank-1, and it was fixed before this notebook ran.
+# Nothing about the holdout enters this choice. The selected configuration is the cross-stage
+# validation rank-1, and it was fixed before this notebook ran.
 #
-# **Its validation Sharpe is negative.** That is this case study's result, not a reason to
-# look for a different carrier: writing straddles on a signal this weak does not pay for the
-# option spread and the hedge, and the holdout is being used to see whether that reading holds
-# on a window nothing was chosen on. Picking the carrier for its sign would be the selection
-# the holdout exists to make honest.
+# **Its validation Sharpe is negative.** That is this case study's result, not a reason to look for
+# a different configuration: writing straddles on a signal this weak does not pay for the option
+# spread and the hedge, and the holdout is being used to see whether that reading holds on a window
+# nothing was chosen on. Picking a configuration for its sign would be the selection the holdout
+# exists to make honest.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
 print(
-    f"Carrier: {carrier['val_backtest_hash']}  stage={carrier['val_stage']}  "
+    f"Selected configuration: {carrier['val_backtest_hash']}  stage={carrier['val_stage']}  "
     f"family={carrier['family']}  config={carrier['config_name']}  "
     f"label={carrier['label']}"
 )
@@ -136,9 +136,9 @@ print(f"  fitted by training run {carrier['training_hash']}")
 
 # %% [markdown]
 # The checkpoint is part of the configuration. Where a family publishes a prediction set per
-# checkpoint on a declared schedule, the carrier's prediction set names one of them, and
-# refitting without it would produce a model at the end of training rather than the one that
-# was ranked. A family with no checkpoint dimension - which is where this case study's carrier
+# checkpoint on a declared schedule, the selected configuration's prediction set names one of them,
+# and refitting without it would produce a model at the end of training rather than the one that was
+# ranked. A family with no checkpoint dimension - which is where this case study's configuration
 # sits - stores NULL in both columns and carries that NULL through unchanged.
 
 # %%
@@ -218,13 +218,14 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 # their model had been fitted on folds ending inside the window. They were removed, and the
 # check below is what makes their shape impossible to reintroduce.
 #
-# **The window carries one configuration at a time.** The check below is on the carrier rather
-# than on the notebook, and it has three outcomes. With the carrier unchanged this is an
-# idempotent replay: the derivation is deterministic and the training identity covers it, so
-# the same identity comes back and the fit is served from the registry, which is why re-running
-# the notebook is free and safe. With the carrier changed it stops and names both
-# configurations. With `REPLACE_HOLDOUT` set it replaces the earlier generation instead of
-# standing beside it, so the registry never holds two refits of the same window.
+# **The window carries one configuration at a time.** The check below is on the selected
+# configuration rather than on the notebook, and it has three outcomes. With the selected
+# configuration unchanged this is an idempotent replay: the derivation is deterministic and the
+# training identity covers it, so the same identity comes back and the fit is served from the
+# registry, which is why re-running the notebook is free and safe. With the selected configuration
+# changed it stops and names both configurations. With `REPLACE_HOLDOUT` set it replaces the
+# earlier generation instead of standing beside it, so the registry never holds two refits of the
+# same window.
 #
 # What the replacement does not do is undo having observed the earlier result, and that is the
 # part worth understanding rather than enforcing. A holdout number is out-of-sample because
@@ -372,7 +373,7 @@ for row in registered_holdout_generations(CASE_DIR):
 # a validation-fitted model on the period meant to judge it - which, for this case study, is
 # not an abstract risk: it had already happened once.
 #
-# Re-running this notebook is free: the same carrier re-derives the same training identity and
+# Re-running this notebook is free: the same configuration re-derives the same training identity and
 # the fit is served from the registry. Evaluating a DIFFERENT configuration is not, and is
 # refused here. If a later pass finds the selection was wrong, that is a question for the
 # registry's lifecycle, which records that a second look was taken - not something to settle by

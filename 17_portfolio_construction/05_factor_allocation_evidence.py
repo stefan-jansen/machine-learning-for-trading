@@ -42,7 +42,7 @@
 #   does and does not establish.
 #
 # ## Book reference
-# Chapter 17, Section 17.4 (baseline allocators).
+# Chapter 17, Section 17.4 (Defining baseline allocators).
 #
 # ## Prerequisites
 #
@@ -85,7 +85,7 @@ from plotly.subplots import make_subplots
 from scipy import stats
 
 from utils import DATA_DIR
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, ml4t_diverging, show_plotly_with_alt
 
 structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
 
@@ -116,8 +116,9 @@ CONVENTIONAL_T_THRESHOLD = 2.0
 # %% [markdown]
 # ## Initialize Data Providers
 #
-# The ml4t-data library provides comprehensive access to factor data from both
-# AQR Capital Management and Kenneth French's Data Library.
+# Two providers supply everything below: AQR Capital Management publishes the long-history and
+# cross-asset series as Excel workbooks, and Kenneth French's Data Library publishes the
+# three-, five- and six-factor US equity series.
 
 # %%
 try:
@@ -370,7 +371,10 @@ fig.update_layout(
     height=500,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four growth-of-one-dollar paths on a logarithmic axis from the 1920s to the present, for the market, momentum, value and size factors, with recessions shaded.",
+)
 
 # %% [markdown]
 # ### What the wealth paths establish
@@ -429,9 +433,10 @@ print(
 )
 
 # %% [markdown]
-# The four exact aggregate columns keep the comparison aligned with the narrative.
-# They combine the underlying stock-selection and macro sleeves rather than mixing
-# regions or showing multiple variants of the same factor.
+# The four columns selected are the all-asset-class aggregates, which combine each factor's
+# stock-selection and macro sleeves into one series. Taking those rather than the per-region
+# variants keeps four lines on the chart instead of forty, and keeps them comparable: each is the
+# same factor definition applied across the same set of markets.
 
 # %%
 fig = go.Figure()
@@ -461,28 +466,26 @@ fig.update_layout(
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four growth-of-one-dollar paths on a logarithmic axis for the value, momentum, carry and defensive aggregates of the Century of Factor Premia data, all rising across the sample.",
+)
 
 # %% [markdown]
 # ---
 #
-# ## Part 1 Summary: What We've Established (and What We Haven't)
+# ## Part 1 Summary: what a premium in the long history is evidence of
 #
-# **EXISTENCE EVIDENCE**
-# - Factor premia exist in long-history data predating their publication
-# - The data is less susceptible to post hoc window selection
-# - Multiple factors (value, momentum, carry, defensive) show positive premia
+# Value, momentum, carry and defensive all show positive premia in data reaching back to 1926,
+# most of which predates their publication. That makes the finding harder to explain as a window
+# chosen after the fact, which is the specific criticism the long history answers.
 #
-# **NOT YET ADDRESSED** (requires separate analysis):
-# - **Transaction costs**: Turnover, bid-ask spreads, market impact
-# - **Financing costs**: Short rebates, leverage financing, margin requirements
-# - **Capacity constraints**: How much capital can these strategies absorb?
-# - **Implementation drag**: Rebalancing timing, corporate actions, index changes
-#
-# **The gap between "evidence of premium" and "tradable strategy" is addressed in**:
-# - Chapter 16: Strategy Simulation (transaction cost modeling)
-# - Chapter 17: Portfolio Construction (leverage constraints)
-# - Chapter 18: Transaction Costs (market impact)
+# What it establishes is that the premium was there in the returns, gross. Four things stand
+# between a gross premium and a return an allocator receives, and none of them is measured in a
+# published research series: the turnover cost of holding the portfolio, the financing cost of
+# its short leg, the capacity at which its own trading moves the prices it trades, and the drag
+# from rebalancing timing and corporate actions. Chapter 16 models the first, and Chapter 18
+# measures the third.
 #
 # ---
 
@@ -748,7 +751,10 @@ fig.update_layout(
     height=450,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of the Newey-West t-statistic on each factor's mean monthly return, with a dotted line at the conventional threshold of two and a dashed line at the discovery threshold of three; bars clearing the higher line are coloured.",
+)
 
 # %% [markdown]
 # ### Test the SMB decay claim directly
@@ -778,7 +784,7 @@ fig = go.Figure(
 fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
 fig.update_layout(
     title=(
-        "SMB weakens after its 1981 publication"
+        "The size premium's two halves differ across its publication year"
         "<br><sup>Annualized mean monthly return; labels show Newey-West t-statistics; "
         "ex-post period split</sup>"
     ),
@@ -786,7 +792,10 @@ fig.update_layout(
     yaxis_title="Annualized mean return (%)",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bars of annualized mean return for the size factor, before and from 1981, each labelled with its Newey-West t-statistic.",
+)
 
 # %%
 for period, period_stats in smb_period_stats.items():
@@ -972,7 +981,10 @@ fig.update_yaxes(title_text="Annualized Sharpe ratio", row=1, col=1)
 _ = fig.update_yaxes(title_text="Correlation", range=[-1, 1], row=1, col=2)
 
 # %%
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels by asset class: annualized Sharpe ratios for value and momentum side by side on the left, and their correlation on the right, every bar on the right below zero.",
+)
 
 # %%
 everywhere_corr = float(vme_df.loc[vme_df["Asset Class"] == "EVERYWHERE", "Val-Mom Corr"].iloc[0])
@@ -1079,7 +1091,7 @@ fig = go.Figure(
 # %%
 _ = fig.update_layout(
     title=(
-        "The value-momentum relationship survives pooling every factor together"
+        "Pairwise correlations among the factors, over their shared history"
         "<br><sup>Pairwise correlations over the window in which all factors have history</sup>"
     ),
     height=560,
@@ -1088,28 +1100,47 @@ _ = fig.update_layout(
     yaxis_title="Factor",
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Lower-triangle correlation heatmap of eight factors over their shared window, each cell labelled, on a diverging scale centred at zero.",
+)
+
+# %%
+print(
+    "Value against momentum, US equity factors over the shared window: "
+    f"{corr_matrix.loc['HML', 'MOM']:+.2f}"
+)
+print(f"The same pair pooled across all VME asset classes: {everywhere_corr:+.2f}")
 
 # %% [markdown]
 # ### Key Correlation Insights
 #
-# 1. **Value vs. Momentum**: The French common-period estimate appears in the visible
-#    lower triangle. It is distinct from the stronger cross-asset VME estimates.
+# 1. **Value against momentum**: the two lines printed above the heatmap put the US equity
+#    estimate beside the cross-asset one. Both are negative and they are not the same number,
+#    which is what the cross-asset evidence adds: a relationship that holds in one market can be
+#    a property of that market, and one that holds in eight is harder to explain that way.
 #
-# 2. **Quality (QMJ) vs. Market**: QMJ has low market beta, providing defensive
-#    characteristics during equity downturns.
-#
-# 3. **Low-Vol (BAB) vs. Market**: BAB is designed to be market-neutral but may still
-#    have residual market exposure during extreme moves.
+# 2. **Quality (QMJ) and low-volatility (BAB) against the market**: three properties are easy to
+#    run together and are not the same. *Long-short* says only that the portfolio holds both
+#    sides. *Dollar-neutral* says the two legs are equal in size. *Beta-neutral* says their market
+#    exposures cancel, which equal dollars do not deliver when the two legs have different betas.
+#    BAB is built for the third: it levers its low-beta leg up to a beta of one, de-levers the
+#    high-beta leg down to one, and holds them against each other, so its *estimated* net beta is
+#    zero by construction. Realized exposure can still differ, because those betas are estimated
+#    on past returns and move. The correlations in the lower triangle say how much each factor
+#    co-moved with the market over this window. A correlation is not a beta - it is scaled by the
+#    two volatilities - so these cells support a statement about co-movement, and the regression
+#    that gives exposure is what `01_portfolio_metrics` runs on a return series.
 
 # %% [markdown]
 # ---
 #
 # # Part 5: Crisis Performance: Who Provides "Crisis Alpha"?
 #
-# One of the most important questions for portfolio construction: **Which factors
-# perform well during market crises?** True "crisis alpha" - positive returns during
-# equity market drawdowns - is extremely valuable.
+# A factor that pays when the rest of the book is losing is worth more to an allocator than the
+# same premium earned in calm markets, because it is the one that lets the whole portfolio be
+# held through the episode. **Crisis alpha** is the name for a positive return during an equity
+# drawdown.
 #
 # These windows are selected ex post. They describe historical co-movement; they do
 # not establish that a factor will insure a future crisis.
@@ -1178,7 +1209,7 @@ fig = go.Figure(
 # %%
 fig.update_layout(
     title=(
-        "Trend following is the one factor that tends to pay in a crisis"
+        "Trend following was positive in most of these chosen windows"
         "<br><sup>Cumulative monthly returns over windows chosen after the fact; blanks predate "
         "a factor's history</sup>"
     ),
@@ -1187,7 +1218,10 @@ fig.update_layout(
     height=520,
     margin=dict(l=105, r=75, b=100),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of cumulative factor return, one row per named crisis window and one column per factor, red for losses and blue for gains, with blank cells where a factor's history had not begun.",
+)
 
 # %% [markdown]
 # **Interpretation**: Crisis performance is where correlations and premia become
@@ -1320,7 +1354,7 @@ fig = go.Figure(
 )
 fig.update_layout(
     title=(
-        "BAB and QMJ lead the historical factor risk-return trade-off"
+        "Annualized return against volatility for eight published factors"
         "<br><sup>Published monthly factor returns; blue markers clear the discovery "
         "threshold; "
         "sample histories differ</sup>"
@@ -1331,7 +1365,10 @@ fig.update_layout(
     margin=dict(l=75, r=75, b=80),
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter of eight factors, annualized volatility against annualized mean return, each point labelled, coloured by whether its t-statistic clears the discovery threshold.",
+)
 
 # %%
 print(f"Median value-momentum correlation across asset classes: {median_vme_corr:+.2f}")
@@ -1392,8 +1429,9 @@ print(f"Crisis windows in which trend following was positive: {tsmom_positive} o
 # - The crisis windows and the pre- and post-publication split dates are chosen with knowledge of
 #   what happened. They describe; they do not test.
 #
-# **Next:** `08_library_comparison` compares implementations of the allocators these factors would
-# feed. Section 17.4 develops baseline allocators and factor diversification.
+# **Next:** [`06_hierarchical_risk_parity`](06_hierarchical_risk_parity.ipynb) builds an allocator
+# that reads the correlation structure above as a tree rather than inverting it. Section 17.4
+# develops baseline allocators and factor diversification.
 #
 # ## References
 #

@@ -45,7 +45,7 @@ This section reframes framework selection away from hype and toward operational 
 
 - [`10_framework_comparison`](10_framework_comparison.ipynb) — _Runtime: ~14 min._ This optional notebook compares three ways to express the same forecasting pipeline: (a) native Python SDK, (b) CrewAI role-based, and (c) LangGraph state-graph. All three use the same LLMClient from _providers.py for the LLM layer and produce equivalent outputs.
 
-### 24.6 Core Project: The Research Agent
+### 24.6 Designing the Research Agent at the Heart of the Pipeline
 
 The first capstone applies the chapter's ideas in a constrained, single-agent research workflow. By keeping the task narrow and the quality gates explicit, the section shows how evidence collection, validation, abstention, synthesis, and replay work before the reader has to reason about multi-agent complexity. This makes it the chapter's clearest bridge from design principles to an inspectable implementation.
 

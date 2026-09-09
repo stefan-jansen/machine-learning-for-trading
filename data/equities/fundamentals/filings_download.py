@@ -44,11 +44,13 @@ Loader: ``data.load_sec_filings(form_type, universe, ...)``.
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
 from pathlib import Path
 
+# Importing utils loads .env into os.environ, which is where EDGAR_IDENTITY lives.
 from utils.downloading import atomic_write_parquet, print_section, resolve_data_dir
 
 # ---------------------------------------------------------------------------
@@ -479,14 +481,27 @@ def main():
         print("[DRY RUN] No files created")
         return
 
-    # Init edgartools
+    # Init edgartools. The SEC requires a real User-Agent on every request and
+    # attributes the traffic to whoever it names, so this is the reader's own
+    # identity rather than a hardcoded one.
     try:
         from edgar import set_identity
-
-        set_identity("ML4T Book stefan@ml4trading.io")
     except ImportError:
-        print("ERROR: edgartools not installed. Run: pip install edgartools")
+        print("ERROR: edgartools not installed. Run: uv sync")
         sys.exit(1)
+
+    identity = os.environ.get("EDGAR_IDENTITY", "").strip()
+    if not identity:
+        print(
+            "ERROR: EDGAR_IDENTITY is not set. The SEC requires a real User-Agent\n"
+            "(your name and email) on every EDGAR request and blocks placeholder\n"
+            "addresses. It is free and needs no account: put your own name and\n"
+            "email on the EDGAR_IDENTITY= line of .env in the repository root,\n"
+            "        EDGAR_IDENTITY=Jane Doe jane@example.org\n"
+            "or export it in this shell before re-running."
+        )
+        sys.exit(1)
+    set_identity(identity)
 
     # Resume
     if args.resume:

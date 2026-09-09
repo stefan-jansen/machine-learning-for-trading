@@ -1,0 +1,60 @@
+name: Resolve the ml4t image to measure in
+description: >-
+  Load the candidate image this commit produced when there is one, and report the
+  reference to run against. Without this a job takes its environment from
+  ml4t/ml4t:latest, which is whatever was published last rather than what the
+  commit declares.
+
+inputs:
+  candidate-result:
+    description: >-
+      The result of the build-image-candidate job. A failure or cancellation is
+      fatal here: the commit changes what the image installs and no image was
+      produced to measure it in, so falling back to the published image would
+      measure the environment this commit replaces. A skip is normal and means
+      the commit does not move the image.
+    required: true
+
+outputs:
+  ref:
+    description: The image reference to run against.
+    value: ${{ steps.pick.outputs.ref }}
+  is-candidate:
+    description: Non-empty when the reference is an image built from this commit.
+    value: ${{ steps.pick.outputs.is_candidate }}
+
+runs:
+  using: composite
+  steps:
+    - name: The candidate image built
+      if: inputs.candidate-result == 'failure' || inputs.candidate-result == 'cancelled'
+      shell: bash
+      run: |
+        echo "::error::build-image-candidate ${{ inputs.candidate-result }}:"
+        echo "::error::this commit changes what the image installs, and no image was"
+        echo "::error::produced to measure it in. Measuring in ml4t/ml4t:latest would"
+        echo "::error::test the environment this commit replaces."
+        exit 1
+
+    - name: Load the candidate image
+      if: inputs.candidate-result == 'success'
+      uses: actions/download-artifact@v4
+      with:
+        name: ml4t-candidate-image
+        path: /tmp
+
+    - name: Which image this commit is measured in
+      id: pick
+      shell: bash
+      run: |
+        if [ -f /tmp/ml4t-candidate.tar ]; then
+          docker load -i /tmp/ml4t-candidate.tar
+          ref=ml4t/ml4t:candidate
+          echo "is_candidate=yes" >> "$GITHUB_OUTPUT"
+          echo "::notice::measuring in an image built from this commit"
+        else
+          ref=ml4t/ml4t:latest
+          docker pull "$ref"
+          echo "is_candidate=" >> "$GITHUB_OUTPUT"
+        fi
+        echo "ref=$ref" >> "$GITHUB_OUTPUT"

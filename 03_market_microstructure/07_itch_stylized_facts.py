@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -73,7 +73,7 @@ import pyarrow.dataset as ds
 import seaborn as sns
 from IPython.display import display  # noqa: F401
 
-from utils.paths import display_path, get_output_dir
+from utils.paths import display_path, get_output_dir, require_chapter_inputs
 
 sns.set_style("whitegrid")
 
@@ -98,10 +98,6 @@ TRADING_ACTIVITY_DIR = NASDAQ_ITCH_OUTPUT / "trading_activity"
 print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
 print(f"Input directory (trade summary): {display_path(TRADING_ACTIVITY_DIR)}")
 
-if not MESSAGE_DIR.exists():
-    print(f"\nWARNING: Message directory not found: {display_path(MESSAGE_DIR)}")
-    print("   Run 01_itch_parser first.")
-
 # %% [markdown]
 # ## 2. Load Trade Data
 #
@@ -117,38 +113,34 @@ if not MESSAGE_DIR.exists():
 TRADE_SUMMARY_PATH = TRADING_ACTIVITY_DIR / "trade_summary.parquet"
 TRADES_PATH = TRADING_ACTIVITY_DIR / "trades.parquet"
 
+# Well-known tickers substituted for the ones this dataset traded would let the
+# notebook finish with most of its panels empty, so stop and say what is missing.
+require_chapter_inputs(
+    {
+        MESSAGE_DIR: "01_itch_parser",
+        TRADE_SUMMARY_PATH: "05_itch_trading_activity",
+        TRADES_PATH: "05_itch_trading_activity",
+    }
+)
+
 # Load trade summary for ticker selection
-if TRADE_SUMMARY_PATH.exists():
-    trade_summary = pl.read_parquet(TRADE_SUMMARY_PATH)
-    # Sort explicitly by value to ensure correct selection
-    trade_summary = trade_summary.sort("total_value", descending=True)
-    num_syms = len(trade_summary)
-    high_sym = trade_summary["ticker"][0]  # highest value
-    mid_sym = trade_summary["ticker"][num_syms // 2]  # middle
-    low_sym = trade_summary["ticker"][-1]  # lowest value
-    print(f"Loaded trade summary: {num_syms} tickers")
-else:
-    # Fallback to common symbols if no summary available
-    high_sym, mid_sym, low_sym = "AAPL", "INTC", "UGA"
-    trade_summary = None
-    print(f"Trade summary not found at {TRADE_SUMMARY_PATH}")
-    print("Using fallback symbols (run 05_itch_trading_activity first for best results)")
+trade_summary = pl.read_parquet(TRADE_SUMMARY_PATH)
+# Sort explicitly by value to ensure correct selection
+trade_summary = trade_summary.sort("total_value", descending=True)
+num_syms = len(trade_summary)
+high_sym = trade_summary["ticker"][0]  # highest value
+mid_sym = trade_summary["ticker"][num_syms // 2]  # middle
+low_sym = trade_summary["ticker"][-1]  # lowest value
+print(f"Loaded trade summary: {num_syms} tickers")
 
 # Load canonical trades (single source of truth for trade extraction)
-if TRADES_PATH.exists():
-    all_trades = pl.read_parquet(TRADES_PATH)
-    data_available = True
-    print(f"Loaded canonical trades: {len(all_trades):,} trades")
-    if "msg_type" in all_trades.columns:
-        msg_breakdown = all_trades.group_by("msg_type").len().sort("msg_type")
-        print("  Message type breakdown:")
-        for row in msg_breakdown.iter_rows():
-            print(f"    {row[0]}: {row[1]:>12,}")
-else:
-    all_trades = None
-    data_available = MESSAGE_DIR.exists()
-    print(f"Canonical trades not found at {TRADES_PATH}")
-    print("Run 05_itch_trading_activity first to generate trades.parquet")
+all_trades = pl.read_parquet(TRADES_PATH)
+print(f"Loaded canonical trades: {len(all_trades):,} trades")
+if "msg_type" in all_trades.columns:
+    msg_breakdown = all_trades.group_by("msg_type").len().sort("msg_type")
+    print("  Message type breakdown:")
+    for row in msg_breakdown.iter_rows():
+        print(f"    {row[0]}: {row[1]:>12,}")
 
 print("\nSelected tickers for analysis:")
 print(f"  High liquidity:   {high_sym}")
@@ -456,16 +448,14 @@ def plot_order_flow(add_df: pl.DataFrame, ticker: str) -> None:
 
 
 # %%
-if MESSAGE_DIR.exists() and data_available:
-    flow_results, flow_add_df = analyze_order_flow_for_ticker(MESSAGE_DIR, high_sym)
-    print_order_flow_summary(flow_results, flow_add_df)
-    plot_order_flow(flow_add_df, high_sym)
+flow_results, flow_add_df = analyze_order_flow_for_ticker(MESSAGE_DIR, high_sym)
+print_order_flow_summary(flow_results, flow_add_df)
+plot_order_flow(flow_add_df, high_sym)
 
 # %%
-if MESSAGE_DIR.exists() and data_available:
-    flow_results, flow_add_df = analyze_order_flow_for_ticker(MESSAGE_DIR, mid_sym)
-    print_order_flow_summary(flow_results, flow_add_df)
-    plot_order_flow(flow_add_df, mid_sym)
+flow_results, flow_add_df = analyze_order_flow_for_ticker(MESSAGE_DIR, mid_sym)
+print_order_flow_summary(flow_results, flow_add_df)
+plot_order_flow(flow_add_df, mid_sym)
 
 # %% [markdown]
 # ## 4. The Bid-Ask Bounce
@@ -530,44 +520,43 @@ def compute_tick_autocorrelation(trades_df: pl.DataFrame, ticker: str, max_lags:
 
 
 # %%
-if data_available and all_trades is not None:
-    # Compute autocorrelation for high-liquidity ticker
-    bounce_result = compute_tick_autocorrelation(all_trades, high_sym, max_lags=10)
+# Compute autocorrelation for high-liquidity ticker
+bounce_result = compute_tick_autocorrelation(all_trades, high_sym, max_lags=10)
 
-    if bounce_result and bounce_result["autocorrs"]:
-        lags = list(range(1, len(bounce_result["autocorrs"]) + 1))
-        autocorrs = bounce_result["autocorrs"]
+if bounce_result and bounce_result["autocorrs"]:
+    lags = list(range(1, len(bounce_result["autocorrs"]) + 1))
+    autocorrs = bounce_result["autocorrs"]
 
-        fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(10, 5))
 
-        colors = ["red" if ac < 0 else "blue" for ac in autocorrs]
-        ax.bar(lags, autocorrs, color=colors, alpha=0.7)
-        ax.axhline(0, color="black", linewidth=0.5)
-        ax.axhline(-0.1, color="gray", linestyle="--", alpha=0.5)
-        ax.axhline(0.1, color="gray", linestyle="--", alpha=0.5)
+    colors = ["red" if ac < 0 else "blue" for ac in autocorrs]
+    ax.bar(lags, autocorrs, color=colors, alpha=0.7)
+    ax.axhline(0, color="black", linewidth=0.5)
+    ax.axhline(-0.1, color="gray", linestyle="--", alpha=0.5)
+    ax.axhline(0.1, color="gray", linestyle="--", alpha=0.5)
 
-        ax.set_xlabel("Lag (seconds)")
-        ax.set_ylabel("Autocorrelation")
-        ax.set_title(f"Negative lag-1 autocorrelation is the bid-ask bounce — {high_sym}")
-        ax.set_xticks(lags)
+    ax.set_xlabel("Lag (seconds)")
+    ax.set_ylabel("Autocorrelation")
+    ax.set_title(f"Negative lag-1 autocorrelation is the bid-ask bounce — {high_sym}")
+    ax.set_xticks(lags)
 
-        # Add annotation
-        ax.annotate(
-            f"Lag-1: {autocorrs[0]:.3f}",
-            xy=(1, autocorrs[0]),
-            xytext=(3, autocorrs[0] - 0.1),
-            arrowprops=dict(arrowstyle="->", color="red"),
-            fontsize=12,
-            color="red",
-        )
+    # Add annotation
+    ax.annotate(
+        f"Lag-1: {autocorrs[0]:.3f}",
+        xy=(1, autocorrs[0]),
+        xytext=(3, autocorrs[0] - 0.1),
+        arrowprops=dict(arrowstyle="->", color="red"),
+        fontsize=12,
+        color="red",
+    )
 
-        plt.tight_layout()
-        plt.show()
+    plt.tight_layout()
+    plt.show()
 
-        print(f"\nBid-Ask Bounce Analysis for {high_sym}:")
-        print(f"  Lag-1 autocorrelation: {autocorrs[0]:.4f}")
-        print("  (Negative value confirms bounce between bid and ask)")
-        print("\n  Implication: Use mid-price returns, not trade-price returns!")
+    print(f"\nBid-Ask Bounce Analysis for {high_sym}:")
+    print(f"  Lag-1 autocorrelation: {autocorrs[0]:.4f}")
+    print("  (Negative value confirms bounce between bid and ask)")
+    print("\n  Implication: Use mid-price returns, not trade-price returns!")
 
 
 # %% [markdown]
@@ -645,55 +634,54 @@ def compare_liquidity_metrics(trades_df: pl.DataFrame, tickers: list[str]) -> pl
 
 
 # %%
-if data_available and all_trades is not None:
-    # Select stocks spanning the liquidity spectrum. We draw the tiers from the
-    # *tradeable* universe — names with enough activity to form intraday bars —
-    # because the long tail of the ITCH session (thousands of tickers with only a
-    # handful of prints) cannot be resampled to one-minute bars and would drop out.
-    MIN_TRADES = 500  # floor that guarantees each tier resamples to many 1-min bars
-    if trade_summary is not None:
-        tradeable = trade_summary.filter(pl.col("trade_count") >= MIN_TRADES)
-        n_pool = len(tradeable)
-        if n_pool >= 5:
-            # `tradeable` is sorted by total_value descending; span it evenly.
-            tier_idx = [0, n_pool // 4, n_pool // 2, 3 * n_pool // 4, n_pool - 1]
-            spectrum_tickers = [tradeable["ticker"][i] for i in tier_idx]
-        elif n_pool > 0:
-            spectrum_tickers = tradeable["ticker"].to_list()
-        else:
-            spectrum_tickers = trade_summary["ticker"].to_list()
+# Select stocks spanning the liquidity spectrum. We draw the tiers from the
+# *tradeable* universe — names with enough activity to form intraday bars —
+# because the long tail of the ITCH session (thousands of tickers with only a
+# handful of prints) cannot be resampled to one-minute bars and would drop out.
+MIN_TRADES = 500  # floor that guarantees each tier resamples to many 1-min bars
+if trade_summary is not None:
+    tradeable = trade_summary.filter(pl.col("trade_count") >= MIN_TRADES)
+    n_pool = len(tradeable)
+    if n_pool >= 5:
+        # `tradeable` is sorted by total_value descending; span it evenly.
+        tier_idx = [0, n_pool // 4, n_pool // 2, 3 * n_pool // 4, n_pool - 1]
+        spectrum_tickers = [tradeable["ticker"][i] for i in tier_idx]
+    elif n_pool > 0:
+        spectrum_tickers = tradeable["ticker"].to_list()
     else:
-        # Fallback: well-known tickers across the liquidity spectrum
-        spectrum_tickers = ["AAPL", "MSFT", "INTC", "AMD", "UGA"]
+        spectrum_tickers = trade_summary["ticker"].to_list()
+else:
+    # Fallback: well-known tickers across the liquidity spectrum
+    spectrum_tickers = ["AAPL", "MSFT", "INTC", "AMD", "UGA"]
 
-    liquidity_comparison = compare_liquidity_metrics(all_trades, spectrum_tickers)
+liquidity_comparison = compare_liquidity_metrics(all_trades, spectrum_tickers)
 
-    kept = liquidity_comparison["ticker"].to_list() if len(liquidity_comparison) else []
-    dropped = [t for t in spectrum_tickers if t not in kept]
-    if dropped:
-        print(f"Note: dropped {', '.join(dropped)} (too few one-minute bars to compare).\n")
+kept = liquidity_comparison["ticker"].to_list() if len(liquidity_comparison) else []
+dropped = [t for t in spectrum_tickers if t not in kept]
+if dropped:
+    print(f"Note: dropped {', '.join(dropped)} (too few one-minute bars to compare).\n")
 
-    if len(liquidity_comparison) > 0:
-        # Sort by volume
-        liquidity_comparison = liquidity_comparison.sort("total_volume", descending=True)
+if len(liquidity_comparison) > 0:
+    # Sort by volume
+    liquidity_comparison = liquidity_comparison.sort("total_volume", descending=True)
 
-        print("=" * 80)
-        print("LIQUIDITY SPECTRUM: From Blue Chips to Small Caps")
-        print("=" * 80)
+    print("=" * 80)
+    print("LIQUIDITY SPECTRUM: From Blue Chips to Small Caps")
+    print("=" * 80)
+    print(
+        f"{'Ticker':<8} {'Volume':>12} {'Value ($M)':>12} {'Avg Trade':>10} {'Volatility':>12} {'Price Range':>12}"
+    )
+    print("-" * 80)
+
+    for row in liquidity_comparison.iter_rows(named=True):
         print(
-            f"{'Ticker':<8} {'Volume':>12} {'Value ($M)':>12} {'Avg Trade':>10} {'Volatility':>12} {'Price Range':>12}"
+            f"{row['ticker']:<8} {row['total_volume']:>12,.0f} {row['total_value'] / 1e6:>12.1f} "
+            f"{row['avg_trade_size']:>10.0f} {row['volatility_bps']:>11.1f}bp {row['price_range_pct']:>11.2f}%"
         )
-        print("-" * 80)
-
-        for row in liquidity_comparison.iter_rows(named=True):
-            print(
-                f"{row['ticker']:<8} {row['total_volume']:>12,.0f} {row['total_value'] / 1e6:>12.1f} "
-                f"{row['avg_trade_size']:>10.0f} {row['volatility_bps']:>11.1f}bp {row['price_range_pct']:>11.2f}%"
-            )
 
 # %%
 # Liquidity spectrum visualization
-if data_available and all_trades is not None and len(liquidity_comparison) > 0:
+if len(liquidity_comparison) > 0:
     tickers = liquidity_comparison["ticker"].to_list()
     volumes = liquidity_comparison["total_volume"].to_numpy()
     volatilities = liquidity_comparison["volatility_bps"].to_numpy()
@@ -729,7 +717,7 @@ if data_available and all_trades is not None and len(liquidity_comparison) > 0:
 
 # %%
 # Liquidity ratio summary
-if data_available and all_trades is not None and len(liquidity_comparison) >= 2:
+if len(liquidity_comparison) >= 2:
     share_ratio = volumes[0] / volumes[-1] if volumes[-1] > 0 else float("inf")
     values = liquidity_comparison["total_value"].to_numpy()
     value_ratio = values[0] / values[-1] if values[-1] > 0 else float("inf")

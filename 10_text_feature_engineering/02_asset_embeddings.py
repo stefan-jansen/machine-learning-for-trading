@@ -445,10 +445,7 @@ for slot, (i, name) in enumerate(highlighted):
 
 ax.set_xlabel("t-SNE Dimension 1")
 ax.set_ylabel("t-SNE Dimension 2")
-ax.set_title(
-    "Asset Embeddings from Word2Vec on Portfolios\n"
-    "(Stocks with similar institutional ownership cluster together)"
-)
+ax.set_title("Stocks with similar institutional ownership cluster together")
 plt.tight_layout()
 plt.show()
 

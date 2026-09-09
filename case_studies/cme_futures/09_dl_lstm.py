@@ -103,6 +103,7 @@ from case_studies.cme_futures.research_workflow import (
     run_official_model_catalog,
     run_resolved_model_requests,
 )
+from case_studies.research import population_supersedes
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -111,7 +112,12 @@ PREVIEW_REDUCTIONS: dict = {}
 # The population hash this run replaces, read from the registry and set by a person. A
 # first population takes None; a re-run whose membership has changed is refused without
 # the hash it supersedes, and the refusal names the value required.
-SUPERSEDES_POPULATION: str | None = None
+SUPERSEDES_POPULATION: str | None = "8c2c87299a47"
+# The device to fit on. Empty means the device this population was published on.
+DEVICE: str = ""
+# The population this run publishes into. Empty publishes the canonical one, which a run
+# on another device may not do.
+POPULATION_NAME: str = ""
 
 # %% [markdown]
 # ## Declared requests
@@ -123,19 +129,36 @@ SUPERSEDES_POPULATION: str | None = None
 # adapter falls back to a literal `"cuda"` written in `case_studies/utils/deep_learning.py`, and
 # resolving the request raises `CUDA was requested for sequence training, but CUDA is unavailable`
 # rather than quietly moving the fit to the CPU. That refusal comes from resolving the request, so
-# it arrives before any fitting starts. A CUDA device is therefore a hard requirement of this
-# population, and stating it in the request puts that requirement where a reader meets it instead
-# of two layers below. The resolved specification hash is the same with the override as without,
-# so this names what the published run already did.
+# it arrives before any fitting starts. Stating it in the request puts that requirement where a
+# reader meets it instead of two layers below. The resolved specification hash is the same with the
+# override as without, so this names what the published run already did.
+#
+# The device is part of what the fitted model is, not a note beside it: the same architecture
+# trained on a GPU and on a CPU accumulates its sums in different orders and reaches different
+# weights. `PUBLISHED_DEVICE` is the device this population was fitted on, and the canonical
+# population accepts no other. A reader without an NVIDIA card sets `DEVICE="cpu"` and passes a
+# `POPULATION_NAME` to fit the same grid into a population of its own, which the backtest does
+# not read.
 
 # %%
+PUBLISHED_DEVICE = "cuda"
+device = DEVICE or PUBLISHED_DEVICE
+if device != PUBLISHED_DEVICE and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits on device {device!r}, which is not the {PUBLISHED_DEVICE!r} this "
+        f"population was published on, so it cannot publish the canonical population; pass "
+        f"POPULATION_NAME to give it its own"
+    )
+
+population_name = POPULATION_NAME or "cme_futures-deep_learning-validation-v1"
+
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
 requests = model_request_catalog("deep_learning", labels=ALL_LABELS)
 resolved = resolve_model_requests(
     study,
     requests,
     execution_tier=EXECUTION_TIER,
-    overrides={"device": "cuda"},
+    overrides={"device": device},
     preview_reductions=PREVIEW_REDUCTIONS,
 )
 universe = product_universe_table()
@@ -185,9 +208,13 @@ if EXECUTION_TIER == "canonical":
     execution, population = run_official_model_catalog(
         study,
         requests,
-        population_name="cme_futures-deep_learning-validation-v1",
+        population_name=population_name,
         resolved_requests=resolved,
-        supersedes=SUPERSEDES_POPULATION,
+        supersedes=population_supersedes(
+            study,
+            name=population_name,
+            declared=SUPERSEDES_POPULATION,
+        ),
     )
 else:
     if WORKSPACE is None or not PREVIEW_REDUCTIONS:

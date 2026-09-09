@@ -92,7 +92,7 @@ from case_studies.utils.temporal import (
 )
 from data import load_fx_pairs
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
-from utils.cv_splits import generate_cv_splits, load_evaluation_config
+from utils.cv_splits import generate_cv_splits, load_evaluation_config, select_folds
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -448,7 +448,7 @@ for split in raw_folds:
     folds.append(fold)
 
 if MAX_FOLDS:
-    folds = folds[:MAX_FOLDS]
+    folds = select_folds(folds, range(MAX_FOLDS))
 
 print(f"Resolved {len(folds)} walk-forward windows for the screen in section 10:")
 for f in folds:

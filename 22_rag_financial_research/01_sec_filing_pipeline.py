@@ -105,8 +105,16 @@ print(f"Filing storage: {SP100_10K_PARQUET}")
 edgar_identity = os.environ.get("EDGAR_IDENTITY")
 if not edgar_identity:
     raise RuntimeError(
-        "EDGAR_IDENTITY is not set. Provide a real name and email address, "
-        'for example: EDGAR_IDENTITY="Jane Doe jane@example.org".'
+        "EDGAR_IDENTITY is not set. The SEC requires a real User-Agent - your "
+        "name and email - on every EDGAR request, and blocks placeholder "
+        "addresses. It is not an API key and there is nothing to sign up for.\n"
+        "Put your own name and email on the EDGAR_IDENTITY line of the .env "
+        "file in the repository root:\n"
+        "    EDGAR_IDENTITY=Jane Doe jane@example.org\n"
+        ".env is read once, when the process starts, so then restart this "
+        "notebook's kernel (Kernel -> Restart Kernel). On the Docker path, stop "
+        "Jupyter Lab and run `docker compose up ml4t` again - `docker compose "
+        "restart` keeps the environment the container was created with."
     )
 set_identity(edgar_identity)
 print("edgartools configured with a non-placeholder SEC identity")

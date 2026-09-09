@@ -28,6 +28,7 @@ from tests.pm_helpers import (
     current_test_tier,
     get_overrides,
     get_tier,
+    gpu_skip_reason,
     invocations_for,
     missing_required_env,
     run_notebook,
@@ -196,14 +197,9 @@ def test_case_study_pipeline(
             pytest.skip(f"Requires {pkg} (not installed in this Docker image)")
 
     # Check GPU requirement
-    if overrides.get("gpu"):
-        try:
-            import torch
-
-            if not torch.cuda.is_available():
-                pytest.skip("GPU required but not available")
-        except ImportError:
-            pytest.skip("GPU required but torch not installed")
+    reason = gpu_skip_reason(overrides)
+    if reason:
+        pytest.skip(reason)
 
     timeout = overrides.get("timeout", 300)
 

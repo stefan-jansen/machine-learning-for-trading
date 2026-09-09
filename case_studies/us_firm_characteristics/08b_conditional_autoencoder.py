@@ -63,6 +63,7 @@
 
 import plotly.graph_objects as go
 import polars as pl
+import yaml
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
@@ -76,6 +77,7 @@ from case_studies.research import (
     run_model_population,
     supersedes_for_run,
 )
+from utils.paths import get_case_study_dir
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -85,6 +87,8 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
+# The device to fit on. Empty means the one declared in config/setup.yaml.
+DEVICE: str = ""
 
 MODEL_NAME = "cae"
 
@@ -141,6 +145,28 @@ if set(configs.get_column("label")) != set(declared.get_column("label")) and not
     )
 
 # %% [markdown]
+# The device is the second thing that can put a run outside the declared population, and it is
+# not a note beside the result: a network trained on a GPU and the same network trained on a CPU
+# accumulate their sums in different orders and reach different weights, so the two are different
+# computations and get different identities. `config/setup.yaml` declares the device this family
+# publishes on under `modeling.latent_factors`, and the runner refuses a device the machine does
+# not have rather than falling back to one it does. A reader without an NVIDIA card passes
+# `DEVICE="cpu"` with a `POPULATION_NAME` of their own.
+
+# %%
+setup = yaml.safe_load(
+    (get_case_study_dir("us_firm_characteristics") / "config" / "setup.yaml").read_text()
+)
+PUBLISHED_DEVICE = str(setup["modeling"]["latent_factors"]["device"])
+device = DEVICE or PUBLISHED_DEVICE
+
+if device != PUBLISHED_DEVICE and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits on device {device!r} rather than the declared {PUBLISHED_DEVICE!r}, so "
+        "it cannot publish the canonical population; pass POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
 # ## 2. Binding the declarations to the data
 #
 # Planning reads the label and feature files, computes the fold boundaries from the walk-forward
@@ -161,6 +187,7 @@ requests = model_requests(
     study,
     configs,
     execution_tier=EXECUTION_TIER,
+    overrides={"device": device},
     preview_reductions=PREVIEW_REDUCTIONS,
     notebook="08b_conditional_autoencoder",
 )
