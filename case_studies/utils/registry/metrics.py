@@ -207,7 +207,7 @@ def compute_prediction_fold_metrics(
     # OOS dates across folds into a single series and compute HAC SE +
     # stationary block-bootstrap CI. This is what `model_analysis` notebooks
     # use for headline IC/AUC and CIs.
-    horizon = _horizon_in_observations(
+    horizon = horizon_in_observations(
         label_buffer, predictions[date_col] if date_col in predictions.columns else None
     )
     if horizon is None:
@@ -421,7 +421,7 @@ def _observation_step_seconds(dates: Any) -> float | None:
     return float(gaps.mode().min()) / 1e6
 
 
-def _horizon_in_observations(label_buffer: str | None, dates: Any) -> int | None:
+def horizon_in_observations(label_buffer: str | None, dates: Any) -> int | None:
     """How many IC observations a sub-daily label's holding period covers.
 
     A label name cannot say this. ``fwd_ret_15m`` is fifteen minutes and ``fwd_ret_1m``
