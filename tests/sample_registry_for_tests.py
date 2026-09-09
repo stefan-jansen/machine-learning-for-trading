@@ -66,27 +66,27 @@ CASE_STUDY_IDS = [
 # sample that drops a label entirely is not a smaller registry, it is a differently shaped one.
 TOP_N_PER_GROUP = 3
 
-# Prediction hashes a shipped notebook names as a literal, per case study. These
-# need more than a registry row: the notebook checks that
-# run_log/predictions/<hash>/predictions.parquet exists and reads it. The
-# registry sample carries the row, the fixture tree carried no artifact, and
-# 26_mlops_governance/02_online_drift_detection failed on whichever of the two
-# was missing. Keep a hash here for as long as a notebook pins it.
-# The identity is declared here rather than read from the production registry,
-# because the notebooks do not resolve a hash on its own: they filter on family,
-# label, config_name and split. Comparing the fixture against production would
-# pass when production itself no longer satisfies those predicates, or when both
-# sides return nothing. Declaring it makes the sampler fail on the day a pinned
-# hash stops meaning what the notebook expects.
-PINNED_PREDICTION_HASHES = {
-    "us_equities_panel": {
-        # 26/02_online_drift_detection OLS_PREDICTION_HASH, and 26/03's FIXED_OLS
-        "f9e84a32a9f0": ("linear", "fwd_ret_1d", "ols", "validation"),
-        # 26/02_online_drift_detection RIDGE_PREDICTION_HASH
-        "c0b36ffb8f51": ("linear", "fwd_ret_1d", "ridge_a10000000.0", "validation"),
-        # 26/03_safe_model_rollout FIXED_RIDGE_PREDICTION_HASH
-        "b381d21ffa4a": ("linear", "fwd_ret_1d", "ridge_a100000.0", "validation"),
-    },
+# Prediction sets a shipped notebook names, per case study, as the (family, label,
+# config_name, split) the notebook filters on. These need more than a registry row: the
+# notebook checks that run_log/predictions/<hash>/predictions.parquet exists and reads it.
+# The registry sample carried the row, the fixture tree carried no artifact, and
+# 26_mlops_governance/02_online_drift_detection failed on whichever of the two was missing.
+#
+# Declared as configurations rather than as prediction hashes. A prediction hash is
+# content-addressed, so it moves whenever the case study is refitted while the configuration
+# the notebook asks for does not, and this table went stale exactly that way: the three
+# hashes it named on 2026-09-09 were in no registry on this machine, so this function raised
+# on every case study that reached it and the notebooks pinning them could not run outside
+# CI. The notebooks now pin configuration names and resolve the hash, and so does this.
+PINNED_PREDICTION_CONFIGS = {
+    "us_equities_panel": [
+        # 26/02_online_drift_detection OLS_CONFIG, 26/03_safe_model_rollout INCUMBENT_CONFIG
+        ("linear", "fwd_ret_1d", "ols", "validation"),
+        # 26/02_online_drift_detection RIDGE_CONFIG
+        ("linear", "fwd_ret_1d", "ridge_a1000000.0", "validation"),
+        # 26/03_safe_model_rollout CANDIDATE_CONFIG
+        ("linear", "fwd_ret_1d", "ridge_a100.0", "validation"),
+    ],
 }
 
 # Symbols to keep when subsampling a pinned prediction artifact. Production
@@ -668,6 +668,37 @@ def _pinned_prediction_universe(
     return sorted(common)[:PINNED_PREDICTION_SYMBOLS]
 
 
+def _resolve_pinned_hashes(cs_id: str, src_db: Path) -> dict[str, tuple[str, str, str, str]]:
+    """Map each declared configuration to the prediction hash production holds for it.
+
+    Most recent wins, which is the rule the consuming notebooks apply. Raises when a
+    declared configuration has no prediction set: that means either the notebook pins
+    something this case study never produced, or the declaration above is out of date,
+    and both are worth failing the fixture build over.
+    """
+    resolved: dict[str, tuple[str, str, str, str]] = {}
+    connection = sqlite3.connect(str(src_db))
+    try:
+        for identity in PINNED_PREDICTION_CONFIGS.get(cs_id, []):
+            family, label, config_name, split = identity
+            row = connection.execute(
+                "SELECT ps.prediction_hash FROM training_runs tr "
+                "JOIN prediction_sets ps ON tr.training_hash = ps.training_hash "
+                "WHERE tr.family = ? AND tr.label = ? AND tr.config_name = ? AND ps.split = ? "
+                "ORDER BY tr.created_at DESC LIMIT 1",
+                identity,
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"{cs_id}: no {split} prediction set for {family}/{config_name} on "
+                    f"{label}. A notebook pins a configuration this case study does not hold."
+                )
+            resolved[str(row[0])] = identity
+    finally:
+        connection.close()
+    return resolved
+
+
 def ensure_pinned_predictions(cs_id: str, intermediates_dir: Path) -> dict:
     """Give every pinned hash both a registry row and a materialized artifact.
 
@@ -678,14 +709,16 @@ def ensure_pinned_predictions(cs_id: str, intermediates_dir: Path) -> dict:
     """
     import polars as pl
 
-    pinned = PINNED_PREDICTION_HASHES.get(cs_id, {})
-    hashes = list(pinned)
-    if not hashes:
+    declared = PINNED_PREDICTION_CONFIGS.get(cs_id, [])
+    if not declared:
         return {"pinned": 0}
     src_db = CODE_CS_DIR / cs_id / "run_log" / "registry.db"
     dst_db = intermediates_dir / cs_id / "run_log" / "registry.db"
     if not src_db.exists() or not dst_db.exists():
         return {"pinned": 0, "reason": "no registry"}
+
+    pinned = _resolve_pinned_hashes(cs_id, src_db)
+    hashes = list(pinned)
 
     src_pred_dir = CODE_CS_DIR / cs_id / "run_log" / "predictions"
     dst_pred_dir = intermediates_dir / cs_id / "run_log" / "predictions"
@@ -729,8 +762,8 @@ def ensure_pinned_predictions(cs_id: str, intermediates_dir: Path) -> dict:
             ).fetchone()
             if training_hash is None:
                 raise ValueError(
-                    f"{cs_id}: pinned prediction hash {prediction_hash} is not in the "
-                    f"production registry. A notebook pins a hash nothing produces."
+                    f"{cs_id}: the resolved prediction hash {prediction_hash} has no "
+                    f"prediction_sets row. The registry contradicts itself."
                 )
             for table, column, value in (
                 ("training_runs", "training_hash", training_hash[0]),
@@ -762,7 +795,7 @@ def ensure_pinned_predictions(cs_id: str, intermediates_dir: Path) -> dict:
             src_parquet = src_pred_dir / prediction_hash / "predictions.parquet"
             if not src_parquet.exists():
                 raise FileNotFoundError(
-                    f"{cs_id}: pinned prediction hash {prediction_hash} has a registry row "
+                    f"{cs_id}: pinned prediction set {prediction_hash} has a registry row "
                     f"but no artifact at {src_parquet}"
                 )
             frame = pl.read_parquet(src_parquet).filter(pl.col("symbol").is_in(universe))
@@ -816,8 +849,7 @@ def preflight_pinned_predictions(cs_id: str, intermediates_dir: Path) -> None:
     Raises rather than returning a verdict, so a caller that skips it still hits
     the same failures - just later, once the destination has been mutated.
     """
-    pinned = PINNED_PREDICTION_HASHES.get(cs_id, {})
-    if not pinned:
+    if not PINNED_PREDICTION_CONFIGS.get(cs_id):
         return
     if intermediates_dir.name != "intermediates":
         raise ValueError(
@@ -834,6 +866,7 @@ def preflight_pinned_predictions(cs_id: str, intermediates_dir: Path) -> None:
     src_db = CODE_CS_DIR / cs_id / "run_log" / "registry.db"
     if not src_db.exists():
         return
+    pinned = _resolve_pinned_hashes(cs_id, src_db)
     src_pred_dir = CODE_CS_DIR / cs_id / "run_log" / "predictions"
     # Raises on a missing source, an unreadable schema, or an empty intersection.
     universe = _pinned_prediction_universe(
@@ -860,7 +893,7 @@ def preflight_pinned_predictions(cs_id: str, intermediates_dir: Path) -> None:
             artifact = src_pred_dir / prediction_hash / "predictions.parquet"
             if not artifact.exists():
                 raise FileNotFoundError(
-                    f"{cs_id}: pinned prediction hash {prediction_hash} has a registry row "
+                    f"{cs_id}: pinned prediction set {prediction_hash} has a registry row "
                     f"but no artifact at {artifact}"
                 )
             # resolve() works on a path that does not exist yet, so the

@@ -1179,8 +1179,9 @@
 26_mlops_governance/03_safe_model_rollout:
   # Was skipped for a cause that no longer exists: the reason described an A/B and
   # staged-capital slicing the notebook has since dropped, and it now stops after
-  # the 63-session shadow decision. With the prediction artifacts it pins present
-  # in the fixture it runs, so it is a real test again.
+  # the 63-session shadow decision. The prediction sets it needs reach the fixture
+  # through PINNED_PREDICTION_CONFIGS in tests/sample_registry_for_tests.py, so it
+  # is a real test again.
   #
   # TOP_K is reduced because the book is dollar-neutral over the top and bottom
   # TOP_K predictions and the fixture carries well under 200 symbols on any
