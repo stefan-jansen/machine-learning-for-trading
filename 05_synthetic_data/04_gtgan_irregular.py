@@ -188,8 +188,9 @@ SEED = 42
 # reading aid for the printed number, not a value the paper reports.
 GOOD_RECONSTRUCTION_MSE = 0.01
 
-# Progress bars write to stderr and papermill records every repaint; the training loop
-# prints its progress to stdout as well. Set True to watch a long run interactively.
+# Progress bars write to stderr and papermill records every repaint, so they are off by
+# default and the training loop prints the same numbers to stdout instead. Set True to
+# watch a long run interactively.
 PROGRESS_BARS = False
 
 # %%
@@ -976,13 +977,17 @@ def train_gtgan(
         losses["g"].append(loss_g.item())
 
         if step % max(1, total_steps // 10) == 0:
-            pbar.set_postfix(
-                {
-                    "Recon": f"{recon_loss.item():.4f}",
-                    "D_real": f"{loss_d_real.item():.3f}",
-                    "G": f"{loss_g.item():.3f}",
-                }
-            )
+            report = {
+                "Recon": f"{recon_loss.item():.4f}",
+                "D_real": f"{loss_d_real.item():.3f}",
+                "G": f"{loss_g.item():.3f}",
+            }
+            pbar.set_postfix(report)
+            # The progress bar is the only place set_postfix shows up, so with bars off
+            # the same numbers go to stdout and reach the render.
+            if not PROGRESS_BARS:
+                fields = "  ".join(f"{k}: {v}" for k, v in report.items())
+                print(f"  Step {step}/{total_steps}  {fields}", flush=True)
 
     print("Training complete!")
     return losses

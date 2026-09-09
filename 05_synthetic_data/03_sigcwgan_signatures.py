@@ -241,8 +241,9 @@ def compute_signature_np(path: np.ndarray, depth: int) -> np.ndarray:
 PAPER_REFERENCE = {"sig_w1": 2.76, "tstr_ratio": 1.0}
 
 # Progress bars write to stderr, and papermill captures every repaint as its own
-# output. Both loops below print their progress to stdout as well, so the bars are
-# off by default. Set True in an interactive session to watch a long run.
+# output, so they are off by default. The training loop prints its loss to stdout at
+# the same interval, and the signature loop is announced by the print above its call.
+# Set True in an interactive session to watch a long run.
 PROGRESS_BARS = False
 
 # Standard deviation of the Gaussian increments whose cumulative sum forms the
