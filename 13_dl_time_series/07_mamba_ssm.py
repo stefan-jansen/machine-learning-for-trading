@@ -30,7 +30,7 @@
 # - Build a multi-layer Mamba-like regressor with gated output projection
 # - Compare SSM predictions against a Ridge regression baseline
 #
-# **Book Reference**: Chapter 13, Section 13.6 (The Full Practitioner Toolkit)
+# **Book Reference**: Chapter 13, Section 13.6 (Alternative architectures and foundation models)
 #
 # **Note**: This is a *pedagogical* selective SSM written in pure PyTorch
 # to expose the inner workings of the selective scan. It captures Mamba's

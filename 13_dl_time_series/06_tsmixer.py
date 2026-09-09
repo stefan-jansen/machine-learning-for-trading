@@ -28,7 +28,7 @@
 # - Understand how transposing the input tensor enables mixing along different axes
 # - Compare pure-MLP mixing against a Ridge regression baseline
 #
-# **Book Reference**: Chapter 13, Section 13.6 (The Full Practitioner Toolkit)
+# **Book Reference**: Chapter 13, Section 13.6 (Alternative architectures and foundation models)
 #
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 

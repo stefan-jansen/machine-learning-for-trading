@@ -40,7 +40,7 @@
 # - Understand why the transfer gap exists for financial time series
 # - Use sktime's ChronosForecaster wrapper for univariate forecasting
 #
-# **Book Reference**: Chapter 13, Section 13.6 (Foundation Models)
+# **Book Reference**: Chapter 13, Section 13.6 (Alternative architectures and foundation models)
 #
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 

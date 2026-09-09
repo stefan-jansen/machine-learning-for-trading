@@ -32,7 +32,7 @@
 #   with controlled empirical coverage
 # - Decompose epistemic vs aleatoric uncertainty
 #
-# **Book Reference**: Chapter 13, Section 13.8 (Prediction Uncertainty)
+# **Book Reference**: Chapter 13, Section 13.8 (Quantifying prediction uncertainty)
 #
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 

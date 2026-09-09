@@ -34,7 +34,7 @@
 # - Compare CNN-on-images against a Ridge+PCA baseline on the same flattened
 #   image pixels, evaluated by MSE and Spearman IC
 #
-# **Book Reference**: Chapter 13, Section 13.6 (The Full Practitioner Toolkit)
+# **Book Reference**: Chapter 13, Section 13.6 (Alternative architectures and foundation models)
 #
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 

@@ -38,7 +38,7 @@
 # - Place the DL family inside the architectural-class taxonomy (recurrent,
 #   MLP-style, convolutional, attention)
 #
-# **Book reference**: Section 13.7 (Practitioner Framework) and Section 13.9
+# **Book reference**: Section 13.7 (A practical framework) and Section 13.9
 # (Cross-Case-Study Synthesis).
 #
 # **Prerequisites**: each case study's per-architecture training notebooks

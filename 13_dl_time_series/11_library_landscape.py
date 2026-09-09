@@ -30,7 +30,7 @@
 # - See how sktime wraps NeuralForecast, PyTorch Forecasting, and HuggingFace
 # - Evaluate when to use raw PyTorch vs library abstractions
 #
-# **Book Reference**: Chapter 13, Section 13.7 (A Practitioner's Framework)
+# **Book Reference**: Chapter 13, Section 13.7 (A practical framework)
 #
 # **Prerequisites**: ETF price data via the canonical `load_etfs()` loader
 
