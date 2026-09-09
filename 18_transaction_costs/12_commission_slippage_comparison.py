@@ -487,7 +487,7 @@ show_plotly_with_alt(
     "split between a slippage share and a commission share, with the one-way total in basis "
     "points annotated above each bar. Slippage is the larger share in three of the four stacks "
     "and is nearly the whole bar in one of them; the institutional ETF stack reverses that, with "
-    "commission taking nearly the whole bar and only a sliver of slippage beneath it.",
+    "commission taking nearly the whole bar and only a sliver of slippage capping it.",
 )
 
 # %%
