@@ -71,7 +71,7 @@ from plotly.subplots import make_subplots
 # rendered .ipynb is browsed without a live Plotly runtime.
 import utils  # noqa: F401
 from data import load_etfs
-from utils.style import COLORS
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 N_BARS = 1260  # 5 years daily
@@ -123,13 +123,7 @@ commission_df = pl.DataFrame(commission_rows)
 # ### Compare Equity-Style Cost Profiles
 
 # %%
-profile_colors = [
-    COLORS["neutral"],
-    COLORS["negative"],
-    COLORS["blue"],
-    COLORS["amber"],
-    COLORS["positive"],
-]
+profile_colors = ml4t_palette(5, categorical=True)
 profile_dashes = ["dot", "solid", "dash", "dashdot", "longdash"]
 fig = go.Figure()
 for (name, _model), color, dash in zip(
@@ -149,13 +143,21 @@ for (name, _model), color, dash in zip(
         )
     )
 fig.update_layout(
-    title="Minimum Fees Matter Most for Small Equity Tickets",
+    title="One-way commission against trade notional, by commission model",
     xaxis_title=f"Trade notional at ${SHARE_PRICE:,.0f} per share (log scale)",
     yaxis_title="One-way commission (bps of notional)",
     xaxis_type="log",
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Five lines of one-way commission in basis points against trade notional on a logarithmic "
+    "horizontal axis, one per commission model. The no-commission line runs flat along the "
+    "bottom and the percentage line runs flat across the whole range. The three models carrying "
+    "a minimum or a per-share element each descend to a floor, the per-share one falling from "
+    "the smallest ticket and the tiered one holding level before it steps down, so the models "
+    "are furthest apart on the small tickets at the left and converge towards the right.",
+)
 
 # %% [markdown]
 # **Finding**: Percentage fees stay constant in basis-point terms. Minimum and
@@ -284,12 +286,19 @@ fig.update_xaxes(title_text="Order participation", tickformat=".0%", row=1, col=
 fig.update_yaxes(title_text="One-way slippage (bps)", range=[-0.5, 11.5], row=1, col=1)
 fig.update_yaxes(title_text="One-way slippage (bps)", row=1, col=2)
 fig.update_layout(
-    title="Only Volume-Share Slippage Responds to Participation",
+    title="One-way slippage against order participation, by slippage model",
     height=450,
     legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
     margin=dict(b=95),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels of one-way slippage against order participation, sharing a legend. In the left "
+    "panel three models each draw a flat horizontal line across the whole participation range, "
+    "at three different levels. In the right panel the volume-share model rises steeply and "
+    "almost linearly with participation, reaching an order of magnitude above the flat "
+    "percentage line drawn beside it for reference.",
+)
 
 # %% [markdown]
 # **Finding**: Fixed, spread, and percentage assumptions do not respond to bar
@@ -465,14 +474,29 @@ for row in rows:
         font=dict(color=COLORS["neutral"], size=10),
     )
 fig.update_layout(
-    title=f"Slippage Dominates {slippage_dominant} of {len(rows)} Illustrative Cost Stacks",
+    title="Slippage and commission shares of one-way cost, by asset class",
     xaxis_title="Illustrative asset-class stack",
     yaxis_title="Share of one-way total cost (%)",
     yaxis_range=[0, 112],
     barmode="stack",
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four stacked bars, one per asset-class stack, each running the full height of the axis and "
+    "split between a slippage share and a commission share, with the one-way total in basis "
+    "points annotated above each bar. Slippage is the larger share in three of the four stacks "
+    "and is nearly the whole bar in one of them; the institutional ETF stack is the exception, "
+    "where commission takes the whole bar.",
+)
+
+# %%
+display(
+    Markdown(
+        f"**Composition**: slippage is the larger share in **{slippage_dominant} of "
+        f"{len(rows)}** of these illustrative stacks."
+    )
+)
 
 # %% [markdown]
 # **Finding**: The composition, not the cross-market magnitude, identifies the
@@ -695,7 +719,7 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=f"Commission Choice Moves Monthly Sharpe by {sharpe_range:.4f}",
+    title="Net Sharpe by commission model, monthly rebalancing",
     xaxis_title="Net Sharpe ratio",
     yaxis_title="Commission model",
     xaxis_range=[min(sharpe_vals) - x_padding, max(sharpe_vals) + x_padding],
@@ -703,7 +727,14 @@ fig.update_layout(
     showlegend=False,
     margin=dict(l=175),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A dot plot of net Sharpe by commission model, one row per model, each marker a different "
+    "shape and colour and labelled with its value. The whole set spans a narrow range of the "
+    "Sharpe axis: the no-commission and per-share rows sit at the right-hand end and are almost "
+    "indistinguishable from one another, the percentage row sits furthest left, and the tiered "
+    "and combined rows fall between them.",
+)
 
 # %% [markdown]
 # ### Read the Monthly Sensitivity
@@ -869,11 +900,18 @@ fig.update_xaxes(title_text="Rebalance cadence", row=1, col=1)
 fig.update_xaxes(title_text="Rebalance cadence", row=1, col=2)
 fig.update_layout(
     height=480,
-    title=f"Daily Fee-Induced Sharpe Gap Is {amplification:.1f}x the Monthly Gap",
+    title="Net Sharpe and total commission by rebalance cadence",
     legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5),
     margin=dict(b=100, t=100),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels against rebalance cadence, from daily to monthly, comparing a no-commission "
+    "path with a percentage-fee path, every point labelled. In the Sharpe panel both paths rise "
+    "towards monthly cadence and the gap between them closes as they go. In the commission "
+    "panel the no-commission path is flat on zero while the fee path falls steeply from its "
+    "daily value, so the two panels move in step.",
+)
 
 # %% [markdown]
 # **Finding**: Dollar fees and the Sharpe gap widen together along the daily

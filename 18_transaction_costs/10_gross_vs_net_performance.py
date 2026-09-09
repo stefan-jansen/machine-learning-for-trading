@@ -47,7 +47,7 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # No heavy computation - runs in seconds. Retained for Papermill compatibility.
@@ -383,12 +383,20 @@ for i, eq in enumerate(equity_series):
     )
 
 fig.update_layout(
-    title="Gross-to-net gaps compound as explicit costs accumulate",
+    title="Gross and net cumulative wealth, three strategy profiles",
     height=200 * len(equity_series) + 100,
 )
 fig.update_xaxes(title_text="Calendar date")
 fig.update_yaxes(title_text="Cumulative wealth (start = 1.0)")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels of cumulative wealth against calendar date, one per strategy profile, "
+    "each carrying a dashed gross line and a solid net line from a common starting value. In "
+    "every panel the two lines begin together and the net line falls progressively further "
+    "below the gross one. The gap is widest in the leveraged long-short panel, where the net "
+    "line ends near where it started while the gross line ends well above it, and narrowest in "
+    "the low-turnover panel, where the two stay close throughout.",
+)
 
 # %% [markdown] tags=[]
 # **Interpretation**: The equity curves make cost drag path-dependent rather than
@@ -433,7 +441,7 @@ cost_df = pl.DataFrame(cost_breakdown)
 # Grouped bar chart
 fig = go.Figure()
 categories = ["Trading Costs", "Financing Costs", "Fund Expenses"]
-colors = [COLORS["blue"], COLORS["amber"], COLORS["slate"]]
+colors = ml4t_palette(3, categorical=True)
 
 for i, strat in enumerate(cost_breakdown):
     fig.add_trace(
@@ -446,13 +454,19 @@ for i, strat in enumerate(cost_breakdown):
     )
 
 fig.update_layout(
-    title="Leverage and turnover determine the annual cost mix",
+    title="Annual cost by component and strategy profile",
     yaxis_title="Annual cost (%)",
     yaxis_tickformat=".1%",
     barmode="group",
-    height=400,
+    height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of annual cost by component, three profiles per component. Trading costs are "
+    "dominated by the high-turnover profile and are near zero for the low-turnover one. "
+    "Financing costs are borne entirely by the leveraged profile and are absent from the other "
+    "two. Fund expenses are the same height for all three.",
+)
 
 # %% [markdown] tags=[]
 # **Finding**: The grouped bars show that "cost" is not a single knob. Different
@@ -491,7 +505,9 @@ sens_df = pl.DataFrame(sensitivity_data)
 # %% tags=[]
 fig = go.Figure()
 
-for cost_bps in one_way_cost_bps:
+for cost_bps, cost_color in zip(
+    one_way_cost_bps, ml4t_palette(len(one_way_cost_bps), categorical=True), strict=True
+):
     subset = sens_df.filter(pl.col("One-Way Cost (bps)") == cost_bps)
     fig.add_trace(
         go.Scatter(
@@ -499,21 +515,32 @@ for cost_bps in one_way_cost_bps:
             y=subset["Net Sharpe"].to_list(),
             mode="lines",
             name=f"{cost_bps} bps one-way",
+            line=dict(color=cost_color),
         )
     )
 
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["slate"])
 fig.add_hline(
-    y=0.5, line_dash="dot", line_color=COLORS["positive"], annotation_text="Net SR = 0.5 reference"
+    y=0.5,
+    line_dash="dot",
+    line_color=COLORS["neutral"],
+    annotation_text="Net SR = 0.5 reference",
+    annotation_position="top left",
 )
 
 fig.update_layout(
-    title="Higher one-way costs reduce the turnover compatible with a target Sharpe",
+    title="Net Sharpe against annual turnover, one line per one-way cost",
     xaxis_title="Annual One-Way Turnover (x)",
     yaxis_title="Net Sharpe Ratio",
     height=450,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four straight lines of net Sharpe against annual turnover, one per one-way cost level, all "
+    "starting from the same point at zero turnover and fanning downward. The steepest line is "
+    "the most expensive one, and it is the only one to fall below the dotted reference and then "
+    "below zero inside the plotted turnover range.",
+)
 
 # %% [markdown] tags=[]
 # **Interpretation**: The sensitivity chart is the general policy rule behind the
@@ -607,12 +634,17 @@ fig.add_scatter(
     line_color=COLORS["amber"],
 )
 fig.update_layout(
-    title="Covariance drift changes minimum-variance weights after construction",
+    title="Minimum-variance weight change per rebalancing period",
     xaxis_title="Rebalancing period",
     yaxis_title="Weight change (L1 or vector L2)",
-    height=350,
+    height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two flat series of per-period weight change against rebalancing period. The L1 measure sits "
+    "roughly three times higher than the vector L2 measure across the whole range; both drift "
+    "slightly without trending, and the two never approach one another.",
+)
 
 # %% [markdown] tags=[]
 # **Finding**: covariance drift creates maintenance turnover under this fixed-rule
@@ -669,8 +701,8 @@ for strat in strategies:
     )
 
 # %% [markdown] tags=[]
-# **Mechanism**: the computed Net-Sharpe rows are binned by configuration and range
-# into three Net-Sharpe ranges. The bucket boundaries (1.0 and 0.5) are presentation
+# **Mechanism**: the computed Net-Sharpe rows are binned by configuration into three
+# Net-Sharpe ranges. The two bucket boundaries are set in the cell above and are presentation
 # thresholds for grouping the demonstration outcomes, not a thumbs-up / thumbs-down
 # judgment on whether any of these configurations would be deployable on real data.
 # The point of these computed rows is to make the gross-to-net gap visible for each

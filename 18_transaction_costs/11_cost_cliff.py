@@ -58,11 +58,13 @@ from IPython.display import Markdown, display
 
 import utils  # noqa: F401
 from data import load_nasdaq100_bars
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# The retail half-spread that anchors the cost stacks is measured from real AlgoSeek
+# NASDAQ-100 minute-bar quotes over the window set below.
 
 # %% tags=["parameters"]
-# The retail half-spread that anchors the cost stacks is measured from real
-# AlgoSeek NASDAQ-100 minute-bar quotes over the window below.
 SPREAD_START_DATE = "2021-12-01"
 SPREAD_END_DATE = "2021-12-31"
 
@@ -146,12 +148,18 @@ fig.add_vline(
     annotation_text=f"Median {median_rel_spread_bps:.1f} bps",
 )
 fig.update_layout(
-    title="The Median Name Sets a Material Crossing-Cost Anchor",
+    title="Relative spread across the NASDAQ-100 symbols",
     xaxis_title="Relative spread (bps)",
     yaxis_title="Number of symbols",
     height=380,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A histogram of volume-weighted relative spread, one observation per index member, counts "
+    "on the vertical axis. The distribution is right-skewed: most symbols fall in the "
+    "narrow-spread bars on the left, and a thin tail of individual symbols runs out to roughly "
+    "three times the median. A dashed vertical line marks the median and is labelled with it.",
+)
 
 # %% [markdown]
 # **Finding**: The cross-sectional distribution shows why a mega-cap quote is not
@@ -444,10 +452,11 @@ fig.add_hline(
     line_dash="dash",
     line_color=COLORS["neutral"],
     annotation_text="Scenario threshold",
+    annotation_position="top left",
 )
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["negative"])
 fig.update_layout(
-    title="Crossing Costs Overwhelm the High-Turnover Profile",
+    title="Gross and net Sharpe by cost structure and turnover profile",
     yaxis_title="Sharpe Ratio",
     xaxis_title="Hypothetical strategy profile",
     barmode="group",
@@ -455,7 +464,16 @@ fig.update_layout(
     showlegend=True,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of Sharpe ratio, one group per turnover profile, each holding the gross Sharpe "
+    "and the net Sharpe under three cost structures, every bar labelled with its value. Within "
+    "each group the crossing bar is the shortest and the passive low-cost bar the tallest. The "
+    "spread between them narrows sharply from the high-turnover group to the low-turnover one, "
+    "where all three cost structures land close to the gross bar. A dashed horizontal line marks "
+    "the scenario threshold, and only the high-turnover crossing and worked-order bars sit "
+    "clearly below it.",
+)
 
 # %% [markdown]
 # ### Quantitative Reading
@@ -525,18 +543,25 @@ fig.add_hline(
 )
 
 fig.update_layout(
-    title="Crossing Costs Consume the High-Turnover Return Budget",
+    title="Annual cost as a share of gross return, by cost structure",
     yaxis_title="Cost as % of Gross Return",
     xaxis_title="Cost Structure",
     barmode="group",
     height=400,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of annual cost as a share of gross return, one group per cost structure and "
+    "one bar per turnover profile, every bar labelled. Within each group the bars fall from high "
+    "to low turnover. The crossing group is by far the tallest and its high-turnover bar nearly "
+    "reaches the dashed line marking the whole of gross return; the passive low-cost group is "
+    "barely off the axis.",
+)
 
 # %% [markdown]
 # **Finding**: Cost as a share of gross return is the clearest sanity check for
-# intraday claims. Once annual cost approaches 100% of gross return, the strategy
+# intraday claims. Once annual cost approaches the whole of gross return, the strategy
 # has no margin for model error, slippage misses, or live degradation.
 
 # %% [markdown]
@@ -623,13 +648,19 @@ for cost_name, _cost_obj in cost_scenarios:
     )
 
 fig.update_layout(
-    title="Lower Execution Costs Support More Daily Turnover",
+    title="Maximum daily turnover against gross Sharpe, by cost structure",
     xaxis_title="Gross Sharpe",
     yaxis_title="Maximum daily round-trip NAV turnover (log scale)",
     yaxis_type="log",
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three rising lines of maximum sustainable daily turnover against gross Sharpe, one per cost "
+    "structure, on a logarithmic vertical axis with the right-hand endpoints labelled. The lines "
+    "never cross: the passive low-cost line sits an order of magnitude above the crossing line "
+    "across the whole Sharpe range, with the worked-order line between them.",
+)
 
 # %% [markdown]
 # **Interpretation**: The break-even curves convert cost assumptions into a
@@ -664,8 +695,8 @@ fig.show()
 #   scales linearly with portfolio NAV turnover, not with an unscaled trade count.
 # - **Crossing is the demanding case**: with the spread anchored to the measured
 #   median NASDAQ-100 half-spread, the crossing stack supplies the largest return drag.
-# - **Cost-as-%-of-gross-return is the cleanest diagnostic**: once annual cost
-#   crosses 100% of gross return, the strategy has no margin for model error,
+# - **Cost as a share of gross return is the cleanest diagnostic**: once annual cost
+#   exceeds gross return outright, the strategy has no margin for model error,
 #   live degradation, or slippage misses.
 # - **Break-even turnover is a deployment guardrail**: solving for the maximum
 #   daily round-trip NAV turnover under a target net Sharpe gives a limit that can
