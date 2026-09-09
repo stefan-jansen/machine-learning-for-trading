@@ -373,10 +373,18 @@ else:
     print(f"Insufficient valid synthetic samples ({len(synth_data)}) for fidelity visualization")
 
 # %% [markdown]
-# **Interpretation**: Overlapping point clouds confirm that GReaT-generated tabular
-# data occupies similar regions of feature space as real data. LLM-based generation
-# can capture complex feature dependencies via autoregressive modeling. Gaps may
-# indicate parsing errors or LLM hallucination on certain feature combinations.
+# **Interpretation**: the two clouds do not sit on top of each other. In the PCA panel
+# the synthetic rows concentrate to one side, including a dense knot, while the real
+# rows spread further across the plane; in the t-SNE panel each set occupies a different
+# part of the area, overlapping in places rather than throughout. On this budget - a
+# short fine-tune of a small backbone - GReaT is not covering the region the real rows
+# occupy.
+#
+# Read that as a statement about this run rather than about the method. The two levers
+# it does not exercise are the ones the approach depends on: backbone size and
+# fine-tuning length. What the marginal comparisons below add is *where* the coverage
+# fails, which the projections cannot say, since a projection mixes every feature
+# together.
 
 # %% [markdown]
 # ## 5. Compare Real vs Synthetic Distributions
