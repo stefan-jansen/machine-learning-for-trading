@@ -64,7 +64,6 @@ from case_studies.research import (
     open_study,
 )
 from case_studies.research.holdout import build_holdout_training_spec
-from case_studies.research.population import superseded_members_at
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
@@ -81,6 +80,7 @@ from case_studies.utils.registry.specs import training_hash_from_spec
 from case_studies.utils.strategy_analysis import (
     resolve_canonical_rank1_lineage,
     resolve_solvent_carrier,
+    selectable_validation_candidates,
 )
 from case_studies.utils.uncertainty import ENTIRE_REGISTRY
 from utils.paths import get_case_study_dir
@@ -152,26 +152,22 @@ selected_computation = selected_training_spec.get("computation", selected_traini
 
 # Everything this case study backtested on validation and still publishes: the equal-weight
 # baselines, the allocation variants and the risk overlays. Cost siblings are excluded, because
-# a cost variant is a descendant of a selection rather than a candidate for one. Superseded
-# generations are excluded for the same reason the carrier resolution excludes them - a retired
-# row still ranks, and a distribution that mixes two generations answers no question.
-_retired = superseded_members_at(study.root, member_kind="backtest")
-candidate_rows_source = (
-    study.backtests.table()
-    .filter(
-        (pl.col("split") == "validation")
-        & (pl.col("execution_tier") == "canonical")
-        & pl.col("complete")
-        & pl.col("stage").is_in(["signal", "allocation", "risk_overlay"])
-        & pl.col("sharpe").is_not_null()
-        & ~pl.col("backtest_hash").is_in(list(_retired))
-        # Restricted to the frozen set, because this is the distribution the selection was
-        # made from and the selection sees exactly this field. A table drawn from a wider one
-        # invites the reader to compare the carrier against rows it was never ranked against.
-        & pl.col("backtest_hash").is_in(list(ADMITTED))
-    )
-    .sort("sharpe", "backtest_hash", descending=[True, False])
-)
+# a cost variant is a descendant of a selection rather than a candidate for one.
+#
+# `selectable_validation_candidates` is the function the carrier resolution ranks, called here
+# with the same frozen set, so the table below and the selection are the same field by
+# construction rather than by two filters that have to agree. Rebuilding the field in a query
+# beside it did not agree: that query excluded the *retired* set, which is not the *published*
+# set. A backtest no population ever listed was retired by nobody, so an exclusion filter admits
+# it while the membership test the selection applies does not - and one such row, `56070f34dff1`,
+# sorted above the carrier on raw Sharpe and made this page refuse to render.
+#
+# The order is the resolver's own. Where a conformal candidate is in the field it re-ranks every
+# member on the timestamps they all price, because a calibration that abstains through its
+# warm-up books those decisions as zero and is otherwise compared against allocators measured
+# over a longer span. Each row therefore carries both numbers: `sharpe` as the registry stored
+# it, and `comparison_sharpe` as the selection read it.
+candidate_field = selectable_validation_candidates(CASE_STUDY_ID, admitted=ADMITTED)
 
 pl.DataFrame(
     {
@@ -179,7 +175,7 @@ pl.DataFrame(
         "value": [
             selected_validation.hash,
             str(carrier["val_stage"]),
-            str(candidate_rows_source.height),
+            str(len(candidate_field)),
             f"{carrier['val_sharpe']:.4f}",
         ],
     }
@@ -252,7 +248,8 @@ def _metric_row(result: BacktestResult) -> dict[str, Any]:
 
 
 candidate_rows = []
-for member_hash in candidate_rows_source.get_column("backtest_hash").to_list():
+for _candidate in candidate_field:
+    member_hash = _candidate["backtest_hash"]
     result = Result.open(study, member_hash)
     if not isinstance(result, BacktestResult) or not result.complete:
         raise ValueError(f"candidate {member_hash} is not a complete backtest")
@@ -279,26 +276,23 @@ for member_hash in candidate_rows_source.get_column("backtest_hash").to_list():
             "checkpoint_kind": prediction_record["checkpoint_kind"],
             "checkpoint_value": prediction_record["checkpoint_value"],
             "sharpe": metric["sharpe"],
+            "comparison_sharpe": _candidate["comparison_sharpe"],
             "sharpe_ci95_lo": metric["sharpe_ci95_lo"],
             "sharpe_ci95_hi": metric["sharpe_ci95_hi"],
         }
     )
 
-# Sorted on raw Sharpe, which is not how the carrier was chosen: with a conformal candidate in
-# the field the resolver re-ranks everything on the timestamps they all share, and it can return
-# a row that is not first here. The two agree on this case study and the check says so rather
-# than assuming it. A disagreement is a refusal and not a re-ordering, because the honest table
-# is the one whose top row is the result the page goes on to report - and if raw Sharpe stops
-# producing that row, what to display instead is a decision, not a repair.
-candidate_evidence = pl.DataFrame(candidate_rows).sort(
-    ["sharpe", "backtest_hash"], descending=[True, False]
-)
+# Not re-sorted: the rows arrive in the order the selection ranked them, so the top row is the
+# carrier by construction. The check below is kept anyway and is now a real one - it fails if the
+# resolver ever returns a field whose first member is not the carrier it resolved, which would
+# mean the two halves of the same function had come apart.
+candidate_evidence = pl.DataFrame(candidate_rows)
 if candidate_evidence["backtest_hash"][0] != selected_validation.hash:
     raise ValueError(
-        f"the displayed candidate distribution ranks {candidate_evidence['backtest_hash'][0]} "
-        f"first on raw Sharpe, but the carrier is {selected_validation.hash}. The canonical "
-        "resolver re-ranked the field on common support; the table and the selection would "
-        "describe different results."
+        f"the ranked candidate field begins with {candidate_evidence['backtest_hash'][0]} "
+        f"and the resolved carrier is {selected_validation.hash}. Both come from "
+        "`selectable_validation_candidates` over the same admitted set, so the ranking and "
+        "the resolution disagree with each other."
     )
 candidate_evidence
 
