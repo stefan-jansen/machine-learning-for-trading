@@ -91,6 +91,7 @@ def _register(
     declared: int | None,
     folds: list[int] | None = None,
     tier: str | None = None,
+    split: str = "validation",
 ) -> None:
     """Write one member with ``delivered`` prediction rows and a declared expectation."""
     spec = {"computation": {}}
@@ -107,7 +108,7 @@ def _register(
         )
         db.execute(
             "INSERT INTO prediction_sets VALUES (?, ?, ?)",
-            (member, f"t-{member}", "validation"),
+            (member, f"t-{member}", split),
         )
 
     rows = _panel_rows()[:delivered]
@@ -332,3 +333,41 @@ class TestAReducedRunIsNotChargedTheCanonicalPanel:
         monkeypatch.setattr(coverage_module, "check_prediction_cross_section", fake)
         _register(case_dir, SHORT, delivered=1, declared=200, tier="preview")
         assert set(undercovered_prediction_members(case_dir, [SHORT], case_study="x")) == {SHORT}
+
+
+class TestTheHoldoutIsOneWindow:
+    """`declared_cross_section` labels the holdout window `fold=None`.
+
+    The holdout training spec does not: `build_holdout_cv` gives it the integer id after
+    the last validation fold - 8 in `etfs`, 2 in `sp500_options`, both read from the shipped
+    registries on 2026-09-09. Filtering the cross-section on that id empties it, the member
+    is reported unevaluable, and an unevaluable member is dropped - so the one prediction set
+    the holdout stage produces would never reach the pool that reads it.
+    """
+
+    def test_a_holdout_member_is_not_filtered_by_its_declared_fold(
+        self, case_dir, monkeypatch
+    ) -> None:
+        seen: list = []
+
+        def fake(frame, case_study, label, **kwargs):
+            seen.append((kwargs.get("split"), kwargs.get("folds")))
+            return SimpleNamespace(accountable_coverage=1.0, summary=lambda: "")
+
+        monkeypatch.setattr(coverage_module, "check_prediction_cross_section", fake)
+        _register(case_dir, WHOLE, delivered=200, declared=200, folds=[8], split="holdout")
+        assert undercovered_prediction_members(case_dir, [WHOLE], case_study="x") == {}
+        assert seen == [("holdout", None)]
+
+    def test_a_validation_member_still_is(self, case_dir, monkeypatch) -> None:
+        """The exemption is the holdout's alone, not a way out of the fold axis."""
+        seen: list = []
+
+        def fake(frame, case_study, label, **kwargs):
+            seen.append((kwargs.get("split"), kwargs.get("folds")))
+            return SimpleNamespace(accountable_coverage=1.0, summary=lambda: "")
+
+        monkeypatch.setattr(coverage_module, "check_prediction_cross_section", fake)
+        _register(case_dir, WHOLE, delivered=200, declared=200, folds=[8])
+        undercovered_prediction_members(case_dir, [WHOLE], case_study="x")
+        assert seen == [("validation", (8,))]

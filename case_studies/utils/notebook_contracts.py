@@ -514,7 +514,13 @@ def undercovered_prediction_members(
                 split=split,
                 case_dir=root,
                 input_panel=panel,
-                folds=_declared_folds(spec_json),
+                # The holdout is one window and `declared_cross_section` labels it
+                # `fold=None`, while a holdout spec carries the integer id the CV builder
+                # gave it - 8 in etfs, 2 in sp500_options. Filtering on that empties the
+                # cross-section and reports a complete holdout member unevaluable, which
+                # drops it. The fold axis is a validation question; the holdout has one
+                # window and the configuration is the only thing that declares it.
+                folds=None if split == "holdout" else _declared_folds(spec_json),
                 source=f"{family}/{config}",
             )
         except CoverageError as exc:
