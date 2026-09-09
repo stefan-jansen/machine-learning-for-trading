@@ -961,6 +961,12 @@ def plot_redundancy_clusters(
     columns = list(columns)
     frame = df.select(columns)
     if frame.height > max_rows:
+        # Positional: `sample` draws ROW POSITIONS, so which rows the correlation is measured
+        # on is decided by the order of `df`. Every caller is a stage-03 notebook passing its
+        # canonical panel, sorted by the case study's keys, and that is what makes this
+        # reproducible - not the seed on its own. A caller passing a frame straight out of an
+        # unordered `group_by` would get a different cut on every run at the same seed, which
+        # is what happened to `_bootstrap_median_interval` below before it sorted its input.
         frame = frame.sample(max_rows, seed=seed)
     # Ranked before correlating, so the distance is Spearman. The claim the figure makes
     # is that two features carry the same *ordering*, and Pearson on raw values answers a
