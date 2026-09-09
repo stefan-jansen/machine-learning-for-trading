@@ -36,9 +36,8 @@
 # poorly on information coefficient is still run, because ranking accuracy and strategy
 # performance are different questions - a model can order the cross-section well and trade so much
 # that turnover consumes the whole of it, or rank indifferently and hold a book that does not.
-# Selecting on
-# the ranking measure before backtesting would decide the second question with the answer to the
-# first.
+# Selecting on the ranking measure before backtesting would decide the second question with the
+# answer to the first.
 #
 # **This is where selection genuinely begins.** Every notebook so far has said "selection happens
 # in `16_backtest`". This notebook produces the validation backtests it happens on; the choice
@@ -79,8 +78,10 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
+    population_supersedes,
     run_backtests,
 )
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
@@ -121,6 +122,9 @@ PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-21d-ipca-v1",
 ]
 EXECUTION_TIER = "canonical"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 WORKSPACE = "experiments"
 PREVIEW_LABELS = []
 PREVIEW_FAMILIES = []
@@ -132,16 +136,17 @@ MAX_SYMBOLS = 0
 # ## 2. Every model, no shortlist
 #
 # The named sets above are opened and their membership checked, and every member goes on to be
-# backtested. Nothing here filters on a predictive metric, for the reason the preamble gives: a
-# model that ranks the cross-section well can still trade too much to survive turnover, and one
-# that ranks indifferently can hold a book that works. Deciding the second question with the answer
-# to the first is the mistake the whole design avoids.
+# backtested. Both tiers resolve the study through `open_study`, which reads the labels and
+# features in place and redirects only writes, so a preview run scores the same inputs a canonical
+# one does and cannot publish over it.
+#
+# Nothing here filters on a predictive metric, for the reason the preamble gives: a
+# model that ranks the cross-section well can still trade too much for anything to be left after
+# turnover, and one that ranks indifferently can hold a book that works. Deciding the second
+# question with the answer to the first is the mistake the whole design avoids.
 
 # %%
 preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
-# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
-# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
-# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_filters or PREVIEW_MAX_PREDICTIONS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -229,7 +234,12 @@ prediction_population
 #
 # **The top-*k* grid is a strategy decision, not a tuning knob.** Holding 20 names a side and
 # holding 50 are different strategies with different concentration and different turnover, and
-# both are backtested rather than one being chosen in advance.
+# both are backtested rather than one being chosen in advance.#
+# `SUPERSEDES_POPULATION` and `SUPERSEDES_SETS` name the generation this run replaces. A population
+# and a candidate set are both immutable, so a re-run that admits different members has to say
+# which snapshot it supersedes or the registry refuses the write. Both default to empty, which is
+# right for a first run and for a reader's clean clone; `population_supersedes` and
+# `candidate_set_supersedes` withhold a declared hash wherever offering it would be refused.
 
 # %%
 backtest_config = get_backtest_config(CASE_STUDY_ID)
@@ -307,9 +317,13 @@ if planned_population.get_column("backtest_hash").n_unique() != planned_populati
 
 official_population = None
 if EXECUTION_TIER == "canonical":
+    population_name = POPULATION_NAME or "us-equities-baseline-v1"
     official_population = OfficialPopulation.create(
         study,
-        name="us-equities-baseline-v1",
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
         member_kind="backtest",
         members=tuple(planned_population.get_column("backtest_hash")),
     )
@@ -427,9 +441,13 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
+        result_set_name = f"us-equities-{label_name}-baseline-v1"
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
-            name=f"us-equities-{label_name}-baseline-v1",
+            name=result_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=result_set_name, declared=SUPERSEDES_SETS.get(result_set_name, "")
+            ),
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}

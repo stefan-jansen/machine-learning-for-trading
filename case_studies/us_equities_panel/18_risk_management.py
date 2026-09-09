@@ -86,8 +86,10 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
+    population_supersedes,
     run_backtests,
 )
 from case_studies.research.strategy import strategy_warmup_periods
@@ -113,6 +115,9 @@ ALLOCATION_SET_NAMES = [
 ]
 VALIDATION_SET_NAME_TEMPLATE = "us-equities-{label}-validation-strategies-v1"
 EXECUTION_TIER = "canonical"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 WORKSPACE = "experiments"
 PREVIEW_LABELS = []
 PREVIEW_MAX_SOURCE_ROWS = 0
@@ -265,6 +270,12 @@ selected_sources.select(
 # results: each one against the strategy it was laid on, on the trade count and the Sharpe. A
 # difference establishes that the control acted. Matching values establish only that those two
 # statistics did not move, and leave every other outcome undetermined.
+#
+# `SUPERSEDES_POPULATION` and `SUPERSEDES_SETS` name the generation this run replaces. A population
+# and a candidate set are both immutable, so a re-run that admits different members has to say
+# which snapshot it supersedes or the registry refuses the write. Both default to empty, which is
+# right for a first run and for a reader's clean clone; `population_supersedes` and
+# `candidate_set_supersedes` withhold a declared hash wherever offering it would be refused.
 
 # %%
 risk_requests = []
@@ -381,9 +392,13 @@ if planned_population.get_column("backtest_hash").n_unique() != planned_populati
 
 official_population = None
 if EXECUTION_TIER == "canonical":
+    population_name = POPULATION_NAME or "us-equities-risk-overlay-v1"
     official_population = OfficialPopulation.create(
         study,
-        name="us-equities-risk-overlay-v1",
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
         member_kind="backtest",
         members=tuple(planned_population.get_column("backtest_hash")),
     )
@@ -578,9 +593,13 @@ set_rows = []
 if EXECUTION_TIER == "canonical":
     for label in completed_risk.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
+        result_set_name = f"us-equities-{label_name}-risk-overlay-v1"
         result_set = study.backtests.freeze(
             completed_risk.filter(pl.col("label") == label),
-            name=f"us-equities-{label_name}-risk-overlay-v1",
+            name=result_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=result_set_name, declared=SUPERSEDES_SETS.get(result_set_name, "")
+            ),
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}
@@ -600,9 +619,15 @@ if EXECUTION_TIER == "canonical":
             != validation_candidates.height
         ):
             raise ValueError(f"Selection-eligible strategy sets overlap for {label}")
+        validation_set_name = VALIDATION_SET_NAME_TEMPLATE.format(label=label_name)
         validation_set = study.backtests.freeze(
             validation_candidates,
-            name=VALIDATION_SET_NAME_TEMPLATE.format(label=label_name),
+            name=validation_set_name,
+            supersedes=candidate_set_supersedes(
+                study,
+                name=validation_set_name,
+                declared=SUPERSEDES_SETS.get(validation_set_name, ""),
+            ),
         )
         set_rows.append(
             {

@@ -74,8 +74,10 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
+    population_supersedes,
     run_backtests,
 )
 from case_studies.research.strategy import strategy_warmup_periods
@@ -107,6 +109,9 @@ RISK_SET_NAMES = [
     "us-equities-fwd-ret-21d-risk-overlay-v1",
 ]
 EXECUTION_TIER = "canonical"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 WORKSPACE = "experiments"
 PREVIEW_LABELS = []
 PREVIEW_MAX_SOURCE_ROWS = 0
@@ -295,6 +300,12 @@ selected_sources.select(
 # Every identity is written down before the first backtest runs, for the same reason the model
 # populations were: a sweep that came out short would otherwise look like a smaller sweep rather
 # than a failed one.
+#
+# `SUPERSEDES_POPULATION` and `SUPERSEDES_SETS` name the generation this run replaces. A population
+# and a candidate set are both immutable, so a re-run that admits different members has to say
+# which snapshot it supersedes or the registry refuses the write. Both default to empty, which is
+# right for a first run and for a reader's clean clone; `population_supersedes` and
+# `candidate_set_supersedes` withhold a declared hash wherever offering it would be refused.
 
 # %%
 bps_values = get_cost_grid_bps(CASE_STUDY_ID)
@@ -435,9 +446,13 @@ if planned_population.get_column("backtest_hash").n_unique() != planned_populati
 
 official_population = None
 if EXECUTION_TIER == "canonical":
+    population_name = POPULATION_NAME or "us-equities-cost-sensitivity-v1"
     official_population = OfficialPopulation.create(
         study,
-        name="us-equities-cost-sensitivity-v1",
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
         member_kind="backtest",
         members=tuple(planned_population.get_column("backtest_hash")),
     )
@@ -562,9 +577,13 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
+        result_set_name = f"us-equities-{label_name}-cost-sensitivity-v1"
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
-            name=f"us-equities-{label_name}-cost-sensitivity-v1",
+            name=result_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=result_set_name, declared=SUPERSEDES_SETS.get(result_set_name, "")
+            ),
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}

@@ -85,8 +85,10 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
+    population_supersedes,
     run_backtests,
 )
 from case_studies.research.strategy import strategy_warmup_periods
@@ -109,6 +111,9 @@ BASELINE_SET_NAMES = [
     "us-equities-fwd-ret-21d-baseline-v1",
 ]
 EXECUTION_TIER = "canonical"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 WORKSPACE = "experiments"
 PREVIEW_LABELS = []
 PREVIEW_MAX_BASELINE_ROWS = 0
@@ -254,6 +259,12 @@ shortlist.select(
 # others because shrinkage on a matrix estimated from too few observations pulls it all the way to
 # its target and hands back something close to equal weight under a different name. Each allocator
 # therefore declares the history it needs, and is measured on that.
+#
+# `SUPERSEDES_POPULATION` and `SUPERSEDES_SETS` name the generation this run replaces. A population
+# and a candidate set are both immutable, so a re-run that admits different members has to say
+# which snapshot it supersedes or the registry refuses the write. Both default to empty, which is
+# right for a first run and for a reader's clean clone; `population_supersedes` and
+# `candidate_set_supersedes` withhold a declared hash wherever offering it would be refused.
 
 # %% [markdown]
 # **Prices are cached by label and warmup, not once per label.** Each allocator needs a different
@@ -355,9 +366,13 @@ if planned_population.get_column("backtest_hash").n_unique() != planned_populati
 
 official_population = None
 if EXECUTION_TIER == "canonical":
+    population_name = POPULATION_NAME or "us-equities-allocation-v1"
     official_population = OfficialPopulation.create(
         study,
-        name="us-equities-allocation-v1",
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
         member_kind="backtest",
         members=tuple(planned_population.get_column("backtest_hash")),
     )
@@ -473,9 +488,13 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
+        result_set_name = f"us-equities-{label_name}-allocation-v1"
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
-            name=f"us-equities-{label_name}-allocation-v1",
+            name=result_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=result_set_name, declared=SUPERSEDES_SETS.get(result_set_name, "")
+            ),
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}
