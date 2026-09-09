@@ -937,6 +937,29 @@ print(f"\nSaved to {CHECKPOINT_DIR}/")
 # holdout inside the fitted range, which the assertion in the normalization
 # section enforces, so the ratio is answering one question rather than two.
 #
+# ### When the Moments Agree and the Discriminator Does Not
+#
+# The generation cell prints the synthetic and real mean and standard deviation,
+# and on this run they agree to about two decimal places. The discriminative
+# accuracy printed just above is nonetheless far from chance. Those two facts are
+# not in conflict, and holding them together is the point of the section the
+# chapter devotes to evaluation.
+#
+# Matching the first two moments of a pooled distribution is a weak requirement.
+# It says nothing about the order of values within a sequence, about how
+# volatility clusters, or about the dependence between the six stocks on the same
+# day. A classifier that reads whole sequences can use any of that, and a high
+# accuracy says it found something it could use. Which of those the generator
+# missed is not something the accuracy alone can say — it is a single number, and
+# diagnosing it needs the stylized-fact and dependence checks the chapter
+# introduces alongside this score.
+#
+# This is also why the two diagnostics are reported together rather than one
+# being chosen. A ratio near one says a downstream predictor trained on synthetic
+# data transfers to real data for this particular task, which is a claim about
+# utility. It does not say the synthetic sequences are indistinguishable from
+# real ones, which is what the discriminator tests.
+#
 # ### Limitations
 #
 # TimeGAN focuses on matching overall distribution, not tail risk. For alternatives:
