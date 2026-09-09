@@ -503,7 +503,7 @@ execution_diagnostics
 # two rows that measured their Sharpe on different folds are not two rankings of one thing, and
 # this is what refuses to freeze them together.
 
-# %% tags=["results"]
+# %%
 completed_risk = study.backtests.table(include_preview=True).filter(
     pl.col("backtest_hash").is_in(planned_population.get_column("backtest_hash"))
 )
