@@ -356,12 +356,14 @@ def add_message_title(
     subtitle: str | None = None,
     source: str | None = None,
 ) -> None:
-    """Left-aligned takeaway title (a claim, not a label), optional subtitle + source note.
+    """Left-aligned figure title, optional subtitle + source note.
 
-    `message` should state the finding ("Momentum decays beyond a 12-month hold"), not
-    label the axes. `subtitle` carries the qualifier the title omits (metric, universe,
-    frequency, period); `source` is a small bottom-left note. No figure number — the
-    publisher captions separately.
+    `message` describes what the figure shows ("Classification error metrics"). It does
+    not interpret it and does not name a value this notebook computed: the interpretation
+    belongs in the markdown around the figure, where correcting it costs no re-run. Ruled
+    2026-09-09; the parameter name predates it. `subtitle` carries the qualifier the title
+    omits (metric, universe, frequency, period); `source` is a small bottom-left note. No
+    figure number - the publisher captions separately.
     """
     extra_lines = 0
     if subtitle:
