@@ -758,7 +758,7 @@ fig_bc = make_subplots(
     cols=1,
     subplot_titles=[
         "The window the stack was given",
-        "What every block together could not describe",
+        "What is left after each block subtracts its backcast",
     ],
     shared_xaxes=True,
     vertical_spacing=0.12,
