@@ -443,7 +443,7 @@ if embeddings_2d is not None:
 
     ax.set_xlabel("t-SNE axis 1, no units")
     ax.set_ylabel("t-SNE axis 2, no units")
-    ax.set_title("Opposites land together, so this geometry is not polarity")
+    ax.set_title("Word vectors in two t-SNE dimensions, colored by category")
     show_with_alt(
         fig,
         "A scatter of about twenty labeled words in two t-SNE dimensions, colored by whether "

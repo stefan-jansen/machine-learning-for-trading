@@ -361,9 +361,9 @@
   requires_import: gensim
   timeout: 300
 10_text_feature_engineering/04_bert_finetuning:
-  env:
-    TEST: '1'
   gpu: true
+  parameters:
+    MAX_TRAIN_STEPS: 20
   timeout: 600
 10_text_feature_engineering/05_financial_ner_finetuning:
   env:
