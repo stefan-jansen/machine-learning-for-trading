@@ -1423,6 +1423,7 @@ case_studies/nasdaq100_microstructure/13_model_analysis:
     TCN_POPULATION: smoke-tcn
     PATCHTST_POPULATION: smoke-patchtst
   writes: []
+  measured_s: 23
   headroom_gb: 8
 
 case_studies/nasdaq100_microstructure/14_backtest:
@@ -1437,6 +1438,7 @@ case_studies/nasdaq100_microstructure/14_backtest:
     TOP_N_PREDICTIONS: 2
     MAX_ENTRY_SCHEMES: 12
   writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  measured_s: 156
   headroom_gb: 12
 
 case_studies/nasdaq100_microstructure/15_portfolio_management:
@@ -1446,6 +1448,7 @@ case_studies/nasdaq100_microstructure/15_portfolio_management:
     MAX_SYMBOLS: 12
     TOP_N_PREDICTIONS: 3
   writes: [backtest_runs, backtest_metrics]
+  measured_s: 30
   headroom_gb: 12
 
 case_studies/nasdaq100_microstructure/16_risk_management:
@@ -1456,6 +1459,7 @@ case_studies/nasdaq100_microstructure/16_risk_management:
     TOP_N_COMBOS: 2
     MAX_RISK_VARIANTS: 2
   writes: [backtest_runs, backtest_metrics]
+  measured_s: 9
   headroom_gb: 12
 
 case_studies/nasdaq100_microstructure/17_costs:
@@ -1465,13 +1469,19 @@ case_studies/nasdaq100_microstructure/17_costs:
     MAX_SYMBOLS: 12
     TOP_N_COMBOS: 2
   writes: [backtest_runs, backtest_metrics]
+  measured_s: 149
   headroom_gb: 12
 
 case_studies/nasdaq100_microstructure/20_strategy_analysis:
-  parameters:
-    EXECUTION_TIER: preview
-  writes: []
-  headroom_gb: 8
+  exempt: true
+  exempt_reason: >-
+    Section 6 anchors on the canonical holdout backtest, which cannot exist in a preview
+    workspace for the reason recorded on 18_holdout_predictions - the holdout stage refits from
+    an immutable canonical training spec. Measured 2026-09-09: with the universe axis wired the
+    notebook clears sections 1 through 5, including the cohort rebuild that used to fail, and
+    stops at "No canonical holdout backtest registered". Same structural exemption as the
+    holdout pair, one stage later. It is NOT exempt from the canonical run, where the holdout
+    exists and the raise is the correct behaviour.
 
 # --- us_equities_panel: the two stages that cannot have a smoke run ----------------------------
 #
