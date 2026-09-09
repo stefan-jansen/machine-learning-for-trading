@@ -384,6 +384,30 @@ regime_means = pl.DataFrame(
 ).sort("mean_forward_return", descending=True)
 regime_means
 
+# %% [markdown]
+# Each t-statistic above tests one regime's mean against zero, which is not the question. The
+# hypothesis was that TVL predicts returns, and what that implies is a *difference* between the
+# regimes. Testing it means contrasting the coefficients under the same corrected covariance,
+# which the fitted model can do directly.
+
+# %%
+contrasts = []
+for left in range(len(regimes)):
+    for right in range(left + 1, len(regimes)):
+        weights = np.zeros(len(regimes))
+        weights[left], weights[right] = 1.0, -1.0
+        test = regime_fit.t_test(weights)
+        contrasts.append(
+            {
+                "comparison": f"{regimes[left]} minus {regimes[right]}",
+                "difference": float(test.effect[0]),
+                "standard_error": float(test.sd[0]),
+                "t_statistic": float(test.tvalue),
+                "p_value": float(test.pvalue),
+            }
+        )
+pl.DataFrame(contrasts)
+
 # %%
 fig = px.bar(
     regime_means.to_pandas(),
@@ -408,15 +432,18 @@ show_plotly_with_alt(
 # %% [markdown]
 # The error bars are what the first table does not show. Once the overlap is priced in, the two
 # extreme regimes carry standard errors larger than their own means, so neither is
-# distinguishable from zero.
+# distinguishable from zero, and the contrasts say whether the regimes differ from each other.
 #
-# The middle regime is the one whose interval clears zero, and that is the shape of the result
-# worth stopping on. A story in which TVL predicts returns would separate the two extremes and
-# leave the middle between them. This does the opposite: the neutral bucket, the one defined as
-# "no signal", is the one with the large negative mean. That is what a partition of ten
-# independent windows into three buckets produces when there is nothing to find, and it is why a
-# single statistic clearing a threshold is not the end of the reading. There are three
-# comparisons here, drawn from a sample with about ten independent observations in it.
+# The direct test of the hypothesis is the contraction-against-expansion contrast, since that is
+# the pair the story says should differ, and it is the flattest of the three. So the hypothesis
+# this section set out to test - that TVL expansion precedes higher returns and contraction lower
+# ones - is not supported by these estimates.
+#
+# What the estimates do show puts the largest mean on the middle bucket, the one defined as
+# carrying no signal, which is not what any monotonic relationship would produce. Noise
+# partitioned three ways is one explanation and this sample cannot separate it from another; the
+# three contrasts are also three tests on ten independent windows, which is not a setting in which
+# one clearing a threshold means much.
 #
 # ### The same question as a regression
 #
