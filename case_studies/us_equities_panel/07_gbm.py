@@ -284,13 +284,15 @@ planned.select(
 # parameter moves every training identity as surely as a changed menu does, so the refit is a
 # different population under the same name and the registry refuses to write it without being told
 # which snapshot it supersedes. That lineage is the only record of which generation is which.
+#
+# A declared `SUPERSEDES_POPULATION` hash only means something where a generation of this name
+# already exists. A preview run, a first canonical run against an empty `run_log/`, and a run
+# under a caller-chosen `POPULATION_NAME` are all refused by `OfficialPopulation.create` if one
+# is passed anyway, so `supersedes_for_run` works out which of those cases this run is and
+# resolves the hash accordingly.
 
 # %%
 population_name = POPULATION_NAME or "us-equities-gbm-checkpoints-v1"
-# The declared hash is only meaningful where a generation of this name already exists. A
-# preview run, a first canonical run against an empty `run_log/`, and a run under a
-# caller-chosen `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is
-# passed anyway. The resolution lives in shared code so no notebook branches on the tier.
 supersedes = supersedes_for_run(
     study,
     population_name=population_name,
@@ -611,11 +613,13 @@ trees_effect
 # the line printed under the frame says so rather than assuming it. The configurations are held in one order across
 # the panels - their ranking on the primary label - so a panel that does not descend is a horizon
 # that orders the grid differently.
+#
+# The final state below is each configuration's own last checkpoint, so a configuration declaring
+# a shorter schedule than its neighbours is still compared at the state it reached. Every preset
+# in this grid declares the same `max_iterations`, so today those last checkpoints coincide, and
+# the line printed under the agreement frame reports the iteration count they all landed on.
 
 # %%
-# Each configuration's own last checkpoint, not the label's. They are the same number while every
-# preset declares the same `max_iterations`, and taking the label-wide maximum would silently drop
-# a configuration with a shorter schedule instead of comparing it at the state it reached.
 final = (
     catalog.filter(
         pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("label", "config_name")
@@ -677,7 +681,7 @@ fig_final.update_xaxes(
     col=1,
 )
 fig_final.update_layout(
-    title="The grid does not keep one order across the three horizons",
+    title="Validation IC at the final iteration, in the primary label's order",
     height=300 * len(panel_labels),
     width=1000,
     margin=dict(t=90),
