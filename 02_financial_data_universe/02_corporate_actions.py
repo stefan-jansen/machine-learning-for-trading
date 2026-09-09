@@ -31,8 +31,8 @@
 # - Validate adjusted prices against a trusted reference series.
 # - Pick the right price representation for a given strategy horizon.
 #
-# **Book reference**: §2.3 ("A Due Diligence Framework for Data Sourcing" —
-# corporate-action handling) and §2.2 (Equities).
+# **Book reference**: §2.3, "A due diligence framework for data sourcing", and §2.2,
+# "The asset-class market data landscape".
 #
 # **Prerequisites**: Wiki Prices US-equities parquet on disk
 # (`load_us_equities` resolves it via `ML4T_DATA_PATH`); `ml4t-data` library
@@ -41,13 +41,18 @@
 # %%
 """Corporate Actions — Adjusting for splits and dividends in historical price series."""
 
+import inspect
+from datetime import date
+
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from IPython.display import Markdown, display
 from ml4t.data.adjustments import apply_corporate_actions
 
 from data import load_us_equities
-from utils.style import COLORS
+from utils.paths import get_chapter_dir
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -86,27 +91,49 @@ raw_wiki = load_us_equities()
 print(f"Wiki Prices loaded: {len(raw_wiki):,} rows")
 
 # %% [markdown]
-# Apple is a clean illustrative example: four splits and 54 cash dividends
-# across 1980–2018.
+# Apple is a clean illustrative example: a long history carrying both kinds of action, with
+# every split large enough to be unmistakable in the raw price.
 
 # %%
 dividend_col = "ex_dividend" if "ex_dividend" in raw_wiki.columns else "ex-dividend"
 aapl = raw_wiki.filter(pl.col("symbol") == "AAPL").sort("timestamp")
 
+n_splits = aapl.filter(pl.col("split_ratio") != 1.0).height
+n_dividends = aapl.filter(pl.col(dividend_col) > 0).height
 print(f"AAPL records: {len(aapl):,}  ({aapl['timestamp'].min()} to {aapl['timestamp'].max()})")
+print(f"Corporate actions on record: {n_splits} splits, {n_dividends} cash dividends")
 
 # %% [markdown]
-# Stock splits in the AAPL history. `close` is the price as it traded that
-# day; `adj_close` is that same price carried back through every split and
-# dividend that came after it. The series is therefore anchored at the last
-# observation, 2018-03-27, where the two are equal, and gets smaller the
-# further back you look: the 1987 close of \$41.50 divided by the
-# $2 \times 2 \times 7 = 28$ of the three later splits is \$1.48, and the
-# dividends paid since bring it to \$1.22.
+# Stock splits in the AAPL history. `close` is the price as it traded that day; `adj_close`
+# is that same price carried back through every split and dividend that came after it. The
+# series is anchored at the final observation, where the two are equal, and gets smaller the
+# further back you look.
 
 # %%
 splits = aapl.filter(pl.col("split_ratio") != 1.0)
 splits.select(["timestamp", "close", "split_ratio", "adj_close"])
+
+# %% [markdown]
+# The first split's row is worth walking through, because it shows what the adjusted column
+# is made of. Divide that day's traded close by the product of every split that came after
+# it and you land near the adjusted value; the gap that remains is the dividend stream.
+
+# %%
+first_split = splits.row(0, named=True)
+later_splits = splits.filter(pl.col("timestamp") > first_split["timestamp"])["split_ratio"]
+split_product = float(later_splits.product())
+split_only = first_split["close"] / split_product
+
+display(
+    Markdown(
+        f"The {first_split['timestamp']:%B %Y} close of "
+        f"**${first_split['close']:.2f}** divided by the "
+        f"**{' x '.join(f'{r:.0f}' for r in later_splits)} = {split_product:.0f}** of the "
+        f"{len(later_splits)} later splits is **${split_only:.2f}**. The adjusted close on "
+        f"that row is **${first_split['adj_close']:.2f}**, and the difference is every "
+        f"dividend Apple has paid since."
+    )
+)
 
 # %% [markdown]
 # First ten of 54 cash dividends. The dividend is in the dollars of its own
@@ -194,45 +221,48 @@ ax.annotate(
 
 ax.set_ylabel("Cumulative return (start = 1)")
 ax.set_xlabel("Date")
-ax.set_title("Raw vs adjusted cumulative return — AAPL 1980–2018")
+ax.set_title("Every split reads as a crash in the raw series, and the gap never closes")
 ax.legend(loc="upper left", fontsize=10)
 ax.set_yscale("log")
 ax.set_ylim(0.5, adj_cumret[-1] * 1.5)
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}x" if x >= 1 else f"{x:.1f}x"))
 ax.grid(True, alpha=0.3)
-plt.show()
+show_with_alt(
+    fig,
+    "Two cumulative return curves on a log scale from 1980 to 2018. The adjusted curve rises "
+    "steadily to several hundred times its starting value; the raw curve steps down sharply "
+    "at each of the four marked split dates and ends far below it.",
+)
+
+# %% [markdown]
+# ### Figure 2.3 inputs
+#
+# The print version of Figure 2.3 is drawn in the book repository from the two frames written
+# below, so the book build renders the curves this notebook computed rather than recomputing
+# the adjustment.
 
 # %%
-# Persist Figure 2.3 artifact for book script (Hard Rule 15).
-import polars as _pl
-
-from utils.paths import get_chapter_dir as _get_chapter_dir
-
-_ARTIFACTS_DIR = _get_chapter_dir(2) / "output" / "book_figure_artifacts"
-_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-_pl.DataFrame(
+ARTIFACTS_DIR = get_chapter_dir(2) / "output" / "book_figure_artifacts"
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+pl.DataFrame(
     {
         "timestamp": dates_arr[1:],
         "adj_cumret": adj_cumret,
         "raw_cumret": raw_cumret,
     }
-).write_parquet(_ARTIFACTS_DIR / "figure_2_3_corporate_actions_curves.parquet")
-_pl.DataFrame(
+).write_parquet(ARTIFACTS_DIR / "figure_2_3_corporate_actions_curves.parquet")
+pl.DataFrame(
     {
         "split_date": split_dates,
         "split_ratio": split_ratios,
     }
-).write_parquet(_ARTIFACTS_DIR / "figure_2_3_corporate_actions_splits.parquet")
-print(
-    f"Persisted figure_2_3_corporate_actions: {len(adj_cumret)} dates, "
-    f"{len(split_dates)} splits, final raw={raw_cumret[-1]:.1f}x adj={adj_cumret[-1]:.1f}x"
-)
+).write_parquet(ARTIFACTS_DIR / "figure_2_3_corporate_actions_splits.parquet")
+print(f"Wrote {len(adj_cumret):,} dates and {len(split_dates)} splits for the book figure")
 
 # %% [markdown]
-# Quantify the divergence: a buy-and-hold of AAPL since 1980 returned roughly
-# $400\times$ on a total-return basis but only $\sim 6\times$ on raw prices —
-# the entire dividend stream and the share-count effect of the four splits are
-# missing from the raw series.
+# The size of the divergence is the point. What the raw series is missing is the whole
+# dividend stream plus the share-count effect of every split, and over a long holding period
+# that is not a correction at the margin - it is most of the return.
 
 # %%
 print(f"Final cumulative return — raw prices:      {raw_cumret[-1]:.1f}x")
@@ -250,7 +280,7 @@ print(
 # vendors. The function signature documents the convention it expects.
 
 # %%
-help(apply_corporate_actions)
+print(f"apply_corporate_actions{inspect.signature(apply_corporate_actions)}")
 
 # %% [markdown]
 # Apply the adjustment to AAPL. The function expects a `date` column and
@@ -275,14 +305,12 @@ print("Adjusted columns:", [c for c in adjusted.columns if c.startswith("adj_")]
 # series shipped with the dataset.
 
 # %%
-from datetime import date as _date
-
 example_dates = [
-    _date(1980, 12, 12),
-    _date(1987, 6, 16),
-    _date(2000, 6, 21),
-    _date(2014, 6, 9),
-    _date(2018, 3, 27),
+    date(1980, 12, 12),
+    date(1987, 6, 16),
+    date(2000, 6, 21),
+    date(2014, 6, 9),
+    date(2018, 3, 27),
 ]
 
 comparison = (
@@ -345,7 +373,7 @@ ax1 = axes[0]
 ax1.plot(dates, our_adj, label="Our adjustment", alpha=0.85)
 ax1.plot(dates, quandl_adj, label="Quandl adjustment", alpha=0.85, linestyle="--")
 ax1.set_ylabel("Adjusted price ($)")
-ax1.set_title("Local vs Quandl pre-calculated adjusted close")
+ax1.set_title("The two adjustments agree everywhere the eye can separate them")
 ax1.set_yscale("log")
 ax1.legend()
 
@@ -360,11 +388,16 @@ ax2.axhline(
 )
 ax2.set_ylabel("Relative difference (%)")
 ax2.set_xlabel("Date")
-ax2.set_title("Relative difference between local and Quandl series")
+ax2.set_title("What is left is floating-point drift, not a difference in method")
 ax2.set_ylim(0, max(relative_diff.max() * 1.1, tolerance_pct * 2))
 ax2.legend()
 
-plt.show()
+show_with_alt(
+    fig,
+    "Above, two adjusted price series on a log scale that lie on top of each other over the "
+    "whole history. Below, their relative difference in percent, which stays well under the "
+    "dashed tolerance line across every year.",
+)
 
 # %% [markdown]
 # ## 7. The Adjustment Formulas
@@ -533,23 +566,33 @@ ranked.select(
 # divided by the split ratio.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **AAPL has 4 stock splits and 54 cash dividends** in the Wiki Prices
-#    sample (1980-12-12 to 2018-03-27); ignoring them turns a 398.2× total
-#    return into a 5.9× raw-price return — a 68× difference, or a 6,701%
-#    underestimation.
-# 2. **Backward adjustment is the standard convention.** The local
-#    `apply_corporate_actions` implementation matches Quandl's pre-computed
-#    series within a 0.05% relative tolerance; the largest observed
-#    discrepancy is 0.0249%, attributable to floating-point accumulation
-#    across the 9,400-row recursion.
-# 3. **Pick the price representation that matches the use case** — total-return
-#    adjusted for ML features and long-horizon backtests, raw for execution
-#    simulation, split-adjusted for short-horizon trading.
-# 4. **Vendor conventions differ**, so always verify against a known split or
-#    dividend date before integrating a new data source.
+# - **A corporate action is not a return, and a raw price series cannot tell the difference.**
+#   Compute returns from a raw close and every split enters as a loss of the split ratio.
+#   Over a long holding period those artifacts dominate whatever the strategy was measuring.
+# - **Backward adjustment anchors at the present.** The factor starts at one on the most
+#   recent date and walks backwards, so today's price is untouched and history is scaled to
+#   match it. That is why an adjusted price from decades ago is not a price anyone paid, and
+#   why a vendor restating history changes every adjusted value before it.
+# - **Validate an adjustment against a reference before trusting it.** This panel ships both
+#   the raw prices and a pre-computed adjusted series, so the local implementation can be
+#   checked row by row rather than assumed. Where no reference ships, one known split date is
+#   enough to tell you which convention a vendor's `close` column follows.
+# - **A tolerance is a claim about accumulated error, not about correctness.** The recursion
+#   here runs once per trading day, so the two series drift apart by floating-point noise that
+#   grows with the length of the history. Set the tolerance from that mechanism and say so;
+#   a check that passes at any tolerance you happen to pick is not a check.
+# - **Match the price representation to the decision.** Returns and features come from the
+#   total-return series; a fill price comes from the raw one. The distinction stops mattering
+#   only at horizons short enough for the dividend to be negligible, which is a judgement about
+#   the holding period rather than about the data.
 #
-# **Next**: `03_etfs_eda` profiles the ETF universe used in the rotational
-# strategy. **Book reference**: §2.3 (corporate-action handling) and §2.2
-# (Equities).
+# **Known limitations.** The adjustment is a convention rather than a description of behaviour:
+# it treats the dividend as reinvested at the previous close, and real ex-date moves differ from
+# the dividend amount. Only one symbol is validated here, and the check does not hold panel-wide -
+# `15_survivorship_bias_detection` finds where it fails. The momentum illustration is a stylized
+# one-period example built from literals, not a measured result.
+#
+# **Next**: `03_etfs_eda` profiles the ETF universe used by the rotational strategy.
+# **Book reference**: §2.3 and §2.2.
