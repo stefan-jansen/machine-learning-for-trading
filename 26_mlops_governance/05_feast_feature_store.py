@@ -22,36 +22,69 @@
 # **Prerequisites**: Familiarity with feature engineering and Chapter 25 deployment verification.
 #
 # **Learning Objectives**:
-# - Define feature views on real Parquet sources with an explicit entity key,
-#   event timestamp, and TTL.
-# - Perform a point-in-time offline join that respects the sealed-holdout
-#   boundary as a fail-closed governance guard.
-# - Retrieve an online-style as-of snapshot for inference and quantify the
-#   training-serving skew that an incorrect timestamp rule introduces.
+# - Describe a table of features the way a feature store does: which column identifies the
+#   thing being described, which column says when the value was true, and how long a value
+#   stays usable.
+# - Assemble a training set by joining each feature to the moment it was known, and add a
+#   check that refuses to build one that reaches past the date the model may not see.
+# - Assemble the same feature vector the way a live system would, from the latest value known
+#   at the moment of the decision.
+# - Measure what changes when the timestamp rule is wrong by one session.
 #
-# The notebook demonstrates the core feature-store tasks on the actual
-# `us_equities_panel` artifacts. A production feature store such as Feast would
-# automate these steps; here the same controls stay visible and reproducible
-# inside the repo.
+# A **feature store** is the component that answers one question in two places: what were this
+# thing's features at this moment. Training asks it for millions of past moments at once;
+# a live system asks it for one moment, now. When the two answers are produced by different
+# code, they drift apart, and a model trained on one is served the other. The drift is called
+# **training-serving skew**, and it is the failure this whole component exists to prevent.
+#
+# Nothing below imports a feature store. The tasks are done directly against the case study's
+# own Parquet files, so what a store automates stays visible. `05b_feast_live` runs the same
+# workflow through Feast.
 
 # %%
-"""Feature Store Patterns on Real Case-Study Artifacts — demonstrate core feature-store tasks on real case-study artifacts."""
+"""Feature Store Patterns on Real Case-Study Artifacts: point-in-time joins, as-of serving, and the skew between them."""
+
+# %% [markdown]
+# ## Settings
+#
+# `TRAINING_START`, `TRAINING_END` and `AS_OF_DATE` bound the two retrievals: the offline
+# training window, and the single moment the live system is asked about. Left unset they are
+# derived from the case study's own fold geometry - the training window is the tail of the
+# last validation window, and the serving date is the first session inside the holdout, so the
+# arrangement is "the model was fitted up to here, and today is after that". They are derived
+# rather than typed because a date typed here is a claim about where a fold boundary falls,
+# and rebuilding the case study with a different number of folds moves every boundary while
+# the literal does not. Set any of them to a date string to pin it by hand.
+#
+# `TRAINING_LOOKBACK_DAYS` is how far back from `TRAINING_END` the offline join reaches, when
+# derived. A quarter is enough rows to make the join's behaviour visible and small enough to
+# read.
+#
+# `N_SAMPLE_ASSETS` is how many names the online retrieval asks about. A live system asks
+# about the book it holds; eight is enough to show the shape of the answer.
+#
+# `FEATURE_TTL_DAYS` is how long a feature value stays servable after its timestamp. One
+# session, because these are daily features: a value from two sessions ago is stale, and a
+# store that served it would be answering a question about today with yesterday's data.
+#
+# `LIQUIDITY_WINDOW_DAYS` and `LIQUIDITY_RANK_DAYS` govern which names the sample picks, by
+# average dollar volume over the tail of the training window.
+#
+# `SKEW_SEARCH_DAYS` is how far forward the deliberately wrong retrieval in section 4 is
+# allowed to look for the next snapshot.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 PRIMARY_LABEL = "fwd_ret_1d"
-# Left unset so the offline window and the serving date are derived from the fixture's
-# own fold geometry. The literals that stood here - 2015-10-01 / 2015-12-30 / 2016-01-04
-# - were not independent choices: TRAINING_END equalled the then-final validation fold's
-# `val_end` to the day. #819 restored this case study to 16 folds and moved every
-# boundary, so a date that used to sit at the edge of a window now sits wherever the new
-# geometry puts it. Set any of them to a date string to pin it by hand.
 TRAINING_START = None
 TRAINING_END = None
 AS_OF_DATE = None
-# How much of the final validation window the offline join draws on, when derived.
 TRAINING_LOOKBACK_DAYS = 91
 N_SAMPLE_ASSETS = 8
+FEATURE_TTL_DAYS = 1
+LIQUIDITY_WINDOW_DAYS = 21
+LIQUIDITY_RANK_DAYS = 30
+SKEW_SEARCH_DAYS = 7
 
 # %%
 import warnings
@@ -67,9 +100,11 @@ from IPython.display import Markdown, display
 
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+# Named, not blanket: a bare ignore would also hide the convergence and numerical
+# warnings a reader needs to see.
+warnings.filterwarnings("ignore", category=FutureWarning, module="polars")
 
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 CODE_ROOT = CASE_DIR.parent.parent  # repo root (case_studies lives at repo root)
@@ -79,10 +114,25 @@ print("Feature Store Patterns on Real Case-Study Artifacts")
 print("=" * 60)
 
 # %% [markdown]
-# ## 1. Define feature views from the real feature tables
+# ## 1. Describe the feature tables the way a store would
 #
-# The `financial.parquet` and `model_based.parquet` files act as the offline
-# store. The entity key is `symbol`, and the event timestamp is `timestamp`.
+# A **feature view** is a store's description of one table of features. Four things have to be
+# said about it, and they are the four fields below.
+#
+# The **entity key** is the column naming the thing each row is about, here `symbol`. The
+# **event timestamp** is the column saying when the row's values were true, here `timestamp`.
+# Those two together are what makes a point-in-time join possible: without them a store can
+# find a row but cannot say whether it was knowable yet.
+#
+# The **time to live** is how long a value stays usable after its timestamp. It is what turns
+# a missing row into an error rather than a silently stale answer: ask for a name whose last
+# feature row is a week old and a store with a one-session TTL says it has nothing, while a
+# store without one hands back last week's value as if it were today's.
+#
+# The **feature columns** are what the view actually serves. Two tables here: the financial
+# features computed directly from prices, and the model-based ones, which are outputs of
+# models fitted per fold - a conditional volatility from a GARCH fit, and two fractionally
+# differenced price and volume series.
 
 
 # %%
@@ -105,7 +155,7 @@ feature_views = [
         source_path=CASE_DIR / "features" / "financial.parquet",
         entity_key="symbol",
         event_timestamp="timestamp",
-        ttl_days=1,
+        ttl_days=FEATURE_TTL_DAYS,
         feature_columns=FINANCIAL_FEATURES,
     ),
     FeatureViewSpec(
@@ -113,7 +163,7 @@ feature_views = [
         source_path=CASE_DIR / "features" / "model_based.parquet",
         entity_key="symbol",
         event_timestamp="timestamp",
-        ttl_days=1,
+        ttl_days=FEATURE_TTL_DAYS,
         feature_columns=MODEL_FEATURES,
     ),
 ]
@@ -138,29 +188,34 @@ feature_registry
 setup = yaml.safe_load(SETUP_PATH.read_text())
 holdout_start = pd.Timestamp(setup["evaluation"]["holdout_start"])
 holdout_end = pd.Timestamp(setup["evaluation"]["holdout_end"])
-print(f"Sealed holdout starts on {holdout_start.date()}")
+print(f"Holdout starts on {holdout_start.date()}")
 
 # %%
 timeline = pl.scan_parquet(feature_views[0].source_path).select("timestamp").unique().collect()
 cv_splits = generate_cv_splits(timeline, case_study_id=CASE_STUDY_ID, label_buffer="1D")
 
 
-# A window decides the date range served to the offline store: a feature value is only
-# servable for a session the model was evaluated on. Whether it *also* names a fold
-# depends on which artifact vintage is on disk, and both are in circulation. Stage 04
-# now writes one row per stock-date, so a date's value is the same whichever fold reads
-# it. A fixture built before that conversion writes one row per (key, fold) with
-# genuinely different values per fold, so there the fold is still how a date is
-# addressed and cannot be collapsed away.
+# %% [markdown]
+# ### Which sessions a feature value may be served for
+#
+# A feature value is servable for a session the model was actually evaluated on, so the store's
+# date range is the union of the walk-forward validation windows and the holdout.
+#
+# Where the model-based table carries a `fold` column, each stock-date appears once per fold
+# with the value that fold's own fit produced, and the window and the fold have to be applied
+# together. Where it does not, one stock-date is one row and the date range alone selects it.
+# Both shapes are handled below because both exist on disk.
+
+
 # %%
 def folds_by_coverage(path, windows: list[tuple]) -> list[object]:
     """Pair each evaluation window with the artifact fold that covers it, by date.
 
-    Never by fold id. `ml4t-diagnostic` 0.1.4 reversed what a fold number means, and a
-    legacy artifact was written under the older convention, so pairing a stored id with
-    a freshly generated one joins each date against the wrong vintage - invisibly, since
-    both ids exist and the join succeeds. Ordering both sides by date is the one pairing
-    that does not depend on which convention wrote the file.
+    A fold id is a label the writer chose, not a property of the data, and two tools can
+    number the same folds in opposite directions. Joining a stored id to a freshly
+    generated one then pairs each date with the wrong fitted state and still succeeds,
+    because both ids exist. Ordering both sides by the dates they cover is the pairing
+    that holds whatever numbering wrote the file.
     """
     coverage = (
         pl.scan_parquet(path)
@@ -197,42 +252,33 @@ model_folds = (
     if FOLD_KEYED_ARTIFACT
     else [None] * len(model_windows)
 )
-# By date rather than by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
-# which end of the list holds the latest window is the thing that moved.
+# By date rather than by list position: which end of the list holds the latest window
+# depends on the numbering convention, and the dates do not.
 last_validation_span = max(validation_spans)
 
-# The offline join trains on the tail of the last validation window, and serves as of
-# the first session inside the sealed holdout - "the model is live, today is after it
-# was fitted". Both derived from the geometry rather than pinned.
-if TRAINING_END is None:
-    TRAINING_END = str(last_validation_span[1])
-if TRAINING_START is None:
-    TRAINING_START = str(
-        max(
-            last_validation_span[0],
-            pd.Timestamp(TRAINING_END).date() - pd.Timedelta(days=TRAINING_LOOKBACK_DAYS),
-        )
+training_end = TRAINING_END or str(last_validation_span[1])
+training_start = TRAINING_START or str(
+    max(
+        last_validation_span[0],
+        pd.Timestamp(training_end).date() - pd.Timedelta(days=TRAINING_LOOKBACK_DAYS),
     )
-if AS_OF_DATE is None:
-    AS_OF_DATE = str(
-        pl.scan_parquet(feature_views[0].source_path)
-        .filter(pl.col("timestamp") >= holdout_start.date())
-        .select(pl.min("timestamp"))
-        .collect()
-        .item()
-    )
+)
+as_of_date = AS_OF_DATE or str(
+    pl.scan_parquet(feature_views[0].source_path)
+    .filter(pl.col("timestamp") >= holdout_start.date())
+    .select(pl.min("timestamp"))
+    .collect()
+    .item()
+)
 
-# Fail-closed governance guard: the training window must end before the sealed holdout
-# starts. A misconfigured TRAINING_END would otherwise silently mix pre- and
-# post-holdout data into the offline join. It runs after the derivation so that it
-# covers a hand-pinned override, which is the case it exists for.
-assert pd.Timestamp(TRAINING_END) < holdout_start, (
-    f"TRAINING_END {TRAINING_END} must precede sealed holdout {holdout_start.date()}"
+assert pd.Timestamp(training_end) < holdout_start, (
+    f"training window ends {training_end}, on or after the holdout opens "
+    f"{holdout_start.date()}; the offline join would mix data the model may not see"
 )
-assert pd.Timestamp(TRAINING_START) <= pd.Timestamp(TRAINING_END), (
-    f"TRAINING_START {TRAINING_START} must not follow TRAINING_END {TRAINING_END}"
+assert pd.Timestamp(training_start) <= pd.Timestamp(training_end), (
+    f"training window runs {training_start} to {training_end}, which is backwards"
 )
-print(f"Offline training window {TRAINING_START} to {TRAINING_END}; serving as of {AS_OF_DATE}")
+print(f"Offline training window {training_start} to {training_end}; serving as of {as_of_date}")
 
 # %% [markdown]
 # ## 2. Offline training retrieval with point-in-time correctness
@@ -248,11 +294,11 @@ print(f"Offline training window {TRAINING_START} to {TRAINING_END}; serving as o
 def window_terms(clipped: list[tuple]) -> list[pl.Expr]:
     """One predicate per evaluation window, to be OR-ed into a single filter.
 
-    Against a fold-free artifact a window is a date range and nothing else. Against a
-    fold-keyed one the same window also names the fold whose fitted state that range is
-    evaluated under, and the two must be applied together: those vintages hold different
-    values for the same stock-date, so a date range alone would return one row per fold
-    and no rule for choosing between them.
+    Where the artifact carries no fold column a window is a date range and nothing else.
+    Where it does, the same window also names the fold whose fitted state that range is
+    evaluated under, and the two are applied together: each fold holds its own value for
+    the same stock-date, so a date range alone returns one row per fold with no rule for
+    choosing between them.
     """
     if FOLD_KEYED_ARTIFACT:
         return [
@@ -289,10 +335,10 @@ def load_model_vintage(
 ) -> pl.DataFrame:
     """Load the model features servable for each decision date in the range.
 
-    One filter over the union of the evaluation windows, not one frame per window
-    concatenated. A concat double-counts any date two windows cover, and would do it
-    silently; under a single filter the only duplication that can reach the result is
-    the artifact's own, which `collapse_fold_replication` resolves or refuses.
+    One filter over the union of the evaluation windows rather than one frame per window
+    concatenated: a concat would double-count any date two windows cover, and it would do
+    it silently. Under a single filter the only duplication that can reach the result is
+    the artifact's own, which the assertion below refuses.
     """
     start_date = pd.Timestamp(start).date()
     end_date = pd.Timestamp(end).date()
@@ -303,7 +349,7 @@ def load_model_vintage(
     ]
     if not clipped:
         raise ValueError(
-            f"No validation window and not the sealed holdout covers {start}..{end}; "
+            f"No validation window and not the holdout covers {start}..{end}; "
             "the requested range lies outside every window this model was evaluated on"
         )
     frame = pl.scan_parquet(MODEL_BASED_PATH).filter(pl.any_horizontal(*window_terms(clipped)))
@@ -318,8 +364,25 @@ def load_model_vintage(
 
 
 # %% [markdown]
+# ### The two assertions above are the governance guard
+#
+# The training window must end before the holdout opens, and it must run forwards. They sit
+# after the derivation rather than before it so that they also cover a hand-pinned override,
+# which is the case they exist for: a derived window cannot reach past the holdout, and a
+# typed one can.
+#
+# A guard that refuses to build the training set is the right shape here. The alternative
+# failure is silent: an offline join that quietly includes post-holdout sessions produces a
+# training set that looks ordinary and a model whose evaluation means nothing.
+
+# %% [markdown]
 # ### Point-in-time join
-# Join feature values to training events using exact timestamp matching.
+#
+# Each training event is a (symbol, date) pair with its label. The join attaches the feature
+# values carrying exactly that date - the values known after that session's close - and the
+# label is the return from that session to the next. Rows missing any feature are dropped
+# rather than filled, and the count of what was dropped is printed, because a feature store
+# that silently imputes is a feature store that hides its own gaps.
 
 
 # %%
@@ -335,7 +398,7 @@ def offline_join(events: pl.DataFrame) -> pl.DataFrame:
         )
         .collect()
     )
-    model_based = load_model_vintage(TRAINING_START, TRAINING_END, MODEL_FEATURES).join(
+    model_based = load_model_vintage(training_start, training_end, MODEL_FEATURES).join(
         events.select(["symbol", "timestamp"]), on=["symbol", "timestamp"], how="inner"
     )
     joined = (
@@ -348,7 +411,7 @@ def offline_join(events: pl.DataFrame) -> pl.DataFrame:
     return joined.drop_nulls(FINANCIAL_FEATURES + MODEL_FEATURES)
 
 
-training_events = load_training_events(TRAINING_START, TRAINING_END)
+training_events = load_training_events(training_start, training_end)
 offline_training_set = offline_join(training_events)
 
 print(f"Training events:      {training_events.height:,}")
@@ -357,34 +420,42 @@ print(f"Excluded incomplete:  {training_events.height - offline_training_set.hei
 offline_training_set.head(5)
 
 # %% [markdown]
-# ## 3. Online-style as-of retrieval
+# ## 3. Retrieve the same features the way a live system would
 #
-# At inference time the system needs the latest known features for each asset at
-# or before the decision timestamp. The notebook uses the same source tables and
-# resolves the latest valid snapshot directly.
+# The offline join above asked for exact dates, because it knew which sessions it wanted. A
+# live system does not: it has a moment, and it needs each name's most recent value at or
+# before it. That is the **as-of** retrieval, and it is a different query against the same
+# tables.
+#
+# It has to be a different query and it has to give the same answer. Ask for a date the
+# offline join covered and the as-of retrieval must return exactly what the join attached; if
+# it does not, the model is being served something it was never trained on. Section 4 measures
+# what that costs when the rule is wrong by one session.
 
 
 # %%
 def sample_assets(n_assets: int) -> list[str]:
     from data import load_us_equities
 
-    # Rank on prior dollar liquidity, not nominal share volume. Ranked over the tail of
-    # the offline training window rather than a pinned calendar month, so the sample
-    # follows the derived window instead of silently drifting away from it.
-    rank_from = pd.Timestamp(TRAINING_END).date() - pd.Timedelta(days=30)
-    prices = load_us_equities(start_date=TRAINING_START, end_date=TRAINING_END)
+    rank_from = pd.Timestamp(training_end).date() - pd.Timedelta(days=LIQUIDITY_RANK_DAYS)
+    prices = load_us_equities(start_date=training_start, end_date=training_end)
     universe = (
         prices.lazy()
         .sort("symbol", "timestamp")
         .with_columns((pl.col("adj_close") * pl.col("adj_volume")).alias("dollar_volume"))
-        .with_columns(pl.col("dollar_volume").rolling_mean(21).over("symbol").alias("adv_21d"))
+        .with_columns(
+            pl.col("dollar_volume")
+            .rolling_mean(LIQUIDITY_WINDOW_DAYS)
+            .over("symbol")
+            .alias("avg_dollar_volume")
+        )
         .filter(
             (pl.col("timestamp") >= rank_from)
-            & (pl.col("timestamp") <= pd.Timestamp(TRAINING_END).date())
+            & (pl.col("timestamp") <= pd.Timestamp(training_end).date())
         )
         .group_by("symbol")
-        .agg(pl.col("adv_21d").mean().alias("avg_adv_21d"))
-        .sort("avg_adv_21d", descending=True)
+        .agg(pl.col("avg_dollar_volume").mean().alias("mean_dollar_volume"))
+        .sort("mean_dollar_volume", descending=True)
         .head(n_assets)
         .collect()
     )
@@ -392,8 +463,10 @@ def sample_assets(n_assets: int) -> list[str]:
 
 
 # %% [markdown]
-# ### Latest-known snapshot retrieval
-# Retrieve the most recent valid feature row for each asset at or before the decision date.
+# ### Latest-known snapshot
+#
+# Everything at or before the cut-off, sorted, last row per name. The `<=` is the whole
+# control: a `<` would drop the current session's own values, and a `>` is section 4.
 
 
 # %%
@@ -421,9 +494,9 @@ def latest_model_snapshot(as_of_date: str, assets: list[str]) -> pl.DataFrame:
 
 sampled_assets = sample_assets(N_SAMPLE_ASSETS)
 online_financial = latest_snapshot(
-    feature_views[0].source_path, AS_OF_DATE, sampled_assets, FINANCIAL_FEATURES
+    feature_views[0].source_path, as_of_date, sampled_assets, FINANCIAL_FEATURES
 )
-online_model = latest_model_snapshot(AS_OF_DATE, sampled_assets)
+online_model = latest_model_snapshot(as_of_date, sampled_assets)
 online_snapshot = online_financial.join(online_model, on=["symbol", "timestamp"], how="inner").sort(
     "symbol"
 )
@@ -435,11 +508,16 @@ online_snapshot = online_financial.join(online_model, on=["symbol", "timestamp"]
 online_snapshot
 
 # %% [markdown]
-# ## 4. Quantify training-serving skew
+# ## 4. Measure what one session of look-ahead costs
 #
-# The failure mode is simple: serve the *next* available snapshot instead of the
-# last known snapshot. That is only one day of look-ahead, but it still changes
-# the feature vector and leaks future information into inference.
+# The failure being measured is one comparison operator. `latest_snapshot` above takes the
+# last row at or before the cut-off; `leaked_snapshot` below takes the first row after it. In
+# code that is `<=` against `>`, and in production it is a serving path that reads the newest
+# row in the table without checking whether it was knowable yet - which is what happens when
+# a batch job writes tomorrow's features tonight and the serving query does not filter.
+#
+# One session is the smallest version of this mistake. The comparison below is what it does to
+# the feature vector.
 
 
 # %%
@@ -469,7 +547,7 @@ def leaked_snapshot(as_of_date: str, assets: list[str]) -> pl.DataFrame:
     )
 
 
-future_snapshot = leaked_snapshot(AS_OF_DATE, sampled_assets)
+future_snapshot = leaked_snapshot(as_of_date, sampled_assets)
 comparison = (
     online_snapshot.rename({col: f"{col}_correct" for col in FINANCIAL_FEATURES + MODEL_FEATURES})
     .join(
@@ -503,17 +581,21 @@ skew_table
 largest_skew = skew_table.iloc[0]
 display(
     Markdown(
-        f"**Finding**: `{largest_skew['feature']}` moves most under the deliberately "
-        f"leaked timestamp rule (mean absolute delta {largest_skew['mean_abs_delta']:.4g}). "
-        "A feature store prevents even a one-session look-ahead from reaching production."
+        f"Serving one session late moves every feature. `{largest_skew['feature']}` moves "
+        f"most, by {largest_skew['mean_abs_delta']:.4g} on average across the sampled names. "
+        "Whether a given size matters depends on the model; that any of them move is the "
+        "point, because a model trained on the first vector is being served the second."
     )
 )
 
 # %% [markdown]
-# ## 5. Source-lineage view
+# ## 5. Record where each view came from
 #
-# A feature registry needs more than names. Operators need to know where a view
-# came from, how many rows it contains, and what date range it covers.
+# A registry that lists feature names says what exists. What an operator needs when a served
+# value looks wrong is where it came from: which file, how many rows, over what dates, and how
+# many distinct entity-timestamp keys - the last of these because a count of rows above the
+# count of keys means the table holds more than one value per key, and the store's answer then
+# depends on which one it picked.
 
 # %%
 lineage_rows = []
@@ -543,48 +625,66 @@ lineage_table = pd.DataFrame(lineage_rows)
 lineage_table
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
-
-ax1 = axes[0]
-ax1.barh(skew_table["feature"], skew_table["mean_abs_delta"], color=COLORS["negative"])
-add_message_title(ax1, "Look-ahead moves served features")
-ax1.set_xlabel("Absolute feature delta")
-
-ax2 = axes[1]
-ax2.barh(
-    lineage_table["feature_view"],
-    lineage_table["unique_keys"] / 1_000_000,
-    color=COLORS["blue"],
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ordered = skew_table.iloc[::-1]
+ax.barh(ordered["feature"], ordered["mean_abs_delta"], color=COLORS["negative"])
+add_message_title(
+    ax,
+    "Feature change under a one-session serving error",
+    subtitle=f"Mean absolute difference across {N_SAMPLE_ASSETS} names, as of {as_of_date}",
 )
-add_message_title(ax2, "Lineage counts unique keys")
-ax2.set_xlabel("Unique entity-time keys (millions)")
-
-plt.tight_layout()
-fig.show()
-
-# %% [markdown]
-# ### Feature registry
-
-# %%
-feature_registry
+ax.set_xlabel("Absolute difference in feature value")
+show_with_alt(
+    fig,
+    "Horizontal bar chart, one bar per feature, sorted with the largest at the top. Each "
+    "bar is the mean absolute difference between the feature value a correct as-of "
+    "retrieval returns and the value the next-session retrieval returns.",
+)
 
 # %% [markdown]
-# ### Lineage table
-
-# %%
-lineage_table
+# The bars are on different scales because the features are: a relative strength index runs
+# from 0 to 100 while an annualized volatility is a small decimal, so the chart ranks how far
+# each moved and does not compare them with each other. The bars near the axis are not zero -
+# the table above gives their sizes - and that is the point worth taking: one wrong comparison
+# operator moves the whole vector, not one feature of it.
 
 # %% [markdown]
-# **Trading implication**: The operational contract is simple. Training joins
-# use the last valid feature values at the decision timestamp, serving uses the
-# same rule online, and the registry makes the source tables auditable. A tool
-# like Feast automates these controls, but the control itself is what matters.
+# The contract a store enforces is three sentences. The offline join takes the feature values
+# known at each decision timestamp. The online retrieval takes the last values known at the
+# moment of the decision, by the same rule. The registry says where both came from. Feast
+# automates all three, which is what `05b_feast_live` shows, and the reason to know what they
+# are is that a store configured with the wrong timestamp column automates the wrong one.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. Feature stores enforce point-in-time correctness by joining only the feature vintage fitted for each decision timestamp.
-# 2. Training-serving skew from using the wrong timestamp rule is quantifiable — even one day of look-ahead changes the feature vector.
-# 3. A source-lineage registry makes each feature view auditable — operators know the source, date range, and row count.
+# 1. A feature table needs an entity key, an event timestamp and a time to live before it can
+#    be served correctly. The first two make a point-in-time join possible; the third is what
+#    turns a missing row into an error instead of a stale answer.
+# 2. Training and serving ask different queries of the same data - a join on exact dates, and
+#    a latest-at-or-before lookup - and the whole discipline is making them agree. Skew is what
+#    it is called when they do not.
+# 3. Measure the skew rather than reasoning about it. One session of look-ahead is the smallest
+#    version of the mistake and it still moves every feature; a larger one is not visibly
+#    different in the code.
+# 4. Guard the holdout boundary where the training set is built, and make the guard refuse. A
+#    join that quietly includes sessions the model may not see produces a training set that
+#    looks ordinary and an evaluation that means nothing.
+# 5. Record lineage per view, including the count of distinct entity-timestamp keys. Rows above
+#    keys means the table holds more than one value per key, and the store's answer then
+#    depends on which one it happened to pick.
+#
+# **Known limitations**
+#
+# - The skew here is measured on the feature vectors, not on what a model does with them. A
+#   large move in a feature the model barely uses matters less than a small move in one it
+#   leans on, and nothing here weights them.
+# - Eight names on one date is enough to show that the error reaches every feature. It is not
+#   an estimate of the size of the error on any other date.
+# - The time to live is declared and not enforced: these retrievals filter on dates rather
+#   than checking staleness against the TTL. A real store rejects the stale read.
+# - The offline store here is two Parquet files read directly. A production store adds an
+#   online key-value tier for serving, and the consistency between the two tiers is its own
+#   problem, not covered here.
 #
 # **Next**: See `05b_feast_live` for the same workflow automated with Feast, or `06_mlflow_experiments` for experiment tracking.
