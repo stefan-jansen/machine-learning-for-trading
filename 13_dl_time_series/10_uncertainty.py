@@ -114,6 +114,16 @@ df = mds.dataset.drop_nulls(subset=FEATURE_COLS + [TARGET_COL])
 print(f"Features ({len(FEATURE_COLS)}): {FEATURE_COLS}")
 print(f"Target: {TARGET_COL}")
 print(f"Rows after dropna: {len(df):,}")
+per_date = df.group_by(mds.date_col).len().sort(mds.date_col)
+print(
+    f"{df[mds.date_col].min()} to {df[mds.date_col].max()}, "
+    f"{df[mds.entity_cols[0]].n_unique()} funds; funds per date "
+    f"{per_date['len'].min()} to {per_date['len'].max()}, median {per_date['len'].median():.0f}"
+)
+print(
+    f"Label {TARGET_COL}: mean {df[TARGET_COL].mean():+.5f}, "
+    f"standard deviation {df[TARGET_COL].std():.5f}"
+)
 
 # %% [markdown]
 # ## Sequence Creation and Temporal Split
