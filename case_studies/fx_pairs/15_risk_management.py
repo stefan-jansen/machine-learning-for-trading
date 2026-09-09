@@ -65,6 +65,7 @@ from case_studies.research import (
     plan_backtests,
     population_supersedes,
     research_name,
+    reuse_disclosure,
     run_backtests,
     superseded_members,
 )
@@ -494,7 +495,7 @@ for job in risk_jobs:
 
 served = run_status.count("reused")
 print(
-    f"Risk overlays: {len(risk_results) - served} computed, {served} served from the registry, "
+    f"Risk overlays: {reuse_disclosure(len(risk_results) - served, served)}, "
     f"{len(risk_results)} in the population"
 )
 

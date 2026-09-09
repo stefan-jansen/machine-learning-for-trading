@@ -362,12 +362,12 @@ print(summary_df)
 
 # %% tags=[]
 # IC time series for the key signal (weighted_surprise, 1-day horizon)
-key_signal = "weighted_surprise"
-key_horizon = 1
+KEY_SIGNAL = "weighted_surprise"
+KEY_HORIZON = 1
 
-if key_signal in AVAILABLE_SIGNALS:
+if KEY_SIGNAL in AVAILABLE_SIGNALS:
     ic_df = daily_ic(
-        text_features, key_signal, RET_COL_BY_HORIZON[key_horizon], CONFIG.min_assets_per_day
+        text_features, KEY_SIGNAL, RET_COL_BY_HORIZON[KEY_HORIZON], CONFIG.min_assets_per_day
     )
 
     if len(ic_df) > 10:
@@ -391,7 +391,7 @@ if key_signal in AVAILABLE_SIGNALS:
         )
         axes[0].set_xlabel("Trading Day")
         axes[0].set_ylabel("Information Coefficient")
-        axes[0].set_title(f"Daily Cross-Sectional IC ({key_signal}, {key_horizon}d)")
+        axes[0].set_title(f"Daily Cross-Sectional IC ({KEY_SIGNAL}, {KEY_HORIZON}d)")
         axes[0].legend()
 
         # IC histogram
@@ -403,22 +403,22 @@ if key_signal in AVAILABLE_SIGNALS:
         axes[1].set_title("IC Distribution")
         axes[1].legend()
 
-        plt.suptitle(f"Text Signal IC Analysis: {key_signal}")
+        plt.suptitle(f"Text Signal IC Analysis: {KEY_SIGNAL}")
         plt.tight_layout()
         plt.show()
 
 # %% tags=[]
 # Quintile returns for key signal
-if key_signal in AVAILABLE_SIGNALS:
+if KEY_SIGNAL in AVAILABLE_SIGNALS:
     # Compute quintile returns
     d = text_features.select(
-        ["timestamp", "symbol", key_signal, RET_COL_BY_HORIZON[key_horizon]]
+        ["timestamp", "symbol", KEY_SIGNAL, RET_COL_BY_HORIZON[KEY_HORIZON]]
     ).drop_nulls()
 
     # Rank and assign quintiles
     d = d.with_columns(
         (
-            (pl.col(key_signal).rank(method="average").over("timestamp") - 1)
+            (pl.col(KEY_SIGNAL).rank(method="average").over("timestamp") - 1)
             / (pl.len().over("timestamp") - 1).clip(lower_bound=1)
         ).alias("rank_pct")
     ).with_columns(
@@ -439,19 +439,19 @@ if key_signal in AVAILABLE_SIGNALS:
         d.group_by("quintile")
         .agg(
             [
-                pl.col(RET_COL_BY_HORIZON[key_horizon]).mean().alias("mean_ret"),
+                pl.col(RET_COL_BY_HORIZON[KEY_HORIZON]).mean().alias("mean_ret"),
                 pl.len().alias("n_obs"),
             ]
         )
         .sort("quintile")
     )
 
-    print(f"\nQuintile Returns ({key_signal}, {key_horizon}d forward return):")
+    print(f"\nQuintile Returns ({KEY_SIGNAL}, {KEY_HORIZON}d forward return):")
     print(quintile_returns)
 
 # %% tags=[]
 # Plot quintile returns
-if key_signal in AVAILABLE_SIGNALS:
+if KEY_SIGNAL in AVAILABLE_SIGNALS:
     fig, ax = plt.subplots(figsize=(8, 5))
 
     quintiles = quintile_returns["quintile"].to_list()
@@ -461,9 +461,9 @@ if key_signal in AVAILABLE_SIGNALS:
     quintile_colors = ["#cfe2f3", "#9fc5e8", "#6fa8dc", "#3d85c6", "#0b5394"]
     bars = ax.bar(quintiles, returns_bps, color=quintile_colors)
     ax.axhline(0, color="black", linestyle="-", linewidth=0.5)
-    ax.set_xlabel(f"{key_signal} Quintile (Q1=Low, Q5=High)")
-    ax.set_ylabel(f"Average {key_horizon}-Day Forward Return (bps)")
-    ax.set_title(f"Quintile Returns: {key_signal}")
+    ax.set_xlabel(f"{KEY_SIGNAL} Quintile (Q1=Low, Q5=High)")
+    ax.set_ylabel(f"Average {KEY_HORIZON}-Day Forward Return (bps)")
+    ax.set_title(f"Quintile Returns: {KEY_SIGNAL}")
 
     # Add value labels
     for bar, val in zip(bars, returns_bps, strict=False):

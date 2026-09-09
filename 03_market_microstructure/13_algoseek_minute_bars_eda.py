@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -438,7 +438,7 @@ ax.set_ylabel("Cumulative share of bars")
 add_message_title(
     ax,
     "Most minute bars quote a tight spread of a few basis points",
-    subtitle=f"Empirical CDF of quoted spread; x-axis clipped at the 99th pct ({p99:.0f} bps)",
+    subtitle="Empirical CDF of quoted spread; x-axis clipped at the 99th percentile",
 )
 plt.show()
 

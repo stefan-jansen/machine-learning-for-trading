@@ -48,6 +48,7 @@ import polars as pl
 from IPython.display import Markdown, display
 
 from utils.paths import get_chapter_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -231,7 +232,16 @@ ax.set_xlabel("Median engine-call seconds (log scale)")
 ax.set_title("Measured runtime for correctness-passing pairs")
 ax.legend()
 ax.grid(axis="x", alpha=0.25)
-plt.show()
+# The alt text reads the direction off the frame rather than asserting one: which engine is
+# faster changes by row, so a sentence naming a winner would be wrong on the next machine.
+_ml4t_faster = int((plot_data["ml4t_seconds"] < plot_data["external_seconds"]).sum())
+show_with_alt(
+    fig,
+    "Paired horizontal bars on a logarithmic seconds axis, one pair per strategy and engine, "
+    "with the external engine above and ML4T below in each pair. Read from the underlying "
+    f"frame: ML4T is the faster of the two in {_ml4t_faster} of {len(plot_data)} pairs, and the "
+    "direction is not the same across engines.",
+)
 
 # %% [markdown]
 # Ratios below one mean the external engine was faster in that row; ratios above one mean ML4T was

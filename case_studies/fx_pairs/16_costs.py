@@ -76,6 +76,7 @@ from case_studies.research import (
     plan_backtests,
     population_supersedes,
     research_name,
+    reuse_disclosure,
     run_backtests,
     superseded_members,
 )
@@ -549,7 +550,7 @@ for job in cost_jobs:
 
 served = run_status.count("reused")
 print(
-    f"Cost siblings: {len(cost_results) - served} computed, {served} served from the registry, "
+    f"Cost siblings: {reuse_disclosure(len(cost_results) - served, served)}, "
     f"{len(cost_results)} in the population"
 )
 
