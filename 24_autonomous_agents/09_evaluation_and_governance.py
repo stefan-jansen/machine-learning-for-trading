@@ -467,12 +467,15 @@ show_with_alt(
 display(
     Markdown(
         f"**On this panel.** Neyman aggregation gives sharpness {model_sharp:.2f} and Brier "
-        f"{model_brier:.3f}. Fitting the transform on all ten rows reaches {in_sample_brier:.4f}; "
-        f"fitting it on nine and applying it to the tenth reaches {loo_brier:.4f}. The gap "
-        "between those two is what fitting on the rows being scored buys, and it is the only "
-        "thing this comparison measures."
+        f"{model_brier:.3f}. Fitting the transform on all ten rows reaches "
+        f"{in_sample_brier:.4f} and fitting it on nine and applying it to the tenth reaches "
+        f"{loo_brier:.4f}, a difference of {abs(in_sample_brier - loo_brier):.4f}. That "
+        "difference is normally the price of fitting on the rows being scored; here it is "
+        "zero for the reason given above, because every fold's search stopped at the same "
+        "bound."
     )
 )
+
 # %% [markdown]
 # ## Security: The Warden Pattern
 #

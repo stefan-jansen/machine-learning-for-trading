@@ -628,14 +628,13 @@ show_with_alt(
 # %%
 display(
     Markdown(
-        "**What the filter did.** Sharpe falls from "
-        f"{us_metrics['Sharpe'][0]:.2f} to {us_metrics['Sharpe'][1]:.2f}, a change of "
-        f"{(us_metrics['Sharpe'][1] - us_metrics['Sharpe'][0]) / us_metrics['Sharpe'][0]:.0%}, "
-        f"while mean IC falls from {us_metrics['IC mean (HAC)'][0]:.3f} to "
-        f"{us_metrics['IC mean (HAC)'][1]:.3f} and the universe shrinks by "
-        f"{(us_metrics['Assets/period'][1] - us_metrics['Assets/period'][0]) / us_metrics['Assets/period'][0]:.0%}. "
-        f"Maximum drawdown deepens from {us_metrics['Max Drawdown'][0]:.0%} to "
-        f"{us_metrics['Max Drawdown'][1]:.0%}, and turnover barely moves."
+        "**What the filter did.** Removing the smallest quartile takes "
+        f"{abs((us_metrics['Assets/period'][1] - us_metrics['Assets/period'][0]) / us_metrics['Assets/period'][0]):.0%}"
+        f" of the universe with it. Sharpe falls from {us_metrics['Sharpe'][0]:.2f} to "
+        f"{us_metrics['Sharpe'][1]:.2f}, mean IC from {us_metrics['IC mean (HAC)'][0]:.3f} to "
+        f"{us_metrics['IC mean (HAC)'][1]:.3f}, and maximum drawdown deepens from "
+        f"{us_metrics['Max Drawdown'][0]:.0%} to {us_metrics['Max Drawdown'][1]:.0%}. Turnover "
+        "barely moves."
     )
 )
 

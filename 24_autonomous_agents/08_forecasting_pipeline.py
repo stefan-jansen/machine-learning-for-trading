@@ -808,12 +808,13 @@ recession, rate_hike = results
 display(
     Markdown(
         "**This replay.** "
-        f"The recession forecast ends at {recession.final_probability:.0%} against a "
-        f"{recession.question.current_market_price:.0%} market price, and the rate-hike "
-        f"forecast at {rate_hike.final_probability:.0%} against "
-        f"{rate_hike.question.current_market_price:.0%}. Both market prices were shown to the "
-        "research agents, so the distances are not an independent comparison, and both "
-        "questions were unresolved when the capture was taken, so neither can be scored."
+        f"The recession forecast ends at {recession.final_probability:.1%} and the rate-hike "
+        f"forecast at {rate_hike.final_probability:.1%}, against market prices of "
+        f"{recession.question.current_market_price:.1%} and "
+        f"{rate_hike.question.current_market_price:.1%}. Neither distance is a comparison: "
+        "both market prices were in every research agent's prompt, so the pipeline was told "
+        "where the market stood before it looked at anything. And both questions were "
+        "unresolved when the capture was taken, so neither forecast can be scored."
     )
 )
 # %% [markdown]
