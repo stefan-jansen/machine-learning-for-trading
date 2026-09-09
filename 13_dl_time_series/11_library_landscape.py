@@ -217,7 +217,7 @@ results.append(
         "Model": "Last value",
         "Library": "None",
         "Lines": "~1",
-        "Train Time (s)": 0.0,
+        "Fit + Predict (s)": 0.0,
         **m_naive,
         "Trainable": False,
         "Target Scale": "normalized",
@@ -267,11 +267,10 @@ for epoch in range(EPOCHS):
         n_batches += 1
     if (epoch + 1) % 10 == 0:
         print(f"  Epoch {epoch + 1}/{EPOCHS}: loss={epoch_loss / n_batches:.6f}")
-pytorch_time = time.time() - start
-
 model.eval()
 with torch.no_grad():
     preds_pt = model(X_test_t).cpu().numpy().flatten()
+pytorch_time = time.time() - start
 
 m = evaluate(y_test, preds_pt)
 results.append(
@@ -279,7 +278,7 @@ results.append(
         "Model": "LSTM",
         "Library": "Raw PyTorch",
         "Lines": "~50",
-        "Train Time (s)": round(pytorch_time, 1),
+        "Fit + Predict (s)": round(pytorch_time, 1),
         **m,
         "Trainable": True,
         "Target Scale": "normalized",
@@ -308,11 +307,10 @@ print(
 # loop. The underlying recurrent architecture is equivalent.
 #
 # **Dependency note**: sktime's neural forecasters require `neuralforecast`, which
-# depends on `ray` - and Python 3.14 wheels are still pending in
-# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
-# Once those wheels land, install via `uv pip install neuralforecast`
-# and uncomment the demo below. Recent sktime releases also renamed
-# `hidden_size` to `encoder_hidden_size`.
+# depends on `ray`, and Python 3.14 wheels for ray are still pending
+# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)). This
+# section describes the call rather than running it. Note also that recent sktime
+# releases renamed the wrapper's `hidden_size` argument to `encoder_hidden_size`.
 
 # %% [markdown]
 # The shape of the call, when it can be made, is
@@ -329,10 +327,9 @@ print(
 # `fit()`/`predict()` API, different architecture underneath.
 #
 # **Dependency note**: sktime's PyTorch Forecasting wrapper requires
-# `pytorch-forecasting`. The previous run also tripped over a wrapper API
-# mismatch around `max_prediction_length`/`max_encoder_length`. Once the
-# wrapper signature stabilizes, install `pytorch-forecasting` and uncomment
-# the demo below.
+# `pytorch-forecasting`, and the last attempt also hit a wrapper API mismatch around
+# `max_prediction_length` and `max_encoder_length`. This section describes the call
+# rather than running it.
 
 # %% [markdown]
 # The call would be `PytorchForecastingNBeats(max_prediction_length=...,
@@ -383,7 +380,7 @@ results.append(
         "Model": "PatchTST",
         "Library": "sktime/HuggingFace",
         "Lines": "~8",
-        "Train Time (s)": round(t, 1),
+        "Fit + Predict (s)": round(t, 1),
         **m,
         "Trainable": True,
         "Target Scale": "raw_price",
@@ -420,7 +417,7 @@ results.append(
         "Model": "Chronos (tiny)",
         "Library": "sktime/HuggingFace",
         "Lines": "~3",
-        "Train Time (s)": round(t, 1),
+        "Fit + Predict (s)": round(t, 1),
         **m,
         "Trainable": False,
         "Target Scale": "raw_price",
@@ -477,7 +474,7 @@ results.append(
         "Model": "LSTM",
         "Library": "Darts",
         "Lines": "~10",
-        "Train Time (s)": round(t, 1),
+        "Fit + Predict (s)": round(t, 1),
         **m,
         "Trainable": True,
         "Target Scale": "raw_price",
@@ -501,7 +498,7 @@ print(f"Darts LSTM: {t:.1f}s, MSE={m['mse']}, IC={m['ic']}")
 # PyTorch Forecasting wrapper by an upstream API mismatch. The last-value baseline
 # needs no library at all.
 #
-# **Read `Lines` and `Train Time (s)` across rows. Do not read `mse` across rows.**
+# **Read `Lines` and `Fit + Predict (s)` across rows. Do not read `mse` across rows.**
 # The `Target Scale` and `Evaluation Points` columns say why: raw PyTorch and the
 # baseline fit a *normalized* target and are scored over hundreds of rolling windows,
 # while sktime and Darts work on raw price levels and are scored on a single
@@ -527,7 +524,7 @@ comparison
 #
 # Implementation effort is what this table measures cleanly. The raw-PyTorch path
 # needs a model class and a training loop; each wrapper is a constructor plus `fit`
-# and `predict`. Line counts are approximate but they are counted the same way for
+# and `predict`. Line counts are approximate, but they are counted the same way for
 # every row, which is more than the error column can say.
 
 # %%
@@ -585,9 +582,10 @@ if results:
     trainable = [r for r in _libraries if r["Trainable"]]
     zero_shot = [r for r in _libraries if not r["Trainable"]]
     if trainable:
-        fastest = min(trainable, key=lambda r: r["Train Time (s)"])
+        fastest = min(trainable, key=lambda r: r["Fit + Predict (s)"])
         print(
-            f"Fastest trainable: {fastest['Model']} ({fastest['Library']}) at {fastest['Train Time (s)']}s"
+            f"Fastest to fit and predict: {fastest['Model']} ({fastest['Library']}) "
+            f"at {fastest['Fit + Predict (s)']}s"
         )
     if zero_shot:
         print(f"Zero-shot models: {len(zero_shot)} (no training required)")
@@ -596,11 +594,14 @@ if results:
 # ## Key takeaways
 #
 # 1. **Two of the table's columns can be compared across rows, and the error column
-#    cannot.** Lines of code and training time are measured the same way for every
-#    approach. Error is not: the raw-PyTorch row is a normalized target scored over a
-#    long rolling test set, the sktime and Darts rows are raw price levels scored on a
-#    single `HORIZON`-step forecast. The scale gap moves the number by orders of
-#    magnitude and the sample gap moves its variance. `Target Scale` and
+#    cannot.** Lines of code is one; the other is wall-clock time, which is measured
+#    over the same span for every row - the fit and the prediction together - because
+#    that is the only boundary all of them share. Chronos does no fitting at all, so
+#    separating the two would leave its cell empty and the column unreadable. Error is
+#    the one that cannot be compared: the raw-PyTorch row is a normalized target scored
+#    over a long rolling test set, the sktime and Darts rows are raw price levels
+#    scored on a single `HORIZON`-step forecast. The scale gap moves the number by
+#    orders of magnitude and the sample gap moves its variance. `Target Scale` and
 #    `Evaluation Points` are in the table so the mismatch cannot be missed.
 # 2. **The last-value baseline is the row to read first.** It shares its scale and its
 #    test points with the raw-PyTorch row, so those two are genuinely comparable - and
