@@ -1074,11 +1074,21 @@ show_plotly_with_alt(
 # game a plateau does not mean either network has stopped changing - the two are scored
 # against each other, so the weights and the generated distribution can keep moving
 # while the losses stay flat. Establishing that would take comparing parameters or
-# checkpoint outputs, which this notebook does not do. What the plateau does not tell
-# you, the two scatter panels and the per-strategy numbers above do: the correlation
-# and the median per-strategy error are the honest summary, and the aggregate relative
-# error is flattered by cancellation between strategies the model overstates and
-# strategies it understates.
+# checkpoint outputs, which this notebook does not do.
+#
+# What the plateau cannot tell you, the per-strategy numbers above do, and they are the
+# ones to read. The real-versus-synthetic correlation across strategies is close to
+# zero, so knowing a strategy's real tail risk tells you almost nothing about its
+# synthetic one; the median per-strategy error is several times the aggregate; and the
+# share of strategies the model overstates is close to half. Those three facts are one
+# fact: the aggregate error is small because roughly half the strategies are overstated
+# and half understated, and the two halves cancel. The scatter panels show the same
+# thing - points spread on both sides of the 45-degree line rather than tracking it.
+#
+# This is the notebook's most transferable lesson, and it is not specific to Tail-GAN.
+# An aggregate computed across units can look tolerable while carrying no information
+# about any single unit. If the intended use is per-strategy - sizing one book, stressing
+# one desk - the aggregate is the wrong number to have been reassured by.
 
 # %% [markdown]
 # ## 16. Results Summary
