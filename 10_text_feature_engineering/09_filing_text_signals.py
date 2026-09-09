@@ -64,6 +64,7 @@
 # %%
 """SEC Filing Text Signals - FinBERT sentiment and embedding-based alpha factors."""
 
+import os
 import warnings
 
 import matplotlib.pyplot as plt
@@ -73,13 +74,18 @@ import torch
 
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
-warnings.filterwarnings("ignore")
+# The tokenizer's Rust parallelism warns on every batch once this process has forked, and the
+# inference passes below do not need it.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+# %% [markdown]
+# Zero means every symbol. FinBERT scores one filing at a time, so runtime is close to linear
+# in the number of filings and the default trades coverage for a notebook that finishes.
+
 
 # %% tags=["parameters"]
-# Production defaults (0 = all symbols; full dataset has 477 companies, 6770 filings)
-# FinBERT scoring is sequential per-filing, so runtime scales linearly.
-# 50 symbols (~750 filings) runs in ~5 minutes on GPU; set to 0 for full dataset.
 SEED = 42
 MAX_SYMBOLS = 50
 MAX_FILINGS = 0
@@ -120,10 +126,8 @@ print(f"Loaded {len(filings):,} MD&A sections from {filings['symbol'].n_unique()
 print(f"Date range: {filings['filing_date'].min()} to {filings['filing_date'].max()}")
 
 if MAX_SYMBOLS > 0:
-    # Break ties on filing count by symbol so the selected universe is stable
-    # across runs — group_by returns rows in a nondeterministic order, so a
-    # sort on `len` alone would pick different symbols at the 50-symbol cutoff
-    # each run, shifting every downstream statistic.
+    # Ties broken by symbol: `group_by` returns rows in no fixed order, so sorting on the
+    # count alone picks different symbols at the cutoff on each run.
     top_symbols = (
         filings.group_by("symbol")
         .len()
@@ -138,12 +142,16 @@ if MAX_FILINGS > 0 and len(filings) > MAX_FILINGS:
     filings = filings.sort(["filing_date", "symbol"]).head(MAX_FILINGS)
     print(f"Reduced to first {MAX_FILINGS} filings for test run")
 
-# One MD&A signal per (symbol, filing_date). A few firms file multiple quarters'
-# 10-Qs on the same date (late/catch-up filers, e.g. KHC on 2017-11-07 filed three).
-# The investable event is the filing date, so keep the current quarter (latest
-# period_end). Without this, both the sentiment and narrative-change tables carry
-# duplicate keys and the section-4 join fans out on both sides, double-counting
-# those firms in the reported information coefficients.
+# %% [markdown]
+# ### One signal per filing date
+#
+# A catch-up filer can submit several quarters' 10-Qs on one date. The investable event is
+# the date, so only the most recent period is kept. Left in, the duplicates give the sentiment
+# and narrative tables repeated keys, the later join fans out on both sides, and those firms
+# are counted several times in every information coefficient below.
+
+
+# %%
 n_before = len(filings)
 filings = filings.sort(["symbol", "filing_date", "period_end"]).unique(
     subset=["symbol", "filing_date"], keep="last", maintain_order=True
@@ -163,16 +171,17 @@ filings.head(5).select(["symbol", "filing_date", "period_end", "word_count"])
 print("MD&A word count statistics:")
 print(filings["word_count"].describe())
 
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
 
-axes[0].hist(filings["word_count"].to_numpy(), bins=50, edgecolor="white")
-axes[0].set_xlabel("Word Count")
-axes[0].set_ylabel("Frequency")
-axes[0].set_title("MD&A Length Distribution")
-axes[0].axvline(filings["word_count"].median(), color="red", linestyle="--", label="Median")
-axes[0].legend()
+axes[0].hist(filings["word_count"].to_numpy(), bins=50, color=COLORS["blue"])
+axes[0].set_xlabel("Words in the MD&A section")
+axes[0].set_ylabel("Filings")
+axes[0].set_title("Length of the extracted MD&A text")
+axes[0].axvline(
+    filings["word_count"].median(), color=COLORS["amber"], linestyle="--", label="Median"
+)
+axes[0].legend(fontsize=6)
 
-# Filings per quarter
 quarterly = (
     filings.with_columns(
         quarter=pl.col("filing_date").dt.year().cast(pl.String)
@@ -183,14 +192,30 @@ quarterly = (
     .len()
     .sort("quarter")
 )
-axes[1].bar(range(len(quarterly)), quarterly["len"].to_numpy())
+axes[1].bar(range(len(quarterly)), quarterly["len"].to_numpy(), color=COLORS["blue"])
 axes[1].set_xticks(range(0, len(quarterly), 4))
-axes[1].set_xticklabels(quarterly["quarter"].to_list()[::4], rotation=45)
+axes[1].set_xticklabels(quarterly["quarter"].to_list()[::4], rotation=45, fontsize=6)
 axes[1].set_ylabel("Filings")
-axes[1].set_title("Filings per Quarter")
+axes[1].set_xlabel("Calendar quarter the filing was accepted")
+axes[1].set_title("Filings accepted per calendar quarter")
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels. The left is a histogram of MD&A length in words, sharply peaked a few "
+    "thousand words in with a long thin tail reaching several times further right, and a "
+    "dashed median line just right of the peak. The right is a bar per calendar quarter "
+    "across the sample: the bars repeat a four-quarter pattern in which one quarter of each "
+    "year carries roughly a fifth as many filings as the other three.",
+)
+
+# %% [markdown]
+# The gap in the right panel is a property of the forms, not of the sample. A company files
+# three 10-Qs a year and a 10-K for the fourth quarter, and the 10-K is the form that lands
+# in the first calendar quarter for most filers. So the quarter that looks empty is the one
+# whose disclosure went into an annual report this notebook does not read.
+#
+# Anything read seasonally from these signals has to account for that: one quarter in four is
+# a different and much smaller sample of companies, not a quiet period.
 
 # %% [markdown]
 # ## 2. FinBERT Sentiment Scoring
@@ -307,39 +332,58 @@ print(f"\nSentiment scoring complete: {len(sentiment_df):,} filings scored")
 sentiment_df.head(5)
 
 # %%
-# Sentiment distribution
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+fig, axes = plt.subplots(1, 3, figsize=FIGSIZE["triple_h_tall"])
 
-axes[0].hist(sentiment_df["sentiment_mean"].to_numpy(), bins=50, edgecolor="white")
-axes[0].set_xlabel("Mean Sentiment Score")
-axes[0].set_ylabel("Frequency")
-axes[0].set_title("MD&A Sentiment Distribution")
-axes[0].axvline(0, color="red", linestyle="--", alpha=0.5)
+axes[0].hist(sentiment_df["sentiment_mean"].to_numpy(), bins=50, color=COLORS["blue"])
+axes[0].set_xlabel("Mean chunk sentiment")
+axes[0].set_ylabel("Filings")
+axes[0].set_title("Sentiment averaged over a filing")
+axes[0].axvline(0, color=COLORS["amber"], linestyle="--")
 
-axes[1].hist(sentiment_df["sentiment_std"].to_numpy(), bins=50, edgecolor="white")
-axes[1].set_xlabel("Sentiment Std Dev")
-axes[1].set_title("Within-Filing Sentiment Dispersion")
+axes[1].hist(sentiment_df["sentiment_std"].to_numpy(), bins=50, color=COLORS["blue"])
+axes[1].set_xlabel("Standard deviation across chunks")
+axes[1].set_ylabel("Filings")
+axes[1].set_title("Spread of sentiment within a filing")
 
 axes[2].hist(
     sentiment_df["sentiment_pos_pct"].to_numpy(),
     bins=30,
-    edgecolor="white",
     alpha=0.7,
-    label="Positive %",
+    color=COLORS["blue"],
+    label="Chunks scored positive",
 )
 axes[2].hist(
     sentiment_df["sentiment_neg_pct"].to_numpy(),
     bins=30,
-    edgecolor="white",
     alpha=0.7,
-    label="Negative %",
+    color=COLORS["amber"],
+    label="Chunks scored negative",
 )
-axes[2].set_xlabel("Fraction of Chunks")
-axes[2].set_title("Positive vs Negative Chunk Fractions")
-axes[2].legend()
+axes[2].set_xlabel("Share of a filing's chunks")
+axes[2].set_ylabel("Filings")
+axes[2].set_title("Positive and negative shares, overlaid")
+axes[2].legend(fontsize=6)
 
-fig.tight_layout()
-fig.show()
+for ax in axes:
+    ax.tick_params(labelsize=7)
+
+show_with_alt(
+    fig,
+    "Three histograms over filings. The first is the mean sentiment of a filing's chunks, a "
+    "single hump whose bulk sits to the right of the dashed zero line. The second is the "
+    "spread of sentiment within a filing, a symmetric hump centered well above zero, so a "
+    "typical filing contains chunks scored both ways rather than a uniform tone. The third "
+    "overlays the share of chunks scored positive against the share scored negative: the "
+    "negative distribution is concentrated near zero and the positive one sits to its right, "
+    "with the two overlapping in the middle.",
+)
+
+# %% [markdown]
+# The middle panel is the one to read before using the left one. Sentiment averaged over a
+# filing is a mean of chunk scores whose spread is substantial, so two filings with the same
+# mean can differ in whether the document was uniformly mild or a mix of strongly positive
+# and strongly negative passages. That is why `sentiment_std` is carried as its own signal
+# rather than discarded as noise around the mean.
 
 # %% [markdown]
 # ## 3. Document Embeddings and Narrative Change
@@ -395,10 +439,6 @@ embeddings_array = np.stack(embeddings)
 print(f"Embedding matrix: {embeddings_array.shape}")
 
 # %%
-# Compute quarter-over-quarter narrative change (cosine distance)
-# For each filing, compare its embedding to the previous quarter's filing for the same company
-
-# Sort by symbol and filing date
 filing_order = (
     filings.select(["symbol", "filing_date"]).with_row_index("idx").sort(["symbol", "filing_date"])
 )
@@ -437,23 +477,29 @@ print("  (first filing per company has no prior quarter for comparison)")
 narrative_df.drop_nulls("narrative_change")["narrative_change"].describe()
 
 # %%
-# Distribution of narrative change
 valid_changes = narrative_df.drop_nulls("narrative_change")["narrative_change"].to_numpy()
 
-fig, ax = plt.subplots(figsize=(8, 4))
-ax.hist(valid_changes, bins=50, edgecolor="white")
-ax.set_xlabel("Cosine Distance (Quarter-over-Quarter)")
-ax.set_ylabel("Frequency")
-ax.set_title("MD&A Narrative Change Distribution")
-ax.axvline(
-    np.median(valid_changes),
-    color="red",
-    linestyle="--",
-    label=f"Median: {np.median(valid_changes):.3f}",
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.hist(valid_changes, bins=50, color=COLORS["blue"])
+ax.set_xlabel("Cosine distance between consecutive filings by the same company")
+ax.set_ylabel("Filings")
+ax.set_title("Quarter-over-quarter change in MD&A text")
+ax.axvline(np.median(valid_changes), color=COLORS["amber"], linestyle="--", label="Median")
+ax.legend(fontsize=6)
+
+show_with_alt(
+    fig,
+    "A histogram of the cosine distance between each filing's MD&A embedding and the same "
+    "company's previous one. The distribution is a single hump concentrated at small "
+    "distances, with a dashed median line inside it and a tail extending to larger distances "
+    "that thins out well before the axis ends.",
 )
-ax.legend()
-fig.tight_layout()
-fig.show()
+
+# %% [markdown]
+# Most consecutive filings are close together, which is what boilerplate does: an MD&A is
+# largely carried forward and edited, so the base rate of change is low and the tail is where
+# something was rewritten. The signal is the distance relative to that base rate, not the
+# distance itself.
 
 # %% [markdown]
 # ## 4. Combine Signals and Join to Market Data
@@ -494,12 +540,17 @@ price_returns = (
     .select(["symbol", "timestamp", "fwd_1d", "fwd_5d", "fwd_20d"])
 )
 
-# %%
-# Join signals to prices using asof join
-# Match each filing_date to the next trading day on or after that date
-# This is PIT-correct: signal is available when the filing is accepted
+# %% [markdown]
+# ### The point-in-time join
+#
+# Each filing date is matched forward to the first trading day on or after it. Forward, not
+# backward: a backward match would attach the signal to a session that closed before the
+# filing existed, which is the look-ahead this whole construction is arranged to avoid. An
+# SEC filing is public on acceptance, so the filing date itself is investable when it is a
+# trading day.
 
-# Add trade_date column to prices so we can track which day was matched
+
+# %%
 prices_with_trade_date = price_returns.with_columns(trade_date=pl.col("timestamp")).sort(
     ["symbol", "timestamp"]
 )
@@ -546,14 +597,15 @@ signal_cols = [
 return_cols = ["fwd_1d", "fwd_5d", "fwd_20d"]
 
 # %% [markdown]
-# We compute pooled Spearman ICs across all (filing, forward-return) pairs and
-# pair each pooled IC with a **cluster bootstrap** inference: resample whole
-# symbols (with replacement), recompute the pooled IC on each bootstrap
-# replicate, and report the 95% percentile interval and a two-sided bootstrap
-# p-value for the null IC=0. The cluster bootstrap requires a non-null cluster
-# id, so filings with a null `symbol` are dropped from `eval_df` before
-# computing both the point IC and the bootstrap; this shrinks `n_obs` per row
-# slightly versus the prior signal-only `drop_nulls` and is intentional.
+# The IC is pooled across all filing and forward-return pairs, and each one is paired with a
+# cluster bootstrap: resample whole symbols with replacement, recompute the pooled IC on each
+# replicate, and report the percentile interval and a two-sided bootstrap p-value against the
+# null that the IC is zero.
+#
+# The bootstrap needs a cluster id, so filings with no symbol are dropped before both the
+# point estimate and the resampling. That shrinks the observation count per row slightly and
+# is deliberate: the alternative is a point estimate computed on rows the interval could not
+# be computed on.
 #
 # Why a cluster bootstrap on symbols? The pooled sample places the same firm
 # at multiple quarterly filings into one correlation. Returns are also
@@ -564,19 +616,20 @@ return_cols = ["fwd_1d", "fwd_5d", "fwd_20d"]
 # the chapter's headline inference framework uses HAC on cross-sectional IC
 # series with adequate breadth (see NB07, NB08).
 
+# %% [markdown]
+# A replicate that drops too many observations to be meaningful is discarded, and if fewer
+# than `MIN_VALID_BOOT` of the replicates survive, the interval and p-value for that pair are
+# reported as missing rather than computed from what remains. A draw dominated by one cluster
+# still produces a number, and a missing entry says that where a computed one would not.
+
+
 # %%
-# Compute pooled ICs and cluster-bootstrap inference (cluster = symbol).
 print("Signal Evaluation: Pooled ICs with cluster bootstrap (cluster=symbol)")
 print("=" * 70)
 
 N_BOOT = 1000
-# Single RNG shared across all (signal, horizon) iterations. Reproducibility
-# of the table therefore depends on the iteration order of `signal_cols` ×
-# `return_cols` — reorder either list and every subsequent pair gets a
-# different bootstrap draw. If fewer than MIN_VALID_BOOT of N_BOOT replicates
-# remain valid after NaN-drop, the percentile/p-value is suppressed (NaN) so
-# unstable estimates from degenerate draws (e.g., a draw where one cluster
-# dominates) do not leak into the table.
+# One RNG across every (signal, horizon) pair, so the table reproduces only for a fixed
+# iteration order: reorder either list and every later pair draws differently.
 MIN_VALID_BOOT = 200
 _boot_rng = np.random.default_rng(SEED)
 
@@ -616,10 +669,9 @@ for sig in signal_cols:
         if boot_ics.size >= MIN_VALID_BOOT:
             ci_lo = float(np.percentile(boot_ics, 2.5))
             ci_hi = float(np.percentile(boot_ics, 97.5))
-            # Two-sided bootstrap p-value via percentile-method test inversion:
-            # the smallest α such that the (1-α) bootstrap CI excludes zero.
-            # Not a recentered-around-zero reflection test — for that, swap
-            # in `mean(|boot - boot.mean()| >= |ic_point|)`.
+            # Percentile-method test inversion: the smallest alpha whose interval excludes
+            # zero. Not a recentered reflection test, which would be
+            # `mean(|boot - boot.mean()| >= |ic_point|)`.
             p_boot = 2.0 * min(
                 float(np.mean(boot_ics <= 0.0)),
                 float(np.mean(boot_ics >= 0.0)),
@@ -654,17 +706,25 @@ else:
     print("Insufficient data for IC computation (need more symbols/filings)")
 
 # %% [markdown]
-# The point estimates with their 95% cluster-bootstrap confidence intervals,
-# charted so the signal-horizon pairs whose intervals exclude zero stand out at a
-# glance rather than having to be read off the table above.
+# The point estimates with their cluster-bootstrap intervals, charted so the signal-horizon
+# pairs separated from zero stand out rather than having to be read off the table above.
+#
+# The interval lengths carry as much as the bar heights here. Where an interval is long
+# relative to the bar it sits on, the point estimate is a draw from a wide distribution and
+# its sign is not information.
 
 # %%
 if len(ic_summary) > 0:
     signals = ic_summary["signal"].unique(maintain_order=True).to_list()
-    horizons = ic_summary["horizon"].unique(maintain_order=True).to_list()
+    # Sorted by the horizon they name rather than alphabetically, which orders a set like
+    # 1d / 5d / 20d as 1, 20, 5 and puts the legend out of sequence with the axis.
+    horizons = sorted(
+        ic_summary["horizon"].unique().to_list(),
+        key=lambda label: int("".join(ch for ch in label if ch.isdigit()) or 0),
+    )
     x = np.arange(len(signals))
     width = 0.8 / max(len(horizons), 1)
-    fig, ax = plt.subplots(figsize=(max(8.0, 1.6 * len(signals)), 5))
+    fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
     for i, h in enumerate(horizons):
         by_sig = {
             r["signal"]: r for r in ic_summary.filter(pl.col("horizon") == h).iter_rows(named=True)
@@ -674,14 +734,22 @@ if len(ic_summary) > 0:
         hi = np.array([by_sig.get(s, {}).get("ci95_hi", np.nan) for s in signals], dtype=float)
         yerr = np.nan_to_num(np.vstack([ic - lo, hi - ic]), nan=0.0)
         ax.bar(x + i * width, np.nan_to_num(ic), width, yerr=yerr, capsize=3, label=h)
-    ax.axhline(0, color="black", linewidth=0.8)
+    ax.axhline(0, color=COLORS["neutral"], linewidth=0.8)
     ax.set_xticks(x + width * (len(horizons) - 1) / 2)
-    ax.set_xticklabels(signals, rotation=30, ha="right")
-    ax.set_ylabel("Rank IC (pooled Spearman)")
-    ax.set_title("Filing-text signal ICs with 95% cluster-bootstrap CIs")
-    ax.legend(title="Horizon")
-    fig.tight_layout()
-    fig.show()
+    ax.set_xticklabels(signals, rotation=30, ha="right", fontsize=6)
+    ax.set_ylabel("Pooled rank IC")
+    ax.set_title("Signal ICs by horizon, with cluster-bootstrap intervals")
+    ax.legend(title="Forward horizon", fontsize=6, title_fontsize=6)
+    ax.tick_params(axis="y", labelsize=7)
+
+    show_with_alt(
+        fig,
+        "A grouped bar chart with one group per signal and one bar per forward horizon "
+        "inside it, each bar carrying a vertical interval line. The bars are small against "
+        "the axis and fall on both sides of the zero line, and almost every interval line "
+        "crosses zero, so few of the signal-horizon pairs are separated from it. The "
+        "intervals are long relative to the bars they sit on.",
+    )
     ic_summary = pl.DataFrame()
 
 # %% [markdown]
@@ -722,7 +790,7 @@ def quintile_analysis(df: pl.DataFrame, signal_col: str, return_col: str) -> pl.
 # %%
 # Quintile analysis for key signals
 key_signals = ["sentiment_mean", "narrative_change"]
-fig, axes = plt.subplots(1, len(key_signals), figsize=(6 * len(key_signals), 5))
+fig, axes = plt.subplots(1, len(key_signals), figsize=FIGSIZE["dual_h_tall"])
 if len(key_signals) == 1:
     axes = [axes]
 
@@ -733,34 +801,36 @@ for i, sig in enumerate(key_signals):
     if q_df.height > 0:
         quintiles = q_df["quintile"].to_list()
         returns = q_df["avg_return"].to_numpy()
-        colors = ["#d32f2f" if r < 0 else "#2e7d32" for r in returns]
 
-        ax.bar(range(len(quintiles)), returns * 100, color=colors, edgecolor="white")
+        # One color for every bar: coloring by sign encodes the outcome twice, once in the
+        # height and once in the hue, and makes a difference of a basis point either side of
+        # zero look categorical.
+        ax.bar(range(len(quintiles)), returns * 100, color=COLORS["blue"])
         ax.set_xticks(range(len(quintiles)))
-        ax.set_xticklabels(quintiles)
-        ax.set_ylabel("Average 20-day Return (%)")
-        ax.set_title(f"{sig}: Quintile Returns")
-        ax.axhline(0, color="black", linewidth=0.5)
-
-        # Long-short spread
-        if len(returns) >= 2:
-            spread = returns[-1] - returns[0]
-            ax.text(
-                0.95,
-                0.95,
-                f"Q5-Q1: {spread * 100:.2f}%",
-                transform=ax.transAxes,
-                ha="right",
-                va="top",
-                fontsize=10,
-                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
-            )
+        ax.set_xticklabels(quintiles, fontsize=7)
+        ax.set_ylabel("Mean 20-day forward return, percent")
+        ax.set_xlabel("Bucket, lowest signal at the left")
+        ax.set_title(f"Forward return by {sig} bucket", fontsize=8)
+        ax.axhline(0, color=COLORS["neutral"], linewidth=0.5)
+        ax.tick_params(axis="y", labelsize=7)
     else:
         ax.text(0.5, 0.5, "Insufficient data", transform=ax.transAxes, ha="center")
-        ax.set_title(f"{sig}: Quintile Returns")
+        ax.set_title(f"Forward return by {sig} bucket", fontsize=8)
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels, one per signal, each with five bars for the mean forward return of a bucket, "
+    "ordered from the lowest signal values at the left to the highest at the right. Neither "
+    "panel's bars rise or fall across the buckets: in the left panel the tallest bar is the "
+    "leftmost, and in the right panel the tallest is the rightmost with the second tallest "
+    "the leftmost, so in both the two extreme buckets are among the highest.",
+)
+
+# %% [markdown]
+# The spread between the extreme buckets is not annotated on either panel. It is a difference
+# between two pooled means with no interval attached, and the cluster bootstrap above is the
+# inference this notebook actually supports - putting a bare number in the corner of a chart
+# invites it to be read as a result when the chart beside it shows the ordering is not there.
 
 # %% [markdown]
 # ## 7. Save Signals
