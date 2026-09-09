@@ -593,11 +593,7 @@ for name, model in models.items():
 
     mse_orig = float(np.mean((pred_orig - y_test) ** 2))
     mse_shuf = float(np.mean((pred_shuf - y_test) ** 2))
-    # How much the error moved, and separately how far the predictions themselves
-    # moved: the root-mean-square gap between the two prediction sets, divided by the
-    # root-mean-square size of the original predictions. Zero means the model emitted
-    # the same numbers; one means it disagreed with itself by as much as it was
-    # predicting in the first place.
+    # RMS gap between the two prediction sets, over the RMS size of the originals.
     pred_shift = float(
         np.sqrt(np.mean((pred_shuf - pred_orig) ** 2)) / np.sqrt(np.mean(pred_orig**2))
     )
