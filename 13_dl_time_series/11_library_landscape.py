@@ -31,7 +31,7 @@
 # takes the other approach: its own `TimeSeries` container and its own model
 # implementations.
 #
-# **What this notebook does not measure is accuracy.** The rows do not share a target
+# **What the table measures is effort, not accuracy.** The rows do not share a target
 # scale or a test set, so the error column cannot be read across them - which is
 # stated where the table appears and marked in the table's own columns. A last-value
 # baseline is included precisely so that the one comparison that *is* like-for-like
@@ -53,9 +53,19 @@
 # %%
 """Library Landscape - compare raw PyTorch vs sktime-wrapped forecasting implementations."""
 
+import logging
 import tempfile
 import time
+import warnings
 from datetime import datetime
+
+# pytorch_lightning emits this at import time, which `from darts...` below triggers, so
+# the filter has to be installed before the import rather than alongside the others.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*LeafSpec.*is deprecated",
+    module=r".*pytorch_lightning.*",
+)
 
 import numpy as np
 import pandas as pd
@@ -75,6 +85,20 @@ from utils.style import (  # COLORS activates the ml4t Plotly template on import
     COLORS,
     show_plotly_with_alt,
 )
+
+# %% [markdown]
+# Three of the libraries below write progress banners to standard error - the accelerator
+# they picked, a suggestion to install a logging integration, a deprecation inside
+# `transformers` reached through sktime's Chronos wrapper. None of it reports a problem
+# and none of it is this notebook's output, so each is quieted by name at its own logger
+# rather than by a blanket filter. Anything these libraries raise as a warning still
+# reaches the render.
+
+# %%
+logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+logging.getLogger("lightning.pytorch").setLevel(logging.ERROR)
+logging.getLogger("darts").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 # %% tags=["parameters"]
 SEED = 42
@@ -452,16 +476,31 @@ ts = TimeSeries.from_dataframe(
 ts_train = ts[:sk_split]
 ts_test = ts[sk_split : sk_split + HORIZON]
 
+# Re-asserted here rather than only at import: something between the import cell and this
+# one puts the LeafSpec deprecation back, and a filter has to be in force where the
+# warning is raised, not merely where it was first installed.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*LeafSpec.*is deprecated",
+    module=r".*pytorch_lightning.*",
+)
+
+# No output_chunk_length: Darts' RNNModel forecasts one step and rolls it forward, so it
+# overrides any value passed here. `predict(HORIZON)` still returns HORIZON steps.
 darts_model = RNNModel(
     model="LSTM",
     input_chunk_length=LOOKBACK,
-    output_chunk_length=HORIZON,
     training_length=LOOKBACK + HORIZON,
     hidden_dim=HIDDEN_SIZE,
     n_epochs=EPOCHS,
     batch_size=BATCH_SIZE,
     random_state=SEED,
-    pl_trainer_kwargs={"enable_progress_bar": False, "accelerator": "auto"},
+    pl_trainer_kwargs={
+        "enable_progress_bar": False,
+        "enable_model_summary": False,
+        "logger": False,
+        "accelerator": "auto",
+    },
 )
 start = time.time()
 darts_model.fit(ts_train)

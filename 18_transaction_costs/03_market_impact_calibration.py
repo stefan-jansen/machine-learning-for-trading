@@ -390,7 +390,7 @@ market_colors = {
     "ETFs": COLORS["blue"],
     "Crypto Perps": COLORS["amber"],
     "CME Futures": COLORS["copper"],
-    "FX Pairs": COLORS["slate"],
+    "FX Pairs": COLORS["recede"],
     "S&P 500 Equities": COLORS["positive"],
     "NASDAQ-100": COLORS["negative"],
 }
@@ -412,7 +412,7 @@ ax.set_xlabel("Participation Rate (%)")
 ax.set_ylabel("Modeled Impact (bps)")
 add_message_title(
     ax,
-    "Literature assumptions produce a wide scenario cost range",
+    "Modeled impact against participation rate, one curve per market",
     subtitle="Square-root model with retrospective median daily volatility",
 )
 ax.legend(loc="upper left", fontsize=9)
@@ -420,9 +420,10 @@ ax.set_xlim(0, 10)
 
 show_with_alt(
     fig,
-    "Six impact curves against participation rate, one per market. All rise steeply from the "
-    "origin and flatten as participation grows, and they are separated by more than an order of "
-    "magnitude, with crypto highest and FX lowest.",
+    "Six concave impact curves against participation rate, one per market, fanning out from a "
+    "common origin. The crypto curve climbs steeply and dominates the vertical range; the three "
+    "cheapest markets stay flat against the bottom of the plot across the whole range, more than "
+    "an order of magnitude below it, with FX lowest.",
 )
 
 # %% tags=["results"]
