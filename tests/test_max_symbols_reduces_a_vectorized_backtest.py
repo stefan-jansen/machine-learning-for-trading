@@ -448,3 +448,160 @@ def test_the_reduced_and_the_full_run_now_disagree(monkeypatch) -> None:
     assert backtest_hash_from_parts("pred1", SPEC) != backtest_hash_from_parts(
         "pred1", _declared_spec(["C", "D"])
     )
+
+
+# ---------------------------------------------------------------------------
+# What a distinct identity lets in: the two now coexist, so nothing downstream
+# may rank one against the other.
+# ---------------------------------------------------------------------------
+
+
+def test_precomputed_weights_are_narrowed_with_the_predictions(monkeypatch) -> None:
+    """The Ch19 risk sweep brings its own weights and skips weight construction.
+
+    Narrowing only the predictions would let a reduced overlay hold names its own parent
+    backtest does not, under one identity - the two execution paths disagreeing about what
+    the portfolio is.
+    """
+    from copy import deepcopy
+
+    import case_studies.utils.backtest_runner as br
+    import case_studies.utils.conformal as conformal
+
+    weights = pl.DataFrame(
+        {
+            "timestamp": [datetime(2024, 1, 1)] * 4,
+            "symbol": ["A", "B", "C", "D"],
+            "weight": [0.25, 0.25, 0.25, 0.25],
+        }
+    )
+    captured: dict = {}
+    monkeypatch.setattr(br, "get_backtest_config", lambda _: object())
+    monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kw: args[2])
+    monkeypatch.setattr(conformal, "ensure_conformal_calibration_identity", lambda s: s)
+    monkeypatch.setattr(br, "substitute_continuous_return_for_classification", lambda p, *_: p)
+
+    def fake_vectorized(**kw):
+        captured.update(kw)
+        return {
+            "daily_returns": pl.DataFrame(
+                {"timestamp": [datetime(2024, 1, 1)], "daily_return": [0.0]}
+            ),
+            "metrics": {"sharpe": 0.0},
+        }
+
+    monkeypatch.setattr(br, "_run_vectorized", fake_vectorized)
+    br.run_backtest(
+        "us_firm_characteristics",
+        "pred1",
+        deepcopy(_declared_spec(["A", "C"])),
+        prices=_prices(["A", "C"]),
+        predictions=_predictions(),
+        precomputed_weights=weights,
+        register=False,
+    )
+    assert sorted(captured["weights"]["symbol"].to_list()) == ["A", "C"]
+    assert sorted(captured["predictions"]["symbol"].to_list()) == ["A", "C"]
+
+
+def _registry_with_a_full_and_a_reduced_backtest(case_dir, reduced_digest: str) -> None:
+    """One prediction, backtested twice: once full and once over a declared universe."""
+    import json
+    import sqlite3
+
+    run_log = case_dir / "run_log"
+    run_log.mkdir(parents=True)
+    with sqlite3.connect(run_log / "registry.db") as db:
+        db.executescript(
+            """
+            CREATE TABLE training_runs (
+                training_hash TEXT PRIMARY KEY, family TEXT, config_name TEXT, label TEXT
+            );
+            CREATE TABLE prediction_sets (
+                prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT,
+                checkpoint_value REAL
+            );
+            CREATE TABLE prediction_metrics (
+                prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_mean_daily REAL,
+                ic_ci_lo REAL, ic_ci_hi REAL, ic_n_days REAL
+            );
+            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE backtest_runs (
+                backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT, spec_json TEXT, stage TEXT
+            );
+            CREATE TABLE backtest_metrics (
+                backtest_hash TEXT PRIMARY KEY, sharpe REAL, cagr REAL, max_drawdown REAL,
+                total_return REAL, volatility REAL, num_trades REAL
+            );
+            CREATE TABLE backtest_fold_metrics (
+                backtest_hash TEXT, fold_id INTEGER, sharpe REAL
+            );
+            """
+        )
+        db.execute("INSERT INTO training_runs VALUES ('train', 'gbm', 'cfg', 'fwd_ret_5d')")
+        db.execute("INSERT INTO prediction_sets VALUES ('pred', 'train', 'validation', 0)")
+        db.execute("INSERT INTO prediction_metrics VALUES ('pred', 0.1, 0.1, 0.0, 0.2, 10.0)")
+        full_spec = {"strategy": {"signal": {"method": "equal_weight_top_k"}}}
+        reduced_spec = {
+            "strategy": {
+                "signal": {
+                    "method": "equal_weight_top_k",
+                    "traded_universe": {"n_symbols": 2, "digest": reduced_digest},
+                }
+            }
+        }
+        # The reduced run carries the higher Sharpe on purpose: MAX(sharpe) is what ranks,
+        # so if the two are pooled the reduced row is the one that wins and advances.
+        db.execute(
+            "INSERT INTO backtest_runs VALUES ('bt_full', 'pred', ?, 'signal')",
+            (json.dumps(full_spec),),
+        )
+        db.execute("INSERT INTO backtest_metrics VALUES ('bt_full', 0.5, 0.1, -0.1, 0.2, 0.1, 1)")
+        db.execute(
+            "INSERT INTO backtest_runs VALUES ('bt_reduced', 'pred', ?, 'signal')",
+            (json.dumps(reduced_spec),),
+        )
+        db.execute(
+            "INSERT INTO backtest_metrics VALUES ('bt_reduced', 9.0, 0.1, -0.1, 0.2, 0.1, 1)"
+        )
+
+
+def test_ranking_does_not_mix_a_reduced_backtest_with_a_full_one(tmp_path) -> None:
+    """A reduced row must not advance a configuration into a full-universe sweep.
+
+    Before this change a reduced run hashed like the full one and was skipped, so the two
+    could not coexist in a registry. Now they can, and `MAX(sharpe)` over both would rank a
+    Sharpe earned on two names against one earned on the whole panel. Ranking two universes
+    against each other is not a comparison, so `resolve_best_predictions` asks which of the
+    two populations it is ranking and defaults to the full run.
+    """
+    from case_studies.utils.registry import resolve_best_predictions
+
+    digest = _declaration(["A", "C"])["digest"]
+    case_dir = tmp_path / "case"
+    _registry_with_a_full_and_a_reduced_backtest(case_dir, digest)
+
+    default = resolve_best_predictions(
+        "test", "fwd_ret_5d", split="validation", case_dir=case_dir, top_n=10
+    )
+    assert default["sharpe"].to_list() == [0.5], "the default ranking took the reduced run's Sharpe"
+
+    named = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        traded_universe_digest=digest,
+    )
+    assert named["sharpe"].to_list() == [9.0]
+
+    other = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        case_dir=case_dir,
+        top_n=10,
+        traded_universe_digest=_declaration(["A", "D"])["digest"],
+    )
+    assert other.is_empty(), "a different universe's digest must not match these rows"

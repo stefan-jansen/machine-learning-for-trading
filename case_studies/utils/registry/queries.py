@@ -850,6 +850,7 @@ def _resolve_best_predictions_canonical(
     checkpoints_per_config: int,
     prediction_hashes: set[str] | None,
     backtest_hashes: set[str] | None = None,
+    traded_universe_digest: str | None = None,
 ):
     """``resolve_best_predictions(coverage_window="canonical")``.
 
@@ -886,6 +887,19 @@ def _resolve_best_predictions_canonical(
     if universe_filter:
         universe_clause = "AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
         params.append(universe_filter)
+    # A reduced run declares its universe and a full run declares none, so ranking has to
+    # say which of the two it is ranking (ml4t/agent-workspace#911). The default arm is the
+    # one that matters: it keeps a reduced row out of a full run's population. It matches
+    # every row whose spec omits the key, so a registry with no reduced rows is unchanged.
+    if traded_universe_digest is None:
+        universe_clause += (
+            " AND json_extract(b.spec_json, '$.strategy.signal.traded_universe.digest') IS NULL"
+        )
+    else:
+        universe_clause += (
+            " AND json_extract(b.spec_json, '$.strategy.signal.traded_universe.digest') = ?"
+        )
+        params.append(traded_universe_digest)
 
     # Same per_prediction shape as the raw path, minus full_coverage_prediction_sql —
     # that comparison is replaced below by canonical_coverage_days, computed in Python.
@@ -993,6 +1007,7 @@ def resolve_best_predictions(
     coverage_window: str = "raw",
     prediction_hashes: set[str] | None = None,
     backtest_hashes: set[str] | None = None,
+    traded_universe_digest: str | None = None,
 ):
     """Return top-N prediction hashes ranked by backtest Sharpe at a given stage.
 
@@ -1044,6 +1059,18 @@ def resolve_best_predictions(
         over all of them ranks the configuration on a number no current result
         carries. Restricting the predictions leaves that untouched, because the
         stale rows belong to predictions that are themselves still current.
+    traded_universe_digest : str, optional
+        Restrict ranking to backtests that declare this traded universe, from
+        ``traded_universe_declaration``. ``None`` - every existing caller - ranks only
+        backtests that declare NO universe, which is what a full run registers.
+
+        Without this the two coexist and are ranked together. A reduced run now gets a
+        backtest identity of its own (ml4t/agent-workspace#911), so where it used to be
+        skipped as already-done it registers a row beside the full one, and ``MAX(sharpe)``
+        would advance a configuration into a full-universe allocation sweep on a Sharpe
+        earned over 300 names rather than 3,708. Ranking two universes against each other is
+        not a comparison. Registries holding no reduced rows are unaffected: the default
+        clause matches every row whose spec omits the key, which is all of them today.
 
     Returns
     -------
@@ -1066,6 +1093,7 @@ def resolve_best_predictions(
             checkpoints_per_config=checkpoints_per_config,
             prediction_hashes=prediction_hashes,
             backtest_hashes=backtest_hashes,
+            traded_universe_digest=traded_universe_digest,
         )
 
     if case_dir is None:
@@ -1146,6 +1174,19 @@ def resolve_best_predictions(
     if universe_filter:
         universe_clause = "AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
         params.append(universe_filter)
+    # A reduced run declares its universe and a full run declares none, so ranking has to
+    # say which of the two it is ranking (ml4t/agent-workspace#911). The default arm is the
+    # one that matters: it keeps a reduced row out of a full run's population. It matches
+    # every row whose spec omits the key, so a registry with no reduced rows is unchanged.
+    if traded_universe_digest is None:
+        universe_clause += (
+            " AND json_extract(b.spec_json, '$.strategy.signal.traded_universe.digest') IS NULL"
+        )
+    else:
+        universe_clause += (
+            " AND json_extract(b.spec_json, '$.strategy.signal.traded_universe.digest') = ?"
+        )
+        params.append(traded_universe_digest)
     params.append(str(top_n))
     params.append(str(max(1, int(checkpoints_per_config))))
 

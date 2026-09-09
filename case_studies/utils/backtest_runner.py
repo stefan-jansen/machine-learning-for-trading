@@ -1537,6 +1537,18 @@ def run_backtest(
         predictions = apply_traded_universe(
             predictions, prices, strategy.get("signal") or {}, case_study=case_study
         )
+        # And the weights, when the caller brought its own. `precompute_weights` ranks the
+        # whole prediction set and `precomputed_weights=` bypasses weight construction
+        # entirely, so narrowing only the predictions would let a reduced overlay hold names
+        # its own parent backtest does not - the two paths would disagree under one identity.
+        # The Ch19 risk sweep is the caller that takes this route.
+        if precomputed_weights is not None:
+            precomputed_weights = apply_traded_universe(
+                precomputed_weights,
+                prices,
+                strategy.get("signal") or {},
+                case_study=case_study,
+            )
 
     # A price panel that does not cover the predictions does not reduce a
     # vectorized run, it just makes the parameter read as if it did - see
