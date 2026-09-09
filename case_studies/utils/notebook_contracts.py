@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
@@ -323,26 +322,6 @@ def prediction_members_in_force(
     return members, notes
 
 
-def _declared_expected_rows(spec_json: str | None) -> int | None:
-    """How many prediction rows a training run declared its inputs let it score.
-
-    ``None`` where the run recorded no expectation, which leaves the caller comparing
-    against the feature panel instead. A malformed or partial spec is read as no
-    expectation rather than as zero: zero would pass every member unconditionally.
-    """
-    if not spec_json:
-        return None
-    try:
-        spec = json.loads(spec_json)
-    except (TypeError, ValueError):
-        return None
-    expected = ((spec or {}).get("computation") or {}).get("expected_prediction_keys") or {}
-    n_rows = expected.get("n_rows")
-    if not isinstance(n_rows, int) or n_rows <= 0:
-        return None
-    return n_rows
-
-
 def undercovered_prediction_members(
     root: Path,
     members: Iterable[str],
@@ -391,47 +370,44 @@ def undercovered_prediction_members(
         # Selecting it here raised `sqlite3.OperationalError` on every populated registry,
         # which is every call that had anything to check.
         rows = db.execute(
-            f"""SELECT p.prediction_hash, p.split, t.label, t.family, t.config_name, t.spec_json
+            f"""SELECT p.prediction_hash, p.split, t.label, t.family, t.config_name
                 FROM prediction_sets p JOIN training_runs t ON t.training_hash = p.training_hash
                 WHERE p.prediction_hash IN ({placeholders})""",
             wanted,
         ).fetchall()
 
+    # The feature panel, not each run's own `expected_prediction_keys`. A run declares,
+    # before it fits, which keys its key builder says it can score, and it is tempting to
+    # charge it against that instead - a sequence model cannot score a window shorter than
+    # its lookback, so its declared set is narrower than the panel by construction, and
+    # measuring it against the panel looks like charging it for the burn-in.
+    #
+    # Measured 2026-09-09 on sp500_equity_option_analytics/fwd_ret_10d/validation, against
+    # the financial panel, one set per family:
+    #
+    #     family          accountable   never scored   partially scored
+    #     linear             100.0%           1              302
+    #     gbm                100.0%           1              302
+    #     tabular_dl         100.0%           1              302
+    #     latent_factors      91.3%          72              239
+    #     deep_learning       65.0%         262               45
+    #
+    # A burn-in shows up as partially scored, and deep_learning has 45 of those. What it
+    # has is 262 of 548 symbols it never scores at all: it ranks a 286-name cross-section
+    # while gbm ranks 548, and a Sharpe from one is not comparable with a Sharpe from the
+    # other. Charging it against its own declaration would report it whole - the declared
+    # set is where the 262 symbols were dropped. It is not a stale artifact either: the
+    # runs registered after #857 put the sequence window on the calendar read the same
+    # 64.9%.
+    #
+    # This is the denominator `load_backtest_predictions` already uses for the same
+    # question, and the two must agree or the pool admits members the backtest then
+    # refuses, which surfaces as "no rankable validation backtests" three stages later.
     panel = feature_panel_keys(root)
     short: dict[str, str] = {}
-    for phash, split, label, family, config, spec_json in rows:
+    for phash, split, label, family, config in rows:
         path = root / "run_log" / "predictions" / phash / "predictions.parquet"
         if not path.is_file():
-            continue
-
-        # A run declares, before it fits anything, which keys its inputs let it score:
-        # `expected_prediction_keys` is built by the family's own key builder from the panel
-        # and the fold geometry, not from what the model chose to emit. A member that
-        # delivered all of them lost nothing, and that is the question here.
-        #
-        # Where an expectation exists it REPLACES the panel comparison rather than
-        # short-circuiting it, because it is the better denominator and not merely a faster
-        # one. For the sequence families it is the only denominator with a defensible
-        # answer: a sequence model cannot score a window that starts before its lookback or
-        # spans a gap wider than its gap policy, so its scoreable set is strictly narrower
-        # than the panel and always will be. Measured 2026-09-09 on
-        # sp500_equity_option_analytics: 143 of 947 members in force carry 65% of the
-        # panel's keys and 100% of their own, so the panel comparison drops every
-        # deep-learning member of the pool for the window builder working as specified.
-        # Falling through on a near miss would put those members back: one that delivered
-        # 649 of 650 declared rows would be judged at 64.9% of the panel and dropped for
-        # being 0.2% short of what it declared.
-        #
-        # The panel comparison below is what a run with no recorded expectation gets.
-        declared_rows = _declared_expected_rows(spec_json)
-        if declared_rows is not None:
-            delivered_rows = int(pl.scan_parquet(path).select(pl.len()).collect().item())
-            covered = delivered_rows / declared_rows
-            if covered < threshold:
-                short[phash] = (
-                    f"{case_study}/{label}/{split} {family}/{config}: {delivered_rows:,} of "
-                    f"{declared_rows:,} rows its own inputs let it score ({covered:.1%})"
-                )
             continue
 
         try:
