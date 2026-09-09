@@ -225,9 +225,12 @@ print(f"Order suggested from the correlogram: {suggestion.suggested_arima_order}
 # value, and for a stationary process that expectation decays to the unconditional mean
 # geometrically. Within a handful of steps every forecast is the same number.
 #
-# A column that is constant carries no information about anything, and its rank correlation
-# with any target is undefined. The demonstration below is worth running once so the shape
-# is familiar.
+# How fast that happens depends on the fitted persistence rather than on stationarity
+# alone, so the demonstration below prints the first and last forecasts and the spread
+# across the whole test period, against the spread of the returns the column is meant to
+# track. A column whose variation is three orders of magnitude below its target's carries
+# essentially nothing about it, and one that reaches an exactly constant vector has no rank
+# correlation at all.
 
 # %%
 static_fit = ARIMA(train["returns"], order=(1, 0, 0)).fit()
@@ -241,16 +244,24 @@ print(f"Spread of the returns it is meant to track: {test['returns'].std() * 100
 # %% [markdown]
 # ## The forecast that does vary
 #
-# The version that works refits nothing and forecasts one step at a time: at each session,
-# the model conditions on everything observed up to that session and predicts the next one.
-# The parameters stay where the training block put them, so no test observation ever
-# influences a parameter, and every prediction is conditioned on data that preceded it.
+# The version that works forecasts one step at a time: at each session, the model conditions
+# on everything observed up to that session and predicts the next one. There are two ways to
+# do that and both are causal. **Filtering** holds the parameters where the training block
+# put them and runs the state recursion forward, so no test observation influences a
+# parameter and the cost is one fit. **Refitting on an expanding window** re-estimates at
+# each step from the observations that precede it, which costs one fit per session and lets
+# the parameters follow the data. This notebook filters, because the cost of refitting a
+# hundred symbols daily is real and the parameters of a model this small barely move; a
+# series whose dynamics genuinely change would be a reason to pay it.
 #
-# `arima_one_step_forecast` is the shared implementation. Two neighbouring calls are wrong
-# in ways nothing downstream would reveal: `apply(endog)` defaults to re-estimating on the
-# array it is handed, which would fit each prediction on the block it is emitted over, and
-# `forecast(h)` continues past the end of the data rather than filtering across it. The
-# helper makes the right call and checks that the parameters did not move.
+# `arima_one_step_forecast` is the shared implementation, and it exists because two
+# neighbouring calls do something else. `apply(endog, refit=True)` re-estimates on the array
+# it is handed, which would fit every prediction on the block it is emitted over;
+# `forecast(h)` continues past the end of the data rather than filtering across it, so it
+# returns as many values as you asked for rather than one per row. The helper passes
+# `refit=False` explicitly, which is also the installed default, and then checks that the
+# parameters did not in fact move, so a changed default upstream fails loudly rather than
+# turning the column into an in-sample fit.
 
 # %%
 full_returns = spy["returns"].to_numpy()
@@ -552,9 +563,11 @@ show_plotly_with_alt(
 # 1. **A forecast is a column, and a column has to vary.** A multi-step forecast from a
 #    stationary model decays to the unconditional mean, which makes it constant, which makes
 #    it useless whatever the model's accuracy.
-# 2. **One-step-ahead means filtering, not refitting.** Filtering a series under parameters
-#    fitted earlier is causal and cheap; refitting at each step to produce the same column
-#    would fit every value on the block it is emitted over.
+# 2. **One-step-ahead is a horizon, not a parameter policy.** Filtering under fixed
+#    parameters and refitting on an expanding window are both causal and differ in cost and
+#    in whether the parameters follow the data. What is not causal is refitting on a window
+#    that includes the value being predicted, which is what an unqualified `apply` or a
+#    whole-sample fit does.
 # 3. **An information criterion and an information coefficient measure different things on
 #    different blocks**, and a model can lead on one and not the other. Select on the
 #    criterion, which reads the training block, and report the coefficient.
