@@ -60,8 +60,6 @@
 # %%
 """Eigenportfolios: large-scale PCA factor extraction from US equities."""
 
-import warnings
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -70,11 +68,15 @@ from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 
-warnings.filterwarnings("ignore")
-
 from data import load_etfs, load_us_equities
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    show_with_alt,
+    zero_line,
+)
 
 # %% tags=["parameters"]
 # Production defaults (Papermill overrides for CI testing)
@@ -243,11 +245,21 @@ ax_cumulative.set_ylim(0, 100)
 ax.legend([bars, cumulative_line], ["Individual", "Cumulative"], loc="center right")
 add_message_title(
     ax,
-    f"PC1 explains {explained_var[0]:.1%} of standardized-return variance",
-    subtitle=f"The first five components explain {cumulative_var[4]:.1%}",
+    "Variance explained per principal component",
+    subtitle="Individual share on the left axis, cumulative on the right",
 )
-
-fig.show()
+show_with_alt(
+    fig,
+    "A bar chart with component number on the horizontal axis. Each bar is that "
+    "component's own share of standardized-return variance, read against the left "
+    "vertical axis in percent, and a line over the bars gives the running cumulative "
+    "share against a separate right axis, also in percent. The first bar is far taller "
+    "than the rest.",
+)
+print(
+    f"Variance explained: PC1 {explained_var[0]:.1%}, "
+    f"first five cumulatively {cumulative_var[4]:.1%}"
+)
 
 # %% [markdown]
 # ## 7. Eigenportfolio Loadings
@@ -282,10 +294,17 @@ zero_line(ax, axis="x")
 ax.set_xlabel("Gross-normalized portfolio weight (%)")
 add_message_title(
     ax,
-    "PC1 is a broad long market portfolio, not a beta estimate",
-    subtitle="Ten smallest and ten largest raw-return-space weights",
+    "Largest and smallest PC1 eigenportfolio weights",
+    subtitle="Ten of each, in raw-return space, gross exposure normalised to one",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A horizontal bar chart of twenty stock tickers, the ten with the smallest PC1 "
+    "weight and the ten with the largest, ordered from smallest at the bottom. The "
+    "horizontal axis is the gross-normalised portfolio weight in percent, with a line "
+    "at zero; bars are coloured red where the weight is negative and navy where it is "
+    "positive.",
+)
 
 # %% [markdown]
 # **Interpretation**: PC1 weights are predominantly positive, confirming its role as a broad
@@ -393,20 +412,28 @@ for row in range(sector_loadings.shape[0]):
 fig.colorbar(image, ax=ax, label="Mean standardized-space loading")
 add_message_title(
     ax,
-    "PC2 is a resource axis; PC3 is defensive-cyclical",
+    "Mean component loading by sector",
     subtitle="Full-sample ETF-correlation sector proxies",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A heatmap with sector on the vertical axis and component on the horizontal, each cell the "
+    "mean loading of that sector's stocks on that component, printed in the cell as well as "
+    "shaded on a diverging red-to-blue scale centred at zero. A colour bar gives the scale.",
+)
 
 # %% [markdown]
-# **Finding**: PC1 loads positively across all sectors with tightly clustered values
-# (0.041–0.056), reflecting the broad market factor. PC2 is dominated by Energy
-# (+0.107) and Materials (+0.046) versus Financials (-0.045), Discretionary (-0.026), and
-# Staples (-0.026), a commodity / cyclical-resource axis rather than the growth-vs-defensive
-# rotation that one might expect. The conventional defensive-vs-cyclical pattern instead
-# appears in PC3, with Utilities (+0.134), Staples (+0.084), and Healthcare (+0.051) on the
-# defensive side and Financials (-0.056), Energy (-0.017), and Materials (-0.013) on the
-# cyclical side. This ordering of factor interpretation is universe- and period-specific:
+# **Reading it**: take one column at a time and ask two questions. Do the sectors all
+# fall on the same side of zero, or does the column split them? A column with one sign
+# throughout is a common direction; a column that splits them is a contrast, and the
+# sectors at its two ends say what the contrast is between.
+#
+# The first component is the common direction here, and the cells are printed so the
+# clustering is checkable rather than asserted. The later components are contrasts, and
+# which contrast lands on which component is not fixed - the components are ordered by
+# variance, so a contrast that happens to be large in this sample outranks one that is
+# not, and reading a familiar name onto a component number is the mistake this section
+# is guarding against. This ordering is universe- and period-specific:
 # on a 2006–2018 top-500 US equity panel, commodity exposure dominates PC2 because
 # Energy and Materials returns share a strong common driver outside the broad market.
 # Higher-order components capture progressively more nuanced sector tilts.
@@ -449,10 +476,15 @@ ax.legend(loc="upper left")
 ax.axhline(y=1, color=COLORS["neutral"], linestyle="--", alpha=0.5)
 add_message_title(
     ax,
-    "PC1 captures the broad market path; higher components rotate around zero drift",
+    "Cumulative return of each eigenportfolio",
     subtitle="In-sample gross-normalized eigenportfolio returns, 2006-2018",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A line chart of the growth of one dollar against date, one line per component, on a shared "
+    "axis with a dashed line at one. The legend names each component with its share of variance "
+    "explained.",
+)
 
 # %% [markdown]
 # **Finding**: PC1 tracks the broad equity market because its raw-return-space weights are
@@ -494,9 +526,15 @@ print(f"Correlation(PC1, Equal-Weight Market): {market_corr:.4f}")
 print(f"PC1 variance explained: {explained_var[0]:.1%}")
 
 # %% [markdown]
-# A correlation above 0.90 confirms that PC1 captures the dominant broad-market mode in this
-# sample. Its PCA loading resembles a common-factor exposure but is not a CAPM beta or a pricing
-# statement.
+# The correlation printed above is the whole question for this section: it says how much
+# of the first eigenportfolio is the equal-weight market and how much is something the
+# equal-weight portfolio does not already give you. Read it before reading any
+# interpretation of PC1 elsewhere in the notebook.
+#
+# Whatever it says, a PCA loading is a common-factor exposure and not a CAPM beta. Beta
+# is defined against a prespecified market portfolio and estimated by regression; this
+# is an eigenvector of a sample covariance matrix. Neither is a statement about whether
+# the exposure is priced.
 
 # %% [markdown]
 # ## 12. Hierarchical PCA (HPCA)
@@ -577,10 +615,15 @@ for row in range(hpca_loadings.shape[0]):
 fig.colorbar(image, ax=ax, label="Cross-sector loading")
 add_message_title(
     ax,
-    "HPCA1 is broad; later components express named sector contrasts",
-    subtitle=f"First-stage factors from {len(valid_sectors)} ETF-proxy sectors",
+    "First-stage HPCA loadings by sector",
+    subtitle="First-stage factors from the ETF-proxy sectors listed on the vertical axis",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A heatmap with sector on the vertical axis and first-stage HPCA component on the horizontal, "
+    "each cell the cross-sector loading printed in the cell and shaded on a diverging red-to-blue "
+    "scale centred at zero, with a colour bar.",
+)
 
 # %% [markdown]
 # **Finding**: HPCA produces cross-sector factors with clear economic interpretation.
@@ -640,10 +683,15 @@ zero_line(ax, axis="x")
 ax.set_xlabel("AR(1) slope")
 add_message_title(
     ax,
-    "Sample residuals show negligible one-day persistence",
+    "One-day AR(1) slope of each seeded stock's residual",
     subtitle="Five seeded stocks; full-sample diagnostic, not a tradable mean-reversion estimate",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A horizontal bar chart with one bar per seeded stock, its length the AR(1) slope of that "
+    "stock's residual series, against a dashed line at zero. Bars are red where the slope is "
+    "negative and navy where it is positive.",
+)
 
 # %% [markdown]
 # **Interpretation**: Slopes near zero indicate little one-day residual persistence in this
@@ -693,10 +741,14 @@ ax.set_ylabel("Share of total variance (%)")
 ax.set_xlabel("Risk component")
 add_message_title(
     ax,
-    f"PC1 explains {decomp.loc['PC1', '% of Total Var']:.1f}% of seeded-portfolio variance",
+    "Share of the seeded portfolio's variance by risk component",
     subtitle="In-sample decomposition of an equal-weight 20-stock portfolio",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A bar chart with one bar per risk component and a final bar for the residual, each bar the "
+    "share of the seeded portfolio's total variance in percent.",
+)
 
 # %% [markdown]
 # **Finding**: The market factor (PC1) dominates portfolio risk, explaining
@@ -756,15 +808,20 @@ print(
 # instability. The absolute diagnostic treats $v$ and $-v$ as equivalent; values below 0.8 then
 # flag rotations or component swaps that a sign correction alone cannot repair.
 
-# %%
-# Procrustes rotation: align each window's factor basis to the preceding aligned basis.
+# %% [markdown]
+# ### Aligning each window's basis to the one before it
 #
-# Each `loading_history[t]` has shape (K, N), components by assets. The factor basis
-# is the transpose: B_t = loading_history[t].T with shape (N, K). Procrustes alignment
-# in factor space solves
-#     min_{R: R^T R = I_K}  || B_t R - B_{t-1} ||_F
-# whose closed-form solution is R = U V^T from SVD of (B_t^T B_{t-1}). The resulting R
-# is K by K: a rotation in the K-dimensional factor space, not N by N.
+# Procrustes rotation removes the coordinate ambiguity. Each `loading_history[t]` has
+# shape (K, N), components by assets, so the factor basis is its transpose $B_t$ with
+# shape (N, K). Alignment in factor space solves
+#
+# $$\min_{R:\; R^\top R = I_K} \; \lVert B_t R - B_{t-1} \rVert_F$$
+#
+# whose closed-form solution is $R = UV^\top$ from the SVD of $B_t^\top B_{t-1}$. Note the
+# shape of $R$: it is $K \times K$, a rotation within the K-dimensional factor space, not
+# an $N \times N$ rotation of the assets.
+
+# %%
 #
 # The coordinate rotation must also be applied to factor scores and factor covariance before
 # downstream use; here it is only a loading-stability diagnostic.
@@ -809,15 +866,21 @@ for ax in axes:
 axes[1].set_xlabel("Window end date")
 add_message_title(
     axes[0],
-    "Raw eigenvectors combine sign flips with structural rotation",
+    "Signed cosine between adjacent windows, raw eigenvectors",
     subtitle="Trailing 252-day windows, re-estimated every 21 observations",
 )
 add_message_title(
     axes[1],
-    "Adjacent-window Procrustes removes coordinate ambiguity",
+    "Signed cosine between adjacent windows, after Procrustes alignment",
     subtitle="Remaining departures from 1 reflect changes in the top-five factor subspace",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis of window end dates. Each plots the signed cosine "
+    "between a component's eigenvector in adjacent windows, one line per component, on a vertical "
+    "axis from minus one to one with reference lines at zero and at the agreement threshold. The "
+    "upper panel uses the raw eigenvectors and the lower the Procrustes-aligned ones.",
+)
 
 # %% [markdown]
 # **Reading the figure**: The Procrustes rotation is a $K \times K$ orthogonal transform in
@@ -943,7 +1006,7 @@ axes[0].set_ylabel("Eigenvalue (log scale)")
 axes[0].legend()
 add_message_title(
     axes[0],
-    f"{n_above_edge} components clear the edge; the model retains {n_signal}",
+    "Eigenvalue spectrum against the Bai-Ng informed edge",
     subtitle="Top 20 eigenvalues; blue retained, amber above edge but beyond the five-factor cap",
 )
 axes[1].bar(
@@ -955,10 +1018,17 @@ axes[1].set_yscale("log")
 axes[1].set_ylabel("Covariance condition number (log scale)")
 add_message_title(
     axes[1],
-    f"Diagonal residual shrinkage changes conditioning by {standard_condition / two_stage_condition:.1f}x",
+    "Covariance condition number, sample against two-stage",
     subtitle="Numerical conditioning is a diagnostic, not out-of-sample validation",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels. The upper is a bar chart of the leading eigenvalues on a logarithmic "
+    "axis against component number, coloured by whether the component is retained, with a dashed "
+    "horizontal line at the informed edge. The lower is a two-bar chart comparing the covariance "
+    "condition number of the sample estimate against the two-stage estimate, also on a "
+    "logarithmic axis.",
+)
 
 # %% [markdown]
 # **Finding**: The as-of-end-date estimate separates fast residual volatility from a slowly
@@ -970,12 +1040,15 @@ fig.show()
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Market dominance**: the gross-normalized PC1 portfolio correlates 0.99 with the equal-weight
-#    return in this sample. This is a descriptive market mode, not CAPM beta or a risk-premium claim
-# 2. **Sector interpretability is universe-specific**: On this 2006–2018 top-500 panel,
-#    PC2 is a commodity / cyclical-resource factor (Energy +0.107, Materials +0.046 vs
-#    Financials, Discretionary, Staples negative); the conventional defensive-vs-cyclical
-#    rotation appears in PC3 (Utilities, Staples, Healthcare positive vs Financials, Energy,
+# 1. **The first eigenportfolio is a market mode, and the correlation printed above says
+#    how closely.** It is a description of covariance, not a CAPM beta and not a claim
+#    that the direction is priced; neither is tested here.
+# 2. **Which contrast lands on which component is a property of the sample.** The
+#    components are ordered by variance, so a contrast that happens to be large in this
+#    universe and period outranks one that is not, and the heatmap above is where to
+#    check what each column actually holds before naming it. On this panel the
+#    conventional defensive-versus-cyclical rotation does not appear where a reader
+#    might expect it (Utilities, Staples, Healthcare positive against Financials, Energy,
 #    Materials negative). The labeling depends on which common drivers dominate after the
 #    market is removed
 # 3. **HPCA improves labeling**: two-step hierarchical PCA exposes named sector contrasts, while
@@ -995,7 +1068,7 @@ fig.show()
 # final as-of-end-date covariance example is a risk-estimation adapter, still not a return forecast.
 # The two-step framework (Figure 14.9) treats fitted factors and loadings as inputs to a Stage 2
 # forecaster that predicts factor premia, then a Stage 3 mapper that turns the forecast back into
-# per-asset signals. PCA plus the simplest Stage 2 (sample mean) collapses to per-asset historical
+# per-asset signals. PCA plus the simplest Stage 2 (sample mean) reduces to per-asset historical
 # mean, useful as a baseline but not a meaningful forecaster. The next-tier Stage 2 forecasters (AR(1),
 # EWMA, ML) are demonstrated in [`04_ipca`](04_ipca.ipynb).
 #
