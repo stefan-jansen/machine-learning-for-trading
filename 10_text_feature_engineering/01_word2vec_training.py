@@ -14,48 +14,62 @@
 # ---
 
 # %% [markdown]
-# # Word2Vec: Training Embeddings from Financial Text
+# # Word2Vec: what a word's neighbors can and cannot tell you
 #
-# **Chapter 10: Text Feature Engineering**
-# **Section Reference**: See Section 10.2 for embedding theory and distributional hypothesis
+# **Chapter 10: Text feature engineering**
+# **Section reference**: Section 10.2, on the distributional hypothesis and Word2Vec
 #
 # **Docker image**: `ml4t-py312`
 #
-# > **Docker required**: This notebook uses `gensim`, which has no Python 3.14 support.
-# > Run with:
+# > **Docker required**: this notebook uses `gensim`, which does not build against the
+# > Python version the rest of the repository runs on. Run it with:
 # > ```bash
 # > docker compose --profile py312 run --rm py312 python 10_text_feature_engineering/01_word2vec_training.py
 # > ```
 #
-# ## Purpose
-# This notebook demonstrates how Word2Vec learns word embeddings from financial text.
-# Understanding the training process illuminates why the distributional hypothesis
-# works - and why the same principle extends to asset embeddings (stocks as words,
-# portfolios as documents).
+# ## What this notebook is for
 #
-# ## Learning Objectives
-# After completing this notebook, you will be able to:
-# - Train Word2Vec models using gensim (Skip-gram and CBOW)
-# - Understand hyperparameters: window size, embedding dimension, negative sampling
-# - Evaluate embeddings using word analogies
-# - Visualize learned embeddings with t-SNE
-# - Compare custom-trained vs pre-trained embeddings
-# - Connect Word2Vec mechanics to asset embedding intuition
+# Word2Vec turns one idea into a number: a word is described by the words it appears next
+# to. The idea is worth understanding twice over, because Chapter 10 applies exactly the
+# same machinery to portfolios, where a stock is described by the stocks held alongside it.
+#
+# This notebook trains the model on a small corpus of financial sentences and then asks
+# what the resulting vectors know. The answer is more interesting than a demonstration
+# that it works: co-occurrence puts words used in the same sentences close together, and
+# the words a financial writer uses in the same sentence as `profit` include `loss`. What
+# the model learns is topic, and polarity is not topic.
+#
+# ## Learning objectives
+#
+# After working through this notebook you will be able to:
+#
+# - Train a Word2Vec model on your own sentences and say what each of its five main
+#   settings changes about the result.
+# - Read a nearest-neighbor table as evidence about what the model measures, rather than
+#   as a list of synonyms.
+# - Show why a model built from co-occurrence places opposites next to each other, and
+#   name the cases where that makes it the wrong feature.
+# - Compare a model trained on a few thousand domain sentences against one trained on
+#   billions of general ones, and say what each has that the other does not.
 #
 # ## Prerequisites
-# - Section 10.2 of the chapter (distributional hypothesis, Word2Vec, GloVe).
-# - Familiarity with token-level NLP terminology (vocabulary, context window).
 #
-# ## Related Notebooks
-# - `02_asset_embeddings.py` - same Skip-gram machinery applied to 13F portfolios
+# - Section 10.2 of the chapter.
+# - A vocabulary is the set of distinct tokens a model keeps; a context window is the
+#   number of words on each side that count as a word's neighbors. Nothing else is assumed.
+#
+# ## Related notebooks
+#
+# - `02_asset_embeddings.py` - the same Skip-gram machinery applied to 13F portfolios
 # - `03_sentiment_evolution.py` - compares static embeddings to TF-IDF and Transformers
 
 # %%
-"""Word2Vec: Training Embeddings from Financial Text - train and evaluate word embeddings on financial text."""
+"""Train Word2Vec on financial sentences and read what the vectors encode."""
 
 import contextlib
 import io
 import json
+import re
 import warnings
 from collections import Counter
 
@@ -69,9 +83,13 @@ from sklearn.manifold import TSNE
 from data import load_financial_phrasebank as load_financial_phrasebank_canonical
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
-warnings.filterwarnings("ignore")
+# gensim builds its Cython extensions against an older NumPy ABI and imports `scipy.linalg`
+# through a path scipy has deprecated. Both are import-time and neither can report a problem
+# with this notebook's own arithmetic. Everything else stays visible.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="gensim")
+warnings.filterwarnings("ignore", category=UserWarning, module="gensim")
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides for CI
@@ -99,31 +117,30 @@ CONFIG = {
     "pretrained_comparison": "glove-wiki-gigaword-100",
 }
 
-print("=" * 70)
-print("EXPERIMENT CONFIGURATION")
-print("=" * 70)
 print(json.dumps(CONFIG, indent=2))
-print("=" * 70)
 
 
 # %% [markdown]
-# ## The Core Insight: Distributional Hypothesis
+# ## The one assumption
 #
-# **"You shall know a word by the company it keeps."** - J.R. Firth (1957)
+# "You shall know a word by the company it keeps," in J. R. Firth's 1957 phrasing. Word2Vec
+# turns that into an optimization: two words that appear beside the same other words are
+# pushed toward the same vector. There are two ways to set up the prediction and they differ
+# only in direction. **Skip-gram** is given a word and predicts its neighbors; **CBOW** is
+# given the neighbors and predicts the word.
 #
-# Word2Vec operationalizes this: words appearing in similar contexts get
-# similar vector representations. The model learns by predicting:
-#
-# - **Skip-gram**: Given a word, predict surrounding context words
-# - **CBOW**: Given context words, predict the center word
-#
-# Both approaches push co-occurring words closer in embedding space.
+# The assumption is doing more work than it looks like. It defines similar to mean *used in
+# the same places*, and that is not the same as *means the same thing*. Where a corpus uses
+# two opposite words in the same sentence frames, the model has been told they are similar,
+# and it will say so. The rest of this notebook is largely about that gap.
 
 # %% [markdown]
-# ## Load Financial Text Data
+# ## The corpus
 #
-# We use the Financial PhraseBank dataset - sentences from financial news
-# labeled for sentiment. This provides domain-specific vocabulary.
+# The Financial PhraseBank is a few thousand sentences from financial news, each labeled for
+# sentiment by human annotators. The `sentences_allagree` subset keeps only the sentences
+# every annotator scored the same way, which is the cleanest and the smallest of the four.
+# Its size is the point of the comparison later on: this is a domain corpus, not a large one.
 
 
 # %%
@@ -139,12 +156,16 @@ print(f"Loaded {len(df):,} sentences")
 df.head()
 
 
-# %%
-# Simple tokenization for Word2Vec training
-def tokenize(text: str) -> list[str]:
-    """Basic tokenization: lowercase, split on whitespace, remove punctuation."""
-    import re
+# %% [markdown]
+# Tokenization here is deliberately the simplest thing that works: lowercase, drop
+# punctuation, split on whitespace, and discard single characters. Note what it does *not*
+# do, because it shapes every result below: it keeps numbers. A corpus of earnings sentences
+# is full of them, and they will compete with words for the model's attention.
 
+
+# %%
+def tokenize(text: str) -> list[str]:
+    """Lowercase, strip punctuation, split on whitespace, drop single characters."""
     text = text.lower()
     text = re.sub(r"[^\w\s]", " ", text)
     tokens = text.split()
@@ -158,8 +179,14 @@ print(f"Total tokens: {sum(len(s) for s in sentences):,}")
 print("\nSample tokenized sentence:")
 print(sentences[0])
 
+# %% [markdown]
+# The fifteen most frequent tokens, before `min_count` removes anything. Function words lead,
+# as they do in any corpus. What is worth noticing is how high `eur` and `mn` sit: currency
+# and magnitude markers are among the most common tokens in this corpus, and the numbers they
+# introduce are in the vocabulary too.
+
+
 # %%
-# Vocabulary analysis: raw token frequency before any min_count filter.
 all_tokens = [t for s in sentences for t in s]
 token_counts = Counter(all_tokens)
 print(f"Distinct tokens before min_count filter: {len(token_counts):,}")
@@ -173,20 +200,25 @@ vocab_freq = pl.DataFrame(
 vocab_freq
 
 # %% [markdown]
-# ## Training Word2Vec
+# ## Training
 #
-# Key hyperparameters:
-# - **vector_size**: Embedding dimensionality (100-300 typical)
-# - **window**: Context window size (5 is common)
-# - **min_count**: Ignore rare words (5-10)
-# - **sg**: 1 for Skip-gram, 0 for CBOW
-# - **negative**: Number of negative samples (5-20)
+# Five settings decide what comes out, and each answers a different question:
+#
+# - `vector_size` is how many numbers describe a word. More capacity needs more text to fill
+#   it; 100 to 300 is the usual range and this corpus does not justify the top of it.
+# - `window` is how many words on each side count as neighbors. A small window learns which
+#   words are interchangeable in a phrase; a large one learns which words share a topic.
+# - `min_count` drops words seen fewer than this many times, because a handful of occurrences
+#   cannot locate a vector.
+# - `sg` picks the direction of the prediction: 1 for Skip-gram, 0 for CBOW.
+# - `negative` is how many random words each update pushes *away*, which is what keeps the
+#   optimization from collapsing every vector onto one point.
+#
+# `workers=1` is not a performance choice. More than one worker means the OS decides the
+# order updates are applied in, and the result stops being reproducible from the seed.
+
 
 # %%
-# Train Word2Vec model
-# Note: workers > 1 introduces non-determinism due to OS thread scheduling.
-# Results may vary slightly between runs even with fixed seed.
-# CONFIG uses workers=1 for reproducibility (slower but deterministic).
 print("Training Word2Vec (Skip-gram)...")
 
 w2v_config = CONFIG["word2vec"]
@@ -207,9 +239,10 @@ print(f"Embedding shape: ({len(model.wv)}, {model.wv.vector_size})")
 
 
 # %% [markdown]
-# ## Word Similarity
+# ## What the neighbors actually are
 #
-# The most direct test of embeddings: do similar words have similar vectors?
+# The most direct question to ask a set of embeddings is which words each one sits next to.
+# Read the table below as evidence about what the model measures, not as a thesaurus.
 
 
 # %%
@@ -230,19 +263,32 @@ probe_words = ["profit", "loss", "revenue", "growth", "shares", "market"]
 similar_words_frame(probe_words, top_n=5).pivot(values="neighbor", index="rank", on="probe")
 
 # %% [markdown]
-# ## Word Analogies: Vector Arithmetic
+# Two things in that table are the notebook's whole argument.
 #
-# A famous property of Word2Vec: semantic relationships can be expressed
-# as vector arithmetic. The classic example:
+# **The nearest neighbor of `profit` is `loss`, and the nearest neighbor of `loss` is
+# `profit`.** They are not similar in meaning; they are maximally opposite. But a sentence
+# reporting one is written almost identically to a sentence reporting the other - "operating
+# profit rose to EUR ... mn" against "operating loss narrowed to EUR ... mn" - so their
+# neighbors are the same words and co-occurrence has no way to tell them apart. This is not
+# a defect in the training run; it is what the distributional hypothesis says, applied
+# honestly.
 #
-# **king - man + woman ≈ queen**
-#
-# Let's test with financial relationships.
+# **Several neighbors are numbers or currency fragments.** The tokenizer kept digits and
+# `eur4`, `eur7` and bare figures are frequent enough to earn vectors of their own. They
+# attach to `profit` because they appear in the same frames it does. A production pipeline
+# either strips numeric tokens or normalizes them to a placeholder before training; this one
+# leaves them in so the effect is visible rather than hidden.
 
 # %% [markdown]
-# Analogy quality scales with corpus size. The Financial PhraseBank subset
-# used here covers a few thousand sentences, so analogy completions are noisy
-# - use them as an indicator that geometry exists, not as semantic gospel.
+# ## Analogies, and what a small corpus does to them
+#
+# The property Word2Vec is famous for is that some relationships behave like vector
+# addition: the vector for `king` minus `man` plus `woman` lands near `queen`. It is a
+# genuine property of the geometry, and it is also the part of the technique that scales
+# worst with corpus size, because it needs each of the four words to be well located.
+#
+# On a few thousand sentences they are not. Read the completions below as a check on whether
+# the arithmetic is even defined here, not as an answer to the analogy.
 
 
 # %%
@@ -283,15 +329,18 @@ analogy_triplets = [
 analogy_frame(analogy_triplets, top_n=3)
 
 # %% [markdown]
-# ## Comparison: Custom-Trained vs Pre-trained
+# ## The same words, trained on six billion others
 #
-# Pre-trained embeddings (GloVe, fastText) are trained on massive corpora
-# but may miss domain-specific relationships. Let's compare.
+# GloVe on Wikipedia plus Gigaword sees roughly six billion tokens against this corpus's
+# forty thousand. The interesting comparison is not which is better but what each has: the
+# large model has enough text to separate words that this one confuses, and the small model
+# has read sentences about earnings that the large one has barely seen.
+#
+# The download is about 128 MB and is cached after the first run. Its progress bar streams
+# tens of thousands of lines, so it is captured rather than printed.
+
 
 # %%
-# Load pre-trained GloVe embeddings (~128MB, cached after first download).
-# The gensim downloader streams a per-chunk progress bar; suppress it so a
-# fresh-container download does not flood the notebook output with ~30k lines.
 print("Loading pre-trained GloVe embeddings (glove-wiki-gigaword-100)...")
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     glove = api.load("glove-wiki-gigaword-100")
@@ -323,19 +372,23 @@ for term in probe_terms:
 pl.DataFrame(comparison_rows)
 
 # %% [markdown]
-# ## Visualizing Embedding Space
+# ## The same finding, drawn
 #
-# We use t-SNE to project embeddings to 2D. Similar words should cluster together.
+# The neighbor table showed the effect one word at a time. Projecting a set of words to two
+# dimensions shows whether it holds across the set. Three groups go in - words a reader would
+# call positive, words they would call negative, and topical financial nouns - and the
+# question is whether the model's geometry recovers that grouping.
+#
+# t-SNE preserves which points are near which; it does not preserve distance, direction or
+# scale, so the axes carry no units and only adjacency is readable.
 
 # %%
-# Select words to visualize
 categories = {
     "positive": ["profit", "growth", "increase", "gain", "strong", "positive", "improved"],
     "negative": ["loss", "decline", "decrease", "weak", "negative", "dropped", "fell"],
     "financial": ["revenue", "earnings", "dividend", "shares", "market", "stock", "company"],
 }
 
-# Get embeddings for words in vocabulary
 words_to_plot = []
 embeddings_to_plot = []
 colors = []
@@ -356,8 +409,12 @@ for category, word_list in categories.items():
 embeddings_array = np.array(embeddings_to_plot)
 print(f"Visualizing {len(words_to_plot)} words")
 
+# %% [markdown]
+# t-SNE needs more points than its perplexity setting, so a vocabulary too small to supply
+# them skips the figure rather than drawing a misleading one.
+
+
 # %%
-# t-SNE projection (requires at least 5 samples for meaningful visualization)
 if len(words_to_plot) < 5:
     print(f"Too few words for t-SNE visualization (need at least 5, have {len(words_to_plot)})")
     print("Skipping visualization - train with more data or check vocabulary coverage")
@@ -368,93 +425,115 @@ else:
     )
     embeddings_2d = tsne.fit_transform(embeddings_array)
 
-# Plot (only if t-SNE succeeded)
 if embeddings_2d is not None:
     from matplotlib.patches import Patch
 
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=colors, s=100, alpha=0.7)
+    fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
+    ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=colors, s=60, alpha=0.8)
 
     for i, word in enumerate(words_to_plot):
-        ax.annotate(word, (embeddings_2d[i, 0], embeddings_2d[i, 1]), fontsize=10, alpha=0.9)
+        ax.annotate(word, (embeddings_2d[i, 0], embeddings_2d[i, 1]), fontsize=7, alpha=0.9)
 
-    # Legend
     legend_elements = [
-        Patch(facecolor=COLORS["positive"], label="Positive"),
-        Patch(facecolor=COLORS["negative"], label="Negative"),
-        Patch(facecolor=COLORS["blue"], label="Financial"),
+        Patch(facecolor=COLORS["positive"], label="Reader calls positive"),
+        Patch(facecolor=COLORS["negative"], label="Reader calls negative"),
+        Patch(facecolor=COLORS["blue"], label="Topical noun"),
     ]
-    ax.legend(handles=legend_elements, loc="upper right")
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=7)
 
-    ax.set_xlabel("t-SNE Dimension 1")
-    ax.set_ylabel("t-SNE Dimension 2")
-    ax.set_title("Sentiment polarity separates from financial vocabulary")
-    plt.tight_layout()
-    plt.show()
-
-# %% [markdown]
-# Even on a 2,264-sentence corpus, the Skip-gram embeddings recover the basic
-# polarity axis: positive terms (`profit`, `growth`, `gain`) cluster apart from
-# negative terms (`loss`, `decline`, `weak`). Domain nouns (`revenue`,
-# `earnings`, `dividend`) form a third cluster organised by topical context
-# rather than sentiment. The pre-trained GloVe comparison above shows where the
-# small-corpus model is unstable - `eur4` and `eur7` artefacts as profit
-# neighbours reflect tokenisation of currency amounts in the source text, not a
-# semantic relationship.
+    ax.set_xlabel("t-SNE axis 1, no units")
+    ax.set_ylabel("t-SNE axis 2, no units")
+    ax.set_title("Opposites land together, so this geometry is not polarity")
+    show_with_alt(
+        fig,
+        "A scatter of about twenty labeled words in two t-SNE dimensions, colored by whether "
+        "a reader would call them positive, negative or topical. The three colors are "
+        "interleaved rather than grouped: the closest pair in the plot is a green word and a "
+        "red one at the bottom right, a red word sits between two green ones at the top, and "
+        "the dark topical words are spread from one corner to the other with no region of "
+        "their own.",
+    )
 
 # %% [markdown]
-# ## Connection to Asset Embeddings
+# The three colors do not separate, and the figure is worth more for that than it would be
+# if they did.
 #
-# The Word2Vec training process reveals why asset embeddings work:
+# The closest pair in the plot is `profit` and `loss`, which is the neighbor table's finding
+# holding across the whole set rather than at one probe word. `weak` sits among `strong` and
+# `positive`. The topical nouns are scattered rather than grouped: `revenue` is at one edge
+# and `earnings` and `dividend` at the opposite one, which says the model has placed
+# `revenue` by the sentences it appears in rather than by what it denotes.
 #
-# | Word2Vec | Asset Embeddings |
-# |----------|------------------|
-# | Words in same sentence | Stocks in same portfolio |
-# | Co-occurrence predicts similarity | Co-ownership predicts similarity |
-# | Skip-gram: predict context from word | SVD: decompose co-occurrence matrix |
-# | Analogies: vector arithmetic | Stock substitution: similar embeddings |
+# What the geometry does encode is which words are used in the same frames. That is a real
+# and useful signal - it is what makes a nearest-neighbor lookup a good way to expand a query
+# or find a substitutable term - and it is the wrong feature for a sentiment model. A
+# classifier handed these vectors would be asked to separate two words the representation has
+# placed on top of each other.
 #
-# The mathematical machinery is identical - only the domain changes.
-# Understanding Word2Vec illuminates why institutional holdings
-# can reveal stock relationships that aren't obvious from fundamentals.
+# Two caveats on the picture itself. t-SNE run on about twenty points with a perplexity of
+# five is a crude summary of a hundred-dimensional space, and a different seed moves the
+# layout. Neither changes the finding, which is already visible in the neighbor table at full
+# dimensionality; the figure only shows that it is general rather than anecdotal.
 
 # %% [markdown]
-# ## Limitations of Static Embeddings
+# ## The same machinery, on portfolios
 #
-# Word2Vec has three structural limitations that contextual models address:
+# `02_asset_embeddings` does not adapt this technique to assets; it runs the same one on a
+# different corpus. The correspondence is exact term for term:
 #
-# 1. **Polysemy**: One vector per word, regardless of context
-#    - "Apple" (company) vs "apple" (fruit) get the same vector
+# | Here | There |
+# |---|---|
+# | A sentence | A filer's portfolio |
+# | A word in it | A stock held in it |
+# | Words sharing a sentence are pushed together | Stocks held by the same institution are pushed together |
+# | Nearest neighbors give substitutable words | Nearest neighbors give substitutable stocks |
 #
-# 2. **Out-of-vocabulary**: Cannot handle unseen words
-#    - New tickers, technical terms not in training data
+# The transfer carries this notebook's finding with it. Co-holding is not similar
+# performance any more than co-occurrence is similar meaning, and two stocks a manager holds
+# as a pair trade are held together precisely because they are expected to move apart. The
+# question to bring to the next notebook is which of those two things its embedding measures.
 #
-# 3. **No sentence understanding**: Word-level only
-#    - Can't directly classify "Net loss narrowed" as positive
+# ## What static embeddings cannot do
 #
-# These limitations motivate Transformers (Section 10.4), which learn
-# contextual embeddings where each word's vector depends on its context.
+# Four limits, in the order they cost you something:
+#
+# 1. **Opposites share contexts.** Demonstrated above. Anything that must distinguish
+#    direction - sentiment, surprise, upgrade against downgrade - needs a representation
+#    built from something other than co-occurrence alone.
+# 2. **One vector per word, whatever it meant.** `Apple` the company and `apple` the fruit
+#    are averaged into a single point, and so are `charge` the fee and `charge` the
+#    accusation.
+# 3. **Nothing to say about a word it never saw.** A ticker that listed last month, a term of
+#    art absent from the corpus, and any typo are all out of vocabulary and have no vector at
+#    all, not a poor one.
+# 4. **No unit above the word.** "Net loss narrowed" is positive and none of its three words
+#    is; there is no operation on the three vectors that recovers that.
+#
+# Section 10.4's contextual models address the first three by making a word's vector a
+# function of the sentence it appears in, and the fourth by producing a vector for the
+# sentence itself.
+#
+# ## Key takeaways
+#
+# 1. **Co-occurrence measures topic, not meaning.** The method places two words together when
+#    they are used in the same frames. Read a nearest-neighbor list as "used like this", and
+#    check the opposite of your target word before you trust it as a feature.
+# 2. **The tokenizer is part of the model.** Keeping numeric tokens put currency fragments
+#    among the neighbors of the most important word in the corpus. Decide what a token is
+#    before deciding what the vectors mean.
+# 3. **Corpus size buys precision, domain buys coverage.** A large general model separates
+#    words a small one confuses; a small domain model has read sentences the large one has
+#    not. Neither substitutes for the other, and the useful question is which failure your
+#    task can tolerate.
+# 4. **Reproducibility costs a worker.** More than one training thread means the update order
+#    is the OS's decision and the seed no longer determines the result.
 
 # %% [markdown]
-# ## Key Takeaways
-#
-# 1. **Word2Vec learns from co-occurrence**: Words in similar contexts
-#    get similar vectors - operationalizing the distributional hypothesis.
-#
-# 2. **Training is unsupervised**: No labels needed, just text.
-#    The model learns structure from co-occurrence patterns.
-#
-# 3. **Domain-specific training matters**: Financial text has different
-#    patterns than Wikipedia-custom training captures these.
-#
-# 4. **Same principle for assets**: Asset embeddings apply Word2Vec
-#    intuition to portfolios: stocks held together are similar.
-#
-# 5. **Transformers overcome limitations**: Static embeddings can't
-#    handle polysemy or out-of-vocabulary words - motivating BERT.
+# The trained model and a short summary are written to the chapter's output directory, so
+# `02_asset_embeddings` and `03_sentiment_evolution` can read them rather than retrain.
+
 
 # %%
-# Save model and results
 chapter_dir = get_chapter_dir(10)
 output_dir = chapter_dir / "output" / "word2vec"
 output_dir.mkdir(parents=True, exist_ok=True)
@@ -462,17 +541,18 @@ model.save(str(output_dir / "word2vec_financial.model"))
 print(f"Model saved to: {output_dir / 'word2vec_financial.model'}")
 
 results_file = output_dir / "results.md"
+algorithm = "Skip-gram" if w2v_config["sg"] else "CBOW"
 with open(results_file, "w") as f:
-    f.write("# Word2Vec Training Results\n\n")
-    f.write("## Model Configuration\n")
+    f.write("# Word2Vec training results\n\n")
+    f.write("## Configuration\n")
     f.write(f"- Training data: Financial PhraseBank ({len(sentences):,} sentences)\n")
     f.write(f"- Vocabulary size: {len(model.wv):,}\n")
     f.write(f"- Embedding dimension: {model.wv.vector_size}\n")
-    f.write("- Window size: 5\n")
-    f.write("- Algorithm: Skip-gram with negative sampling\n\n")
-    f.write("## Key Insight\n")
-    f.write("The distributional hypothesis (words in similar contexts are similar)\n")
-    f.write("applies equally to financial assets: stocks in similar portfolios share\n")
-    f.write("investment characteristics. Word2Vec mechanics illuminate asset embeddings.\n")
+    f.write(f"- Context window: {w2v_config['window']}\n")
+    f.write(f"- Algorithm: {algorithm} with {w2v_config['negative']} negative samples\n\n")
+    f.write("## What the vectors encode\n")
+    f.write("Co-occurrence, which is topic rather than meaning. On this corpus the nearest\n")
+    f.write("neighbor of `profit` is `loss`, because the two are reported in identical\n")
+    f.write("sentence frames. Treat a neighbor list as evidence of interchangeable usage.\n")
 
 print(f"Results saved to: {results_file}")
