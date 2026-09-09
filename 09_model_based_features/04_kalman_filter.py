@@ -643,8 +643,11 @@ display(pd.DataFrame(ic_rows))
 # Two settings control it. `DELTA` sets how much the coefficients may move per session,
 # through $\mathbf{Q} = \frac{\delta}{1-\delta}\mathbf{I}$: at the value used here the
 # coefficients move very little per session and a great deal over a year. `PAIR_OBS_VAR`
-# is the variance of the pricing error, in squared dollars, and it is set from the size of
-# the residual a fixed regression leaves rather than assumed.
+# is the variance of the pricing error, in squared dollars, and it is set from the residual
+# a fixed regression leaves rather than assumed. That regression is fitted on a burn-in
+# period at the start, and the section reports nothing inside it, because a variance read
+# off the whole pair would put later prices into the gain that produced every earlier
+# hedge ratio.
 
 
 # %%
@@ -677,6 +680,7 @@ def kalman_hedge_ratio(x: np.ndarray, y: np.ndarray, delta: float, obs_var: floa
 PAIR_SYMBOL = "QQQ"
 DELTA = 1e-3
 HEDGE_WINDOW = 60  # sessions in the rolling regression the filter is compared against
+HEDGE_BURN_IN = 252  # sessions used to set the observation variance, and reported on nothing
 
 pair = (
     etfs.filter(pl.col("symbol") == PAIR_SYMBOL)
@@ -693,10 +697,12 @@ spy_px = paired["close"].to_numpy()
 pair_px = paired["pair_close"].to_numpy()
 pair_sessions = paired["timestamp"].to_list()
 
-# The observation variance is the squared residual of one fixed regression over the whole
-# pair, which is the scale of pricing error the filter should not chase.
-static = linregress(pair_px, spy_px)
-PAIR_OBS_VAR = float(np.var(spy_px - (static.slope * pair_px + static.intercept)))
+# The observation variance is the residual variance of one fixed regression, fitted on the
+# burn-in and on nothing after it. Reading it off the whole pair would put later prices
+# into the gain that produces every earlier hedge ratio.
+burn_in = slice(0, HEDGE_BURN_IN)
+static = linregress(pair_px[burn_in], spy_px[burn_in])
+PAIR_OBS_VAR = float(np.var(spy_px[burn_in] - (static.slope * pair_px[burn_in] + static.intercept)))
 
 hedge = kalman_hedge_ratio(pair_px, spy_px, delta=DELTA, obs_var=PAIR_OBS_VAR)
 
@@ -704,8 +710,12 @@ rolling_hedge = np.full(len(spy_px), np.nan)
 for t in range(HEDGE_WINDOW, len(spy_px)):
     rolling_hedge[t] = linregress(pair_px[t - HEDGE_WINDOW : t], spy_px[t - HEDGE_WINDOW : t]).slope
 
-print(f"Static regression slope over the whole pair: {static.slope:.3f}")
+# The burn-in is the training period, so nothing computed inside it is shown or used.
+after_burn_in = np.where(np.arange(len(spy_px)) >= HEDGE_BURN_IN, 1.0, np.nan)
+
+print(f"Burn-in regression slope, fitted on {HEDGE_BURN_IN} sessions: {static.slope:.3f}")
 print(f"Observation variance set from its residual: {PAIR_OBS_VAR:,.1f} squared dollars")
+print(f"Sessions the pair section reports: {len(spy_px) - HEDGE_BURN_IN:,} of {len(spy_px):,}")
 
 # %% [markdown]
 # The spread is what is left after the hedge: the price of one asset minus the estimated
@@ -714,16 +724,18 @@ print(f"Observation variance set from its residual: {PAIR_OBS_VAR:,.1f} squared 
 # marked as extreme was extreme against the history available at the time.
 
 # %%
-spread = spy_px - hedge["beta"] * pair_px - hedge["alpha"]
+spread = (spy_px - hedge["beta"] * pair_px - hedge["alpha"]) * after_burn_in
 expanding_std = pd.Series(spread).expanding(min_periods=HEDGE_WINDOW).std().to_numpy()
 
 fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
 
 ax = axes[0]
-ax.plot(pair_sessions, hedge["beta"], linewidth=1, color=COLORS["blue"], label="Filter")
+ax.plot(
+    pair_sessions, hedge["beta"] * after_burn_in, linewidth=1, color=COLORS["blue"], label="Filter"
+)
 ax.plot(
     pair_sessions,
-    rolling_hedge,
+    rolling_hedge * after_burn_in,
     linewidth=1,
     linestyle="--",
     color=COLORS["amber"],
@@ -743,7 +755,12 @@ ax.set_ylabel("US dollars")
 ax.set_title("Spread, against two expanding standard deviations")
 
 ax = axes[2]
-ax.plot(pair_sessions, np.sqrt(hedge["uncertainty"]), linewidth=0.8, color=COLORS["slate"])
+ax.plot(
+    pair_sessions,
+    np.sqrt(hedge["uncertainty"]) * after_burn_in,
+    linewidth=0.8,
+    color=COLORS["slate"],
+)
 ax.set_ylabel("Standard deviations")
 ax.set_xlabel("Session")
 ax.set_title("How uncertain the hedge ratio is")
@@ -751,12 +768,12 @@ ax.set_title("How uncertain the hedge ratio is")
 fig.suptitle("A hedge ratio the filter revises as the pair moves")
 show_with_alt(
     fig,
-    "Three stacked panels. The top compares the filter's hedge ratio with a sixty-session "
-    "rolling regression estimate: both drift over the sample and the regression estimate "
-    "is the more jagged of the two. The middle draws the residual spread against dotted "
-    "bands at plus and minus two expanding standard deviations, which widen early and "
-    "settle. The bottom draws the standard deviation of the hedge-ratio estimate, which "
-    "falls sharply at the start and then holds roughly level.",
+    "Three stacked panels covering the sessions after the burn-in. The top compares the "
+    "filter's hedge ratio with a sixty-session rolling regression estimate: both drift "
+    "over the sample and the regression estimate swings far more widely. The middle draws "
+    "the residual spread against dotted bands at plus and minus two expanding standard "
+    "deviations, which settle within a few months. The bottom draws the standard deviation "
+    "of the hedge-ratio estimate, which declines slowly across the sample.",
 )
 
 # %% [markdown]
