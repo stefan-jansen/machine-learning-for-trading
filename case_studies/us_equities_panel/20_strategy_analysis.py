@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # Strategy Analysis for the US Equities Panel
+# # US equities panel: what the one holdout was spent on, and what it bought
 #
 # This notebook reads the immutable validation backtest set, applies the selection rule to it, and
 # resolves the holdout evaluation of whatever that rule chose. The selection rule is one sentence:
@@ -33,8 +33,11 @@
 # **Book reference**: Chapters 16-20 for signal evaluation, allocation, trading costs, risk, and
 # strategy assessment.
 #
-# **Prerequisites**: the strategy execution notebooks must have published the canonical validation
-# set, and the holdout notebooks must have registered the refit and its backtest.
+# **Prerequisites**: [`18_risk_management`](18_risk_management.ipynb) has frozen the per-label
+# validation strategy set this notebook opens, and the holdout notebooks have registered the refit
+# and its backtest.
+#
+# **What it writes**: nothing. It reads the registry, applies the selection rule and reports.
 
 # %%
 """Read-only assessment of one validation and holdout lineage."""
@@ -97,19 +100,14 @@ if validation_set.member_kind != "backtest":
 # once, and the holdout it leads to is used once - so what the ranking is taken over decides what
 # that single use buys. A set spanning `fwd_ret_1d`, `fwd_ret_5d` and `fwd_ret_21d` would rank a
 # one-day-horizon Sharpe against a twenty-one-day one and spend the holdout on a cross-horizon
-# comparison, which is not the question the funnel asks. `reference/CASE_STUDY_PIPELINE.md`
-# section 4 runs the funnel per label and every other case study compares within one label; this
-# notebook is held to the same rule. Requiring `label_artifact` to be constant across the set is how
+# comparison, which is not the question the funnel asks. Every case study in the book runs the
+# funnel once per label for that reason. Requiring `label_artifact` to be constant across the set
+# is how
 # that is enforced, and it is why the set this notebook opens is one of the per-label sets rather
 # than a union of them. `feature_artifacts` and `cv` are allowed to vary: within a label the funnel
-# ranks model families against each other, and they do not share a feature lineage.
-
-#
-# One label, many families. `label_artifact` has to be constant across the set - that is what makes
-# the ranking a within-label one - while `feature_artifacts` and `cv` may vary, because the funnel
-# ranks model families against each other and they do not share a feature lineage: `latent_factors`
-# builds `feature_artifacts` from `input_lineage["files"]` and the rest from `["artifacts"]`.
-# Requiring all three constant would reject every set the funnel actually produces.
+# ranks model families against each other, and they do not share a feature lineage -
+# `latent_factors` builds `feature_artifacts` from `input_lineage["files"]` and the rest from
+# `["artifacts"]`. Requiring all three constant would reject every set the funnel produces.
 
 # %% tags=["results"]
 CONSTANT_IDENTITY_FIELDS = {"label_artifact"}

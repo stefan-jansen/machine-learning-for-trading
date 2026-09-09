@@ -30,9 +30,11 @@
 #   confident about, so it trusts the magnitude of a prediction and not only its order.
 #   `conformal_weighted` reads the prediction's uncertainty rather than its size: it weights each
 #   name by one over the width of its prediction interval, so a name the model is less sure about
-#   gets less capital. That is the same width whose calibration
-#   [`15_model_analysis`](15_model_analysis.ipynb) checked, which is why the check there matters
-#   here.
+#   gets less capital. The width is floored at the first percentile of that date's own
+#   cross-section before the reciprocal is taken, which keeps an unusually confident name from
+#   taking the whole leg and uses no width from a later date to do it. That is the same width whose
+#   calibration [`15_model_analysis`](15_model_analysis.ipynb) checked, which is why the check
+#   there matters here.
 # - **From each stock's own volatility.** `inverse_vol` puts less into a stock that moves more, so
 #   each position contributes a similar amount of variation rather than a similar amount of money.
 #   `risk_parity` as implemented here is the same idea with a steeper exponent on volatility,

@@ -517,27 +517,35 @@ if (
     raise RuntimeError("The risk catalog is incomplete or mis-staged")
 
 # %% [markdown]
-# **Did the overlay change anything?** Each result is compared against the strategy it was laid on,
-# on the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
-# acted, because there is no other way for those numbers to move.
+# **Did the control fire, and did anything move?** Those are two questions and the catalog answers
+# both.
 #
-# A row identical on both moved neither of the two statistics compared here, and that is a weaker
-# statement than it looks. It is weaker than "changed nothing", because two different return paths
-# can share a Sharpe and a trade count while differing in total return or in drawdown. It is weaker
-# still than "never fired", because a stop can close a position the next rebalance would have
-# closed anyway, replacing one exit with an earlier one and leaving the count where it was. What
-# would settle whether a control fired is a per-control trigger count, and the backtest does not
-# surface one into the catalog today.
+# `risk_triggers` counts how many times the declared control acted during the backtest, recorded by
+# the engine as it installs each rule. It is what separates a control that fired and changed
+# nothing measurable from a control that was never installed at all: a positive count is the first,
+# a zero count the second, and a null means no control of that kind was declared for this row.
+# Reading it is what this stage owes, because a sweep of fourteen settings that all report the same
+# numbers is a finding about risk control if they fired and a defect in the wiring if they did not,
+# and nothing else on this page tells the two apart.
 #
-# **So there are three outcomes here, not two.** A row is CHANGED when either comparison is true,
-# because one difference is enough to establish the control acted. It is UNCHANGED only when both
-# are false and both were comparable. Anything else is UNKNOWN: a comparison that could not be made
-# is not evidence of sameness, and collapsing it into one would manufacture the signature this
+# The second question is whether the numbers moved, and each result is compared against the
+# strategy it was laid on across the two axes the catalog carries: the trade count and the Sharpe.
+# A row that differs on either acted; a row identical on both moved neither of those two
+# statistics, which is weaker than "changed nothing", because two different return paths can share
+# a Sharpe and a trade count while differing in total return or in drawdown. It is weaker still
+# than "never fired" - a stop can close a position the next rebalance would have closed anyway,
+# replacing one exit with an earlier one and leaving the count where it was - and that is exactly
+# the gap the trigger count fills.
+#
+# **So the movement check has three outcomes, not two.** A row is CHANGED when either comparison is
+# true, because one difference is enough to establish the control acted. It is UNCHANGED only when
+# both are false and both were comparable. Anything else is UNKNOWN: a comparison that could not be
+# made is not evidence of sameness, and collapsing it into one would manufacture the signature this
 # check exists to detect.
 
 # %% tags=["results"]
 overlay_effect = (
-    completed_risk.select("label", "backtest_hash", "sharpe", "num_trades")
+    completed_risk.select("label", "backtest_hash", "sharpe", "num_trades", "risk_triggers")
     .join(
         planned_population.select("backtest_hash", "risk", "source_backtest_hash"),
         on="backtest_hash",
@@ -563,7 +571,15 @@ overlay_effect = (
         .then(None)
         .otherwise(pl.col("sharpe") != pl.col("source_sharpe")),
     )
-    .select("label", "risk", "num_trades", "source_num_trades", "trades_moved", "sharpe_moved")
+    .select(
+        "label",
+        "risk",
+        "risk_triggers",
+        "num_trades",
+        "source_num_trades",
+        "trades_moved",
+        "sharpe_moved",
+    )
     .sort("label", "risk")
 )
 _changed = overlay_effect.get_column("trades_moved").fill_null(False) | overlay_effect.get_column(
@@ -581,6 +597,22 @@ print(
     f"laid on; {n_unchanged} match it on both compared statistics; {n_unknown} could not be "
     "fully compared"
 )
+_triggers = overlay_effect.get_column("risk_triggers")
+n_fired = int((_triggers.fill_null(0) > 0).sum())
+n_silent = int((_triggers == 0).sum())
+n_undeclared = int(_triggers.is_null().sum())
+print(
+    f"{n_fired} of {overlay_effect.height} controls fired at least once; {n_silent} were installed "
+    f"and never fired; {n_undeclared} registered no trigger count"
+)
+# A control that never fires is what C17 calls a failure rather than a finding, and it is only
+# visible here.
+if n_silent == overlay_effect.height:
+    raise RuntimeError(
+        "every declared control was installed and fired zero times, so this sweep measured "
+        "nothing about risk control; check that the declared thresholds can be reached on this "
+        "book before reading any row below"
+    )
 if n_unchanged and not n_changed and not n_unknown:
     print(
         "  No declared control moved either the trade count or the Sharpe. Neither statistic "
@@ -662,9 +694,8 @@ compatible_sets
 # sample, one strategy per label, and no correction for having looked at fourteen. A flat line
 # means the measured Sharpe did not move across the declared settings, which is weaker than it
 # sounds in two directions: two different thresholds can produce the same exits, and two different
-# return paths can share a Sharpe. It is not evidence that the controls never fired. Nothing on
-# this page can settle that, and the trigger count that would is not something the backtest
-# records.
+# return paths can share a Sharpe. It is not evidence that the controls never fired, and the
+# `risk_triggers` column above is what settles that rather than the shape of any line here.
 
 # %%
 control_axes = {
@@ -786,8 +817,9 @@ show_with_alt(
 # **Check that the overlays moved something before reading what they did.** A result matching the
 # unprotected book on both compared statistics has not been shown to change anything, and matching
 # across every declared setting is a reason to confirm the controls reach the engine rather than a
-# finding about risk control. Neither question is settled by these two columns; a per-control
-# trigger count would settle the first, and the backtest does not surface one today.
+# finding about risk control. The two compared columns do not settle it on their own; the
+# `risk_triggers` count does, and a sweep where every control was installed and fired zero times
+# stops the notebook rather than being reported as a result.
 #
 # **An overlay can only remove, so it reshapes a return distribution rather than shifting it.** It
 # truncates the left tail by closing losing positions early and truncates the right by closing
