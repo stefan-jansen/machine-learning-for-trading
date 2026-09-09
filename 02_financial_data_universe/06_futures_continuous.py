@@ -897,9 +897,9 @@ es_continuous_ratio.select(
 # the 23:00 bar, which is the opening hour of the next session in winter and its second hour in
 # summer.
 #
-# Either way it belongs to the session that is starting, not to the one that just closed, so
-# calling it a session close would be wrong in both halves of the year. It is a UTC day close.
-# The cell below measures which hour it actually lands on rather than taking that on trust.
+# In both halves of the year that bar sits inside the session starting that evening rather than
+# the session that closed that afternoon, so the accurate name for it is a UTC day close. The
+# cell below measures which hour it lands on rather than taking that on trust.
 #
 # Matching the vendor's daily convention is exactly what makes the comparison valid: both sides
 # are then the same object, and any difference is about roll logic. It is also the convention
