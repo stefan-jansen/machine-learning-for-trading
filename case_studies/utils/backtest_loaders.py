@@ -1295,6 +1295,27 @@ def load_backtest_prices_for(
             cal_per_period = _calendar_days_per_period(case_study_id, label)
             prefix_days = max(math.ceil(warmup_periods * cal_per_period), 7)
             kwargs.setdefault("start_date", (win[0] - timedelta(days=prefix_days)).isoformat())
+
+    # The warmup prefix is extra history for the universe this run trades, not a
+    # different universe. `max_symbols` keeps the entities with the most rows, so
+    # handing it the prefixed panel lets the warmup decide *which* symbols survive:
+    # a name quoted before the window but thin inside it outranks one that is only
+    # quoted inside it. Two stages of one chain then reduce to the same *count* and
+    # a different *set*, which is what `sp500_equity_option_analytics/16_risk_management`
+    # hit against a spec `14_backtest` wrote - 21 declared, 21 in the panel, different
+    # digests, and the traded-universe check stopped the run rather than register a
+    # portfolio under another one's identity.
+    #
+    # So the universe is chosen over the window the run trades, and the prefixed read
+    # is narrowed to it. Only a reduced run reaches this: production passes
+    # `max_symbols=0` and the branch is skipped.
+    if warmup_periods > 0 and win is not None and int(kwargs.get("max_symbols") or 0) > 0:
+        window_only = dict(kwargs, start_date=win[0].isoformat())
+        universe = (
+            load_backtest_prices(case_study_id, **window_only)["symbol"].unique().sort().to_list()
+        )
+        prefixed = load_backtest_prices(case_study_id, **dict(kwargs, max_symbols=0))
+        return prefixed.filter(pl.col("symbol").is_in(universe))
     return load_backtest_prices(case_study_id, **kwargs)
 
 
