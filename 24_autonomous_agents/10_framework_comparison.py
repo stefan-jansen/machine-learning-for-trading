@@ -17,7 +17,7 @@
 #
 # **Docker image**: `ml4t`
 #
-# The pipeline of NB04–NB08 was built end-to-end with plain Python classes,
+# The pipeline of notebooks 04 to 08 was built end to end with plain Python classes,
 # no orchestration framework. That choice keeps every transition visible and
 # every artifact inspectable, but it pushes the reader to write the
 # orchestration logic by hand. The agentic-framework ecosystem offers
@@ -29,7 +29,7 @@
 #
 # 1. **Native Python SDK**: direct composition of the chapter's
 #    `ResearchAgent` / `DebateAgent` / `SupervisorAgent` classes, same shape
-#    as `AIAForecaster` in NB08.
+#    as `AIAForecaster` in [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb).
 # 2. **CrewAI**: *role-prompted approximation* of the same flow. CrewAI's
 #    primitives (`Agent`, `Task`, `Crew`) drive an LLM via LiteLLM with
 #    role / goal / backstory prompts; the CrewAI variant does not wrap the
@@ -55,7 +55,9 @@
 #
 # **Book reference**: §24.5 (The Engineering Stack: Frameworks and Migration).
 #
-# **Prerequisites**: NB04-NB08 (specialist classes and forecasting pipeline used by Variants A and C).
+# **Prerequisites**: [`04_research_agent`](04_research_agent.ipynb) through
+# [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb), which build the specialist
+# classes and the pipeline that variants A and C compose.
 #
 # **Replay vs live mode**: by default (`RUN_LIVE = False`) the notebook replays a
 # pinned 2026-06-09 claude-sonnet run. It reloads the saved native and LangGraph
@@ -75,10 +77,7 @@ import inspect
 import os
 import textwrap
 import time
-import warnings
 from typing import TypedDict
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -91,32 +90,43 @@ from agent_schemas import AgentForecastArtifact
 from agent_specialists import DebateAgent, SupervisorAgent
 from agent_tools import create_search_client
 
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
+
+# %% [markdown]
+# ## Settings
+#
+# `RUN_LIVE` left at `False` replays the pinned 2026-06-09 run: the saved native and LangGraph
+# traces are reloaded, no API calls are made, and the reported figures are the ones measured
+# that day. Set it to `True` to run all three variants live against a current question, which
+# costs money and reproduces nothing.
+#
+# `N_AGENTS`, `MAX_STEPS`, `DEBATE_ROUNDS` and `SUPERVISOR_QUERIES` configure the pipeline
+# identically across the three variants, which is what makes the orchestration the thing being
+# compared. The turn budget matters more here than elsewhere: an agent that runs out of turns
+# returns the loop's no-answer value, and three of those would make a variant look decisive
+# when it had said nothing.
+#
+# `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set, and it
+# reaches variants A and C only. CrewAI drives its own LiteLLM layer.
 
 # %% tags=["parameters"]
-# RUN_LIVE=False (the default) replays the pinned 2026-06-09 claude-sonnet run:
-# the notebook reloads the saved native + LangGraph traces named below, makes no
-# API calls, and reports the genuine measured numbers, so the comparison is
-# stable and matches the chapter. Set RUN_LIVE=True (with API keys) to run all
-# three variants live against a current question; that path produces different
-# numbers and is not reproducible.
 RUN_LIVE = False
 PINNED_TRACES = {
     "native_sdk": "10_framework_comparison_20260609T150909Z_ba1855847f4c.json",
     "langgraph": "10_framework_comparison_20260609T151202Z_c8cba3007562.json",
 }
 
-LLM_PROVIDER = ""  # empty -> auto-detect; "mock" for CI (live path only)
+LLM_PROVIDER = ""
 N_AGENTS = 3
 DEBATE_ROUNDS = 2
 SUPERVISOR_QUERIES = 2
-MAX_STEPS = 5  # research-agent reasoning budget; too small a budget leaves agents at the neutral 0.5 fallback
+MAX_STEPS = 5
 
 # %% [markdown]
 # ## Setup: one question, one LLM/search pair shared across variants
 #
 # We use the pinned `CHAPTER_CONTESTED_QUESTION` (the same rate-hike question
-# NB04, NB07, and NB08 forecast), then run all three variants against it.
+# notebooks 04, 07 and 08 forecast), then run all three variants against it.
 # Holding the question fixed removes one source of variation. CrewAI still
 # changes the prompts, agent classes, search access, and client boundary, so
 # this is not a controlled runtime or forecast-quality benchmark.
@@ -146,7 +156,7 @@ print(f"Cutoff:   {question.cutoff_date}")
 #
 # Direct composition of the chapter's classes. The orchestration is plain
 # Python: a function that calls the four phases in sequence, owns its own
-# state in local variables, and returns a dict. This is the form NB08
+# state in local variables, and returns a dict. This is the form notebook 08
 # encapsulated as `AIAForecaster`.
 #
 # Three properties earn it the "default" slot:
@@ -282,15 +292,17 @@ else:
 #
 # **LLM layer**: CrewAI uses LiteLLM by default. Setting one of the
 # standard env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) is enough.
-# LiteLLM picks the provider, while the model is named via the `model=` string
-# (e.g. `"gpt-4.1-mini"`, `"anthropic/claude-sonnet-4"`,
-# `"openrouter/anthropic/claude-sonnet-4"`).
+# LiteLLM picks the provider, while the model is named via the `model=` string, which carries
+# the provider as a prefix, as in `anthropic/claude-sonnet-4` or
+# `openrouter/anthropic/claude-sonnet-4`.
+
+# %% [markdown]
+# Variant B drives CrewAI's own LiteLLM runtime, so its calls never pass through the chapter's
+# `LLMClient` and nothing captures them into a run trace. That is itself one of the
+# observability differences the notebook is about, and it is why the replay path pins this
+# variant's measured result rather than reloading it.
 
 # %%
-# Variant B drives CrewAI's own LiteLLM runtime, so it never passes through the
-# chapter's LLMClient boundary and is not captured in a RunTrace (see the
-# observability note further down). Under replay we therefore pin its genuine
-# 2026-06-09 measured result rather than reloading it from a trace.
 PINNED_CREWAI_RESULT = {
     "framework": "crewai",
     "agent_probs": [0.25, 0.25, 0.25],
@@ -809,15 +821,13 @@ else:
 print(replay_llm_calls(native_calls[:2], content_chars=600))
 
 # %% [markdown]
-# ## Side-by-side: real measurements
+# ## Side by side
 #
-# The orchestration cost we report is **statement count**, not line count.
-# `_orchestration_statements` parses each pipeline function with `ast` and
-# counts the statement nodes inside the function body. AST counting ignores
-# whitespace, comments, and line wrapping, so reformatting the source does
-# not change the reported number. The `elapsed_s` column comes from
-# `time.perf_counter` around each invocation. `ResearchAgent`, `DebateAgent`,
-# and `SupervisorAgent` are shared by Native
+# The orchestration cost is measured as a **statement count** rather than a line count. The
+# helper below parses each pipeline function with `ast` and counts the statement nodes in its
+# body, so blank lines, comments and line wrapping do not enter it and reformatting the source
+# cannot move the number. The elapsed times come from `time.perf_counter` around each
+# invocation. `ResearchAgent`, `DebateAgent` and `SupervisorAgent` are shared by Native
 # Python and LangGraph. CrewAI substitutes role-prompted agents, so its
 # notebook-owned construction helpers also count. This is a mechanically
 # defined source-size comparison, not a framework performance benchmark.
@@ -838,11 +848,9 @@ def _orchestration_statements(fn) -> int:
 
 
 # %% [markdown]
-# LangGraph's orchestration footprint is the builder plus the four node
-# functions. The chapter's `_node_research`, `_node_aggregate`,
-# `_node_debate`, `_node_supervise` are all part of the pipeline you write
-# to use LangGraph, so they count toward the variant's orchestration
-# statement total.
+# LangGraph's footprint is the graph builder plus the four node functions defined above. A node
+# is code you write in order to use the framework, so it counts toward this variant's
+# orchestration total in the same way the CrewAI agent and task constructors count toward its.
 
 # %%
 stmts_a = _orchestration_statements(native_sdk_pipeline)
@@ -900,35 +908,40 @@ rows.append(
 )
 
 comparison_df = pl.DataFrame(rows)
+comparison_df
 
 # %% [markdown]
-# Three aligned panels separate the controlled structural measure from the two
-# descriptive run outputs.
+# One panel, because only one of the three columns supports a comparison. Statement count is
+# measured the same way for every variant against the same pipeline, so a difference is a
+# difference in how much orchestration each framework asks the caller to write. The elapsed
+# times and the final probabilities stay in the table: they come from three separate runs, one
+# of which used a different model path, and drawing them side by side invites the causal
+# reading the next paragraph has to spend itself denying.
 
 # %%
-fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"])
-panels = [
-    ("statements", "Orchestration Statements"),
-    ("elapsed_s", "Elapsed Time (seconds)"),
-    ("final_p", "Final Probability of Yes"),
-]
-for ax, (column, label) in zip(axes, panels, strict=True):
-    ax.barh(
-        comparison_df["variant"],
-        comparison_df[column],
-        color=[COLORS["blue"], COLORS["amber"], COLORS["slate"]][: comparison_df.height],
-    )
-    ax.set_xlabel(label)
-    ax.set_xlim(left=0)
-    ax.invert_yaxis()
-add_message_title(
-    axes[0],
-    "Native Python uses the smallest notebook-owned orchestration surface",
-    subtitle="Runtime and probability panels are descriptive, not controlled effects",
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.barh(
+    comparison_df["variant"],
+    comparison_df["statements"],
+    color=[COLORS["blue"], COLORS["amber"], COLORS["slate"]][: comparison_df.height],
 )
-fig.tight_layout()
-fig.show()
-plt.show()
+ax.bar_label(ax.containers[0], padding=3)
+ax.set_xlabel("Orchestration statements written by the caller")
+ax.set_xlim(left=0)
+ax.invert_yaxis()
+add_message_title(
+    ax,
+    "Native Python asks the caller to write the least orchestration",
+    subtitle="Statement nodes in the pipeline functions each variant requires, counted by AST",
+)
+show_with_alt(
+    fig,
+    "Horizontal bar chart of orchestration statement counts for the three variants: "
+    + ", ".join(
+        f"{row['variant']} {row['statements']}" for row in comparison_df.iter_rows(named=True)
+    )
+    + ".",
+)
 
 # %% [markdown]
 # The statement count covers the orchestration layer, not the agent classes.
@@ -952,7 +965,7 @@ plt.show()
 # | **Orchestration shape** | function call stack | role-based agents in a `Crew` | `StateGraph` with typed nodes |
 # | **State location** | local variables | task outputs threaded by framework | explicit `TypedDict` |
 # | **Parallelism** | manual (threads / asyncio) | opt-in asynchronous tasks | conditional / parallel edges |
-# | **Checkpointing** | DIY, see NB03 | not first-class | first-class (`BaseCheckpointSaver` interface) |
+# | **Checkpointing** | write it yourself, as in notebook 03 | not first-class | first-class (`BaseCheckpointSaver`) |
 # | **LLM layer** | chapter `LLMClient` | LiteLLM (provider auto-detect) | passes through whatever the nodes use |
 # | **Debug entry point** | the line that raised | inside CrewAI's loop | `app.get_state(thread)` snapshot |
 # | **Full-trace capture** | one client wrapper | framework callbacks / verbose logs | one client wrapper |
@@ -969,23 +982,31 @@ plt.show()
 #
 # ## Key Takeaways
 #
-# 1. **Start native for this pipeline.** Plain Python has the smallest
-#    notebook-owned statement count and the most direct call stack in this
-#    implementation. That is local structural evidence, not a universal
-#    framework ranking.
-# 2. **Reach for a framework only when a real pressure justifies it.**
-#    LangGraph exposes explicit checkpointing when crash recovery becomes a
-#    requirement. CrewAI's role / goal / backstory structure is most relevant
-#    when named personas are part of the design. Pin the selected versions.
-# 3. **Variant B is not a controlled benchmark.** The CrewAI variant
-#    drives LiteLLM with role-prompted agents and does not share the
-#    chapter's specialist classes or search-tool surface, so any final-
-#    probability gap against Native or LangGraph is "different
-#    formulation," not "framework overhead."
+# 1. **Start with plain Python for a pipeline this shape.** It asks the caller to write the
+#    least orchestration and puts every failure on the line that caused it. That is structural
+#    evidence about this pipeline, not a ranking of the frameworks.
+# 2. **A framework earns its place against a named pressure, not a preference.** Crash recovery
+#    mid-run is what LangGraph's checkpoint abstraction is for; named personas with distinct
+#    charters are what CrewAI's role and goal slots are for. Without one of those pressures, the
+#    dependency and the indirection are the whole trade.
+# 3. **Ask where the run's state lives before adopting anything.** It decides what you can
+#    inspect when a run goes wrong: local variables you can print, a framework's task outputs,
+#    or a typed state object you can snapshot.
+# 4. **A framework that owns the model client owns the observability.** CrewAI drives LiteLLM
+#    directly, so nothing in this chapter's tracing sees its calls, and its variant had to be
+#    pinned rather than replayed. That is the concrete cost of the boundary moving.
+# 5. **The three final probabilities are not a benchmark of anything.** One variant changes the
+#    prompts, the agent classes and the search surface; the other two are separate samples from
+#    a stochastic model. Comparing frameworks needs a structural measure.
+#
+# **Known limitations of what is built here.** One question, one run per variant, one model.
+# The statement count is a proxy for how much a caller writes and says nothing about how much
+# there is to understand: a framework can trade statements for concepts. The elapsed times are
+# single measurements of three different call paths on one machine, and the comparison matrix
+# describes framework versions that move.
 #
 # **Next**: [`11_research_operator`](11_research_operator.ipynb) replays a
 # production-shaped operator loop against a real case-study registry.
 #
-# **Book**: §24.5 covers migration paths, the persistence / parallelism /
-# conditional-flow pressure framing, and the ecosystem-version note in
-# the depth they deserve.
+# **Book**: Section 24.5 covers migration paths, the persistence, parallelism and
+# conditional-flow pressures that justify a framework, and the ecosystem-version note.
