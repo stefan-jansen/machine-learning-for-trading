@@ -480,27 +480,35 @@ def train_nbeats(model, X_train, y_train, X_val, y_val, epochs, batch_size, lr=1
 
 
 # %% [markdown]
-# ## Train N-BEATS Interpretable
+# ## Fitting the two variants
+#
+# Both are built and trained the same way, and each is **re-seeded immediately before
+# it is constructed**. That line is easy to leave out and the reason to include it is
+# not obvious: a network's starting weights are drawn from the global random stream, so
+# a model built after another one has trained starts from wherever that training left
+# the stream. The second model's initialization would then depend on how many epochs
+# the first one happened to run before early stopping - change anything about the
+# first, and the second starts somewhere else. Re-seeding before each construction
+# breaks that coupling, so each variant's starting point depends only on `SEED`.
+#
+# It does not give the two identical weights, which is impossible here: the
+# interpretable variant's blocks emit a handful of basis coefficients where the generic
+# variant's emit a full-length vector, so they do not even have the same number of
+# parameters. What it gives is a starting point that is a property of the seed rather
+# than of the run that preceded it.
 
 # %%
-print("Training N-BEATS-I (interpretable)...")
+set_global_seeds(SEED)
 nbeats_i = NBEATS(LOOKBACK, HORIZON, HIDDEN_SIZE, N_BLOCKS, N_LAYERS, interpretable=True).to(DEVICE)
-n_params = sum(p.numel() for p in nbeats_i.parameters())
-print(f"  Parameters: {n_params:,}")
-
+print(f"N-BEATS-I: {sum(p.numel() for p in nbeats_i.parameters()):,} parameters")
 nbeats_i = train_nbeats(nbeats_i, X_train, y_train, X_val, y_val, EPOCHS, BATCH_SIZE)
 
-# %% [markdown]
-# ## Train N-BEATS Generic
-
 # %%
-print("\nTraining N-BEATS-G (generic)...")
+set_global_seeds(SEED)
 nbeats_g = NBEATS(LOOKBACK, HORIZON, HIDDEN_SIZE, N_BLOCKS, N_LAYERS, interpretable=False).to(
     DEVICE
 )
-n_params_g = sum(p.numel() for p in nbeats_g.parameters())
-print(f"  Parameters: {n_params_g:,}")
-
+print(f"N-BEATS-G: {sum(p.numel() for p in nbeats_g.parameters()):,} parameters")
 nbeats_g = train_nbeats(nbeats_g, X_train, y_train, X_val, y_val, EPOCHS, BATCH_SIZE)
 
 # %% [markdown]
