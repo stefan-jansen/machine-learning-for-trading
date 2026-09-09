@@ -334,12 +334,20 @@ comparison = (
 comparison
 
 # %% [markdown]
-# ## 6. Validation Against Quandl's Reference
+# ## 6. Validation against Quandl's reference
 #
-# Compare every row of the locally-computed adjusted close to Quandl's
-# pre-calculated value. With ~9,400 iterative backward updates, small
-# floating-point error accumulates; the published convention tolerates a
-# relative difference of about $5 \times 10^{-4}$.
+# Compare every row of the locally computed adjusted close to Quandl's pre-calculated value.
+#
+# The comparison needs a tolerance, and where the tolerance comes from decides whether the
+# comparison means anything. The adjustment is a recursion: one multiplication per trading
+# day, walking backwards. Each multiplication can lose the last bit of a double, so the two
+# series can differ by at most about the number of steps times the machine epsilon even when
+# the two implementations agree exactly on method. That product is the bound below, and
+# anything larger than it is a difference in method rather than in arithmetic.
+#
+# A tolerance picked for roundness instead - a tenth of a percent, say - would be many orders
+# of magnitude looser than that bound, and would pass an implementation that disagreed with
+# Quandl about the dividend convention entirely.
 
 # %%
 our_adj = adjusted["adj_close"].to_numpy()
@@ -347,20 +355,23 @@ quandl_adj = aapl["adj_close"].to_numpy()
 dates = adjusted["timestamp"].to_numpy()
 
 absolute_diff = np.abs(our_adj - quandl_adj)
-relative_diff = absolute_diff / quandl_adj * 100
-tolerance_pct = 0.05  # 0.05 %
+relative_diff = absolute_diff / quandl_adj
 
-print(f"Total comparisons:        {len(our_adj):,}")
-print(f"Max absolute difference:  ${absolute_diff.max():.6f}")
-print(f"Max relative difference:  {relative_diff.max():.4f}%")
-print(f"Mean relative difference: {relative_diff.mean():.6f}%")
-print(f"Median relative difference: {np.median(relative_diff):.6f}%")
+# One multiplication per row, each able to lose the last bit, plus a factor of a hundred so
+# the check is about the method rather than about the order the compiler evaluated in.
+accumulation_bound = 100 * len(our_adj) * float(np.finfo(np.float64).eps)
+
+print(f"Total comparisons:          {len(our_adj):,}")
+print(f"Max absolute difference:    ${absolute_diff.max():.2e}")
+print(f"Max relative difference:    {relative_diff.max():.2e}")
+print(f"Median relative difference: {np.median(relative_diff):.2e}")
+print(f"Accumulation bound:         {accumulation_bound:.2e}")
 print()
-if np.allclose(our_adj, quandl_adj, rtol=tolerance_pct / 100):
-    print(f"VALIDATION PASSED — within {tolerance_pct:.4f}% relative tolerance.")
+if relative_diff.max() <= accumulation_bound:
+    print("VALIDATION PASSED - the two series differ only by accumulated rounding.")
 else:
-    n_out = int((relative_diff > tolerance_pct).sum())
-    print(f"VALIDATION FAILED — {n_out} rows outside {tolerance_pct:.4f}% tolerance.")
+    n_out = int((relative_diff > accumulation_bound).sum())
+    print(f"VALIDATION FAILED - {n_out} rows differ by more than rounding can explain.")
 
 # %% [markdown]
 # Visual check — the two series overlay on the log-scale price chart, and the
@@ -380,16 +391,17 @@ ax1.legend()
 ax2 = axes[1]
 ax2.plot(dates, relative_diff, color=COLORS["blue"], linewidth=1.2, alpha=0.9)
 ax2.axhline(
-    tolerance_pct,
-    color="red",
+    accumulation_bound,
+    color=COLORS["negative"],
     linestyle="--",
-    linewidth=2,
-    label=f"Tolerance ({tolerance_pct:.4f}%)",
+    linewidth=1.5,
+    label="Accumulated-rounding bound",
 )
-ax2.set_ylabel("Relative difference (%)")
+ax2.set_yscale("log")
+ax2.set_ylabel("Relative difference")
 ax2.set_xlabel("Date")
 ax2.set_title("What is left is floating-point drift, not a difference in method")
-ax2.set_ylim(0, max(relative_diff.max() * 1.1, tolerance_pct * 2))
+ax2.set_ylim(relative_diff[relative_diff > 0].min() / 2, accumulation_bound * 2)
 ax2.legend()
 
 show_with_alt(
