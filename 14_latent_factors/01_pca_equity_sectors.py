@@ -59,7 +59,6 @@
 # %%
 """PCA on Sector ETFs - Variance decomposition and bootstrap loading stability."""
 
-import warnings
 from datetime import date
 
 import matplotlib.pyplot as plt
@@ -73,11 +72,16 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-warnings.filterwarnings("ignore")
-
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    show_plotly_with_alt,
+    show_with_alt,
+    zero_line,
+)
 
 # %% tags=["parameters"]
 # Production defaults (Papermill overrides for CI testing)
@@ -168,10 +172,16 @@ ax.set_xlabel("Sector ETF")
 ax.set_ylabel("Daily return (%)")
 add_message_title(
     ax,
-    "Energy has the widest central daily-return distribution",
-    subtitle="Sector ETF returns, 2010-2024; outliers hidden to compare central ranges",
+    "Daily return distribution by sector ETF",
+    subtitle="Outliers hidden so the central ranges are comparable",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A box plot with one box per sector ETF, showing the distribution of its daily "
+    "returns in percent, with outliers hidden and a dashed line at zero. The width of "
+    "each box is that sector's interquartile range, so the boxes can be compared "
+    "against each other for scale.",
+)
 
 # %% [markdown]
 # ## 3. PCA on Sector Returns
@@ -212,6 +222,10 @@ factors_df = pd.DataFrame(factors, index=returns.index, columns=factor_cols)
 
 # %%
 cum_var = np.cumsum(pca.explained_variance_ratio_)
+for i, (share, cumulative) in enumerate(
+    zip(pca.explained_variance_ratio_, cum_var, strict=True), 1
+):
+    print(f"PC{i}: {share:6.1%} of variance, {cumulative:6.1%} cumulative")
 
 # %% [markdown]
 # ### Scree Plot
@@ -247,15 +261,23 @@ ax.set_xticks(range(1, n_components + 1))
 ax.legend()
 add_message_title(
     ax,
-    f"PC1 captures {pca.explained_variance_ratio_[0]:.0%}; the first two capture {cum_var[1]:.0%}",
-    subtitle="Correlation-PCA on nine sector ETFs, 2010-2024",
+    "Variance explained per principal component",
+    subtitle="Correlation-PCA on the sector ETF panel",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A bar chart of the share of variance each principal component explains, with a "
+    "line over it giving the running cumulative share. Both axes are in percent, and "
+    "the components are ordered from largest to smallest.",
+)
 
 # %% [markdown]
-# **Finding**: The first two components capture about 80% of total variance. PC1 (the
-# market factor) dominates at ~71%, with diminishing returns beyond PC3. This steep drop-off
-# is typical for sector ETFs, where broad market risk accounts for most co-movement.
+# **Reading it**: the height of the first bar against the rest is the question. One
+# component carrying most of the variance is what a market factor looks like in a
+# sector panel - the sectors move together, and how much they move together is the
+# first bar. Where the cumulative line flattens is where the remaining components stop
+# adding structure and start describing noise. The printed shares above the chart are
+# the numbers; the shape is what the figure is for.
 
 # %% [markdown]
 # ## 4. Loadings Interpretation
@@ -413,23 +435,33 @@ for component_idx, color in enumerate((COLORS["blue"], COLORS["copper"])):
     )
 
 # %% [markdown]
-# Apply shared loading units and a message-first title before rendering both components.
+# Both panels get the same loading range, so an interval's width means the same thing
+# on each and the two components can be compared by eye.
 
 # %%
 fig.update_layout(
-    title="Market loadings are stable; rotation exposures carry more uncertainty",
-    width=950,
+    title="Bootstrap loading intervals for the first two components",
     height=500,
 )
 loading_limit = 1.1 * max(abs(loading_lower.min()), abs(loading_upper.max()))
 fig.update_xaxes(title_text="Loading", range=[-loading_limit, loading_limit])
 fig.update_yaxes(title_text="Sector")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels, one per component, sharing a loading axis. Each row is a sector, "
+    "drawn as its bootstrap point estimate with a horizontal confidence interval, "
+    "sorted by loading, against a dashed vertical line at zero. The width of an "
+    "interval is how much the resamples disagreed about that sector's loading.",
+)
 
 # %% [markdown]
-# **Finding**: All sectors load positively on PC1, confirming its role as the market factor. PC1
-# intervals cluster tightly, while several PC2 intervals are visibly wider. Rotation exposures
-# therefore deserve more caution than the dominant market direction.
+# **Reading it**: two things are visible at once. Whether every sector falls on the same
+# side of zero on a component says whether that component is a common direction or a
+# contrast between groups, and which sectors sit at the two ends of a contrast says what
+# the contrast is between. Separately, the width of an interval says how much the
+# resamples disagreed - a loading whose interval spans zero is one the data does not
+# pin down, and building a portfolio on it is building on an estimate the bootstrap
+# cannot distinguish from no exposure at all.
 
 # %% [markdown]
 # ## 7. Temporal Stability: Rolling PCA
@@ -472,21 +504,35 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=(
-        f"PC1 variance ranges from {rolling_var_explained[:, 0].min():.0%} to "
-        f"{rolling_var_explained[:, 0].max():.0%} as market co-movement changes"
-    ),
+    title="Variance explained by the first two components, rolling window",
     xaxis_title="Date",
     yaxis_title="Variance Explained",
     yaxis_tickformat=".0%",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two lines against date, one per component, giving the share of variance each "
+    "explains within a trailing window. The vertical axis is in percent. The first "
+    "component's line moves over a wide range across the sample while the second's "
+    "stays much lower.",
+)
+print(
+    f"PC1 rolling variance explained: {rolling_var_explained[:, 0].min():.1%} to "
+    f"{rolling_var_explained[:, 0].max():.1%}; PC2: "
+    f"{rolling_var_explained[:, 1].min():.1%} to {rolling_var_explained[:, 1].max():.1%}"
+)
 
 # %% [markdown]
-# **Finding**: PC1 jumps above 80% during the systemwide COVID-19 shock, but stress does not have one
-# signature. Around the 2022 rate shock, PC1 falls toward 50% while PC2 rises as sector responses
-# diverge. These are trailing-window descriptions, not forecasts.
+# **Reading it**: the first component's share is a measure of how much the sectors are
+# moving together, so the line is a picture of co-movement over time rather than of
+# performance. Read where it rises and where it falls against what was happening, and
+# note that stress does not have one signature: an episode where everything sells off
+# together and an episode where sectors respond in different directions both count as
+# stress and move this line in opposite directions.
+#
+# Every point is computed from the window ending at that date, so the line describes
+# what had already happened. Nothing here forecasts the next window's value.
 
 # %% [markdown]
 # ## 8. Factor Score Analysis
@@ -504,9 +550,15 @@ score_scale = ew_daily_std / factors_df["PC1"].std()
 factor_returns = factors_df * score_scale
 
 # %% [markdown]
-# Daily volatility falls off rapidly past PC1. PC2 carries roughly
-# $\sqrt{\lambda_2/\lambda_1} \approx 36\%$ of PC1's volatility; PC3 is about 31%, and later
-# components fall below 25%. This matches the eigenvalue decline in the scree plot.
+# A component's daily volatility is $\sqrt{\lambda_k}$, so the ratio
+# $\sqrt{\lambda_k / \lambda_1}$ says how large each later component is beside the first.
+# The values are printed below rather than stated here, because they follow the
+# eigenvalues and change with the sample.
+
+# %%
+volatility_ratio = np.sqrt(pca.explained_variance_ / pca.explained_variance_[0])
+for i, ratio in enumerate(volatility_ratio, 1):
+    print(f"PC{i} daily volatility as a share of PC1's: {ratio:.0%}")
 
 # %% [markdown]
 # Prepare two diagnostic series: PC1 vs the equal-weight market (both standardized to unit
@@ -590,39 +642,63 @@ fig.update_xaxes(title_text="Date", row=1, col=2)
 fig.update_yaxes(title_text="63-day correlation", range=[-1, 1], row=1, col=2)
 fig.update_layout(
     height=420,
-    width=1000,
-    title_text=(
-        f"PC1 tracks equal weight at {pc1_market_corr:.3f}; rolling PC1-PC2 correlation "
-        f"averages {roll_corr.mean():+.2f}"
-    ),
+    title_text="PC1 against the equal-weight market, and PC1-PC2 correlation over time",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. The left scatters the first component's daily score against the "
+    "equal-weight sector return, both standardized, on equal axes with a dashed "
+    "diagonal; a cloud lying on that diagonal means the two are the same series up to "
+    "scale. The right plots the rolling correlation between the first two components "
+    "against date, on an axis from minus one to one with a line at zero.",
+)
+print(
+    f"PC1 against equal-weight market: correlation {pc1_market_corr:.3f}. "
+    f"Rolling PC1-PC2 correlation: mean {roll_corr.mean():+.3f}, "
+    f"range {roll_corr.min():+.2f} to {roll_corr.max():+.2f}"
+)
 
 # %% [markdown]
-# **Finding**: PC1's daily score correlates above 0.99 with the equal-weight sector portfolio.
-# PC1 is the broad market mode in this universe, up to centering. The rolling PC1-PC2 correlation
-# fluctuates around zero with non-trivial variance: the in-sample orthogonality constraint
-# holds globally but short-window deviations are substantial, particularly during regime
-# transitions. This is why orthogonality must be re-imposed in production by refitting on
-# expanding or rolling windows rather than relying on a single in-sample decomposition.
+# **Reading it**: the left panel asks what the first component *is*. If its score is
+# nearly the equal-weight return, then PCA has recovered the market and given it a name,
+# rather than found something the equal-weight portfolio does not already capture. The
+# printed correlation is the number; the diagonal is what makes it legible.
+#
+# The right panel is about a property that is easy to over-trust. PCA makes the
+# components orthogonal *over the sample it was fitted on*, and that is a statement
+# about the whole period, not about any window inside it. The rolling correlation shows
+# how far short windows depart from zero. Anything that relies on the components being
+# uncorrelated - a risk decomposition, a hedge built from one against the other - needs
+# them re-fitted on the window it will be used in, because a single in-sample
+# decomposition does not deliver orthogonality inside that window.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Dominant market factor**: PC1 captures ~71% of sector ETF variance; all sectors
-#    load positively, reflecting broad market risk
-# 2. **Bootstrap stability matters**: Not all loadings are equally reliable. Sectors with
-#    wide confidence intervals warrant caution in portfolio construction
-# 3. **Time-varying structure**: PC1 spikes during systemwide shocks, while PC2 can rise when
-#    sectors diverge; stress regimes do not share one covariance pattern
-# 4. **Descriptive scope**: Full-sample PCA explains covariance structure but does not by itself
-#    produce an out-of-sample return forecast
+# 1. **Standardize before decomposing, or the loudest sector wins.** Correlation-PCA
+#    puts every sector on unit variance first, so the components describe co-movement
+#    rather than which sector happens to be most volatile. The box plot at the top is
+#    why: the sectors differ enough in spread for that choice to change the answer.
+# 2. **A loading is an estimate, and the bootstrap says how good.** The interval, not
+#    the point, is what a portfolio decision should read. An interval spanning zero is
+#    an exposure the data does not establish.
+# 3. **The first component's share is a measure of co-movement, and it moves.** A single
+#    full-sample number hides that; the rolling window is what shows it, and it rises
+#    both when everything sells off together and falls when sectors respond in different
+#    directions. Neither is "the stress signature".
+# 4. **Orthogonality is a property of the fitting sample, not of every window in it.**
+#    The rolling correlation between the first two components shows how far a short
+#    window departs from zero, which is what anything built on their independence has to
+#    contend with.
+# 5. **This is a description, not a forecast.** PCA on the full sample says what the
+#    covariance structure was. Turning that into a return prediction needs a second
+#    stage, which is the subject of `04_ipca` and `05_rp_pca`.
 #
 # ### PCA in the Two-Step Framework
 #
 # Everything above is **Stage 1**. To turn it into a return forecast, a
 # Stage 2 factor-premium forecaster is required (see Figure 14.10 for the
-# full catalog). PCA + sample-mean Stage 2 collapses to a per-asset
+# full catalog). PCA with a sample-mean Stage 2 reduces to a per-asset
 # historical-mean predictor - a useful sanity-check baseline but not a
 # forecaster in any meaningful sense. Non-trivial cross-sectional ranking
 # emerges only when Stage 2 conditions on the factor path (AR(1), EWMA, or
