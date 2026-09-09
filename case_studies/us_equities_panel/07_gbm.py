@@ -90,6 +90,7 @@ from IPython.display import display
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
+    candidate_set_supersedes,
     declared_labels,
     load_model_configs,
     model_requests,
@@ -112,6 +113,7 @@ CONFIG_NAMES: list[str] = []
 DIAGNOSTIC_CONFIG_NAMES = ["default_mse"]
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_SETS: dict = {}
 
 # %%
 study = open_study("us_equities_panel", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -139,24 +141,25 @@ declared_labels(study, "gbm")
 # - **Three objectives**, as described above.
 #
 # **`default` is not a fifth rung, and the grid does not isolate capacity.** The `params` block of
-# each `default_*` preset holds only `objective` and `seed`. `default_huber` also declares a
-# top-level `huber_alpha_scale: 0.5`, but every `leaves_*_huber` declares the same value, so it
-# separates the objectives from each other and not `default` from the ladder. Everything else in a
-# `default_*` fit is whatever LightGBM supplies: `num_leaves` 31 - which is the `leaves_31` rung,
-# not a value outside the ladder - a `learning_rate` of 0.1 against the 0.05 the twelve `leaves_*`
-# presets declare, and none of the `bagging_fraction` 0.8, `bagging_freq` 1, `feature_fraction` 0.7,
-# `lambda_l1` 0.5, `lambda_l2` 5.0 or `min_child_samples` 50 that all four ladder profiles carry.
-# Measured on LightGBM 4.6.0, those omissions resolve to `lambda_l1` and `lambda_l2` at 0,
-# subsampling disabled outright because `bagging_freq` defaults to 0, and `min_child_samples` at 20
-# rather than the ladder's 50. So `default` and `leaves_31` share a leaf limit, not a capacity: the
-# same `num_leaves` reached under a leaf-size constraint less than half as strict, with no penalty
-# term, no subsampling and double the learning rate - seven declared parameters apart rather than
-# none.
+# each `default_*` preset holds only `objective` and `seed`; the frame above shows both blocks side
+# by side. `default_huber` also declares a top-level `huber_alpha_scale`, but every `leaves_*_huber`
+# declares the same value, so it separates the objectives from each other and not `default` from the
+# ladder.
+#
+# Everything a `default_*` preset leaves out is filled by LightGBM's own default, and that is where
+# the two profiles part company. Its default leaf limit is the `leaves_31` rung, so the two agree on
+# the axis the ladder varies. It runs at twice the learning rate the twelve `leaves_*` presets
+# declare. And it carries none of their `bagging_fraction`, `bagging_freq`, `feature_fraction`,
+# `lambda_l1`, `lambda_l2` or `min_child_samples`, which resolve to no L1 or L2 penalty at all,
+# subsampling switched off rather than merely weakened, and a minimum leaf size well under half the
+# ladder's. So `default` and `leaves_31` share a leaf limit and not a capacity: seven declared
+# parameters apart rather than none.
 #
 # Read the gap between them as capacity and you will be reading the wrong axis. The two sit side
 # by side in the final-iteration chart in Section 4 at identical leaf counts, and whatever
 # separates them there is those seven parameters rather than the number of regions a tree may
-# carve.
+# carve. A library default is a property of the installed version, so the resolved values the fit
+# actually used are the ones in the training specification the run registers, not these.
 #
 # What the grid does hold fixed is training length - every configuration declares
 # `max_iterations: 500` and `checkpoint_interval: 50` - so the checkpoint comparison below is
@@ -371,7 +374,7 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 #
 # The diagnostic subset is bounded hard, and the reason is arithmetic. `15` loads every diagnostic
 # member's raw prediction frame and holds them all while it joins them pairwise; one frame on this
-# panel is 7.2 million rows and about 225 MB in memory. So the set is one member per label and
+# panel is over seven million rows and about 225 MB in memory. So the set is one member per label and
 # family: the diagnostic configuration at its last checkpoint. `default_mse` is that configuration
 # here - the untuned starting point the leaf and objective sweeps vary from - and its last
 # checkpoint is the state a reader would compare against another family's finished fit. The
@@ -437,9 +440,13 @@ if is_published_population:
     for label_value in panel_labels:
         label_name = label_value.replace("_", "-")
         label_rows = execution.catalog_rows.filter(pl.col("label") == label_value)
+        full_set_name = f"us-equities-{label_name}-gbm-v1"
         full_set = study.predictions.freeze(
             label_rows,
-            name=f"us-equities-{label_name}-gbm-v1",
+            name=full_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=full_set_name, declared=SUPERSEDES_SETS.get(full_set_name, "")
+            ),
         )
         diagnostic_rows = label_rows.filter(
             pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)
@@ -453,9 +460,15 @@ if is_published_population:
             raise ValueError(
                 f"no {label_value} rows for diagnostic configurations {DIAGNOSTIC_CONFIG_NAMES}"
             )
+        diagnostic_set_name = f"us-equities-{label_name}-gbm-diagnostics-v1"
         diagnostic_set = study.predictions.freeze(
             diagnostic_rows,
-            name=f"us-equities-{label_name}-gbm-diagnostics-v1",
+            name=diagnostic_set_name,
+            supersedes=candidate_set_supersedes(
+                study,
+                name=diagnostic_set_name,
+                declared=SUPERSEDES_SETS.get(diagnostic_set_name, ""),
+            ),
         )
         set_rows.extend(
             [
@@ -773,8 +786,8 @@ agreement
 # **Known limitations.** The IC here is an average of per-date rank correlations with no
 # adjustment for the serial dependence that overlapping forward returns create, so it is a ranking
 # diagnostic rather than a test. The grid varies capacity and loss at fixed features and fixed
-# training length, but not at a fixed learning rate - the `default` profile runs at 0.1 and the
-# four ladder profiles at 0.05 - so the `default` rows are not comparable with the rest on
+# training length, but not at a fixed learning rate - the `default` profile runs at twice the
+# ladder's - so the `default` rows are not comparable with the rest on
 # capacity alone, and nothing here separates a learning-rate effect from a regularization one.
 # Every number is measured on
 # the validation folds, which have been read many times over by the time a case study reaches this

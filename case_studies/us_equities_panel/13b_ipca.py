@@ -69,14 +69,17 @@
 # %%
 """Generate IPCA validation predictions through the shared research interface."""
 
-import os
-from pathlib import Path
-
 import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
-from case_studies.research import open_study, plan_models
+from case_studies.research import (
+    candidate_set_supersedes,
+    open_study,
+    plan_models,
+    run_model_population,
+    supersedes_for_run,
+)
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
 from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
@@ -85,8 +88,11 @@ from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt,
 CASE_STUDY_ID = "us_equities_panel"
 LABELS = []
 OVERRIDES = {}
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 EXECUTION_TIER = "canonical"
-WORKSPACE = "experiments"
+WORKSPACE = ""
 MAX_SYMBOLS = 0
 FOLD_IDS = []
 PREVIEW_N_FACTORS = 0
@@ -147,6 +153,29 @@ label_menu = pl.DataFrame(
 )
 label_menu
 
+# %% [markdown]
+# A run that narrows the labels or overrides a parameter produces a different set of predictions
+# from the one the canonical name stands for. Publishing it under that name would leave the name
+# meaning two different member sets at two different times, so the guard below requires such a run
+# to say what to call its own population, and the frozen set names in Section 6 are withheld from
+# it for the same reason.
+
+# %%
+is_published_population = (
+    EXECUTION_TIER == "canonical" and selected_labels == published_labels and not OVERRIDES
+)
+if EXECUTION_TIER == "canonical" and not is_published_population and not POPULATION_NAME:
+    raise ValueError(
+        "this run narrows the declared labels or overrides a parameter, so it cannot publish the "
+        "canonical population; pass POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place
+# and redirects only writes, so a preview run scores the same inputs a canonical one does and
+# cannot publish over it. A preview must be given a workspace to write into; a canonical run
+# leaves `WORKSPACE` empty and regenerates the case study's own artifacts in place.
+
 # %%
 preview_reductions = {}
 if MAX_SYMBOLS:
@@ -158,23 +187,7 @@ if PREVIEW_N_FACTORS:
 if PREVIEW_MAX_ITER:
     preview_reductions["max_iter"] = int(PREVIEW_MAX_ITER)
 
-# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
-# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
-# publish over it.
-if EXECUTION_TIER == "canonical":
-    if preview_reductions:
-        raise ValueError("Canonical execution cannot declare preview reductions")
-    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
-elif EXECUTION_TIER == "preview":
-    if not preview_reductions:
-        raise ValueError("Preview execution requires at least one declared reduction")
-    study = open_study(
-        CASE_STUDY_ID,
-        execution_tier=EXECUTION_TIER,
-        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
-    )
-else:
-    raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -234,11 +247,6 @@ request_table
 
 # %%
 plan = plan_models(study, requests=requests)
-official_population = None
-if EXECUTION_TIER == "canonical":
-    official_population = plan.create_population(
-        name="us-equities-ipca-checkpoints-v1",
-    )
 
 planned_population = pl.DataFrame(
     {
@@ -252,8 +260,35 @@ planned_population = pl.DataFrame(
 )
 planned_population
 
+# %% [markdown]
+# `run_model_population` takes the plan, writes the population down, fits every member and then
+# checks that what came out is what was declared. The same call serves both tiers: a canonical run
+# registers an immutable population that the later notebooks bind to, and a preview run gets a
+# declaration that is verified and then discarded with its workspace, so no notebook here has to
+# branch on the tier to decide what to publish.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is a set of
+# prediction identities, so anything that moves a training identity - a changed preset as much as a
+# changed menu - produces a different population under the same name, and the registry refuses to
+# write it without being told which snapshot it supersedes. Leaving it empty is right for a first
+# run and for a reader's clean clone, and `supersedes_for_run` withholds a declared hash wherever
+# offering it would be refused.
+
 # %%
-execution = plan.run()
+population_name = POPULATION_NAME or "us-equities-ipca-checkpoints-v1"
+execution, official_population = run_model_population(
+    study,
+    plan,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION,
+        execution_tier=EXECUTION_TIER,
+    ),
+)
+
+print(f"population {official_population.name}: {len(official_population.members)} prediction sets")
 
 # %% [markdown]
 # ## 4. What was actually fitted
@@ -339,8 +374,6 @@ for run in execution.runs:
         )
 
 coverage_table = pl.DataFrame(coverage_rows).sort("label", "prediction_hash")
-if official_population is not None:
-    official_population.require_complete()
 coverage_table
 
 # %%
@@ -357,7 +390,7 @@ execution_diagnostics
 #
 # The per-fold values come from the registry rather than from the raw predictions: each fold's
 # information coefficient is registered alongside the prediction set, so reading it back costs a
-# query rather than a 7.2-million-row load. Loadings here are a function of a stock's own
+# query rather than a seven-million-row load. Loadings here are a function of a stock's own
 # characteristics rather than fitted per name, so a fold whose cross-section is unlike the
 # training window's is the one to look at first.
 
@@ -427,20 +460,27 @@ show_with_alt(
 
 # %% tags=["results"]
 set_rows = []
-is_published_population = (
-    EXECUTION_TIER == "canonical" and selected_labels == published_labels and not OVERRIDES
-)
 if is_published_population:
     for selected_label in selected_labels:
         label_name = selected_label.replace("_", "-")
         label_rows = execution.catalog_rows.filter(pl.col("label") == selected_label)
+        full_set_name = f"us-equities-{label_name}-ipca-v1"
         full_set = study.predictions.freeze(
             label_rows,
-            name=f"us-equities-{label_name}-ipca-v1",
+            name=full_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=full_set_name, declared=SUPERSEDES_SETS.get(full_set_name, "")
+            ),
         )
+        diagnostic_set_name = f"us-equities-{label_name}-ipca-diagnostics-v1"
         diagnostic_set = study.predictions.freeze(
             label_rows,
-            name=f"us-equities-{label_name}-ipca-diagnostics-v1",
+            name=diagnostic_set_name,
+            supersedes=candidate_set_supersedes(
+                study,
+                name=diagnostic_set_name,
+                declared=SUPERSEDES_SETS.get(diagnostic_set_name, ""),
+            ),
         )
         set_rows.extend(
             [

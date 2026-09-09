@@ -575,7 +575,7 @@ show_with_alt(
 # the bounded diagnostic subset rather than the whole population. Each model notebook publishes
 # that subset as one member per label and family - its diagnostic configuration at its last
 # checkpoint - and the bound is arithmetic rather than taste. One prediction frame on this panel
-# is 7.2 million rows and about 225 MB held in memory, every diagnostic frame is resident at once
+# is over seven million rows and about 225 MB held in memory, every diagnostic frame is resident at once
 # because Section 5 joins them pairwise, and the full population is several hundred members.
 
 # %% tags=["results"]

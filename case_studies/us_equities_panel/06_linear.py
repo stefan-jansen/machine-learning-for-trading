@@ -88,6 +88,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
+    candidate_set_supersedes,
     declared_labels,
     load_model_configs,
     model_requests,
@@ -110,6 +111,7 @@ CONFIG_NAMES: list[str] = []
 DIAGNOSTIC_CONFIG_NAMES = ["ols"]
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_SETS: dict = {}
 
 # %%
 study = open_study("us_equities_panel", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -428,7 +430,7 @@ catalog.select(
 #
 # The diagnostic subset is bounded hard, and the reason is arithmetic. `15` loads every diagnostic
 # member's raw prediction frame and holds them all while it joins them pairwise; one frame on this
-# panel is 7.2 million rows and about 225 MB in memory. So the set is one member per label and
+# panel is over seven million rows and about 225 MB in memory. So the set is one member per label and
 # family: the diagnostic configuration at its last checkpoint. Here that is `ols`, the unpenalized
 # baseline every penalized configuration is a shrinkage of, and a linear model has one fitted
 # state, so its last checkpoint is its only one.
@@ -443,9 +445,13 @@ if is_published_population:
     for label_value in panel_labels:
         label_name = label_value.replace("_", "-")
         label_rows = execution.catalog_rows.filter(pl.col("label") == label_value)
+        full_set_name = f"us-equities-{label_name}-linear-v1"
         full_set = study.predictions.freeze(
             label_rows,
-            name=f"us-equities-{label_name}-linear-v1",
+            name=full_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=full_set_name, declared=SUPERSEDES_SETS.get(full_set_name, "")
+            ),
         )
         diagnostic_rows = label_rows.filter(
             pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)
@@ -459,9 +465,15 @@ if is_published_population:
             raise ValueError(
                 f"no {label_value} rows for diagnostic configurations {DIAGNOSTIC_CONFIG_NAMES}"
             )
+        diagnostic_set_name = f"us-equities-{label_name}-linear-diagnostics-v1"
         diagnostic_set = study.predictions.freeze(
             diagnostic_rows,
-            name=f"us-equities-{label_name}-linear-diagnostics-v1",
+            name=diagnostic_set_name,
+            supersedes=candidate_set_supersedes(
+                study,
+                name=diagnostic_set_name,
+                declared=SUPERSEDES_SETS.get(diagnostic_set_name, ""),
+            ),
         )
         set_rows.extend(
             [
