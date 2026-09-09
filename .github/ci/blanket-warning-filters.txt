@@ -128,12 +128,6 @@
 22_rag_financial_research/06_esg_rag_vs_finetune.py
 22_rag_financial_research/07_institutional_holdings_graph.py
 22_rag_financial_research/08_rag_security.py
-26_mlops_governance/01_drift_monitoring.py
-26_mlops_governance/02_online_drift_detection.py
-26_mlops_governance/04_circuit_breakers.py
-26_mlops_governance/05_feast_feature_store.py
-26_mlops_governance/05b_feast_live.py
-26_mlops_governance/06_mlflow_experiments.py
 case_studies/cme_futures/01_feasibility_analysis.py
 case_studies/cme_futures/02_labels.py
 case_studies/cme_futures/03_financial_features.py
