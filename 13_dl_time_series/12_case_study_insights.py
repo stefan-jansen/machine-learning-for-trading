@@ -343,9 +343,12 @@ display(
 # %% [markdown]
 # ### 3a. Architecture × case-study heatmap
 #
-# Within each case study, the highest IC achieved by each architecture is
-# shown as a heatmap cell. Cells are blank where the architecture was not
-# trained on that case study - coverage gaps remain visible.
+# Within each case study, the highest IC achieved by each architecture is shown as a
+# heatmap cell. A blank cell means no eligible run, which covers two situations: the
+# architecture was never trained on that case study, or it was but its runs did not
+# cover the same folds and the same number of days as the rest of the row. Both are
+# coverage facts and neither is a low score, so they stay blank rather than being
+# filled in.
 
 # %%
 arch_cols = all_archs_sorted
@@ -384,8 +387,10 @@ show_with_alt(
     fig,
     "A heatmap with one row per case study and one column per architecture, on a diverging colour "
     "scale centred at zero and symmetric about the largest absolute value present. Each cell is "
-    "the highest daily IC that architecture reached on that case study; greyed-out cells are "
-    "pairs the architecture was not trained on. A colour bar gives the scale.",
+    "the highest daily IC that architecture reached on that case study, printed in the cell "
+    "as well as shaded; greyed-out cells are pairs with no run eligible for the comparison, "
+    "whether because the architecture was not trained there or because its runs did not "
+    "cover the same folds and days. A colour bar gives the scale.",
 )
 
 # %%
@@ -707,7 +712,13 @@ def plot_conformal_coverage(conformal_df: pl.DataFrame) -> plt.Figure:
         label=f"Nominal {CONFORMAL_LEVEL:.0%}",
     )
     ax.set_xscale("log")
-    ax.set_xlabel("Mean interval width (fraction of calibration-fold return std; log scale)")
+    # staggered_offsets pushes a label up to 12 points above its marker; without
+    # headroom the topmost case study's label lands outside the axes and is clipped.
+    ax.margins(y=0.18)
+    ax.set_xlabel(
+        "Mean interval width, as a fraction of the outcome standard deviation over the "
+        "same rows (log scale)"
+    )
     ax.set_ylabel("Empirical coverage")
     ax.set_title(f"Cross-fitted out-of-fold calibration at the {CONFORMAL_LEVEL:.0%} level")
     ax.legend(loc="lower right", frameon=False, fontsize=9)
