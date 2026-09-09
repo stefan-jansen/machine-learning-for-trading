@@ -1237,24 +1237,28 @@ maxent_top_feature, maxent_top_weight = maxent_sorted[0]
 feature_top_feature, feature_top_weight = feature_match_sorted[0]
 display(
     Markdown(f"""
-**Cloning an action is not the same as reproducing a policy.** Against the expert, on
+**Every fitted policy lands within a couple of standard errors of the expert.** Against it, on
 {N_EVALUATION_EPISODES} paired episodes:
 
 {gap_lines}
 
-The demonstrations only ever contain states the expert visited; once a clone is driving, its
-own small errors take it to states the demonstrations do not cover, where the next error is
-larger. Nothing in the supervised loss sees that happening, which is why the held-back fitting
-error above and these execution gaps are different measurements of different things.
+Read that as a fact about this demonstrator rather than about these methods. TWAP's action is
+the reference pace at every step, so a behaviour clone has one number to learn, and the states
+it visits while driving are the states the demonstrations already cover. Distribution shift -
+a clone's own errors carrying it into states the demonstrations never contained, where the
+next error is larger - is the characteristic failure of behaviour cloning, and on a constant
+demonstrator it has nothing to bite on. A harder expert is what would separate these columns.
 
 **An inferred reward is a statement about covariance, not about preference.** The
 maximum-entropy fit puts its largest coefficient on **{maxent_top_feature}**
 ({maxent_top_weight:+.3f}) and feature matching on **{feature_top_feature}**
-({feature_top_weight:+.3f}), from the same demonstrations under the same features. The expert
-here is TWAP, which reads neither the depth nor the volatility the observation reports, so a
-large weight on either is a correlate the fit has picked up. Two objectives disagreeing about
-which correlate matters is the normal case for a linear reward over correlated features, and
-it is what non-identifiability looks like in practice.
+({feature_top_weight:+.3f}), from the same demonstrations, under the same features, describing
+the same behaviour. Two objectives disagreeing about which feature carries the explanation is
+the normal case for a linear reward over correlated features, and it is what
+non-identifiability looks like in practice. The test worth applying to any such weight is
+whether the demonstrator could have read the feature at all: TWAP reads neither the depth nor
+the volatility the observation reports, so a large weight on either would have been a
+correlate rather than a preference.
 
 **Check what an optimiser is descending before reading its stopping point.** The
 maximum-entropy log likelihood moves from {irl_result["history"]["log_likelihood"][0]:.3f} to
@@ -1263,10 +1267,12 @@ means something because there is an objective. Feature matching ends with a resi
 of {feature_match_result["history"]["gradient_norm"][-1]:.3f}, which is not a value it was
 minimising, and a smaller one would not have meant a better fit.
 
-**Round-tripping through the reward loses the expert.** The two reward-derived policies appear
-in the same list above, and neither reproduces the demonstrator. That is the scale to keep in
-mind for reward inference generally: this demonstrator is deterministic, its objective is
-simple, and the features it is being explained by include the quantities it actually uses.
+**Matching a cost is not recovering a policy.** Both reward-derived policies sit close to the
+expert on cost, which here is a low bar: an episode's shortfall is mostly what the price did
+over it, and any schedule that trades steadily pays a similar amount. Whether either recovered
+the expert's *behaviour* is the action-distribution figure in section 5, not the cost column,
+and the two rewards behind those policies disagree about which feature explains the
+demonstrations at all.
 
 ### Known limitations
 
