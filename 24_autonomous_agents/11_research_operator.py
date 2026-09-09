@@ -232,35 +232,64 @@ _METRIC_BLOCK = re.compile(
 )
 
 
-def _parsed_metric_blocks(trace: dict) -> dict[str, dict[str, float]]:
-    """Return the last printed metric block per model in an operator trace."""
-    found: dict[str, dict[str, float]] = {}
+def _matched_comparison(trace: dict) -> tuple[str, dict[str, dict[str, float]]]:
+    """Return the header and blocks of the last run that scored both models together.
+
+    The operator scored several model sets during the session under different
+    allocation configurations. Only a set containing both the baseline and the
+    ensemble was scored under one allocation, so only that one is a comparison;
+    taking the last block per model across the whole trace would put Sharpe
+    figures from different allocators in the same table.
+    """
+    matched: tuple[str, dict[str, dict[str, float]]] | None = None
     for entry in trace["trace"]:
         result = entry.get("result")
         if not isinstance(result, dict):
             continue
-        for match in _METRIC_BLOCK.finditer(result.get("stdout_tail") or ""):
+        stdout = result.get("stdout_tail") or ""
+        blocks: dict[str, dict[str, float]] = {}
+        for match in _METRIC_BLOCK.finditer(stdout):
             row = match.groupdict()
             model = row.pop("model")
-            found[model] = {k: float(v) for k, v in row.items()}
-    return found
+            blocks[model] = {k: float(v) for k, v in row.items()}
+        has_pair = any(k.startswith("LSTM") for k in blocks) and any(
+            k.startswith("ENSEMBLE") for k in blocks
+        )
+        if has_pair:
+            header = next(
+                (line.strip() for line in stdout.splitlines() if line.startswith("===")),
+                "(allocation not recorded in the captured output)",
+            )
+            matched = (header, blocks)
+    if matched is None:
+        raise RuntimeError("the trace holds no run that scored both models under one allocation")
+    return matched
 
 
 # %%
-etf_blocks = _parsed_metric_blocks(result)
+allocation_header, etf_blocks = _matched_comparison(result)
 baseline_key = next(k for k in etf_blocks if k.startswith("LSTM"))
 ensemble_key = next(k for k in etf_blocks if k.startswith("ENSEMBLE"))
 baseline, ensemble = etf_blocks[baseline_key], etf_blocks[ensemble_key]
+print(f"Comparison scored under: {allocation_header}")
+
 
 # %% [markdown]
 # ## Run summary
 
 
 # %% Headline metadata
-def _human_money(in_toks: int, out_toks: int) -> str:
+def _run_cost(run: dict) -> float:
     """Approximate what a run cost, at the rates declared in the parameters cell."""
-    cost = (in_toks * PRICE_IN_PER_MTOK + out_toks * PRICE_OUT_PER_MTOK) / 1e6
-    return f"~${cost:.2f}"
+    cost = (
+        run["total_in_tokens"] * PRICE_IN_PER_MTOK + run["total_out_tokens"] * PRICE_OUT_PER_MTOK
+    ) / 1e6
+    return round(cost, 2)
+
+
+def _human_money(run: dict) -> str:
+    """Format `_run_cost` for a printed summary."""
+    return f"~${_run_cost(run):.2f}"
 
 
 print(f"model:          {result['model']}")
@@ -269,7 +298,7 @@ print(f"turns:          {result['iterations']}")
 print(f"tokens (in):    {result['total_in_tokens']:>12,}")
 print(f"tokens (out):   {result['total_out_tokens']:>12,}")
 print(f"elapsed:        {result['elapsed_s']:.0f}s")
-print(f"approx cost:    {_human_money(result['total_in_tokens'], result['total_out_tokens'])}")
+print(f"approx cost:    {_human_money(result)}")
 # %% [markdown]
 # The agent's own closing summary describes this validation-window experiment as a holdout
 # conclusion, which it is not. The raw artifact keeps that text unchanged, because an audit
@@ -373,12 +402,17 @@ comparison = pl.DataFrame(
 comparison
 
 # %% [markdown]
-# One caveat about the intervals in that table. The operator's script used a five-lag HAC
-# adjustment, and the labels are 21-day forward returns, which overlap for twenty sessions.
-# Five lags does not span that overlap, so the standard errors are too small and the t
-# statistics too large for both models alike. The registry holds a 20-lag figure for the
-# baseline, printed below, and nothing in the trace holds one for the ensemble; the two
-# therefore cannot be compared on their intervals, only on their point estimates.
+# The intervals in that table are Sharpe intervals from the backtest, and they are the run's
+# own. The IC column carries a separate uncertainty question the table does not show. The
+# operator's script computed its IC t statistics with a five-lag HAC adjustment while the labels
+# are 21-day forward returns, so consecutive observations overlap for twenty sessions and five
+# lags does not span that overlap. A HAC correction that stops short of the dependence it is
+# correcting for is not enough of one; how much it is out by is not something the run measures.
+#
+# The registry holds a 20-lag figure for the baseline, printed below beside the operator's, and
+# nothing in the trace holds a 20-lag figure for the ensemble. So the two models' IC
+# uncertainties cannot be compared with each other, and the point estimates are what the
+# comparison rests on.
 
 # %%
 registry_lstm = next(
@@ -500,7 +534,7 @@ print(f"turns:          {us_firms['iterations']}")
 print(f"tokens (in):    {us_firms['total_in_tokens']:>12,}")
 print(f"tokens (out):   {us_firms['total_out_tokens']:>12,}")
 print(f"elapsed:        {us_firms['elapsed_s']:.0f}s")
-print(f"approx cost:    {_human_money(us_firms['total_in_tokens'], us_firms['total_out_tokens'])}")
+print(f"approx cost:    {_human_money(us_firms)}")
 
 # %% [markdown]
 # The raw operator artifact remains unchanged for audit. Its interpretation
@@ -608,10 +642,12 @@ display(
 # implementation would realize. Turnover barely moving is the tell: a signal filter does not
 # change how the portfolio is constructed, only which names are eligible.
 #
-# The IC and drawdown movements are consistent with a smaller universe offering fewer
-# independent bets and less diversification within each leg, which is what the fundamental law
-# predicts. This experiment does not isolate that mechanism: the filter also changes which
-# firms remain, and the two are not separated here.
+# It is tempting to reach for the fundamental law here, and worth being careful about what it
+# says. It relates a portfolio's information ratio to the signal's IC and the number of
+# independent bets, so a smaller universe lowers the information ratio at a *fixed* IC. It does
+# not predict that IC itself falls, and it says nothing about drawdown. Both of those moved
+# here, and both are separate empirical outcomes: the filter did not only shrink the universe,
+# it changed which firms are in it, and this experiment does not separate the two.
 #
 # A natural follow-up the agent flagged: **retrain on the filtered universe**
 # A natural follow-up the agent flagged: **retrain on the filtered universe**
@@ -635,9 +671,7 @@ runs = [
         "tokens_in": result["total_in_tokens"],
         "tokens_out": result["total_out_tokens"],
         "elapsed_s": result["elapsed_s"],
-        "cost_usd": round(
-            result["total_in_tokens"] * 0.5e-6 + result["total_out_tokens"] * 1.5e-6, 2
-        ),
+        "cost_usd": _run_cost(result),
         "headline": "no improvement (SR 0.92 → 0.56); diagnosed IC-vs-SR gap",
     },
     {
@@ -647,9 +681,7 @@ runs = [
         "tokens_in": us_firms["total_in_tokens"],
         "tokens_out": us_firms["total_out_tokens"],
         "elapsed_s": us_firms["elapsed_s"],
-        "cost_usd": round(
-            us_firms["total_in_tokens"] * 0.5e-6 + us_firms["total_out_tokens"] * 1.5e-6, 2
-        ),
+        "cost_usd": _run_cost(us_firms),
         "headline": "SR 4.27 → 2.24 (−48%); shows small-cap sensitivity",
     },
 ]
