@@ -551,9 +551,10 @@ print(f"Windows whose majority regime is the stressed one: {int(window_truth.sum
 
 # %% [markdown]
 # A window that straddles a switch contains returns from both regimes, so its ground truth is
-# whichever regime supplied more of its sessions. With a window of `WINDOW_LEN` sessions and
-# six switches, a handful of windows are mixtures and no method can label them correctly by
-# any definition. That sets a ceiling below one on every score in the table.
+# whichever regime supplied more of its sessions. That convention gives every window a
+# definite label and a perfect score remains reachable, but the mixed windows are the hard
+# ones: their returns come from two distributions and the correct answer is decided by a
+# majority that a near-even split makes arbitrary.
 
 # %%
 simulated_wasserstein = WassersteinKMeans1D(
@@ -803,19 +804,26 @@ print(f"Windows per cluster after it: {np.bincount(index_labels[n_train_windows:
 # split says how often the later sample looked like the earlier sample's stressed windows.
 
 # %% [markdown]
-# ## What the two clusters were, as a position
+# ## What the two clusters were, and what holding through one would have been
 #
 # The label is known at the close of the session it is stamped on, so the return it can be
-# earned against is the next session's. The table below therefore holds each regime's label
-# for one session and reads the following return, over the block after the split only, which
-# makes it a comparison of two rules rather than a description of a partition. It charges no
-# costs and no slippage, so it is an upper bound on what either side is worth.
+# earned against is the next session's. Everything below holds each label for one session and
+# reads the following return, over the block after the split only.
 #
-# The drawdown is of an equity curve that holds the index while the label says one thing and
-# nothing while it says the other, so the sessions outside the regime contribute a flat
-# stretch rather than being spliced out. Compounding only the sessions inside a regime, which
-# is the easier thing to write, produces a curve that skips the gaps and a drawdown belonging
-# to no position anyone could hold.
+# The table reports two different return streams and names each column for the one it belongs
+# to, because they answer different questions and averaging one into the other is how a
+# regime study overstates itself.
+#
+# - The columns marked **in this regime** describe the returns of the sessions the label
+#   selects, and nothing else. They are conditional statistics of the index.
+# - The columns marked **holding only here** describe one rule: hold the index while the label
+#   says this regime, hold cash otherwise, over every session in the evaluated block. Cash
+#   sessions contribute a zero return and a flat stretch of the equity curve, which is why the
+#   annualised figures here are smaller than the conditional ones and the drawdown is a
+#   drawdown someone could have taken. No costs and no slippage are charged.
+#
+# Compounding only the sessions inside a regime, which is the easier thing to write, splices
+# out the gaps and produces a drawdown belonging to no position anyone could hold.
 
 # %%
 SESSIONS_PER_YEAR = 252
@@ -833,35 +841,38 @@ regime_rows = []
 for cluster, name in ((0, "calmer"), (STRESSED_CLUSTER, "more volatile")):
     inside = evaluated & (held == cluster).to_numpy()
     while_inside = returns_series[inside]
-    invested = np.where(inside, index_returns, 0.0)[evaluated]
-    curve = np.exp(np.cumsum(invested))
+    rule = np.where(inside, index_returns, 0.0)[evaluated]
+    curve = np.exp(np.cumsum(rule))
     regime_rows.append(
         {
             "regime": name,
             "sessions": int(inside.sum()),
             "share of the evaluated block": inside.sum() / int(evaluated.sum()),
-            "annualised mean return": SESSIONS_PER_YEAR * while_inside.mean(),
-            "annualised volatility": np.sqrt(SESSIONS_PER_YEAR) * while_inside.std(),
-            "worst single session": while_inside.min(),
-            "deepest drawdown of holding only here": float(
+            "annualised mean, in this regime": SESSIONS_PER_YEAR * while_inside.mean(),
+            "annualised volatility, in this regime": np.sqrt(SESSIONS_PER_YEAR)
+            * while_inside.std(),
+            "worst single session, in this regime": while_inside.min(),
+            "annualised mean, holding only here": SESSIONS_PER_YEAR * rule.mean(),
+            "annualised volatility, holding only here": np.sqrt(SESSIONS_PER_YEAR) * rule.std(),
+            "deepest drawdown, holding only here": float(
                 (curve / np.maximum.accumulate(curve) - 1.0).min()
             ),
         }
     )
 
-display(pd.DataFrame(regime_rows).set_index("regime"))
+display(pd.DataFrame(regime_rows).set_index("regime").T)
 
 # %% [markdown]
-# The two rows differ in volatility by construction, since that is what the clusters were
-# ordered by, so the volatility column is a check that the ordering did what it claims rather
-# than a result. The mean return is the result, and it is the asymmetry the chapter's
-# downstream notebooks use: the two regimes are not two draws from one distribution with
-# different spreads.
+# The conditional volatilities differ by construction, since that is what the clusters were
+# ordered by, so that row is a check that the ordering did what it claims rather than a
+# result. The conditional mean return is the result, and it is the asymmetry the chapter's
+# downstream notebooks use: the two regimes are not two draws from one distribution that
+# differ only in spread.
 #
-# Read the drawdown column against the volatility one rather than on its own. The two regimes
-# hold the index for different numbers of sessions, and a curve with fewer sessions has fewer
-# chances to fall, so the deeper drawdown falls to whichever regime combines wide sessions
-# with enough of them.
+# The two rules are what a reader would actually be choosing between, and neither is the
+# index. Each holds it for part of the block and cash for the rest, so both annualise to less
+# than the conditional figure above them, and the difference between the two rules is the only
+# comparison in the table where the same sessions are on both sides.
 
 # %% [markdown]
 # ## The distance between the two clusters' returns
@@ -1018,20 +1029,28 @@ features = (
         }
     )
     .with_columns(pl.exclude("timestamp").fill_nan(None))
+    .filter(pl.Series(evaluated))
     .drop_nulls()
 )
 
+forward_disagreement = disagreement[n_train_windows:]
+
 print(f"Feature rows: {features.height:,} of {len(index_returns):,} sessions")
+print(f"First session carrying a feature: {features['timestamp'][0].date()}")
 print(
-    f"Windows where the two assignments disagree: {int(disagreement.sum())} of {disagreement.size}"
+    "Forward windows where the two assignments disagree: "
+    f"{int(forward_disagreement.sum())} of {forward_disagreement.size}"
 )
 display(features.describe())
 display(features.tail(3))
 
 # %% [markdown]
-# The row count is short of the session count by the sessions before the first window closed,
-# and those rows are dropped rather than filled. A distributional feature has a warm-up and
-# saying so in the row count is cheaper than explaining a filled value later.
+# The row count is far short of the session count, and both reasons are deliberate. The
+# sessions before the first window closed have no value to carry. And the whole fitted block
+# is dropped, because both sets of centroids and the ordering that numbered them were computed
+# from those windows: a column over them would be a fit describing its own input, whatever the
+# stamping does about the window. Fitting chronologically, one refit per block, is what would
+# recover those years, and it is the construction the case studies use.
 #
 # The disagreement rate is the number to carry into `13_regime_as_feature`. A rate near zero
 # would say the column is constant and worthless; a rate near half would say the two methods
@@ -1054,8 +1073,10 @@ display(features.tail(3))
 #    feature. The cost of doing it correctly is a warm-up at the start and a lag of up to a
 #    window plus a step after every switch.
 # 4. **Centroids fitted on the whole sample are not a feature either.** Fit them on a first
-#    block and assign forward; the share of later windows landing in each cluster then means
-#    something, because the clusters were not drawn to accommodate them.
+#    block and keep the columns to the sessions after it; the share of later windows landing in
+#    each cluster then means something, because the clusters were not drawn to accommodate
+#    them. The fitted years are not recovered by stamping the label later, only by refitting
+#    chronologically.
 # 5. **An unsupervised method always reports a clean separation.** Every method here produced
 #    clusters far apart in maximum mean discrepancy, including the one that recovered least of
 #    the truth. Without a column to check against, a separation statistic says the algorithm
