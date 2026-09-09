@@ -43,6 +43,53 @@ runs:
         name: ml4t-candidate-image
         path: /tmp
 
+    # `docker load` on a short tar says `unexpected EOF` and nothing else: not the size it
+    # read, not the space it had, not which of the two went wrong. That is what ch25 failed
+    # on in run 34342897088, 25 minutes into a job that had executed no notebook, while the
+    # same step in the same run succeeded for every other chapter. The artifact is 6.6 GB
+    # and lands on the filesystem the image then loads into, so a truncated download and a
+    # full disk both surface at that line. Read the tar before loading it: `tar -t` walks
+    # the headers to the end, so it fails on a short file and passes on a whole one, and
+    # this step says which happened while the numbers are still available.
+    - name: The candidate image arrived whole
+      id: arrival
+      if: inputs.candidate-result == 'success'
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -u
+        tar=/tmp/ml4t-candidate.tar
+        if [ ! -f "$tar" ]; then
+          echo "::error::build-image-candidate succeeded but no ml4t-candidate.tar was downloaded"
+          exit 1
+        fi
+        echo "candidate tar: $(stat -c%s "$tar") bytes"
+        df -h /tmp /var/lib/docker 2>/dev/null || df -h /tmp
+        tar -tf "$tar" > /dev/null
+
+    # One retry, because a truncated download is the one failure here that a second attempt
+    # fixes and the alternative is losing the whole job to it.
+    - name: Download the candidate image again
+      if: inputs.candidate-result == 'success' && steps.arrival.outcome == 'failure'
+      uses: actions/download-artifact@v4
+      with:
+        name: ml4t-candidate-image
+        path: /tmp
+
+    - name: The retried image arrived whole
+      if: inputs.candidate-result == 'success' && steps.arrival.outcome == 'failure'
+      shell: bash
+      run: |
+        set -u
+        tar=/tmp/ml4t-candidate.tar
+        echo "candidate tar on retry: $(stat -c%s "$tar") bytes"
+        df -h /tmp /var/lib/docker 2>/dev/null || df -h /tmp
+        if ! tar -tf "$tar" > /dev/null; then
+          echo "::error::the candidate image tar is truncated on both attempts."
+          echo "::error::free on /tmp: $(df -h --output=avail /tmp | tail -1 | tr -d ' ')"
+          exit 1
+        fi
+
     - name: Which image this commit is measured in
       id: pick
       shell: bash
