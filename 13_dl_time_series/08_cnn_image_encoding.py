@@ -449,13 +449,14 @@ for row in range(3):
     axes[row, 2].set_title("MTF" if row == 0 else "")
     plt.colorbar(im2, ax=axes[row, 2], fraction=0.046)
 
-fig.suptitle("One window as a series, as a GASF and as an MTF")
+fig.suptitle("Three training windows, each as a series, a GASF and an MTF")
 show_with_alt(
     fig,
-    "A three-by-three grid. Each row takes one training window: the left panel plots "
-    "it as a line against timestep, the middle shows its GASF matrix on a "
-    "red-to-blue scale, and the right shows its MTF matrix on a yellow-to-red scale. "
-    "Both matrices are square, with one row and column per resampled position.",
+    "A three-by-three grid, one row per training window. The left panel of each row "
+    "plots the window as a line against timestep; the middle shows its GASF matrix on "
+    "a blue-to-red diverging scale from minus one to one; the right shows its MTF "
+    "matrix on a yellow-to-red scale from zero. Both matrices are square with one row "
+    "and column per resampled position, and each carries its own colour bar.",
 )
 
 # %% [markdown]

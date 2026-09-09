@@ -587,8 +587,9 @@ show_plotly_with_alt(
     fig,
     "Two panels. The left scatters absolute prediction error against the predicted "
     "standard deviation, one point per test example. The right plots 100 consecutive "
-    "test points: the MC Dropout mean as a line, a shaded band two standard deviations "
-    "wide around it, and the actual forward returns as markers.",
+    "test points: the MC Dropout mean as a line, a shaded 95 percent band around it, "
+    "and the actual forward returns as markers. The band is far narrower than the "
+    "scatter of actual returns around it.",
 )
 
 # %% [markdown]

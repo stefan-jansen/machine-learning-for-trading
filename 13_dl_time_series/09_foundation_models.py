@@ -700,24 +700,31 @@ print(
     f"(standard deviations {np.std(y_pred_lstm):.5f} and {np.std(y_test_lstm):.5f})"
 )
 
-fig, ax = plt.subplots(figsize=(6, 5), constrained_layout=True)
+fig, ax = plt.subplots(figsize=(5.5, 5.5), constrained_layout=True)
 ax.scatter(y_test_lstm[:sample_n], y_pred_lstm[:sample_n], alpha=0.3, s=10, color=COLORS["amber"])
 ax.set_xlabel("Actual forward return")
 ax.set_ylabel("Predicted return")
+# Both axes on one scale. On separate scales the slope-1 line renders as a near-vertical
+# stripe and the compression the figure exists to show is invisible.
+axis_limit = (
+    float(max(np.abs(y_test_lstm[:sample_n]).max(), np.abs(y_pred_lstm[:sample_n]).max())) * 1.05
+)
+ax.set_xlim(-axis_limit, axis_limit)
+ax.set_ylim(-axis_limit, axis_limit)
+ax.set_aspect("equal")
 ax.axline((0, 0), slope=1, color=COLORS["neutral"], linestyle="--", alpha=0.5)
 add_message_title(
     ax,
     "LSTM predictions against the outcomes they were predicting",
-    subtitle=(
-        f"{sample_n} sampled test points; the dashed line is where a perfectly "
-        f"calibrated prediction would lie"
-    ),
+    subtitle=f"{sample_n} sampled test points, both axes on one scale",
 )
 show_with_alt(
     fig,
-    "A scatter of predicted return against actual forward return for a sample of test "
-    "points, with a dashed diagonal marking perfect calibration. The vertical extent "
-    "of the cloud against its horizontal extent is the spread ratio printed above.",
+    "A square scatter of predicted return against actual forward return for a sample "
+    "of test points, both axes on the same scale, with a dashed diagonal marking where "
+    "a perfectly calibrated prediction would lie. The cloud is a narrow horizontal "
+    "band: the outcomes span the full width while the predictions occupy a thin strip "
+    "near zero, which is the spread ratio printed above.",
 )
 
 # %% [markdown]

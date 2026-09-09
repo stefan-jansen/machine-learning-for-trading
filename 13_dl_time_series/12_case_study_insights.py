@@ -669,11 +669,20 @@ conformal_df.select(
 
 # %%
 def staggered_offsets(values: np.ndarray, tolerance: float = 0.04) -> list[int]:
-    offsets = [4] * len(values)
-    last_value, last_offset = -np.inf, 4
+    """Vertical label offsets in points, cycling rather than accumulating.
+
+    Points close together on the y-axis get their labels pushed apart. The offset
+    cycles through `LADDER` instead of growing by a fixed step each time, because an
+    accumulating offset puts the topmost label off the axes once six or seven points
+    fall inside one tolerance band.
+    """
+    ladder = (4, 16, -12, 28)
+    offsets = [ladder[0]] * len(values)
+    last_value, rung = -np.inf, 0
     for index in sorted(range(len(values)), key=lambda i: values[i]):
-        offsets[index] = last_offset + 12 if values[index] - last_value < tolerance else 4
-        last_value, last_offset = values[index], offsets[index]
+        rung = (rung + 1) % len(ladder) if values[index] - last_value < tolerance else 0
+        offsets[index] = ladder[rung]
+        last_value = values[index]
     return offsets
 
 
@@ -712,9 +721,7 @@ def plot_conformal_coverage(conformal_df: pl.DataFrame) -> plt.Figure:
         label=f"Nominal {CONFORMAL_LEVEL:.0%}",
     )
     ax.set_xscale("log")
-    # staggered_offsets pushes a label up to 12 points above its marker; without
-    # headroom the topmost case study's label lands outside the axes and is clipped.
-    ax.margins(y=0.18)
+    ax.margins(y=0.12)
     ax.set_xlabel(
         "Mean interval width, as a fraction of the outcome standard deviation over the "
         "same rows (log scale)"
