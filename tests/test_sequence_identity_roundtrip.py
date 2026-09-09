@@ -88,3 +88,37 @@ def test_the_builder_is_the_only_thing_that_reproduces_itself(config: dict[str, 
     """
     assert _canonical(config) == _canonical(config)
     assert "device" in _canonical(config)
+
+
+def test_an_undeclared_stride_writes_no_key_so_no_registered_run_rekeys() -> None:
+    """`computation` is hashed whole, so a new key written as zero moves every hash.
+
+    Only nasdaq100_microstructure declares a window stride. Writing
+    `train_sequence_stride: 0` for the eight case studies that do not would re-key every
+    sequence run ever registered, for a field none of them uses - the mistake
+    `reference/operating-rules.md` calls the most expensive one available here.
+    """
+    assert "train_sequence_stride" not in _canonical(TORCH_CONFIG)
+    assert "train_sequence_stride" not in _canonical(DARTS_CONFIG)
+
+
+def test_a_declared_stride_is_part_of_the_identity() -> None:
+    """A fit that spaced its windows and one that did not are different fits.
+
+    They see different training sets, so they must not share a training_hash - the same
+    argument the declared cap already rests on.
+    """
+    for config in (TORCH_CONFIG, DARTS_CONFIG):
+        strided = sequence_identity_params(
+            config,
+            identity_params={"n_epochs": 20},
+            input_data_spec=INPUT_DATA_SPEC,
+            label_col="fwd_ret_21d",
+            case_study="etfs",
+            max_train_sequences=0,
+            train_sequence_stride=15,
+            device="cuda",
+        )
+        assert strided is not None
+        assert strided["train_sequence_stride"] == 15
+        assert strided != _canonical(config)

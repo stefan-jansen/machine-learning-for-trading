@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import os
 from datetime import datetime
 from importlib.metadata import version
@@ -12,7 +13,10 @@ import pytest
 
 from case_studies.research import CVSpec, LabelDefinition, Study
 from case_studies.utils import deep_learning, tabular_dl
-from case_studies.utils.deep_learning import resolve_dl_max_train_sequences
+from case_studies.utils.deep_learning import (
+    resolve_dl_max_train_sequences,
+    resolve_dl_train_sequence_stride,
+)
 from tests.test_research_workspace import _seed_release
 
 
@@ -634,3 +638,107 @@ class TestDeclaredMaxTrainSequences:
             resolve_dl_max_train_sequences({"max_train_sequences": -1})
         with pytest.raises(ValueError, match="zero or positive"):
             resolve_dl_max_train_sequences({}, -1)
+
+
+class TestDeclaredTrainSequenceStride:
+    """`modeling.dl.train_sequence_stride_horizons` spaces the windows and derives the count.
+
+    The count form fixes the number of windows, so two folds of different length get
+    different spacing and the spacing is whatever the arithmetic lands on. Nasdaq's 750,000
+    drew one window every 5.4 minutes against a 15-minute label, so consecutive training
+    windows carried overlapping labels - a number carried since the original release with
+    nothing deriving it (ml4t/agent-workspace#1015). Declaring the spacing instead makes the
+    one line cover every label, because each label strides its own horizon.
+    """
+
+    @staticmethod
+    def _minute_grid(n: int = 400) -> pl.Series:
+        start = _dt.datetime(2024, 1, 2, 14, 30)
+        return pl.Series("timestamp", [start + _dt.timedelta(minutes=i) for i in range(n)])
+
+    def test_absent_declaration_strides_nothing_so_no_registered_identity_moves(self):
+        assert resolve_dl_train_sequence_stride({}, horizon="15min", dates=None) == 0
+        assert resolve_dl_train_sequence_stride(None, horizon="15min", dates=None) == 0
+
+    def test_one_horizon_on_a_minute_grid_is_the_horizon_in_minutes(self):
+        grid = self._minute_grid()
+        assert (
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 1}, horizon="15min", dates=grid
+            )
+            == 15
+        )
+
+    def test_the_same_declaration_covers_every_label_because_each_strides_its_own(self):
+        """One line, four labels. A single count could only be right for one of them."""
+        grid = self._minute_grid()
+        config = {"train_sequence_stride_horizons": 1}
+        strides = {
+            horizon: resolve_dl_train_sequence_stride(config, horizon=horizon, dates=grid)
+            for horizon in ("5min", "15min", "60min")
+        }
+        assert strides == {"5min": 5, "15min": 15, "60min": 60}
+
+    def test_more_than_one_horizon_multiplies_the_spacing(self):
+        grid = self._minute_grid()
+        assert (
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 4}, horizon="15min", dates=grid
+            )
+            == 60
+        )
+
+    def test_the_grid_is_measured_not_assumed(self):
+        """nasdaq declares a 15-minute decision cadence and trains on the minute grid.
+
+        Dividing the horizon by the declared cadence would give 1 where the answer is 15.
+        """
+        start = _dt.datetime(2024, 1, 2, 14, 30)
+        quarter_hourly = pl.Series(
+            "timestamp", [start + _dt.timedelta(minutes=15 * i) for i in range(200)]
+        )
+        assert (
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 1}, horizon="15min", dates=quarter_hourly
+            )
+            == 1
+        )
+
+    def test_declaring_both_forms_is_refused_rather_than_one_winning_silently(self):
+        with pytest.raises(ValueError, match="declare one"):
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 1, "max_train_sequences": 750_000},
+                horizon="15min",
+                dates=self._minute_grid(),
+            )
+
+    def test_a_non_positive_declaration_is_refused(self):
+        with pytest.raises(ValueError, match="positive number of label"):
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 0},
+                horizon="15min",
+                dates=self._minute_grid(),
+            )
+
+    def test_a_horizon_with_no_fixed_length_in_seconds_is_refused_not_guessed(self):
+        """A day, a week and a month have no fixed length on a trading calendar."""
+        with pytest.raises(ValueError, match="sub-daily label horizon"):
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 1},
+                horizon="21D",
+                dates=self._minute_grid(),
+            )
+
+    def test_nasdaq_declares_the_stride_and_no_count(self):
+        """The case study this exists for, read from the file the run reads."""
+        import yaml
+
+        setup = yaml.safe_load(
+            (
+                Path(__file__).resolve().parents[1]
+                / "case_studies/nasdaq100_microstructure/config/setup.yaml"
+            ).read_text()
+        )
+        dl = setup["modeling"]["dl"]
+        assert dl["train_sequence_stride_horizons"] == 1
+        assert "max_train_sequences" not in dl
