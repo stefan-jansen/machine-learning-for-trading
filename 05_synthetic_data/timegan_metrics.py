@@ -44,6 +44,12 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
+# Progress bars write to stderr, and papermill captures every redraw as a separate
+# output: one training run left several thousand of them in the committed notebook.
+# `verbose` still controls the informative stdout prints, which are worth keeping.
+# Set this True in an interactive session to watch a long run.
+PROGRESS_BARS = False
+
 
 class PostHocLSTMPredictor(nn.Module):
     """
@@ -257,7 +263,7 @@ def compute_predictive_score_yoon(
 
     # Training loop (iteration-based, not epoch-based)
     model.train()
-    iterator = tqdm(range(iterations), desc="Yoon Predictive", disable=not verbose)
+    iterator = tqdm(range(iterations), desc="Yoon Predictive", disable=not PROGRESS_BARS)
     for _ in iterator:
         # Random mini-batch (paper's approach)
         idx = np.random.permutation(n_train)[:batch_size]
@@ -359,7 +365,7 @@ def compute_discriminative_score_yoon(
 
     # Training (iteration-based)
     model.train()
-    iterator = tqdm(range(iterations), desc="Discriminator", disable=not verbose)
+    iterator = tqdm(range(iterations), desc="Discriminator", disable=not PROGRESS_BARS)
     for _ in iterator:
         idx = np.random.permutation(len(X_train_t))[:batch_size]
         X_batch = X_train_t[idx].to(device)
@@ -483,7 +489,7 @@ def compute_predictive_score(
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
         model.train()
-        iterator = tqdm(range(n_epochs), desc=desc, disable=not verbose)
+        iterator = tqdm(range(n_epochs), desc=desc, disable=not PROGRESS_BARS)
         for _ in iterator:
             epoch_loss = 0.0
             for X_batch, Y_batch in loader:
@@ -642,7 +648,7 @@ def compute_discriminative_score(
 
     # Training loop
     model.train()
-    iterator = tqdm(range(epochs), desc="Discriminator", disable=not verbose)
+    iterator = tqdm(range(epochs), desc="Discriminator", disable=not PROGRESS_BARS)
     for _ in iterator:
         epoch_loss = 0.0
         for X_batch, y_batch in train_loader:

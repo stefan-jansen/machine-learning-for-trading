@@ -92,7 +92,6 @@ from IPython.display import Image, display
 from sklearn.preprocessing import MinMaxScaler
 from timegan_metrics import run_timegan_evaluation
 from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
 
 from data import load_us_equities
 from utils.paths import get_chapter_dir, get_output_dir
@@ -508,7 +507,7 @@ if not SKIP_TRAINING:
     data_iter = infinite_dataloader()
     embedding_losses = []
 
-    for step in tqdm(range(TRAIN_STEPS), desc="Phase 1"):
+    for step in range(TRAIN_STEPS):
         (batch,) = next(data_iter)
         batch = batch.to(device)
 
@@ -543,7 +542,7 @@ if not SKIP_TRAINING:
     opt_supervisor = optim.Adam(supervisor.parameters(), lr=LEARNING_RATE)
     supervisor_losses = []
 
-    for step in tqdm(range(TRAIN_STEPS), desc="Phase 2"):
+    for step in range(TRAIN_STEPS):
         (batch,) = next(data_iter)
         batch = batch.to(device)
 
