@@ -516,15 +516,15 @@ ax.set_title("Lag and signature features contribute nearly equally")
 # Top individual features
 ax = axes[1]
 feature_names = [f"Lag_{i}" for i in range(n_lag)] + [f"Sig_{i}" for i in range(n_sig)]
-top_k = 15
-top_idx = np.argsort(importances)[-top_k:][::-1]
+TOP_K = 15
+top_idx = np.argsort(importances)[-TOP_K:][::-1]
 ax.barh(
     [feature_names[i] for i in top_idx],
     importances[top_idx],
     color=[COLORS["blue"] if i < n_lag else COLORS["copper"] for i in top_idx],
 )
 ax.set_xlabel("Impurity importance")
-ax.set_title(f"Lag and signature terms interleave across the top {top_k}")
+ax.set_title(f"Lag and signature terms interleave across the top {TOP_K}")
 ax.invert_yaxis()
 
 plt.show()

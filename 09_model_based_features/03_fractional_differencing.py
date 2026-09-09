@@ -318,7 +318,7 @@ for d, color in zip(TEACHING_D_GRID, d_colors):
 
 fig.update_layout(
     height=400,
-    title="Lower d keeps larger weights on more distant lags - the source of long memory",
+    title="Lower d keeps larger weights on distant lags, the source of long memory",
     xaxis_title="Lag k (trading days into the past)",
     yaxis_title="|FFD weight w_k| (log scale)",
     yaxis=dict(type="log"),
@@ -469,7 +469,7 @@ fig.update_xaxes(title_text="Date", row=3, col=1)
 fig.update_layout(
     height=600,
     showlegend=False,
-    title="Fractional differencing is stationary like returns but keeps slow-moving structure",
+    title="Fractional differencing is stationary but keeps slow-moving structure",
 )
 fig.show()
 
@@ -637,7 +637,7 @@ fig.update_xaxes(title_text="FFD value", row=1, col=3)
 fig.update_yaxes(title_text="Count", row=1, col=1)
 fig.update_layout(
     height=350,
-    title="Raising d collapses wandering levels toward a memoryless spike; FFD sits in between",
+    title="Raising d collapses wandering levels toward a spike; FFD sits between",
     showlegend=False,
 )
 fig.show()
