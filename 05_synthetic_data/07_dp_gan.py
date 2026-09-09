@@ -629,9 +629,15 @@ def evaluate_quality(real: np.ndarray, synthetic: np.ndarray) -> dict:
             f"{name:<15} {real_mean:>12.4f} {synth_mean:>12.4f} {real_std:>12.4f} {synth_std:>12.4f}"
         )
 
-    # Overall metrics
-    results["mean_diff"] = np.mean(np.abs(real.mean(axis=0) - synthetic.mean(axis=0)))
-    results["std_diff"] = np.mean(np.abs(real.std(axis=0) - synthetic.std(axis=0)))
+    # Overall metrics. Both average over features, so the largest single-feature gap
+    # travels with each mean: an average is small either because every feature is close
+    # or because some offset others, and only the range separates those (standard C18).
+    mean_gaps = np.abs(real.mean(axis=0) - synthetic.mean(axis=0))
+    std_gaps = np.abs(real.std(axis=0) - synthetic.std(axis=0))
+    results["mean_diff"] = np.mean(mean_gaps)
+    results["worst_feature_mean_diff"] = np.max(mean_gaps)
+    results["std_diff"] = np.mean(std_gaps)
+    results["worst_feature_std_diff"] = np.max(std_gaps)
 
     # Correlation preservation (handle NaN from zero-variance features)
     corr_real = np.corrcoef(real, rowvar=False)
@@ -641,8 +647,14 @@ def evaluate_quality(real: np.ndarray, synthetic: np.ndarray) -> dict:
     results["corr_diff"] = np.linalg.norm(corr_real - corr_synth, "fro") / corr_real.size
 
     print("-" * 70)
-    print(f"Mean absolute difference: {results['mean_diff']:.4f}")
-    print(f"Std absolute difference: {results['std_diff']:.4f}")
+    print(
+        f"Mean absolute difference: {results['mean_diff']:.4f}"
+        f"   (worst single feature: {results['worst_feature_mean_diff']:.4f})"
+    )
+    print(
+        f"Std absolute difference: {results['std_diff']:.4f}"
+        f"   (worst single feature: {results['worst_feature_std_diff']:.4f})"
+    )
     print(f"Correlation distance (Frobenius): {results['corr_diff']:.4f}")
 
     return results
