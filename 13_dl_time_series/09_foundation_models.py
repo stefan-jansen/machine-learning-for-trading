@@ -749,12 +749,16 @@ show_with_alt(
 # become interchangeable in a pipeline rather than two separate scripts.
 # `11_library_landscape` is where that interface is used.
 #
-# It is not demonstrated here because it cannot be run in this environment: sktime's
-# neural forecasters pull in `neuralforecast`, which requires `ray`, and ray has no
-# Python 3.14 wheels ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
-# Once those exist, `uv pip install neuralforecast` makes
-# `sktime.forecasting.chronos.ChronosForecaster` importable, and it takes the model
-# path and a `num_samples` config the same way the pipeline above does.
+# It is not demonstrated here because it answers a different question. This notebook
+# scores a cross-section of funds on one date at a time, and `ChronosForecaster` fits
+# and forecasts a single series - which is what `11_library_landscape` uses it for,
+# alongside the same model called directly, so the two paths can be compared on effort
+# rather than on results.
+#
+# Note that the sktime wrapper backed by HuggingFace, which is the one Chronos uses,
+# is available here. Its wrappers backed by `neuralforecast` are not: that package
+# requires `ray`, which has no Python 3.14 wheels
+# ([ray-project/ray#56434](https://github.com/ray-project/ray/issues/56434)).
 
 # %% [markdown]
 # ## Key takeaways
