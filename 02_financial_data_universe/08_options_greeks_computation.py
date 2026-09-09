@@ -483,7 +483,7 @@ for greek, value in test_greeks.items():
 # %%
 # Generate data for visualization
 strikes = np.linspace(80, 120, 41)
-S_0 = 100
+S_0 = DEMO_SPOT
 r_0 = 0.05
 sigma_0 = 0.20
 times = [0.25, 0.5, 1.0]  # 3mo, 6mo, 1yr
@@ -561,7 +561,7 @@ fig = px.line(
     x="strike",
     y="theta",
     color="time_to_exp",
-    title="Daily theta against strike, call and put",
+    title="Daily call theta against strike, by time to expiration",
     labels={
         "strike": "Strike Price ($)",
         "theta": "Theta ($/day)",
@@ -572,7 +572,9 @@ fig.add_vline(x=DEMO_SPOT, line_dash="dash", line_color=COLORS["neutral"], annot
 fig.update_layout(height=400)
 show_plotly_with_alt(
     fig,
-    "Curves of daily theta against strike price for a call and a put, with a dashed vertical line at the spot. Both lie below zero and reach their most negative value near the spot line.",
+    "Curves of daily call theta against strike price, one per time to expiration, with a dashed "
+    "vertical line at the spot. All lie below zero and reach their most negative value near the "
+    "spot line, the shortest-dated curve dipping furthest.",
 )
 
 # %% [markdown]
@@ -880,15 +882,21 @@ _by_side = (
 _by_side
 
 # %% [markdown]
-# The prediction fails. The residual is largest **near the money** on both sides, and deep
-# in-the-money puts - the rows early exercise should hit hardest - carry the smallest residual
-# of the six groups. Whatever is left after the rate correction is not the exercise style.
+# The prediction does not come through: the residual is largest **near the money** on both
+# sides, and deep in-the-money puts carry the smallest of the six groups.
 #
-# Largest near the money is the signature of gamma. Delta is most sensitive to its inputs where
-# gamma is highest, so any small disagreement about the inputs shows up as the biggest delta
-# difference exactly there. That suggests the remaining residual is not a difference of model
-# at all but a difference of inputs, and gamma converts it into a quantity worth reporting: the
-# change in the underlying price that would account for the observed delta gap.
+# **That does not clear the exercise style, and it is worth being precise about why.** Early
+# exercise shows up first in an option's *price*. Its effect on delta deep in the money is
+# muted, because an American and a European put that far in the money both have deltas pinned
+# near minus one. So this test is looking for an exercise-style effect in the one place where
+# delta is least able to reveal it, and a small residual there is weak evidence. What the table
+# does establish is where the residual concentrates, which is a fact about the data whatever
+# causes it.
+#
+# Largest near the money is where gamma is highest, and gamma is what turns a difference in
+# inputs into a difference in delta. That makes an input difference a plausible contributor and
+# gives a way to express the residual in units a reader can judge: divide it by gamma to get
+# the change in the underlying price that would produce the same delta gap.
 
 # %%
 _implied = validation_df.filter(pl.col("our_gamma") > 0).with_columns(
@@ -909,14 +917,19 @@ print(
 )
 
 # %% [markdown]
-# A fraction of a percent of the underlying price accounts for what is left. That is the size of a
-# difference you would expect from the two sides stamping the spot price at slightly different
-# moments of the same close, and it is far too small to be a different pricing model.
+# A fraction of a percent of the underlying price would account for what is left. That is a
+# re-expression of the residual, not an attribution of it: a spot difference of that size is
+# *consistent* with what we see, and so are several other things, including the exercise style
+# the previous test could not rule out. What the figure does is put the residual on a scale
+# where its size can be judged, and on that scale it is small.
 #
-# So the residual decomposes into one correctable error and one irreducible one: the rate was
-# ours to fix and we fixed it, and the remainder is consistent with the two sides not having
-# observed exactly the same spot. Neither of those was knowable from the list of candidates -
-# they had to be measured, and one of the two predictions had to be allowed to fail.
+# Where the section ends up is one source measured and settled, and a remainder that is bounded
+# but not explained. The rate was ours to get wrong and we got it wrong; fixing it accounts for
+# a large share. Attributing the rest would need a comparison that holds the pricing model and
+# every input fixed and varies one thing at a time, which this file cannot support because it
+# does not record what the vendor used. Saying so is the honest end of the analysis, and it is
+# a better place to stop than a list of five candidates presented as though naming them were
+# the same as testing them.
 
 # %% [markdown]
 # ## 6. Computing IV from Market Prices
@@ -924,8 +937,20 @@ print(
 # Let's demonstrate computing implied volatility from the observed option
 # prices and compare to the provided IV values.
 
+# %% [markdown]
+# One filter has to be added before the comparison means anything. `options_filtered` keeps
+# every row with a usable implied volatility, and notebook 07 showed that only about seventy
+# percent of this file's volatilities were solved from the quote - the rest are extrapolated,
+# interpolated, or taken from the other side of the put-call pair. Comparing our solve against
+# a number the vendor did not solve measures the vendor's fallback rule, not either solver.
+
 # %%
-iv_sample = options_filtered.sample(N_IV_VALIDATE, seed=SAMPLE_SEED)
+iv_candidates = options_filtered.filter(pl.col("iv_convergence") == "Converged")
+print(
+    f"Rows with a vendor volatility solved from the quote: {len(iv_candidates):,} of "
+    f"{len(options_filtered):,}"
+)
+iv_sample = iv_candidates.sample(N_IV_VALIDATE, seed=SAMPLE_SEED)
 iv_validation = []
 
 for row in iv_sample.iter_rows(named=True):
@@ -977,15 +1002,16 @@ print(
 )
 
 # %% [markdown]
-# The mean is many times the median, so the mean is not describing a typical option. Something
-# is going badly wrong on a minority of rows, and averaging across both regimes reports a number
-# that is true of neither.
+# Every option solves, and the agreement is close: the median disagreement is a fifth of a
+# volatility point and most rows are within one point of the vendor.
 #
-# The tail has a clear mechanism. Implied volatility is recovered by inverting price for
-# volatility, and the sensitivity of price to volatility is vega. Where vega is near zero the
-# inversion is ill-conditioned: a change in price too small to quote moves the implied
-# volatility a long way. That happens where an option has almost no time value, because its
-# whole price is then a tick or two.
+# That is worth pausing on, because the same comparison run without the `iv_convergence` filter
+# looks very different - solver failures, and a mean many times the median. None of that was
+# about the solvers. It was the comparison reaching for vendor volatilities that had been
+# extrapolated rather than solved, and then treating the difference as a disagreement between
+# two implementations of the same calculation.
+#
+# The next table splits what remains by time value, and finds no such split.
 
 # %%
 iv_by_time_value = (
@@ -1008,15 +1034,102 @@ iv_by_time_value = (
 iv_by_time_value
 
 # %% [markdown]
-# The split is stark, and it is not a defect in either implementation. An option quoted at a
-# couple of cents carries a price whose smallest possible increment is a large fraction of
-# itself, so the volatility implied by that price is not identified to any useful precision.
-# Two correct solvers handed the same tick-level price will disagree wildly and both be right
-# about the arithmetic.
+# The buckets agree with each other, and one bucket is missing: among the rows the vendor
+# solved directly there are almost no options with under five cents of time value.
 #
-# What follows for practice is a filter, not a fix. Implied volatility from a near-worthless
-# option should not be used as a feature, and the vendor's `iv_convergence` codes in
-# `07_sp500_options_eda` are the vendor saying the same thing in its own vocabulary.
+# That absence is the finding, and it points at why the unfiltered comparison behaved so badly.
+# Implied volatility is recovered by inverting price for volatility, and vega is the
+# sensitivity of price to volatility. Where vega is near zero, a change in price too small to
+# quote moves the implied volatility a long way. This is not a claim about solvers - given the
+# same price, two converged solvers find the same root. It is a claim about the price: a quote
+# is known only to the nearest tick, and where vega is small that tick spans a wide range of
+# volatilities.
+#
+# The next cell measures the span directly. Each option is re-solved from a price half a tick
+# above and half a tick below its mid, and the gap between the two is how much volatility the
+# quote alone leaves undetermined. It is drawn from the unfiltered frame, because the thin
+# options are the subject and the vendor's filter has removed them.
+
+# %%
+TICK = 0.01
+
+
+def with_time_value(frame: pl.DataFrame) -> pl.DataFrame:
+    """Add the part of the price that is not intrinsic value."""
+    intrinsic = (
+        pl.when(pl.col("call_put") == "C")
+        .then(pl.max_horizontal(pl.lit(0.0), pl.col("underlying_price") - pl.col("strike")))
+        .otherwise(pl.max_horizontal(pl.lit(0.0), pl.col("strike") - pl.col("underlying_price")))
+    )
+    return frame.with_columns((pl.col("mid_price") - intrinsic).alias("time_value"))
+
+
+def iv_interval_width(row: dict) -> float | None:
+    """Volatility spanned by moving the price half a tick either way."""
+    args = (row["strike"], row["years_to_maturity"], row["risk_free_rate"])
+    opt = "call" if row["call_put"] == "C" else "put"
+    lo = implied_volatility(row["mid_price"] - TICK / 2, row["underlying_price"], *args, opt)
+    hi = implied_volatility(row["mid_price"] + TICK / 2, row["underlying_price"], *args, opt)
+    return None if lo is None or hi is None else abs(hi - lo)
+
+
+_tick_sample = with_time_value(options_filtered).sample(N_IV_VALIDATE, seed=SAMPLE_SEED)
+tick_sensitivity = _tick_sample.select("mid_price", "time_value").with_columns(
+    pl.Series("tick_iv_width", [iv_interval_width(r) for r in _tick_sample.iter_rows(named=True)])
+)
+
+tick_by_time_value = (
+    tick_sensitivity.drop_nulls("tick_iv_width")
+    .with_columns(
+        pl.when(pl.col("time_value") < 0.05)
+        .then(pl.lit("under 5 cents"))
+        .when(pl.col("time_value") < 1.0)
+        .then(pl.lit("5 cents to a dollar"))
+        .otherwise(pl.lit("over a dollar"))
+        .alias("time_value_bucket")
+    )
+    .group_by("time_value_bucket")
+    .agg(
+        pl.len().alias("n"),
+        pl.col("tick_iv_width").median().alias("median_iv_span_of_one_tick"),
+    )
+    .sort("median_iv_span_of_one_tick")
+)
+print("Volatility spanned by one tick of price uncertainty:")
+tick_by_time_value
+
+# One tick is worth orders of magnitude more volatility on the thin options than on the rest.
+# On those rows the quote simply does not determine a volatility to any useful precision, and
+# two implementations disagreeing there are not giving different answers to the same question -
+# they are answering one the price leaves open.
+#
+# The vendor reached the same conclusion first, and the next cell shows it did.
+
+# %%
+_by_code = (
+    with_time_value(options_filtered)
+    .with_columns((pl.col("iv_convergence") == "Converged").alias("solved_from_quote"))
+    .group_by("solved_from_quote")
+    .agg(
+        pl.len().alias("rows"),
+        (pl.col("time_value") < 0.05).mean().alias("share_under_5_cents"),
+    )
+    .sort("solved_from_quote")
+)
+_by_code
+
+# %% [markdown]
+# Options with almost no time value are many times rarer among the rows the vendor solved
+# directly than among the rest. The `iv_convergence` code and the time-value threshold are two
+# ways of naming the same set of contracts: the ones whose price does not pin down a
+# volatility. The vendor did not fail to solve those quotes so much as decline to pretend it
+# had.
+#
+# What follows for practice is a filter, not a fix. An implied volatility recovered from a
+# near-worthless option is not a measurement and should not become a feature. Filtering on
+# `iv_convergence`, as this section does and as `07_sp500_options_eda` recommends, is what
+# applying that judgement looks like - and it is why the comparison above was restricted to
+# solved rows before any of it was measured.
 
 # %%
 # Scatter plot
@@ -1099,20 +1212,35 @@ show_plotly_with_alt(
 #    head of the file actually covers so the reader can see the trap rather than be told about
 #    it.
 #
-# 4. **The exercise style is not the explanation, and the notebook lets that prediction fail.**
-#    Every contract here is American while the formulas are European, which is a real mismatch
-#    and the obvious suspect. Early exercise is worth most on deep in-the-money puts, so those
-#    rows should carry the largest residual; they carry the smallest of the six groups. The
-#    residual is largest near the money on both sides instead.
+# 4. **The exercise-style test comes out negative and cannot be taken as clearing it.** Every
+#    contract here is American while the formulas are European. Early exercise is worth most on
+#    deep in-the-money puts, so those rows should carry the largest residual and they carry the
+#    smallest. But early exercise moves an option's price, and its effect on delta is muted
+#    exactly there, where American and European deltas are both pinned near the bound. A test
+#    aimed where its target is least visible is weak evidence either way, and the notebook says
+#    so rather than banking the result.
 #
-# 5. **What is left behaves like a difference of inputs, not of models.** Largest near the
-#    money is where gamma is highest, which is where delta is most sensitive to what it is fed.
-#    Dividing the residual by gamma converts it into the change in spot price that would account
-#    for it, and the answer is a fraction of a percent of the underlying - the size of a
-#    disagreement about the exact moment the close was stamped, and far too small to be a
-#    different pricing model.
+# 5. **The remainder is bounded, not explained.** The residual concentrates where gamma is
+#    highest, which is where delta is most sensitive to its inputs. Dividing by gamma expresses
+#    it as the spot difference that would produce the same gap - a fraction of a percent of the
+#    underlying. That puts the disagreement on a judgeable scale and shows it is small; it does
+#    not identify a cause. Attribution would need a comparison holding the model and every
+#    input fixed, and this file does not record what the vendor used.
 #
-# 6. **Greeks are local sensitivities.** The charts show delta steepening and gamma peaking near
+# 6. **A validation is only as good as the population it compares against.** The implied
+#    volatility check originally ran against every row with a usable volatility, and roughly a
+#    third of those were extrapolated by the vendor rather than solved from the quote. That
+#    produced solver failures and a mean many times the median, all of it a comparison against
+#    numbers nobody had solved. Filtering on `iv_convergence` first leaves close agreement on
+#    every row.
+#
+# 7. **The vendor's convergence code is a time-value filter under another name.** Options with
+#    almost no time value are two orders of magnitude rarer among the rows solved directly than
+#    among the rest, and one tick of price uncertainty spans tens of times more volatility on
+#    those options than on the rest. Their prices do not determine a volatility, and the code
+#    is the vendor declining to pretend otherwise.
+#
+# 8. **Greeks are local sensitivities.** The charts show delta steepening and gamma peaking near
 #    the money as expiration approaches, which is also the regime where the Black-Scholes
 #    assumptions are under the most strain.
 #
