@@ -1057,8 +1057,8 @@ elif rerank_hits < fusion_hits:
     rerank_vs_fusion = "it finds fewer of them, and ranks those it finds lower"
 else:
     rerank_vs_fusion = (
-        f"it finds the same number, so the whole of the MRR difference is the ordering "
-        f"inside the top {TOP_K}"
+        "it finds the same number, and the MRR above differs anyway - which can come from "
+        "the ordering, from a different spread of hits across the queries, or from both"
     )
 conceptual_bm25 = float(
     by_type.filter((pl.col("method") == "BM25") & (pl.col("query_type") == "conceptual"))[
