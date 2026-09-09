@@ -619,9 +619,10 @@ if daily_ls_rows:
 # 4. **Compute one coefficient per date and average those.** The unit of observation becomes
 #    the date, so a persistent cross-sectional tilt cannot masquerade as predictive accuracy
 #    the way it can when observations are pooled across dates.
-#    It does not fix the standard error. The t-statistics here are the plain
-#    `std / sqrt(n)` over the daily series, and at the five- and twenty-day horizons adjacent
-#    dates read overlapping returns, so those daily coefficients are serially correlated and
+#    It does not fix the standard error. The t-statistics here divide the mean daily
+#    coefficient by the unadjusted standard error `std / sqrt(n)`, and at the five- and
+#    twenty-day horizons adjacent dates read overlapping returns, so those coefficients are
+#    serially correlated and
 #    the interval is narrower than it should be. Nothing in this notebook turns on that,
 #    because none of the signals is near a threshold - but a signal that was would need a
 #    Newey-West or a block bootstrap before the t-statistic could be quoted.
