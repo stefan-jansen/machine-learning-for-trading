@@ -377,13 +377,26 @@ CLOCK_DTYPE = CLOCK.schema["timestamp"]
 def on_clock_dtype(frame: pl.DataFrame) -> pl.DataFrame:
     """One timestamp dtype, so a join on it cannot silently match nothing.
 
-    100 of this case study's 677 prediction artifacts - every `deep_learning` validation set
-    for the two return labels - carry a naive microsecond timestamp where the other 577 carry
-    ms/UTC, because the sequence path round-trips the frame through pandas and pandas drops the
-    zone. The instants are the same. A naive value is therefore read as the UTC it is, rather
-    than the zone being dropped from everything, which would hide the difference; and the
-    replace comes before the cast, because casting a naive column to a zoned dtype converts it
-    instead of stamping it.
+    200 of this case study's 778 prediction artifacts - every `deep_learning` set - carry a
+    microsecond timestamp where the other 578 carry milliseconds, both UTC. The sequence path
+    round-trips the frame through pandas, whose datetime64[ns] comes back as `us` rather than
+    the `ms` the panel is written at. The instants are identical.
+
+    **The divergence is deliberate and must not be unified at the source.**
+    `artifact_digest.value_digest` is sensitive to the time unit and insensitive to the zone -
+    the same two instants digest to `1cc433614b1d12f9` at `ms` and `963d16e17fb4eb7f` at `us`,
+    and identically whether or not they carry UTC. `computation.expected_prediction_keys.digest`
+    is taken over this column, so rewriting the stored unit would move `training_hash` for every
+    registered sequence run, and `_MIGRATABLE_FIELDS` covers only `computation.source_identity`.
+    Reconciling a cosmetic difference by re-keying a registry is the most expensive mistake
+    available here.
+
+    So the normalization belongs at each join site, which is what this is. It also stamps a naive
+    value as the UTC it is rather than dropping the zone from everything, and the replace comes
+    before the cast because casting a naive column to a zoned dtype converts it instead of
+    stamping it. No artifact is naive today - `_timestamps_as_utc` closed the zone half on
+    2026-08-28, deliberately leaving the unit half alone - and the branch stays because the
+    pandas round-trip is what produced the zone loss in the first place.
     """
     dtype = frame.schema["timestamp"]
     if dtype == CLOCK_DTYPE:
@@ -457,12 +470,10 @@ def holding_periods(timeline: pl.DataFrame, step: int) -> list[timedelta]:
 def _utc(moment):
     """One zone for the summary below, whatever the artifact it came from carried.
 
-    100 of this case study's 677 prediction artifacts - every deep_learning validation set
-    for fwd_ret_8h and fwd_ret_24h - carry a naive microsecond timestamp where the other 577
-    carry ms/UTC, because the sequence path round-trips the frame through pandas and pandas
-    drops the zone. The instants are the same: stamping one naive set UTC reproduces the
-    linear set's 2189 decision times exactly, all of them. So this reads a naive value as the
-    UTC it is, rather than dropping the zone from everything and hiding the difference.
+    The counts and the reason the units differ are on `on_clock_dtype` above; this is the same
+    normalization for a scalar the table prints rather than a column a join reads. A naive value
+    is read as the UTC it is rather than the zone being dropped from everything, which would
+    hide the difference instead of resolving it.
     """
     return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
 
