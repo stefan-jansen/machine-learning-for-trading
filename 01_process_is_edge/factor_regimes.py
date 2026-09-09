@@ -193,6 +193,13 @@ FACTOR_COLUMNS = [
 ]
 EQUITY_COLUMN = "Equity indices Market"
 
+missing = [c for c in FACTOR_COLUMNS if c not in aqr_raw.columns]
+if missing:
+    raise ValueError(
+        f"The AQR file is missing {missing}. Re-fetch it with "
+        "`uv run python data/factors/aqr_download.py`."
+    )
+
 # Short names for the figures and tables below; the full AQR column names do not fit on an
 # axis.
 SHORT_NAMES = {
@@ -249,13 +256,6 @@ coverage.style.format({"Mean (% / month)": "{:.2f}", "Std (% / month)": "{:.2f}"
 # on the largest scale.
 
 # %%
-missing = [c for c in FACTOR_COLUMNS if c not in aqr_raw.columns]
-if missing:
-    raise ValueError(
-        f"The AQR file is missing {missing}. Re-fetch it with "
-        "`uv run python data/factors/aqr_download.py`."
-    )
-
 factors_pl = aqr_raw.select(["timestamp", *FACTOR_COLUMNS]).sort("timestamp").drop_nulls()
 
 factors_df = factors_pl.select(FACTOR_COLUMNS).to_pandas()
