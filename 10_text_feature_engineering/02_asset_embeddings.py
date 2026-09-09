@@ -477,9 +477,10 @@ show_with_alt(
 #
 # The matrix carries something the means do not. It splits into two blocks - the technology
 # names close to one another, the bank, oil major, carmaker and conglomerate forming a
-# looser second group - with lighter cells between them. All nine are widely held, so
-# popularity alone cannot produce that split; something in the co-holding patterns
-# distinguishes which institutions hold which.
+# looser second group - with lighter cells between them. That is what differentiated
+# co-holding would look like, and it is not a test of it: these nine are all widely held but
+# not equally so, and nothing here holds frequency fixed while varying who holds what. The
+# benchmark below is where the popularity comparison is actually made.
 #
 # It is worth being clear about what that does not establish. These are the most widely held
 # stocks in the sample, so they co-occur with almost everything, and a method that placed all
