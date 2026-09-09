@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -68,7 +69,7 @@
 # This notebook re-displays saved traces by default. `RUN_LIVE = False` is the
 # publication path and makes no API calls or model-supplied shell calls.
 
-# %% Imports
+# %%
 """Replay (or run) one iteration of the ML4T Research Operator on ETFs §20.9."""
 
 from __future__ import annotations
@@ -117,7 +118,7 @@ DEFAULT_TRACE = ETFS_TRACE
 # `read_skill`) make the standalone skills repo discoverable at runtime.
 # One (`done`) terminates the loop with a structured summary.
 
-# %% Print the tool surface
+# %%
 for schema in ro.TOOL_SCHEMAS:
     fn = schema["function"]
     desc = " ".join(fn["description"].split())
@@ -144,7 +145,7 @@ for schema in ro.TOOL_SCHEMAS:
 # If the library is missing, `list_skills`/`read_skill` return a clear hint
 # instead of failing. The rest of the notebook still runs.
 
-# %% Discover validation skills
+# %%
 res = ro.tool_list_skills(category="validation")
 if "error" in res:
     print(res["error"])
@@ -156,7 +157,7 @@ else:
             f"  {s['name']:32s} | library: {s['library'] or '(none)':18s} | {s['description'][:60]}"
         )
 
-# %% Read one in detail
+# %%
 out = ro.tool_read_skill("walk-forward-cv")
 if "error" in out:
     print(out["error"])
@@ -175,7 +176,7 @@ else:
 # predictions for the rest. Handing it the constraint and the choice rather than the answer is
 # what makes the decision it reaches worth reading.
 
-# %% Show the registered task description
+# %%
 print(ro.CASE_STUDY_TASKS["etfs"])
 
 # %% [markdown]
@@ -195,7 +196,7 @@ print(ro.CASE_STUDY_TASKS["etfs"])
 # filesystem and network. The trace-replay path (`RUN_LIVE = False`)
 # never executes model-supplied commands and is the only fully-safe option.
 
-# %% Choose mode
+# %%
 if not RUN_LIVE:
     trace_path = DEFAULT_TRACE
     print(f"Replaying saved trace: {trace_path.name}")
@@ -278,7 +279,7 @@ print(f"Comparison scored under: {allocation_header}")
 # ## Run summary
 
 
-# %% Headline metadata
+# %%
 def _run_cost(run: dict) -> float:
     """Approximate what a run cost, at the rates declared in the parameters cell."""
     cost = (
@@ -306,7 +307,7 @@ print(f"approx cost:    {_human_money(result)}")
 # evidence the run actually produced, and the gap between the two is the reason a human still
 # reads the summary before anyone acts on it.
 
-# %% Final summary
+# %%
 display(
     Markdown(
         "### What the captured run established\n\n"
@@ -327,8 +328,15 @@ display(
 # registry and the files, discovery and reading of skills, and then a loop of writing, editing
 # and running one experiment script. A run that is mostly reading has not got started; a run
 # that is mostly running has stopped checking what it produced.
+#
+# How much of that shape is the agent's is worth asking of any count like this. The counts are
+# the agent's choices made through a surface the operator built: ten tools and no others, one
+# skill per `read_skill` call so consulting five means five calls, and a bash tool general
+# enough that a whole experiment is one invocation of it. A different surface with the same
+# agent behind it draws a different histogram. What the counts support is a comparison between
+# runs on this surface, not a statement about how agents allocate effort in general.
 
-# %% Tool-call histogram
+# %%
 calls = [
     {"turn": e["turn"], "tool": e["name"]} for e in result["trace"] if e.get("type") == "tool_call"
 ]
@@ -362,7 +370,7 @@ show_with_alt(
     + ".",
 )
 
-# %% Skill reads (which SKILL.md files the agent consulted)
+# %%
 skill_reads = [
     e["args"].get("name_or_path")
     for e in result["trace"]
@@ -525,7 +533,7 @@ display(
 # stocks it may not be able to trade at size. The hypothesis: removing the bottom market-cap
 # quartile erodes the Sharpe materially.
 
-# %% Replay us_firms run
+# %%
 us_firms = json.loads(US_FIRMS_TRACE.read_text())
 
 print(f"model:          {us_firms['model']}")
@@ -662,7 +670,7 @@ display(
 # Only `RESEARCH_OPERATOR_CASE_STUDY` and the task configuration changed.
 # The two outcomes differ, and the operator records both.
 
-# %% Side-by-side run summary
+# %%
 runs = [
     {
         "case_study": "etfs",
