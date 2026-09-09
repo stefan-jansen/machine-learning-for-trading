@@ -288,15 +288,19 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 # chapter and in Section 13.9 use the same model.
 
 
-# %%
-
-
 # %% [markdown]
 # ## iTransformer
 #
-# Inverts the attention dimension: treats each **feature** as a token
-# (rather than each timestep). This lets attention capture cross-variate
-# dependencies directly.
+# The other answer to what a token should be: make it a whole **feature**, not a day
+# and not a patch of days. Each of the eight momentum horizons becomes one token
+# carrying its entire `LOOKBACK`-day history, and attention then relates horizons to
+# horizons rather than moments to moments.
+#
+# Two consequences follow from that one choice. There is no positional encoding,
+# because features have no natural order to encode - temporal order lives inside a
+# token, handled by the projection that maps a history to a vector. And attention now
+# has eight tokens instead of sixty, which is a far smaller matrix and a far more
+# interpretable one, since each row and column names something a reader can identify.
 
 
 # %%
