@@ -158,18 +158,23 @@ latest_filings = filings.group_by("cik", maintain_order=True).first()
 
 print(f"Filings in the window: {len(filings):,}")
 print(f"After keeping the latest per manager: {len(latest_filings):,}")
-print(f"Managers filing more than once: {len(filings) - len(latest_filings):,}")
+repeat_filers = filings.group_by("cik").len().filter(pl.col("len") > 1)
+print(f"Managers with more than one filing: {len(repeat_filers):,}")
+print(f"Filings those managers account for: {int(repeat_filers['len'].sum()):,}")
 
 # %% [markdown]
-# ### Filings reported in the wrong unit
+# ### Filings whose numbers do not go together
 #
 # The SEC changed the value field from thousands of dollars to whole dollars, and the column name
-# in this archive still carries the old convention. Most filers made the change; a few did not,
-# and a filing that reports thousands where the rest report dollars is inflated a thousandfold.
+# in this archive still carries the old convention. Filers did not all move at once, and share
+# counts are misreported too, so a filing can be wrong in either of its two numeric columns.
 #
-# Nothing in the file says which is which, but the filing itself supplies the check: value
-# divided by shares is a price per share, and a price is a quantity with a knowable range. Taking
-# the median across a filing's positions makes the test robust to a single bad row.
+# Which of them is wrong is not determinable from the file, and it does not need to be. The two
+# columns constrain each other: value divided by shares is a price per share, and a price has a
+# knowable range whatever units the two sides were meant to be in. A filing whose positions imply
+# a price outside that range is internally inconsistent, and that is enough to set it aside. The
+# median across a filing's positions is what makes the test robust to one bad row in an otherwise
+# sound filing.
 
 # %%
 implied_prices = (
@@ -207,12 +212,13 @@ screened.filter(~pl.col("believable")).sort("reported_value", descending=True).h
 )
 
 # %% [markdown]
-# The two failures are different sizes and different problems. A handful of filings report values
-# a thousand times too large and carry trillions between them, which is enough to put a small
-# trust company above Vanguard in an unscreened ranking. Several hundred more imply a price below
-# a dollar, which usually means the share count is in the wrong unit rather than the value; they
-# are numerous and carry almost nothing, so they distort a count of managers rather than a total.
-# Reporting both, separately, is what lets a reader decide whether the screen was the right one.
+# The two failures are different sizes and different problems. A handful of filings imply prices
+# in the tens of thousands of dollars a share and carry trillions of reported value between them,
+# which is enough to put a small trust company above Vanguard in an unscreened ranking by size.
+# Several hundred more imply prices below a dollar; they are numerous and carry almost nothing, so
+# they distort a count of managers rather than a total. Reporting both, separately, is what lets a
+# reader decide whether the screen was the right one, and looking at a few of each is what
+# suggests where the error is - which the file itself never states.
 
 # %%
 top_managers = kept.sort("reported_value", descending=True).head(TOP_N)
@@ -366,8 +372,12 @@ def co_ownership_edges(positions: pl.DataFrame, min_shared: int, universe_cap: i
 
 # %%
 co_owned = co_ownership_edges(top_holdings, MIN_SHARED_MANAGERS, CO_OWNERSHIP_UNIVERSE)
-possible_pairs = CO_OWNERSHIP_UNIVERSE * (CO_OWNERSHIP_UNIVERSE - 1) // 2
+# The universe is the cap or the number of securities available, whichever is smaller; using the
+# cap where it exceeds what is there would divide by pairs that were never considered.
+universe = min(CO_OWNERSHIP_UNIVERSE, top_holdings["cusip"].n_unique())
+possible_pairs = universe * (universe - 1) // 2
 
+print(f"Securities in the pairwise pass: {universe:,}")
 print(f"Pairs considered: {possible_pairs:,}")
 print(f"Edges at {MIN_SHARED_MANAGERS} or more shared managers: {len(co_owned):,}")
 print(f"Density of the resulting graph: {len(co_owned) / possible_pairs:.1%}")
@@ -380,7 +390,7 @@ print(f"Density of the resulting graph: {len(co_owned) / possible_pairs:.1%}")
 # of shared-manager counts says what a round number was always going to miss.
 
 # %%
-shared_counts = co_ownership_edges(top_holdings, 0, CO_OWNERSHIP_UNIVERSE)["shared_managers"]
+shared_counts = co_ownership_edges(top_holdings, 0, universe)["shared_managers"]
 print(
     f"Managers two of these securities share, at the tenth percentile: {shared_counts.quantile(0.1):.0f}"
 )
@@ -425,7 +435,7 @@ show_plotly_with_alt(
 
 # %%
 breadth = dict(zip(by_security["cusip"], by_security["managers_holding"], strict=True))
-overlap = co_ownership_edges(top_holdings, 0, CO_OWNERSHIP_UNIVERSE).with_columns(
+overlap = co_ownership_edges(top_holdings, 0, universe).with_columns(
     overlap_coefficient=pl.struct("cusip_a", "cusip_b", "shared_managers").map_elements(
         lambda row: row["shared_managers"] / min(breadth[row["cusip_a"]], breadth[row["cusip_b"]]),
         return_dtype=pl.Float64,
@@ -476,9 +486,10 @@ overlap.sort("overlap_coefficient", descending=True).head(5).select(
 # 1. Group on the identifier, never on the name. A filer types the issuer name and thousands of
 #    securities in this archive carry more than one spelling, with the most widely held names
 #    carrying the most. A ranking built on names is wrong worst exactly where it is read.
-# 2. A bulk regulatory file is not clean because it is official. A few filings report values in a
-#    unit the rest abandoned, and they land at the top of any ranking by size. The filing supplies
-#    its own check: value divided by shares is a price, and a price has a knowable range.
+# 2. A bulk regulatory file is not clean because it is official. A few filings are internally
+#    inconsistent and they land at the top of any ranking by size. The filing supplies its own
+#    check without needing to know which of its columns is wrong: value divided by shares is a
+#    price, and a price has a knowable range.
 # 3. Say what a screen removed. Reporting the number of filings and the share of the total value
 #    dropped is what separates a screen from a quiet deletion.
 # 4. An accession number is not a timestamp. Its leading block identifies the filing agent, so
