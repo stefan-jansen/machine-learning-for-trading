@@ -29,7 +29,7 @@
 # - Evaluate interpolation quality at unobserved timestamps (GT-GAN's unique capability)
 # - Compare GT-GAN's irregular-data approach with fixed-grid generators (TimeGAN, Sig-CWGAN)
 #
-# **Book Reference**: Chapter 5, Section 5.4 (GANs for Financial Time Series) — GT-GAN
+# **Book Reference**: Chapter 5, Section 5.5 (GANs for financial time series) - GT-GAN
 # is treated here as a hybrid GAN + continuous-time generator for irregular observations.
 #
 # **Prerequisites**: Familiarity with GANs (`01_timegan_pytorch.py`) and Chapter 3 bar data.
@@ -98,14 +98,13 @@
 # **For production use**: Ensure Chapter 3's microstructure bar data is available.
 # Run Chapter 3 notebooks first to generate tick/volume/dollar bars.
 #
-# ### Results Context
+# ### What this run reports
 #
-# - **Reconstruction MSE**: ~0.026 — above the ~0.01 bar this notebook uses for a
-#   "good" autoencoder, so the encoder only roughly captures the bars (see the
-#   per-cell interpretation; this is a simplified, short-training demo)
-# - **KS statistic**: ~0.68 (high — small synthetic-data regime)
-# - **Smoothness ratio**: ~0.02 — the Neural-ODE interpolation is far smoother
-#   than the real bars (ratio ≪ 1), not matching their roughness
+# Three numbers say how the run went, all printed in the evaluation cells below:
+# reconstruction MSE for the autoencoder round-trip, the KS statistic against the
+# real marginal, and the smoothness ratio of the ODE interpolation against the real
+# bars. This is a short training pass over a small sample, so read them as a
+# demonstration of the architecture rather than as achievable quality.
 #
 # ---
 #
@@ -155,7 +154,7 @@ from tqdm import tqdm
 
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, plot_fidelity_comparison
+from utils.style import COLORS, plot_fidelity_comparison, show_plotly_with_alt, show_with_alt
 
 # %% [markdown]
 # ## GT-GAN Architecture
@@ -168,7 +167,6 @@ ASSETS_DIR = get_chapter_dir(5) / "assets"
 if (ASSETS_DIR / "gtgan_architecture.jpeg").exists():
     display(Image(ASSETS_DIR / "gtgan_architecture.jpeg", width=800))
 
-HEADLESS = os.environ.get("HEADLESS", "0") == "1"
 
 # Checkpoint path for model persistence
 CHECKPOINT_PATH = get_output_dir(5, "gtgan") / "checkpoints" / "gtgan_model.pt"
@@ -185,6 +183,14 @@ ODE_METHOD = "rk4"
 N_BARS = 2000  # Fallback synthetic bar count (when Ch3 data unavailable)
 RETRAIN = False  # Set True to retrain even if checkpoint exists
 SEED = 42
+
+# The reconstruction MSE this notebook treats as a well-behaved autoencoder. It is a
+# reading aid for the printed number, not a value the paper reports.
+GOOD_RECONSTRUCTION_MSE = 0.01
+
+# Progress bars write to stderr and papermill records every repaint; the training loop
+# prints its progress to stdout as well. Set True to watch a long run interactively.
+PROGRESS_BARS = False
 
 # %%
 set_global_seeds(SEED)
@@ -840,9 +846,20 @@ print(f"GT-GAN parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # Check for existing checkpoint
 SKIP_TRAINING = False
-if CHECKPOINT_PATH.exists() and not RETRAIN:
+_saved = (
+    torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+    if CHECKPOINT_PATH.exists() and not RETRAIN
+    else None
+)
+if _saved is not None and "history" not in _saved:
+    print(
+        f"\nCheckpoint at {CHECKPOINT_PATH} predates loss-history saving; retraining so "
+        "the training-progress section has its figure."
+    )
+    _saved = None
+if _saved is not None:
     print(f"\nLoading checkpoint from: {CHECKPOINT_PATH}")
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+    checkpoint = _saved
     model.encoder.load_state_dict(checkpoint["encoder"])
     model.decoder.load_state_dict(checkpoint["decoder"])
     model.generator.load_state_dict(checkpoint["generator"])
@@ -851,6 +868,7 @@ if CHECKPOINT_PATH.exists() and not RETRAIN:
         "min": np.array(checkpoint["scaler"]["min"]),
         "max": np.array(checkpoint["scaler"]["max"]),
     }
+    training_losses = checkpoint["history"]
     print("Checkpoint loaded successfully - skipping training")
     SKIP_TRAINING = True
 else:
@@ -906,7 +924,9 @@ def train_gtgan(
             yield from dataloader
 
     data_iter = infinite_dataloader()
-    pbar = tqdm(range(total_steps), desc=f"Training ({total_steps} steps)")
+    pbar = tqdm(
+        range(total_steps), desc=f"Training ({total_steps} steps)", disable=not PROGRESS_BARS
+    )
 
     for step in pbar:
         batch_seq, batch_time = next(data_iter)
@@ -971,7 +991,7 @@ def train_gtgan(
 # %% [markdown]
 # ### Run Training
 #
-# Execute step-based training. Progress is logged every 10% of total steps.
+# Execute step-based training. Progress is logged at regular intervals.
 
 # %%
 if not SKIP_TRAINING:
@@ -989,12 +1009,12 @@ if not SKIP_TRAINING:
             "max": norm_params["max"].tolist(),
         },
         "config": CONFIG,
+        # The training-progress figure plots these. Without them a checkpoint-loading
+        # run renders that section with no figure at all.
+        "history": training_losses,
     }
     torch.save(checkpoint_data, CHECKPOINT_PATH)
     print(f"\nCheckpoint saved to: {CHECKPOINT_PATH}")
-else:
-    # Create dummy losses for visualization when loading from checkpoint
-    training_losses = {"recon": [], "d_real": [], "d_fake": [], "g": []}
 
 
 # %% [markdown]
@@ -1025,18 +1045,22 @@ if training_losses["recon"]:  # Only plot if we have training losses
         template="ml4t",
         height=400,
     )
-    if not HEADLESS:
-        fig.show()
-else:
-    print("Training skipped (loaded from checkpoint) - no training losses to plot")
+    show_plotly_with_alt(
+        fig,
+        "Two panels of GT-GAN training curves against step. The left panel shows the "
+        "reconstruction loss falling from its starting value and flattening. The right "
+        "panel shows the discriminator's losses on real and on fake sequences together "
+        "with the generator loss, oscillating against one another.",
+    )
 
 # %% [markdown]
 # **Interpretation**: The reconstruction loss should decrease steadily, indicating the
 # autoencoder learns to compress and reconstruct irregular sequences through the ODE
 # bottleneck. The adversarial losses (D real, D fake, Generator) should oscillate and
 # roughly balance -- if the discriminator dominates (D losses near 0), the generator
-# receives no useful gradient. A reconstruction MSE below ~0.01 indicates good
-# autoencoder performance; the GAN component then refines the latent distribution.
+# receives no useful gradient. The notebook prints the reconstruction MSE against
+# `GOOD_RECONSTRUCTION_MSE` below; when it clears that bar, the GAN component is
+# refining a latent space the autoencoder has already learned to invert.
 
 # %% [markdown]
 # ## Generate Synthetic Irregular Sequences
@@ -1078,7 +1102,12 @@ fig = plot_fidelity_comparison(
     n_samples=min(200, N_SYNTHETIC),
     flatten_method="flatten",  # Flatten for irregular sequence comparison
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two scatter panels comparing real and synthetic sequences after flattening. Each "
+    "panel overlays the two sets of points, the PCA projection on the left and the "
+    "t-SNE projection on the right.",
+)
 
 # %% [markdown]
 # **Interpretation**: Overlapping point clouds confirm that synthetic sequences occupy
@@ -1144,18 +1173,23 @@ def evaluate_interpolation(
 interp_results = evaluate_interpolation(model, sequences_norm, seq_times, device)
 
 print("\n=== Interpolation Evaluation ===")
-print(f"Reconstruction MSE: {interp_results['reconstruction_mse']:.6f}")
+recon = interp_results["reconstruction_mse"]
+print(f"Reconstruction MSE: {recon:.6f}")
+print(
+    f"  {'clears' if recon < GOOD_RECONSTRUCTION_MSE else 'above'} the "
+    f"GOOD_RECONSTRUCTION_MSE bar of {GOOD_RECONSTRUCTION_MSE}"
+)
 print(f"Interpolation smoothness: {interp_results['interpolation_smoothness']:.6f}")
 print(f"Real data smoothness: {interp_results['real_smoothness']:.6f}")
 print(f"Smoothness ratio (interp/real): {interp_results['smoothness_ratio']:.2f}")
 
 # %% [markdown]
-# **Interpretation**: A smoothness ratio near 1.0 means the ODE-based interpolation
-# produces trajectories with similar step-to-step variation as the real data -- the model
-# has learned realistic continuous dynamics rather than simply averaging adjacent points.
-# A ratio well below 1.0 indicates over-smoothing (the ODE is too rigid), while a ratio
-# above 1.0 suggests noisy interpolation. The reconstruction MSE measures how faithfully
-# the encode-decode round-trip recovers the input; values below ~0.01 are acceptable.
+# **Interpretation**: a smoothness ratio near one means the ODE-based interpolation
+# varies from step to step about as much as the real data does, so the model has learned
+# continuous dynamics rather than averaging adjacent points. A ratio well below one is
+# over-smoothing, the ODE being too rigid to follow the data; a ratio above one is noisy
+# interpolation. The reconstruction MSE measures how faithfully the encode-decode
+# round-trip recovers the input, and is printed above beside the bar it is judged against.
 
 # %% [markdown]
 # ## Statistical Comparison
@@ -1196,12 +1230,12 @@ print(f"Max KS statistic: {stats_results['max_ks']:.4f}")
 print(f"Correlation error: {stats_results['correlation_error']:.4f}")
 
 # %% [markdown]
-# **Interpretation**: The KS statistic measures distributional divergence (0 = identical,
-# 1 = completely different). Values around 0.3-0.5 are typical for small-sample generative
-# models and indicate partial distributional match. High KS values (~0.7+) are expected
-# when training on limited data (a few hundred bars) and do not necessarily indicate
-# model failure -- they reflect the difficulty of capturing full distributional structure
-# from short irregular series. The correlation error measures how well the cross-feature
+# **Interpretation**: the KS statistic measures distributional divergence, from zero for
+# identical distributions to one for completely separated ones. A middling value is
+# typical of small-sample generative models and indicates a partial distributional match.
+# A high value is expected when training on a few hundred bars and does not on its own
+# mean the model has failed - it reflects how little distributional structure a short
+# irregular series carries. The correlation error measures how well the cross-feature
 # covariance is preserved.
 
 # %% [markdown]
@@ -1277,8 +1311,11 @@ fig = plot_irregular_sequences(
     seq_times[sample_idx],
     synthetic_sequences[sample_idx],
 )
-if not HEADLESS:
-    fig.show()
+show_plotly_with_alt(
+    fig,
+    "One real and one synthetic irregular sequence drawn on the same axes, with "
+    "markers at the observation times so the uneven spacing is visible in both.",
+)
 
 # %% [markdown]
 # **Interpretation**: The overlay of real vs synthetic irregular sequences reveals
@@ -1328,8 +1365,11 @@ fig.update_layout(
     yaxis_title="PC2",
     template="ml4t",
 )
-if not HEADLESS:
-    fig.show()
+show_plotly_with_alt(
+    fig,
+    "A PCA scatter of real and synthetic bar sequences projected onto their first two "
+    "principal components, plotted as two overlaid point clouds.",
+)
 
 
 # %% [markdown]
@@ -1543,10 +1583,10 @@ GT-GAN's key advantage: handling naturally irregular timestamps from information
 # **Interpretation**: GT-GAN's value proposition is not raw distributional fidelity (where
 # Diffusion-TS or Sig-CWGAN excel on regular grids) but its ability to operate on
 # **naturally irregular** data — the interpolation bounded-fraction metric measures this
-# directly. On this run, the discriminator is degenerate (Discriminative Accuracy = 1.000,
-# AUC = 1.000): the discriminator perfectly separates synthetic from real, which under
-# the GT-GAN evaluation protocol indicates that this short training pass has not yet
-# produced sequences the discriminator finds confusable with real ones. The TSTR MAE
+# directly. Read the discriminative accuracy and AUC printed above first: when they sit
+# at their maximum, the discriminator separates synthetic from real without error, which
+# under the GT-GAN evaluation protocol means this short training pass has not yet
+# produced sequences it finds confusable with real ones. The TSTR MAE
 # ratio and bounded-fraction printed above are the readable signals on this run; the
 # discriminator metric should not be cited until a longer-running retrain is performed
 # (tracked as a deferred retrain follow-up).
