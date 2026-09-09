@@ -18,7 +18,7 @@
 # # Chapter 5: LLM-Based Tabular Data Generation (GReaT Framework)
 #
 # **Chapter 5: Synthetic Data Generation**
-# **Section Reference**: Section 5.6 (LLMs for Structured Financial Data)
+# **Section Reference**: Section 5.7 (LLMs for structured financial data)
 #
 # **Docker image**: `ml4t-gpu`
 #
@@ -44,7 +44,7 @@
 #
 # ## Cross-References
 #
-# - **Book**: Section 5.6 discusses GReaT and LLM-based tabular generation
+# - **Book**: Section 5.7 discusses GReaT and LLM-based tabular generation
 # - **Related**: [`02_tailgan_tail_risk`](02_tailgan_tail_risk.ipynb) (GAN for time series comparison)
 #
 # ---
@@ -95,7 +95,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, plot_fidelity_comparison
+from utils.style import COLORS, plot_fidelity_comparison, show_plotly_with_alt, show_with_alt
 
 # Suppress transformers warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -107,6 +107,7 @@ N_SAMPLES = 2000  # Training samples from ETF data
 N_GENERATE = 500  # Synthetic samples to generate
 EPOCHS = 50  # Fine-tuning epochs
 BATCH_SIZE = 16  # Training batch size
+TRAIN_FRACTION = 0.7  # Earliest share of the sample used for training; the rest is held out
 SEED = 42
 
 # %%
@@ -305,13 +306,15 @@ else:
 # %% [markdown]
 # ## 3. Generate Synthetic Data
 
+# %% [markdown]
+# Guided sampling enforces the column schema row by row. It matters most when
+# fine-tuning has been short, because the unguided sampler tends to drop columns on an
+# undertrained model - which surfaces later as unparseable rows. On a well-trained
+# checkpoint `guided_sampling=False` is faster and produces equivalent quality.
+
 # %%
 print(f"\nGenerating {CONFIG['n_generate']} synthetic samples...")
 
-# Generate synthetic data: guided sampling enforces the column schema row by
-# row and is essential when fine-tuning is short (the unguided sampler tends
-# to drop columns on undertrained models). With well-trained checkpoints,
-# guided_sampling=False is faster and produces equivalent quality.
 synthetic_df = great.sample(
     n_samples=CONFIG["n_generate"],
     max_length=500,
@@ -358,7 +361,14 @@ if len(synth_data) >= 50:  # Need enough samples for meaningful visualization
         title="GReaT: Real vs Synthetic Distribution",
         n_samples=min(500, len(synth_data)),
     )
-    plt.show()
+    show_with_alt(
+        fig,
+        "Two scatter panels comparing real and synthetic rows. In the PCA projection "
+        "the synthetic points concentrate to the left of centre, including a dense "
+        "knot, while the real points spread further right. In the t-SNE projection the "
+        "two sets occupy visibly different areas, synthetic toward the left and real "
+        "toward the right, overlapping only in places rather than throughout.",
+    )
 else:
     print(f"Insufficient valid synthetic samples ({len(synth_data)}) for fidelity visualization")
 
@@ -468,29 +478,39 @@ for idx, (col, (row, col_num)) in enumerate(zip(plot_cols, positions, strict=Fal
 fig.update_yaxes(title_text="Probability density")
 fig.update_xaxes(title_text="Feature value")
 fig.update_layout(
-    title="Synthetic returns collapse toward zero; scale features match real data",
+    title="Real and synthetic marginal distributions by feature",
     height=500,
     showlegend=True,
     barmode="overlay",
     template="ml4t",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Six overlaid histogram panels, one per feature, each showing the real and "
+    "synthetic distributions together. In the three return panels the synthetic "
+    "distribution is a tall narrow spike at zero against a much wider real "
+    "distribution. In the volatility panel the synthetic mass peaks at a lower value "
+    "than the real one rather than on top of it, and in the volume ratio panel it is "
+    "concentrated in a single narrow spike near the left edge.",
+)
 
 # %% [markdown]
 # ## 7. TSTR Evaluation: Train Synthetic, Test Real
 #
 # The key test: Can a model trained on GReaT synthetic data predict real outcomes?
 #
-# **Task**: Extreme move classification (|fwd_ret_5d| > 90th percentile)
-# - Exploits volatility clustering which has real predictive signal (~0.78 AUC)
-# - Unlike direction prediction (~0.50 AUC), this provides meaningful comparisons
+# **Task**: extreme-move classification, whether the absolute five-day forward return
+# clears a high percentile of its own distribution. The task leans on volatility
+# clustering, which carries real predictive signal, so a classifier can do meaningfully
+# better than chance on it. Direction prediction cannot, which is why it makes a poor
+# yardstick: two models both near chance are hard to tell apart.
 
 # %% [markdown]
 # ### Prepare Features and Temporal Split
 #
-# We use a temporal split (first 70% train, last 30% test) rather than random
-# splitting. This avoids data leakage from future observations contaminating
-# the training set -- a critical requirement for financial time series.
+# We split temporally rather than at random, training on the earlier part of the sample
+# and testing on the later part (`TRAIN_FRACTION`). This avoids data leakage from future
+# observations contaminating the training set, a requirement for financial time series.
 
 # %%
 print("\n" + "=" * 70)
@@ -509,7 +529,7 @@ X_real = df[feature_cols].values
 y_real = df[target_col].values
 
 # Temporal split: avoid mixing future and past observations in train/test
-n_train = int(len(X_real) * 0.7)
+n_train = int(len(X_real) * TRAIN_FRACTION)
 X_train_real, X_test = X_real[:n_train], X_real[n_train:]
 y_train_real, y_test = y_real[:n_train], y_real[n_train:]
 
@@ -611,18 +631,25 @@ for col in numerical_cols:
             print(f"  Mean difference: {mean_diff:.4f}")
 
 # %% [markdown]
-# **Interpretation**: The KS test measures the maximum distance between the real
-# and synthetic cumulative distributions. Return features show high KS values
-# (`ret_1d` 0.51, `ret_5d` 0.59, `ret_20d` 0.58), indicating that the LLM does
-# not match the continuous return distributions well: synthetic returns are
-# compressed toward zero with lower variance. Volatility (KS 0.32) and volume
-# ratio (KS 0.10) are matched more closely. The categorical distributions also
-# diverge: synthetic labels 94.8% of rows "down" while only 45.1% of real rows
-# are "down" (real is 55.0% up / 45.1% down, so synthetic inverts the balance),
-# and under-generates "strong" momentum (9.8% vs 27.8%). The TSTR accuracy
-# ratio (92.7%) and AUC drop (0.759 to 0.697) show that the downstream classifier
-# trained on synthetic data is close to but not at parity with the real-trained
-# baseline; the marginal-distribution failures above are the larger gap.
+# **Interpretation**: the KS statistic is the largest gap between the real and
+# synthetic cumulative distributions, so a larger value means a worse marginal fit.
+# Read the printed table by feature group rather than by individual number.
+#
+# The three return features score worst, and the histograms show why: the synthetic
+# returns pile up in a narrow spike at zero instead of spreading out, so the model has
+# learned roughly where returns sit and not how far they travel. The scale features do
+# better on KS, though the histograms show they are not simply matched either - the
+# synthetic volatility peaks below the real one rather than on top of it.
+#
+# The categorical columns diverge in a way the KS numbers do not cover: the direction
+# label is close to one-sided in the synthetic sample while the real one is nearly
+# balanced, and the strongest momentum bucket is under-generated. Both are printed
+# above.
+#
+# The TSTR accuracy ratio and the AUC drop put the downstream cost of all this near,
+# but not at, parity with the real-trained baseline. The marginal failures are the
+# larger gap, which is the point worth carrying: a downstream score can stay
+# respectable while the distributions underneath it are wrong.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -641,9 +668,10 @@ for col in numerical_cols:
 # 4. **Parsing failures are the main failure mode**: The autoregressive generator
 #    can produce tokens that break column parsing, especially with short
 #    fine-tuning. This is visible as NaN values in the generated output.
-# 5. **Marginal fidelity is mixed**: The LLM captures scale features (volatility,
-#    volume) better than return distributions (KS 0.5+). TSTR evaluation is needed to
-#    verify that inter-feature dependencies transfer to downstream tasks.
+# 5. **Marginal fidelity is mixed**: the LLM scores better on the scale features than
+#    on the return distributions, which it compresses toward zero. A TSTR evaluation is
+#    what shows whether the inter-feature dependencies survive into a downstream task,
+#    and it can look acceptable while the marginals do not.
 #
 # | Generator | Strength | Weakness |
 # |-----------|----------|----------|
@@ -655,7 +683,7 @@ for col in numerical_cols:
 # **Next**: See [`07_dp_gan`](07_dp_gan.ipynb) for adding differential privacy guarantees to
 # synthetic generation -- critical when training data contains sensitive records.
 #
-# **Book**: Section 5.6 discusses the serialization insight in depth, including
+# **Book**: Section 5.7 discusses the serialization insight in depth, including
 # how feature-name semantics from pre-training improve generation quality and
 # how GReaT compares to GAN-based tabular generators (CTGAN, TVAE).
 
