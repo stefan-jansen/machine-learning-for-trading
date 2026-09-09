@@ -21,7 +21,7 @@
 # `04_transformers` let one position in the window depend on another through
 # attention, and `05_tcn` did the same through dilated convolution. Both are devices
 # for relating positions. A fully connected layer already relates every input to every
-# other, so the question TSMixer (Google, 2023) asks is not whether to use one but
+# other, so the question TSMixer (Chen et al., 2023) asks is not whether to use one but
 # along which axis to apply it.
 #
 # Its answer is to alternate, and never to mix both axes in a single layer. A

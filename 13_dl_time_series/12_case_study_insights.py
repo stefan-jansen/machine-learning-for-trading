@@ -55,7 +55,7 @@
 #
 # **Prerequisites**: each case study's per-architecture training notebooks
 # (`dl_lstm.py`, `dl_nlinear.py`, `dl_tsmixer.py`, `dl_tcn.py`, `dl_patchtst.py`)
-# have populated `run_log/registry.db` for the `deep_learning` family. The
+# have populated that study's `run_log/registry.db` for the `deep_learning` family. The
 # linear, GBM, and TabM baselines come from Ch11-Ch12 pipelines.
 
 # %%
