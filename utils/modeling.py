@@ -991,6 +991,10 @@ def load_modeling_dataset(
 
     # Inner-join with labels (drops rows without labels)
     dataset = dataset.join(labels, on=join_cols, how="inner")
+    # Neither operand is read again, and until they were dropped here the function returned
+    # holding three panels: the joined dataset, the feature panel it was built from, and the
+    # labels. On the full nasdaq100_microstructure panel the feature panel alone is 5.6 GB.
+    del features, labels
 
     # Drop any meta columns that leaked in
     drop_cols = [c for c in dataset.columns if c in META_LEAK]
