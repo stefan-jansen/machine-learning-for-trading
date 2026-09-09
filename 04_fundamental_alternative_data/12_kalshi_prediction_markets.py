@@ -224,11 +224,15 @@ summary
 # probability for it cannot exceed a lower threshold's.
 #
 # Checking that ordering on these prices is a **diagnostic and not an arbitrage test**, because
-# the prices are bids. Two contracts with different spreads can show a higher threshold bid above
-# a lower one without anything being tradeable: an arbitrage needs the higher threshold's bid
-# compared against the lower threshold's ask, and net of fees. What a violation here does say is
-# that the two quotes are stale relative to each other, which on a market this thin is the more
-# likely explanation and is worth knowing before either price is used.
+# the prices are bids. Two contracts with different spreads can show a higher threshold's bid
+# above a lower one while their midpoints are correctly ordered, and nothing is tradeable: an
+# arbitrage needs the higher threshold's bid against the lower threshold's ask, net of fees.
+#
+# So a violation here says the bid ordering is broken and does not say why. Two spreads of
+# different widths and two quotes of different ages both produce it, and separating them needs
+# the ask side, which this feed does not carry. It is still worth running, because a feed that
+# never violates the ordering is one whose quotes move together, and that is a property to know
+# about before either price is used.
 
 # %% [markdown]
 # The downloader is configured for six Kalshi series and only the rate series uses the
@@ -240,17 +244,23 @@ summary
 # %%
 THRESHOLD_TICKER = r"^KXFED-(?<meeting>[0-9]{2}[A-Z]{3})-T(?<threshold>[0-9]+(?:\.[0-9]+)?)$"
 
-ladder = (
-    kalshi.filter(pl.col("timestamp") == pl.col("timestamp").max())
-    .with_columns(parsed=pl.col("symbol").str.extract_groups(THRESHOLD_TICKER))
+# Select the threshold contracts first, then take their own latest date: taking the panel's
+# latest date first would return nothing whenever another series traded more recently.
+threshold_contracts = (
+    kalshi.with_columns(parsed=pl.col("symbol").str.extract_groups(THRESHOLD_TICKER))
     .unnest("parsed")
     .drop_nulls("meeting")
     .with_columns(pl.col("threshold").cast(pl.Float64))
+)
+ladder = (
+    threshold_contracts.filter(pl.col("timestamp") == threshold_contracts["timestamp"].max())
     .select("meeting", "threshold", "symbol", probability="close")
     .sort("meeting", "threshold")
+    if not threshold_contracts.is_empty()
+    else threshold_contracts.select("meeting", "threshold", "symbol", probability=pl.col("close"))
 )
 print(f"Contracts loaded: {kalshi['symbol'].n_unique()}")
-print(f"Of those, rate-threshold contracts: {ladder['symbol'].n_unique()}")
+print(f"Of those, rate-threshold contracts: {threshold_contracts['symbol'].n_unique()}")
 violations = ladder.with_columns(rises=pl.col("probability").diff().over("meeting") > 0).filter(
     pl.col("rises")
 )
@@ -259,9 +269,14 @@ print(f"Places where a higher threshold's bid exceeds a lower threshold's: {len(
 ladder
 
 # %%
-widest = ladder.group_by("meeting").len().sort("len", descending=True)["meeting"][0]
+# Ties on contract count are broken by meeting label so the same meeting is drawn on every run.
+widest_meeting = (
+    ladder.group_by("meeting").len().sort(["len", "meeting"], descending=[True, False])["meeting"]
+)
 fig = px.line(
-    ladder.filter(pl.col("meeting") == widest).to_pandas(),
+    ladder.filter(pl.col("meeting") == widest_meeting[0]).to_pandas()
+    if len(widest_meeting)
+    else ladder.to_pandas(),
     x="threshold",
     y="probability",
     markers=True,

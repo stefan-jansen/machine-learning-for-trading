@@ -439,8 +439,9 @@ show_plotly_with_alt(
 # this section set out to test - that TVL expansion precedes higher returns and contraction lower
 # ones - is not supported by these estimates.
 #
-# What the estimates do show puts the largest mean on the middle bucket, the one defined as
-# carrying no signal, which is not what any monotonic relationship would produce. Noise
+# What the estimates do show puts the mean furthest from zero on the middle bucket, the one
+# defined as carrying no signal, and it is a negative mean. That is not what any monotonic
+# relationship in the z-score would produce, in either direction. Noise
 # partitioned three ways is one explanation and this sample cannot separate it from another; the
 # three contrasts are also three tests on ten independent windows, which is not a setting in which
 # one clearing a threshold means much.

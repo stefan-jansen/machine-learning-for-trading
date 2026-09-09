@@ -196,10 +196,12 @@ if candidates.is_empty():
     print("No threshold ladder in this snapshot.")
 else:
     # The resolution term and date with the most contracts is the one worth drawing.
+    # Ties on contract count are broken by the most recent date and then by the resolution
+    # term, so the same group is chosen on every run over the same input.
     best = (
         candidates.group_by("resolves", "timestamp")
         .len()
-        .sort("len", descending=True)
+        .sort(["len", "timestamp", "resolves"], descending=[True, True, False])
         .row(0, named=True)
     )
     ladder = (

@@ -175,7 +175,10 @@ if not identity:
     )
 set_identity(identity)
 
-filings = Company(TICKER).get_filings(form=FORM)[:N_FILINGS]
+# `amendments=False` keeps 10-K/A out of the list. An amendment covers a period the original
+# already covered and often omits the narrative items entirely, so a pair drawn without this
+# filter can be two filings of the same period presented as consecutive ones.
+filings = Company(TICKER).get_filings(form=FORM, amendments=False)[:N_FILINGS]
 documents = [
     {
         "cik": filing.cik,
@@ -433,18 +436,27 @@ def added_paragraphs(old: str, new: str, min_characters: int = 200) -> list[str]
 # %%
 CHANGE_SECTION = "risk_factors"
 newer, older = documents[0]["accession_no"], documents[1]["accession_no"]
-texts = {
-    row["accession_no"]: row["text"]
-    for row in dataset.filter(pl.col("section") == CHANGE_SECTION).iter_rows(named=True)
-}
+comparable = dataset.filter(
+    (pl.col("section") == CHANGE_SECTION)
+    & (pl.col("quality") == "ok")
+    & ~pl.col("boundary_leak")
+    & pl.col("accession_no").is_in([older, newer])
+)
 
-overlap = vocabulary_overlap(texts[older], texts[newer])
-additions = added_paragraphs(texts[older], texts[newer])
-
-print(f"Comparing {CHANGE_SECTION} between {older} and {newer}")
-for name, value in overlap.items():
-    print(f"  {name}: {value:.3f}" if isinstance(value, float) else f"  {name}: {value}")
-print(f"  paragraphs in the newer filing that are not verbatim in the older: {len(additions)}")
+# An extraction the quality check rejected must not enter the comparison. An empty older section
+# scores zero similarity and marks every paragraph of the newer one as an addition, which reads
+# as a company rewriting its risk factors rather than as a failed extraction.
+if comparable.height < 2:
+    additions = []
+    print(f"Both filings' {CHANGE_SECTION} did not pass the quality check; no comparison made.")
+else:
+    texts = {row["accession_no"]: row["text"] for row in comparable.iter_rows(named=True)}
+    overlap = vocabulary_overlap(texts[older], texts[newer])
+    additions = added_paragraphs(texts[older], texts[newer])
+    print(f"Comparing {CHANGE_SECTION} between {older} and {newer}")
+    for name, value in overlap.items():
+        print(f"  {name}: {value:.3f}" if isinstance(value, float) else f"  {name}: {value}")
+    print(f"  paragraphs in the newer filing that are not verbatim in the older: {len(additions)}")
 
 # %% [markdown]
 # A high vocabulary overlap with a substantial number of changed paragraphs is the normal result,
