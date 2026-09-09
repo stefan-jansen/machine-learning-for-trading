@@ -708,10 +708,10 @@ print(f"Model trained: {NUM_BOOST_ROUND} rounds, {NUM_LEAVES} leaves")
 
 
 # %% [markdown]
-# `deterministic` and `force_col_wise` fix LightGBM's histogram construction order, so the seeds
-# above are enough to reproduce this booster exactly on any CPU. A CUDA build trains the same
-# configuration faster but its histogram updates are not bit-exact between runs, so a deployment
-# that trains on the GPU has to verify the artifact by prediction stability rather than by hash.
+# `deterministic` and `force_col_wise` fix LightGBM's histogram construction order, so the same
+# inputs in the same pinned environment produce the same booster on a re-run. A different platform
+# or a differently compiled LightGBM can still differ, and a CUDA build differs between runs of
+# itself, so anything that crosses environments is verified by comparing predictions, not hashes.
 
 # %% [markdown]
 # The model, scaler, and feature order form one deployment artifact contract.
@@ -1041,7 +1041,7 @@ for intent in ["short", "flat", "long"]:
         marker_color=intent_colors[intent],
     )
 fig.update_layout(
-    title="Most of the universe sits near zero edge; only the tails become positions",
+    title="Intent follows class probability, not the size of the directional edge",
     xaxis_title="P(up) minus P(down)",
     yaxis_title="Perpetual swap",
     barmode="stack",
