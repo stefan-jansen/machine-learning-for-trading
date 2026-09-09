@@ -193,32 +193,55 @@ first_changes
 
 
 # %% [markdown]
-# The stamp of an observation is the date the forward fill starts carrying its value, so the
-# dates on which a column changes are its stamps. Recovering them that way rather than from a
-# calendar bucket is what gets the weekly series right: their stamps fall on the weekday the
-# agency chose, Saturday for claims and Wednesday for the balance sheet, and not on any boundary
-# a calendar library would pick. A release that repeats the previous value leaves no change to
-# find; since the value is identical and was already public, the panel this builds is the same
-# either way.
+# Recovering the observations means finding the dates the forward fill starts carrying each new
+# value, and the two frequencies need different routes.
+#
+# A monthly or quarterly series is stamped on the first day of its period, so grouping the panel
+# by month or quarter and taking the first row recovers every release, including one that repeats
+# the previous reading.
+#
+# A weekly series is stamped on the weekday the agency chose - Saturday for jobless claims,
+# Wednesday for the Fed balance sheet - and no calendar library picks that boundary. What
+# identifies it is the data: the weekday on which the column changes most often is the weekday it
+# is stamped on. Selecting every panel row falling on that weekday then gives one row per week,
+# repeats included, which matters because the four-week average later in this notebook is an
+# average of four weeks and not of four distinct readings.
 
 
 # %%
+def stamp_weekday(values: pl.Series, dates: pl.Series) -> int:
+    """The weekday a weekly series is stamped on: the one its value changes on most often."""
+    changed = dates.filter(values.ne_missing(values.shift(1)))
+    return int(changed.dt.weekday().mode().item())
+
+
 def published_observations(panel: pl.DataFrame, series: str, frequency: str, lag: int):
     """One row per release of `series`: its reference period, and the date it was published."""
-    observations = (
-        panel.select(pl.col("timestamp").alias("stamped_on"), pl.col(series).alias("value"))
-        .drop_nulls()
-        .filter(pl.col("value").ne_missing(pl.col("value").shift(1)))
-    )
+    rows = panel.select(
+        pl.col("timestamp").alias("stamped_on"), pl.col(series).alias("value")
+    ).drop_nulls()
     period_length = {"monthly": "1mo", "quarterly": "1q"}.get(frequency)
-    return observations.with_columns(
-        # A weekly series is stamped at the end of the week it covers, so its period is already
-        # closed on the stamp. A monthly or quarterly one is stamped at the start of its period
-        # and runs to the day before the next one begins.
-        period_end=pl.col("stamped_on")
-        if period_length is None
-        else pl.col("stamped_on").dt.offset_by(period_length).dt.offset_by("-1d"),
-    ).with_columns(published_on=pl.col("period_end").dt.offset_by(f"{lag}d"))
+    if period_length is None:
+        # Weekly: every row on the stamping weekday, so a week repeating the previous reading is
+        # still an observation. The stamp already closes the week it covers.
+        weekday = stamp_weekday(rows["value"], rows["stamped_on"])
+        return (
+            rows.filter(pl.col("stamped_on").dt.weekday() == weekday)
+            .with_columns(period_end=pl.col("stamped_on"))
+            .with_columns(published_on=pl.col("period_end").dt.offset_by(f"{lag}d"))
+        )
+    # Monthly or quarterly: stamped on the first day of the period, which runs to the day before
+    # the next one begins.
+    return (
+        rows.group_by(pl.col("stamped_on").dt.truncate(period_length).alias("period"))
+        .agg(pl.col("stamped_on").min(), pl.col("value").first())
+        .drop("period")
+        .sort("stamped_on")
+        .with_columns(
+            period_end=pl.col("stamped_on").dt.offset_by(period_length).dt.offset_by("-1d")
+        )
+        .with_columns(published_on=pl.col("period_end").dt.offset_by(f"{lag}d"))
+    )
 
 
 # %% [markdown]
@@ -517,11 +540,13 @@ def revision_episodes(frame: pl.DataFrame, column: str) -> pl.DataFrame:
     )
     if differing.is_empty():
         return differing.with_columns(episode=pl.lit(None, dtype=pl.Int64))
-    # A new episode starts wherever the differing dates are not consecutive, or the pair of
-    # values changes.
-    breaks = ((pl.col("timestamp") - pl.col("timestamp").shift(1)).dt.total_days() > 1) | pl.col(
-        "revision"
-    ).ne_missing(pl.col("revision").shift(1))
+    # A new episode starts where the dates are not consecutive, or where either side takes a
+    # new value: comparing only the difference merges runs that happen to differ by as much.
+    breaks = (
+        ((pl.col("timestamp") - pl.col("timestamp").shift(1)).dt.total_days() > 1)
+        | pl.col("first_published").ne_missing(pl.col("first_published").shift(1))
+        | pl.col("current").ne_missing(pl.col("current").shift(1))
+    )
     return (
         differing.with_columns(episode=breaks.fill_null(True).cum_sum())
         .group_by("episode")
