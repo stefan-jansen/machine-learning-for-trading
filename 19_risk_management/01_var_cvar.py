@@ -291,7 +291,7 @@ x = [f"{round(c * 100)}%" for c in CONFIDENCE_LEVELS]
 for method in ["historical", "parametric", "cornish_fisher", "monte_carlo"]:
     fig.add_trace(go.Bar(x=x, y=var_df[method], name=method.replace("_", " ").title()))
 fig.update_layout(
-    title="Tail assumptions dominate deep-confidence VaR",
+    title="VaR by confidence level, four estimation methods",
     xaxis=dict(title="Confidence level", type="category"),
     yaxis_title="VaR (% of NAV)",
     barmode="group",
@@ -299,7 +299,10 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Grouped bars of VaR by confidence level, four methods per level. All four agree closely at the shallowest level and fan apart at the deepest, where the assumption about tail shape starts to matter.",
+    "Grouped bars of VaR by confidence level, four methods per level. Three of the four sit "
+    "close together at the shallowest level while Cornish-Fisher is a fraction of their height; "
+    "by the deepest level Cornish-Fisher is the tallest bar by a wide margin and the other "
+    "three have fanned apart, which is where the assumption about tail shape starts to matter.",
 )
 
 # %% [markdown]
@@ -376,7 +379,12 @@ for conf in CONFIDENCE_LEVELS:
 risk_df = pl.DataFrame(risk_measures)
 
 # %%
-fig = make_subplots(rows=1, cols=2, subplot_titles=["VaR comparison", "CVaR comparison"])
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=["VaR comparison", "CVaR comparison"],
+    shared_yaxes=True,
+)
 fig.add_trace(go.Bar(x=x, y=risk_df["var_historical"], name="VaR Historical"), row=1, col=1)
 fig.add_trace(go.Bar(x=x, y=risk_df["var_parametric"], name="VaR Parametric"), row=1, col=1)
 fig.add_trace(go.Bar(x=x, y=risk_df["cvar_historical"], name="CVaR Historical"), row=1, col=2)
@@ -394,12 +402,14 @@ for col in [1, 2]:
         row=1,
         col=col,
     )
-fig.update_layout(
-    title="CVaR reveals loss severity beyond the VaR threshold", barmode="group", height=400
-)
+fig.update_layout(title="VaR and CVaR estimates by confidence level", barmode="group", height=400)
 show_plotly_with_alt(
     fig,
-    "Two grouped bar panels. The left compares VaR estimates across confidence levels, the right compares CVaR estimates. Every CVaR bar stands taller than its VaR counterpart, and the gap widens toward the deeper confidence levels.",
+    "Two grouped bar panels on a shared vertical scale, VaR estimates on the left and CVaR "
+    "estimates on the right, each with one group per confidence level. Every CVaR bar stands "
+    "taller than the VaR bar for the same method and confidence level. How far it stands above "
+    "depends on the method: the historical pair separates further at each deeper level while "
+    "the parametric pair stays about as far apart throughout.",
 )
 
 # %% [markdown]
@@ -439,7 +449,7 @@ for column, label in [
 ]:
     fig.add_trace(go.Scatter(x=k_values, y=cantelli_df[column], mode="lines+markers", name=label))
 fig.update_layout(
-    title="Cantelli remains conservative for observed SPY downside tails",
+    title="Tail probability against downside deviation, three estimates",
     xaxis_title="Downside deviation from mean (standard deviations)",
     yaxis_title="Tail probability",
     yaxis_tickformat=".1%",
@@ -647,7 +657,7 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title="Losses beyond the VaR line cluster rather than arriving evenly",
+    title="Daily returns against the VaR line over the sample",
     xaxis_title="Date",
     yaxis_title="Return (%)",
     height=500,
@@ -731,7 +741,7 @@ fig.update_yaxes(title_text="Risk (%)", row=1, col=1)
 fig.update_yaxes(title_text="CVaR / VaR", row=2, col=1)
 fig.update_layout(
     title=(
-        "Tail severity remains above the loss threshold"
+        "Rolling VaR and CVaR, and the ratio between them"
         "<br><sup>252-trading-day trailing window; daily, unannualized returns</sup>"
     ),
     height=600,
@@ -814,7 +824,7 @@ for col_i, metric in enumerate(["var", "cvar"], 1):
     fig.update_yaxes(title_text=f"{metric.upper()} (%)", row=1, col=col_i)
 fig.update_layout(
     title=(
-        "High-volatility states amplify SPY tail losses"
+        "VaR and CVaR by point-in-time volatility state"
         "<br><sup>Prior-close 63-trading-day volatility; expanding point-in-time terciles</sup>"
     ),
     height=400,
@@ -928,7 +938,7 @@ _ = fig
 fig.update_yaxes(title_text="Wealth ($1 → x)", row=1, col=1)
 fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
 fig.update_layout(
-    title=f"{SYMBOL} took years to regain its pre-crisis peak",
+    title=f"{SYMBOL} wealth curve and drawdown",
     height=600,
     showlegend=True,
 )
@@ -1015,11 +1025,11 @@ fig.add_trace(
         x=portfolio_summary["metric"],
         y=portfolio_summary["weighted_standalone_pct"],
         name="Weighted stand-alone risk",
-        marker_color=COLORS["neutral"],
+        marker_color=COLORS["amber"],
     )
 )
 fig.update_layout(
-    title="Diversification lowers this portfolio's empirical tail risk",
+    title="Portfolio tail risk against the weighted stand-alone sum",
     xaxis_title="Tail measure (95% confidence)",
     yaxis_title="Loss (% of NAV)",
     barmode="group",
@@ -1086,7 +1096,7 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title="Tail-risk diversification changes with the volatility state",
+    title="Empirical diversification benefit by volatility state",
     xaxis_title="Point-in-time volatility state",
     yaxis_title="Empirical diversification benefit (%)",
     barmode="group",
@@ -1228,7 +1238,7 @@ fig.add_trace(
 fig.update_yaxes(title_text="Average QLIKE (lower is better)", row=1, col=1)
 fig.update_yaxes(title_text="MSE (x 1e-6; lower is better)", row=1, col=2)
 fig.update_layout(
-    title="Out-of-sample loss functions compare volatility forecasts",
+    title="Volatility forecasts scored by QLIKE and by variance MSE",
     height=400,
 )
 show_plotly_with_alt(
