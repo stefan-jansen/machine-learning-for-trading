@@ -606,23 +606,29 @@ display(
 # %% [markdown]
 # ### Interactions without writing them out
 #
-# `regime_conditional_features` multiplies one feature by an indicator for each value of a
-# regime column, so each output column is the feature inside one regime and zero everywhere
-# else. A linear model then fits a separate coefficient per regime without any branching, and a
-# tree model gets a column that is already the interaction it would otherwise have to
-# discover through two splits.
+# `regime_conditional_features` multiplies one feature by an indicator for each value of a regime
+# column, so each output column is the feature inside one regime and zero everywhere else. A
+# linear model then fits a separate coefficient per regime without any branching, and a tree model
+# gets a column that is already the interaction it would otherwise have to discover through two
+# splits.
 #
-# The regime values below are the three `market_regime_classifier` emits: minus one for a
-# downtrend, zero for a market with no trend the classifier will name, and one for an uptrend.
-# The helper names each output column after its regime rather than after its position in the
-# list, so the pairing between value and column is spelled out and checked below.
+# The regime values below are the three `market_regime_classifier` emits, and none of them is a
+# direction: one is a trending market, zero a transitional one, and minus one a range-bound or
+# choppy one. The classifier reads a trend-strength indicator and a choppiness indicator, neither
+# of which has a sign, so a market trending hard downward and one trending hard upward both come
+# back as one.
+#
+# `regime_conditional_features` names its output columns `feat_bear`, `feat_neutral` and
+# `feat_bull` from the values minus one, zero and one, which is the naming for a classifier whose
+# states are directional. For this classifier those names are wrong and only the numbers mean
+# anything, so the pairing is spelled out and checked below.
 
 # %%
-TREND_REGIMES = [-1, 0, 1]
-# The helper names its columns for the regime value, so the pairing is stated rather than sorted.
+REGIME_VALUES = [-1, 0, 1]  # what the classifier emits; the meanings are spelled out below
 REGIME_COLUMNS = ["feat_bear", "feat_neutral", "feat_bull"]
+REGIME_MEANING = ["range-bound", "transitional", "trending"]
 
-conditional = regime_conditional_features("returns", "trend_regime", regime_values=TREND_REGIMES)
+conditional = regime_conditional_features("returns", "trend_regime", regime_values=REGIME_VALUES)
 assert sorted(conditional) == sorted(REGIME_COLUMNS), sorted(conditional)
 with_interactions = catalog.with_columns(**conditional)
 
@@ -631,21 +637,24 @@ display(
         [
             {
                 "regime": regime,
-                "column": name,
+                "what the value means": meaning,
+                "column the helper named it": name,
                 "sessions in this regime": int((with_interactions["trend_regime"] == regime).sum()),
                 "sessions where the column is not zero": int((with_interactions[name] != 0).sum()),
             }
-            for regime, name in zip(TREND_REGIMES, REGIME_COLUMNS, strict=True)
+            for regime, name, meaning in zip(
+                REGIME_VALUES, REGIME_COLUMNS, REGIME_MEANING, strict=True
+            )
         ]
     )
 )
 
 # %% [markdown]
 # Two things to read here. The session counts partition the sample, since every session gets
-# exactly one trend regime, and the classifier names a trend on only about a tenth of them: the
-# neutral column carries almost everything and the two directional columns are sparse. Each of
-# those is estimated from its own share of the data alone, which is the mixture-of-experts
-# problem in a milder form.
+# exactly one regime, and the classifier calls the market transitional on almost all of them: the
+# middle column carries nearly everything, and the trending and range-bound columns are sparse. A
+# coefficient on either of those is estimated from its own few hundred sessions alone, which is
+# the mixture-of-experts problem in a milder form.
 #
 # And the two counts per row differ. A session inside a regime whose return happens to be zero
 # gives a zero in its own column, so counting non-zero values undercounts the regime. That makes
