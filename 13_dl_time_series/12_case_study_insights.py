@@ -14,32 +14,44 @@
 # ---
 
 # %% [markdown]
-# # Case Study Insights: Deep Learning for Time Series
+# # What the architectures did across the book's case studies
 #
 # **Docker image**: `ml4t`
 #
-# **Purpose**: assemble the cross-case-study view of temporal deep learning
-# (LSTM, NLinear, TSMixer, TCN, PatchTST) and contrast it with the linear
-# baseline (Ch11), gradient boosting (Ch12), and the tabular DL adapter TabM
-# (Ch12). Per-case-study deep dives live in `case_studies/{cs}/11_model_analysis.py`;
-# this notebook is the comparative view across the eight case studies that carry
-# DL pipelines.
+# Every notebook in this chapter demonstrated an architecture on one split of one
+# panel, and each said in its own words that a single split cannot rank
+# architectures. This notebook is where the ranking question is actually asked. It
+# reads the registry - the stored results of walk-forward runs across the eight case
+# studies that carry deep-learning pipelines - and compares LSTM, NLinear, TSMixer,
+# TCN and PatchTST against each other and against the linear baseline of Chapter 11,
+# the gradient-boosted models of Chapter 12, and the tabular network TabM.
+#
+# Nothing here is trained. Every number is read from runs that already happened, which
+# is why this is the only place in the chapter where a comparison spans datasets, and
+# why the per-case-study detail lives elsewhere, in
+# `case_studies/{cs}/11_model_analysis.py`.
+#
+# **Two things to hold on to while reading.** Each comparison is restricted to
+# configurations that covered the same folds and the same number of days, so a model
+# evaluated on an easier or shorter window cannot win by that alone. And a spread of
+# per-fold results is a description of the folds, not a confidence interval - the HAC
+# intervals on daily IC are the uncertainty estimate, and the fold violins are not.
 #
 # **Learning objectives**
 #
-# - For each case study, read the highest-IC DL configuration's average daily
-#   Spearman IC with HAC 95 % CI on the primary label
-# - Trace the architecture × case-study coverage map and the per-architecture
-#   IC at the primary label
-# - Inspect per-fold IC distributions, checkpoint dynamics, and conformal
-#   coverage at the 90 % nominal level
-# - Compare full-coverage DL and tabular daily-IC point estimates without
-#   treating fold summaries as an uncertainty estimator
-# - Place the DL family inside the architectural-class taxonomy (recurrent,
-#   MLP-style, convolutional, attention)
+# - Read an average daily Spearman IC with a HAC 95 % interval and say what the
+#   interval does and does not cover.
+# - Trace the architecture-by-case-study coverage map, and notice which cells are
+#   empty before reading the ones that are full.
+# - Read per-fold distributions, checkpoint trajectories and conformal coverage as
+#   diagnostics of a run rather than as scores.
+# - Compare deep learning against the strongest tabular family on shared timestamps,
+#   and say why a point-estimate difference is not a test.
+# - Place each architecture in its class - recurrent, MLP-style, convolutional,
+#   attention - and ask whether the class explains more than the individual model.
 #
 # **Book reference**: Section 13.7 (A practical framework) and Section 13.9
-# (Cross-Case-Study Synthesis).
+# (Case study insights).
 #
 # **Prerequisites**: each case study's per-architecture training notebooks
 # (`dl_lstm.py`, `dl_nlinear.py`, `dl_tsmixer.py`, `dl_tcn.py`, `dl_patchtst.py`)
@@ -63,8 +75,6 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 
 # %%
-# Every comparison below ranks only configurations that covered the same folds
-# and the same number of days, so a shorter evaluation window cannot win.
 from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     DATASET_META,
@@ -89,9 +99,24 @@ from case_studies.utils.model_analysis import (
     load_metrics_from_registry,
 )
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging, ml4t_palette
+from utils.style import COLORS, ml4t_diverging, ml4t_palette, show_with_alt
 
-warnings.filterwarnings("ignore")
+# %% [markdown]
+# One warning is silenced, by message and module rather than by a blanket filter.
+# polars cannot verify that a frame is sorted once `by` groups are given, and says so
+# on every grouped `join_asof`. `case_studies/utils/conformal.py` sorts by entity and
+# step itself immediately before each of those joins, which is exactly the
+# precondition the warning is about, so the warning reports a check polars could not
+# perform rather than a problem. Every other warning, from that module or anywhere
+# else, still reaches the output.
+
+# %%
+warnings.filterwarnings(
+    "ignore",
+    message="Sortedness of columns cannot be checked",
+    category=UserWarning,
+    module=r".*case_studies\.utils\.conformal",
+)
 
 # %% tags=["parameters"]
 SEED = 42
@@ -139,6 +164,11 @@ dl_grid = collect_grid_per_cs(
     FAMILY,
 )
 
+
+# %% [markdown]
+# Every comparison below ranks only configurations that covered the same folds and the
+# same number of days, so a model evaluated on a shorter or easier window cannot come
+# out ahead on that account.
 
 # %% [markdown]
 # ## 1. Scope and Coverage
@@ -277,7 +307,12 @@ fig, forest_ax = plot_cross_cs_forest(
     title="Highest-IC DL per case study (primary label, average daily IC ± HAC 95 % CI)",
 )
 forest_ax.set_xlabel("Average daily IC (HAC 95 % CI)")
-fig.show()
+show_with_alt(
+    fig,
+    "A forest plot with one row per case study, each showing the average daily "
+    "information coefficient of its highest-IC deep-learning configuration as a point "
+    "with a HAC 95 percent confidence interval, against a vertical line at zero.",
+)
 
 # %%
 n_dl_total = dl_rank1.height
@@ -343,17 +378,22 @@ for i in range(len(cs_labels)):
             ax.text(j, i, "-", ha="center", va="center", fontsize=8, color=COLORS["silver_muted"])
 ax.set_title("Highest-IC DL configuration per (case study × architecture)")
 fig.colorbar(im, ax=ax, fraction=0.045, pad=0.04, label="Average daily IC")
-fig.show()
+show_with_alt(
+    fig,
+    "A heatmap of case study against architecture, each cell shaded by the average daily "
+    "IC of the highest-IC configuration for that pair, with a colour bar. Blank cells are "
+    "pairs with no complete run.",
+)
 
 # %%
-winner_text = ", ".join(
+leader_text = ", ".join(
     f"{row['short_name']}: {row['architecture']}"
     for row in dl_rank1_display.sort("short_name").iter_rows(named=True)
 )
 display(
     Markdown(
-        f"**Computed architecture leaders.** {winner_text}. Blank heatmap cells remain explicit "
-        "coverage gaps and never enter a winner count."
+        f"**Highest-IC architecture per case study.** {leader_text}. Blank heatmap cells are "
+        "coverage gaps, and they are counted as such rather than as a low score."
     )
 )
 
@@ -399,7 +439,11 @@ for i, (n, ic) in enumerate(
 ):
     ax.text(i, n + 0.1, f"IC={ic:+.3f}", ha="center", fontsize=9)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "A bar chart counting, for each deep-learning architecture, how many case studies it "
+    "achieved the highest IC on.",
+)
 
 # %%
 architecture_count_text = ", ".join(
@@ -470,7 +514,12 @@ if not ckpt_df.is_empty():
     ax.set_title("Checkpoint dynamics for the highest-IC DL configuration per case study")
     ax.legend(loc="best", frameon=False, fontsize=8, ncol=2)
     fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "A small-multiple of line charts, one panel per case study, plotting the per-fold "
+        "median IC with an interquartile band against the training epoch of the saved "
+        "checkpoint.",
+    )
 else:
     print("No DL checkpoint data available.")
 
@@ -523,7 +572,11 @@ fig, _ = plot_per_fold_violin(
     order=order,
     title="Per-fold IC distribution for the highest-IC DL configuration (primary label)",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A violin plot with one violin per case study, showing the distribution of per-fold "
+    "ICs for its highest-IC deep-learning configuration, ordered by average daily IC.",
+)
 
 # %% [markdown]
 # Fold summaries diagnose stability only. Inference remains attached to the
@@ -650,7 +703,7 @@ def plot_conformal_coverage(conformal_df: pl.DataFrame) -> plt.Figure:
     ax.set_xscale("log")
     ax.set_xlabel("Mean interval width (fraction of calibration-fold return std; log scale)")
     ax.set_ylabel("Empirical coverage")
-    ax.set_title(f"Cross-fitted OOF calibration exposes scale drift at {CONFORMAL_LEVEL:.0%}")
+    ax.set_title(f"Cross-fitted out-of-fold calibration at the {CONFORMAL_LEVEL:.0%} level")
     ax.legend(loc="lower right", frameon=False, fontsize=9)
     fig.colorbar(sc, ax=ax, fraction=0.045, pad=0.04, label="Absolute coverage gap")
     return fig
@@ -659,7 +712,12 @@ def plot_conformal_coverage(conformal_df: pl.DataFrame) -> plt.Figure:
 # %%
 if not conformal_df.is_empty():
     fig = plot_conformal_coverage(conformal_df)
-    fig.show()
+    show_with_alt(
+        fig,
+        "A scatter of empirical coverage against nominal coverage for the cross-fitted "
+        "out-of-fold calibration, one point per case study, coloured by the absolute gap "
+        "between the two.",
+    )
 
 # %%
 if not conformal_df.is_empty():
@@ -875,7 +933,12 @@ xs, ys = add_scatter_points(ax, delta_df)
 format_scatter_axes(ax, xs, ys)
 ax.legend(handles=scatter_legend_elements(), loc="upper left", frameon=False, fontsize=8)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "A scatter of the deep-learning average daily IC against the strongest tabular "
+    "family's, one point per case study, with a diagonal marking equality and a legend "
+    "identifying the tabular family behind each point.",
+)
 
 # %%
 n_above = int((ys > xs).sum())
@@ -976,7 +1039,12 @@ if multi_horizon_cs:
         title="Highest-IC DL configuration across regression horizons",
     )
     horizon_ax.set_ylabel("Average daily IC (HAC 95 % CI band)")
-    fig.show()
+    show_with_alt(
+        fig,
+        "A chart of average daily IC with HAC confidence bands for the highest-IC "
+        "deep-learning configuration at each regression horizon, one series per case study "
+        "that has more than one horizon.",
+    )
 else:
     print(
         "No case study has ≥2 DL labels - horizon comparison is degenerate at the registry "
@@ -1096,7 +1164,11 @@ ax.set_ylabel("Average daily IC (HAC 95 % CI)")
 ax.set_title("Highest IC per architectural class per case study")
 ax.legend(frameon=False, fontsize=9, loc="best", ncol=4)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "A grouped chart of average daily IC with HAC 95 percent confidence intervals, one "
+    "group per case study and one bar per architectural class.",
+)
 
 # %%
 class_top_per_cs = (
