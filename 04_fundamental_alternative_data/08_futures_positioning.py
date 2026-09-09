@@ -52,12 +52,12 @@
 #
 # ## Prerequisites
 #
-# The COT reports are a free download. The price series joined in Part 4 is the S&P 500 ETF,
-# which ships with the book and needs nothing further.
+# Two free downloads, neither of which needs a key or a subscription. The first is the COT
+# archive; the second is the S&P 500 ETF, whose sessions Part 4 joins the reports onto.
 #
 # ```bash
-# python data/futures/positioning/cot_download.py                         # all products
-# python data/futures/positioning/cot_download.py --products ES,CL,GC     # this notebook's subset
+# python data/futures/positioning/cot_download.py --products ES,CL,GC   # this notebook's subset
+# python data/etfs/market/download.py --symbol SPY                      # the price series
 # ```
 #
 # ## Cross-References
@@ -358,7 +358,7 @@ equity.select("report_date", "available_from", "lev_money_net", "lev_money_net_z
 # %% [markdown]
 # Joining onto prices is where the date does its work. The price series used here is the S&P 500
 # ETF rather than the E-mini itself: the two track the same index, the ETF's sessions are the US
-# equity trading calendar an E-mini strategy trades on, and it ships with the book, whereas the
+# equity trading calendar an E-mini strategy trades on, and its download is free, whereas the
 # CME futures panel needs a paid market-data subscription. A backward as-of join on
 # `available_from` gives each session the most recent report that had been published by then, so
 # a session late in the week still carries the previous week's report until the new one clears
