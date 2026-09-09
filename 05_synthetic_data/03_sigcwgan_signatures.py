@@ -18,7 +18,7 @@
 # # Chapter 5: Sig-WGAN - Signature-Based Wasserstein GANs
 #
 # **Chapter 5: Synthetic Data Generation**
-# **Section Reference**: Section 5.4 (GANs for Time Series)
+# **Section Reference**: Section 5.5 (GANs for financial time series)
 #
 # **Docker image**: `ml4t-gpu`
 #
@@ -52,7 +52,7 @@
 #
 # - **Upstream**: ETF Universe loader (`data`)
 # - **Downstream**: Conditional generation for scenario analysis
-# - **Book**: Section 5.2 discusses signature-based methods
+# - **Book**: Section 5.5 discusses signature-based methods
 #
 # ---
 #
@@ -168,7 +168,7 @@ from tqdm import tqdm
 
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, plot_fidelity_comparison
+from utils.style import COLORS, plot_fidelity_comparison, show_plotly_with_alt, show_with_alt
 
 ASSETS_DIR = get_chapter_dir(5) / "assets"
 if (ASSETS_DIR / "sigcwgan_architecture.jpeg").exists():
@@ -192,15 +192,12 @@ SEED = 42
 # %%
 set_global_seeds(SEED)
 
-# %%
-# =============================================================================
-# SIGNATURE LIBRARY SETUP
-# =============================================================================
-# SigCWGAN training requires differentiable path signatures (autograd support).
-# signatory provides GPU-accelerated differentiable signatures.
-# Install: pip install --no-build-isolation signatory (requires torch first).
-# =============================================================================
+# %% [markdown]
+# Training needs path signatures that autograd can differentiate through. `signatory`
+# provides GPU-accelerated differentiable signatures; it installs with
+# `pip install --no-build-isolation signatory`, and torch must already be present.
 
+# %%
 import signatory
 
 
@@ -235,7 +232,23 @@ def compute_signature_np(path: np.ndarray, depth: int) -> np.ndarray:
 # Signature dimension scales as $O(d^{\text{depth}})$ where $d$ is the feature count.
 # With depth=4 and proper augmentations, we match the paper's methodology.
 
+# %% [markdown]
+# `PAPER_REFERENCE` holds the values Ni et al. (2024) report for S&P 500 log returns
+# over their sample. The notebook prints them beside what this run achieves, so the
+# comparison stays visible in the output rather than being asserted in prose.
+
 # %%
+PAPER_REFERENCE = {"sig_w1": 2.76, "tstr_ratio": 1.0}
+
+# Progress bars write to stderr, and papermill captures every repaint as its own
+# output. Both loops below print their progress to stdout as well, so the bars are
+# off by default. Set True in an interactive session to watch a long run.
+PROGRESS_BARS = False
+
+# Standard deviation of the Gaussian increments whose cumulative sum forms the
+# generator's Brownian input path, following the paper's implementation.
+BROWNIAN_NOISE_SCALE = 0.1
+
 CONFIG = {
     # Data - PAPER EXACT: Single asset (S&P 500), log returns
     "data_source": "sp500",  # Use bundled S&P 500 index data
@@ -376,15 +389,9 @@ print(
 )
 print("\nPaper reference period: 2005-01-01 to 2020-06-01 (~3,800 days)")
 
-# =============================================================================
-# PAPER-EXACT: NO NORMALIZATION
-# =============================================================================
-# The paper uses RAW log returns without any normalization.
-# Daily log returns are tiny (~0.001), which keeps signature values small.
-# This is critical for matching the paper's Sig-W1 values (~2.76).
-# =============================================================================
-
-# Use raw log returns (NO z-score normalization - paper-exact)
+# Raw log returns, deliberately not z-scored: the paper works on the untransformed
+# series, and their small magnitude is what keeps signature values on the scale its
+# reported Sig-W1 figures assume.
 returns = returns_train_raw
 holdout_returns = holdout_returns_raw
 
@@ -419,15 +426,8 @@ holdout_returns_original = holdout_returns_raw
 #
 # The signature depth of 4 with these augmentations matches the paper methodology.
 
+
 # %%
-# =============================================================================
-# PAPER-EXACT PATH TRANSFORMS (from lib/augmentations.py)
-# =============================================================================
-# These transforms MUST match the paper exactly for comparable results.
-# Reference: configs/STOCKS/SigWGAN.json
-# =============================================================================
-
-
 def scale_transform(path: np.ndarray, scale: float = 2.0, dim: int = 0) -> np.ndarray:
     """
     Scale a specific dimension of the path.
@@ -722,10 +722,6 @@ def augment_and_signature_paper(
 # Confirm dimension calculations match actual signature output.
 
 # %%
-# =============================================================================
-# VERIFY AUGMENTATION PIPELINE
-# =============================================================================
-
 print("\n=== Paper-Exact Signature Specification ===")
 print("Pipeline: Scale(2, dim=0) → AddTime → LeadLag → VisiTrans('I')")
 print(f"Input dimension: {n_assets}")
@@ -828,7 +824,7 @@ def compute_signatures_batch_paper(
         Shape (n_paths, sig_dim)
     """
     signatures = []
-    for path in tqdm(paths, desc=desc):
+    for path in tqdm(paths, desc=desc, disable=not PROGRESS_BARS):
         sig = augment_and_signature_paper(path, depth, config, normalise=normalise)
         signatures.append(sig)
     return np.array(signatures)
@@ -876,12 +872,9 @@ else:
 # **CRITICAL FIX**: The paper uses an **LSTMGenerator** with **Brownian motion noise**,
 # NOT an AR-FNN with independent Gaussian noise.
 #
-# From `lib/networks/generators.py`:
-# ```python
-# z = (0.1 * torch.randn(batch_size, n_lags, input_dim)).cumsum(1)  # Brownian!
-# h1, _ = self.rnn(z, (h0, c0))  # LSTM processes Brownian path
-# x = self.linear(h1)  # Linear projection to output
-# ```
+# The generator draws Gaussian increments scaled by `BROWNIAN_NOISE_SCALE`, takes their
+# cumulative sum to form a Brownian path, runs that through an LSTM, and projects the
+# result linearly to the output dimension.
 #
 # The Brownian motion noise is KEY - it provides smooth, continuous input paths
 # to the LSTM, which then transforms them into realistic output paths.
@@ -996,13 +989,9 @@ class LSTMGenerator(nn.Module):
         Returns:
             Generated paths, shape (batch_size, n_lags, output_dim)
         """
-        # =================================================================
-        # CRITICAL: BROWNIAN MOTION NOISE (paper implementation)
-        # =================================================================
-        # z = (0.1 * randn(...)).cumsum(1)
-        # First point is fixed at 0
-        # =================================================================
-        z = 0.1 * torch.randn(batch_size, n_lags, self.input_dim, device=device)
+        # Brownian motion noise, per the paper: Gaussian increments from the origin,
+        # accumulated into a path.
+        z = BROWNIAN_NOISE_SCALE * torch.randn(batch_size, n_lags, self.input_dim, device=device)
         z[:, 0, :] = 0  # First point fixed at origin
         z = z.cumsum(dim=1)  # Cumulative sum → Brownian path
 
@@ -1066,15 +1055,8 @@ print(f"Total parameters: {sum(p.numel() for p in generator.parameters()):,}")
 #
 # **FACTORIAL NORMALIZATION**: Applied to signatures during training too!
 
+
 # %%
-# =============================================================================
-# GPU PATH TRANSFORMS (PAPER-EXACT, Differentiable)
-# =============================================================================
-# These MUST match the numpy transforms exactly:
-# Scale(2, dim=0) → AddTime → LeadLag → VisiTrans("I")
-# =============================================================================
-
-
 def scale_transform_gpu(paths: torch.Tensor, scale: float = 2.0, dim: int = 0) -> torch.Tensor:
     """
     Scale a specific dimension (GPU, differentiable).
@@ -1306,20 +1288,14 @@ def train_sigwgan_paper(
     best_loss = None
     best_state = None
 
-    pbar = tqdm(range(total_steps), desc=f"Training ({total_steps} steps)")
+    pbar = tqdm(
+        range(total_steps), desc=f"Training ({total_steps} steps)", disable=not PROGRESS_BARS
+    )
 
     for step in pbar:
         optimizer.zero_grad()
 
-        # =================================================================
-        # PAPER ALGORITHM: Generate batch, compute Sig-W1 loss
-        # =================================================================
-        # x_fake = G(batch_size, n_lags, device)
-        # expected_sig_fake = compute_expected_signature(x_fake, ...)
-        # loss = rmse(expected_sig_real, expected_sig_fake)
-        # =================================================================
-
-        # Generate batch of fake paths (unconditional!)
+        # Generate a batch of unconditional fake paths.
         x_fake = generator(batch_size, n_lags, device)
 
         # Compute expected signature of fake paths (with factorial normalization)
@@ -1429,16 +1405,21 @@ fig.add_trace(
     go.Scatter(y=training_losses, mode="lines", name="Sig-W1 Loss", line=dict(color=COLORS["blue"]))
 )
 fig.update_layout(
-    title=f"Sig-WGAN Training Progress ({CONFIG['total_steps']} Steps, Paper Implementation)",
+    title="Sig-W1 distance by generator update step",
     xaxis_title="Generator Update Step",
     yaxis_title="Sig-W1 Distance (RMSE)",
     template="ml4t",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Sig-W1 distance against generator update step. The curve starts high, drops "
+    "very steeply over roughly the first hundred steps, and then runs flat and noisy "
+    "at a low level for the rest of training, with no further downward trend.",
+)
 
 print(f"\nFinal Sig-W1 loss: {training_losses[-1]:.4f}")
 print(f"Best Sig-W1 loss: {min(training_losses):.4f}")
-print("Paper reference: ~2.76 (S&P 500 log returns, 2005-2020)")
+print(f"Paper reference (Ni et al. 2024): {PAPER_REFERENCE['sig_w1']}")
 print("\nUsing paper-exact data source: S&P 500 index log returns")
 
 # %% [markdown]
@@ -1446,7 +1427,7 @@ print("\nUsing paper-exact data source: S&P 500 index log returns")
 # signatures of real and generated paths. A decreasing loss curve confirms the
 # generator is learning to produce paths whose signature statistics match the
 # training data. The absolute Sig-W1 value is **not** comparable to the paper's
-# ~2.76 out of the box - the metric's scale depends on the signature depth,
+# reference printed above - the metric's scale depends on the signature depth,
 # augmentation choices, and the magnitude of the input series (see the caveat in
 # the Key Takeaways). What matters here is the shape of the curve: a rapid drop
 # in the first ~150 steps followed by a low, stable plateau.
@@ -1501,7 +1482,7 @@ print(f"Generated {n_holdout_gen} synthetic paths for holdout comparison")
 # %% [markdown]
 # ## 10. Evaluation
 #
-# ### 10.1 Fidelity: Visual Comparison with PCA and t-SNE
+# ### Fidelity: visual comparison with PCA and t-SNE
 #
 # We project both real and synthetic paths into 2D to assess whether the
 # generator covers the same regions of the data manifold.
@@ -1514,7 +1495,14 @@ fig = plot_fidelity_comparison(
     n_samples=min(500, len(holdout_windows)),
     flatten_method="flatten",  # Flatten entire path for comparison
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two scatter panels comparing real and synthetic paths. In the PCA projection "
+    "both sets overlap in a dense cluster at the origin, but the real points also "
+    "scatter far out in every direction while the synthetic points stay in the "
+    "cluster. In the t-SNE projection the synthetic points spread over a wider area "
+    "than the real ones, which concentrate toward the centre.",
+)
 
 # %% [markdown]
 # **Interpretation**: In the dense core, the synthetic point cloud overlaps the
@@ -1526,7 +1514,7 @@ plt.show()
 # assessment than visual inspection alone.
 
 # %% [markdown]
-# ### 10.2 Compare Signature Distributions
+# ### Comparing signature distributions
 #
 # **Paper Evaluation**: Compare expected signatures of real vs synthetic paths.
 # This is the same metric used for training (Sig-W1).
@@ -1759,14 +1747,25 @@ def plot_path_comparison_unconditional(
 fig = plot_path_comparison_unconditional(
     holdout_windows, synthetic_holdout, n_samples=30, asset_idx=0
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels of cumulative return paths over fifteen days, drawn on a shared "
+    "vertical scale. Real paths on the left stay in a narrow band around zero. "
+    "Synthetic paths on the right fan out from the origin to roughly twice that "
+    "width by the last day, spread symmetrically above and below zero.",
+)
 
 # %% [markdown]
-# **Interpretation**: Both panels should show paths with similar volatility
-# and drift characteristics. Synthetic paths that are too smooth or too volatile
-# indicate the generator has not fully captured the return distribution.
-# The cumulative sum visualization amplifies differences: look for matching
-# spread (volatility) and symmetry around zero (mean accuracy).
+# **Interpretation**: both sets start at zero and stay symmetric around it, so the
+# generator has the location right. What differs is the spread: the synthetic paths
+# fan out considerably wider by the end of the window than the real ones do, on the
+# same vertical scale.
+#
+# That is worth pausing on, because the marginal standard deviation matched closely
+# in the metrics above. A cumulative sum is not determined by the marginal alone - it
+# also depends on how consecutive returns relate to one another. The stylized-facts
+# table below reports the lag-1 autocorrelation of returns and of squared returns for
+# both series, which is where that difference is measured rather than eyeballed.
 
 # %% [markdown]
 # ## 12. TSTR Evaluation: Train Synthetic, Test Real
@@ -1869,13 +1868,14 @@ print(f"Test samples: {tstr_results['n_test_samples']}")
 print(f"Accuracy (trained on REAL): {tstr_results['accuracy_train_real']:.4f}")
 print(f"Accuracy (trained on SYNTHETIC): {tstr_results['accuracy_train_synthetic']:.4f}")
 print(f"TSTR Ratio: {tstr_results['tstr_ratio']:.4f}")
-print("\n(TSTR ratio near 1.0 indicates synthetic data preserves predictive utility)")
+print(f"Paper reference (Ni et al. 2024): {PAPER_REFERENCE['tstr_ratio']}")
+print("\n(a ratio near the paper's reference indicates preserved predictive utility)")
 
 # %% [markdown]
-# **Interpretation**: A TSTR ratio near 1.0 means a classifier trained on
+# **Interpretation**: a TSTR ratio near one means a classifier trained on
 # synthetic data performs as well on real holdout data as one trained on actual
-# data. For return-sign prediction (a near-random task), ratios close to 1.0
-# are expected even with moderate generation quality. The key diagnostic is
+# data. For return-sign prediction, which is close to a coin flip either way,
+# a ratio near one is expected even with moderate generation quality. The key diagnostic is
 # whether the synthetic-trained model significantly underperforms the
 # real-trained baseline.
 
@@ -1931,12 +1931,19 @@ fig.add_trace(
 fig.update_yaxes(title_text="Metric value (lower is better)", row=1, col=1)
 fig.update_yaxes(title_text="Classifier accuracy", row=1, col=2, range=[0, 1.05])
 fig.update_layout(
-    title_text="Sig-WGAN Evaluation Summary (Paper Implementation)",
+    title_text="Fidelity metrics and TSTR classifier accuracy",
     showlegend=False,
     template="ml4t",
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bar panels. The left panel shows three fidelity metrics on a common axis "
+    "where lower is better: the scaled Sig-W1 distance, a taller KS statistic, and a "
+    "mean error bar so close to zero it is barely visible. The right panel shows "
+    "classifier accuracy for training on real and on synthetic data, two bars of "
+    "similar height with the real-trained one slightly taller.",
+)
 
 # %% [markdown]
 # **Interpretation**: The left panel reports three distributional checks - the
@@ -1945,9 +1952,10 @@ fig.show()
 # and synthetic samples. A near-zero Mean Error bar is good news (centred
 # generation), not a missing value - the bar is small because the generator has
 # learned the marginal location. The right panel reports TSTR: classifier
-# accuracy when trained on real vs synthetic. The two bars should sit at similar
-# heights for utility preservation; a gap exceeding ~0.05 indicates the
-# synthetic data is missing discriminative structure.
+# accuracy when trained on real vs synthetic. Utility is preserved when the two bars
+# sit at similar heights; a visible gap in favour of the real-trained classifier means
+# the synthetic data is missing discriminative structure. The TSTR ratio printed in the
+# evaluation cell is the same comparison as a single number.
 
 # %% [markdown]
 # ## 13b. Additional Evaluation Metrics
@@ -2021,12 +2029,12 @@ if n_assets >= 2:
 # %% [markdown]
 # **Interpretation**: The stylized facts (computed here as *excess* kurtosis, so
 # a Gaussian scores 0) are where the unconditional Sig-WGAN shows its limits. The
-# generator matches the marginal **mean and standard deviation** closely, but the
-# synthetic series collapses toward a near-Gaussian shape: excess kurtosis falls
-# from the real series' heavy fat tails (well into double digits) to roughly zero,
-# the real returns' negative skew (asymmetric crash risk) vanishes, and the lag-1
-# ACF of squared returns - the signature of volatility clustering - largely
-# disappears. This is the key teaching point of the notebook: matching low-order
+# generator matches the marginal **mean and standard deviation** closely, while the
+# higher moments printed above move toward what a Gaussian would give: excess
+# kurtosis drops away from the real series' fat tails, the real returns' negative
+# skew (asymmetric crash risk) is not reproduced, and the lag-1 ACF of squared
+# returns - the fingerprint of volatility clustering - falls toward zero. Read the
+# table above for the sizes. This is the key teaching point of the notebook: matching low-order
 # expected signatures pins down location and scale, but on this single-asset,
 # depth-4 setup it does **not**, on its own, recover the higher-moment and
 # temporal-dependence structure of returns. Capturing volatility clustering and
@@ -2154,25 +2162,23 @@ print(f"  {checkpoint_dir}/")
 # 3. **Factorial Normalization**: Rescales signature levels to comparable magnitudes,
 #    critical for stable training and meaningful loss values
 #
-# **PAPER-EXACT Implementation** (Ni et al., Mathematical Finance 2024):
+# **Following the paper** (Ni et al., Mathematical Finance 2024). Every numeric setting
+# below is declared in the `CONFIG` cell near the top, which is the single place to
+# change them:
 #
-# 1. **Generator**: LSTMGenerator with Brownian motion noise input
-#    - NOT AR-FNN with independent Gaussian noise
-#    - Noise: `z = 0.1 * randn(...).cumsum(1)` (Brownian path)
+# 1. **Generator**: an LSTM driven by Brownian motion noise - Gaussian increments
+#    scaled by `BROWNIAN_NOISE_SCALE`, accumulated into a path
 #
-# 2. **Augmentations**: Scale(2,0) → AddTime → LeadLag → VisiTrans("I")
-#    - NOT cumsum_concat → lag_added → lead_lag
-#    - Critical: VisiTrans adds 2 rows + 1 column
+# 2. **Augmentations**: Scale → AddTime → LeadLag → VisiTrans("I"), applied in that
+#    order. VisiTrans changes the path's shape, which is why the dimension check
+#    earlier in the notebook prints both the expected and the actual signature size
 #
-# 3. **Factorial Normalization**: Level k terms multiplied by k!
-#    - Without this, higher levels have tiny magnitudes
-#    - Paper: `sig[count:count+dim**(i+1)] *= factorial(i+1)`
+# 3. **Factorial normalization**: level *k* terms are multiplied by *k*!, which brings
+#    the levels to comparable magnitudes; without it the higher ones are too small to
+#    influence the loss
 #
-# 4. **Hyperparameters**: batch=2000, depth=4, lr=1e-3, steps=2500
-#    - Scheduler: StepLR(128, 0.95)
-#
-# 5. **Loss**: RMSE (L2 norm), NOT squared MSE
-#    - `loss = sqrt(sum((sig_fake - sig_real)**2))`
+# 4. **Loss**: the RMSE of the difference between expected signatures, an L2 norm
+#    rather than a squared error
 #
 # **Paper-Exact Data Source**:
 #
@@ -2184,10 +2190,8 @@ print(f"  {checkpoint_dir}/")
 #
 # **Paper reference values** (Ni et al., 2024, on S&P 500 log returns):
 #
-# | Metric | Paper Reference |
-# |--------|-----------------|
-# | Sig-W1 | ~2.76           |
-# | TSTR   | ~1.0            |
+# The reference values are declared as `PAPER_REFERENCE` in the configuration cell
+# and printed next to this run's Sig-W1 and TSTR figures in the evaluation cells.
 #
 # The Sig-W1 scale depends on signature depth, augmentation choices, and the
 # magnitude of the input series, so direct numeric comparison to the paper is
