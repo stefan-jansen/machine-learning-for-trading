@@ -172,17 +172,17 @@ if not LIVE_PREDICTIONS:
 print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 
 # %%
-# The stages the sweep may draw the configuration it overlays from. This is not a free choice: it is exactly the set
-# `resolve_canonical_rank1_lineage` selects over,
-# and the two have to agree. Pool anything narrower and they can name different configurations -
-# the curve below would then describe a strategy `20_strategy_analysis` does not report, and that
-# notebook would find no cost rows for the configuration it did select.
+# The stages the sweep may draw the configuration it overlays from. This is not a free choice: it is
+# exactly the set `resolve_canonical_rank1_lineage` selects over, and the two have to agree. Pool
+# anything narrower and they can name different configurations - the curve below would then describe
+# a strategy `20_strategy_analysis` does not report, and that notebook would find no cost rows for
+# the configuration it did select.
 #
 # Breadth is also what keeps the risk question empirical. The risk stage files one row per named
 # control and none for the un-overlaid strategy, so a pool of `risk_overlay` alone would force an
-# overlay onto the selected configuration even where every control hurt it - letting the shape of a query decide
-# what the sweep is supposed to measure. `signal` and `allocation` are how an un-overlaid
-# configuration wins when it deserves to.
+# overlay onto the selected configuration even where every control hurt it - letting the shape of a
+# query decide what the sweep is supposed to measure. `signal` and `allocation` are how an
+# un-overlaid configuration wins when it deserves to.
 #
 # `cost_sensitivity` stays out: pooling it would let a cost-charged run re-enter the selection it
 # is a consequence of. It is also the terminal stage, which is why taking everything before it
@@ -437,10 +437,10 @@ ps_done, ps_failures = sweep_costs(
 # %%
 # Every hash this sweep registered has to have landed at `cost_sensitivity`. It is checked rather
 # than assumed because the stage is inferred from the spec, and the spec being priced is a clone of
-# the selected configuration's - so a selection from the risk stage brings its risk block along, and an inference
-# that read that block before the chapter tag would file the whole curve as new risk overlays. The
-# readback below would then report an empty stage, which points at the sweep rather than at the
-# classification. This names it.
+# the selected configuration's - so a selection from the risk stage brings its risk block along, and
+# an inference that read that block before the chapter tag would file the whole curve as new risk
+# overlays. The readback below would then report an empty stage, which points at the sweep rather
+# than at the classification. This names it.
 _misfiled = {
     _hash: _stage
     for _hash, _stage in ((_hash, _stage_of(_hash)) for _hash in sorted(SWEPT_COST_HASHES))

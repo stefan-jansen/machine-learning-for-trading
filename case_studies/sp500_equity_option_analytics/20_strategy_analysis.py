@@ -250,9 +250,9 @@ if candidate_frame.filter(pl.col("sharpe").is_null()).height:
 strategy_carrier = candidate_frame.filter(pl.col("backtest_hash") == SELECTED.hash).row(
     0, named=True
 )
-# The equal-weight rows inside the frozen set, which is where the selected configuration's starting point comes
-# from. Drawing it from the set rather than re-querying keeps baseline and lineage under one
-# eligibility rule - the one the set was frozen under.
+# The equal-weight rows inside the frozen set, which is where the selected configuration's starting
+# point comes from. Drawing it from the set rather than re-querying keeps baseline and lineage under
+# one eligibility rule - the one the set was frozen under.
 baseline_pool = candidate_frame.filter(
     (pl.col("allocator") == "equal_weight") & pl.col("risk").is_null()
 )
@@ -338,10 +338,11 @@ print(
 # %%
 fixed_controls = get_position_risk_controls(CASE_STUDY)
 risk_plans = []
-# The selected configuration is drawn from a pool that now includes the risk overlays, so it may already carry
-# one. Every comparison below is against the strategy the overlay was laid over, not against the
-# overlay itself: on an overlaid configuration, reusing it as its own baseline reports a paired
-# improvement of exactly zero and silently drops the allocation-only figure the reader is shown.
+# The selected configuration is drawn from a pool that now includes the risk overlays, so it may
+# already carry one. Every comparison below is against the strategy the overlay was laid over, not
+# against the overlay itself: on an overlaid configuration, reusing it as its own baseline reports a
+# paired improvement of exactly zero and silently drops the allocation-only figure the reader is
+# shown.
 #
 # The parent is found in the frozen set rather than reconstructed by stripping the risk block.
 # Stripping does not reproduce it - the two rows also differ in the `chapter` tag that records
@@ -362,10 +363,10 @@ def _un_overlaid_parents(frame: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-# The field first, because a parent that competed is the right comparison. But the parent is a
-# fact about the selected configuration rather than about the field - 16_risk_management laid this overlay over
-# it - so where the field does not carry it, the registry is asked directly. The two differ
-# whenever the field is narrower than the registry: a reduced sweep registers the overlay and
+# The field first, because a parent that competed is the right comparison. But the parent is a fact
+# about the selected configuration rather than about the field - 16_risk_management laid this
+# overlay over it - so where the field does not carry it, the registry is asked directly. The two
+# differ whenever the field is narrower than the registry: a reduced sweep registers the overlay and
 # leaves its un-overlaid sibling outside the eligible set, and requiring field membership would
 # refuse to score an overlay whose baseline exists and is complete.
 no_overlay_rows = _un_overlaid_parents(candidate_frame)
@@ -426,9 +427,9 @@ print(
 # notebook reproduces their identities rather than recomputing them.
 #
 # `risk_base` is the un-overlaid parent: `16_risk_management` laid each control over that, so a
-# variant differs from it in the position rule and nothing else. `cost_base` is the selected configuration
-# itself: `17_costs` stresses whatever survived the risk stage, overlay included. Planning both
-# from one spec reproduces neither set of hashes.
+# variant differs from it in the position rule and nothing else. `cost_base` is the selected
+# configuration itself: `17_costs` stresses whatever survived the risk stage, overlay included.
+# Planning both from one spec reproduces neither set of hashes.
 risk_base = json.loads(NO_OVERLAY["spec_json"])
 cost_base = CARRIER_SPEC
 base_spec = risk_base
@@ -585,9 +586,9 @@ carrier_rows = (
     if baseline_row is not None
     else []
 )
-# The allocation step is the un-overlaid parent. Where the selected configuration is itself an overlay the two
-# differ, and naming the overlay here would show the allocation step already carrying the risk
-# rule's effect and then show the risk step adding nothing.
+# The allocation step is the un-overlaid parent. Where the selected configuration is itself an
+# overlay the two differ, and naming the overlay here would show the allocation step already
+# carrying the risk rule's effect and then show the risk step adding nothing.
 if baseline_row is None or baseline_row["backtest_hash"] != NO_OVERLAY_HASH:
     carrier_rows.append(
         {
@@ -882,9 +883,9 @@ print(
 # model and allocation search, so it is a lower bound on the total search cost.
 
 # %%
-# The un-overlaid parent, not the selected configuration. On an overlaid configuration the two are different rows,
-# and using the selected configuration here would compare the winning overlay with itself and report a paired
-# difference of exactly zero.
+# The un-overlaid parent, not the selected configuration. On an overlaid configuration the two are
+# different rows, and using the selected configuration here would compare the winning overlay with
+# itself and report a paired difference of exactly zero.
 baseline_returns = canonical_daily_returns(NO_OVERLAY_HASH)
 leader_returns = canonical_daily_returns(risk_leader["backtest_hash"])
 if baseline_returns is None or leader_returns is None:
@@ -896,13 +897,13 @@ aligned = (
 )
 if aligned.is_empty():
     raise RuntimeError("The overlay and its baseline are flat across the canonical window")
-# `challenger_overlays_baseline` says what a flat session on the challenger means, and here
-# the challenger is a risk overlay running on top of this exact configuration. Both are live from
-# the selected configuration's first traded session, so a session the overlay sits out is a position it
-# chose to hold and belongs in the comparison - it is the effect being measured. The default
-# is for two independent series, where the challenger's leading zeros are a warmup before its
-# first signal, and applying it here would delete the overlay's largest effect and pull
-# `sharpe_diff` toward zero in the direction the overlay is under test.
+# `challenger_overlays_baseline` says what a flat session on the challenger means, and here the
+# challenger is a risk overlay running on top of this exact configuration. Both are live from the
+# selected configuration's first traded session, so a session the overlay sits out is a position it
+# chose to hold and belongs in the comparison - it is the effect being measured. The default is for
+# two independent series, where the challenger's leading zeros are a warmup before its first signal,
+# and applying it here would delete the overlay's largest effect and pull `sharpe_diff` toward zero
+# in the direction the overlay is under test.
 paired_risk = compute_paired_uncertainty(
     aligned["challenger_ret"],
     aligned["baseline_ret"],
@@ -1063,10 +1064,10 @@ def _without(value, path: tuple[str, ...]):
 
 # The whole backtest specification, not the strategy block. `strategy_view` returns signal,
 # allocation and risk and stops there, so a comparison built on it accepts a holdout run at
-# different commissions, slippage, fill timing or stop behaviour as the selected configuration's own result -
-# and those are exactly the settings a holdout has to hold fixed for its number to be comparable.
-# What legitimately differs between the two runs is the predictions it consumed and the price
-# panel it was sliced to, so only those are projected out.
+# different commissions, slippage, fill timing or stop behaviour as the selected configuration's own
+# result - and those are exactly the settings a holdout has to hold fixed for its number to be
+# comparable. What legitimately differs between the two runs is the predictions it consumed and the
+# price panel it was sliced to, so only those are projected out.
 BACKTEST_VARYING_PATHS = (
     ("_runtime_backtest_config",),
     ("input_identity",),
@@ -1086,7 +1087,7 @@ CARRIER_BACKTEST = _comparable_backtest(json.loads(strategy_carrier["spec_json"]
 CARRIER_TRAINING_SPEC = json.loads(carrier_source[3])
 
 
-# The identity the selected configuration's configuration *should* have on the holdout, derived rather than
+# The identity the selected configuration *should* have on the holdout, derived rather than
 # approximated by comparing fields. `build_holdout_training_spec` is the same derivation
 # 18_holdout_predictions fits and 19_holdout_backtest checks, so every boundary is inside the
 # hash - the label buffer, the feature floor that bounds the training start, the fold identifier
@@ -1100,11 +1101,11 @@ OBSERVATIONS = (
     .to_list()
 )
 # The derivation needs a CURRENT resolved training specification - it re-keys the resolver's
-# per-fold fields onto the holdout fold - so a selected configuration fitted before that schema cannot be
-# matched this way. Where it can be derived it is the strongest available check and is used;
-# where it cannot, the weaker structural match runs and the notebook says which one answered,
-# because "this is the selected configuration's holdout" and "this is a holdout of the same configuration" are
-# different claims and the reader is entitled to know which is being made.
+# per-fold fields onto the holdout fold - so a selected configuration fitted before that schema
+# cannot be matched this way. Where it can be derived it is the strongest available check and is
+# used; where it cannot, the weaker structural match runs and the notebook says which one answered,
+# because "this is the selected configuration's holdout" and "this is a holdout of the same
+# configuration" are different claims and the reader is entitled to know which is being made.
 try:
     EXPECTED_HOLDOUT_TRAINING = training_hash_from_spec(
         build_holdout_training_spec(

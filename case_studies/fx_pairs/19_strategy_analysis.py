@@ -101,10 +101,10 @@ CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 # siblings are not candidates: a cost variant is a descendant of a selection rather than an
 # entrant in one. Nothing on this page can revise the choice.
 #
-# The holdout lineage is matched to that configuration by CONFIGURATION - family, configuration name,
-# label and checkpoint - rather than by the validation model's training hash. A genuine retrain
-# does not share that hash; that is what makes it a retrain, and a lineage query keyed on it can
-# only ever find a validation fit scored over a later window.
+# The holdout lineage is matched to that selection by CONFIGURATION - family, configuration name,
+# label and checkpoint - rather than by the validation model's training hash. A genuine retrain does
+# not share that hash; that is what makes it a retrain, and a lineage query keyed on it can only
+# ever find a validation fit scored over a later window.
 #
 # There is no lock and no ledger. The whole rule is: take the configuration validation ranked
 # first, retrain it on everything up to the holdout window, predict, and run that same backtest
@@ -115,14 +115,13 @@ CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 # %% tags=["results"]
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
-# The selected configuration is the highest-Sharpe registered validation backtest across the baseline,
-# allocation and risk-overlay stages, among runs that stayed solvent and belong to a generation
-# still in force. Read from the registry, so this page cannot report a configuration the
-# validation stages did not rank first.
-# The frozen set is the field, exactly as in `17` and `18`. This page reports the selected configuration as the
-# case study's answer, so it resolves over the same restricted field rather than over the whole
-# registry - otherwise a row the set never admitted could still move the common-support
-# intersection and change which admitted row is reported.
+# The selected configuration is the highest-Sharpe registered validation backtest across the
+# baseline, allocation and risk-overlay stages, among runs that stayed solvent and belong to a
+# generation still in force. Read from the registry, so this page cannot report a configuration the
+# validation stages did not rank first. The frozen set is the field, exactly as in `17` and `18`.
+# This page reports the selected configuration as the case study's answer, so it resolves over the
+# same restricted field rather than over the whole registry - otherwise a row the set never admitted
+# could still move the common-support intersection and change which admitted row is reported.
 holdout_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
 ADMITTED = frozenset(holdout_candidates.members)
 # The prediction sets behind the admitted backtests. `compute_and_register` scopes cohorts by
@@ -151,10 +150,10 @@ selected_training_spec = selected_training.spec()
 selected_computation = selected_training_spec.get("computation", selected_training_spec)
 
 # Everything this case study backtested on validation and still publishes: the equal-weight
-# baselines, the allocation variants and the risk overlays. Cost siblings are excluded, because
-# a cost variant is a descendant of a selection rather than a candidate for one. Superseded
-# generations are excluded for the same reason the selected configuration resolution excludes them - a retired
-# row still ranks, and a distribution that mixes two generations answers no question.
+# baselines, the allocation variants and the risk overlays. Cost siblings are excluded, because a
+# cost variant is a descendant of a selection rather than a candidate for one. Superseded
+# generations are excluded for the same reason the selected configuration resolution excludes them -
+# a retired row still ranks, and a distribution that mixes two generations answers no question.
 _retired = superseded_members_at(study.root, member_kind="backtest")
 candidate_rows_source = (
     study.backtests.table()
@@ -284,11 +283,11 @@ for member_hash in candidate_rows_source.get_column("backtest_hash").to_list():
         }
     )
 
-# Sorted on raw Sharpe, which is not how the selected configuration was chosen: with a conformal candidate in
-# the field the resolver re-ranks everything on the timestamps they all share, and it can return
-# a row that is not first here. The two agree on this case study and the check says so rather
-# than assuming it. A disagreement is a refusal and not a re-ordering, because the honest table
-# is the one whose top row is the result the page goes on to report - and if raw Sharpe stops
+# Sorted on raw Sharpe, which is not how the selected configuration was chosen: with a conformal
+# candidate in the field the resolver re-ranks everything on the timestamps they all share, and it
+# can return a row that is not first here. The two agree on this case study and the check says so
+# rather than assuming it. A disagreement is a refusal and not a re-ordering, because the honest
+# table is the one whose top row is the result the page goes on to report - and if raw Sharpe stops
 # producing that row, what to display instead is a decision, not a repair.
 candidate_evidence = pl.DataFrame(candidate_rows).sort(
     ["sharpe", "backtest_hash"], descending=[True, False]
@@ -529,11 +528,11 @@ if len(_holdout_backtests) != 1:
     )
 holdout_backtest = Result.open(study, _holdout_backtests[0])
 
-# One complete backtest on the holdout prediction is not the same as the selected configuration's replay
-# having been the one that produced it, and comparing the `strategy` block alone does not
-# close the gap: commissions, slippage, account settings and the price identity all sit
-# outside that block, so a cost variant or a stale-price run registered against the same
-# prediction set would pass a strategy comparison and be reported as the selected configuration's holdout.
+# One complete backtest on the holdout prediction is not the same as the selected configuration's
+# replay having been the one that produced it, and comparing the `strategy` block alone does not
+# close the gap: commissions, slippage, account settings and the price identity all sit outside that
+# block, so a cost variant or a stale-price run registered against the same prediction set would
+# pass a strategy comparison and be reported as the selected configuration's holdout.
 #
 # The backtest hash covers every input that changes the result, by construction. So the
 # expected specification is rebuilt here exactly as `18_holdout_backtest` builds it - the

@@ -297,11 +297,11 @@ if result.backtest_hash != prospective_hash:
     )
 print(f"Holdout backtest: {result.backtest_hash}")
 
-# The stage is checked rather than trusted. This configuration comes from the risk stage and its spec
-# carries a risk block, and stage inference reads the prediction's split before that block - so
-# a holdout run files as `holdout`. If that order ever changes, the whole out-of-sample result
-# lands in `risk_overlay` and `20_strategy_analysis` finds no holdout at all, which is a failure
-# four notebooks away from its cause.
+# The stage is checked rather than trusted. This configuration comes from the risk stage and its
+# spec carries a risk block, and stage inference reads the prediction's split before that block - so
+# a holdout run files as `holdout`. If that order ever changes, the whole out-of-sample result lands
+# in `risk_overlay` and `20_strategy_analysis` finds no holdout at all, which is a failure four
+# notebooks away from its cause.
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
     registered_stage = conn.execute(
         "SELECT stage FROM backtest_runs WHERE backtest_hash = ?", (result.backtest_hash,)
@@ -326,11 +326,11 @@ if registered_stage != "holdout":
 
 # %% tags=["results"]
 metrics = result.metrics
-# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports the
-# common-support figure, which re-ranks candidates on the timestamps every one of them covers;
-# that is the right number for choosing between candidates and the wrong one to set beside a
-# holdout measured over its own full window. Both are printed, so neither has to be inferred
-# from the other.
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier`
+# reports the common-support figure, which re-ranks candidates on the timestamps every one of them
+# covers; that is the right number for choosing between candidates and the wrong one to set beside a
+# holdout measured over its own full window. Both are printed, so neither has to be inferred from
+# the other.
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
     carrier_sharpe, carrier_periods, carrier_trades = conn.execute(
         "SELECT sharpe, n_periods, num_trades FROM backtest_metrics WHERE backtest_hash = ?",
@@ -353,10 +353,10 @@ print(
     f"max drawdown {metrics.get('max_drawdown', float('nan')):.2%}, "
     f"win rate {metrics.get('win_rate', float('nan')):.0%}"
 )
-# This case study runs the bar-by-bar engine - the configuration it overlays declares a trailing stop, which a
-# vectorized weight-times-return path cannot express - so trade counts are recorded and can be
-# compared. A holdout that rebalanced far less than the validation run at the same cadence
-# would say the basket stopped changing, which is a different thing from a lower Sharpe.
+# This case study runs the bar-by-bar engine - the configuration it overlays declares a trailing
+# stop, which a vectorized weight-times-return path cannot express - so trade counts are recorded
+# and can be compared. A holdout that rebalanced far less than the validation run at the same
+# cadence would say the basket stopped changing, which is a different thing from a lower Sharpe.
 print(
     f"Trades: {int(metrics.get('num_trades', 0)):,} on the holdout, "
     f"{int(carrier_trades):,} on validation"

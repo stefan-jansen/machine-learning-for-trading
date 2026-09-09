@@ -308,8 +308,8 @@ SELECTED_LABEL = top_signal.row(0, named=True)["label"]
 # support wherever a conformal candidate is present, so a row this notebook never admitted would
 # otherwise decide how far the intersection reaches and therefore which admitted row wins.
 #
-# `resolve_solvent_carrier` rather than the bare lineage resolver, so a selected configuration whose equity
-# reached zero is refused rather than reported. A long-short book with no margin call keeps
+# `resolve_solvent_carrier` rather than the bare lineage resolver, so a selected configuration whose
+# equity reached zero is refused rather than reported. A long-short book with no margin call keeps
 # compounding through zero, so every metric it reports after that point - including a Sharpe high
 # enough to top a ranking - is arithmetic on a balance that no longer exists.
 CARRIER = resolve_solvent_carrier(CASE_STUDY, admitted=ADMITTED)

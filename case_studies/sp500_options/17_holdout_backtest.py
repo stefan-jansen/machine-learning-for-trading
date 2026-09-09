@@ -297,11 +297,11 @@ with sqlite3.connect(str(REGISTRY)) as conn:
         for backtest_hash in (carrier["val_backtest_hash"], result.hash)
     )
 
-# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports the
-# common-support figure, which re-ranks candidates on the timestamps every one of them covers;
-# that is the right number for choosing between candidates and the wrong one to set beside a
-# holdout measured over its own full window. Both are printed, so neither has to be inferred
-# from the other.
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier`
+# reports the common-support figure, which re-ranks candidates on the timestamps every one of them
+# covers; that is the right number for choosing between candidates and the wrong one to set beside a
+# holdout measured over its own full window. Both are printed, so neither has to be inferred from
+# the other.
 #
 # `num_trades` is deliberately absent. The HTM cohort engine settles each straddle at expiration
 # rather than rebalancing a book, so it registers no trade count for either run, and printing a

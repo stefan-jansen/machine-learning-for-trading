@@ -229,14 +229,13 @@ else:
 # generation.
 
 # %% tags=["results"]
-# The warmup prefix is not optional for this configuration. `hrp` sizes from a covariance
-# estimated over a rolling window, and prices loaded from the holdout boundary give it no
-# history to estimate from. `compute_hrp_weights` then falls back to equal weight until
-# enough covariance history has accumulated, so the opening weeks of the holdout would be
-# allocated by a different rule than the one selected - not a degraded version of it, a
-# different allocator - where every validation weight was the selected configuration's own. That is a
-# difference between the two runs the strategy specification does not record, and the
-# comparison in section 4 would absorb it as decay.
+# The warmup prefix is not optional for this configuration. `hrp` sizes from a covariance estimated
+# over a rolling window, and prices loaded from the holdout boundary give it no history to estimate
+# from. `compute_hrp_weights` then falls back to equal weight until enough covariance history has
+# accumulated, so the opening weeks of the holdout would be allocated by a different rule than the
+# one selected - not a degraded version of it, a different allocator - where every validation weight
+# was the selected configuration's own. That is a difference between the two runs the strategy
+# specification does not record, and the comparison in section 4 would absorb it as decay.
 #
 # `strategy_warmup_periods` reads the resolved allocation and returns 0 for any allocator
 # that does not estimate a moment, so this is unconditional rather than a branch on the
@@ -419,11 +418,11 @@ print(f"Holdout backtest: {result.backtest_hash}")
 
 # %% tags=["results"]
 metrics = result.metrics
-# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports
-# the common-support figure, which re-ranks the conformal field on the timestamps every
-# candidate covers; that is the right number for choosing between candidates and the wrong
-# one to set beside a holdout measured over its own full window. Both are printed, so
-# neither has to be inferred from the other.
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier`
+# reports the common-support figure, which re-ranks the conformal field on the timestamps every
+# candidate covers; that is the right number for choosing between candidates and the wrong one to
+# set beside a holdout measured over its own full window. Both are printed, so neither has to be
+# inferred from the other.
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
     carrier_sharpe, carrier_periods = conn.execute(
         "SELECT sharpe, n_periods FROM backtest_metrics WHERE backtest_hash = ?",

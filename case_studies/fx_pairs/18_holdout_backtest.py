@@ -16,7 +16,7 @@
 # %% [markdown]
 # # Holdout Backtest - FX Pairs
 #
-# This notebook runs the selected configuration's own backtest configuration against the holdout
+# This notebook runs the selected configuration's own backtest specification against the holdout
 # predictions `17_holdout_predictions` registered. It changes nothing about the strategy: signal,
 # allocation, risk controls, rebalance rule, costs and account configuration are the selected
 # configuration's registered specification. What does change is what the specification points at -
@@ -99,12 +99,12 @@ LABEL = str(carrier["label"])
 validation_prediction = study.results.open(carrier["val_prediction_hash"])
 validation_record = validation_prediction.registry_record()
 
-# The holdout prediction is resolved by DERIVING the holdout training identity here and querying
-# for it exactly, not by matching the selected configuration's family, configuration name and label. Those names
-# do not identify a training specification: an earlier refit against different folds, features or
-# CV geometry carries the same three names, and when it is the only row present it is selected
-# silently. Deriving the specification the same way `17` does and hashing it means this notebook
-# accepts the run `17` would produce and nothing else.
+# The holdout prediction is resolved by DERIVING the holdout training identity here and querying for
+# it exactly, not by matching the selected configuration's family, configuration name and label.
+# Those names do not identify a training specification: an earlier refit against different folds,
+# features or CV geometry carries the same three names, and when it is the only row present it is
+# selected silently. Deriving the specification the same way `17` does and hashing it means this
+# notebook accepts the run `17` would produce and nothing else.
 observation_timeline = (
     pl.read_parquet(study.root / "labels" / f"{LABEL}.parquet")
     .get_column("timestamp")
@@ -176,7 +176,7 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ## Run the selected configuration's configuration on the holdout
+# ## Run the selected configuration on the holdout
 #
 # The specification is the selected configuration's own registered one with the prediction set
 # re-pointed and the chapter re-tagged. Nothing else is rebuilt from this notebook's defaults,
@@ -216,8 +216,8 @@ spec = ensure_backtest_spec(
 )
 spec["chapter"] = "ch20"
 # `ensure_backtest_spec` returns an already-canonical specification untouched apart from the
-# prediction hash, so the selected configuration's `input_identity.prices` survives into the holdout run and
-# the registered lineage then names the validation price frame for a run that never read it.
+# prediction hash, so the selected configuration's `input_identity.prices` survives into the holdout
+# run and the registered lineage then names the validation price frame for a run that never read it.
 # The digest is of the frame this notebook actually passes to the engine.
 spec.setdefault("input_identity", {})["prices"] = value_digest(prices)
 
@@ -319,8 +319,8 @@ pl.DataFrame(
 # %% [markdown]
 # ## Key takeaways
 #
-# - The configuration run here is the selected configuration's registered specification, not a strategy rebuilt
-#   from this notebook's own defaults.
+# - The configuration run here is the selected configuration's registered specification, not
+#   a strategy rebuilt from this notebook's own defaults.
 # - The holdout prediction set is matched by the training identity derived here, not by the
 #   configuration's family and name, which several training specifications share.
 # - The price frame carries the strategy's declared warmup. It makes no difference to this

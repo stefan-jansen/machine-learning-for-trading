@@ -505,10 +505,11 @@ from case_studies.utils.registry import read_predictions
 db_path = CASE_DIR / "run_log" / "registry.db"
 conn = sqlite3.connect(str(db_path))
 cur = conn.cursor()
-# The universe predicate is the same statement section 1 makes about the selected configuration pool, and it
-# has to be made again here: this query picks its own row. Without it the cadence exhibit - the
-# publication finding of this notebook - is built on whichever signal row ranks highest, which
-# is the full-universe variant `setup.yaml` excludes from canonical candidacy whenever it wins.
+# The universe predicate is the same statement section 1 makes about the selected configuration
+# pool, and it has to be made again here: this query picks its own row. Without it the cadence
+# exhibit - the publication finding of this notebook - is built on whichever signal row ranks
+# highest, which is the full-universe variant `setup.yaml` excludes from canonical candidacy
+# whenever it wins.
 cur.execute(
     """
 SELECT br.prediction_hash, tr.family, tr.config_name, bm.sharpe

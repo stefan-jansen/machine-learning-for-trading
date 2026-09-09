@@ -16,7 +16,7 @@
 # %% [markdown]
 # # CME Futures: Transaction-Cost Sensitivity
 #
-# This notebook prices one configuration: the single configuration the case study ships, resolved
+# This notebook prices one configuration: the one the case study ships, resolved
 # across labels from the immutable union of signal, allocation and risk-overlay results, with
 # its risk overlay carried rather than cleared. It then applies the declared all-in cost grid
 # to that fixed configuration. Commission and slippage each receive half of the grid value.
@@ -123,7 +123,7 @@ SUPERSEDES_COST_POPULATION: str = ""
 # %% [markdown]
 # ## Fixed inputs
 #
-# There is one configuration to price, and the shared configuration selector below decides which
+# There is one configuration to price, and the shared selector below decides which
 # label it is on. `PREVIEW_LABELS` is still validated rather than ignored: a preview run
 # that names a label the case study does not declare is a mistake worth stopping, even
 # though nothing here loops over the set.

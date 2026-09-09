@@ -210,7 +210,7 @@ print(
 # configuration name would accept a fit of the same model over the wrong window.
 #
 # Rather than compare fields and hope the list is complete, this derives the
-# identity the selected configuration's configuration *should* have on the holdout, by the same
+# identity the selected configuration *should* have on the holdout, by the same
 # `build_holdout_training_spec` [`18_holdout_predictions`](18_holdout_predictions.ipynb)
 # fits, and requires a registered prediction under exactly that hash. The
 # derivation is deterministic and costs a dataset read rather than a fit, so the

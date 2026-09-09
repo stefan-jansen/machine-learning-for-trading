@@ -183,9 +183,9 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # The conformal branch below is inert for this configuration and is kept because the selected
 # configuration is resolved rather than fixed. `conformal_weighted` sizes from residuals the model
 # has already made, and on the holdout there are none to use - every holdout return realises inside
-# the window being evaluated - so a conformal configuration would calibrate from validation residuals
-# with an embargo covering the label horizon. This one allocates from price moments and needs no
-# calibration at all.
+# the window being evaluated - so a conformal configuration would calibrate from validation
+# residuals with an embargo covering the label horizon. This one allocates from price moments and
+# needs no calibration at all.
 
 # %% tags=["results"]
 strategy = strategy_view(json.loads(carrier["spec_json"]))
@@ -343,11 +343,11 @@ print(f"Holdout backtest: {result.backtest_hash}")
 
 # %% tags=["results"]
 metrics = result.metrics
-# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports
-# the common-support figure, which re-ranks candidates on the timestamps every one of them
-# covers; that is the right number for choosing between candidates and the wrong one to set
-# beside a holdout measured over its own full window. Both are printed, so neither has to be
-# inferred from the other.
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier`
+# reports the common-support figure, which re-ranks candidates on the timestamps every one of them
+# covers; that is the right number for choosing between candidates and the wrong one to set beside a
+# holdout measured over its own full window. Both are printed, so neither has to be inferred from
+# the other.
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
     carrier_sharpe, carrier_periods = conn.execute(
         "SELECT sharpe, n_periods FROM backtest_metrics WHERE backtest_hash = ?",

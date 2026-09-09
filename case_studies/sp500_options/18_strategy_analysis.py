@@ -125,7 +125,8 @@ MAX_SYMBOLS = 0
 CASE_STUDY = "sp500_options"
 # The immutable grid `12_backtest` publishes; the DSR below deflates for its members.
 BASELINE_POPULATION = "sp500-options-baseline-validation-v1"
-# The nominees `13_portfolio_management` publishes; the selected configuration has to be one of them.
+# The nominees `13_portfolio_management` publishes; the selected configuration has to be one of
+# them.
 STRATEGY_CANDIDATES = "sp500-options-strategy-candidates-v1"
 PRIMARY_LABEL = "ret_to_expiry"  # registered HTM strategy label (Appendix A)
 PERIODS_PER_YEAR = 252
@@ -203,8 +204,8 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # therefore which admitted candidate does. A membership check on the winner passes while the
 # answer has already been moved by a row that was never eligible.
 _candidate_hashes = frozenset(CandidateSet.one(_selection_study, name=STRATEGY_CANDIDATES).members)
-# `resolve_solvent_carrier` rather than the bare lineage resolver: it applies the same
-# selection and additionally refuses a selected configuration whose equity reached zero, whose Sharpe is
+# `resolve_solvent_carrier` rather than the bare lineage resolver: it applies the same selection and
+# additionally refuses a selected configuration whose equity reached zero, whose Sharpe is
 # arithmetic on a balance that no longer exists.
 _lineage = resolve_solvent_carrier(CASE_STUDY, admitted=_candidate_hashes)
 TOP_HASH = _lineage["val_backtest_hash"]
@@ -226,10 +227,10 @@ assert HO_HASH is not None, (
     "validation-fitted model scored on the holdout window, which is the one thing the "
     "holdout exists to rule out."
 )
-# The field was applied before the ranking, so this cannot fail on a row from outside it.
-# It stays because it is cheap and because it is the assertion a reader needs: the selected configuration
-# published below is one of the nominees `13_portfolio_management` froze, not whatever
-# happened to rank first in the registry.
+# The field was applied before the ranking, so this cannot fail on a row from outside it. It stays
+# because it is cheap and because it is the assertion a reader needs: the selected configuration
+# published below is one of the nominees `13_portfolio_management` froze, not whatever happened to
+# rank first in the registry.
 if TOP_HASH not in _candidate_hashes:
     raise RuntimeError(
         f"Canonical rank-1 {TOP_HASH} is not a member of {STRATEGY_CANDIDATES} "
@@ -443,15 +444,15 @@ FAMILY_COHORT = _cohort_payload(_family_row)
 if SEARCH_COHORT is None:
     raise RuntimeError("Missing cross-family baseline cohort metrics")
 SEARCH_ATTRIBUTION = cohort_metric_attribution(SEARCH_COHORT, TOP_HASH)
-# The cohort is fetched at the selected configuration's own stage, so the leader it has to name is that
-# stage's leader. This read `stage="signal"` while fetching the cohort at
-# `_lineage["val_stage"]`, which agreed only while the selected configuration happened to be a baseline row.
-# The current configuration is an allocation row, and the two sides of the comparison were then two
-# different stages: the check reported a mismatch that was its own.
-# Same population as the cohort above, and for the same reason: `best` with a stage alone
-# ranges over every label and every universe in the registry, so the leader it returns can be
-# a row the cohort never saw, and the check would then fail on the difference between two
-# populations rather than on a real disagreement.
+# The cohort is fetched at the selected configuration's own stage, so the leader it has to name is
+# that stage's leader. This read `stage="signal"` while fetching the cohort at
+# `_lineage["val_stage"]`, which agreed only while the selected configuration happened to be a
+# baseline row. The current configuration is an allocation row, and the two sides of the comparison
+# were then two different stages: the check reported a mismatch that was its own. Same population as
+# the cohort above, and for the same reason: `best` with a stage alone ranges over every label and
+# every universe in the registry, so the leader it returns can be a row the cohort never saw, and
+# the check would then fail on the difference between two populations rather than on a real
+# disagreement.
 _stage_leader = explorer.best(
     stage=_lineage["val_stage"],
     top_n=1,
@@ -471,17 +472,17 @@ if SEARCH_COHORT["leader_hash"] != _stage_leader["backtest_hash"]:
 # if part of the grid is missing, the recorded K and the measured count shrink together and the
 # check passes on an under-deflated DSR, which is the one thing it exists to catch.
 #
-# The grid is declared, not measured, and it is the grid of the selected configuration's own stage. The
-# nominees `13_portfolio_management` publishes span both stages the selection ranges over -
-# the baseline grid `12_backtest` declared and the allocation grid built on top of it - and
-# the DSR that deflates the selected configuration is the one computed over the stage it came from.
-# Restricting the declared set to that stage is what keeps the three checks describing one
-# search: the cohort, its leader, and the members it was computed over.
+# The grid is declared, not measured, and it is the grid of the selected configuration's own stage.
+# The nominees `13_portfolio_management` publishes span both stages the selection ranges over - the
+# baseline grid `12_backtest` declared and the allocation grid built on top of it - and the DSR that
+# deflates the selected configuration is the one computed over the stage it came from. Restricting
+# the declared set to that stage is what keeps the three checks describing one search: the cohort,
+# its leader, and the members it was computed over.
 #
-# This read `sp500-options-baseline-validation-v1` unconditionally, which is the same set
-# whenever the selected configuration is a baseline row and a different search whenever it is not. Both
-# populations are immutable and `require_complete` refuses a missing or partial member, so
-# the count cannot shrink to meet a K that already has.
+# This read `sp500-options-baseline-validation-v1` unconditionally, which is the same set whenever
+# the selected configuration is a baseline row and a different search whenever it is not. Both
+# populations are immutable and `require_complete` refuses a missing or partial member, so the count
+# cannot shrink to meet a K that already has.
 with sqlite3.connect(str(_db)) as _con:
     _stage_of = dict(
         _con.execute(
@@ -761,10 +762,10 @@ spec_block = {
     "bootstrap_block_length": int(full["bootstrap_block_length"]),
     "bootstrap_n": int(full["bootstrap_n"]),
 }
-# The stage comes from the selected configuration's own lineage. Naming it "equal-weight baseline" was
-# correct only while the cross-stage rank-1 happened to be a signal-stage row; the selected configuration in
-# force is an allocation row, and a reader told otherwise has the wrong provenance for every
-# number in the block.
+# The stage comes from the selected configuration's own lineage. Naming it "equal-weight baseline"
+# was correct only while the cross-stage rank-1 happened to be a signal-stage row; the selected
+# configuration in force is an allocation row, and a reader told otherwise has the wrong provenance
+# for every number in the block.
 print(
     f"Pinned-configuration specification ({_lineage['val_stage']} stage, "
     f"{ALLOCATOR_METHOD or 'equal-weight'} allocation, validation window):"

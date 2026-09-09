@@ -117,10 +117,10 @@ def _delete_holdout_generation(case_dir, prediction_hash):
 # validation rank-1, and it was fixed before this notebook ran.
 #
 # **Its validation Sharpe is negative.** That is this case study's result, not a reason to look for
-# a different configuration: writing straddles on a signal this weak does not pay for the option spread
-# and the hedge, and the holdout is being used to see whether that reading holds on a window
-# nothing was chosen on. Picking a configuration for its sign would be the selection the
-# holdout exists to make honest.
+# a different configuration: writing straddles on a signal this weak does not pay for the option
+# spread and the hedge, and the holdout is being used to see whether that reading holds on a window
+# nothing was chosen on. Picking a configuration for its sign would be the selection the holdout
+# exists to make honest.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
@@ -137,9 +137,9 @@ print(f"  fitted by training run {carrier['training_hash']}")
 # %% [markdown]
 # The checkpoint is part of the configuration. Where a family publishes a prediction set per
 # checkpoint on a declared schedule, the selected configuration's prediction set names one of them,
-# and refitting without it would produce a model at the end of training rather than the one that
-# was ranked. A family with no checkpoint dimension - which is where this case study's configuration sits
-# - stores NULL in both columns and carries that NULL through unchanged.
+# and refitting without it would produce a model at the end of training rather than the one that was
+# ranked. A family with no checkpoint dimension - which is where this case study's configuration
+# sits - stores NULL in both columns and carries that NULL through unchanged.
 
 # %%
 validation_prediction = study.results.open(carrier["val_prediction_hash"])
