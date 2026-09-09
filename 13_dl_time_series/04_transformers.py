@@ -707,16 +707,23 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# Read the heads separately and compare them. Heads that concentrate on different
-# feature pairs are the layer doing what multi-head attention is for; heads that look
-# alike mean the extra head is buying little. A head close to uniform everywhere is
-# passing its inputs through roughly evenly, which is a real observation about that
-# head on these windows.
+# Read the heads separately and compare the patterns, keeping the claims to the
+# patterns. Heads that concentrate weight on different feature pairs are attending
+# differently; a head close to uniform is spreading its weight evenly across the
+# tokens. Both are observations about these matrices on these windows, and neither
+# extends to what the heads contribute.
 #
-# Three limits on what any of this establishes. It is the **first** layer of two, so it
-# is not the model's overall view of the features. It is averaged over the sampled
-# holdout windows, so a head that behaves differently in different market conditions
-# shows up here as its average behaviour. And attention weight is not importance: a
+# It is tempting to read two similar matrices as one head being redundant, and that
+# does not follow: each head multiplies its weights into its **own** learned value
+# projection, so two heads with the same attention pattern can still write
+# complementary things into the output. Establishing that a head contributes little
+# means removing it and measuring what the predictions do, which this notebook does not
+# do.
+#
+# Three further limits. It is the **first** layer of two, so it is not the model's
+# overall view of the features. It is averaged over the sampled holdout windows, so a
+# head that behaves differently in different market conditions shows up here as its
+# average behaviour. And attention weight is not importance: a
 # feature can receive little attention and still dominate the output through the
 # residual path around the attention block, which is why these matrices are a
 # description of one internal computation and not a feature-importance ranking, causal
