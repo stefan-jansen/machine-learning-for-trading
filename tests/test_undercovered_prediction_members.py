@@ -23,10 +23,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
+from case_studies.utils import coverage as coverage_module
 from case_studies.utils.notebook_contracts import undercovered_prediction_members
 
 WHOLE = "aaaa11112222"
@@ -41,7 +43,7 @@ TRAINING_RUNS_COLUMNS = (
     "execution_tier TEXT"
 )
 
-SESSIONS = [f"2024-01-{day:02d}" for day in range(1, 21)]
+SESSIONS = [f"2024-{1 + day // 28:02d}-{1 + day % 28:02d}" for day in range(100)]
 ENTITIES = ["AAA", "BBB"]
 
 
@@ -115,7 +117,7 @@ class TestTheQueryRunsAgainstTheRealSchema:
 
         Every other test here would also have raised, so the assertion is the call.
         """
-        _register(case_dir, WHOLE, delivered=40, declared=40)
+        _register(case_dir, WHOLE, delivered=200, declared=200)
         assert undercovered_prediction_members(case_dir, [WHOLE], case_study="x") == {}
 
     def test_nothing_to_check_is_not_evidence_of_anything(self, case_dir: Path) -> None:
@@ -123,20 +125,105 @@ class TestTheQueryRunsAgainstTheRealSchema:
 
 
 class TestAMemberIsChargedAgainstItsOwnDeclaredExpectation:
-    def test_delivering_every_declared_key_is_whole_however_narrow_the_set(
+    """`BACKTEST_COVERAGE_MINIMUM` applied to the run's own scoreable set, not to the panel."""
+
+    def test_delivering_every_declared_row_is_whole_however_narrow_the_set(
         self, case_dir: Path
     ) -> None:
-        """A sequence family declares fewer keys than the panel and is not short for it."""
-        _register(case_dir, WHOLE, delivered=20, declared=20)
+        """A sequence family declares fewer keys than the panel and is not short for it.
+
+        The panel offers 200 pairs and the member declares 100, so a panel comparison
+        would put it at 50% and drop it.
+        """
+        _register(case_dir, WHOLE, delivered=100, declared=100)
         assert undercovered_prediction_members(case_dir, [WHOLE], case_study="x") == {}
 
-    def test_delivering_less_than_it_declared_is_reported(self, case_dir: Path) -> None:
-        _register(case_dir, SHORT, delivered=10, declared=40)
+    def test_a_near_miss_is_judged_against_the_expectation_and_survives(
+        self, case_dir: Path
+    ) -> None:
+        """The case that a 100%-only shortcut would drop.
+
+        99 of 100 declared rows is 99% and passes the default 98% minimum. Against the
+        200-pair panel the same member reads 49.5%, so falling through on a near miss
+        would drop it for being one row short of what it declared.
+        """
+        _register(case_dir, WHOLE, delivered=99, declared=100)
+        assert undercovered_prediction_members(case_dir, [WHOLE], case_study="x") == {}
+
+    def test_delivering_less_than_it_declared_is_reported_with_both_numbers(
+        self, case_dir: Path
+    ) -> None:
+        _register(case_dir, SHORT, delivered=25, declared=100)
         reported = undercovered_prediction_members(case_dir, [SHORT], case_study="x")
         assert set(reported) == {SHORT}
+        assert "25 of 100 rows its own inputs let it score (25.0%)" in reported[SHORT]
 
-    def test_a_run_that_declared_nothing_falls_back_to_the_panel(self, case_dir: Path) -> None:
-        """No expectation recorded, so the panel is the only ceiling available."""
+    def test_the_threshold_is_the_caller_s_to_set(self, case_dir: Path) -> None:
+        """Half of what it declared passes at a minimum of 0.4 and fails at 0.6.
+
+        Without this the reported set could come from anywhere; this pins it to the
+        comparison the function claims to make.
+        """
+        _register(case_dir, SHORT, delivered=50, declared=100)
+        assert undercovered_prediction_members(case_dir, [SHORT], case_study="x", minimum=0.4) == {}
+        assert set(
+            undercovered_prediction_members(case_dir, [SHORT], case_study="x", minimum=0.6)
+        ) == {SHORT}
+
+
+class TestARunThatDeclaredNothingFallsBackToThePanel:
+    """The fallback path, exercised by standing in for `coverage.py`'s own machinery.
+
+    `check_prediction_cross_section` needs a label artifact and the case study's fold
+    boundaries, neither of which a tmp registry has; `tests/test_coverage*.py` is where
+    that function is tested. What belongs here is that the fallback is reached at all,
+    that its verdict is the threshold applied to `accountable_coverage`, and that a
+    member it cannot evaluate is reported rather than passed.
+
+    `undercovered_prediction_members` imports it inside the function to break an import
+    cycle, so the stand-in goes on `case_studies.utils.coverage`, where the import reads
+    it, rather than on the calling module.
+    """
+
+    @staticmethod
+    def _standin(monkeypatch, *, coverage: float | None):
+        """Replace the coverage call with one that reports `coverage`, or raises."""
+        calls: list[str] = []
+
+        def fake(frame, case_study, label, **kwargs):
+            calls.append(f"{case_study}/{label}")
+            if coverage is None:
+                raise coverage_module.CoverageError("no label artifact")
+            return SimpleNamespace(
+                accountable_coverage=coverage, summary=lambda: f"stand-in at {coverage}"
+            )
+
+        monkeypatch.setattr(coverage_module, "check_prediction_cross_section", fake)
+        return calls
+
+    def test_a_member_below_the_minimum_is_reported(self, case_dir, monkeypatch) -> None:
+        calls = self._standin(monkeypatch, coverage=0.65)
         _register(case_dir, UNDECLARED, delivered=10, declared=None)
         reported = undercovered_prediction_members(case_dir, [UNDECLARED], case_study="x")
-        assert set(reported) == {UNDECLARED}
+        assert calls == ["x/fwd_ret_5d"]
+        assert reported == {UNDECLARED: "stand-in at 0.65"}
+
+    def test_a_member_above_the_minimum_is_not(self, case_dir, monkeypatch) -> None:
+        self._standin(monkeypatch, coverage=0.99)
+        _register(case_dir, UNDECLARED, delivered=10, declared=None)
+        assert undercovered_prediction_members(case_dir, [UNDECLARED], case_study="x") == {}
+
+    def test_a_member_that_cannot_be_evaluated_is_short_rather_than_passed(
+        self, case_dir, monkeypatch
+    ) -> None:
+        self._standin(monkeypatch, coverage=None)
+        _register(case_dir, UNDECLARED, delivered=10, declared=None)
+        reported = undercovered_prediction_members(case_dir, [UNDECLARED], case_study="x")
+        assert "coverage could not be evaluated" in reported[UNDECLARED]
+
+    def test_a_declared_expectation_never_reaches_the_fallback(self, case_dir, monkeypatch) -> None:
+        """The panel denominator is what dropped 143 whole members; it must not be used."""
+        calls = self._standin(monkeypatch, coverage=0.65)
+        _register(case_dir, SHORT, delivered=25, declared=100)
+        undercovered_prediction_members(case_dir, [SHORT], case_study="x")
+        assert calls == []

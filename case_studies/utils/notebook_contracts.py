@@ -409,19 +409,30 @@ def undercovered_prediction_members(
         # and the fold geometry, not from what the model chose to emit. A member that
         # delivered all of them lost nothing, and that is the question here.
         #
-        # It is not the same question as the panel comparison below, and for the sequence
-        # families it is the only one with a defensible answer. A sequence model cannot
-        # score a window that starts before its lookback or spans a gap wider than its gap
-        # policy, so its scoreable set is strictly narrower than the panel and always will
-        # be. Measured 2026-09-09 on sp500_equity_option_analytics: 143 of 947 members in
-        # force carry 65% of the panel's keys and 100% of their own declared keys - the
-        # panel comparison alone would drop every deep-learning member of the pool for a
-        # shortfall that is the window builder working as specified.
+        # Where an expectation exists it REPLACES the panel comparison rather than
+        # short-circuiting it, because it is the better denominator and not merely a faster
+        # one. For the sequence families it is the only denominator with a defensible
+        # answer: a sequence model cannot score a window that starts before its lookback or
+        # spans a gap wider than its gap policy, so its scoreable set is strictly narrower
+        # than the panel and always will be. Measured 2026-09-09 on
+        # sp500_equity_option_analytics: 143 of 947 members in force carry 65% of the
+        # panel's keys and 100% of their own, so the panel comparison drops every
+        # deep-learning member of the pool for the window builder working as specified.
+        # Falling through on a near miss would put those members back: one that delivered
+        # 649 of 650 declared rows would be judged at 64.9% of the panel and dropped for
+        # being 0.2% short of what it declared.
+        #
+        # The panel comparison below is what a run with no recorded expectation gets.
         declared_rows = _declared_expected_rows(spec_json)
         if declared_rows is not None:
-            delivered_rows = pl.scan_parquet(path).select(pl.len()).collect().item()
-            if delivered_rows >= declared_rows:
-                continue
+            delivered_rows = int(pl.scan_parquet(path).select(pl.len()).collect().item())
+            covered = delivered_rows / declared_rows
+            if covered < threshold:
+                short[phash] = (
+                    f"{case_study}/{label}/{split} {family}/{config}: {delivered_rows:,} of "
+                    f"{declared_rows:,} rows its own inputs let it score ({covered:.1%})"
+                )
+            continue
 
         try:
             report = check_prediction_cross_section(
