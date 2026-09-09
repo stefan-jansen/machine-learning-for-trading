@@ -481,8 +481,6 @@ display(
 # in the prompt is that a prompt is a request and a proxy is a control. An agent told not to
 # write files sometimes writes files; an agent whose write calls never reach a filesystem
 # cannot.
-# Section 24.9 describes the **Warden proxy**: a filter that sits between the
-# agent and external tools, enforcing policies on every tool call.
 
 
 # %%
