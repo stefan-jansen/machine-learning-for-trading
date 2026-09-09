@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -19,31 +20,45 @@
 #
 # **Chapter 22: RAG for Financial Research** (Section 22.5)
 #
-# This notebook demonstrates hybrid retrieval combining:
+# Four retrieval stacks over one corpus of 10-K passages: BM25, dense
+# embeddings, the two fused by reciprocal rank fusion, and that fusion
+# reranked by a cross-encoder.
 #
-# 1. **Semantic search** - Dense embeddings capture meaning
-# 2. **Keyword search (BM25)** - Sparse retrieval for exact matches
-# 3. **Reciprocal Rank Fusion (RRF)** - Combining ranked lists
+# The scores they are ranked by come from a term-overlap rule, because nobody
+# has annotated this corpus. That rule reads the same signal BM25 reads, and
+# the section that measures how much says so before any ranking is reported.
+# The result is not that one retriever wins. It is that a lexical label rule
+# cannot be used to choose between a lexical retriever and a semantic one, and
+# this notebook shows what that looks like from the inside.
 #
-# **Learning Objectives**:
-# - Implement a simple hybrid retrieval stack combining semantic and lexical search.
-# - Inspect when BM25, dense retrieval, and RRF succeed on different query types.
-# - Connect retrieval design choices to the finance-specific failure modes in Chapter 22.
+# **Learning objectives**
 #
-# **Prerequisites**: SP100 10-K filings (`data/equities/fundamentals/10k/sp100/`).
-# Familiarity with embeddings from `02_domain_embeddings_comparison`
-# is helpful but not required.
+# After working through this notebook you will be able to:
 #
-# ## Key Findings (Preview)
-# - Hybrid retrieval broadens first-stage recall by combining lexical and semantic signals
-# - Reranking is evaluated as a production pattern against an explicitly lexical
-#   proxy, not as a human-rated deployment benchmark
-# - BM25 excels at exact symbols, figures, and entity names
-# - Semantic search captures conceptual similarity and paraphrases
-# - Fixed-k RRF is score-calibration-free and robust, but not always sufficient on its own
+# - Implement BM25 from the formula, dense retrieval from a pinned encoder,
+#   and reciprocal rank fusion over the two, without a retrieval library.
+# - Say what reciprocal rank fusion does that a weighted score blend does not,
+#   and why that matters when two retrievers score on different scales.
+# - Measure the dependence between a proxy label rule and a retriever scored
+#   against it, and recognise the circularity when a benchmark has it.
+# - Read a Precision@k against its ceiling rather than against one.
+# - Say why a cross-encoder reranker can lower a benchmark score while
+#   improving the ranking.
+#
+# **Prerequisites**
+#
+# - The SP100 10-K corpus, read through `data.load_sec_filings`.
+#   [`01_sec_filing_pipeline`](01_sec_filing_pipeline.ipynb) establishes what
+#   the stored text is; these passages inherit it.
+# - `sentence-transformers` and a CUDA GPU. `REQUIRE_GPU` refuses a CPU run.
+# - [`02_domain_embeddings_comparison`](02_domain_embeddings_comparison.ipynb)
+#   builds the same kind of proxy and measures a different weakness in it.
+#
+# **Book reference**: Section 22.5, on hybrid retrieval architectures, the RRF
+# derivation, and vector database selection criteria.
 
 # %% [markdown]
-# ## 1. Setup and Imports
+# ## Setup
 #
 # These parameters control query count and retrieval depth so the comparison
 # stays reproducible across lexical, dense, fused, and reranked pipelines.
@@ -52,10 +67,7 @@
 """Hybrid Retrieval - BM25 + semantic search with Reciprocal Rank Fusion."""
 
 import re
-import warnings
 from collections import defaultdict
-
-warnings.filterwarnings("ignore")
 
 import numpy as np
 import plotly.graph_objects as go
@@ -69,25 +81,30 @@ from plotly.subplots import make_subplots
 # ML4T configuration
 from data import load_sec_filings
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_palette
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 MAX_QUERIES = 0
 MAX_DOCUMENTS = 0
 TOP_K = 10
-# Spec from §22.5: retrieve a broad candidate pool, rerank, pass a small set
-# to generation. RERANK_CANDIDATES is the pool size the cross-encoder scores;
-# FINAL_TOP_K is the cut delivered to the LLM in production. Single-stage
-# retrievers are still evaluated at TOP_K so the cross-architecture comparison
-# stays apples-to-apples.
+BM25_K1 = 1.5  # how fast repeated terms stop adding score
+BM25_B = 0.75  # how much a long document is penalised for its length
+RRF_K = 60  # rank offset in the fusion; larger flattens the top of each list
 RERANK_CANDIDATES = 50
 FINAL_TOP_K = 5
 REQUIRE_GPU = True
 SEED = 42
+# Pinned so a re-run cannot silently change the encoder underneath the scores.
+DENSE_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DENSE_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+CROSS_ENCODER_REVISION = "c5ee24cb16019beea0893ab7796b1df96625c6b8"
+
+# %% [markdown]
+# The seeding stays immediately after the parameters cell: a papermill `SEED`
+# override has to take effect before anything consumes randomness.
 
 # %%
-# Must remain immediately after the parameters cell so a Papermill SEED
-# override re-seeds before any randomness is consumed downstream.
 set_global_seeds(SEED)
 
 if REQUIRE_GPU and not torch.cuda.is_available():
@@ -100,16 +117,22 @@ print(f"Query cap: {MAX_QUERIES if MAX_QUERIES > 0 else 'all configured queries'
 print(f"Top-K retrieval: {TOP_K}")
 
 # %% [markdown]
-# ## 1. Document Corpus
+# `RERANK_CANDIDATES` is the pool the cross-encoder scores and `FINAL_TOP_K` is
+# the cut a production pipeline would hand to generation, following the
+# chapter's retrieve-rerank-generate pattern. The single-stage retrievers are
+# still evaluated at `TOP_K`, so all four
+# methods are scored at the same depth whatever the production cut would be.
+
+# %% [markdown]
+# ## 1. The corpus and the labels
 #
 # We load real 10-K filing text from the SP100 corpus and chunk it into
 # retrieval-ready passages. The chunks naturally contain exact terms (symbol
 # symbols, accession numbers), conceptual content (risk factors, competition),
 # and mixed language - matching how analysts actually search filings.
 #
-# **Interpretation**: The top-k and query-count settings define how much room
-# each retrieval stage has to recover relevant evidence. That result strongly
-# affects whether fusion or reranking looks necessary.
+# `TOP_K` decides how much room each retriever has to surface a labelled
+# document, and therefore how forgiving every metric below is.
 
 # %%
 # Load real 10-K filing chunks from SP100 corpus via the canonical loader
@@ -161,13 +184,12 @@ def sample_document_corpus(
 # ### Materialize the retrieval corpus
 #
 # Apply the seeded selector once, then expose aligned text and document-ID
-# arrays to every retrieval method.
+# arrays to every retrieval method. Two hundred passages is enough for both
+# retrievers to have somewhere to be wrong, and small enough that the
+# cross-encoder pass stays under a minute.
 
 
 # %%
-# Sample and assign document IDs. The default of 200 is large enough that
-# both BM25 and semantic retrieval have meaningful discrimination room
-# without making the notebook slow.
 DOCUMENT_CORPUS = sample_document_corpus(raw_chunks, MAX_DOCUMENTS, SEED)
 
 documents = [d["text"] for d in DOCUMENT_CORPUS]
@@ -177,12 +199,20 @@ print(f"Document corpus: {len(documents)} documents")
 
 
 # %% [markdown]
-# ### Pseudo-relevance labelling
+# ### The labels, and what they are made of
 #
-# Without human-annotated relevance judgments, we use a term-overlap proxy.
-# Documents must share at least one exact query token longer than three
-# characters. The three strongest positive matches become proxy-relevant, with
-# document ID as the tie-break. Production benchmarks still need human labels.
+# Nobody has annotated this corpus, so relevance is a rule: count the query
+# tokens longer than three characters that appear in a document, and call the
+# three highest-scoring documents relevant, breaking ties on the document id.
+#
+# Read that rule next to BM25, which the notebook builds two sections below.
+# BM25 also counts query tokens appearing in a document; it weights them by
+# inverse document frequency and normalises for document length, and that is
+# the whole of the difference. The label rule is an unweighted BM25.
+#
+# So one of the four retrievers about to be compared is a simplification of
+# the thing scoring them. A section after the evaluation measures how much
+# that is worth, and it is worth a lot.
 
 
 # %%
@@ -222,19 +252,19 @@ def find_proxy_docs(query: str, corpus: list[dict]) -> list[str]:
 # Test queries grounded in real 10-K filing content
 TEST_QUERIES = []
 query_specs = [
-    # Exact-match query slice
+    # Queries naming a company or a concrete artefact.
     ("How does Apple compete against low-cost competitors?", "exact"),
     ("What intellectual property protections does the company have?", "exact"),
     ("What are the company's product development capabilities?", "exact"),
     ("pharmaceutical products and regulatory requirements", "exact"),
     ("aircraft defense manufacturing operations", "exact"),
-    # Conceptual query slice
+    # The same subject matter phrased without a name to key on.
     ("What competitive threats does the company face?", "conceptual"),
     ("How does the company protect against imitation?", "conceptual"),
     ("What risks affect the company's technology strategy?", "conceptual"),
     ("How does the company develop innovative products?", "conceptual"),
     ("What operational challenges exist in manufacturing?", "conceptual"),
-    # Mixed query slice
+    # Keyword-style fragments rather than questions.
     ("company hardware software integration strategy", "mixed"),
     ("customer acquisition costs and retention", "mixed"),
     ("supply chain risk management approach", "mixed"),
@@ -255,10 +285,11 @@ N_QUERIES = len(TEST_QUERIES)
 print(f"Test queries: {N_QUERIES}")
 
 # %% [markdown]
-# **Interpretation**: The query set is partitioned into exact, conceptual, and
-# mixed tasks. Labels are the three passages with the strongest positive term
-# overlap. This is a lexical diagnostic and is intentionally not independent of
-# BM25, so it cannot decide which production retriever is best.
+# The three registers are a design choice about phrasing, not a property of the
+# queries that anything here verifies. They are grouped this way because the
+# usual expectation is that literal phrasing suits BM25 and paraphrase suits a
+# dense encoder. Whether the numbers bear that out is the question section 7
+# asks, and the answer is no.
 
 # %% [markdown]
 # ## 2. BM25 Implementation
@@ -266,16 +297,17 @@ print(f"Test queries: {N_QUERIES}")
 # BM25 (Best Matching 25) is a bag-of-words retrieval function that ranks
 # documents based on term frequency and inverse document frequency.
 #
-# Key parameters:
-# - **k1**: Term frequency saturation (typically 1.2-2.0)
-# - **b**: Length normalization (typically 0.75)
+# It has two constants, both declared in the parameters cell:
+#
+# - `BM25_K1` decides how quickly a repeated term stops adding score. Low
+#   values mean a second occurrence is worth much less than the first.
+# - `BM25_B` decides how much a long document is penalised for its length,
+#   from none at zero to fully proportional at one.
 
 
 # %%
 def bm25_tokenize(text: str) -> list[str]:
-    """Simple tokenization for lexical retrieval."""
-    import re
-
+    """Split on word boundaries and lowercase - the token contract BM25 scores on."""
     return re.findall(r"\b\w+\b", text.lower())
 
 
@@ -394,7 +426,7 @@ def make_retrieval_result(rank: int, doc_id: str, score: float, text: str) -> di
 class BM25Retriever:
     """BM25 retrieval implementation for exact lexical matching."""
 
-    def __init__(self, documents: list, k1: float = 1.5, b: float = 0.75):
+    def __init__(self, documents: list, k1: float = BM25_K1, b: float = BM25_B):
         self.documents = documents
         self.k1 = k1
         self.b = b
@@ -430,9 +462,10 @@ for r in test_result:
     print(f"  {r['rank']}. {r['doc_id']} (score: {r['score']:.3f})")
 
 # %% [markdown]
-# **Interpretation**: BM25 immediately surfaces the symbol-and-number match.
-# That is why lexical retrieval remains essential for filings containing quoted
-# figures, form names, and entity identifiers.
+# A term the corpus contains rarely gets a high inverse document frequency, so
+# a query carrying one pulls the passages containing it to the top. That is
+# what makes BM25 hard to replace for filings, where a form number or a ticker
+# is often the whole of what distinguishes the right passage.
 
 # %% [markdown]
 # ## 3. Semantic Retrieval with Embeddings
@@ -449,7 +482,7 @@ def build_semantic_index(documents: list[str], model_name: str) -> tuple[object,
     """Create dense document embeddings via sentence-transformers."""
     from sentence_transformers import SentenceTransformer
 
-    model = SentenceTransformer(model_name, device=RETRIEVAL_DEVICE)
+    model = SentenceTransformer(model_name, revision=DENSE_REVISION, device=RETRIEVAL_DEVICE)
     parameter_device = next(model.parameters()).device
     if REQUIRE_GPU and parameter_device.type != "cuda":
         raise RuntimeError(f"Dense encoder parameters are on {parameter_device}, not CUDA.")
@@ -459,10 +492,9 @@ def build_semantic_index(documents: list[str], model_name: str) -> tuple[object,
 
 
 # %% [markdown]
-# **Interpretation**: The backend message tells us whether semantic retrieval is
-# using a real encoder or a teaching fallback. That result changes how much
-# confidence we should place in dense-retrieval gains later on.
-#
+# The device line is a check, not decoration: a model that silently fell back
+# to CPU would still produce numbers, and `REQUIRE_GPU` refuses that rather
+# than letting the run take an hour and go unremarked.
 # %% [markdown]
 # ### Semantic similarity scoring
 #
@@ -492,7 +524,7 @@ def semantic_similarity_scores(query: str, model, embeddings: np.ndarray) -> np.
 class SemanticRetriever:
     """Semantic retrieval using dense embeddings and cosine similarity."""
 
-    def __init__(self, documents: list, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, documents: list, model_name: str = DENSE_MODEL):
         self.documents = documents
         self.model_name = model_name
         self.model, self.embeddings = build_semantic_index(documents, model_name)
@@ -522,9 +554,10 @@ for r in test_result:
     print(f"  {r['rank']}. {r['doc_id']} (score: {r['score']:.3f})")
 
 # %% [markdown]
-# **Interpretation**: Dense retrieval performs better when the query is phrased
-# conceptually rather than literally. It can match "main risks" to passages
-# about concentration, lead times, or regulation even when the wording diverges.
+# The dense retriever returns passages that share no distinctive term with the
+# query. Whether that is better is what the evaluation is for; what it is, is
+# different, and a fusion of two retrievers is only worth building when they
+# disagree.
 
 # %% [markdown]
 # ## 4. Reciprocal Rank Fusion (RRF)
@@ -553,7 +586,7 @@ for r in test_result:
 
 
 # %%
-def reciprocal_rank_fusion(ranked_lists: list[list], k: int = 60) -> list:
+def reciprocal_rank_fusion(ranked_lists: list[list], k: int = RRF_K) -> list:
     """
     Combine multiple ranked lists using Reciprocal Rank Fusion.
 
@@ -613,7 +646,10 @@ class HybridRetriever:
     """
 
     def __init__(
-        self, bm25_retriever: BM25Retriever, semantic_retriever: SemanticRetriever, rrf_k: int = 60
+        self,
+        bm25_retriever: BM25Retriever,
+        semantic_retriever: SemanticRetriever,
+        rrf_k: int = RRF_K,
     ):
         self.bm25 = bm25_retriever
         self.semantic = semantic_retriever
@@ -647,9 +683,11 @@ for r in test_result:
     print(f"  {r['rank']}. {r['doc_id']} (score: {r['score']:.4f})")
 
 # %% [markdown]
-# **Interpretation**: This mixed query exposes how RRF combines independently
-# ranked lexical and semantic candidates. Judged relevance must determine
-# whether the combined pool is better.
+# The fused scores are small and close together, which is the point of the
+# construction: RRF never looks at either retriever's score, only at the rank,
+# so a BM25 score in the single digits and a cosine below one contribute the
+# same amount from the same position. Nothing has to be calibrated, and neither
+# retriever can dominate the fusion by using a larger scale.
 
 # %% [markdown]
 # ## 5. Re-ranking the Candidate Set
@@ -670,8 +708,7 @@ for r in test_result:
 
 # %%
 def reranker_tokenize(text: str) -> list[str]:
-    import re
-
+    """Token contract for the heuristic fallback score."""
     return re.findall(r"\b\w+\b", text.lower())
 
 
@@ -694,7 +731,7 @@ def load_cross_encoder(model_name: str):
         print("Re-ranker backend: heuristic fallback (sentence-transformers missing)")
         return None, "heuristic"
 
-    model = CrossEncoder(model_name, device=RETRIEVAL_DEVICE)
+    model = CrossEncoder(model_name, revision=CROSS_ENCODER_REVISION, device=RETRIEVAL_DEVICE)
     parameter_device = next(model.model.parameters()).device
     if REQUIRE_GPU and parameter_device.type != "cuda":
         raise RuntimeError(f"Cross-encoder parameters are on {parameter_device}, not CUDA.")
@@ -702,11 +739,9 @@ def load_cross_encoder(model_name: str):
     return model, "cross_encoder"
 
 
-# %% [markdown]
-# **Interpretation**: The reranker backend selection makes the evaluation
-# honest. A heuristic fallback can teach the workflow, but it is not evidence of
-# cross-encoder quality.
-#
+# The heuristic path exists so the notebook is readable without the model, and
+# the cell that builds the reranker raises if it is taken, so no number in this
+# notebook can come from it.
 # %% [markdown]
 # ### Heuristic fallback score
 #
@@ -742,7 +777,7 @@ def heuristic_rerank_score(query: str, candidate: dict) -> float:
 class CrossEncoderReranker:
     """Re-rank retrieved candidates with a cross-encoder when available."""
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(self, model_name: str = CROSS_ENCODER_MODEL):
         self.model_name = model_name
         self.model, self.backend = load_cross_encoder(model_name)
 
@@ -764,7 +799,7 @@ class CrossEncoderReranker:
                 "preview": candidate["preview"],
                 "first_stage_rank": candidate["rank"],
             }
-            for candidate, score in zip(candidates, scores, strict=False)
+            for candidate, score in zip(candidates, scores, strict=True)
         ]
         reranked.sort(key=lambda item: (-item["score"], item["doc_id"]))
         return [
@@ -823,9 +858,10 @@ for r in test_result:
     print(f"  {r['rank']}. {r['doc_id']} (score: {r['score']:.4f})")
 
 # %% [markdown]
-# **Interpretation**: Reranking does not replace hybrid retrieval; it refines it.
-# The first stage broadens recall, and the second stage decides which passages
-# deserve the limited context budget passed to generation.
+# The cross-encoder reads the query and the passage together, which is what a
+# bi-encoder cannot do: an embedding is computed once per document with no
+# query in view. The cost is that it cannot be precomputed, which is why it
+# runs over 50 candidates rather than over the corpus.
 
 # %% [markdown]
 # ## 6. Comparative Evaluation
@@ -838,19 +874,18 @@ for r in test_result:
 # deployment.
 
 # %% [markdown]
-# ### Retriever Evaluation
+# ### The three metrics, and the ceiling on one of them
 #
-# Measures precision, recall, and MRR against the lexical-proxy document
-# labels for each query type (exact, conceptual, mixed).
+# Precision@k is the share of the k retrieved documents that carry a label.
+# There are at most three labels per query against a `TOP_K` of ten, so
+# precision cannot exceed three in ten however good the retrieval is. Recall
+# and MRR both reach one. Read the precision column against that ceiling, which
+# the results section prints, and prefer the other two metrics.
 
 
 # %%
 def evaluate_retriever(retriever, queries: list, top_k: int = 5) -> pl.DataFrame:
-    """
-    Evaluate a retriever on lexical-proxy-labelled queries.
-
-    Returns DataFrame with precision, recall, and MRR metrics.
-    """
+    """Score a retriever against the proxy labels: Precision@k, recall and MRR per query."""
     results = []
 
     for query, query_type, relevant_docs in queries:
@@ -903,12 +938,7 @@ two_stage_results = two_stage_results.with_columns(pl.lit("Hybrid + Rerank").ali
 all_results = pl.concat([bm25_results, semantic_results, hybrid_results, two_stage_results])
 
 # %% [markdown]
-# ## 7. Results Analysis
-#
-# This section turns query-level metrics into a controlled mechanics comparison.
-#
-# **Interpretation**: The evaluation pass shows how fusion and reranking change
-# agreement with a deliberately lexical label rule.
+# ## 7. Results, and what the label rule did to them
 
 # %%
 # Overall comparison
@@ -927,16 +957,24 @@ overall
 
 # %%
 best_proxy_row = overall.row(0, named=True)
-hybrid_proxy_mrr = overall.filter(pl.col("method") == "Hybrid (RRF)")["avg_mrr"][0]
-rerank_proxy_mrr = overall.filter(pl.col("method") == "Hybrid + Rerank")["avg_mrr"][0]
+proxy_mrr = dict(zip(overall["method"], overall["avg_mrr"], strict=True))
+proxy_precision = dict(zip(overall["method"], overall["avg_precision"], strict=True))
+precision_ceiling = 3 / TOP_K
 display(
-    Markdown(
-        f"The highest lexical-proxy MRR in this run is "
-        f"**{best_proxy_row['method']} at {best_proxy_row['avg_mrr']:.3f}**. "
-        f"The reranked pipeline scores {rerank_proxy_mrr:.3f}, compared with "
-        f"{hybrid_proxy_mrr:.3f} for RRF before reranking. These values describe "
-        "agreement with the lexical fixture, not human relevance."
-    )
+    Markdown(f"""
+The highest agreement with the label rule is **{best_proxy_row["method"]}** at an MRR of
+{best_proxy_row["avg_mrr"]:.3f}. Adding the cross-encoder to that pipeline takes it to
+{proxy_mrr["Hybrid + Rerank"]:.3f}, a fall of
+{(proxy_mrr["Hybrid (RRF)"] - proxy_mrr["Hybrid + Rerank"]) / proxy_mrr["Hybrid (RRF)"]:.0%}.
+The dense retriever on its own reaches {proxy_mrr["Semantic"]:.3f}.
+
+Every precision figure in the table above is against a ceiling of
+{precision_ceiling:.2f}, not 1: {best_proxy_row["method"]} at
+{proxy_precision[best_proxy_row["method"]]:.2f} is
+{proxy_precision[best_proxy_row["method"]] / precision_ceiling:.0%} of what is reachable.
+The next section is about why the ordering here should not be read as a ranking of
+retrievers.
+""")
 )
 
 # %%
@@ -954,51 +992,124 @@ print("\n=== Performance by Query Type ===\n")
 by_type
 
 # %% [markdown]
-# ## 8. Visualization
+# ### The label rule reads BM25's signal
 #
-# The figure summarizes both average performance and query-type heterogeneity so
-# we can see how the proxy response varies across query types.
+# The evaluation ranks four retrievers. One of them, BM25, scores documents by
+# a weighted count of shared query tokens; the label rule scores them by an
+# unweighted count of the same tokens. If the two agree closely, then BM25's
+# position in that table is a measure of how similar it is to the rule, and
+# says nothing about retrieval.
 #
-# **Interpretation**: The chart should be read as a workload diagnostic. The
-# result reports which stage agrees most with this fixture rather than implying
-# one universal best method.
+# The cell below measures the agreement directly: for every query it ranks the
+# whole corpus twice, once by the label rule's overlap count and once by BM25's
+# score, and takes the Spearman correlation between the two orderings. The same
+# correlation for the dense retriever is the control.
+
 
 # %%
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=("MRR by Method", "MRR by Query Type"),
-    horizontal_spacing=0.12,
+def spearman(a: np.ndarray, b: np.ndarray) -> float:
+    """Rank correlation, ties averaged - both scores are heavily tied at zero."""
+    ranked = [pl.Series(values).rank(method="average").to_numpy() for values in (a, b)]
+    centred = [values - values.mean() for values in ranked]
+    denominator = np.sqrt((centred[0] ** 2).sum() * (centred[1] ** 2).sum())
+    return float((centred[0] * centred[1]).sum() / denominator) if denominator else 0.0
+
+
+label_overlap = {
+    query: np.array(
+        [len(lexical_token_set(query) & lexical_token_set(doc["text"])) for doc in DOCUMENT_CORPUS]
+    )
+    for query, _, _ in TEST_QUERIES
+}
+agreement = pl.DataFrame(
+    {
+        "query_type": [t for _, t, _ in TEST_QUERIES],
+        "bm25_vs_labels": [spearman(label_overlap[q], bm25.score(q)) for q, _, _ in TEST_QUERIES],
+        "dense_vs_labels": [
+            spearman(label_overlap[q], semantic.score(q)) for q, _, _ in TEST_QUERIES
+        ],
+    }
+)
+agreement_summary = agreement.group_by("query_type").agg(
+    pl.col("bm25_vs_labels").mean().round(3),
+    pl.col("dense_vs_labels").mean().round(3),
+)
+agreement_summary
+
+# %%
+bm25_agreement = float(agreement["bm25_vs_labels"].mean())
+dense_agreement = float(agreement["dense_vs_labels"].mean())
+total_labels = int(sum(len(relevant) for _, _, relevant in TEST_QUERIES))
+hits_by_method = dict(
+    all_results.group_by("method").agg(pl.col("hits").sum()).iter_rows()  # noqa: B905
+)
+rerank_hits = hits_by_method["Hybrid + Rerank"]
+fusion_hits = hits_by_method["Hybrid (RRF)"]
+conceptual_bm25 = float(
+    by_type.filter((pl.col("method") == "BM25") & (pl.col("query_type") == "conceptual"))[
+        "avg_mrr"
+    ][0]
+)
+exact_bm25 = float(
+    by_type.filter((pl.col("method") == "BM25") & (pl.col("query_type") == "exact"))["avg_mrr"][0]
 )
 
-methods = overall["method"].to_list()
-mrr_values = overall["avg_mrr"].to_list()
+display(
+    Markdown(f"""
+Averaged over the {N_QUERIES} queries, BM25's document ordering correlates with the label
+rule's at **{bm25_agreement:.2f}**. The dense retriever's correlates at
+**{dense_agreement:.2f}**.
 
+That is the benchmark, not a property of the retrievers. BM25 is being scored against a
+coarser version of itself, and the dense encoder is being scored against a rule that ignores
+everything it was trained to represent.
+
+Two consequences are visible in the table above, and both run against what the query
+registers were set up to show. BM25 reaches an MRR of **{conceptual_bm25:.2f}** on the
+register named for paraphrase and **{exact_bm25:.2f}** on the one named for literal
+matching - the opposite ordering to the one the names imply. And the cross-encoder, the only
+component here trained on human relevance judgments, is the component the benchmark
+penalises most heavily. Neither is a finding about retrieval. Both are the label rule
+showing through.
+
+What the reranker does is visible in the recall column rather than in MRR. It retrieves
+**{rerank_hits}** of the {total_labels} labelled documents inside the top {TOP_K} against the
+fusion's **{fusion_hits}** - it finds more of them and puts them lower, which is what a
+reordering by a different notion of relevance looks like when it is scored by this one.
+""")
+)
+
+# %% [markdown]
+# ## 8. The four methods as a chart
+#
+# The same MRR figures, overall and split by query register. Both panels run to
+# 1 because that is the scale MRR can reach, and the method colours are shared
+# across the two so a method can be followed from one to the other.
+
+# %%
 method_order = ["BM25", "Semantic", "Hybrid (RRF)", "Hybrid + Rerank"]
 colors = dict(zip(method_order, ml4t_palette(len(method_order), categorical=True), strict=True))
 
-_ = fig.add_trace(
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("All queries", "By query register"),
+    horizontal_spacing=0.12,
+)
+fig.add_trace(
     go.Bar(
-        x=methods,
-        y=mrr_values,
-        marker_color=[colors[m] for m in methods],
-        text=[f"{v:.2f}" for v in mrr_values],
+        x=overall["method"].to_list(),
+        y=overall["avg_mrr"].to_list(),
+        marker_color=[colors[m] for m in overall["method"]],
+        text=[f"{v:.2f}" for v in overall["avg_mrr"]],
         textposition="outside",
         showlegend=False,
     ),
     row=1,
     col=1,
 )
-
-# %% [markdown]
-# ### Add query-type slices
-#
-# The second panel uses the same color for each method so aggregate and
-# slice-level proxy scores remain easy to compare.
-
-# %%
 for method in method_order:
-    subset = by_type.filter(pl.col("method") == method)
+    subset = by_type.filter(pl.col("method") == method).sort("query_type")
     fig.add_trace(
         go.Bar(
             name=method,
@@ -1011,23 +1122,32 @@ for method in method_order:
     )
 
 fig.update_layout(
-    title=(f"{best_proxy_row['method']} leads the lexical proxy; reranking must earn its place"),
+    title="Mean reciprocal rank against the lexical proxy, by method and register",
     height=500,
     showlegend=True,
     legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
     barmode="group",
     margin=dict(t=90, b=100),
 )
-
-fig.update_yaxes(title_text="Lexical-proxy MRR", range=[0, 1], row=1, col=1)
-fig.update_yaxes(title_text="Lexical-proxy MRR", range=[0, 1], row=1, col=2)
-
-fig.show()
+fig.update_yaxes(title_text="MRR against the proxy labels", range=[0, 1], row=1, col=1)
+fig.update_yaxes(title_text="MRR against the proxy labels", range=[0, 1], row=1, col=2)
+show_plotly_with_alt(
+    fig,
+    "Two bar panels on a mean-reciprocal-rank scale running from zero to one. Left, over all "
+    "queries: the RRF fusion stands highest, BM25 just below it, the reranked pipeline well "
+    "below that, and the dense retriever lowest. Right, the same four methods grouped by "
+    "register: on the conceptual register BM25 and the fusion both reach the top of the axis; "
+    "on the exact register every method falls, BM25 furthest, leaving the fusion highest; on "
+    "the mixed register BM25 and the fusion stand close together above the other two. The "
+    "dense retriever is the lowest bar in all three groups.",
+)
 
 # %% [markdown]
-# **Interpretation**: The by-type breakdown shows that a single aggregate hides
-# different proxy behavior. Reranking changes the order but does not improve the
-# lexical-proxy score in this run; human labels decide whether that change helps.
+# The left panel is the ordering the previous section explained: the two
+# retrievers closest to the label rule stand highest, and the cross-encoder
+# pipeline stands below the fusion it reranks. The right panel is the same
+# ordering register by register, which is where the register names stop
+# describing what they were named for.
 
 # %% [markdown]
 # ## 9. Query Enhancement: HyDE
@@ -1045,66 +1165,63 @@ fig.show()
 # 4. **Retrieve documents** similar to the hypothetical answer
 #
 # **Intended benefit**: bridge a vocabulary gap by embedding an answer-shaped
-# query representation. This notebook does not implement or measure HyDE.
+# query representation. **This notebook does not implement or measure HyDE**,
+# so nothing above bears on whether it works.
 #
-# **Trade-offs**: Adds LLM latency to retrieval, risk of hallucinated hypothetical
-# affecting retrieval quality. Best combined with keyword search as fallback.
+# **Trade-offs**: it puts a generation call in the retrieval path, so latency
+# rises and a hallucinated hypothetical steers the search. A lexical fallback
+# alongside it bounds that.
 
 # %% [markdown]
 # ## 10. Key Insights
 #
-# ### When to Use Each Method
+# ### What each method is for
 #
-# | Query Pattern | Candidate to test | Examples |
-# |---------------|-------------------|----------|
-# | Exact symbols, form numbers | BM25 | "AAPL 10-K", "Form 8-K" |
-# | Exact figures, dates | BM25 | "Q4 2023 revenue", "$89.5 billion" |
-# | Conceptual questions | Semantic | "What are the risks?", "How profitable?" |
-# | Paraphrased queries | Semantic | "profit margins" vs "gross margin" |
-# | Mixed requirements | Hybrid, then tested reranking | "Apple supply chain Asia risk" |
+# This table is a statement about mechanism, not a ranking derived from the run
+# above - the run cannot support a ranking, for the reason section 7 measures.
 #
-# ### Production Recommendations
+# | Query pattern | Mechanism that handles it | Examples |
+# |---|---|---|
+# | Tickers, form numbers, accession numbers | BM25: a rare token carries high inverse document frequency | "AAPL 10-K", "Form 8-K" |
+# | Exact figures and dates | BM25: the digits are tokens | "Q4 2023 revenue" |
+# | Questions with no distinctive term | Dense: the embedding does not need a shared token | "What are the risks?" |
+# | Paraphrase | Dense: two phrasings land near each other | "profit margins" against "gross margin" |
+# | Both at once | Fusion: neither retriever has to win outright | "Apple supply chain Asia risk" |
 #
-# 1. **Treat hybrid retrieval as a candidate first stage** - Verify it on human
-#    relevance judgments before deployment.
+# ### What to do with this in production
 #
-# 2. **Gate reranking on human labels** - A second-stage re-ranker changes the
-#    ordering and adds latency; it belongs only when judged relevance improves.
+# 1. **Get labels before choosing anything.** Section 7 is what a benchmark
+#    looks like when its labels come from one of the candidates. A hundred
+#    query-document pairs judged by someone who knows the domain outranks any
+#    quantity of proxy-scored comparison.
 #
-# 3. **Tune the RRF k parameter** - Keep the query labels fixed while testing
-#    how rank fusion changes the result.
+# 2. **Fuse before you tune.** RRF has one parameter and needs no calibration,
+#    so it is the cheapest thing to put between two retrievers that disagree.
+#    Tune k against judged labels, never against a proxy.
 #
-# 4. **Evaluate HyDE for open-ended queries** - It adds generation latency and
-#    can inject unsupported concepts, so compare it on the same judged set.
+# 3. **Expect a reranker to cost latency and to need its own evidence.** It
+#    scores each query-candidate pair, so it cannot be precomputed, and here it
+#    lowered the proxy score. Only judged relevance can say whether that
+#    reordering is an improvement.
 
 # %%
-# Summary statistics
-print("=== Hybrid Retrieval Summary ===\n")
-
-if len(overall) >= 2:
-    hybrid_mrr = overall.filter(pl.col("method") == "Hybrid (RRF)")["avg_mrr"].to_list()
-    rerank_mrr = overall.filter(pl.col("method") == "Hybrid + Rerank")["avg_mrr"].to_list()
-    bm25_mrr = overall.filter(pl.col("method") == "BM25")["avg_mrr"].to_list()
-    semantic_mrr = overall.filter(pl.col("method") == "Semantic")["avg_mrr"].to_list()
-
-    if hybrid_mrr and rerank_mrr and bm25_mrr and semantic_mrr:
-        hybrid_val = hybrid_mrr[0]
-        rerank_val = rerank_mrr[0]
-        best_single = max(bm25_mrr[0], semantic_mrr[0])
-        improvement = (hybrid_val - best_single) / best_single * 100
-        rerank_improvement = (rerank_val - hybrid_val) / hybrid_val * 100 if hybrid_val else 0.0
-
-        print(f"Hybrid (RRF) MRR: {hybrid_val:.3f}")
-        print(f"Hybrid + rerank MRR: {rerank_val:.3f}")
-        print(f"Best single method MRR: {best_single:.3f}")
-        print(f"Hybrid vs best single: {improvement:.1f}%")
-        print(f"Rerank vs hybrid: {rerank_improvement:.1f}%")
-        print(f"\nRRF constant k={hybrid.rrf_k}")
-        print(f"Re-ranker backend: {reranker.backend}")
-        print(f"Documents in corpus: {len(documents)}")
-        print(f"Queries evaluated: {len(TEST_QUERIES)}")
-else:
-    print("Insufficient data for summary")
+print("=== The run, in one place ===\n")
+for method in method_order:
+    row = overall.filter(pl.col("method") == method).row(0, named=True)
+    hits = int(all_results.filter(pl.col("method") == method)["hits"].sum())
+    print(
+        f"{method:<16} MRR {row['avg_mrr']:.3f}  recall {row['avg_recall']:.3f}  "
+        f"P@{TOP_K} {row['avg_precision']:.3f} (ceiling {precision_ceiling:.2f})  "
+        f"{hits} of {total_labels} labelled documents retrieved"
+    )
+print(
+    f"\nRRF constant k={hybrid.rrf_k}; rerank pool {RERANK_CANDIDATES}; "
+    f"reranker backend {reranker.backend}"
+)
+print(f"{len(documents)} documents, {len(TEST_QUERIES)} queries, {total_labels} labels")
+print(
+    f"Label rule vs BM25 ordering: {bm25_agreement:.2f}; vs dense ordering: {dense_agreement:.2f}"
+)
 
 # %% [markdown]
 # ### Production Vector Database Support
@@ -1120,32 +1237,37 @@ else:
 #
 # LlamaIndex and LangChain provide abstractions for hybrid search
 # that work across multiple backends.
-#
-# **Interpretation**: The summary statistics and backend options point to the
-# same conclusion: hybrid retrieval is most useful as a configurable production
-# pattern, not as a single fixed recipe.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Hybrid retrieval is a first-stage recall mechanism.** Combining BM25
-#    and semantic search exposes the candidate pool to both exact identifiers
-#    and paraphrased concepts. The computed summary above reports how each
-#    variant agrees with this notebook's lexical proxy.
-# 2. **BM25 remains essential** for financial documents: exact symbols,
-#    form numbers, exact dollar figures, and dates are explicit lexical signals
-#    that dense retrieval should not be expected to preserve perfectly.
-# 3. **Reranking is a production pattern, not a guaranteed gain.** The
-#    cross-encoder changes a finance-domain candidate list, but only a judged
-#    relevance set can establish whether the new order is better.
-# 4. **RRF combines ranks without calibrating score scales.** The smoothing
-#    constant $k=60$ is a visible parameter and should be tested when labels
-#    are available.
-# 5. **HyDE remains an unmeasured extension here.** Its vocabulary-bridging
-#    hypothesis and hallucination risk need a separate controlled evaluation.
+# 1. **A proxy label rule that shares a retriever's mechanism cannot rank that
+#    retriever.** Section 7 measures the correlation between the label rule's
+#    document ordering and each retriever's. The lexical rule and BM25 agree
+#    far more closely than the rule and the dense encoder, so the table's
+#    ordering is partly a similarity measurement wearing the clothes of a
+#    benchmark. This is the most transferable thing in the notebook: it happens
+#    to any evaluation whose labels are generated by one of the things being
+#    evaluated.
 #
-# **Next**: See [`04_ragas_evaluation`](04_ragas_evaluation.ipynb) for systematic evaluation of full
-# RAG pipelines using retrieval, grounding, abstention, and security metrics.
+# 2. **The register names describe phrasing, not behaviour.** BM25 scores
+#    higher on the register named for paraphrase than on the one named for
+#    literal matching. Naming a slice after the retriever you expect to win it
+#    is a hypothesis, and this run does not support it.
 #
-# **Book Reference**: Section 22.5 covers hybrid retrieval architectures,
-# RRF derivation, and vector database selection criteria.
+# 3. **Reciprocal rank fusion needs no calibration.** It reads ranks, never
+#    scores, so a retriever emitting values in the single digits and one
+#    emitting cosines contribute equally from equal positions. The constant
+#    $k=60$ damps the top of each list; it is the only thing to tune, and it
+#    should be tuned against judged labels.
+#
+# 4. **Precision@k is bounded by the number of labels.** Three labels against
+#    a top-ten cut puts the ceiling at three in ten. A precision column read
+#    against one makes every method here look like a failure.
+#
+# 5. **HyDE is described and not measured.** Section 9 says what it would do
+#    and this notebook does not implement it, so nothing here supports or
+#    contradicts it.
+#
+# **Next**: [`04_ragas_evaluation`](04_ragas_evaluation.ipynb) evaluates whole
+# RAG pipelines on retrieval, grounding and abstention.
