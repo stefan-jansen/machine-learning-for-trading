@@ -110,6 +110,7 @@ TOP_N_COMBOS = None
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 
+# %%
 # A reduced run is a preview run. Refused on the canonical tier so a narrowed result can
 # never land in the registry the book's numbers come from, and so the two can never sit in
 # one registry to be ranked against each other: `resolve_best_backtest_runs` takes the top

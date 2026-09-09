@@ -551,3 +551,42 @@ def test_a_reduced_run_is_refused_on_the_canonical_tier() -> None:
         "these hash a specification off a reducible panel without refusing the reduction "
         f"canonically, so a reduced row could reach the canonical registry: {missing}"
     )
+
+
+def test_the_refusal_runs_after_papermill_injects_its_overrides() -> None:
+    """A refusal in the parameters cell reads the defaults and never fires.
+
+    Papermill puts the injected values in a cell immediately after the tagged one, so a
+    guard placed inside that cell evaluates `MAX_SYMBOLS = 0` - the literal above it - and a
+    canonical run supplying a nonzero value walks straight past it into a reduced sweep
+    against the canonical registry. That is what `nasdaq100_microstructure/17_costs` did when
+    the refusal was first added, and a check that only reads whether the condition exists
+    cannot see it. This reads where it is.
+    """
+    from pathlib import Path
+
+    from tests.pm_helpers import PARAMETERS_CELL_MARKER, _percent_cell_bounds
+    from utils.paths import REPO_ROOT
+
+    too_early = []
+    for path in sorted((Path(REPO_ROOT) / "case_studies").glob("*/[0-9]*.py")):
+        source = path.read_text()
+        if 'EXECUTION_TIER == "canonical" and MAX_SYMBOLS' not in source:
+            continue
+        cells = _percent_cell_bounds(source)
+        tagged = [
+            (first, last) for header, first, last in cells if PARAMETERS_CELL_MARKER in header
+        ]
+        assert tagged, f"{path}: refuses MAX_SYMBOLS but declares no parameters cell"
+        first, last = tagged[0]
+        guard_line = next(
+            i
+            for i, line in enumerate(source.splitlines(), start=1)
+            if 'EXECUTION_TIER == "canonical" and MAX_SYMBOLS' in line
+        )
+        if first <= guard_line <= last:
+            too_early.append(f"{path.parent.name}/{path.stem}:{guard_line}")
+    assert not too_early, (
+        "these refuse a reduced canonical run from inside the parameters cell, which papermill "
+        f"overwrites after: the guard reads the default and never fires: {too_early}"
+    )
