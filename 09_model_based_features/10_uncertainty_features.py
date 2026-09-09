@@ -295,52 +295,73 @@ R_HAT_CEILING = 1.01
 EFFECTIVE_SAMPLE_FLOOR = 200
 DIAGNOSTIC_PARAMETERS = ["phi", "sigma_eta", "mu_h", "nu"]
 
-diagnostics = az.summary(traces[-1], var_names=DIAGNOSTIC_PARAMETERS)
-display(diagnostics[["mean", "sd", "r_hat", "ess_bulk", "ess_tail"]])
-
-print(f"Parameters above the r_hat ceiling: {(diagnostics['r_hat'] > R_HAT_CEILING).sum()}")
-print(
-    "Parameters below the effective sample floor: "
-    f"{(diagnostics['ess_bulk'] < EFFECTIVE_SAMPLE_FLOOR).sum()}"
+diagnostics = (
+    pd.concat(
+        az.summary(trace, var_names=DIAGNOSTIC_PARAMETERS)[
+            ["mean", "sd", "r_hat", "ess_bulk", "mcse_mean"]
+        ]
+        .rename_axis("parameter")
+        .assign(refit=index)
+        for index, trace in enumerate(traces, start=1)
+    )
+    .set_index("refit", append=True)
+    .reorder_levels(["refit", "parameter"])
+    .sort_index()
 )
-print(f"Divergences across all refits: {posteriors['divergences'].max()} at worst")
+display(diagnostics)
+
+print(f"Parameter fits in total: {len(diagnostics)}")
+print(f"Above the r_hat ceiling: {(diagnostics['r_hat'] > R_HAT_CEILING).sum()}")
+print(
+    f"Below the effective sample floor: {(diagnostics['ess_bulk'] < EFFECTIVE_SAMPLE_FLOOR).sum()}"
+)
+print(f"Divergences in the worst refit: {posteriors['divergences'].max()}")
 
 # %% [markdown]
-# ## Whether the sampler noise swamps the feature
+# ## Whether the sampler noise is large enough to matter
 #
 # Two of these parameters are features, so a failed diagnostic is not an academic point
-# about the fit; it decides whether the column carries anything. The check that settles it
-# compares two quantities directly. The **Monte Carlo standard error** is how far the
-# posterior mean of one fit could be from the mean the sampler was trying to estimate,
-# purely because it took finitely many draws. The **spread across refits** is how much the
-# feature moves from quarter to quarter, which is the variation a model would read.
+# about the fit; it decides whether the column carries anything. Two quantities bound the
+# question. The **Monte Carlo standard error** is how far one fit's posterior mean could be
+# from the mean the sampler was estimating, purely because it took finitely many draws; it is
+# reported per refit above because it differs between them. The **spread across refits** is
+# how much the feature moves from quarter to quarter, which is the variation a model would
+# read.
 #
-# If the first is comparable to the second, the feature's movement is the sampler rather
-# than the market.
+# Putting the largest error next to that spread says whether sampling error is large enough
+# to matter. It does not divide the spread into signal and noise: each fit's error is a
+# separate quantity, and a fit whose diagnostics failed makes its own error estimate
+# unreliable.
 
 # %%
 FEATURE_PARAMETERS = {"phi": "persistence", "sigma_eta": "vol_of_vol"}
 
+
+def sampling_error_row(name: str, column: str) -> dict:
+    """The Monte Carlo error of the noisiest fit against the spread across all of them."""
+    errors = diagnostics.xs(name, level="parameter")["mcse_mean"]
+    spread = per_refit[column].std()
+    return {
+        "parameter": column,
+        "smallest Monte Carlo error across refits": errors.min(),
+        "largest Monte Carlo error across refits": errors.max(),
+        "spread across refits": spread,
+        "ratio of the largest error to the spread": errors.max() / spread,
+    }
+
+
 display(
-    pd.DataFrame(
-        [
-            {
-                "parameter": column,
-                "Monte Carlo standard error of one fit": diagnostics.loc[name, "mcse_mean"],
-                "spread across the four refits": per_refit[column].std(),
-                "ratio": diagnostics.loc[name, "mcse_mean"] / per_refit[column].std(),
-            }
-            for name, column in FEATURE_PARAMETERS.items()
-        ]
-    )
+    pd.DataFrame([sampling_error_row(name, column) for name, column in FEATURE_PARAMETERS.items()])
 )
 
 # %% [markdown]
-# Read the ratio column before using either parameter as a feature. Where it is a
-# meaningful fraction of one, most of what the column does between refits is the sampler
-# taking a different path rather than the volatility process changing. Separating the two
-# takes more draws, and how many more scales with the square of how much further the ratio
-# has to fall.
+# Read the last column before using either parameter as a feature. A ratio that is a
+# meaningful fraction of one says the sampler alone could move the column by an amount
+# comparable to what it moves between quarters, which is enough to make the
+# quarter-to-quarter path unreliable at that resolution. It does not say what share of the
+# path is sampling error; establishing that means rerunning the fits with more draws and
+# watching whether the spread stays where it was. The draws needed scale with the square of
+# how much further the error has to fall.
 #
 # This is a property of the model rather than of the data, and it is worth knowing which
 # models have it. A likelihood with a narrow curved region takes many draws to explore
@@ -362,10 +383,10 @@ ax.fill_between(
     2 * posteriors["posterior_mean"],
     alpha=0.2,
     color=COLORS["blue"],
-    label="Two posterior standard deviations",
+    label="Twice the carried-forward posterior mean scale",
 )
 ax.set_ylabel("Percent")
-ax.set_title("Returns against the band the model assigns them")
+ax.set_title("Returns against twice the scale the model carries for them")
 ax.legend(fontsize=7)
 
 ax = axes[1]
@@ -397,8 +418,9 @@ fig.suptitle("What a quarterly refit can and cannot give you")
 show_with_alt(
     fig,
     "Two stacked panels over the last year of the sample. The top draws daily returns "
-    "against a shaded band at twice the posterior volatility, which steps to a new level at "
-    "each refit and does not follow the returns within a quarter. The bottom draws the "
+    "against a shaded band at twice the posterior mean of the scale parameter, which steps "
+    "to a new level at each refit and does not follow the returns within a quarter. The "
+    "bottom draws the "
     "posterior mean as a step function with its credible interval shaded around it and "
     "dotted vertical lines at the refit dates; the steps differ in level and the interval "
     "differs in width between them.",
