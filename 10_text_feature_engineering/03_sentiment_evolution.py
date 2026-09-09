@@ -14,46 +14,63 @@
 # ---
 
 # %% [markdown]
-# # Sentiment Analysis Evolution: TF-IDF → GloVe → Transformers
+# # Three generations of text features on one task
 #
-# **Chapter 10: From Text to Features - The Transformer Breakthrough**
-# **Section Reference**: See Sections 10.2, 10.3, 10.5 for conceptual discussion
+# **Chapter 10: text feature engineering**
+# **Section reference**: Sections 10.2, 10.3 and 10.5
 #
 # **Docker image**: `ml4t-py312`
 #
-# > **Docker required**: This notebook uses `gensim`, which has no Python 3.14 support.
-# > Run with:
+# > **Docker required**: this notebook uses `gensim`, which does not build against the Python
+# > version the rest of the repository runs on. Run it with:
 # > ```bash
 # > docker compose --profile py312 run --rm py312 python 10_text_feature_engineering/03_sentiment_evolution.py
 # > ```
 #
-# ## Purpose
-# This notebook demonstrates the evolution of text representation for sentiment
-# classification, comparing three approaches on the Financial PhraseBank dataset.
-# We show how each generation of NLP techniques addresses limitations of its
-# predecessors, culminating in Transformer-based models.
+# ## What this notebook is for
 #
-# ## Learning Objectives
-# After completing this notebook, you will be able to:
-# - Implement TF-IDF vectorization for document classification
-# - Use pre-trained static embeddings (GloVe) for document-level features
-# - Apply a pre-trained Transformer (FinBERT) without task-specific fine-tuning
-# - Compare accuracy and F1 scores across NLP paradigms
-# - Interpret confusion matrices to identify class-specific errors
-# - Understand why pre-trained models need fine-tuning for new tasks
+# Three ways of turning a sentence into numbers, each the standard answer of its decade, all
+# scored on the same split of the same corpus: counts of words and word pairs, an average of
+# static word vectors, and a transformer that reads the sentence in order.
+#
+# The comparison is arranged so the differences are attributable. Every method sees the same
+# training and test sentences, the two learned classifiers use the same estimator on top, and
+# the transformer is not fine-tuned here at all - it is a published checkpoint applied as it
+# ships, so what it contributes is what its pre-training put there rather than anything this
+# notebook taught it.
+#
+# One detail decides whether the comparison is honest. `yiyanghkust/finbert-tone` was trained
+# on analyst reports and earnings-call transcripts, not on the Financial PhraseBank, so the
+# test sentences here are new to it. A checkpoint trained on this corpus would post a high
+# score for a reason that has nothing to do with the representation, which is what
+# `04_bert_finetuning` runs into with a different one.
+#
+# ## Learning objectives
+#
+# After working through this notebook you will be able to:
+#
+# - Build a TF-IDF classifier and say which properties of a sentence its features can and
+#   cannot represent.
+# - Turn static word vectors into a document vector, and name what averaging destroys.
+# - Apply a published classification checkpoint without fine-tuning, and check its label
+#   order against your own before trusting a single score.
+# - Read three confusion matrices side by side to locate which class accounts for a
+#   difference in accuracy.
 #
 # ## Prerequisites
-# - Sections 10.1-10.4 of the chapter (TF-IDF, static embeddings, Transformers).
-# - Financial PhraseBank `sentences_allagree` subset on disk (loaded via
-#   `data.load_financial_phrasebank`).
 #
-# ## Related Notebooks
-# - `01_word2vec_training.py` - Skip-gram mechanics on the same corpus.
-# - `04_bert_finetuning.py` - fine-tunes FinBERT on PhraseBank (this notebook
-#   shows the pre-fine-tuning baseline).
+# - Sections 10.1 to 10.4 of the chapter.
+# - The Financial PhraseBank `sentences_allagree` subset on disk, loaded via
+#   `data.load_financial_phrasebank`.
+#
+# ## Related notebooks
+#
+# - `01_word2vec_training.py` - what the static vectors averaged here actually encode
+# - `04_bert_finetuning.py` - fine-tuning a checkpoint on this corpus, and the leakage that
+#   comes with the domain-specific one
 
 # %%
-"""Sentiment Analysis Evolution - compare TF-IDF, GloVe, and Transformer approaches on Financial PhraseBank."""
+"""Compare TF-IDF, averaged GloVe and a pre-trained transformer on one sentiment split."""
 
 import contextlib
 import io
@@ -76,8 +93,13 @@ from transformers import set_seed as set_transformers_seed
 from data import load_financial_phrasebank as load_financial_phrasebank_canonical
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
-warnings.filterwarnings("ignore", category=UserWarning)
+# A category with no module is nearly a blanket filter: it silences every UserWarning from
+# every library, including any this notebook's own arithmetic would raise. Named to the two
+# packages whose import-time notices repeat.
+warnings.filterwarnings("ignore", category=UserWarning, module="gensim")
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 # %% tags=["parameters"]
 # Production defaults - Papermill can override for fast CI runs.
@@ -85,9 +107,12 @@ SEED = 42
 MAX_SAMPLES = 0  # 0 = use the full sentences_allagree subset
 FINBERT_TEST_SAMPLES = 0  # 0 = run FinBERT on the entire stratified test split
 
+# %% [markdown]
+# `set_global_seeds` covers Python, NumPy and Torch. The transformers pipelines draw from
+# their own generator, which needs seeding separately or the run is not reproducible.
+
+
 # %%
-# Reproducibility - set_global_seeds covers Python random / NumPy / Torch.
-# transformers has its own RNG (used by Trainer + pipelines) that needs explicit seeding.
 set_global_seeds(SEED)
 set_transformers_seed(SEED)
 
@@ -117,11 +142,8 @@ CONFIG = {
     },
 }
 
-print("=" * 70)
 print("EXPERIMENT CONFIGURATION")
-print("=" * 70)
 print(json.dumps(CONFIG, indent=2))
-print("=" * 70)
 
 # %% [markdown]
 # ## 2. Load Financial PhraseBank Dataset
@@ -159,15 +181,17 @@ if MAX_SAMPLES > 0 and len(df) > MAX_SAMPLES:
 label_map = {0: "negative", 1: "neutral", 2: "positive"}
 df = df.with_columns(pl.col("label").replace_strict(label_map).alias("sentiment"))
 
-# %%
-# ============================================================================
-# SANITY CHECKS
-# ============================================================================
-# These checks ensure the data and label mapping are correct before training.
+# %% [markdown]
+# ### Checks before anything is fitted
+#
+# Label mappings are the failure that produces a plausible-looking wrong number rather than
+# an error, so they are verified here rather than inferred from a score that looks about
+# right. The class balance is printed for the same reason: it is what any accuracy below has
+# to be read against.
 
-print("\n" + "=" * 70)
+
+# %%
 print("DATASET SANITY CHECKS")
-print("=" * 70)
 
 # 1. Class distribution in full dataset
 print("\n1. CLASS DISTRIBUTION (Full Dataset)")
@@ -200,7 +224,6 @@ for label_id, label_name in label_map.items():
     sample = df.filter(pl.col("label") == label_id).head(1)["sentence"][0]
     print(f"   {label_name}: '{sample[:80]}...'")
 
-print("\n" + "=" * 70)
 
 # %%
 # Train/test split (convert Polars columns to numpy for sklearn)
@@ -213,9 +236,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 )
 
 # Print split details
-print("\n" + "=" * 70)
 print("TRAIN/TEST SPLIT DETAILS")
-print("=" * 70)
 print("Split protocol: Stratified random split (preserves class proportions)")
 print(f"Test size: {CONFIG['test_size']} ({CONFIG['test_size'] * 100:.0f}%)")
 print(f"Random seed: {SEED}")
@@ -372,15 +393,14 @@ print(f"  F1 (macro): {f1_glove:.3f}")
 # where the same checkpoint slips behind TF-IDF. Section 6 and the takeaways
 # quantify both sides.
 
-# %%
-# ============================================================================
-# FINBERT CHECKPOINT IDENTITY
-# ============================================================================
-# Explicit documentation for reproducibility and reviewer scrutiny.
+# %% [markdown]
+# Which checkpoint this is decides what its score means, so it is printed rather than left to
+# the config dictionary above. A reader comparing this number against another notebook's has
+# to be able to see that the two are not the same model.
 
-print("\n" + "=" * 70)
+
+# %%
 print("FINBERT CHECKPOINT DETAILS")
-print("=" * 70)
 print(f"Model ID:     {CONFIG['finbert']['model_id']}")
 print(f"Tokenizer ID: {CONFIG['finbert']['tokenizer_id']}")
 print(f"Max Length:   {CONFIG['finbert']['max_length']}")
@@ -391,7 +411,6 @@ for label, idx in CONFIG["finbert"]["labels"].items():
 print("\nThis checkpoint was fine-tuned on analyst reports, not PhraseBank;")
 print("scores below therefore measure cross-dataset transfer, not a like-for-like")
 print("comparison after task-specific fine-tuning.")
-print("=" * 70)
 
 
 def get_finbert_predictions(texts: list[str], batch_size: int = 32) -> np.ndarray:
@@ -469,11 +488,8 @@ results = pl.DataFrame(
     pl.col("F1 (macro)").map_elements(lambda x: f"{x:.3f}", return_dtype=pl.String),
 )
 
-print("\n" + "=" * 50)
 print("COMPARISON SUMMARY")
-print("=" * 50)
 print(results)
-print("=" * 50)
 
 # Relative change calculation (negative = regression vs the lexical baseline).
 relative_change = (acc_finbert - acc_tfidf) / acc_tfidf * 100
@@ -482,37 +498,54 @@ print(
     f"\nFinBERT (pre-trained) accuracy is {abs(relative_change):.1f}% {direction} the TF-IDF baseline."
 )
 
+# %% [markdown]
+# The three matrices share one color scale and one colorbar. Per-panel scales would shade the
+# same count differently in each panel, which is exactly the comparison these are drawn for.
+
 # %%
-# Confusion matrices
-fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-fig.suptitle("Sentiment Classification Confusion Matrices", fontsize=12, y=1.02)
+fig, axes = plt.subplots(1, 3, figsize=FIGSIZE["triple_h_tall"])
 labels = ["negative", "neutral", "positive"]
 
-for ax, (name, y_pred) in zip(
-    axes,
-    [("TF-IDF", y_pred_tfidf), ("GloVe", y_pred_glove), ("FinBERT (pre-trained)", y_pred_finbert)],
-    strict=False,
-):
-    y_true = y_test_finbert if "FinBERT" in name else y_test
-    cm = confusion_matrix(y_true, y_pred)
+panels = [
+    ("TF-IDF", y_pred_tfidf, y_test),
+    ("GloVe", y_pred_glove, y_test),
+    ("FinBERT (pre-trained)", y_pred_finbert, y_test_finbert),
+]
+matrices = [confusion_matrix(y_true, y_pred) for _, y_pred, y_true in panels]
+shared_max = max(matrix.max() for matrix in matrices)
+
+for ax, (name, _, _), matrix in zip(axes, panels, matrices, strict=True):
     sns.heatmap(
-        cm,
+        matrix,
         annot=True,
         fmt="d",
         cmap="Blues",
+        vmin=0,
+        vmax=shared_max,
+        cbar=False,
+        annot_kws={"size": 7},
         xticklabels=labels,
         yticklabels=labels,
         ax=ax,
     )
-    ax.set_title(name)
+    ax.set_title(name, fontsize=8)
     ax.set_xlabel("Predicted")
     ax.set_ylabel("Actual")
+    ax.tick_params(labelsize=7)
 
-plt.show()
+fig.suptitle("Test-set confusion matrices by method")
+show_with_alt(
+    fig,
+    "Three heatmaps side by side, one per method, each a three-by-three grid of counts with "
+    "the annotated class down the side and the predicted class across the bottom, all three "
+    "on the same color scale. The neutral diagonal cell dominates every panel. The negative "
+    "row differs most between panels: in the first two a large share of it sits away from the "
+    "diagonal, and in the third almost all of it is on the diagonal. Every panel loses a "
+    "similar number of the positive row into the neutral column.",
+)
 
 # %%
-# Bar chart comparison
-fig, ax = plt.subplots(figsize=(8, 5))
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 
 methods = ["TF-IDF + LR", "GloVe + LR", "FinBERT (pre-trained)"]
 accuracies = [acc_tfidf, acc_glove, acc_finbert]
@@ -521,15 +554,15 @@ f1_scores = [f1_tfidf, f1_glove, f1_finbert]
 x = np.arange(len(methods))
 width = 0.35
 
-bars1 = ax.bar(x - width / 2, accuracies, width, label="Accuracy", color="#0a1628")
-bars2 = ax.bar(x + width / 2, f1_scores, width, label="F1 (macro)", color="#D4A84B")
+bars1 = ax.bar(x - width / 2, accuracies, width, label="Accuracy", color=COLORS["blue"])
+bars2 = ax.bar(x + width / 2, f1_scores, width, label="F1 (macro)", color=COLORS["amber"])
 
 ax.set_ylabel("Score")
-ax.set_title("Sentiment Classification Method Comparison")
+ax.set_title("Test accuracy and macro F1 by method")
 ax.set_xticks(x)
-ax.set_xticklabels(methods)
-ax.legend()
-ax.set_ylim(0, 1)
+ax.set_xticklabels(methods, fontsize=7)
+ax.set_ylim(0, 1.15)
+ax.legend(fontsize=7, loc="upper left")
 
 # Add value labels
 for bar in bars1:
@@ -554,43 +587,46 @@ for bar in bars2:
         va="bottom",
     )
 
-plt.show()
+show_with_alt(
+    fig,
+    "A grouped bar chart with one pair of bars per method, accuracy and macro F1, each "
+    "labeled with its value, on an axis running from zero to one. The first two pairs are "
+    "close to each other in height, with the second slightly the lower of the two. The third "
+    "pair is clearly taller than both, and its two bars are closer together than the two bars "
+    "in either of the first two pairs.",
+)
 
 # %% [markdown]
-# ## What the Comparison Shows
+# ## What the comparison shows
 #
-# The comparison table above is the chapter's headline result for §10.1, §10.2,
-# and the lead-in to §10.4. Three patterns to read off it:
+# Three things to read off the table and the matrices, in the order they matter.
 #
-# - **TF-IDF + Logistic Regression** is a hard baseline. With bigram features
-#   and stop-word removal, lexical signal alone classifies most sentences
-#   correctly because financial news vocabulary (`profit`, `loss`, `revenue`,
-#   `narrowed`, `tumbled`) is highly polarised.
-# - **GloVe averages add semantic similarity** - synonyms cluster, so a held-
-#   out phrase like "earnings retreated" benefits from proximity to training
-#   examples about "profits falling". The gain over TF-IDF is modest because
-#   the document-vector mean throws away word order and negation.
-# - **FinBERT-tone evaluated without task-specific fine-tuning** depends
-#   strongly on which PhraseBank subset is in scope. On `sentences_allagree`
-#   (this notebook's current subset - only sentences where every annotator
-#   agreed), FinBERT outperforms both lexical baselines because the high-
-#   agreement labels are the cleanest signal and the pre-trained head can
-#   transfer well. On the larger mixed-agreement subset that the chapter
-#   §10.4 table reports, FinBERT underperforms TF-IDF - the same checkpoint
-#   degrades on noisier labels because its training distribution is analyst-
-#   report tone, not journalistic news. This is "pre-trained, no task-
-#   specific fine-tuning" - not "zero-shot" in the prompted-LLM sense,
-#   because the classification head already exists.
+# **TF-IDF is a hard baseline, and that is the point of running it.** Financial news
+# vocabulary is unusually polarized - `profit`, `loss`, `narrowed`, `tumbled` - so counting
+# words and word pairs already separates most sentences. Any representation that costs more
+# has to clear this, and one of the two below does not.
 #
-# The next code cells quantify each contrast with the actual run; the
-# follow-up notebook `04_bert_finetuning.py` shows what fine-tuning recovers
-# on the harder mixed-agreement subset.
+# **Averaging static vectors loses more than it adds.** The averaged document vector brings
+# in synonymy, so a test phrase about earnings retreating sits near training examples about
+# profits falling. But the mean over a sentence discards word order and negation entirely,
+# and the n-gram features keep both in the cases that matter. On this split it comes out
+# behind TF-IDF rather than ahead.
+#
+# **The transformer's gap is concentrated in one class.** The confusion matrices are where
+# to look: the difference in accuracy is not spread evenly but sits almost entirely in the
+# negative row, which the lexical methods scatter across all three columns and the
+# transformer recovers nearly whole. All three lose a similar number of positives to the
+# neutral column, so that error is not what separates them.
+#
+# A caution about what "pre-trained" means here. This checkpoint has a trained
+# classification head, so it is not zero-shot in the prompted-LLM sense; it is a supervised
+# sentiment model built on a different corpus, applied unchanged. What its score measures is
+# transfer from analyst-report text to journalistic sentences, and it is a fair test only
+# because those sentences were not in its training data.
 
 # %%
 # Structured output for automated extraction
-print("=" * 70)
 print("KEY STATISTICS FOR CHAPTER PROSE")
-print("=" * 70)
 print("\nDataset: Financial PhraseBank")
 print(f"Train/Test split: {len(X_train)}/{len(X_test)}")
 print(f"\nTF-IDF + LR: Accuracy={acc_tfidf:.1%}, F1={f1_tfidf:.3f}")
@@ -682,27 +718,30 @@ print(f"  - {results_file}")
 print(f"  - {json_file}")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **TF-IDF + logistic regression** reaches 83.2% accuracy / 0.742 macro F1 on
-#    this `sentences_allagree` split, setting a hard baseline that the
-#    embedding-based methods must clear.
+# 1. **Run the cheap baseline before the expensive representation.** TF-IDF on a polarized
+#    vocabulary is hard to beat, costs seconds, and tells you what any richer method has to
+#    clear. Averaged static vectors do not clear it here.
+# 2. **Averaging word vectors throws away the two things sentiment depends on.** Order and
+#    negation are gone in the mean, and "profit narrowed" and "narrowed profit" become the
+#    same document. A representation is defined as much by what it discards as by what it
+#    encodes.
+# 3. **Check a published checkpoint's label order against your own.** This one emits its
+#    classes in a different order from the dataset's, so mapping by index rather than by name
+#    would produce a low score that looks like a modelling result. The notebook maps by name
+#    and asserts the dataset's mapping is what it expects.
+# 4. **Check what the checkpoint was trained on before reading its score as transfer.** This
+#    one was trained on analyst reports, so the PhraseBank test sentences are genuinely new
+#    to it. `04_bert_finetuning` uses a checkpoint for which that is not true and gets a
+#    number that cannot be compared with this one.
+# 5. **A single accuracy hides where a method fails.** The matrices put the difference in one
+#    class, which is the actionable form: it says what to fix, and a scalar does not.
 #
-# 2. **GloVe averages do not beat TF-IDF on this split** (80.6% accuracy /
-#    0.709 macro F1). Averaging static word vectors discards word order and
-#    negation, and the resulting document representation loses information that
-#    the n-gram features preserve.
+# ### The scope these numbers have
 #
-# 3. **Pre-trained transformer transfer is subset-dependent**: on the high-
-#    agreement PhraseBank subset used here, FinBERT outperforms the lexical
-#    baselines because clean labels expose the value of pre-training. On the
-#    larger mixed-agreement subset (the §10.4 table), the same checkpoint
-#    underperforms TF-IDF - distribution shift between analyst-report training
-#    text and journalistic test text matters more when label noise grows.
-#
-# 4. **Distribution shift is the key lesson**: same labels (positive/neutral/
-#    negative) do not mean same text distribution, and the gap between subsets
-#    here illustrates that label-quality and text-domain gaps interact. Always
-#    validate on your target domain *and* your target label-quality regime.
-#
-# **Next**: See `04_bert_finetuning` for how fine-tuning transforms performance.
+# One split of the `sentences_allagree` subset, which keeps only sentences every annotator
+# scored the same way and is therefore the cleanest and smallest of the four PhraseBank
+# subsets. Results on the mixed-agreement subsets are reported in the chapter text and are
+# not measured here; nothing in this notebook establishes how any of these three methods
+# behaves as label noise grows.
