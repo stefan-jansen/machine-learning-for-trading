@@ -1449,12 +1449,18 @@ def evaluate_statistics(real_data: np.ndarray, synthetic_data: np.ndarray) -> di
     syn_ac = [autocorr(syn_flat[:, i]) for i in range(n_assets)]
     ac_error = np.mean(np.abs(np.array(real_ac) - np.array(syn_ac)))
 
+    # Every figure below averages over assets. Carry the spread as well, so a mean
+    # that hides one badly-fitted asset is visible as one (standard C18).
     return {
+        "n_assets": n_assets,
         "mean_ks_statistic": np.mean(ks_stats),
+        "worst_ks_statistic": np.max(ks_stats),
+        "best_ks_statistic": np.min(ks_stats),
         "mean_error": np.mean(np.abs(real_flat.mean(0) - syn_flat.mean(0))),
         "std_error": np.mean(np.abs(real_flat.std(0) - syn_flat.std(0))),
         "correlation_error": corr_error,
         "autocorrelation_error": ac_error,
+        "worst_autocorrelation_error": np.max(np.abs(np.array(real_ac) - np.array(syn_ac))),
     }
 
 
@@ -1462,13 +1468,20 @@ stats_results = evaluate_statistics(sequences, synthetic_sequences)
 
 print("\n=== Statistical Evaluation ===")
 for key, value in stats_results.items():
-    print(f"  {key}: {value:.4f}")
+    print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
 
 # %% [markdown]
-# **Interpretation**: Low KS statistics indicate that marginal distributions
-# per asset are well-matched. Correlation error tests cross-asset dependence
-# preservation. Autocorrelation error verifies that the model reproduces
-# the weak serial dependence and volatility clustering of daily returns.
+# **Interpretation**: a low KS statistic means the marginal distribution for an asset
+# is well matched. Correlation error tests whether cross-asset dependence survived, and
+# autocorrelation error whether the weak serial dependence of daily returns did.
+#
+# Read each mean against the range printed beside it, not on its own. Every number here
+# except the correlation error is an average over assets, and an average is small either
+# because all the assets are close or because some offset others. The smallest and
+# largest per-asset KS values say which: a largest value near the mean means the fit is
+# even across assets, and one far above it means the mean describes the assets the model
+# handles and conceals the one it does not. The largest per-asset autocorrelation error
+# reads the same way.
 
 
 # %%
