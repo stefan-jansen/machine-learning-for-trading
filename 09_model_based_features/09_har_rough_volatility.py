@@ -14,38 +14,55 @@
 # ---
 
 # %% [markdown]
-# # HAR Model and Rough Volatility
+# # HAR and Rough Volatility
+#
+# **Chapter 9 | Section 9.3**
 #
 # **Docker image**: `ml4t`
 #
-# This notebook covers multi-horizon volatility modeling and the Hurst exponent
-# as features for ML trading systems.
+# The GARCH model in the previous notebook has one memory: a single decay rate that
+# governs how long a shock lasts. This notebook covers two things that memory cannot
+# express. **HAR** replaces the single decay with three horizons at once, on the argument
+# that the people trading at a daily, weekly and monthly rhythm are different people.
+# **Roughness** asks a different question entirely: not how long volatility remembers, but
+# how jagged its path is, and the answer for real markets is far jaggeder than the models
+# that were standard for thirty years assume.
 #
-# **Learning Objectives**:
-# - Compute true realized volatility from intraday minute-bar returns
-# - Use range-based estimators (Parkinson, Garman-Klass) as a daily-data fallback
-# - Build and estimate the HAR model for multi-horizon vol decomposition
-# - Implement rescaled range (R/S) analysis and DFA for the Hurst exponent
-# - Interpret rough volatility ($H \approx 0.1$) vs trending/mean-reverting regimes
+# Both need a measurement of volatility to work on, and getting that measurement right is
+# the first third of the notebook.
 #
-# **Book Reference**: Chapter 9, Section 9.3 (Volatility Features)
+# **Learning objectives**
 #
-# **Prerequisites**: Familiarity with GARCH models (`08_garch_volatility`);
-# range-based estimators introduced in Chapter 8.
+# - Compute volatility from within-session data, and use it to check what the estimators
+#   available from daily bars alone are actually measuring.
+# - Fit a model of volatility across three horizons, and read its coefficients as a
+#   statement about which horizon is driving the current level.
+# - Correct the standard errors of that fit for the overlap its own regressors contain.
+# - Estimate how jagged a series is over time, apply it to returns and to volatility, and
+#   read the two answers as the different things they are.
+#
+# **Book reference**
+#
+# Chapter 9, Section 9.3 (Volatility Features).
+#
+# **Prerequisites**
+#
+# `08_garch_volatility` for conditional volatility and for what persistence means.
+# Chapter 8 introduced the range-based estimators this notebook tests.
+
+# %% [markdown]
+# ## Setup
 
 # %%
-"""HAR Model and Rough Volatility — multi-horizon vol features and Hurst exponent."""
+"""HAR and rough volatility - multi-horizon volatility and the Hurst exponent."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
-from datetime import date
-
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import statsmodels.api as sm
+from arch import arch_model
 from IPython.display import display
 from ml4t.engineer.features.regime import hurst_exponent
 from ml4t.engineer.features.volatility import (
@@ -58,1121 +75,1181 @@ from ml4t.engineer.features.volatility import (
 from scipy import stats
 
 from data import load_etfs, load_nasdaq100_bars
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
 START_DATE = "2006-01-01"
 END_DATE = "2024-12-31"
 INTRADAY_SYMBOL = "AAPL"
-MIN_BARS_PER_DAY = 360  # Full trading days (~390 1-min bars)
+DAILY_SYMBOL = "SPY"
+MINIMUM_BARS_PER_SESSION = 360  # a full session is about 390 one-minute bars
+SESSIONS_PER_YEAR = 252
+ROLLING_WINDOW = 20  # sessions in every rolling average below: about one month
 
 # %% [markdown]
-# ## Load Data
+# # Part 1: what "volatility" is being measured
 #
-# We use two data sources: **NASDAQ-100 minute bars** (AAPL, 2020–2021) for
-# true intraday realized volatility, and **SPY daily OHLCV** (2006–2024) for
-# the longer history needed by the HAR model and range-based fallback estimators.
-
-# %%
-etf_data = load_etfs()
-
-START = date.fromisoformat(START_DATE)
-END = date.fromisoformat(END_DATE)
-SYMBOL = "SPY"
-
-spy = (
-    etf_data.filter(
-        (pl.col("symbol") == SYMBOL) & (pl.col("timestamp") >= START) & (pl.col("timestamp") <= END)
-    )
-    .sort("timestamp")
-    .select(["timestamp", "open", "high", "low", "close", "volume"])
-)
-
-print(
-    f"SPY OHLCV: {len(spy):,} trading days ({spy['timestamp'].min()} to {spy['timestamp'].max()})"
-)
-
-# %% [markdown]
-# # Part 1 — Heterogeneous Autoregressive (HAR) Model
-#
-# The HAR model (Corsi, 2009) decomposes realized volatility into daily, weekly,
-# and monthly components, capturing the heterogeneous behavior of market
-# participants operating at different horizons:
-#
-# $$RV_{t+1}^{(d)} = c + \beta_d \, RV_t^{(d)} + \beta_w \, RV_t^{(w)} + \beta_m \, RV_t^{(m)} + \varepsilon_{t+1}$$
-#
-# where $RV^{(d)}$, $RV^{(w)}$, $RV^{(m)}$ are realized volatility averaged over
-# 1, 5, and 22 days respectively.
-
-# %% [markdown]
-# ### Realized Volatility from Intraday Returns
-#
-# The canonical RV measure is the sum of squared intraday returns. With minute
-# bars from the NASDAQ-100 case study, we compute **true realized volatility**
-# rather than relying on daily proxies. This is the standard academic approach
-# (Andersen and Bollerslev 1998).
+# Everything in this notebook models a series called realized volatility, and there are
+# several different things that name refers to. The definition with the strongest claim to
+# it is computed from within-session data: sum the squared returns of every minute in a
+# session, and the total estimates that session's variance with an error that falls as the
+# bars get finer.
 #
 # $$RV_t = \sum_{i=1}^{M} r_{t,i}^2$$
 #
-# where $r_{t,i}$ is the $i$-th intraday return on day $t$ and $M$ is the
-# number of intraday intervals (here: 1-minute bars during regular hours).
+# It measures the **trading session** and nothing else, and that is the first thing to be
+# clear about, because a daily estimator's target is the whole day. This section
+# establishes the relation between the two on a symbol where both are available, and turns
+# up two data traps on the way.
 
 # %%
-# Load minute bars (regular trading hours only: 09:30–16:00)
-
-intraday = (
-    load_nasdaq100_bars(
-        symbols=[INTRADAY_SYMBOL],
-        include_microstructure=True,
-        lazy=True,
-    )
+minute_bars = (
+    load_nasdaq100_bars(symbols=[INTRADAY_SYMBOL], include_microstructure=True, lazy=True)
     .filter((pl.col("time") >= "09:30") & (pl.col("time") < "16:00"))
-    .select(["date", "symbol", "time", "vwap", "volume"])
+    .select(["date", "time", "first_trade_price", "last_trade_price"])
     .collect()
     .sort(["date", "time"])
 )
 
-print(f"{INTRADAY_SYMBOL} minute bars: {len(intraday):,} observations")
-print(f"Date range: {intraday['date'].min()} to {intraday['date'].max()}")
-print(f"Trading days: {intraday['date'].n_unique()}")
+print(
+    f"{INTRADAY_SYMBOL} minute bars: {minute_bars.height:,} rows over "
+    f"{minute_bars['date'].n_unique()} sessions, "
+    f"{minute_bars['date'].min()} to {minute_bars['date'].max()}"
+)
+
+# %% [markdown]
+# Two choices in the cell above are worth stating rather than leaving in the code. The
+# returns are taken from the **last trade price** of each minute rather than from the
+# minute's volume-weighted average. A volume-weighted average is an average over the
+# minute, so a series of them is smoother than the price actually was, and squared returns
+# built from it understate the variance. On this sample the difference is not small.
+#
+# And the bars cover 09:30 to 16:00 only, so the sum below is the variance of the trading
+# session. What happens between one session's close and the next one's open is a separate
+# quantity, measured separately here.
 
 # %%
-# Compute true realized volatility: sum of squared 1-minute log returns per day
-intraday_rv = (
-    intraday.with_columns(
-        log_ret=pl.col("vwap").log().diff().over("date"),
-    )
-    .drop_nulls(subset=["log_ret"])
+intraday = (
+    minute_bars.with_columns(minute_return=pl.col("last_trade_price").log().diff().over("date"))
+    .drop_nulls(subset=["minute_return"])
     .group_by("date")
     .agg(
-        # Daily RV = sum of squared intraday returns, annualized
-        rv_intraday=(pl.col("log_ret").pow(2).sum() * 252).sqrt(),
-        n_bars=pl.col("log_ret").count(),
+        intraday_variance=pl.col("minute_return").pow(2).sum(),
+        bars=pl.len(),
+        session_open=pl.col("first_trade_price").first(),
+        session_close=pl.col("last_trade_price").last(),
     )
     .sort("date")
-    .filter(pl.col("n_bars") >= MIN_BARS_PER_DAY)
-)
-
-print(f"Intraday RV computed: {len(intraday_rv):,} trading days")
-rv_mean = intraday_rv["rv_intraday"].mean()
-print(f"Mean annualized RV: {rv_mean:.4f}" if rv_mean is not None else "No full trading days")
-
-# %%
-# Visualize intraday RV
-fig, axes = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
-
-rv_pd = intraday_rv.to_pandas().set_index("date")
-
-ax = axes[0]
-ax.plot(rv_pd.index, rv_pd["rv_intraday"], linewidth=0.6)
-ax.set_title(f"True Realized Volatility — {INTRADAY_SYMBOL} (Sum of Squared 1-Min Returns)")
-ax.set_ylabel("Annualized RV")
-
-# 21-day moving average for smoother view
-ax = axes[1]
-rv_smooth = rv_pd["rv_intraday"].rolling(21).mean()
-ax.plot(rv_pd.index, rv_smooth, linewidth=1.0)
-ax.set_title("21-Day Moving Average of Realized Volatility")
-ax.set_ylabel("Annualized RV")
-ax.set_xlabel("Date")
-
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# The intraday RV series shows the characteristic volatility clustering and
-# mean-reversion that the HAR model is designed to capture. We use this as
-# the primary RV input for the HAR demonstration below.
-#
-# For the HAR model estimation on SPY (which requires a longer history than
-# the 2020–2021 intraday window), we use range-based estimators as a fallback.
-
-# %% [markdown]
-# ### Fallback: Range-Based Realized Volatility
-#
-# When intraday data is unavailable — as for longer histories or less liquid
-# assets — range-based estimators approximate RV from daily OHLC prices.
-# These extract more variance information than close-to-close returns
-# alone (Chapter 8, Section 8.2).
-
-
-# %%
-def compute_range_rv(df: pl.DataFrame) -> pl.DataFrame:
-    """Compute range-based realized volatility estimators from OHLCV data.
-
-    Returns DataFrame with Parkinson, Garman-Klass, and close-to-close RV.
-    """
-    return df.with_columns(
-        # Log returns (close-to-close)
-        log_return=pl.col("close").log().diff(),
-        # Parkinson (1980): uses high-low range
-        # Var = (1 / 4*ln(2)) * (ln(H/L))^2
-        rv_parkinson=((pl.col("high") / pl.col("low")).log().pow(2) / (4.0 * np.log(2))).sqrt()
-        * np.sqrt(252),
-        # Garman-Klass (1980): uses OHLC
-        # Var = 0.5 * (ln(H/L))^2 - (2*ln(2) - 1) * (ln(C/O))^2
-        rv_garman_klass=(
-            0.5 * (pl.col("high") / pl.col("low")).log().pow(2)
-            - (2.0 * np.log(2) - 1.0) * (pl.col("close") / pl.col("open")).log().pow(2)
-        )
-        .clip(lower_bound=0)
-        .sqrt()
-        * np.sqrt(252),
-        # Close-to-close squared return (annualized vol proxy)
-        rv_cc=(pl.col("close").log().diff().pow(2)).sqrt() * np.sqrt(252),
+    .filter(pl.col("bars") >= MINIMUM_BARS_PER_SESSION)
+    .with_columns(
+        overnight_return=(pl.col("session_open") / pl.col("session_close").shift(1)).log(),
+        close_to_close_return=(pl.col("session_close") / pl.col("session_close").shift(1)).log(),
     )
+    .drop_nulls()
+)
 
-
-spy_rv = compute_range_rv(spy).drop_nulls(subset=["log_return"])
-print(f"Range-based RV computed: {len(spy_rv):,} observations")
-spy_rv.select(["timestamp", "rv_parkinson", "rv_garman_klass", "rv_cc"]).head(5)
+print(f"Complete sessions: {intraday.height:,} of {minute_bars['date'].n_unique()}")
 
 # %% [markdown]
-# ### Compare Estimator Properties
+# ## The first trap: these prices are not adjusted
 #
-# Parkinson and Garman-Klass are more efficient than close-to-close (they use
-# intraday range information), producing smoother volatility estimates.
+# A close-to-close return computed from raw trade prices crosses every corporate action as
+# though it were a price move. The check below finds any session whose return is too large
+# to be one, and on this symbol and period it finds exactly one.
 
 # %%
-fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+IMPLAUSIBLE_RETURN = 0.25  # a one-session log return larger than this is a corporate action
 
-# Convert to pandas for plotting
-rv_pd = spy_rv.select(["timestamp", "rv_parkinson", "rv_garman_klass", "rv_cc"]).to_pandas()
-rv_pd.set_index("timestamp", inplace=True)
+implausible = intraday.filter(pl.col("close_to_close_return").abs() > IMPLAUSIBLE_RETURN)
+print(f"Sessions with a return beyond {IMPLAUSIBLE_RETURN:.0%}: {implausible.height}")
+for row in implausible.iter_rows(named=True):
+    print(f"  {row['date']}: {row['close_to_close_return']:+.3f} in logs")
 
-# Rolling 21-day average to smooth daily noise
-rv_smooth = rv_pd.rolling(21).mean()
+clean = intraday.filter(pl.col("close_to_close_return").abs() <= IMPLAUSIBLE_RETURN)
 
+# %% [markdown]
+# One session, and it is the four-for-one share split. The intraday variance of that
+# session is unaffected, because a split happens between sessions and every minute return
+# inside the session is a real price move; what is corrupted is anything computed across
+# the boundary. That asymmetry is worth carrying: the same raw data can be sound for one
+# statistic and unusable for another, and which is which depends on whether the statistic
+# crosses a session boundary.
+
+# %% [markdown]
+# ## The second trap: a session is not a day
+#
+# With the split session removed, the three quantities below should reconcile. The
+# variance of a close-to-close return is the variance of the overnight move plus the
+# variance of the session that follows it, plus twice their covariance. If the intraday
+# measurement is sound, adding the overnight component to it should land close to the
+# close-to-close variance computed directly, and the remaining gap is that covariance.
+
+# %%
+intraday_variance = float(clean["intraday_variance"].mean())
+overnight_variance = float((clean["overnight_return"] ** 2).mean())
+close_to_close_variance = float((clean["close_to_close_return"] ** 2).mean())
+annualize = np.sqrt(SESSIONS_PER_YEAR)
+
+display(
+    pd.DataFrame(
+        [
+            {
+                "component": "trading session, measured from minute bars",
+                "annualized volatility": np.sqrt(intraday_variance) * annualize,
+            },
+            {
+                "component": "overnight, close to next open",
+                "annualized volatility": np.sqrt(overnight_variance) * annualize,
+            },
+            {
+                "component": "the two added, as a volatility",
+                "annualized volatility": np.sqrt(intraday_variance + overnight_variance)
+                * annualize,
+            },
+            {
+                "component": "close to close, computed directly",
+                "annualized volatility": np.sqrt(close_to_close_variance) * annualize,
+            },
+        ]
+    )
+)
+print(
+    "Share of the daily variance that happens overnight: "
+    f"{overnight_variance / (intraday_variance + overnight_variance):.1%}"
+)
+print(
+    "Gap between the sum and the direct figure, in variance: "
+    f"{(intraday_variance + overnight_variance) / close_to_close_variance - 1:+.1%}"
+)
+
+# %% [markdown]
+# The two land within a few percent of each other in variance, and the small gap is the
+# covariance term the decomposition leaves out. So the measurement is sound, and the share
+# printed above says the overnight component is a large fraction of the total rather than a
+# rounding error, for a symbol whose market is open six and a half hours out of
+# twenty-four. Any
+# comparison between an intraday measurement and a daily estimator has to account for it,
+# and a strategy holding overnight is exposed to a risk that no intraday measurement sees.
+
+# %%
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+
+sessions = clean["date"].to_list()
 ax = axes[0]
-ax.plot(rv_smooth.index, rv_smooth["rv_cc"], label="Close-to-Close", alpha=0.7, linewidth=0.8)
-ax.plot(rv_smooth.index, rv_smooth["rv_parkinson"], label="Parkinson", alpha=0.8, linewidth=0.8)
 ax.plot(
-    rv_smooth.index, rv_smooth["rv_garman_klass"], label="Garman-Klass", alpha=0.8, linewidth=0.8
+    sessions,
+    clean["intraday_variance"].sqrt() * annualize,
+    linewidth=0.7,
+    color=COLORS["blue"],
+    label="Trading session",
 )
-ax.set_title("Range-Based RV Estimators (21-Day Average, Annualized)")
-ax.set_ylabel("Volatility")
-ax.legend()
+ax.plot(
+    sessions,
+    clean["overnight_return"].abs() * annualize,
+    linewidth=0.5,
+    alpha=0.7,
+    color=COLORS["amber"],
+    label="Overnight",
+)
+ax.set_ylabel("Annualized volatility")
+ax.set_title("Two components of the same day")
+ax.legend(fontsize=7)
 
-# Efficiency ratio: Parkinson vs close-to-close
 ax = axes[1]
-efficiency = rv_smooth["rv_parkinson"] / rv_smooth["rv_cc"]
-ax.plot(rv_smooth.index, efficiency, linewidth=0.8, color="purple")
-ax.axhline(1.0, color="red", linestyle="--", linewidth=0.5)
-ax.set_title("Parkinson / Close-to-Close Ratio")
-ax.set_ylabel("Ratio")
-ax.set_xlabel("Date")
+ax.plot(
+    sessions,
+    (clean["intraday_variance"].sqrt() * annualize).rolling_mean(ROLLING_WINDOW),
+    linewidth=1,
+    color=COLORS["blue"],
+    label="Trading session",
+)
+ax.plot(
+    sessions,
+    (clean["overnight_return"].abs() * annualize).rolling_mean(ROLLING_WINDOW),
+    linewidth=1,
+    color=COLORS["amber"],
+    label="Overnight",
+)
+ax.set_ylabel("Annualized volatility")
+ax.set_xlabel("Session")
+ax.set_title(f"The same two, averaged over {ROLLING_WINDOW} sessions")
+ax.legend(fontsize=7)
 
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# ### ml4t-engineer: All Five Estimators in One Call
-#
-# The manual implementation above shows how Parkinson and Garman-Klass work
-# internally. For production use across many symbols, `ml4t-engineer` provides
-# all five standard range-based estimators as Polars expressions — including
-# Rogers-Satchell (drift-independent) and Yang-Zhang (combining overnight and
-# intraday components).
-
-# %%
-# realized_volatility() expects a returns column, not prices — compute log returns first
-spy_rv_ml4t = spy.with_columns(
-    log_ret=(pl.col("close") / pl.col("close").shift(1)).log(),
-).with_columns(
-    rv_close=realized_volatility("log_ret", period=20),
-    rv_parkinson=parkinson_volatility("high", "low", period=20),
-    rv_gk=garman_klass_volatility("open", "high", "low", "close", period=20),
-    rv_rs=rogers_satchell_volatility("open", "high", "low", "close", period=20),
-    rv_yz=yang_zhang_volatility("open", "high", "low", "close", period=20),
+fig.suptitle("The market is shut for most of the day, and it moves then too")
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a time axis over two years. The top draws the session "
+    "volatility measured from minute bars against the absolute overnight move, both noisy "
+    "day to day, with the session series generally the larger and both spiking in March "
+    "2020. The bottom draws the same two averaged over twenty sessions, where the session "
+    "series stays above the overnight one throughout and the two move together.",
 )
 
-# Compare all estimators
-rv_cols = ["rv_close", "rv_parkinson", "rv_gk", "rv_rs", "rv_yz"]
-print("=== Range-Based Volatility Estimators (ml4t-engineer) ===")
-for col in rv_cols:
-    vals = spy_rv_ml4t[col].drop_nulls()
-    print(f"  {col:<16}: mean={vals.mean():.4f}, std={vals.std():.4f}")
-
-# %%
-fig, ax = plt.subplots(figsize=(14, 5))
-
-rv_pd = spy_rv_ml4t.select(["timestamp"] + rv_cols).drop_nulls().to_pandas().set_index("timestamp")
-# Rolling smooth for readability
-rv_smooth = rv_pd.rolling(21).mean()
-
-for col in rv_cols:
-    label = col.replace("rv_", "").replace("_", "-").title()
-    ax.plot(rv_smooth.index, rv_smooth[col], linewidth=0.8, alpha=0.8, label=label)
-
-ax.set_title("Five Range-Based Volatility Estimators (21-Day Average)")
-ax.set_ylabel("Annualized Volatility")
-ax.legend(loc="upper left")
-plt.tight_layout()
-plt.show()
-
 # %% [markdown]
-# **Interpretation**: Yang-Zhang and Rogers-Satchell are the most efficient
-# estimators because they account for overnight gaps and drift, respectively.
-# Close-to-close is the noisiest. The choice of estimator matters most when
-# data has frequent overnight gaps or when the underlying has non-zero drift.
-
-# %% [markdown]
-# ### Build HAR Regressors
+# ## Which daily estimator to use
 #
-# The HAR model uses three horizons of averaged RV as predictors:
-# - $RV^{(d)}_t$: daily (1-day) — captures intraday trader behavior
-# - $RV^{(w)}_t$: weekly average (5-day) — captures medium-term investors
-# - $RV^{(m)}_t$: monthly average (22-day) — captures institutional rebalancers
+# Ranking estimators by accuracy needs a target measured the same way, and the section
+# above is the reason there is not one here: the intraday measurement covers the session
+# and every daily estimator covers something else. What can be compared without a target is
+# **efficiency**, which is the property Chapter 8 claims for the range-based estimators:
+# for the same underlying volatility, a more efficient estimator scatters less around it.
+#
+# The measurement below is that scatter. Each estimator is computed per session on the ETF
+# panel's adjusted daily bars, and its dispersion is taken around its own twenty-session
+# average, so a common movement in the underlying volatility cancels and what is left is
+# the estimator's own noise.
 
 
 # %%
-def build_har_features(rv_series: pl.Series, timestamps: pl.Series) -> pl.DataFrame:
-    """Build HAR regressors from a daily RV series.
-
-    Returns DataFrame with daily, weekly, monthly RV and next-day target.
-    """
-    df = pl.DataFrame({"timestamp": timestamps, "rv": rv_series})
-
-    har = df.with_columns(
-        # Daily RV (lagged 1 day to avoid lookahead)
-        rv_daily=pl.col("rv").shift(1),
-        # Weekly average: mean of past 5 days (lagged)
-        rv_weekly=pl.col("rv").shift(1).rolling_mean(5),
-        # Monthly average: mean of past 22 days (lagged)
-        rv_monthly=pl.col("rv").shift(1).rolling_mean(22),
-        # Target: next-day RV
-        rv_target=pl.col("rv"),
+def range_volatility(frame: pl.DataFrame) -> pl.DataFrame:
+    """Per-session Garman-Klass volatility, annualized, plus the close-to-close return."""
+    return frame.with_columns(
+        log_return=pl.col("close").log().diff(),
+        volatility=(
+            (
+                0.5 * (pl.col("high") / pl.col("low")).log().pow(2)
+                - (2 * np.log(2) - 1) * (pl.col("close") / pl.col("open")).log().pow(2)
+            ).clip(lower_bound=0)
+            * SESSIONS_PER_YEAR
+        ).sqrt(),
     ).drop_nulls()
 
-    return har
 
+spy = (
+    load_etfs(symbols=[DAILY_SYMBOL])
+    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
+    .sort("timestamp")
+    .select(["timestamp", "open", "high", "low", "close"])
+)
 
-# Use Garman-Klass as primary RV estimator
-har_data = build_har_features(spy_rv["rv_garman_klass"], spy_rv["timestamp"])
-print(f"HAR dataset: {len(har_data):,} observations")
-har_data.head(5)
+per_session = spy.with_columns(
+    close_to_close=(pl.col("close").log().diff().pow(2) * SESSIONS_PER_YEAR).sqrt(),
+    parkinson=(
+        (pl.col("high") / pl.col("low")).log().pow(2) / (4 * np.log(2)) * SESSIONS_PER_YEAR
+    ).sqrt(),
+    garman_klass=(
+        (
+            0.5 * (pl.col("high") / pl.col("low")).log().pow(2)
+            - (2 * np.log(2) - 1) * (pl.col("close") / pl.col("open")).log().pow(2)
+        ).clip(lower_bound=0)
+        * SESSIONS_PER_YEAR
+    ).sqrt(),
+    rogers_satchell=(
+        (
+            (pl.col("high") / pl.col("close")).log() * (pl.col("high") / pl.col("open")).log()
+            + (pl.col("low") / pl.col("close")).log() * (pl.col("low") / pl.col("open")).log()
+        ).clip(lower_bound=0)
+        * SESSIONS_PER_YEAR
+    ).sqrt(),
+).drop_nulls()
 
-# %% [markdown]
-# ### Estimate HAR via OLS
-#
-# The HAR model is a simple OLS regression despite its time-series motivation.
-# The $\beta$ coefficients reveal which horizon dominates current volatility.
+ESTIMATORS = ["close_to_close", "parkinson", "garman_klass", "rogers_satchell"]
 
-
-# %%
-def fit_har(df: pl.DataFrame) -> dict:
-    """Fit HAR model via OLS and return coefficients + diagnostics."""
-    y = df["rv_target"].to_numpy()
-    X = np.column_stack(
-        [
-            np.ones(len(df)),
-            df["rv_daily"].to_numpy(),
-            df["rv_weekly"].to_numpy(),
-            df["rv_monthly"].to_numpy(),
-        ]
-    )
-
-    # OLS: beta = (X'X)^{-1} X'y
-    beta = np.linalg.lstsq(X, y, rcond=None)[0]
-    y_hat = X @ beta
-    residuals = y - y_hat
-    ss_res = np.sum(residuals**2)
-    ss_tot = np.sum((y - y.mean()) ** 2)
-    r_squared = 1 - ss_res / ss_tot
-
-    # Standard errors
-    n, k = X.shape
-    mse = ss_res / (n - k)
-    se = np.sqrt(np.diag(mse * np.linalg.inv(X.T @ X)))
-    t_stats = beta / se
-
-    return {
-        "intercept": beta[0],
-        "beta_daily": beta[1],
-        "beta_weekly": beta[2],
-        "beta_monthly": beta[3],
-        "r_squared": r_squared,
-        "se": se,
-        "t_stats": t_stats,
-        "y_hat": y_hat,
-        "residuals": residuals,
-    }
-
-
-har_result = fit_har(har_data)
-
-names = ["Intercept", "beta_daily", "beta_weekly", "beta_monthly"]
-horizons = ["daily", "weekly", "monthly"]
-har_param_rows = []
-for i, name in enumerate(names):
-    coef = har_result["intercept"] if i == 0 else har_result[f"beta_{horizons[i - 1]}"]
-    har_param_rows.append(
-        {
-            "parameter": name,
-            "estimate": coef,
-            "std_err": har_result["se"][i],
-            "t_stat": har_result["t_stats"][i],
-        }
-    )
-display(pd.DataFrame(har_param_rows))
-
-print(f"R²: {har_result['r_squared']:.4f}")
-print(f"Daily contribution: {har_result['beta_daily']:.3f}")
-print(f"Weekly contribution: {har_result['beta_weekly']:.3f}")
-print(f"Monthly contribution: {har_result['beta_monthly']:.3f}")
-
-# %% [markdown]
-# **Interpretation**: The $\beta$ coefficients decompose the sources of volatility
-# persistence. A large $\beta_m$ indicates that long-term (institutional) dynamics
-# dominate; a large $\beta_d$ indicates that short-term shocks drive volatility.
-# This decomposition is what makes HAR more interpretable than GARCH for
-# understanding *why* volatility is at its current level.
-
-# %% [markdown]
-# ### HAR vs GARCH Comparison
-#
-# HAR uses multi-horizon decomposition; GARCH(1,1) uses a single exponential
-# decay. We compare their out-of-sample forecast accuracy.
-
-# %%
-from arch import arch_model
-
-# Split into train/test
-n = len(har_data)
-train_frac = 0.7
-n_train = int(n * train_frac)
-
-train_data = har_data.head(n_train)
-test_data = har_data.tail(n - n_train)
-
-# HAR forecast on test set (coefficients fit on the training window only)
-har_fit = fit_har(train_data)
-X_test = np.column_stack(
+efficiency = pd.DataFrame(
     [
-        np.ones(len(test_data)),
-        test_data["rv_daily"].to_numpy(),
-        test_data["rv_weekly"].to_numpy(),
-        test_data["rv_monthly"].to_numpy(),
-    ]
-)
-har_forecast = X_test @ np.array(
-    [
-        har_fit["intercept"],
-        har_fit["beta_daily"],
-        har_fit["beta_weekly"],
-        har_fit["beta_monthly"],
-    ]
-)
-
-# %%
-# GARCH(1,1) one-step-ahead out-of-sample forecast.
-# GARCH parameters are estimated on the training window only (via last_obs), to
-# match HAR, whose coefficients are also fit on training data. The forecast then
-# rolls one step ahead across the test period: each day's conditional-variance
-# forecast conditions on the realized return history through the prior day, so
-# the comparison is genuinely out-of-sample.
-returns_pct = spy_rv["log_return"].to_numpy() * 100  # Scale for GARCH
-returns_pd = pd.Series(
-    returns_pct,
-    index=pd.DatetimeIndex(spy_rv["timestamp"].to_list()),
-    name="returns",
-)
-
-test_rv = test_data["rv_target"].to_numpy()
-test_dates = test_data["timestamp"].to_list()
-
-# Split date = first test observation; parameters use only data strictly before it
-split_ts = pd.Timestamp(test_dates[0])
-garch_model = arch_model(returns_pd, mean="Constant", vol="GARCH", p=1, q=1)
-garch_fit = garch_model.fit(disp="off", last_obs=split_ts)
-
-# Forecast origins start at the last training day so that row t (horizon 1)
-# forecasts day t+1: origins then map one-to-one onto the test dates. Annualize
-# the forecast standard deviation and unscale the earlier ×100.
-forecast_start = returns_pd.index[returns_pd.index.get_loc(split_ts) - 1]
-garch_forecast = garch_fit.forecast(horizon=1, start=forecast_start, reindex=False)
-garch_test = np.sqrt(garch_forecast.variance["h.1"].to_numpy()) * np.sqrt(252) / 100
-garch_test = garch_test[: len(test_rv)]  # drop final origin (forecasts past the test window)
-
-# Compute RMSE / MAE
-rmse_har = np.sqrt(np.mean((har_forecast - test_rv) ** 2))
-rmse_garch = np.sqrt(np.mean((garch_test - test_rv) ** 2))
-mae_har = np.mean(np.abs(har_forecast - test_rv))
-mae_garch = np.mean(np.abs(garch_test - test_rv))
-
-# %%
-display(
-    pd.DataFrame(
         {
-            "metric": ["RMSE", "MAE"],
-            "HAR": [rmse_har, mae_har],
-            "GARCH": [rmse_garch, mae_garch],
+            "estimator": name,
+            "mean, annualized": per_session[name].mean(),
+            "dispersion around its own average": float(
+                (per_session[name] / per_session[name].rolling_mean(ROLLING_WINDOW))
+                .drop_nulls()
+                .std()
+            ),
+            "sessions estimated at zero": int((per_session[name] < 1e-6).sum()),
         }
-    )
+        for name in ESTIMATORS
+    ]
+).sort_values("dispersion around its own average")
+display(efficiency)
+
+# %%
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+smooth = per_session.select(
+    [pl.col("timestamp")]
+    + [pl.col(name).rolling_mean(ROLLING_WINDOW).alias(name) for name in ESTIMATORS]
+).drop_nulls()
+for name, color in zip(
+    ESTIMATORS, [COLORS["recede"], COLORS["amber"], COLORS["blue"], COLORS["copper"]]
+):
+    ax.plot(smooth["timestamp"], smooth[name], linewidth=0.8, alpha=0.9, color=color, label=name)
+ax.set_ylabel("Annualized volatility")
+ax.set_xlabel("Session")
+ax.set_title(f"Four estimators of the same thing, averaged over {ROLLING_WINDOW} sessions")
+ax.legend(fontsize=7)
+show_with_alt(
+    fig,
+    "Four volatility estimators for the same symbol, each averaged over twenty sessions and "
+    "drawn over the whole sample. All four rise and fall together at the same dates and are "
+    "separated by a roughly constant vertical offset, with the close-to-close series the "
+    "lowest and the range-based ones above it.",
 )
 
-# %%
-fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-ax = axes[0]
-ax.plot(test_dates, test_rv, label="Actual RV", alpha=0.5, linewidth=0.5)
-ax.plot(test_dates, har_forecast, label="HAR", linewidth=1)
-ax.plot(test_dates, garch_test, label="GARCH", linewidth=1, alpha=0.8)
-ax.set_title("HAR vs GARCH: Out-of-Sample Volatility Forecasts")
-ax.set_ylabel("Realized Volatility (ann.)")
-ax.legend()
-
-# Forecast errors
-ax = axes[1]
-ax.plot(test_dates, har_forecast - test_rv, label="HAR Error", linewidth=0.5, alpha=0.7)
-ax.plot(test_dates, garch_test - test_rv, label="GARCH Error", linewidth=0.5, alpha=0.7)
-ax.axhline(0, color="black", linestyle="--", linewidth=0.5)
-ax.set_title("Forecast Errors")
-ax.set_ylabel("Error")
-ax.legend()
-
-plt.tight_layout()
-plt.show()
-
 # %% [markdown]
-# Both series are genuine out-of-sample forecasts: HAR coefficients and GARCH
-# parameters are estimated on the training window only, and each GARCH forecast
-# conditions on returns through the prior day. Over the test period the HAR
-# forecast tracks realized volatility more closely, with one-step-ahead RMSE of
-# about 0.061 against 0.084 for GARCH and MAE of about 0.041 against 0.064. HAR's
-# multi-horizon regressors track the level and persistence of realized volatility
-# directly, whereas GARCH represents close-to-close return variance through a
-# single exponential decay and adjusts more slowly. The two estimators also
-# target slightly different quantities (range-based Garman-Klass RV versus
-# close-to-close return volatility), which lifts the GARCH forecast to a somewhat
-# higher average level.
-
-# %% [markdown]
-# ### Rolling HAR Estimation
+# Two things separate the four, and they are different properties. The dispersion column
+# ranks them on noise, which is what "more efficient" means and what the range-based
+# estimators are for: reading the high and the low uses information a close-to-close return
+# throws away, so the same underlying volatility produces a steadier estimate. The
+# close-to-close column also counts the sessions it estimates at zero, which is what a
+# session that closed where it opened looks like to an estimator that reads nothing else.
 #
-# In production, re-estimate HAR coefficients periodically on a rolling window.
-# The $\beta$ coefficients themselves become slowly varying features that indicate
-# which horizon dominates current volatility dynamics.
-
-# %%
-WINDOW = 504  # ~2 years of training data
-STEP = 22  # Re-estimate monthly
-
-rolling_betas = []
-rolling_dates = []
-
-for start in range(0, len(har_data) - WINDOW, STEP):
-    window_data = har_data.slice(start, WINDOW)
-    result = fit_har(window_data)
-    mid_date = window_data["timestamp"][WINDOW // 2]
-    rolling_betas.append(
-        {
-            "timestamp": window_data["timestamp"][-1],
-            "beta_daily": result["beta_daily"],
-            "beta_weekly": result["beta_weekly"],
-            "beta_monthly": result["beta_monthly"],
-            "r_squared": result["r_squared"],
-        }
-    )
-
-rolling_df = pl.DataFrame(rolling_betas)
-
-fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
-
-roll_pd = rolling_df.to_pandas().set_index("timestamp")
-
-ax = axes[0]
-ax.plot(roll_pd.index, roll_pd["beta_daily"], label="β_daily", linewidth=1)
-ax.plot(roll_pd.index, roll_pd["beta_weekly"], label="β_weekly", linewidth=1)
-ax.plot(roll_pd.index, roll_pd["beta_monthly"], label="β_monthly", linewidth=1)
-ax.set_title("Rolling HAR Coefficients (2-Year Window)")
-ax.set_ylabel("β Coefficient")
-ax.legend()
-
-ax = axes[1]
-ax.fill_between(roll_pd.index, 0, roll_pd["r_squared"], alpha=0.3)
-ax.plot(roll_pd.index, roll_pd["r_squared"], linewidth=1)
-ax.set_title("Rolling HAR R²")
-ax.set_ylabel("R²")
-
-plt.tight_layout()
-plt.show()
+# The mean column ranks them on level, and there the ordering says nothing about which is
+# right. Each estimator assumes something about the process, they measure overlapping but
+# different windows of the day, and this notebook has no target to check any of them
+# against. Read the level as a scale each estimator carries, and never mix two of them in
+# the same feature without rescaling.
 
 # %% [markdown]
-# ### Vol Term Structure Feature
+# ## The library's versions, and the one that sees the gap
 #
-# The ratio of short-term to long-term RV captures the shape of the volatility
-# term structure — a feature that indicates whether volatility is expected to
-# rise (backwardation) or fall (contango).
+# `ml4t.engineer.features.volatility` supplies all five as Polars expressions. They take a
+# window rather than working session by session, and they average variances before taking
+# the square root where the cells above take the square root first, so the two do not agree
+# exactly even where they implement the same formula. The difference is the usual one
+# between a mean of roots and a root of means, and it is small next to the difference
+# between estimators.
+#
+# The fifth estimator is the reason to run this: **Yang-Zhang** adds an overnight component
+# to an intraday one, so it is the only one of the five whose target is the whole day that
+# Part 1 decomposed. Its level should sit above the others for exactly that reason.
 
 # %%
-vol_term = (
-    spy_rv.with_columns(
-        rv_d=pl.col("rv_garman_klass"),
-        rv_w=pl.col("rv_garman_klass").rolling_mean(5),
-        rv_m=pl.col("rv_garman_klass").rolling_mean(22),
-    )
+library = (
+    per_session.with_columns(log_return=pl.col("close").log().diff())
     .with_columns(
-        # Term structure: daily / monthly ratio
-        vol_term_structure=pl.col("rv_d") / pl.col("rv_m"),
+        library_close=realized_volatility("log_return", period=ROLLING_WINDOW),
+        library_parkinson=parkinson_volatility("high", "low", period=ROLLING_WINDOW),
+        library_garman_klass=garman_klass_volatility(
+            "open", "high", "low", "close", period=ROLLING_WINDOW
+        ),
+        library_rogers_satchell=rogers_satchell_volatility(
+            "open", "high", "low", "close", period=ROLLING_WINDOW
+        ),
+        library_yang_zhang=yang_zhang_volatility(
+            "open", "high", "low", "close", period=ROLLING_WINDOW
+        ),
     )
-    .drop_nulls(subset=["vol_term_structure"])
+    .drop_nulls()
 )
-
-vt_pd = vol_term.select(["timestamp", "vol_term_structure"]).to_pandas().set_index("timestamp")
-
-# %%
-fig, ax = plt.subplots(figsize=(14, 4))
-ax.plot(vt_pd.index, vt_pd["vol_term_structure"], linewidth=0.5, alpha=0.5)
-ax.plot(vt_pd.index, vt_pd["vol_term_structure"].rolling(21).mean(), linewidth=1, color="red")
-ax.axhline(1.0, color="black", linestyle="--", linewidth=0.5)
-ax.set_title("Volatility Term Structure (Daily / Monthly RV)")
-ax.set_ylabel("Ratio")
-ax.set_xlabel("Date")
-ax.fill_between(
-    vt_pd.index,
-    1.0,
-    vt_pd["vol_term_structure"].rolling(21).mean(),
-    where=vt_pd["vol_term_structure"].rolling(21).mean() > 1.0,
-    alpha=0.2,
-    color="red",
-    label="Backwardation (short > long)",
-)
-ax.fill_between(
-    vt_pd.index,
-    1.0,
-    vt_pd["vol_term_structure"].rolling(21).mean(),
-    where=vt_pd["vol_term_structure"].rolling(21).mean() <= 1.0,
-    alpha=0.2,
-    color="blue",
-    label="Contango (short < long)",
-)
-ax.legend(loc="upper right")
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# # Part 2 — Hurst Exponent and Rough Volatility
-#
-# The Hurst exponent $H \in (0, 1)$ measures the scaling behavior of increments:
-#
-# - $H < 0.5$: anti-persistent (rough) — increments negatively correlated
-# - $H = 0.5$: Brownian motion — uncorrelated increments
-# - $H > 0.5$: persistent (trending) — increments positively correlated
-#
-# Applied to **returns**, $H$ distinguishes trending from mean-reverting regimes.
-# Applied to **log-volatility**, $H \approx 0.1$ reveals the "rough volatility"
-# phenomenon (Gatheral, Jaisson, and Rosenbaum, 2018).
-
-# %% [markdown]
-# ### Rescaled Range (R/S) Analysis
-#
-# The classic method for estimating $H$. For a time series of length $n$:
-# 1. Divide into windows of size $s$
-# 2. In each window, compute the range $R$ of cumulative deviations from the mean
-# 3. Normalize by the standard deviation $S$
-# 4. The scaling relationship $\mathbb{E}[R/S] \sim s^H$ gives the Hurst exponent
-
-
-# %%
-def rescaled_range(series: np.ndarray, min_window: int = 20, max_window: int = None) -> tuple:
-    """Compute R/S statistic across multiple window sizes.
-
-    Returns (log_sizes, log_rs, H, intercept) where H is the Hurst exponent.
-    """
-    n = len(series)
-    if max_window is None:
-        max_window = n // 4
-
-    # Window sizes: powers of 2 and intermediate values
-    sizes = []
-    s = min_window
-    while s <= max_window:
-        sizes.append(s)
-        s = int(s * 1.5)  # ~50% increments for good coverage
-    sizes = sorted(set(sizes))
-
-    log_sizes = []
-    log_rs = []
-
-    for s in sizes:
-        n_windows = n // s
-        if n_windows < 2:
-            continue
-
-        rs_values = []
-        for i in range(n_windows):
-            window = series[i * s : (i + 1) * s]
-            mean = window.mean()
-            deviations = np.cumsum(window - mean)
-            R = deviations.max() - deviations.min()
-            S = window.std(ddof=1)
-            if S > 0:
-                rs_values.append(R / S)
-
-        if rs_values:
-            log_sizes.append(np.log(s))
-            log_rs.append(np.log(np.mean(rs_values)))
-
-    log_sizes = np.array(log_sizes)
-    log_rs = np.array(log_rs)
-
-    # Linear regression: log(R/S) = H * log(s) + c
-    slope, intercept, r_value, p_value, std_err = stats.linregress(log_sizes, log_rs)
-
-    return log_sizes, log_rs, slope, intercept, r_value**2
-
-
-# %% [markdown]
-# ### Detrended Fluctuation Analysis (DFA)
-#
-# DFA is more robust than R/S for non-stationary series. It removes local trends
-# before computing fluctuations:
-# 1. Compute the cumulative sum (profile) of the mean-centered series
-# 2. Divide into windows, fit a local polynomial trend in each
-# 3. Compute the RMS of residuals (fluctuation function $F(s)$)
-# 4. The scaling $F(s) \sim s^\alpha$ gives the DFA exponent $\alpha \approx H$
-
-
-# %%
-def dfa(series: np.ndarray, min_window: int = 10, max_window: int = None, order: int = 1) -> tuple:
-    """Detrended Fluctuation Analysis.
-
-    Returns (log_sizes, log_F, alpha) where alpha ≈ H.
-    """
-    n = len(series)
-    if max_window is None:
-        max_window = n // 4
-
-    # Cumulative sum (profile)
-    profile = np.cumsum(series - series.mean())
-
-    sizes = []
-    s = min_window
-    while s <= max_window:
-        sizes.append(s)
-        s = int(s * 1.5)
-    sizes = sorted(set(sizes))
-
-    log_sizes = []
-    log_F = []
-
-    for s in sizes:
-        n_windows = n // s
-        if n_windows < 2:
-            continue
-
-        fluctuations = []
-        for i in range(n_windows):
-            segment = profile[i * s : (i + 1) * s]
-            x = np.arange(s)
-            # Fit polynomial trend
-            coeffs = np.polyfit(x, segment, order)
-            trend = np.polyval(coeffs, x)
-            residual = segment - trend
-            fluctuations.append(np.sqrt(np.mean(residual**2)))
-
-        if fluctuations:
-            log_sizes.append(np.log(s))
-            log_F.append(np.log(np.mean(fluctuations)))
-
-    log_sizes = np.array(log_sizes)
-    log_F = np.array(log_F)
-
-    slope, intercept, r_value, p_value, std_err = stats.linregress(log_sizes, log_F)
-
-    return log_sizes, log_F, slope, intercept, r_value**2
-
-
-# %% [markdown]
-# ### Hurst Exponent on Returns vs Log-Volatility
-#
-# We compute $H$ on two series to demonstrate different behaviors:
-# - **Returns**: typically $H \approx 0.5$ (near random walk), with deviations
-#   indicating trending ($H > 0.5$) or mean-reverting ($H < 0.5$) regimes
-# - **Log-volatility**: typically $H \approx 0.1$ (rough), meaning volatility
-#   spikes are bursty — they arrive suddenly and decay quickly
-
-# %%
-returns_np = spy_rv["log_return"].to_numpy()
-# Log-volatility from Garman-Klass — use increments for roughness
-log_vol_level = np.log(spy_rv["rv_garman_klass"].to_numpy().clip(min=1e-10))
-log_vol_incr = np.diff(log_vol_level)  # Increments of log-vol
-
-# R/S analysis on returns
-rs_sizes_ret, rs_rs_ret, H_rs_ret, _, r2_rs_ret = rescaled_range(returns_np)
-# R/S on log-vol increments (roughness)
-rs_sizes_vol, rs_rs_vol, H_rs_vol, _, r2_rs_vol = rescaled_range(log_vol_incr)
-
-# DFA on returns
-dfa_sizes_ret, dfa_F_ret, H_dfa_ret, _, r2_dfa_ret = dfa(returns_np)
-# DFA on log-vol increments
-dfa_sizes_vol, dfa_F_vol, H_dfa_vol, _, r2_dfa_vol = dfa(log_vol_incr)
 
 display(
     pd.DataFrame(
         [
             {
-                "series": "Returns",
-                "H_RS": H_rs_ret,
-                "R²_RS": r2_rs_ret,
-                "H_DFA": H_dfa_ret,
-                "R²_DFA": r2_dfa_ret,
-            },
-            {
-                "series": "Log-Vol Increments",
-                "H_RS": H_rs_vol,
-                "R²_RS": r2_rs_vol,
-                "H_DFA": H_dfa_vol,
-                "R²_DFA": r2_dfa_vol,
-            },
+                "expression": name.removeprefix("library_"),
+                "mean, annualized": library[name].mean(),
+                "sees the overnight gap": name.endswith(("close", "yang_zhang")),
+            }
+            for name in library.columns
+            if name.startswith("library_")
         ]
     )
 )
-print("Returns H ≈ 0.5 confirms near-random-walk behavior.")
-print("Log-vol increments H < 0.5 confirms rough volatility (anti-persistent increments).")
-
-# %%
-fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-
-# R/S: Returns
-ax = axes[0, 0]
-ax.scatter(rs_sizes_ret, rs_rs_ret, s=20, zorder=5)
-ax.plot(
-    rs_sizes_ret,
-    H_rs_ret * rs_sizes_ret + (rs_rs_ret[0] - H_rs_ret * rs_sizes_ret[0]),
-    "r--",
-    label=f"H = {H_rs_ret:.3f}",
-)
-ax.set_title("R/S Analysis — Returns")
-ax.set_xlabel("log(window size)")
-ax.set_ylabel("log(R/S)")
-ax.legend()
-
-# R/S: Log-Volatility
-ax = axes[0, 1]
-ax.scatter(rs_sizes_vol, rs_rs_vol, s=20, zorder=5)
-ax.plot(
-    rs_sizes_vol,
-    H_rs_vol * rs_sizes_vol + (rs_rs_vol[0] - H_rs_vol * rs_sizes_vol[0]),
-    "r--",
-    label=f"H = {H_rs_vol:.3f}",
-)
-ax.set_title("R/S Analysis — Log-Volatility")
-ax.set_xlabel("log(window size)")
-ax.set_ylabel("log(R/S)")
-ax.legend()
-
-# DFA: Returns
-ax = axes[1, 0]
-ax.scatter(dfa_sizes_ret, dfa_F_ret, s=20, zorder=5)
-ax.plot(
-    dfa_sizes_ret,
-    H_dfa_ret * dfa_sizes_ret + (dfa_F_ret[0] - H_dfa_ret * dfa_sizes_ret[0]),
-    "r--",
-    label=f"α = {H_dfa_ret:.3f}",
-)
-ax.set_title("DFA — Returns")
-ax.set_xlabel("log(window size)")
-ax.set_ylabel("log(F(s))")
-ax.legend()
-
-# DFA: Log-Volatility
-ax = axes[1, 1]
-ax.scatter(dfa_sizes_vol, dfa_F_vol, s=20, zorder=5)
-ax.plot(
-    dfa_sizes_vol,
-    H_dfa_vol * dfa_sizes_vol + (dfa_F_vol[0] - H_dfa_vol * dfa_sizes_vol[0]),
-    "r--",
-    label=f"α = {H_dfa_vol:.3f}",
-)
-ax.set_title("DFA — Log-Volatility")
-ax.set_xlabel("log(window size)")
-ax.set_ylabel("log(F(s))")
-ax.legend()
-
-plt.suptitle("Hurst Exponent: Returns (H ≈ 0.5) vs Log-Vol (H ≈ 0.1)", y=1.02)
-plt.tight_layout()
-plt.show()
 
 # %% [markdown]
-# ### Rolling Hurst Exponent
+# Yang-Zhang and the close-to-close estimator are the two that cross a session boundary,
+# and they are the two whose target is the day rather than the session. The three purely
+# intraday estimators are measuring something smaller and should not be compared against
+# them on level, which is the same point Part 1 made with the decomposition and is the
+# reason a feature set should not mix them.
+
+# %% [markdown]
+# # Part 2: three horizons instead of one
 #
-# The Hurst exponent varies over time. Computing it on 252-day rolling windows
-# produces a slowly varying feature that indicates regime shifts:
-# - **Returns H > 0.5**: trending regime (momentum strategies favored)
-# - **Returns H < 0.5**: mean-reverting regime (reversal strategies favored)
-# - **Log-vol H dropping**: increasing roughness, vol spikes decaying faster
+# The **heterogeneous autoregressive** model (Corsi, 2009) predicts tomorrow's volatility
+# from three averages of today's: yesterday's, the last week's, and the last month's.
+#
+# $$RV_{t+1} = c + \beta_d\,RV^{(d)}_t + \beta_w\,RV^{(w)}_t + \beta_m\,RV^{(m)}_t + \varepsilon_{t+1}$$
+#
+# The argument for that shape is economic rather than statistical. Traders operating at
+# different frequencies watch volatility at different horizons and act on what they watch,
+# so the volatility a market produces is a superposition of their responses rather than a
+# single decay. The model is a linear regression, which makes it far easier to fit than
+# GARCH and far easier to read: each coefficient is the weight one horizon carries.
+#
+# The regressors are built from a range-based estimator for the reason Part 1 established,
+# and each is lagged so that nothing on the right-hand side of the regression is known
+# later than the session it predicts from.
+
+# %%
+HORIZONS = {"daily": 1, "weekly": 5, "monthly": 22}
+
+spy = (
+    load_etfs(symbols=[DAILY_SYMBOL])
+    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
+    .sort("timestamp")
+    .select(["timestamp", "open", "high", "low", "close"])
+)
+
+
+def range_volatility(frame: pl.DataFrame) -> pl.DataFrame:
+    """Per-session Garman-Klass volatility, annualized, plus the close-to-close return."""
+    return frame.with_columns(
+        log_return=pl.col("close").log().diff(),
+        volatility=(
+            (
+                0.5 * (pl.col("high") / pl.col("low")).log().pow(2)
+                - (2 * np.log(2) - 1) * (pl.col("close") / pl.col("open")).log().pow(2)
+            ).clip(lower_bound=0)
+            * SESSIONS_PER_YEAR
+        ).sqrt(),
+    ).drop_nulls()
+
+
+def har_frame(frame: pl.DataFrame) -> pl.DataFrame:
+    """The three lagged averages and the next session's volatility, as one table."""
+    return (
+        frame.with_columns(
+            [
+                pl.col("volatility").shift(1).rolling_mean(length).alias(name)
+                for name, length in HORIZONS.items()
+            ]
+        )
+        .rename({"volatility": "target"})
+        .drop_nulls()
+    )
+
+
+spy_volatility = range_volatility(spy)
+har = har_frame(spy_volatility)
+print(f"{DAILY_SYMBOL}: {spy_volatility.height:,} sessions, {har.height:,} usable for the model")
+display(har.select(["timestamp", *HORIZONS, "target"]).tail(3))
+
+# %% [markdown]
+# ## Fitting it, and correcting the standard errors
+#
+# The regression is ordinary least squares, and its ordinary standard errors are wrong
+# here for a reason built into the model. The weekly regressor is an average of five
+# sessions and the monthly one an average of twenty-two, so consecutive rows share most of
+# their inputs and the residuals are serially correlated by construction. Standard errors
+# computed as though the rows were independent are too small, and every t-statistic
+# computed from them is too large.
+#
+# **Newey-West** standard errors correct for that by estimating the covariance of the
+# residuals over a number of lags rather than assuming it is zero. The number of lags has
+# to reach at least as far as the overlap, which here is the longest horizon.
+
+# %%
+NEWEY_WEST_LAGS = max(HORIZONS.values())
+
+
+def fit_har(frame: pl.DataFrame):
+    """OLS with Newey-West standard errors over the longest horizon's overlap."""
+    design = sm.add_constant(frame.select(list(HORIZONS)).to_pandas())
+    return sm.OLS(frame["target"].to_numpy(), design).fit(
+        cov_type="HAC", cov_kwds={"maxlags": NEWEY_WEST_LAGS}
+    )
+
+
+har_fit = fit_har(har)
+plain_fit = sm.OLS(
+    har["target"].to_numpy(), sm.add_constant(har.select(list(HORIZONS)).to_pandas())
+).fit()
+
+display(
+    pd.DataFrame(
+        {
+            "coefficient": har_fit.params,
+            "standard error, Newey-West": har_fit.bse,
+            "standard error, assuming independence": plain_fit.bse,
+            "t statistic, Newey-West": har_fit.tvalues,
+            "t statistic, assuming independence": plain_fit.tvalues,
+        }
+    )
+)
+print(f"R-squared: {har_fit.rsquared:.4f}")
+print(
+    "Ratio of the two standard errors, by coefficient: "
+    + ", ".join(f"{name} {ratio:.2f}" for name, ratio in (har_fit.bse / plain_fit.bse).items())
+)
+
+# %% [markdown]
+# The two sets of standard errors differ by the ratio printed above, and every t-statistic
+# moves with them. Nothing about the coefficients changed; what changed is how much
+# confidence the fit reports in them, and the uncorrected version reports more than the
+# data supports. This is the same correction the overlapping forward windows in
+# `07_arima_features` needed and did not get, and it is worth making a habit of: any
+# regressor built as a rolling average of its own history has it.
+#
+# The coefficients themselves are the reason to fit HAR rather than GARCH. Each one is the
+# weight the model puts on one horizon, so their relative sizes say which horizon is
+# carrying the current level, and that is a statement a person can act on. GARCH answers
+# the same forecasting question with one decay rate and no such decomposition.
+#
+# Two things to watch when reading them. They are not constrained to be positive, and a
+# negative coefficient on one horizon usually means it is collinear with another rather
+# than that volatility at that horizon predicts less volatility next session. And they sum
+# to close to one on a persistent series, so a rise in one is generally a fall in another;
+# read the three together rather than one at a time.
+
+# %% [markdown]
+# ## Against GARCH, out of sample
+#
+# Both models are fitted on the same training block and asked for one-step-ahead forecasts
+# over the same test block. They are not forecasting exactly the same quantity, which is
+# the first thing the comparison has to state: HAR targets the range-based volatility it
+# was built from, and GARCH targets the variance of close-to-close returns. The levels
+# therefore differ for a reason that has nothing to do with forecast quality, and the error
+# measures below carry that difference.
+
+# %%
+TRAIN_FRACTION = 0.7
+
+split = int(har.height * TRAIN_FRACTION)
+train, test = har.head(split), har.tail(har.height - split)
+
+har_out_of_sample = fit_har(train).predict(sm.add_constant(test.select(list(HORIZONS)).to_pandas()))
+
+returns_percent = pd.Series(
+    spy_volatility["log_return"].to_numpy() * 100,
+    index=pd.DatetimeIndex(spy_volatility["timestamp"].to_list()),
+)
+split_timestamp = pd.Timestamp(test["timestamp"][0])
+garch_fit = arch_model(returns_percent, mean="Constant", vol="GARCH", p=1, q=1).fit(
+    disp="off", last_obs=split_timestamp
+)
+origin = returns_percent.index[returns_percent.index.get_loc(split_timestamp) - 1]
+garch_out_of_sample = (
+    np.sqrt(garch_fit.forecast(horizon=1, start=origin, reindex=False).variance["h.1"].to_numpy())
+    * np.sqrt(SESSIONS_PER_YEAR)
+    / 100
+)[: test.height]
+
+actual = test["target"].to_numpy()
+display(
+    pd.DataFrame(
+        [
+            {
+                "model": name,
+                "root mean squared error": float(np.sqrt(np.mean((forecast - actual) ** 2))),
+                "mean absolute error": float(np.mean(np.abs(forecast - actual))),
+                "mean forecast": float(np.mean(forecast)),
+                "correlation with the target": float(np.corrcoef(forecast, actual)[0, 1]),
+            }
+            for name, forecast in [
+                ("HAR", har_out_of_sample.to_numpy()),
+                ("GARCH", garch_out_of_sample),
+            ]
+        ]
+        + [{"model": "the target itself", "mean forecast": float(np.mean(actual))}]
+    )
+)
+
+# %%
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+
+test_sessions = test["timestamp"].to_list()
+ax = axes[0]
+ax.plot(test_sessions, actual, linewidth=0.5, alpha=0.6, color=COLORS["neutral"], label="Target")
+ax.plot(test_sessions, har_out_of_sample, linewidth=0.9, color=COLORS["blue"], label="HAR")
+ax.plot(test_sessions, garch_out_of_sample, linewidth=0.9, color=COLORS["amber"], label="GARCH")
+ax.set_ylabel("Annualized volatility")
+ax.set_title("One-step-ahead forecasts, parameters fitted before the block")
+ax.legend(fontsize=7)
+
+ax = axes[1]
+ax.plot(test_sessions, har_out_of_sample - actual, linewidth=0.5, color=COLORS["blue"], label="HAR")
+ax.plot(
+    test_sessions, garch_out_of_sample - actual, linewidth=0.5, color=COLORS["amber"], label="GARCH"
+)
+ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
+ax.set_ylabel("Forecast minus target")
+ax.set_xlabel("Session")
+ax.set_title("Errors, on the same scale")
+ax.legend(fontsize=7)
+
+fig.suptitle("Two models of the same thing, forecasting two slightly different things")
+show_with_alt(
+    fig,
+    "Two stacked panels over the test block. The top draws the target volatility against "
+    "the HAR and GARCH forecasts: both track its large movements, the HAR line sitting "
+    "closer to the target and the GARCH line at a visibly higher level throughout. The "
+    "bottom draws each forecast minus the target, with the GARCH errors offset above zero "
+    "and both widening at the same dates.",
+)
+
+# %% [markdown]
+# Read the mean forecast column before the error columns. The two models sit at different
+# levels because they are estimating different quantities, and a squared error between a
+# forecast and a target measured a different way charges the model for that difference as
+# though it were inaccuracy. The correlation column is the part of the comparison that
+# the level difference does not touch, because a correlation is invariant to it.
+#
+# So the comparison establishes less than it looks like it does. What it does establish is
+# that a linear regression on three lagged averages tracks realized volatility about as
+# well as a fitted GARCH does, at a fraction of the machinery, which is the reason HAR is
+# the standard baseline in the realized-volatility literature.
+
+# %% [markdown]
+# ## The coefficients as features
+#
+# Refitting on a moving window turns the three weights into three slowly varying columns,
+# and their movement is a statement about which horizon is driving volatility now. The
+# window is long because the coefficients are estimated rather than observed, and the step
+# is a month because refitting daily would produce three columns whose variation is mostly
+# estimation noise.
+
+# %%
+REFIT_WINDOW = 504  # sessions each fit reads: about two years
+REFIT_STEP = 22  # sessions between fits: about one month
+
+rolling_rows = []
+for start in range(0, har.height - REFIT_WINDOW, REFIT_STEP):
+    window = har.slice(start, REFIT_WINDOW)
+    fit = fit_har(window)
+    rolling_rows.append(
+        {
+            "timestamp": window["timestamp"][-1],
+            **{name: fit.params[name] for name in HORIZONS},
+            "r_squared": fit.rsquared,
+        }
+    )
+
+rolling_har = pd.DataFrame(rolling_rows).set_index("timestamp")
+print(f"Refits: {len(rolling_har)}, each on {REFIT_WINDOW} sessions")
+
+# %%
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+
+ax = axes[0]
+for name, color in zip(HORIZONS, [COLORS["blue"], COLORS["amber"], COLORS["copper"]]):
+    ax.plot(rolling_har.index, rolling_har[name], linewidth=1, color=color, label=name)
+ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
+ax.set_ylabel("Coefficient")
+ax.set_title("Which horizon carries the weight, and when")
+ax.legend(fontsize=7)
+
+ax = axes[1]
+ax.fill_between(rolling_har.index, 0, rolling_har["r_squared"], alpha=0.3, color=COLORS["blue"])
+ax.plot(rolling_har.index, rolling_har["r_squared"], linewidth=1, color=COLORS["blue"])
+ax.set_ylabel("R-squared")
+ax.set_xlabel("Session the window ends")
+ax.set_title("How much of the variation the fit explains")
+
+fig.suptitle(f"Refitted every {REFIT_STEP} sessions, each fit reading {REFIT_WINDOW}")
+show_with_alt(
+    fig,
+    "Two stacked panels over the refit dates. The top draws the three HAR coefficients, "
+    "which move substantially and cross each other repeatedly; the weekly one is the "
+    "largest over much of the sample, the daily one overtakes it in places, and the monthly "
+    "one dips below zero in a few windows. The bottom draws the fit's R-squared, which "
+    "rises and falls between about a sixth and three quarters across the sample.",
+)
+
+# %% [markdown]
+# ## The shape of the term structure
+#
+# The ratio of the short horizon to the long one is a single number saying whether
+# volatility right now is above or below where it has been. Above one, the recent past has
+# been more volatile than the month; below one, less. It is bounded in practice, means the
+# same thing in every year, and is the form a conditioning feature usually wants for the
+# reason `08_garch_volatility` gave about ranks. The figure draws it smoothed over a
+# month, because the unsmoothed daily ratio is dominated by whichever single session
+# sits in its numerator and reaches several times the average.
+
+# %%
+term_structure = (
+    spy_volatility.with_columns(
+        short=pl.col("volatility").rolling_mean(HORIZONS["daily"]),
+        long=pl.col("volatility").rolling_mean(HORIZONS["monthly"]),
+    )
+    .with_columns(ratio=pl.col("short") / pl.col("long"))
+    .drop_nulls()
+)
+
+frame = term_structure.select(["timestamp", "ratio"]).to_pandas().set_index("timestamp")
+smoothed = frame["ratio"].rolling(HORIZONS["monthly"]).mean()
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.plot(frame.index, frame["ratio"], linewidth=0.4, alpha=0.4, color=COLORS["recede"])
+ax.plot(frame.index, smoothed, linewidth=1, color=COLORS["blue"])
+ax.axhline(1.0, color=COLORS["neutral"], linestyle="--", linewidth=0.6)
+ax.fill_between(
+    frame.index, 1.0, smoothed, where=smoothed > 1.0, alpha=0.25, color=COLORS["copper"]
+)
+ax.fill_between(frame.index, 1.0, smoothed, where=smoothed <= 1.0, alpha=0.25, color=COLORS["blue"])
+ax.set_ylabel("Short horizon over long")
+ax.set_xlabel("Session")
+ax.set_title("Volatility above its own month, and below it")
+show_with_alt(
+    fig,
+    "The ratio of a one-session volatility to a twenty-two-session average, drawn faintly "
+    "day by day with a smoothed line over it and a dashed reference at one. The smoothed "
+    "line oscillates around the reference, shaded on one side when above and the other "
+    "when below, with the largest excursions above during the sharpest sell-offs.",
+)
+
+# %% [markdown]
+# # Part 3: how jagged is the path
+#
+# The **Hurst exponent** $H$ describes how the size of a series' movement scales with the
+# length of the interval measured. For a random walk the distance covered grows with the
+# square root of the interval, which is $H = 1/2$. Above a half the series is persistent:
+# a move is more likely to be followed by another in the same direction, so the path
+# wanders further than a random walk would. Below a half it is anti-persistent, or
+# **rough**: moves tend to be reversed, so the path is jagged and covers less ground.
+#
+# Two things are worth separating before estimating it. Applied to **returns**, $H$ says
+# whether a price is trending or reverting, and for a liquid market it comes out near a
+# half because anything else would be a tradable pattern. Applied to **log-volatility**,
+# it says how jagged the volatility path is, and Gatheral, Jaisson and Rosenbaum (2018)
+# found it comes out near a tenth across every asset they measured, far below the half
+# that the standard volatility models had assumed for decades.
+
+# %% [markdown]
+# ## Two ways to estimate it
+#
+# **Rescaled range** is the original method. Cut the series into windows of size $s$;
+# inside each, take the cumulative deviations from that window's mean, measure the range
+# they cover, and divide by the window's standard deviation. Average over windows, repeat
+# for several sizes, and the slope of the average against the size on a log scale is $H$.
+#
+# **Detrended fluctuation analysis** does the same and is unaffected by a trend. It
+# integrates the series first, removes a straight line from each window rather than a
+# mean, and measures what is left. The slope of that against the window size is the same
+# exponent, and it does not move when the series has a drift the rescaled range would
+# absorb into its estimate.
+#
+# Both fit a straight line on a log scale, so both report an $R^2$ alongside the exponent,
+# and that $R^2$ is the check on whether the scaling relationship the method assumes holds
+# at all. An exponent read off a set of points that are not on a line is not an estimate
+# of anything.
+
+# %%
+MINIMUM_WINDOW = 10
+WINDOW_GROWTH = 1.5
+
+
+def window_sizes(n: int, minimum: int, maximum: int | None = None) -> list[int]:
+    """Geometrically spaced window sizes, so the log axis is evenly covered."""
+    maximum = maximum if maximum is not None else n // 4
+    sizes, size = [], minimum
+    while size <= maximum:
+        sizes.append(size)
+        size = int(size * WINDOW_GROWTH)
+    return sorted(set(sizes))
+
+
+def rescaled_range(series: np.ndarray, minimum: int = 20, maximum: int | None = None):
+    """Hurst exponent by rescaled range, with the points the line was fitted to."""
+    log_sizes, log_statistic = [], []
+    for size in window_sizes(len(series), minimum, maximum):
+        values = []
+        for index in range(len(series) // size):
+            window = series[index * size : (index + 1) * size]
+            spread = window.std(ddof=1)
+            if spread > 0:
+                deviations = np.cumsum(window - window.mean())
+                values.append((deviations.max() - deviations.min()) / spread)
+        if values:
+            log_sizes.append(np.log(size))
+            log_statistic.append(np.log(np.mean(values)))
+    fit = stats.linregress(log_sizes, log_statistic)
+    return np.array(log_sizes), np.array(log_statistic), fit.slope, fit.rvalue**2
+
+
+def detrended_fluctuation(
+    series: np.ndarray, minimum: int = MINIMUM_WINDOW, maximum: int | None = None, order: int = 1
+):
+    """Hurst exponent by detrended fluctuation analysis, with its fitted points."""
+    profile = np.cumsum(series - series.mean())
+    log_sizes, log_fluctuation = [], []
+    for size in window_sizes(len(series), minimum, maximum):
+        steps = np.arange(size)
+        fluctuations = []
+        for index in range(len(series) // size):
+            segment = profile[index * size : (index + 1) * size]
+            trend = np.polyval(np.polyfit(steps, segment, order), steps)
+            fluctuations.append(np.sqrt(np.mean((segment - trend) ** 2)))
+        if fluctuations:
+            log_sizes.append(np.log(size))
+            log_fluctuation.append(np.log(np.mean(fluctuations)))
+    fit = stats.linregress(log_sizes, log_fluctuation)
+    return np.array(log_sizes), np.array(log_fluctuation), fit.slope, fit.rvalue**2
+
+
+# %% [markdown]
+# ## The two series, and what each one says
+#
+# Returns go in directly. Volatility goes in as the **increments of its logarithm**,
+# which is the quantity the rough-volatility result is about: the model it argues against
+# says those increments behave like a random walk's, and the finding is that they do not.
+
+# %%
+returns_series = spy_volatility["log_return"].to_numpy()
+log_volatility = np.log(spy_volatility["volatility"].to_numpy().clip(min=1e-10))
+log_volatility_increments = np.diff(log_volatility)
+
+estimates = []
+for name, series in [
+    ("returns", returns_series),
+    ("log-volatility increments", log_volatility_increments),
+]:
+    rs_sizes, rs_values, rs_exponent, rs_fit = rescaled_range(series)
+    dfa_sizes, dfa_values, dfa_exponent, dfa_fit = detrended_fluctuation(series)
+    estimates.append(
+        {
+            "series": name,
+            "H, rescaled range": rs_exponent,
+            "R-squared, rescaled range": rs_fit,
+            "H, detrended fluctuation": dfa_exponent,
+            "R-squared, detrended fluctuation": dfa_fit,
+            "_points": (rs_sizes, rs_values, dfa_sizes, dfa_values),
+        }
+    )
+
+display(pd.DataFrame(estimates).drop(columns="_points"))
+
+# %%
+fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["grid_3x2"])
+
+for row, estimate in enumerate(estimates):
+    rs_sizes, rs_values, dfa_sizes, dfa_values = estimate["_points"]
+    for column, (sizes, values, exponent, label) in enumerate(
+        [
+            (rs_sizes, rs_values, estimate["H, rescaled range"], "Rescaled range"),
+            (dfa_sizes, dfa_values, estimate["H, detrended fluctuation"], "Detrended fluctuation"),
+        ]
+    ):
+        ax = axes[row, column]
+        ax.scatter(sizes, values, s=14, color=COLORS["blue"], zorder=3)
+        ax.plot(
+            sizes,
+            exponent * sizes + (values[0] - exponent * sizes[0]),
+            linestyle="--",
+            linewidth=1,
+            color=COLORS["negative"],
+        )
+        ax.set_title(f"{label}, {estimate['series']}")
+        ax.set_xlabel("Log window size")
+        ax.set_ylabel("Log statistic")
+
+fig.suptitle("The exponent is a slope, so the points have to be on a line")
+show_with_alt(
+    fig,
+    "A two by two grid of log-log scatter plots with a dashed fitted line through each. "
+    "The top row is for returns and the bottom for log-volatility increments; the left "
+    "column is the rescaled range and the right the detrended fluctuation. The returns "
+    "points lie close to their lines with a clear positive slope; the log-volatility "
+    "points lie on much flatter lines.",
+)
+
+# %%
+for estimate in estimates:
+    print(
+        f"{estimate['series']}: "
+        f"rescaled range {estimate['H, rescaled range']:.3f}, "
+        f"detrended fluctuation {estimate['H, detrended fluctuation']:.3f}, "
+        f"against 0.5 for a random walk"
+    )
+
+# %% [markdown]
+# Read the two rows against a half and against each other. Whichever method is used, the
+# two series land in different places, and the direction of the difference is the finding:
+# returns scale close to a random walk's, and the increments of log-volatility scale far
+# below it, meaning volatility reverses direction much more often than a random walk does.
+#
+# That is what "rough" means, and its consequence is practical. A model built on the
+# assumption that log-volatility is a random walk, which describes most of the standard
+# volatility models, is assuming a path smoother than the one the data traces. It will
+# be slow to follow volatility down after a spike, because it expects the level to persist
+# when in fact the next increment is more likely than not to reverse the last.
+#
+# The two methods do not agree exactly, and neither is a measurement of a physical
+# constant. Each estimates a slope from a handful of points, the points are averages over
+# overlapping structure, and the estimate moves with the window range chosen. Read the
+# exponent together with the $R^2$ beside it, and treat a difference of a few hundredths
+# between methods as noise rather than as a finding.
+
+# %% [markdown]
+# ## Roughness over time
+#
+# Estimated on a moving window, the exponent becomes a column. For returns it is a slow
+# statement about whether the market is trending or reverting; for log-volatility it says
+# how bursty the current volatility regime is.
 
 # %%
 HURST_WINDOW = 252
-HURST_STEP = 5  # Compute every 5 days to reduce cost
+HURST_STEP = 10  # sessions between estimates; each estimate is a fit over many sub-windows
 
-rolling_hurst = []
-
-for end in range(HURST_WINDOW, len(returns_np), HURST_STEP):
-    window_ret = returns_np[end - HURST_WINDOW : end]
-    window_vol = log_vol_incr[max(0, end - HURST_WINDOW - 1) : end - 1]
-
-    # DFA is more robust than R/S for shorter windows
-    _, _, h_ret, _, _ = dfa(window_ret, min_window=10, max_window=HURST_WINDOW // 4)
-    _, _, h_vol, _, _ = dfa(window_vol, min_window=10, max_window=HURST_WINDOW // 4)
-
-    rolling_hurst.append(
+rolling_rows = []
+for end in range(HURST_WINDOW, len(returns_series), HURST_STEP):
+    _, _, returns_exponent, _ = detrended_fluctuation(
+        returns_series[end - HURST_WINDOW : end], maximum=HURST_WINDOW // 4
+    )
+    # The increments series is one shorter than the returns series, so its window ends one
+    # index earlier and covers the same sessions.
+    _, _, volatility_exponent, _ = detrended_fluctuation(
+        log_volatility_increments[max(0, end - HURST_WINDOW - 1) : end - 1],
+        maximum=HURST_WINDOW // 4,
+    )
+    rolling_rows.append(
         {
-            "timestamp": spy_rv["timestamp"][end],
-            "hurst_returns": h_ret,
-            "roughness_h": h_vol,
+            "timestamp": spy_volatility["timestamp"][end],
+            "returns": returns_exponent,
+            "log-volatility": volatility_exponent,
         }
     )
 
-hurst_df = pl.DataFrame(rolling_hurst)
-hurst_pd = hurst_df.to_pandas().set_index("timestamp")
-
-# %%
-fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-ax = axes[0]
-ax.plot(hurst_pd.index, hurst_pd["hurst_returns"], linewidth=0.8)
-ax.axhline(0.5, color="red", linestyle="--", linewidth=0.5, label="H = 0.5 (random walk)")
-ax.fill_between(
-    hurst_pd.index,
-    0.5,
-    hurst_pd["hurst_returns"],
-    where=hurst_pd["hurst_returns"] > 0.5,
-    alpha=0.2,
-    color="green",
-    label="Trending",
-)
-ax.fill_between(
-    hurst_pd.index,
-    0.5,
-    hurst_pd["hurst_returns"],
-    where=hurst_pd["hurst_returns"] <= 0.5,
-    alpha=0.2,
-    color="orange",
-    label="Mean-reverting",
-)
-ax.set_title("Rolling Hurst Exponent — Returns (DFA, 252-Day Window)")
-ax.set_ylabel("H")
-ax.legend(loc="upper right")
-
-ax = axes[1]
-ax.plot(hurst_pd.index, hurst_pd["roughness_h"], linewidth=0.8, color="purple")
-ax.axhline(0.5, color="red", linestyle="--", linewidth=0.5, label="H = 0.5")
-ax.axhline(0.1, color="blue", linestyle=":", linewidth=0.5, label="H = 0.1 (rough)")
-ax.set_title("Rolling Roughness — Log-Volatility (DFA, 252-Day Window)")
-ax.set_ylabel("H")
-ax.set_xlabel("Date")
-ax.legend(loc="upper right")
-
-plt.tight_layout()
-plt.show()
-
-# %% [markdown]
-# **Interpretation**: The returns Hurst exponent fluctuates around 0.5, with
-# sustained departures indicating regime changes. The log-volatility Hurst stays
-# well below 0.5, confirming the rough-volatility phenomenon empirically. When
-# roughness $H$ drops further (toward 0.05–0.1), volatility spikes are more
-# bursty and GARCH-based forecasts — which assume smooth dynamics — may
-# underestimate the speed of vol decay after a spike.
-
-# %% [markdown]
-# ### ml4t-engineer: Hurst Exponent as a Polars Expression
-#
-# The manual R/S and DFA implementations above total ~100 lines of NumPy code.
-# For production pipelines, `hurst_exponent()` computes a rolling Hurst estimate
-# as a single Polars expression — suitable for `with_columns()` across
-# many symbols.
-
-# %%
-spy_hurst = spy.with_columns(
-    hurst=hurst_exponent("close", period=252),
-)
-
-hurst_vals = spy_hurst["hurst"].drop_nulls()
+rolling_hurst = pd.DataFrame(rolling_rows).set_index("timestamp")
+print(f"Rolling estimates: {len(rolling_hurst)}, each fitted on {HURST_WINDOW} sessions")
 print(
-    f"ml4t-engineer Hurst: mean={hurst_vals.mean():.3f}, "
-    f"std={hurst_vals.std():.3f}, "
-    f"min={hurst_vals.min():.3f}, max={hurst_vals.max():.3f}"
+    "Median exponent: "
+    f"returns {rolling_hurst['returns'].median():.3f}, "
+    f"log-volatility {rolling_hurst['log-volatility'].median():.3f}"
+)
+print(
+    "Share of windows above one half: "
+    f"returns {(rolling_hurst['returns'] > 0.5).mean():.1%}, "
+    f"log-volatility {(rolling_hurst['log-volatility'] > 0.5).mean():.1%}"
+)
+
+# %%
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+
+for ax, column, color, title in [
+    (axes[0], "returns", COLORS["blue"], "Returns: trending above the line, reverting below"),
+    (axes[1], "log-volatility", COLORS["copper"], "Log-volatility: rough throughout"),
+]:
+    ax.plot(rolling_hurst.index, rolling_hurst[column], linewidth=0.9, color=color)
+    ax.axhline(0.5, color=COLORS["negative"], linestyle="--", linewidth=0.7)
+    ax.annotate(
+        "A random walk",
+        xy=(0.995, 0.5),
+        xycoords=("axes fraction", "data"),
+        xytext=(0, 3),
+        textcoords="offset points",
+        ha="right",
+        fontsize=7,
+        color=COLORS["negative"],
+    )
+    ax.set_ylabel("Exponent")
+    ax.set_title(title)
+axes[1].set_xlabel("Session the window ends")
+
+fig.suptitle(f"The exponent on a {HURST_WINDOW}-session moving window")
+show_with_alt(
+    fig,
+    "Two stacked panels, each drawing a rolling Hurst exponent against a dashed reference "
+    "at one half. The top, for returns, oscillates around the reference and crosses it "
+    "repeatedly. The bottom, for log-volatility increments, stays well below the reference "
+    "throughout the sample without approaching it.",
 )
 
 # %% [markdown]
-# **Note**: The library call above applies R/S analysis to **close prices**,
-# while the manual DFA computation earlier used **returns** and **log-volatility
-# increments**. These are different inputs and will produce different Hurst
-# estimates — the close-price version measures persistence in levels, while the
-# returns version measures persistence in changes. Use the manual implementation
-# to understand the methodology and to apply it to the appropriate series; use
-# the library expression for multi-symbol pipelines when the R/S-on-prices
-# approximation is acceptable.
+# The top panel is a feature and the bottom panel is a fact about markets. Returns cross
+# the line in both directions, so a column holding that exponent separates periods; the
+# log-volatility exponent never comes near it, so a column holding that one separates
+# almost nothing and its value is a property of the asset class rather than of the moment.
+#
+# That asymmetry is the practical reading of the rough-volatility literature. The finding
+# is important because it says the standard model is wrong, and it is a poor feature for
+# exactly the same reason: it is wrong everywhere, in the same direction, all the time.
 
 # %% [markdown]
-# ## Feature Catalog: HAR and Hurst Features
+# ## The library expression, and what it measures
 #
-# | Feature | Source | Computation | Update |
-# |---------|--------|-------------|--------|
-# | `rv_daily` | Range-based | Garman-Klass daily | Daily |
-# | `rv_weekly` | Range-based | 5-day average | Daily |
-# | `rv_monthly` | Range-based | 22-day average | Daily |
-# | `daily_contribution` | HAR | β_d coefficient | Weekly/monthly |
-# | `monthly_contribution` | HAR | β_m coefficient | Weekly/monthly |
-# | `vol_term_structure` | RV ratios | rv_daily / rv_monthly | Daily |
-# | `hurst_exponent` | DFA on returns | Rolling 252-day | Weekly |
-# | `roughness_h` | DFA on log-vol | Rolling 252-day | Weekly |
-
-# %% [markdown]
-# ## Multi-Asset Application
-#
-# Compute HAR features and Hurst exponents across multiple ETFs to show
-# cross-sectional variation in volatility dynamics.
-
+# `hurst_exponent` computes a rolling estimate as a Polars expression, and it takes a
+# **price** column. That is a third series, different from both of the ones above: the
+# rescaled range of a price level rather than of its returns or of its volatility. The
+# three answer different questions and there is no reason for them to agree.
 
 # %%
-def compute_features_for_symbol(symbol: str, etf_df: pl.DataFrame) -> dict | None:
-    """Compute HAR and Hurst features for a single symbol."""
-    sym_data = etf_df.filter(pl.col("symbol") == symbol).sort("timestamp")
-    if len(sym_data) < 600:
+library_hurst = spy.with_columns(hurst=hurst_exponent("close", period=HURST_WINDOW))
+library_values = library_hurst["hurst"].drop_nulls()
+
+display(
+    pd.DataFrame(
+        [
+            {
+                "series": "close price, library expression",
+                "median": library_values.median(),
+                "share above one half": float((library_values > 0.5).mean()),
+            },
+            {
+                "series": "returns, detrended fluctuation",
+                "median": rolling_hurst["returns"].median(),
+                "share above one half": float((rolling_hurst["returns"] > 0.5).mean()),
+            },
+        ]
+    )
+)
+
+# %% [markdown]
+# The two differ, and the difference is the input rather than the implementation. Use the
+# expression where a rolling exponent of the price is what is wanted and the cost of the
+# manual version across a panel is prohibitive; use the manual version where the series
+# being characterised is a return or a volatility, which is most of the time in this
+# chapter.
+
+# %% [markdown]
+# # Part 4: across the panel
+#
+# Every number above comes from one symbol. Fitting the same three quantities across the
+# ETF panel says which of them are properties of this symbol and which are properties of
+# the asset class.
+
+# %%
+MINIMUM_PANEL_SESSIONS = 600
+
+panel_source = (
+    load_etfs()
+    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
+    .sort(["symbol", "timestamp"])
+)
+
+
+def panel_row(symbol: str) -> dict | None:
+    """HAR coefficients and both exponents for one symbol, or None where the history is short."""
+    frame = panel_source.filter(pl.col("symbol") == symbol).select(
+        ["timestamp", "open", "high", "low", "close"]
+    )
+    if frame.height < MINIMUM_PANEL_SESSIONS:
         return None
 
-    # Range-based RV
-    sym_rv = compute_range_rv(sym_data).drop_nulls(subset=["log_return"])
-    if len(sym_rv) < 300:
+    volatility = range_volatility(frame)
+    model_frame = har_frame(volatility)
+    if model_frame.height < MINIMUM_PANEL_SESSIONS // 2:
         return None
 
-    # HAR estimation
-    har = build_har_features(sym_rv["rv_garman_klass"], sym_rv["timestamp"])
-    if len(har) < 100:
-        return None
-
-    try:
-        har_fit = fit_har(har)
-    except Exception:
-        return None
-
-    # Full-sample Hurst
-    returns = sym_rv["log_return"].to_numpy()
-    log_v = np.log(sym_rv["rv_garman_klass"].to_numpy().clip(min=1e-10))
-    log_v_incr = np.diff(log_v)
-
-    try:
-        _, _, h_ret, _, _ = dfa(returns, min_window=10)
-        _, _, h_vol, _, _ = dfa(log_v_incr, min_window=10)
-    except Exception:
-        h_ret, h_vol = np.nan, np.nan
+    fit = fit_har(model_frame)
+    increments = np.diff(np.log(volatility["volatility"].to_numpy().clip(min=1e-10)))
+    _, _, returns_exponent, _ = detrended_fluctuation(volatility["log_return"].to_numpy())
+    _, _, volatility_exponent, _ = detrended_fluctuation(increments)
 
     return {
         "symbol": symbol,
-        "n_obs": len(sym_rv),
-        "beta_daily": har_fit["beta_daily"],
-        "beta_weekly": har_fit["beta_weekly"],
-        "beta_monthly": har_fit["beta_monthly"],
-        "har_r2": har_fit["r_squared"],
-        "hurst_returns": h_ret,
-        "roughness_h": h_vol,
+        **{name: fit.params[name] for name in HORIZONS},
+        "r_squared": fit.rsquared,
+        "H returns": returns_exponent,
+        "H log-volatility": volatility_exponent,
     }
 
 
-# Process all symbols
-etf_filtered = etf_data.filter((pl.col("timestamp") >= START) & (pl.col("timestamp") <= END)).sort(
-    "timestamp"
+panel = pd.DataFrame(
+    [row for symbol in panel_source["symbol"].unique().sort() if (row := panel_row(symbol))]
+)
+print(f"Symbols fitted: {len(panel)} of {panel_source['symbol'].n_unique()}")
+display(panel.describe().loc[["mean", "std", "min", "max"]].round(4))
+
+# %%
+fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["grid_3x2"])
+
+ax = axes[0, 0]
+for name, color in zip(HORIZONS, [COLORS["blue"], COLORS["amber"], COLORS["copper"]]):
+    ax.hist(panel[name], bins=25, alpha=0.6, color=color, label=name)
+ax.axvline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.6)
+ax.set_xlabel("Coefficient")
+ax.set_ylabel("Symbols")
+ax.set_title("The three HAR weights across the panel")
+ax.legend(fontsize=7)
+
+ax = axes[0, 1]
+ax.hist(panel["r_squared"], bins=25, color=COLORS["blue"])
+ax.set_xlabel("R-squared")
+ax.set_ylabel("Symbols")
+ax.set_title("How much of volatility the model explains")
+
+for ax, column, reference, title in [
+    (axes[1, 0], "H returns", 0.5, "Exponent on returns"),
+    (axes[1, 1], "H log-volatility", 0.5, "Exponent on log-volatility"),
+]:
+    ax.hist(panel[column], bins=25, color=COLORS["copper"])
+    ax.axvline(reference, color=COLORS["negative"], linestyle="--", linewidth=0.8)
+    ax.set_xlabel("Exponent")
+    ax.set_ylabel("Symbols")
+    ax.set_title(title)
+
+fig.suptitle("What varies across symbols, and what does not")
+show_with_alt(
+    fig,
+    "A two by two grid of histograms across the ETF panel. Top left overlays the three HAR "
+    "coefficients, which occupy different and partly overlapping ranges. Top right is the "
+    "R-squared, concentrated over a moderate range. Bottom left is the exponent on returns, "
+    "clustered near the dashed reference at one half. Bottom right is the exponent on "
+    "log-volatility, clustered far below that reference with no overlap between the two.",
 )
 
-symbols = etf_filtered["symbol"].unique().sort().to_list()
-
-results = []
-for sym in symbols:
-    r = compute_features_for_symbol(sym, etf_filtered)
-    if r is not None:
-        results.append(r)
-
-multi_df = pl.DataFrame(results)
-print(f"\nComputed features for {len(multi_df)} / {len(symbols)} symbols")
-
 # %%
-# Subsample to top-N by HAR R² for readability — with ~100 ETFs the barh y-ticks
-# collide into a black smear; the cross-sectional pattern is preserved by taking
-# the strongest and weakest tails.
-TOP_N = 20
-multi_pd_full = multi_df.to_pandas().set_index("symbol")
-top_by_r2 = multi_pd_full.nlargest(TOP_N, "har_r2").sort_values("har_r2")
-
-fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
-# HAR R²
-ax = axes[0, 0]
-top_by_r2["har_r2"].plot.barh(ax=ax)
-ax.set_title(f"HAR R² — Top {TOP_N} Symbols")
-ax.set_xlabel("R²")
-
-# Beta decomposition (same subset, same order)
-ax = axes[0, 1]
-top_by_r2[["beta_daily", "beta_weekly", "beta_monthly"]].plot.barh(stacked=True, ax=ax)
-ax.set_title(f"HAR β Decomposition — Top {TOP_N} Symbols")
-ax.set_xlabel("β Coefficient")
-ax.legend(loc="lower right")
-
-# Hurst on returns — show full distribution as histogram (universe view)
-ax = axes[1, 0]
-ax.hist(multi_pd_full["hurst_returns"].dropna(), bins=20, color="green", alpha=0.75)
-ax.axvline(0.5, color="red", linestyle="--", linewidth=1.0, label="Random walk (H=0.5)")
-ax.set_title("Hurst Exponent — Returns")
-ax.set_xlabel("H")
-ax.set_ylabel("count")
-ax.legend()
-
-# Roughness on log-vol — distribution view
-ax = axes[1, 1]
-ax.hist(multi_pd_full["roughness_h"].dropna(), bins=20, color="purple", alpha=0.75)
-ax.axvline(0.5, color="red", linestyle="--", linewidth=1.0, label="Random walk")
-ax.axvline(0.1, color="blue", linestyle=":", linewidth=1.0, label="Rough vol (H≈0.1)")
-ax.set_title("Roughness — Log-Volatility")
-ax.set_xlabel("H")
-ax.set_ylabel("count")
-ax.legend()
-
-plt.tight_layout()
-plt.show()
+print(
+    "Exponent on returns: "
+    f"median {panel['H returns'].median():.3f}, "
+    f"{(panel['H returns'] > 0.5).sum()} of {len(panel)} symbols above one half"
+)
+print(
+    "Exponent on log-volatility: "
+    f"median {panel['H log-volatility'].median():.3f}, "
+    f"{(panel['H log-volatility'] > 0.5).sum()} of {len(panel)} symbols above one half"
+)
+print(
+    "HAR coefficient with the largest median: "
+    + max(HORIZONS, key=lambda name: panel[name].median())
+)
 
 # %% [markdown]
-# ## Save HAR and Hurst Features for Downstream Chapters
+# The two bottom panels are the answer to the question the panel was fitted to settle. The
+# exponent on returns clusters close to a half with symbols on both sides of it, which is
+# what a liquid market should look like. The exponent on log-volatility sits far below a
+# half for every symbol, with no overlap at all between the two distributions, which
+# reproduces the rough-volatility finding across a hundred assets rather than one.
 #
-# Multi-asset HAR coefficients and Hurst exponents are consumed by:
-# - Chapter 12: Gradient boosting uses volatility regime features
-# - Chapter 18: Position sizing depends on volatility horizon decomposition
-
-# %%
-from utils.paths import REPO_ROOT, get_case_study_dir
-
-MODEL_DIR = get_case_study_dir("etfs") / "models" / "time_series"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
-
-output_path = MODEL_DIR / "har_hurst_features.parquet"
-multi_df.write_parquet(output_path)
-
-print(f"Saved HAR/Hurst features to {output_path}")
-print(f"  Shape: {multi_df.shape}")
-print(f"  Symbols: {len(multi_df)}")
+# Compare the returns figure here against the rolling one two sections up before reading
+# either as a level. This one estimates the exponent once over each symbol's whole history;
+# that one estimates it over 252 sessions at a time, and their medians differ. An exponent
+# is a slope through averaged points and the estimate moves with the range of window sizes
+# the fit was given, so the two numbers are answers to slightly different questions rather
+# than a disagreement about the market. What both agree on is the direction, which is that
+# returns sit near a half and volatility does not.
+#
+# The HAR coefficients vary more across symbols than either exponent does, and that
+# variation is what makes them worth carrying per symbol rather than fitting once.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## The features this notebook produces
 #
-# 1. **HAR decomposes volatility by horizon**: daily, weekly, monthly components
-#    reveal which timescale drives current conditions — more interpretable than
-#    GARCH's single exponential decay
-# 2. **Range-based estimators** (Parkinson, Garman-Klass, Rogers-Satchell,
-#    Yang-Zhang) extract more variance information from OHLC data than
-#    close-to-close returns alone
-# 3. **Hurst exponent on returns** distinguishes trending ($H > 0.5$) from
-#    mean-reverting ($H < 0.5$) regimes — a slowly varying feature for strategy
-#    selection
-# 4. **Rough volatility** ($H \approx 0.1$ on log-vol) means volatility spikes
-#    are bursty and decay faster than smooth-volatility models predict
-# 5. **Rolling estimation** of both HAR $\beta$s and Hurst produces time-varying
-#    features; re-estimate weekly to avoid noise
-# 6. **ml4t-engineer** provides all five range-based estimators and
-#    `hurst_exponent()` as Polars expressions — use the manual implementations
-#    to learn, then the library for multi-symbol pipelines
+# | Column | What it is | Causal |
+# |---|---|---|
+# | `daily`, `weekly`, `monthly` | lagged averages of range-based volatility over three horizons | yes |
+# | HAR coefficients | the weight on each horizon, refitted on a moving window | yes, refit on past windows |
+# | term structure ratio | the short horizon over the long one | yes |
+# | exponent on returns | how trending or reverting the price has been, on a moving window | yes |
+# | exponent on log-volatility | how jagged the volatility path has been | yes |
 #
-# **Previous**: `08_garch_volatility` for GARCH/EGARCH conditional volatility features.
-# **Next**: `10_uncertainty_features` for Bayesian uncertainty quantification.
+# The realized volatility measured from minute bars is not on the list, because it exists
+# for two symbols and two years and the point of Part 1 was to establish which daily
+# estimator stands in for it.
+
+# %% [markdown]
+# ## Key takeaways
+#
+# 1. **Check the estimator against a measurement where you can.** A squared close-to-close
+#    return misses a session that moved and came back; the range-based estimators see it,
+#    and comparing them against volatility measured from minute bars is how you find out by
+#    how much and in which direction each is biased.
+# 2. **HAR is a linear regression, and that is its advantage.** Three lagged averages track
+#    realized volatility about as closely as a fitted GARCH does, and unlike GARCH each
+#    coefficient is readable as the weight one horizon carries.
+# 3. **Regressors built from rolling averages need Newey-West standard errors.** The
+#    weekly and monthly regressors overlap by construction, so the residuals are correlated
+#    and the uncorrected standard errors are too small.
+# 4. **Two models forecasting differently-measured targets cannot be ranked by their
+#    errors.** Report the mean of each forecast next to the mean of the target, and read
+#    the correlation, which the level difference does not touch.
+# 5. **Roughness is a finding about markets and a poor feature.** The exponent on
+#    log-volatility sits far below a half for every symbol in the panel, which is why the
+#    standard models are wrong and also why a column holding it separates nothing. The
+#    exponent on returns crosses a half in both directions and is the one worth carrying.
+#
+# **Known limitations.** Part 1 compares estimators on one symbol over two years, both
+# chosen by what intraday data exists rather than by what would be representative. The HAR
+# and GARCH comparison uses one split at one date. Every Hurst estimate is a slope through
+# a handful of averaged points and moves with the window range chosen, so differences of a
+# few hundredths between methods carry no information. And the panel's ETFs overlap
+# heavily in what they hold, so its hundred rows are far fewer than a hundred independent
+# observations.
+#
+# **Previous**: `08_garch_volatility` for a single-horizon volatility model.
+# **Next**: `10_uncertainty_features`, which treats the model's own uncertainty as the
+# feature rather than its estimate.
