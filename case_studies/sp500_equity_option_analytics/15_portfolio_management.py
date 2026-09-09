@@ -67,7 +67,10 @@ from case_studies.utils.backtest_loaders import (
     load_backtest_prices_for,
     warmup_periods_for,
 )
-from case_studies.utils.backtest_presets import build_backtest_spec
+from case_studies.utils.backtest_presets import (
+    build_backtest_spec,
+    traded_universe_declaration,
+)
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.conformal import ensure_conformal_calibration_identity
 from case_studies.utils.notebook_contracts import prediction_members_in_force
@@ -212,6 +215,32 @@ prices = load_backtest_prices_for(
 n_assets = prices["symbol"].n_unique()
 print(f"Price support: {len(prices):,} rows across {n_assets} historical symbols")
 
+# `MAX_SYMBOLS` reduces the price panel, and until the run says so in its own specification
+# that reduction did not reach `backtest_hash`: a reduced run and the full run over the same
+# predictions hashed alike, so the second was served the first's result and the reduction
+# bought nothing (ml4t/agent-workspace#911). Declaring it here, before anything is hashed,
+# gives a reduced run an identity of its own; `run_backtest` checks the panel against the
+# declaration and narrows the predictions to it, so the sweep ranks the cross-section this
+# says it ranks and `n_assets` above describes that same set. A full run declares nothing and
+# is byte-identical to before.
+# A reduced run is a preview run. Refused on the canonical tier so a narrowed result can
+# never land in the registry the book's numbers come from, and so the two can never sit in
+# one registry to be ranked against each other: `resolve_best_predictions` takes MAX(sharpe)
+# over every backtest of a prediction, and a Sharpe earned over a handful of names would
+# advance a configuration ahead of one earned over the whole panel. `us_equities_panel` 16
+# through 19 already refuse the parameter this way, and `canonically_refused_parameters`
+# reads the refusal out of the source, so the canonical fixture path drops the name rather
+# than handing the notebook something its first cell raises on.
+if EXECUTION_TIER == "canonical" and MAX_SYMBOLS:
+    raise ValueError(
+        "MAX_SYMBOLS narrows the universe this run trades, which makes it a different "
+        "portfolio from the declared one and gives it its own backtest identity "
+        "(ml4t/agent-workspace#911). A canonical run trades the declared universe: set "
+        "MAX_SYMBOLS=0, or run under EXECUTION_TIER='preview' with a WORKSPACE."
+    )
+TRADED_UNIVERSE = traded_universe_declaration(prices) if MAX_SYMBOLS else None
+
+
 # %% [markdown]
 # ## 2. Sweep alternative allocators
 #
@@ -247,6 +276,7 @@ for pred_row in top_preds.iter_rows(named=True):
                 CASE_STUDY_ID,
                 bt_config,
                 prices=prices,
+                traded_universe=TRADED_UNIVERSE,
                 prediction_hash=pred_row["prediction_hash"],
                 initial_cash=bt_config.initial_cash,
                 chapter="ch17",

@@ -1441,8 +1441,24 @@ case_studies/cme_futures/11_causal_dml:
 # the reduced run cheap without changing the shape of what the notebook does. The remaining scale
 # comes from the fixture registry itself.
 case_studies/cme_futures/12_model_analysis:
+  # Its inputs are registered by cme_futures::06_linear into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 8 (RuntimeError): preview execution registered no complete validation predictions
+  requires_stage: 06_linear
   timeout: 300
 case_studies/cme_futures/13_backtest:
+  # Its inputs are registered by cme_futures::06_linear into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 9 (RuntimeError): preview execution found no complete validation predictions for ['fwd_ret_21d']
+  requires_stage: 06_linear
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
     PREVIEW_MAX_PREDICTIONS: 4
@@ -1483,6 +1499,14 @@ case_studies/cme_futures/18_holdout_backtest:
   skip: true
   skip_reason: "Reads the holdout prediction set 17_holdout_predictions registers and resolves the same carrier to find it, so it refuses at `resolve_solvent_carrier` for the same reason and one step earlier than 17 does. Remove this skip together with 17's."
 case_studies/cme_futures/19_strategy_analysis:
+  # Its inputs are registered by cme_futures::13_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 9 (NoSelectableCandidates): No validation rank-1 candidate for cme_futures
+  requires_stage: 13_backtest
   parameters:
     PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
@@ -1657,6 +1681,14 @@ case_studies/crypto_perps_funding/14_portfolio_management:
     - fwd_ret_8h
   timeout: 300
 case_studies/crypto_perps_funding/15_risk_management:
+  # Its inputs are registered by crypto_perps_funding::13_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 6 (RuntimeError): no preview baseline or allocation backtest for fwd_ret_8h traded in this workspace
+  requires_stage: 13_backtest
   parameters:
     # MAX_RISK_VARIANTS went the same way as MAX_SYMBOLS: the overlay grid is declared in
     # config/setup.yaml under backtest.risk and read from there, so no parameter trims it.
@@ -1664,6 +1696,14 @@ case_studies/crypto_perps_funding/15_risk_management:
     - fwd_ret_8h
   timeout: 600
 case_studies/crypto_perps_funding/16_costs:
+  # Its inputs are registered by crypto_perps_funding::15_risk_management into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 6 (RuntimeError): no preview baseline, allocation or overlay backtest for fwd_ret_8h traded in this workspace
+  requires_stage: 15_risk_management
   parameters:
     LABELS:
     - fwd_ret_8h
@@ -2249,6 +2289,14 @@ case_studies/fx_pairs/13_backtest:
     TOP_N_PREDICTIONS: 2
   timeout: 900
 case_studies/fx_pairs/14_portfolio_management:
+  # Its inputs are registered by fx_pairs::13_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 5 (ValueError): official population name 'fx_pairs:preflight:equal-weight-baselines' resolved to 0 current identities among 0 snapshots
+  requires_stage: 13_backtest
   research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight
@@ -2256,12 +2304,28 @@ case_studies/fx_pairs/14_portfolio_management:
     TOP_N_CONFIGS: 1
   timeout: 900
 case_studies/fx_pairs/15_risk_management:
+  # Its inputs are registered by fx_pairs::13_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 5 (ValueError): official population name 'fx_pairs:preflight:equal-weight-baselines' resolved to 0 current identities among 0 snapshots
+  requires_stage: 13_backtest
   research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight
     MAX_RISK_VARIANTS: 3
   timeout: 900
 case_studies/fx_pairs/16_costs:
+  # Its inputs are registered by fx_pairs::13_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 5 (ValueError): official population name 'fx_pairs:preflight:equal-weight-baselines' resolved to 0 current identities among 0 snapshots
+  requires_stage: 13_backtest
   research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight
@@ -3188,6 +3252,14 @@ case_studies/sp500_options/11_model_analysis:
   skip: true
   skip_reason: "Resolves four named official populations, and a preview run cannot create one (research/population.py::_refuse_preview_activation). Runnable when the fixture registry ships canonical populations under those names."
 case_studies/sp500_options/12_backtest:
+  # Its inputs are registered by sp500_options::06_linear into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 5 (RuntimeError): preview execution found no complete validation predictions for ['ret_to_expiry']
+  requires_stage: 06_linear
   # MAX_SYMBOLS and TOP_K are gone: the notebook takes its concentration grid from
   # setup.yaml and its universe from the signal, and neither name is bound any more.
   #
@@ -3212,6 +3284,14 @@ case_studies/sp500_options/12_backtest:
     PREVIEW_MAX_PREDICTIONS: 4
   timeout: 900
 case_studies/sp500_options/13_portfolio_management:
+  # Its inputs are registered by sp500_options::12_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 5 (RuntimeError): preview execution found no complete baseline backtests for 'ret_to_expiry'
+  requires_stage: 12_backtest
   # PREVIEW_MAX_BASELINE_CONFIGS is the preview's own shortlist width, and it counts model
   # configurations rather than backtest rows: the baseline stage registers one row per
   # concentration, so a row limit would spend the whole budget inside the first
@@ -3234,6 +3314,14 @@ case_studies/sp500_options/14_risk_management:
   skip: true
   skip_reason: "Opens the canonical candidate set `sp500-options-strategy-candidates-v1` and refuses a preview tier, and a preview run of 13_portfolio_management cannot create one (`CandidateSet.create` refuses a preview member). Runnable when the fixture registry ships that candidate set."
 case_studies/sp500_options/15_costs:
+  # Its inputs are registered by sp500_options::12_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 5 (RuntimeError): preview execution found no complete baseline backtests for 'ret_to_expiry'
+  requires_stage: 12_backtest
   # The same conversion as 13 above, one stage further on: this notebook read literal
   # PREVIEW_BASELINE_HASHES and now selects the preview baselines by label. One
   # representative per family is what the canonical run prices, and two configurations is
@@ -3491,6 +3579,14 @@ case_studies/us_equities_panel/14_causal_dml:
     PREVIEW_N_PLACEBO: 25
   timeout: 120
 case_studies/us_equities_panel/15_model_analysis:
+  # Its inputs are registered by us_equities_panel::06_linear into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 12 (ValueError): Preview analysis selection is empty
+  requires_stage: 06_linear
   # 15 declares EXECUTION_TIER and WORKSPACE, so research_preview_parameters routes it to the
   # preview tier, and the preview branch requires a catalog filter plus explicit prediction and
   # diagnostic limits. Without them it raised before reading anything. Diagnostics must be a
@@ -3503,6 +3599,14 @@ case_studies/us_equities_panel/15_model_analysis:
     PREVIEW_MAX_DIAGNOSTICS: 2
   timeout: 300
 case_studies/us_equities_panel/16_backtest:
+  # Its inputs are registered by us_equities_panel::06_linear into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 8 (ValueError): The baseline requires complete validation predictions from one execution tier
+  requires_stage: 06_linear
   # TOP_K is gone: the signal-to-position mapping grid comes from
   # config/setup.yaml's top_k_grid and is not a notebook parameter any more.
   # A preview needs a catalog filter plus an explicit prediction cap, and
@@ -3518,6 +3622,14 @@ case_studies/us_equities_panel/16_backtest:
     MAX_SYMBOLS: 45
   timeout: 600
 case_studies/us_equities_panel/17_portfolio_management:
+  # Its inputs are registered by us_equities_panel::16_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 7 (ValueError): Allocation requires complete finite equal-weight validation rows
+  requires_stage: 16_backtest
   # TOP_N_PREDICTIONS became PREVIEW_MAX_BASELINE_ROWS. The canonical shortlist
   # size is read from setup.yaml's top_n_predictions.allocation and is no longer
   # overridable; what a preview bounds is how many baseline rows it reads.
@@ -3529,6 +3641,14 @@ case_studies/us_equities_panel/17_portfolio_management:
     MAX_SYMBOLS: 45
   timeout: 300
 case_studies/us_equities_panel/19_costs:
+  # Its inputs are registered by us_equities_panel::16_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 7 (ValueError): Cost analysis requires complete finite selection-eligible validation rows
+  requires_stage: 16_backtest
   # TOP_N_COMBOS became PREVIEW_MAX_SOURCE_ROWS, and the cost grid is bounded by
   # PREVIEW_MAX_COST_VALUES rather than run in full.
   # See 16_backtest on the 45-symbol floor.
@@ -3539,6 +3659,14 @@ case_studies/us_equities_panel/19_costs:
     MAX_SYMBOLS: 45
   timeout: 600
 case_studies/us_equities_panel/18_risk_management:
+  # Its inputs are registered by us_equities_panel::16_backtest into this same workspace,
+  # and the seeded registry holds none of them: tests/conftest.py records that seeding
+  # the preview root was measured to starve the coverage group the real predictions land
+  # in, so the dependency is declared rather than removed (ml4t/agent-workspace#1036).
+  # A full in-order run satisfies it. Reproduced 2026-09-09 by running this stage alone,
+  # which failed on:
+  #   Cell 7 (ValueError): Risk overlays require complete finite selection-eligible validation rows
+  requires_stage: 16_backtest
   # TOP_N_COMBOS became PREVIEW_MAX_SOURCE_ROWS and MAX_RISK_VARIANTS became
   # PREVIEW_MAX_RISK_CONTROLS.
   # See 16_backtest on the 45-symbol floor.
