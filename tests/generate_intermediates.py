@@ -45,10 +45,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 try:
-    from tests.pm_helpers import get_overrides, run_notebook
+    from tests.fixture_registry import prune_stale_training_runs, unbacktested_populations
+    from tests.pm_helpers import get_overrides, invocations_for, run_notebook
     from tests.preset_patches import _patch_presets_for_testing, _trim_label_configs
 except ModuleNotFoundError:
-    from pm_helpers import get_overrides, run_notebook
+    from fixture_registry import prune_stale_training_runs, unbacktested_populations
+    from pm_helpers import get_overrides, invocations_for, run_notebook
     from preset_patches import _patch_presets_for_testing, _trim_label_configs
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -162,6 +164,21 @@ def discover_stages(cs_dir: Path, through_stage: int, skip_dl: bool) -> list[Pat
     return stages
 
 
+# The pipeline stages: the ones that build the artifacts a training run pins by
+# sha256. Everything after them registers runs fitted on those artifacts. The boundary
+# is read from the stem rather than from the stage number because it is not the same
+# number in every case study - `us_firm_characteristics` has no model-based stage and
+# starts registering at `05_linear`, where the other eight start at `06_linear`.
+PIPELINE_STAGE_STEMS = re.compile(
+    r"\d{2}_(feasibility_analysis|labels|financial_features|model_based_features|evaluation)$"
+)
+
+
+def registers_training_runs(notebook: Path) -> bool:
+    """Whether this stage registers training runs, rather than building their inputs."""
+    return PIPELINE_STAGE_STEMS.match(notebook.stem) is None
+
+
 # Outcomes a stage can end a generation run with. `incomplete` is the one this
 # script used to have no name for: the stage did not run and nothing downstream
 # of it could, so the fixture on disk is whatever a previous run left there.
@@ -264,6 +281,16 @@ def main():
     results = {}
     total_start = time.time()
 
+    # Which populations the fixture already carried, so the summary can name the ones
+    # this run added rather than every one it finds.
+    populations_before = {
+        cs: {
+            population["population_hash"]
+            for population in unbacktested_populations(output_dir / cs)
+        }
+        for cs in case_studies
+    }
+
     for cs in case_studies:
         cs_dir = REPO_ROOT / "case_studies" / cs
         if not cs_dir.exists():
@@ -285,6 +312,7 @@ def main():
         print(f"{'=' * 60}")
 
         cs_failed = False
+        pruned = False
         for notebook in stages:
             stage = notebook.stem
 
@@ -292,6 +320,31 @@ def main():
                 print(f"  {stage}: NOT RUN (an earlier stage did not complete)")
                 results[f"{cs}::{stage}"] = NOT_RUN
                 continue
+
+            # The last moment at which the fixture's own artifacts are final and nothing
+            # has been registered against them yet. Stages 01-05 have just rewritten
+            # `features/` and `labels/`, so any training run in the registry pinning an
+            # older vintage describes a population this fixture no longer holds - and the
+            # vintage guard refuses to let the stage about to run join it, which is what
+            # stopped `06_linear` for sp500_options and us_equities_panel on 2026-09-07
+            # (ml4t/agent-workspace#1082).
+            if not pruned and registers_training_runs(notebook):
+                pruned = True
+                summary = prune_stale_training_runs(output_dir / cs)
+                dropped = summary.get("training_runs_pruned", 0)
+                if dropped:
+                    example = summary["example"]
+                    pins = ", ".join(
+                        f"{name}={sha[:12]}" for name, sha in example["absent_pins"].items()
+                    )
+                    rows = ", ".join(
+                        f"{table} {count}" for table, count in sorted(summary["deleted"].items())
+                    )
+                    print(
+                        f"  pruned {dropped} training run(s) fitted on artifacts this fixture "
+                        f"no longer ships (e.g. {example['training_hash'][:12]} pinned {pins})"
+                    )
+                    print(f"    rows removed: {rows}")
 
             rel_path = notebook.relative_to(REPO_ROOT).with_suffix("")
             overrides = get_overrides(str(rel_path))
@@ -321,31 +374,70 @@ def main():
                 continue
 
             timeout = overrides.get("timeout", 300)
-            parameters = overrides.get("parameters", {})
 
-            print(f"  {stage}: running...", end="", flush=True)
-            start = time.time()
+            # Every invocation the entry declares, not the first. A notebook CI runs once
+            # per label has to be generated once per label too, or the fixture carries rows
+            # for one label while the job consuming it exercises five - and the four that
+            # find nothing fail on the fixture rather than on the notebook. Each is its own
+            # line in the summary, so a generation that produced four of five says which.
+            for run in invocations_for(overrides, key=str(rel_path)):
+                named = stage if run.id is None else f"{stage}[{run.id}]"
+                print(f"  {named}: running...", end="", flush=True)
+                start = time.time()
 
-            result = run_notebook(
-                py_path=notebook,
-                parameters=parameters,
-                timeout=timeout,
-                output_dir=output_dir,
-                research_preview=False,
-            )
+                result = run_notebook(
+                    py_path=notebook,
+                    parameters=run.parameters,
+                    timeout=timeout,
+                    output_dir=output_dir,
+                    research_preview=False,
+                )
 
-            elapsed = time.time() - start
+                elapsed = time.time() - start
 
-            if result["status"] == "ok":
-                print(f" OK ({elapsed:.0f}s)")
-                results[f"{cs}::{stage}"] = OK
-            else:
-                print(f" FAILED ({elapsed:.0f}s)")
-                print(f"    Error: {result['error']}")
-                results[f"{cs}::{stage}"] = FAILED
-                cs_failed = True
+                if result["status"] == "ok":
+                    print(f" OK ({elapsed:.0f}s)")
+                    results[f"{cs}::{named}"] = OK
+                else:
+                    print(f" FAILED ({elapsed:.0f}s)")
+                    print(f"    Error: {result['error']}")
+                    results[f"{cs}::{named}"] = FAILED
+                    cs_failed = True
 
     total_elapsed = time.time() - total_start
+
+    # A population whose members carry no backtest is what `14_backtest` reads as an
+    # empty ranking, and before public #849 what it read as `ZeroDivisionError`. The
+    # model stages declare the population and the backtest stages are numbers 14 and up,
+    # so `--through-stage 8` cannot avoid leaving one; what it can do is say so, rather
+    # than let the next CI run be the thing that reports it fifteen minutes after the
+    # fixture was committed (ml4t/agent-workspace#1086).
+    # Only the ones this run added. Eight of the nine committed fixtures already ship a
+    # population in that state, so listing all of them on every run would be noise; a
+    # run creating one is the event that landed test-data 4db8572f.
+    unbacked = {}
+    for cs in case_studies:
+        added = [
+            population
+            for population in unbacktested_populations(output_dir / cs)
+            if population["population_hash"] not in populations_before.get(cs, set())
+        ]
+        if added:
+            unbacked[cs] = added
+    if unbacked:
+        print(f"\n{'=' * 60}")
+        print("This run published a population with no backtested member")
+        print(f"{'=' * 60}")
+        print("  `14_backtest` scopes its baseline ranking to the members in force, so it")
+        print("  has nothing to rank against this fixture and refuses. The backtest stages")
+        print("  are numbers 14 and up, which this run did not reach. Either run them into")
+        print("  the fixture, or do not commit these populations.")
+        for cs, populations in sorted(unbacked.items()):
+            for population in populations:
+                print(
+                    f"  {cs}: {population['name']} "
+                    f"({population['members']} member(s), 0 backtested)"
+                )
 
     # Summary
     print(f"\n{'=' * 60}")
@@ -408,6 +500,10 @@ def main():
         "total_seconds": round(total_elapsed),
         "size_mb": round(total_bytes / 1e6, 1),
         "size_mb_by_case_study": sizes,
+        "populations_with_no_backtested_member": {
+            cs: [population["name"] for population in populations]
+            for cs, populations in sorted(unbacked.items())
+        },
     }
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)

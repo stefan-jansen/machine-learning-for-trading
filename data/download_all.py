@@ -35,6 +35,7 @@ Update Mode:
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -305,6 +306,28 @@ def update_datasets(data_path: Path) -> dict:
     return results
 
 
+def write_report(path: Path | None, results: dict[str, bool], *, mode: str) -> None:
+    """Record which datasets arrived, for a caller that cannot read the printed summary.
+
+    A run whose log is unavailable is otherwise left with an exit code and no name, and
+    one source failing (an outage to wait out) then looks identical to every source
+    failing (network egress, which is ours to fix).
+    """
+    if path is None:
+        return
+    failed = sorted(name for name, ok in results.items() if not ok)
+    payload = {
+        "mode": mode,
+        "datasets": dict(results),
+        "failed": failed,
+        "completed": sum(results.values()),
+        "total": len(results),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"\nPer-dataset result written to: {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Download all ML4T datasets")
     parser.add_argument(
@@ -337,6 +360,15 @@ def main():
         type=Path,
         default=None,
         help="Data storage location (default: ML4T_DATA_PATH, else <repo>/data/)",
+    )
+    # Which dataset failed is the whole diagnosis, and the printed summary lives only in
+    # the caller's log. A CI job whose log cannot be retrieved is left with an exit code
+    # and no name, so write the per-dataset result somewhere a caller can read back.
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="Write a JSON per-dataset result to this path",
     )
     args = parser.parse_args()
 
@@ -393,6 +425,7 @@ def main():
             print("\nNote: Some datasets may require API keys:")
             print("  FRED_API_KEY   - for Macro data")
             print("  OANDA_API_KEY  - for FX data (optional, uses Yahoo fallback)")
+        write_report(args.report, results, mode="update")
         return 0 if total_success == total else 1
 
     results = {}
@@ -473,6 +506,8 @@ def main():
     print(
         "  data/equities/market/microstructure/MBO_DOWNLOAD.md          # MBO tick data (Databento, manual)"
     )
+
+    write_report(args.report, results, mode=mode)
 
     # Exit non-zero when anything the caller asked for did not arrive. Printing [FAIL]
     # and exiting 0 makes a partial download indistinguishable from a complete one to

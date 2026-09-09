@@ -36,7 +36,7 @@ separate answer.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -56,6 +56,11 @@ __all__ = [
     "declared_sessions",
     "check_prediction_coverage",
     "check_backtest_input_coverage",
+    "CrossSectionReport",
+    "declared_cross_section",
+    "check_prediction_cross_section",
+    "feature_panel_keys",
+    "BACKTEST_COVERAGE_MINIMUM",
 ]
 
 _TIME_ALIASES = ("timestamp", "date", "datetime", "ts")
@@ -468,6 +473,7 @@ def _coverage(
     case_dir: Path | None,
     fold_column: tuple[str, ...] | str | None,
     decision_axis: pl.Series | None = None,
+    folds: Sequence[int] | None = None,
 ) -> CoverageReport:
     if frame.is_empty():
         raise CoverageError(
@@ -482,6 +488,26 @@ def _coverage(
     expected = declared_sessions(
         case_study, label, split=split, case_dir=case_dir, decision_axis=decision_axis
     )
+    if folds is not None:
+        # A reduced run fits the folds it declared and no others, so measuring it against all of
+        # them reports a gap that is the reduction itself. Narrowing here rather than in the
+        # caller keeps every condition below comparing against a declaration: the windows are
+        # still setup.yaml's, and a fold present in the frame but outside the subset is still
+        # refused as undeclared.
+        keep = {int(fold) for fold in folds}
+        if not keep:
+            raise CoverageError(
+                f"{case_study}/{label}/{split}: an empty fold subset asks for no coverage at all"
+            )
+        declared_ids = {fold for fold, _, _ in windows if fold is not None}
+        unknown = sorted(keep - declared_ids)
+        if unknown:
+            raise CoverageError(
+                f"{case_study}/{label}/{split}: folds {unknown} are not declared in setup.yaml, "
+                f"which declares {sorted(declared_ids)}; a subset can only narrow"
+            )
+        windows = [window for window in windows if window[0] in keep]
+        expected = {fold: sessions for fold, sessions in expected.items() if fold in keep}
 
     observed = _normalize_time(frame.select(pl.col(time_col)).unique().get_column(time_col))
     observed_set = set(observed.to_list())
@@ -672,6 +698,7 @@ def check_prediction_coverage(
     fold_column: tuple[str, ...] | str | None = _FOLD_ALIASES,
     raise_on_gap: bool = True,
     decision_axis: pl.Series | None = None,
+    folds: Sequence[int] | None = None,
 ) -> CoverageReport:
     """Assert a prediction set covers the declared validation geometry.
 
@@ -697,6 +724,7 @@ def check_prediction_coverage(
         case_dir=case_dir,
         fold_column=fold_column,
         decision_axis=decision_axis,
+        folds=folds,
     )
     if raise_on_gap:
         report.raise_if_incomplete()
@@ -737,3 +765,365 @@ def check_backtest_input_coverage(
     if raise_on_gap:
         report.raise_if_incomplete()
     return report
+
+
+# ---------------------------------------------------------------------------
+# The cross-section, which the session checks above cannot see
+# ---------------------------------------------------------------------------
+#
+# Conditions (1)-(3) at the top of this module are all about the time axis: which
+# folds, which sessions inside them, and whether the folds span the window. A family
+# that scores every session for half the symbols satisfies all three. That is not a
+# hypothetical - `case_studies/utils/sequence_dataset.py:215` drops a symbol from a
+# fold outright when it holds fewer than `lookback + 1` bars, and `:233` drops every
+# endpoint whose preceding window straddles a period gap. Measured on 2026-09-07, the
+# `deep_learning` family never scores 258 of 529 symbols in
+# `sp500_equity_option_analytics` and 288 of 522 in `sp500_options`, while its session
+# coverage is complete and every peer guard agrees with it.
+#
+# What makes it invisible rather than merely wrong: `expected_prediction_keys` in the
+# training identity records what the model *declared* it would deliver, and the
+# completeness machinery checks delivery against that declaration. A family that
+# narrows the universe narrows its own declaration in the same step, so it is complete
+# by its own account and is then ranked against families that were not narrowed.
+#
+# The declaration this compares against is the label instead: every entity carrying a
+# non-null label at a declared session is owed a prediction.
+
+_ENTITY_ALIASES = ("symbol", "product", "asset", "ticker", "pair", "instrument")
+
+
+def _entity_column(columns: list[str], *, where: str) -> str:
+    column = _first_present(columns, _ENTITY_ALIASES)
+    if column is None:
+        raise CoverageError(
+            f"no entity column among {_ENTITY_ALIASES} in {where} columns {sorted(columns)}; "
+            "the cross-section cannot be evaluated"
+        )
+    return column
+
+
+@dataclass(frozen=True)
+class CrossSectionReport:
+    """How much of the declared ``(entity, session)`` grid a result actually carries.
+
+    Two denominators, because a family that delivered nothing and a family that was
+    handed nothing produce the same shortfall and are different defects. ``expected`` is
+    what the label declares. ``achievable`` is the part of that a caller's input panel
+    actually reaches, and is ``None`` when no panel was supplied.
+
+    Measured in ``sp500_equity_option_analytics``: 53,712 of 248,460 declared pairs
+    (21.6%) carry a label and no row in ``features/financial.parquet``. Every family
+    misses exactly those, so a gate denominated on the label alone refuses all five for
+    a shortfall none of them caused - while ``deep_learning``'s own further 68,564 and
+    ``latent_factors``' own further 16,979, which are the real findings, get no more
+    weight than the floor.
+    """
+
+    case_study: str
+    label: str
+    split: str
+    source: str
+    expected: int
+    delivered: int
+    achievable: int | None
+    delivered_achievable: int | None
+    never_scored: tuple[str, ...]
+    partially_scored: tuple[str, ...]
+    entities_declared: int
+    per_fold: tuple[tuple[int | None, int, int], ...]
+
+    @property
+    def coverage(self) -> float:
+        """Share of what the label declares. The honest denominator, and the reported one."""
+        return self.delivered / self.expected if self.expected else 0.0
+
+    @property
+    def achievable_coverage(self) -> float | None:
+        """Share of what the input panel actually offered, or ``None`` if none was given."""
+        if self.achievable is None:
+            return None
+        return self.delivered_achievable / self.achievable if self.achievable else 0.0
+
+    @property
+    def accountable_coverage(self) -> float:
+        """What a gate should refuse on: the model's own shortfall, not its input's.
+
+        Falls back to :attr:`coverage` when no panel was supplied, so a caller that
+        cannot name the achievable set is held to the label rather than to nothing.
+        """
+        narrowed = self.achievable_coverage
+        return self.coverage if narrowed is None else narrowed
+
+    @property
+    def missing(self) -> int:
+        return self.expected - self.delivered
+
+    @property
+    def complete(self) -> bool:
+        return self.missing == 0
+
+    def summary(self) -> str:
+        head = (
+            f"{self.case_study}/{self.label}/{self.split} {self.source}: "
+            f"{self.delivered} of {self.expected} declared (entity, session) pairs "
+            f"({self.coverage:.1%}) across {self.entities_declared} entities"
+        )
+        if self.achievable is not None:
+            head += (
+                f"; of the {self.achievable} its input panel offered it carries "
+                f"{self.delivered_achievable} ({self.accountable_coverage:.1%})"
+            )
+        if self.complete:
+            return f"{head} - complete"
+        lines = [f"{head} - {self.missing} missing"]
+        if self.never_scored:
+            shown = ", ".join(self.never_scored[:10])
+            more = f" (+{len(self.never_scored) - 10} more)" if len(self.never_scored) > 10 else ""
+            lines.append(f"  never scored ({len(self.never_scored)}): {shown}{more}")
+        if self.partially_scored:
+            lines.append(f"  scored in part ({len(self.partially_scored)} entities)")
+        for fold, delivered, expected in self.per_fold:
+            if delivered < expected:
+                where = "window" if fold is None else f"fold {fold}"
+                lines.append(f"  {where}: {delivered} of {expected}")
+        return "\n".join(lines)
+
+    def raise_if_below(self, minimum: float) -> None:
+        if self.accountable_coverage < minimum:
+            raise CoverageError(
+                f"coverage {self.accountable_coverage:.1%} is below {minimum:.1%}\n{self.summary()}"
+            )
+
+
+def declared_cross_section(
+    case_study: str,
+    label: str,
+    *,
+    split: str = "validation",
+    case_dir: Path | None = None,
+    decision_axis: pl.Series | None = None,
+) -> pl.DataFrame:
+    """Every ``(fold, entity, session)`` the case study owes a prediction for.
+
+    The sessions come from ``declared_sessions``, so the seal, the fold boundaries and
+    any ``decision_axis`` narrowing apply here unchanged rather than being re-derived.
+    The entities come from the label artifact at those sessions: an entity carrying a
+    non-null label is one a model was in a position to rank.
+
+    Returned columns are ``fold``, ``entity`` and ``session``. The entity column is
+    renamed because the two sides disagree - ``cme_futures`` keys its labels by
+    ``product`` and its prediction panels by ``symbol``, so comparing by the source
+    name would report every row missing.
+    """
+    sessions = declared_sessions(
+        case_study, label, split=split, case_dir=case_dir, decision_axis=decision_axis
+    )
+    path = _label_artifact(case_study, label, case_dir)
+    columns = pl.scan_parquet(path).collect_schema().names()
+    time_col = _time_column(columns)
+    entity_col = _entity_column(columns, where=f"label artifact {path.name}")
+    if label not in columns:
+        raise CoverageError(f"{path} has no column named {label!r}; the cross-section is undefined")
+
+    panel = (
+        pl.scan_parquet(path)
+        .filter(pl.col(label).is_not_null())
+        .select(
+            pl.col(entity_col).cast(pl.String).alias("entity"),
+            pl.col(time_col).alias("session"),
+        )
+        .unique()
+        .collect()
+    )
+    panel = panel.with_columns(_normalize_time(panel.get_column("session")).alias("session"))
+
+    parts = [
+        panel.filter(pl.col("session").is_in(pl.Series(values).implode())).with_columns(
+            pl.lit(fold, dtype=pl.Int64).alias("fold")
+        )
+        for fold, values in sessions.items()
+        if values
+    ]
+    if not parts:
+        raise CoverageError(
+            f"{case_study}/{label}/{split}: no declared fold carries a session, so the "
+            "cross-section is empty and coverage cannot be evaluated"
+        )
+    return pl.concat(parts).select("fold", "entity", "session")
+
+
+def check_prediction_cross_section(
+    predictions: pl.DataFrame,
+    case_study: str,
+    label: str,
+    *,
+    split: str = "validation",
+    source: str = "predictions",
+    case_dir: Path | None = None,
+    decision_axis: pl.Series | None = None,
+    input_panel: pl.DataFrame | None = None,
+    folds: Collection[int] | None = None,
+    minimum: float | None = None,
+) -> CrossSectionReport:
+    """Measure a prediction set against the ``(entity, session)`` grid the label declares.
+
+    ``input_panel`` is the frame the stage was fitted on - a feature panel, a merged
+    design matrix. Supplying it splits the shortfall into the part the stage inherited
+    and the part it caused, and ``minimum`` is then applied to the latter. Any frame
+    carrying an entity and a time column will do; only its distinct keys are read.
+
+    ``minimum`` raises when coverage falls below it; the default returns the report and
+    leaves the judgement to the caller, because the legitimate reasons for a shortfall
+    (a warm-up window, a universe a family genuinely cannot trade) are not distinguishable
+    from the defective ones by the number alone.
+
+    An entity absent from every fold and one missing its first weeks produce the same
+    percentage and are different failures, so ``never_scored`` and ``partially_scored``
+    are reported apart.
+
+    ``folds`` is the fold axis the run was asked to produce, and it is not derivable from
+    the case study: ``declared_sessions`` reads the fold windows from the configuration,
+    which lists every configured fold whatever the run did. A run that fitted a subset is
+    then charged for folds it was never asked to produce, and reads at the ratio of the two
+    counts however complete it is. Pass the folds the run declares and the shortfall is
+    measured inside them; the symbol axis is untouched, so a family that lost names within
+    the folds it ran is still charged for them.
+    """
+    scored = _scored_rows(predictions, case_study=case_study, label=label, split=split)
+    entity_col = _entity_column(scored.columns, where=f"{source} frame")
+    time_col = _time_column(scored.columns)
+    got = scored.select(
+        pl.col(entity_col).cast(pl.String).alias("entity"),
+        pl.col(time_col).alias("session"),
+    ).unique()
+    got = got.with_columns(_normalize_time(got.get_column("session")).alias("session"))
+
+    want = declared_cross_section(
+        case_study, label, split=split, case_dir=case_dir, decision_axis=decision_axis
+    )
+    if folds is not None:
+        kept = sorted(folds)
+        want = want.filter(pl.col("fold").is_in(pl.Series(kept, dtype=pl.Int64).implode()))
+        if want.is_empty():
+            raise CoverageError(
+                f"{case_study}/{label}/{split}: the run declares fold(s) {kept} and the "
+                "configuration declares none of them, so the cross-section is empty and "
+                "coverage cannot be evaluated"
+            )
+    delivered = want.join(got, on=["entity", "session"], how="semi")
+    missing = want.join(got, on=["entity", "session"], how="anti")
+
+    achievable = delivered_achievable = None
+    if input_panel is not None:
+        # `feature_panel_keys` hands back the canonical two columns already; a caller
+        # passing a raw panel gets them resolved. Without this branch the canonical shape
+        # is the one shape that fails, because "entity" is not among the source names a
+        # panel is allowed to use.
+        if {"entity", "session"} <= set(input_panel.columns):
+            panel_entity, panel_time = "entity", "session"
+        else:
+            panel_entity = _entity_column(input_panel.columns, where="input panel")
+            panel_time = _time_column(input_panel.columns)
+        offered = input_panel.select(
+            pl.col(panel_entity).cast(pl.String).alias("entity"),
+            pl.col(panel_time).alias("session"),
+        ).unique()
+        offered = offered.with_columns(
+            _normalize_time(offered.get_column("session")).alias("session")
+        )
+        reachable = want.join(offered, on=["entity", "session"], how="semi")
+        achievable = reachable.height
+        delivered_achievable = reachable.join(got, on=["entity", "session"], how="semi").height
+
+    scored_entities = set(delivered.get_column("entity").unique().to_list())
+    missing_entities = set(missing.get_column("entity").unique().to_list())
+    per_fold = tuple(
+        (
+            None if row["fold"] is None else int(row["fold"]),
+            int(row["delivered"]),
+            int(row["expected"]),
+        )
+        for row in want.group_by("fold")
+        .agg(expected=pl.len())
+        .join(delivered.group_by("fold").agg(delivered=pl.len()), on="fold", how="left")
+        .with_columns(pl.col("delivered").fill_null(0))
+        .sort("fold", nulls_last=True)
+        .iter_rows(named=True)
+    )
+
+    report = CrossSectionReport(
+        case_study=case_study,
+        label=label,
+        split=split,
+        source=source,
+        expected=want.height,
+        delivered=delivered.height,
+        achievable=achievable,
+        delivered_achievable=delivered_achievable,
+        never_scored=tuple(sorted(missing_entities - scored_entities)),
+        partially_scored=tuple(sorted(missing_entities & scored_entities)),
+        entities_declared=want.get_column("entity").n_unique(),
+        per_fold=per_fold,
+    )
+    if minimum is not None:
+        report.raise_if_below(minimum)
+    return report
+
+
+#: Share of the achievable cross-section a prediction set must carry to be backtested.
+#: A model that scores 98% of what it was handed has a warm-up or a holiday; one that
+#: scores two thirds has dropped a universe, and ranking it against a complete peer
+#: compares two different experiments. Measured 2026-09-08 across the seven case
+#: studies: linear, gbm and tabular_dl deliver 100% everywhere, so this refuses nothing
+#: that is whole and is not a threshold tuned to admit a known-bad family.
+BACKTEST_COVERAGE_MINIMUM = 0.98
+
+
+def feature_panel_keys(case_dir: Path | str) -> pl.DataFrame | None:
+    """The ``(entity, session)`` pairs the case study's modeling panel offers a model.
+
+    This is the ceiling the model families share: a pair carrying a label but no feature
+    row is one no model was in a position to score, and charging it to the models hides
+    the families that lost rows they were given. Returns ``None`` when the case study has
+    no ``features/financial.parquet``, which leaves the caller measuring against the
+    label alone.
+
+    **The financial panel alone, not an intersection across ``features/``.**
+    ``load_modeling_dataset`` builds the dataset by scanning ``features/financial.parquet``
+    and LEFT-joining ``features/model_based.parquet`` onto it (``utils/modeling.py``, the
+    two ``how="left"`` joins), so a key the financial panel carries survives whether or not
+    the model-based panel has a row for it - with null model-based columns, which every
+    family imputes. Those rows are in the dataset and every family is asked to score them.
+
+    Intersecting the two panels therefore removes keys the models were handed, and it
+    removes them from the DENOMINATOR: a family that dropped exactly the rows
+    ``model_based`` lacks reads as complete. Measured 2026-09-09 on the registered panels,
+    as the share of financial keys the intersection discards:
+
+        case study                      financial   model_based   intersection   discarded
+        sp500_equity_option_analytics     481,184       480,938        378,789      21.28%
+        crypto_perps_funding               99,877        98,741         92,125       7.76%
+        etfs                              404,500       470,662        404,500       0.00%
+
+    A guard that exists to catch a family scoring two thirds of its cross-section cannot
+    be measured against a universe 21% narrower than the one the family was given.
+    """
+    path = Path(case_dir) / "features" / "financial.parquet"
+    if not path.is_file():
+        return None
+    names = pl.scan_parquet(path).collect_schema().names()
+    entity = _first_present(names, _ENTITY_ALIASES)
+    time_col = _first_present(names, _TIME_ALIASES)
+    if entity is None or time_col is None:
+        return None
+    offered = (
+        pl.scan_parquet(path)
+        .select(
+            pl.col(entity).cast(pl.String).alias("entity"),
+            pl.col(time_col).alias("session"),
+        )
+        .unique()
+        .collect()
+    )
+    return offered.with_columns(_normalize_time(offered.get_column("session")).alias("session"))

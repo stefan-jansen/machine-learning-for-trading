@@ -171,9 +171,11 @@ def _enforce_input_artifact_vintage(db, spec: dict) -> None:
     under - and it is silent, so the mixture is found later by comparing the registry to the
     disk by hand, if at all (ml4t/agent-workspace#987).
 
-    Measured on the fleet 2026-09-07: `fx_pairs` has 138 training runs pinning one
-    `model_based` sha and **zero** of them match the file on disk. That state is safe only
-    for as long as nobody runs a modelling notebook there, and nothing enforced it.
+    The state this catches is reachable and was reached. On 2026-09-07 `fx_pairs` held 138
+    training runs pinning one `model_based` sha while no file on disk carried it; a
+    re-derivation later the same day put those bytes back. Nothing reported either change,
+    and a fit registered in between would have joined that population under a vintage no
+    other member was fitted on.
 
     Refusing here is what makes it cheap: `register_training_run` runs before the fit on
     every path, so the run stops at the moment the change can still be undone rather than

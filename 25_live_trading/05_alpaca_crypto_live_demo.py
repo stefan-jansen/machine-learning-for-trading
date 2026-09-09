@@ -18,9 +18,7 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Chapter**: 25 - Live Trading Systems
-# **Section**: 25.3 (Alpaca Integration - Crypto)
-# **Learning Outcome**: LO2 - Deploy crypto strategies with 24/7 market access
+# **Book Reference**: Chapter 25, Section 25.3 (Integrating with Alpaca)
 #
 # **Purpose**: Demonstrate the operational shape of an always-on crypto strategy connected to Alpaca: how the
 # 19-perp case study universe maps onto Alpaca's USD spot venue, how a momentum-based z-score signal is
@@ -62,6 +60,10 @@ from ml4t.backtest import OrderSide, Strategy
 from utils.paths import display_path, get_output_dir
 from utils.reproducibility import set_global_seeds
 
+# The broker adapters pull in websockets' legacy module, which deprecates itself on import, so
+# the filter has to be in force before the import rather than after it.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets\.legacy")
+
 HAS_ALPACA_SDK = False
 try:
     import alpaca  # noqa: F401
@@ -72,9 +74,16 @@ try:
 except ImportError:
     pass
 
-warnings.filterwarnings("ignore")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+
+# basicConfig is a no-op once an imported library has attached a root handler, so this notebook
+# takes its own logger rather than depending on which import happened to run first.
+logger = logging.getLogger("alpaca_crypto_demo")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(_handler)
 logging.getLogger("alpaca").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
@@ -90,11 +99,14 @@ SIMULATION_STEPS = 20
 LIVE_FEED = 0  # explicit opt-in; default execution is offline and paper-safe
 SEED = 42
 
+# %% [markdown]
+# One environment override before anything else, for the same reason as in
+# [`04_alpaca_paper_trading_demo`](04_alpaca_paper_trading_demo.ipynb): Alpaca's WebSocket loop and
+# the nested event loop a headless runner installs do not cooperate, so an unattended run would
+# hang past its own duration limit rather than finishing. When the runner announces itself, the
+# live feed is turned off and the simulated path runs instead. Interactive Jupyter is unaffected.
+
 # %%
-# The Alpaca crypto WebSocket loop is incompatible with papermill's nest_asyncio:
-# `asyncio.wait_for` cannot reliably cancel the inner streaming task, so a
-# headless run hangs past DEMO_DURATION_SECONDS. Detect papermill and fall back
-# to the simulated path; interactive Jupyter is unaffected.
 if os.environ.get("ML4T_HEADLESS_PAPERMILL") == "1":
     LIVE_FEED = 0
 
@@ -189,7 +201,7 @@ CRYPTO_SYMBOLS = ALL_CRYPTO_SYMBOLS[:MAX_SYMBOLS] if MAX_SYMBOLS > 0 else ALL_CR
 # | Trading Hours | 9:30-16:00 ET | 24/7/365 |
 # | Settlement | T+2 | Instant |
 # | Minimum Trade | 1 share | Fractional |
-# | Volatility | ~1% daily | ~3-5% daily |
+# | Volatility | lower | several times higher |
 # | Funding Rates | N/A | 8-hour intervals |
 
 # %%
@@ -229,10 +241,19 @@ else:
 # resulting series in place of the momentum proxy.
 
 
+# %% [markdown]
+# ### Funding windows
+#
+# A perpetual future has no expiry, so nothing forces its price toward the spot price except a
+# periodic cash payment between longs and shorts: the **funding rate**, settled at fixed hours.
+# Positions held across one of those hours pay or receive it, which makes the funding clock part
+# of the execution decision rather than a detail of the accounting.
+#
+# The hours are stated in UTC and the comparison has to normalise before checking. A naive
+# timestamp is treated as UTC and a tz-aware one is converted, because a clock in any other zone
+# would silently miss every window while appearing to check for them.
+
 # %%
-# Binance funding times in UTC. Comparing requires a tz-aware UTC timestamp;
-# `_is_funding_hour` normalises before checking so naive or non-UTC inputs do
-# not silently miss funding windows.
 FUNDING_HOURS_UTC = [0, 8, 16]
 
 
@@ -661,9 +682,10 @@ print("   - No 'market close' for stops")
 # - **The deployed signal is a momentum z-score proxy, not the Ch6 premium index.** Production wiring would
 #   read perp + spot closes from a venue feed and compute `(perp - spot) / spot`; the structure of the
 #   strategy is the same, but the input series is the missing piece on the Alpaca USD spot venue.
-# - **Funding-window detection must normalise to UTC.** `_is_funding_hour` treats naive timestamps as UTC and
-#   converts tz-aware timestamps before comparing against `[0, 8, 16]`; otherwise a non-UTC clock silently
-#   skips every funding event.
+# - **Funding-window detection must normalise to UTC.** The check treats a naive timestamp as UTC and
+#   converts a tz-aware one before comparing against the funding hours. A clock in any other zone
+#   would skip every funding event while appearing to look for them, which is the failure mode that
+#   produces no error and no log line.
 # - **The simulated path is not shadow mode.** Without credentials the demo uses a flat-dict `MockCryptoBroker`
 #   for inspection only; shadow mode requires a real broker connection wrapped in `SafeBroker`, which the
 #   credential-present live path provides.

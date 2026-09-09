@@ -77,7 +77,7 @@ import polars as pl
 import torch  # cudart preload - required before ml4t.diagnostic imports # noqa: F401
 import yaml
 
-from case_studies.research import CausalResult, Study
+from case_studies.research import CausalResult, Study, open_study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -114,6 +114,8 @@ warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY = "sp500_equity_option_analytics"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 PRIMARY_LABEL = "fwd_ret_5d"
 DATE_COL = "timestamp"
 ENTITY_COL = "symbol"
@@ -141,22 +143,40 @@ POPULATION_FAMILY = {
 POPULATIONS = {model: f"{CASE_STUDY}-{model}-validation-v1" for model in POPULATION_FAMILY}
 
 # %% [markdown]
-# This notebook reads; it registers nothing, and that decides how it opens the registry. Every
-# route through `open_study` ends in `Study.activate()`, which rewrites `ML4T_OUTPUT_DIR` for the
-# rest of the process and clears the caches keyed on it, so every later `get_case_study_dir`
-# answers for a different directory than the one resolved here. On the canonical tier with no
-# workspace that route is `Study.regenerate`, which refuses outright unless `features`, `labels`
-# and `run_log` are symlinks - true in a maintainer worktree, false in every clean clone and
-# every CI run. On the preview tier it repoints the notebook at `.preview/<case>`, whose registry
-# `activate()` creates empty, and the comparison below then reports on nothing while reporting
-# success.
+# This notebook reads; it registers nothing, and that is what decides how it opens the registry.
+# Every route through `open_study` ends in `Study.activate()`, which rewrites `ML4T_OUTPUT_DIR`
+# for the rest of the process and clears the caches keyed on it, so every later
+# `get_case_study_dir` answers for a different directory than the one resolved before it. On the
+# canonical tier with no workspace that route is `Study.regenerate`, which refuses outright
+# unless `features`, `labels` and `run_log` are symlinks - true in a maintainer worktree, false
+# in every clean clone and every CI run. So canonical opens `Study.at`: the read-only form, one
+# root, no activation.
 #
-# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
-# question this notebook asks is answered from it.
+# A preview run is the case where that rewrite is the point. It reads and reports on the rows a
+# smoke chain registered in its own workspace, which live under `.preview/<case>` and nowhere
+# else, so the analysis has to follow `ML4T_OUTPUT_DIR` there rather than answer from the
+# canonical directory. `activate()` links `config`, `labels` and `features` into that directory,
+# and `CASE_DIR` below is whichever of the two roots the tier resolved.
+#
+# What a preview cannot have is a published population: `_refuse_preview_activation` stops a
+# reduced run from creating one, by design. The resolution below already distinguishes that from
+# a broken lineage and falls through to comparing every registered prediction set, so the preview
+# needs no branch of its own here - it takes the same path as a fixture or a clean clone.
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY)
-study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
+if EXECUTION_TIER == "preview":
+    if not WORKSPACE:
+        raise ValueError("preview execution requires WORKSPACE")
+    study = open_study(
+        CASE_STUDY,
+        execution_tier="preview",
+        workspace=WORKSPACE,
+        entry_point="13_model_analysis",
+    )
+    CASE_DIR = get_case_study_dir(CASE_STUDY)
+else:
+    CASE_DIR = get_case_study_dir(CASE_STUDY)
+    study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)

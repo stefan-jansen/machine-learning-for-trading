@@ -1883,18 +1883,6 @@ wheels = [
 ]
 
 [[package]]
-name = "eventkit"
-version = "1.0.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/16/1e/0fac4e45d71ace143a2673ec642701c3cd16f833a0e77a57fa6a40472696/eventkit-1.0.3.tar.gz", hash = "sha256:99497f6f3c638a50ff7616f2f8cd887b18bbff3765dc1bd8681554db1467c933", size = 28320, upload-time = "2023-12-11T11:41:35.339Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/93/d9/7497d650b69b420e1a913329a843e16c715dac883750679240ef00a921e2/eventkit-1.0.3-py3-none-any.whl", hash = "sha256:0e199527a89aff9d195b9671ad45d2cc9f79ecda0900de8ecfb4c864d67ad6a2", size = 31837, upload-time = "2023-12-11T11:41:33.358Z" },
-]
-
-[[package]]
 name = "exchange-calendars"
 version = "4.13.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2752,19 +2740,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/30/4d/dfc1da8224c3ffcdcd668da7283c4e5f14239a07f83ea66af99700296fc3/ib_async-2.1.0.tar.gz", hash = "sha256:6a03a87d6c06acacb0217a5bea60a8a168ecd5b5a7e86e1c73678d5b48cbc796", size = 87678, upload-time = "2025-12-08T01:42:32.004Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/80/e7/8f33801788c66f15e9250957ff7f53a8000843f79af1a3ed7a96def0e96b/ib_async-2.1.0-py3-none-any.whl", hash = "sha256:f6d8b991bdbd6dd38e700c61b3dced06ebe0f14be4e5263e2ef10ba10b88d434", size = 88876, upload-time = "2025-12-08T01:42:30.883Z" },
-]
-
-[[package]]
-name = "ib-insync"
-version = "0.9.86"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "eventkit" },
-    { name = "nest-asyncio" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/55/bb/733d5c81c8c2f54e90898afc7ff3a99f4d53619e6917c848833f9cc1ab56/ib_insync-0.9.86.tar.gz", hash = "sha256:73af602ca2463f260999970c5bd937b1c4325e383686eff301743a4de08d381e", size = 69859, upload-time = "2023-07-02T12:43:31.968Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/f3/28ea87be30570f4d6b8fd24380d12fa74e59467ee003755e76aeb29082b8/ib_insync-0.9.86-py3-none-any.whl", hash = "sha256:a61fbe56ff405d93d211dad8238d7300de76dd6399eafc04c320470edec9a4a4", size = 72980, upload-time = "2023-07-02T12:43:29.928Z" },
 ]
 
 [[package]]
@@ -4278,7 +4253,7 @@ dev = [
 ]
 live = [
     { name = "alpaca-py" },
-    { name = "ib-insync" },
+    { name = "ib-async" },
     { name = "python-okx" },
 ]
 mlops = [
@@ -4331,7 +4306,7 @@ requires-dist = [
     { name = "granite-tsfm", specifier = ">=0.3" },
     { name = "gymnasium", specifier = ">=1.2" },
     { name = "hmmlearn", specifier = ">=0.3" },
-    { name = "ib-insync", marker = "extra == 'live'", specifier = ">=0.9" },
+    { name = "ib-async", marker = "extra == 'live'", specifier = ">=2.0" },
     { name = "iex-parser", specifier = ">=1.7" },
     { name = "influxdb-client", marker = "extra == 'db-benchmark'", specifier = ">=1.45" },
     { name = "ipython", specifier = ">=8.22" },

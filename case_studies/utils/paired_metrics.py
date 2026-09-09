@@ -158,17 +158,6 @@ def _apply_rung_restriction(df: pl.DataFrame, rung: dict | None) -> pl.DataFrame
     return df.filter(rung["predicate"])
 
 
-def _apply_carrier_pin(df: pl.DataFrame, predicate: pl.Expr | None) -> pl.DataFrame:
-    """Restrict candidate rows to the pinned model carrier, if configured.
-
-    Applied alongside ``_apply_rung_restriction`` at every cross-stage
-    carrier-selection site (signal / cross-stage spine / holdout-pairing walk).
-    """
-    if predicate is None or df.is_empty() or "config_name" not in df.columns:
-        return df
-    return df.filter(predicate)
-
-
 def _benchmark_returns_from_artifact(
     cs: str, label: str, period: str = "overall"
 ) -> tuple[str, pl.DataFrame, str] | None:
@@ -396,7 +385,6 @@ def _val_rank1_carrier(
     *,
     label_restriction: frozenset[str] | None,
     rung: dict | None,
-    carrier_pin_predicate: pl.Expr | None,
     prediction_hashes: list[str] | None = None,
     retired_hashes: frozenset[str] | None = None,
 ) -> dict | None:
@@ -423,7 +411,6 @@ def _val_rank1_carrier(
     if label_restriction and "label" in cand.columns:
         cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
     cand = _apply_rung_restriction(cand, rung)
-    cand = _apply_carrier_pin(cand, carrier_pin_predicate)
     if cand.is_empty():
         return None
     # Do NOT dedup by prediction_hash here — the walk needs every registered
@@ -968,7 +955,6 @@ def populate_paired_metrics(
     *,
     label_restriction: frozenset[str] | None = None,
     rung: dict | None = None,
-    carrier_pin_predicate: pl.Expr | None = None,
     carrier: CarrierScope,
     periods_per_year: int | None = None,
     verbose: bool = True,
@@ -987,7 +973,6 @@ def populate_paired_metrics(
       sp500_options → ``frozenset({'ret_to_expiry'})``); None for most CSs.
     * ``rung`` — ``{"predicate", "universe_filter", "exit_at_max_days"}`` for
       the rung-pinned CSs (sp500_options, nasdaq100_microstructure); None else.
-    * ``carrier_pin_predicate`` — polars expr for the carrier-pinned CS
       (us_firm_characteristics → ``config_name == 'default_huber'``); None else.
     * ``periods_per_year`` — the annualization factor. Defaults to the case
       study's own ``evaluation.periods_per_year`` declaration rather than to a
@@ -1185,7 +1170,6 @@ def populate_paired_metrics(
     if label_restriction and "label" in cand.columns:
         cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
     cand = _apply_rung_restriction(cand, rung)
-    cand = _apply_carrier_pin(cand, carrier_pin_predicate)
     if cand.is_empty():
         _report(cs, rows, verbose)
         return rows
@@ -1228,7 +1212,6 @@ def populate_paired_metrics(
         explorer,
         label_restriction=label_restriction,
         rung=rung,
-        carrier_pin_predicate=carrier_pin_predicate,
         prediction_hashes=live,
         retired_hashes=_retired_prediction_hashes(cs),
     )

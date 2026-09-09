@@ -99,6 +99,64 @@ def test_an_execution_count_inside_an_output_is_ignored_too():
     assert outputs_digest(first) == outputs_digest(second)
 
 
+def test_papermills_injected_cell_does_not_move_the_digest():
+    """`nb-run.sh` stamps before dropping that cell, so the digest must not see it.
+
+    The ordering is fixed at both ends: the stamper cross-checks its parameter declaration
+    against the injected cell, so it has to run first, and the cell has to go before
+    `jupytext --sync` can bake the argument values into the paired `.py`. A digest that
+    counted the cell therefore described a notebook that is never committed, and every
+    parameterized production run reported OUTPUTS CHANGED on a file nothing had edited.
+    """
+    committed = _notebook([_code_cell("print(sharpe)", [_stream("0.81\n")])])
+    executed = _notebook(
+        [
+            {
+                "cell_type": "code",
+                "metadata": {"tags": ["injected-parameters"]},
+                "source": "REPLACE_HOLDOUT = True\n",
+                "outputs": [],
+                "execution_count": None,
+            },
+            _code_cell("print(sharpe)", [_stream("0.81\n")]),
+        ]
+    )
+
+    assert outputs_digest(executed) == outputs_digest(committed)
+
+
+def test_the_parameters_cell_itself_is_still_covered():
+    """Only papermill's fossil is excluded, not the notebook's own parameters cell.
+
+    That cell is source a reader edits and can carry output; dropping it from the digest
+    would let a stamped notebook change what it declares without the gate noticing.
+    """
+    before = _notebook(
+        [
+            {
+                "cell_type": "code",
+                "metadata": {"tags": ["parameters"]},
+                "source": "LABEL = 'fwd_ret_5d'\n",
+                "outputs": [_stream("fwd_ret_5d\n")],
+                "execution_count": 1,
+            }
+        ]
+    )
+    after = _notebook(
+        [
+            {
+                "cell_type": "code",
+                "metadata": {"tags": ["parameters"]},
+                "source": "LABEL = 'fwd_ret_5d'\n",
+                "outputs": [_stream("fwd_ret_21d\n")],
+                "execution_count": 1,
+            }
+        ]
+    )
+
+    assert outputs_digest(before) != outputs_digest(after)
+
+
 def test_editing_prose_does_not_change_the_digest():
     """`sync-prose` exists so a markdown edit costs no re-run; this keeps it true."""
     code = _code_cell("print(sharpe)", [_stream("0.81\n")])

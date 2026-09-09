@@ -170,7 +170,12 @@ if catalog.is_empty():
 # on the catalog alone, the second refuses once the family has registered rows.
 declared, population_notes = declared_population_members(
     study,
-    study.root,
+    # The registry this study reads, not the case directory it was opened from. Under a preview
+    # those differ: `study.root` stays the canonical directory, which does publish populations,
+    # so asking it took the broken-lineage branch - the resolver then found none of the declared
+    # names in the preview registry and refused, on the state the comment below says is the
+    # tolerated one. Measured 2026-09-06, smoke job 59.
+    study.storage_root(EXECUTION_TIER),
     {model: f"{CASE_STUDY_ID}-{model}-validation-v1" for model in sorted(declared_models)},
     produced={model: catalog.height for model in declared_models},
 )

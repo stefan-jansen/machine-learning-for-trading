@@ -18,13 +18,13 @@ Covers all 27 chapters and 9 case studies. Includes PyTorch with CUDA 12.8 suppo
 ```bash
 docker compose pull ml4t
 docker compose up ml4t                    # Jupyter Lab at http://localhost:8888
-docker compose run --rm ml4t python nb.py # Run a notebook directly
+docker compose run --rm ml4t python 11_ml_pipeline/01_ols_inference.py   # one notebook, no Jupyter
 ```
 
 GPU passthrough (same image, NVIDIA runtime required):
 
 ```bash
-docker compose --profile gpu run --rm ml4t-gpu python notebook.py
+docker compose --profile gpu run --rm ml4t-gpu python 13_dl_time_series/01_core_architectures.py
 ```
 
 ### py312 (Python 3.12 Dependencies)
@@ -34,7 +34,7 @@ For notebooks requiring libraries without Python 3.14 wheels:
 | Notebook | Library |
 |----------|---------|
 | Ch05 `03_sigcwgan_signatures` | signatory |
-| Ch09 `06_path_signatures`, `12_wasserstein_regimes` | signatory, esig |
+| Ch09 `06_path_signatures` | signatory, esig |
 | Ch10 `01_word2vec`, `02_asset_embeddings`, `03_sentiment_evolution` | gensim |
 | Ch15 `06_fed_announcement_bsts` | tfcausalimpact (TFP BSTS) |
 

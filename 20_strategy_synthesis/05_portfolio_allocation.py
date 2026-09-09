@@ -90,9 +90,9 @@ def extract_top_k(spec_json: str) -> int:
 # vol, MVO, risk parity, score-weighted, HRP) while holding the signal
 # constant. We load the `stage: "allocation"` runs and restrict to the spine
 # prediction_hash per case study so the comparison reads as
-# "best within the highest-validation-Sharpe signal carrier".
+# "best within the highest-validation-Sharpe signal configuration".
 #
-# A case study absent from the carrier file is an error: `01_aggregate_synthesis`
+# A case study absent from the selected configuration file is an error: `01_aggregate_synthesis`
 # writes a row for every case study it iterates, so a missing key means the file
 # is stale. A case study present with a *null* spine is different: its registry
 # holds no backtests to resolve one from. It is named and excluded. The check
@@ -105,7 +105,7 @@ def extract_top_k(spec_json: str) -> int:
 # against 100, sp500_options 480 against 627, us_equities_panel 311 against 3199.
 
 # %%
-# Spine prediction hash per case study — read from the synthesis carrier
+# Spine prediction hash per case study - read from the synthesis selection
 # file produced by 01_aggregate_synthesis. backtest_comparison.parquet is
 # the canonical Ch20 artifact that records spine_prediction_hash per CS.
 _spine_df = pl.read_parquet(get_chapter_dir(20) / "output" / "backtest_comparison.parquet").select(
@@ -200,7 +200,7 @@ comparison = (
 
 # Collapse to one row per (case_study, allocator) — keep the configuration
 # (rebalance / top_k / overlay) that posts the highest Sharpe. Table 20.6
-# entries are the "best for that allocator" within the spine carrier.
+# entries are the "best for that allocator" within the spine configuration.
 comparison = comparison.sort("sharpe", descending=True).unique(
     subset=["case_study", "allocator"], keep="first"
 )

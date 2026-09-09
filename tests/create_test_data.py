@@ -823,8 +823,25 @@ def build_etfs(source: Path, output: Path) -> list[Path]:
 
 # --- crypto perpetuals --------------------------------------------------------
 #
-# 5 of the 19 perpetuals production carries, across the hourly bars, the 8-hour
+# 10 of the 19 perpetuals production carries, across the hourly bars, the 8-hour
 # premium index and the funding rate.
+#
+# Ten is the smallest width that realizes what the case study declares, not a round
+# number. `config/setup.yaml` sweeps `top_k_grid [3, 5, 10]` long-short and
+# `quantile_grid [5]`, and `case_studies/utils/sweep_config.py::get_entry_schemes_for`
+# drops a top-k whose two disjoint legs do not fit (`2k > tradeable`) or that holds
+# the whole cross-section (`k >= tradeable`), and drops a quantile axis below
+# `2 * n_quantiles` names. At five names every scheme fell to one of those and the
+# sweep had nothing to run - ml4t/agent-workspace#1077, which presented as
+# `13_backtest` refusing and four notebooks failing downstream of it. At ten, k=3 and
+# k=5 both seat and the quintile axis clears its floor exactly, so the fixture
+# exercises the concentrated end, the diversified end and the quantile axis. Six
+# would have satisfied the refusal with k=3 alone and left the fixture testing one
+# scheme of the three a reader runs.
+#
+# The ten are the longest-lived of the nineteen; the fifth-newest of them starts
+# 2020-08-13, so the panel is close to rectangular over the fixture window and its
+# ragged head is short enough not to dominate the first fold.
 #
 # The bars stop two days before the other two files and before production. That is
 # where the fixture was cut, and the bound is declared rather than removed because
@@ -838,7 +855,18 @@ CRYPTO_DIR = Path("crypto") / "market"
 CRYPTO_PERPS = CRYPTO_DIR / "perps_1h.parquet"
 CRYPTO_PREMIUM = CRYPTO_DIR / "premium_index_8h.parquet"
 CRYPTO_FUNDING = CRYPTO_DIR / "funding_rate.parquet"
-CRYPTO_SYMBOLS = ("ADAUSDT", "BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT")
+CRYPTO_SYMBOLS = (
+    "ADAUSDT",
+    "ATOMUSDT",
+    "BNBUSDT",
+    "BTCUSDT",
+    "COMPUSDT",
+    "DOGEUSDT",
+    "ETHUSDT",
+    "LINKUSDT",
+    "MKRUSDT",
+    "XRPUSDT",
+)
 CRYPTO_PERPS_END = datetime(2025, 12, 29, 23, 0, tzinfo=UTC)
 
 

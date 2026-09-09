@@ -17,7 +17,9 @@ and asserting the results are identical.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -33,6 +35,7 @@ from case_studies.utils.artifact_digest import write_artifact
 __all__ = [
     "HmmFit",
     "arima_one_step_forecast",
+    "chain_worker_pool",
     "filtered_state_probs",
     "fit_hmm_kmeans_init",
     "fit_hmm_restarts",
@@ -49,6 +52,44 @@ __all__ = [
 # Guards the log of a zero transition or start probability. Small enough not to move a
 # fitted probability, large enough that log() stays finite.
 _LOG_FLOOR = 1e-300
+
+
+@contextmanager
+def chain_worker_pool(n_threads: int):
+    """Size the BLAS and OpenMP pools of sampler chain workers, leaving this process alone.
+
+    ``pm.sample(cores=...)`` runs each chain in its own process, started through
+    multiprocessing's forkserver. Those children are fresh interpreters: they import numpy
+    and scipy themselves, so they size their pools from these variables at import. Setting
+    the variables is the only thing that reaches them - ``threadpoolctl`` reconfigures pools
+    already loaded in the calling interpreter, and the workers are not in it. Measured on an
+    sp500_options SV fit, peak threads across the process tree: 113 with nothing set, 115
+    with ``threadpool_limits`` around the sampler, 41 with this.
+
+    The forkserver starts at the first parallel sample, which is why the variables have to be
+    set before it and why restoring them afterwards is safe: by then it exists, and later
+    samples reuse it. This process's own pools are untouched, so whatever else the notebook
+    fits keeps the threading it had.
+
+    The pool size does not change the draws. Same data and seed at 2,000 draws, 2,000 tune
+    and 4 chains, every variant above returns a ``sigma_eta`` array equal bit for bit, so this
+    is a runtime setting and stays out of any identity. Contrast ``DML_THREAD_LIMIT`` in
+    ``case_studies/utils/causal.py``, which is recorded in the resolved specification because
+    there the reduction order does move the estimate.
+    """
+    if n_threads < 1:
+        raise ValueError("chain_worker_pool needs at least one thread per worker")
+    names = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+    previous = {name: os.environ.get(name) for name in names}
+    os.environ.update(dict.fromkeys(names, str(n_threads)))
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def filtered_state_probs(model: GaussianHMM, X: np.ndarray) -> np.ndarray:
@@ -242,10 +283,12 @@ def arima_one_step_forecast(fitted: Any, y_prefix: np.ndarray) -> np.ndarray:
     and the check that it stayed correct, not a reimplementation of the filter.
 
     Two neighbouring calls are wrong in ways that no assertion over the output frame can see.
-    ``apply(endog)`` defaults to ``refit=True`` and re-estimates on the array it is given, which
-    in a walk-forward feature means every emitted value was fitted on the block it is emitted
-    over. ``forecast(h)`` continues past the end of the data instead of filtering across it, so
-    it returns *h* values for an *n*-row prefix and lines up with nothing.
+    ``apply(endog, refit=True)`` re-estimates on the array it is given, which in a walk-forward
+    feature means every emitted value was fitted on the block it is emitted over. ``forecast(h)``
+    continues past the end of the data instead of filtering across it, so it returns *h* values
+    for an *n*-row prefix and lines up with nothing. In the locked ``statsmodels`` 0.14.6 the
+    default is ``refit=False``, which is the safe one - this paragraph previously said the
+    opposite, and the reason it matters is the next one, not the default.
 
     The parameter comparison is not decoration. ``refit=False`` is a keyword whose name is the
     only thing asserting the behaviour, and a default that changed upstream would otherwise

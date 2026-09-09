@@ -78,6 +78,7 @@ from ml4t.diagnostic.integration import (
     generate_tearsheet_from_run_artifacts,
 )
 
+from case_studies.research import read_only_study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.cohort_metrics import compute_and_register
@@ -111,19 +112,45 @@ from case_studies.utils.strategy_analysis import (
     plot_concentration_curve,
     plot_equity_drawdown,
     plot_sharpe_waterfall,
+    resolve_solvent_carrier,
     write_strategy_assessment,
 )
 from case_studies.utils.sweep_config import get_universe_filters_for
 from case_studies.utils.uncertainty import ENTIRE_REGISTRY, NO_CARRIER
-from utils.paths import get_case_study_dir, get_output_dir
+from utils.paths import get_output_dir
 
 # %% tags=["parameters"]
+CASE_STUDY = "nasdaq100_microstructure"
 MAX_SYMBOLS = 0
+# Where this notebook reads. Empty means the canonical registry; a smoke run passes the
+# workspace the stages before it wrote to.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+
+# %% [markdown]
+# This notebook reads; it registers nothing, and that decides how it opens the registry. Every
+# route through `open_study` ends in `Study.activate()`, which rewrites `ML4T_OUTPUT_DIR` for
+# the rest of the process and clears the caches keyed on it, so every later
+# `get_case_study_dir` answers for a different directory than the one resolved here. On the
+# canonical tier with no workspace that route is `Study.regenerate`, which refuses outright
+# unless `features`, `labels` and `run_log` are symlinks - true in a maintainer worktree, false
+# in every clean clone.
+#
+# `read_only_study` is the form that does not activate: it resolves the root for the tier and
+# workspace it is given and hands back a `Study.at` over it, which points the path helpers at
+# that root rather than clearing the variable. `CASE_DIR` is that root, and every question this
+# notebook asks - the catalog, the lineage, the populations, the artifacts - is answered from
+# it.
 
 # %%
-CASE_STUDY = "nasdaq100_microstructure"
+study = read_only_study(
+    CASE_STUDY,
+    workspace=WORKSPACE or None,
+    execution_tier=EXECUTION_TIER,
+    entry_point="20_strategy_analysis",
+)
+CASE_DIR = study.root
 PERIODS_PER_YEAR = 252  # strategy returns are aggregated to daily before Sharpe
-CASE_DIR = get_case_study_dir(CASE_STUDY)
 OUTPUT_DIR = get_output_dir(20, CASE_STUDY)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -276,46 +303,24 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 #
 # The strategy phase inherits one configuration, chosen once across the stages
 # that are eligible for the holdout - signal, allocation and risk overlay -
-# on validation results only. Pooling those stages and keeping the highest-scoring
-# strategy per trained model means a model appears once, represented by the
-# strongest use that was made of it, rather than once per stage it reached.
+# on validation results only.
 #
-# Two properties make this a selection rule rather than a search. It reads
-# validation results only, so the holdout is untouched at the moment of choosing.
-# And it is deterministic: where two strategies have identical Sharpe, the tie is
-# broken on the backtest identifier rather than on whichever row the database
-# returned first, so the same registry always yields the same choice.
+# The selection is made by `resolve_solvent_carrier`, the shared resolver, and not by
+# ranking a Sharpe column here. The same resolver answers `18_holdout_predictions` and
+# `19_holdout_backtest`, so this page reports the configuration those notebooks refitted
+# and priced.
 #
-# The label is taken from the selected configuration rather than assumed. The
-# selection pools stages across labels, so the chosen strategy may rest on a
-# variant label rather than the primary one, and every loader downstream has to
-# follow the selection rather than the default.
+# The label is taken from the selection rather than assumed. The pool spans every
+# declared label, so the chosen strategy may rest on a variant label rather than the
+# primary one, and every loader downstream follows the selection rather than the default.
 
 # %%
-_HOLDOUT_STAGES = ("signal", "allocation", "risk_overlay")
-top_signal = (
-    pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in _HOLDOUT_STAGES],
-        how="diagonal_relaxed",
-    )
-    .filter(pl.col("family") != "benchmark")
-    # backtest_hash breaks exact Sharpe ties the same way on every machine.
-    .sort(["sharpe", "backtest_hash"], descending=[True, False])
-    .unique(subset=["prediction_hash"], keep="first", maintain_order=True)
-    .head(1)
-)
-if top_signal.is_empty():
-    raise RuntimeError(
-        f"No validation backtest for {CASE_STUDY} across stages {_HOLDOUT_STAGES}; "
-        f"the strategy phase has nothing to carry forward."
-    )
-
-_selected = top_signal.row(0, named=True)
-TOP_HASH = _selected["backtest_hash"]
-TOP_PHASH = _selected["prediction_hash"]
-RANK1_FAMILY = _selected["family"]
-RANK1_CONFIG = _selected["config_name"]
-RANK1_LABEL = _selected["label"]
+carrier = resolve_solvent_carrier(CASE_STUDY)
+TOP_HASH = carrier["val_backtest_hash"]
+TOP_PHASH = carrier["val_prediction_hash"]
+RANK1_FAMILY = carrier["family"]
+RANK1_CONFIG = carrier["config_name"]
+RANK1_LABEL = carrier["label"]
 PRIMARY_LABEL = RANK1_LABEL
 
 _db = CASE_DIR / "run_log" / "registry.db"

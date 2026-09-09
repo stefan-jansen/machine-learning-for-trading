@@ -131,7 +131,11 @@ jobs:
         run: uv run python scripts/verify_installation.py
 
       - name: Download the free datasets
-        run: uv run python data/download_all.py --free-only
+        run: uv run python data/download_all.py --free-only --report download-report.json
+
+      - name: Record which datasets arrived
+        if: always()
+        run: uv run python .github/scripts/publish_download_report.py download-report.json
 
       - name: Run the first notebook
         env:
@@ -227,8 +231,12 @@ jobs:
 
       - name: Download the free datasets
         run: |
-          uv run python data/download_all.py --free-only
+          uv run python data/download_all.py --free-only --report download-report.json
           if ($LASTEXITCODE -ne 0) { throw "download_all.py failed with exit $LASTEXITCODE" }
+
+      - name: Record which datasets arrived
+        if: always()
+        run: uv run python .github/scripts/publish_download_report.py download-report.json
 
       - name: Run the first notebook
         env:

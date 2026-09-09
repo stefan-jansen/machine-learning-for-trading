@@ -148,29 +148,24 @@ DECODER_ALLOWLIST: dict[tuple[str, str, str], str] = {
     "not a PIT feature for a backtest. Signed 2026-07-11.",
     (
         "09_model_based_features/11_hmm_regimes.py",
-        "hmm2",
+        "spy_hmm",
         "predict",
-    ): "Ch09 teaching: demonstrates HMM state decoding on the toy/SPY series; "
-    "the notebook explicitly contrasts this with filtered probs. Signed 2026-07-11.",
+    ): "Ch09 teaching: Viterbi labels on SPY, computed only to be named as the thing the "
+    "hard state feature does NOT use; the feature is the argmax of the filtered probability, "
+    "and the prose beside it says which is which. Signed 2026-09-08.",
     (
         "09_model_based_features/11_hmm_regimes.py",
-        "hmm2",
+        "spy_hmm",
         "predict_proba",
-    ): "Ch09 teaching: shows smoothed probabilities *as the look-ahead mistake* next "
-    "to filtered probs; plotted, never used as a feature. Signed 2026-07-11.",
+    ): "Ch09 teaching: smoothed probabilities on SPY, plotted against the filtered series to "
+    "show the lead the smoothed reading gets from the future; the feature frame carries "
+    "smoothed_stressed as the labelled mistake and no model reads it. Signed 2026-09-08.",
     (
         "09_model_based_features/11_hmm_regimes.py",
         "toy_hmm",
         "predict_proba",
     ): "Ch09 teaching: toy-HMM smoothed vs filtered comparison in the forward-algorithm "
     "walkthrough. Signed 2026-07-11.",
-    (
-        "09_model_based_features/11_hmm_regimes.py",
-        "msar_result",
-        "smoothed_marginal_probabilities",
-    ): "Ch09 teaching: MS-AR smoothed probs computed *for diagnostics/comparison only*, "
-    "plotted next to filtered (causal) probs; the notebook labels smoothed as full-sample "
-    "and never feeds it to a model. Signed 2026-07-11.",
 }
 
 # Backlog: known, UN-AUDITED occurrences awaiting that chapter's Gate-0 pass. NOT approvals.

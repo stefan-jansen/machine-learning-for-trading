@@ -230,8 +230,15 @@ mlops = [
     "mlflow>=2.16",
 ]
 # Live Trading (Ch25)
+# ib_async, not ib_insync. Both ship a top-level `eventkit` package to the same
+# site-packages path, and ib_insync's copy runs `main_event_loop = get_event_loop()`
+# at import time, which raises on Python 3.14. Installing both makes `import
+# ib_async` - and therefore `import ml4t.live` and every Ch25 notebook - fail with
+# "There is no current event loop in thread 'MainThread'". ib_insync is
+# unmaintained and nothing here imports it; ib_async is its maintained successor
+# and the name the notebooks and ml4t-live use.
 live = [
-    "ib_insync>=0.9",
+    "ib_async>=2.0",
     "python-okx>=0.3",
     "alpaca-py>=0.33",
 ]

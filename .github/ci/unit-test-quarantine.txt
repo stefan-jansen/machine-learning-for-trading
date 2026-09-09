@@ -46,7 +46,9 @@
 # module scope reaches lightgbm and torch through the family training paths it
 # dispatches to. It tests two pure functions and needs none of that, but the
 # module cannot be imported without it. `test_holdout_force_regenerates` loads
-# the same module for the same reason and is behind the same boundary.
+# the same module for the same reason and is behind the same boundary, and so does
+# `test_holdout_selection_is_single_sourced`, which has to call `select_best_models`
+# and the canonical resolver on one registry to show they answer the same.
 # ---------------------------------------------------------------------------
 # The three files the etfs deep-learning and latent-factor pass added are behind
 # the same boundary. `test_common_sample_daily_ic` tests one pure polars
@@ -72,6 +74,7 @@ tests/test_gbm_identity.py
 tests/test_gbm_runtime.py
 tests/test_holdout_expected_keys.py
 tests/test_holdout_force_regenerates.py
+tests/test_holdout_selection_is_single_sourced.py
 tests/test_insight_chapter.py
 tests/test_latent_epoch_ic_over_dates.py
 tests/test_latent_factors_identity.py

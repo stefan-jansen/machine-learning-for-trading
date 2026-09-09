@@ -193,11 +193,13 @@ def test_the_canonical_resolver_does_not_re_enter_the_diagnosis(monkeypatch, tmp
         CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
         CREATE TABLE fold_metrics (
             prediction_hash TEXT, fold INTEGER, ic REAL, n_days INTEGER);
-        CREATE TABLE prediction_metrics (prediction_hash TEXT PRIMARY KEY, ic_mean REAL);
+        CREATE TABLE prediction_metrics (
+            prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_n_days REAL);
         CREATE TABLE prediction_coverage (prediction_hash TEXT PRIMARY KEY, status TEXT);
 
         INSERT INTO training_runs VALUES ('t1', 'gbm', 'leaves_31_mse', 'fwd_ret_5d', '{}');
         INSERT INTO prediction_sets VALUES ('p1', 't1', 'validation', 100, 'iteration');
+        INSERT INTO prediction_metrics VALUES ('p1', 0.02, 250);
         INSERT INTO backtest_runs VALUES ('b1', 'p1', 'signal', '{"strategy": {"a": 1}}');
         INSERT INTO backtest_metrics VALUES ('b1', 1.2);
         """

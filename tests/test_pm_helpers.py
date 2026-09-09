@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from tests.pm_helpers import (
     TIER_ON_DEMAND,
     TIER_PER_COMMIT,
     TIER_WEEKLY,
+    canonically_refused_parameters,
     check_kernel_routing,
     collect_chapter_notebooks,
     current_test_tier,
@@ -26,6 +29,7 @@ from tests.pm_helpers import (
     missing_required_env,
     research_preview_parameters,
     resolved_registry_path,
+    unreachable_declared_parameters,
     unusable_parameters,
 )
 
@@ -400,21 +404,49 @@ def test_every_declared_parameter_reaches_its_notebook(
     756-session burn-in `model_based.regime` declares, leaving 19 declared features
     entirely missing from its design matrix.
     """
-    unreachable = {
-        key: unusable
-        for key, value in overrides.items()
-        if isinstance(value, dict) and isinstance(value.get("parameters"), dict)
-        for unusable in [
-            unusable_parameters(
-                REPO_ROOT / f"{key}.py",
-                value["parameters"],
-                research_preview=research_preview,
-            )
-        ]
-        if unusable
-    }
+    assert unreachable_declared_parameters(overrides, research_preview=research_preview) == {}
 
-    assert unreachable == {}
+
+def test_an_entry_whose_shape_is_not_understood_is_refused_rather_than_skipped() -> None:
+    """The sweep above filtered on `isinstance(value.get("parameters"), dict)`.
+
+    Anything else - a list, a string, a key it did not know - was dropped from the sweep
+    rather than failed by it, and a dropped entry returns the same empty dict as one that
+    was checked and found clean. That is the shape of every defect this repository spent
+    2026-09-07 finding: a guard in a branch a parameter skipped, a CI gate counting
+    failures where an absent check reads as a pass, a fixture asserting a grid it could
+    not realize. A check that cannot fire is worse than no check, because it reports.
+
+    Every entry here declares a real parameter that `case_studies/etfs/06_linear` cannot
+    take, so a sweep that examines them fails and a sweep that skips them passes.
+    """
+    for shape in (
+        {"parameters": ["NOT_A_MAPPING"]},
+        {"parameters": {"NOT_DECLARED_ANYWHERE": 1}, "invocations": [{"id": "a"}]},
+        {"invocations": {"id": "a", "parameters": {"NOT_DECLARED_ANYWHERE": 1}}},
+        {"invocations": [{"parameters": {"NOT_DECLARED_ANYWHERE": 1}}]},
+        {"invocations": [{"id": "a", "parameters": {"NOT_DECLARED_ANYWHERE": 1}, "timeout": 5}]},
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            unreachable_declared_parameters(
+                {"case_studies/etfs/06_linear": shape}, research_preview=True
+            )
+
+
+def test_a_named_invocation_is_swept_like_any_other_parameter_block() -> None:
+    """And the name it reports is the run's, not only the notebook's."""
+    unreachable = unreachable_declared_parameters(
+        {
+            "case_studies/etfs/06_linear": {
+                "invocations": [
+                    {"id": "reachable", "parameters": {"MAX_FOLDS": 2}},
+                    {"id": "unreachable", "parameters": {"NOT_DECLARED_ANYWHERE": 1}},
+                ]
+            }
+        },
+        research_preview=True,
+    )
+    assert list(unreachable) == ["case_studies/etfs/06_linear[unreachable]"]
 
 
 def _accepted_reduction_fields() -> tuple[set[str], set[str]]:
@@ -511,21 +543,33 @@ def test_requested_configurations_survive_the_fixture_trim(overrides: dict) -> N
     kept `default_mse` and `default_mae`, and the entry was wrong and untested at the same
     time: `06_linear` failed ahead of it on every regeneration that reached that far, so the
     name was never resolved.
+
+    The trim is *run*, not restated. This test used to keep `configs[:_MAX_CONFIGS_PER_FAMILY]`
+    itself, which is a second copy of the rule rather than a check on it: when the trim changed
+    to span the menu instead of taking its head, the copy went on describing the head and the
+    test passed while `us_equities_panel/06_linear` was asking for a `ridge_a0.001` the menu no
+    longer declared. Copying the menus into a tmp dir and calling `_trim_label_configs` is what
+    makes this fail on a rule the trim no longer follows.
     """
-    from tests.preset_patches import _MAX_CONFIGS_PER_FAMILY, _TRIM_FAMILIES
+    from tests.preset_patches import _trim_label_configs
 
     def declared_after_trim(case_study: str, labels: list[str] | None) -> set[str]:
         menus = REPO_ROOT / "case_studies" / case_study / "config" / "training"
-        names: set[str] = set()
-        for menu in sorted(menus.glob("*.yaml")):
-            if labels and menu.stem not in labels:
-                continue
-            for family, configs in (yaml.safe_load(menu.read_text()) or {}).items():
-                if not isinstance(configs, list):
+        with tempfile.TemporaryDirectory() as scratch:
+            trimmed = Path(scratch) / "training"
+            trimmed.mkdir()
+            for menu in sorted(menus.glob("*.yaml")):
+                shutil.copy2(menu, trimmed / menu.name)
+            _trim_label_configs(Path(scratch))
+
+            names: set[str] = set()
+            for menu in sorted(trimmed.glob("*.yaml")):
+                if labels and menu.stem not in labels:
                     continue
-                keep = configs[:_MAX_CONFIGS_PER_FAMILY] if family in _TRIM_FAMILIES else configs
-                names |= set(keep)
-        return names
+                for configs in (yaml.safe_load(menu.read_text()) or {}).values():
+                    if isinstance(configs, list):
+                        names |= {c["name"] if isinstance(c, dict) else c for c in configs}
+            return names
 
     missing = {}
     for key, value in overrides.items():
@@ -1480,6 +1524,75 @@ def test_injected_parameters_strips_every_preview_prefixed_name_on_a_canonical_r
     assert not leaked, f"canonical injection carries preview-only parameters: {leaked}"
 
 
+def test_injected_parameters_strips_the_device_and_the_name_that_carries_it() -> None:
+    """DEVICE and POPULATION_NAME are preview-only for a DL entry, and neither takes the prefix.
+
+    A DL notebook takes the device as an ordinary parameter, so the override file spells it
+    `DEVICE`, and `generate_intermediates.py` reads that same entry with `research_preview=False`.
+    Injected there the pair does not fail: the notebook publishes a real population under the
+    preview name and reports success, and `cme_futures` then resolves `MODEL_POPULATION_NAMES`
+    against a fixture where the canonical name was never written.
+    """
+    parameters = {"DEVICE": "cpu", "POPULATION_NAME": "cme_futures-tabular_dl-preview"}
+    resolved = injected_parameters(
+        Path("case_studies/cme_futures/08_tabular_dl.py"),
+        parameters,
+        None,
+        research_preview=False,
+    )
+    # `resolved or None`: nothing survives the strip, so papermill injects no parameters cell
+    # and the notebook keeps its own declared defaults - cuda, and the canonical population.
+    assert resolved is None
+    assert parameters["DEVICE"] == "cpu", "the caller's entry must not be mutated"
+
+    kept = injected_parameters(
+        Path("case_studies/cme_futures/08_tabular_dl.py"),
+        {"DEVICE": "cpu", "SUPERSEDES_POPULATION": "8c2c87299a47"},
+        None,
+        research_preview=False,
+    )
+    assert kept == {"SUPERSEDES_POPULATION": "8c2c87299a47"}
+
+
+def test_injected_parameters_keeps_a_population_name_that_carries_no_device() -> None:
+    """The strip is keyed on DEVICE, so it does not reach a name meant canonically.
+
+    `fx_pairs` 13-16 declare `research_preview: false` because they need the canonical tier, and
+    `fx_pairs:preflight` so that tier does not publish the real population. That is the entry
+    `tests/test_case_studies.py` runs, not one the fixture generator alone sees, and removing the
+    name would put a CI run back on the canonical population it was written to stay off.
+    """
+    parameters = {"POPULATION_NAME": "fx_pairs:preflight", "TOP_K": 2}
+    assert (
+        injected_parameters(
+            Path("case_studies/fx_pairs/13_backtest.py"),
+            parameters,
+            None,
+            research_preview=False,
+        )
+        == parameters
+    )
+
+
+def test_no_entry_pairs_a_device_with_a_canonical_ci_run() -> None:
+    """The strip above is sound only while DEVICE means "this entry runs under the preview tier".
+
+    Every entry that declares DEVICE leaves `research_preview` at its default, so the canonical
+    branch of `injected_parameters` is reached for it by `generate_intermediates.py` and by
+    nothing else. An entry that declared both would be a canonical run CI performs, and the strip
+    would silently take its device and its population name away.
+    """
+    entries = yaml.safe_load((REPO_ROOT / "tests/overrides.yaml").read_text())
+    paired = [
+        key
+        for key, entry in entries.items()
+        if isinstance(entry, dict)
+        and "DEVICE" in (entry.get("parameters") or {})
+        and entry.get("research_preview") is False
+    ]
+    assert not paired, f"DEVICE on an entry CI runs canonically: {paired}"
+
+
 def test_injected_parameters_keeps_everything_else_on_a_canonical_run() -> None:
     parameters = {"MAX_SYMBOLS": 5, "TOP_K": 2}
     assert (
@@ -1491,6 +1604,76 @@ def test_injected_parameters_keeps_everything_else_on_a_canonical_run() -> None:
         )
         == parameters
     )
+
+
+def test_canonical_run_drops_a_parameter_the_notebook_itself_refuses() -> None:
+    """MAX_SYMBOLS carries no PREVIEW_ prefix and is preview-only for these four notebooks.
+
+    Their canonical branch raises on it, so passing it through was a guaranteed failure on the
+    notebook's first cell. It cannot be added to the prefix strip either - the entry above pins
+    it as a legitimate canonical parameter elsewhere - so the only place that can answer is the
+    notebook, and this reads its answer.
+    """
+    for stem in ("16_backtest", "17_portfolio_management", "18_risk_management", "19_costs"):
+        py_path = REPO_ROOT / f"case_studies/us_equities_panel/{stem}.py"
+        assert "MAX_SYMBOLS" in canonically_refused_parameters(py_path), stem
+        resolved = injected_parameters(py_path, {"MAX_SYMBOLS": 5}, None, research_preview=False)
+        # An empty injection is returned as None - papermill is handed nothing rather than an
+        # empty mapping - so the contract here is that the notebook receives no parameter at all.
+        assert not resolved, f"{stem} still receives a parameter it raises on"
+
+
+def test_a_requirement_guard_is_not_read_as_a_refusal() -> None:
+    """`16_backtest` refuses MAX_SYMBOLS and requires PREDICTION_SET_NAMES in the same branch.
+
+    Both are `if ...: raise` inside `if EXECUTION_TIER == "canonical":`. Reading the second as a
+    refusal would strip the names the canonical run needs, so the two shapes have to be told
+    apart: a refusal is a bare disjunction of names, a requirement negates or compares them.
+    """
+    refused = canonically_refused_parameters(
+        REPO_ROOT / "case_studies/us_equities_panel/16_backtest.py"
+    )
+    assert "MAX_SYMBOLS" in refused
+    assert "PREDICTION_SET_NAMES" not in refused
+
+
+def test_the_flattened_and_guard_shape_is_read_too() -> None:
+    """Two shapes express the same refusal and both are in the fleet.
+
+    `cme_futures/13_backtest` nests the refusal inside `if EXECUTION_TIER == "canonical":`;
+    `sp500_options/13_portfolio_management` flattens it into a single `and`. Reading only the
+    nested one would leave the flattened notebooks unprotected.
+    """
+    assert canonically_refused_parameters(
+        REPO_ROOT / "case_studies/sp500_options/13_portfolio_management.py"
+    ) == {"PREVIEW_LABELS", "PREVIEW_MAX_BASELINE_CONFIGS"}
+    assert canonically_refused_parameters(
+        REPO_ROOT / "case_studies/cme_futures/13_backtest.py"
+    ) == {"PREVIEW_LABELS", "PREVIEW_MAX_PREDICTIONS"}
+
+
+def test_no_override_entry_declares_a_parameter_its_notebook_refuses_canonically() -> None:
+    """The fleet-wide statement, so a new entry cannot reintroduce this silently.
+
+    A name in this position does not fail loudly on the preview path - it reduces, correctly -
+    and fails on the canonical path only when a run reaches that notebook. `us_equities_panel`
+    16 through 19 sit above `generate_intermediates.py`'s default `--through-stage 8`, which is
+    why four of them sat here unnoticed.
+    """
+    entries = yaml.safe_load((REPO_ROOT / "tests/overrides.yaml").read_text())
+    leaked = {}
+    for key, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        declared = set(entry.get("parameters") or {})
+        py_path = REPO_ROOT / f"{key}.py"
+        if not declared or not py_path.exists():
+            continue
+        resolved = injected_parameters(py_path, entry["parameters"], None, research_preview=False)
+        refused = canonically_refused_parameters(py_path) & set(resolved or {})
+        if refused:
+            leaked[key] = sorted(refused)
+    assert not leaked, f"canonical injection carries names the notebook raises on: {leaked}"
 
 
 def test_injected_parameters_keeps_preview_reductions_under_the_preview_tier(
@@ -1615,3 +1798,153 @@ def test_a_model_mapping_without_a_fold_count_still_gets_one(tmp_path: Path) -> 
         research_preview=True,
     )
     assert resolved["PREVIEW_REDUCTIONS"]["folds"] == [0, 1]
+
+
+# --- gpu_skip_reason -------------------------------------------------------------------------
+#
+# `gpu:` names a capability, not a wish for a card. The two in use are checked differently and a
+# machine can have one without the other: this repo's lockfile resolves the PyPI LightGBM wheel,
+# which is built without `-DUSE_CUDA=1`, so a box with an NVIDIA card satisfies `torch` and not
+# `lightgbm_cuda`. Checking torch for a LightGBM notebook let four Ch19 notebooks run and fail at
+# `fit()` instead of skipping - ml4t/agent-workspace#862.
+
+
+def _capabilities(monkeypatch, *, torch_cuda: bool, lightgbm_cuda: bool) -> None:
+    """Present a machine with the named capabilities, whatever this one has."""
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: torch_cuda)),
+    )
+    # Already replaced by an earlier call in the same test, so the cache may be gone.
+    clear = getattr(pm_helpers._cuda_lightgbm_probe, "cache_clear", None)
+    if clear is not None:
+        clear()
+    monkeypatch.setattr(
+        pm_helpers,
+        "_cuda_lightgbm_probe",
+        lambda: None if lightgbm_cuda else "the installed LightGBM has no CUDA build",
+    )
+
+
+def test_no_gpu_declaration_never_skips(monkeypatch) -> None:
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({}) is None
+    assert pm_helpers.gpu_skip_reason({"gpu": False}) is None
+
+
+def test_gpu_true_still_means_torch(monkeypatch) -> None:
+    """The spelling that predates capabilities keeps its meaning."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": True}) is None
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=True)
+    assert "torch reports no CUDA device" in pm_helpers.gpu_skip_reason({"gpu": True})
+
+
+def test_a_lightgbm_notebook_skips_where_only_torch_has_a_card(monkeypatch) -> None:
+    """The #862 machine: an NVIDIA card, and a LightGBM that cannot use it."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    reason = pm_helpers.gpu_skip_reason({"gpu": "lightgbm_cuda"})
+    assert reason is not None and "no CUDA build" in reason
+
+
+def test_a_torch_notebook_runs_where_only_torch_has_a_card(monkeypatch) -> None:
+    """The same machine must not skip a notebook that only ever asks torch."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": "torch"}) is None
+
+
+def test_a_notebook_naming_both_needs_both(monkeypatch) -> None:
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=True)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is None
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is not None
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=True)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is not None
+
+
+def test_an_unknown_capability_is_refused_rather_than_ignored(monkeypatch) -> None:
+    """A typo must not read as "no GPU needed" and let the notebook run anywhere."""
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=False)
+    with pytest.raises(ValueError, match="cude"):
+        pm_helpers.gpu_skip_reason({"gpu": "cude"})
+
+
+def test_every_declared_capability_in_overrides_is_one_the_guard_knows() -> None:
+    """A `gpu:` value nothing implements would raise at collection, one notebook at a time."""
+    overrides = yaml.safe_load((REPO_ROOT / "tests/overrides.yaml").read_text())
+    for key, entry in overrides.items():
+        declared = (entry or {}).get("gpu")
+        if not declared or declared is True:
+            continue
+        names = [declared] if isinstance(declared, str) else list(declared)
+        unknown = [n for n in names if n not in pm_helpers.GPU_CAPABILITIES]
+        assert not unknown, f"{key} declares gpu: {declared!r}, unknown: {unknown}"
+
+
+def test_the_real_probe_runs_and_stays_quiet_under_pytest_capture(capfd) -> None:
+    """The probe redirects descriptor 2, and pytest is also holding it.
+
+    `sys.stderr.fileno()` raises `UnsupportedOperation` under `--capture=sys` and names the
+    capture file rather than the stream LightGBM writes to under the default `--capture=fd`,
+    so the probe takes descriptor 2 by number. Every other test here replaces the probe, which
+    would leave that exact interaction uncovered. This one calls it.
+    """
+    pm_helpers._cuda_lightgbm_probe.cache_clear()
+    try:
+        result = pm_helpers._cuda_lightgbm_probe()
+        assert result is None or isinstance(result, str)
+        out, err = capfd.readouterr()
+        assert "LightGBM" not in err, f"the probe leaked its own failure to stderr: {err!r}"
+        # Descriptor 2 has to be a working descriptor afterwards, or every later test that
+        # writes to stderr fails somewhere far from here.
+        os.write(2, b"")
+    finally:
+        pm_helpers._cuda_lightgbm_probe.cache_clear()
+
+
+def test_a_busy_card_is_not_reported_as_a_missing_build(monkeypatch) -> None:
+    """A runtime failure on shared hardware must not read as a property of the installation.
+
+    One 3090 carries several lanes here, so a CUDA allocation can fail while the build is
+    perfectly capable. Both cases skip - a notebook that cannot get a card cannot run - but the
+    reason has to say which, or a contention blip is indistinguishable in the log from a wheel
+    built without -DUSE_CUDA=1, and someone re-derives ml4t/agent-workspace#862 from scratch.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True)),
+    )
+    clear = getattr(pm_helpers._cuda_lightgbm_probe, "cache_clear", None)
+    if clear is not None:
+        clear()
+    monkeypatch.setattr(
+        pm_helpers,
+        "_cuda_lightgbm_probe",
+        lambda: "the CUDA LightGBM probe failed for another reason: CUBLAS_STATUS_ALLOC_FAILED",
+    )
+    reason = pm_helpers.gpu_skip_reason({"gpu": "lightgbm_cuda"})
+    assert "no CUDA build" not in reason
+    assert "CUBLAS_STATUS_ALLOC_FAILED" in reason
+
+
+def test_the_missing_build_message_is_the_one_lightgbm_actually_raises() -> None:
+    """The probe keys on LightGBM's own wording, so a version change must not pass silently.
+
+    Only observable where the build lacks CUDA, which is every CI runner and this workstation.
+    Where the build has it there is no message to check and nothing to go stale, so the test
+    skips rather than failing on a machine that is better equipped than the one it was written on.
+    """
+    lgb = pytest.importorskip("lightgbm")
+    np = pytest.importorskip("numpy")
+    pm_helpers._cuda_lightgbm_probe.cache_clear()
+    if pm_helpers._cuda_lightgbm_probe() is None:
+        pytest.skip("this LightGBM has a CUDA build, so it raises no message to key on")
+    with pytest.raises(Exception, match=pm_helpers._NO_CUDA_BUILD) as caught:
+        lgb.train(
+            {"objective": "binary", "device_type": "cuda", "verbose": -1, "num_leaves": 2},
+            lgb.Dataset(np.zeros((20, 2)), label=np.arange(20) % 2),
+            num_boost_round=1,
+        )
+    assert pm_helpers._NO_CUDA_BUILD in str(caught.value)

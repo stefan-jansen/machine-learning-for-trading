@@ -686,6 +686,92 @@ def test_an_empty_restriction_still_scans_everything() -> None:
     assert check_all(only=None) == check_all()
 
 
+def test_check_reports_and_fails_a_stamp_over_an_empty_output_set(tmp_path, monkeypatch) -> None:
+    """The corpus assertion above passes vacuously if the detection is broken.
+
+    `test_every_committed_notebook_is_its_current_py` asserts `not result.hollow` over the
+    real tree, which is exactly as green when nothing is hollow as when nothing can be
+    seen. ml4t/agent-workspace#301 is the failure that motivates it: two notebooks carried
+    `production: True` over zero outputs and `check` reported clean, because the gate that
+    exists to catch a render claiming a run it never made was not looking at the outputs.
+
+    So this builds that render deliberately and asserts both halves - the category names
+    it, and the CLI exits non-zero on it.
+    """
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    py = tmp_path / "nb.py"
+    py.write_text("# %%\nprint(1)\n", encoding="utf-8")
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(
+        json.dumps(
+            _notebook(
+                [_code("print(1)")],
+                metadata={
+                    notebook_provenance.STAMP_KEY: {
+                        "production": True,
+                        "parameters": {},
+                        "source_py_blob": notebook_provenance.git_blob(py),
+                        "outputs_digest": notebook_provenance.outputs_digest(
+                            _notebook([_code("print(1)")])
+                        ),
+                        "library_digest": notebook_provenance.library_digest(py),
+                    }
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(notebook_provenance, "iter_notebooks", lambda: [nb])
+
+    result = check_all()
+    assert result.hollow == ["nb.ipynb"], result
+    assert not result.stale and not result.testmode, result
+
+    args = __import__("argparse").Namespace(paths=[], strict=False, since=None, no_merge_base=False)
+    assert notebook_provenance._cmd_check(args) == 1
+
+
+def test_check_passes_the_same_notebook_once_it_has_an_output(tmp_path, monkeypatch) -> None:
+    """The control for the test above: only the empty output set makes it fail.
+
+    Without it, a `hollow` that fired on every stamped notebook would still turn that
+    test green while blocking the whole corpus.
+    """
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path)
+    py = tmp_path / "nb.py"
+    py.write_text("# %%\nprint(1)\n", encoding="utf-8")
+    executed = _notebook([_code("print(1)", [_stdout("1")])])
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(
+        json.dumps(
+            _notebook(
+                [_code("print(1)", [_stdout("1")])],
+                metadata={
+                    notebook_provenance.STAMP_KEY: {
+                        "production": True,
+                        "parameters": {},
+                        "source_py_blob": notebook_provenance.git_blob(py),
+                        "outputs_digest": notebook_provenance.outputs_digest(executed),
+                        "library_digest": notebook_provenance.library_digest(py),
+                    }
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(notebook_provenance, "iter_notebooks", lambda: [nb])
+
+    result = check_all()
+    assert not result.hollow, result
+    assert not result.stale and not result.outputs_changed, result
+
+
 # -----------------------------------------------------------------------------
 # The cleared state
 #

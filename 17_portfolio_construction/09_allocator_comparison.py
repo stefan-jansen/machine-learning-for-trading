@@ -28,7 +28,8 @@
 # - Evaluate methods on Sharpe, drawdown, turnover, and stability
 # - Understand when allocation choice matters vs when signal dominates
 #
-# **Book Reference**: Chapter 17, §17.4 (Baseline allocators) and §17.7 (Comparing allocator performance)
+# **Book Reference**: Chapter 17, Section 17.4 (Defining baseline allocators) and Section 17.7
+# (Comparing allocator performance)
 #
 # **Prerequisites**: `02_mean_variance_optimization`, `06_hierarchical_risk_parity`
 # %% [markdown]
@@ -68,7 +69,7 @@ from case_studies.utils.backtest_loaders import compute_allocator_metrics
 from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging, ml4t_palette
+from utils.style import COLORS, ml4t_diverging, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults; Papermill overrides these values for CI testing
@@ -80,6 +81,14 @@ HOLDOUT_START = "2022-01-01"
 LABEL_HORIZON = 5
 ALLOCATION_WINDOW = 252
 TURNOVER_INCLUDE_INITIAL = True
+MOMENTUM_WINDOWS = [21, 63, 126]
+MOVING_AVERAGE_WINDOWS = [21, 63]
+VOLATILITY_WINDOW = 21
+SIGNAL_LOOKBACK = 252
+REBALANCE_FREQ = 21
+MAX_SIDE_POSITIONS = 10
+COMMISSION_RATE = 0.001
+SLIPPAGE_RATE = 0.0005
 SEED = 42
 
 # %%
@@ -106,6 +115,24 @@ BACKTEST_START = "2018-01-01"
 
 print(f"Loading data for {len(UNIVERSE)} ETFs...")
 
+
+# %% [markdown]
+# ### What the signal settings decide
+#
+# The three feature windows are calendar spans in trading sessions: roughly a month, a quarter and
+# half a year. Using all three lets the model separate a move that has just started from one that
+# has been running, which a single window cannot do. The volatility window matches the shortest of
+# them, so the risk estimate is measured over the same span as the fastest signal.
+#
+# `SIGNAL_LOOKBACK` is how much history each rebalance's model is fitted on: one trading year, so
+# the fit sees a full seasonal cycle and still forgets a regime four years gone. `REBALANCE_FREQ`
+# of 21 sessions rebalances monthly, which is what keeps turnover in a range the transaction-cost
+# comparison later in the chapter can absorb.
+#
+# `MAX_SIDE_POSITIONS` caps each side of the long-short book. It is a ceiling rather than the
+# count: the code below also refuses to put more than a quarter of the loaded universe on either
+# side, because a long book and a short book that between them name more than half the assets are
+# not selecting anything.
 
 # %% [markdown]
 # ### Load ETF Price Panel
@@ -166,16 +193,11 @@ coverage
 
 
 # %%
-def select_feature_config(n_observations: int) -> dict[str, list[int] | int]:
-    """Scale feature windows to the available history."""
-    if n_observations >= 252:
-        return {"momentum": [21, 63, 126], "moving_average": [21, 63], "volatility": 21}
-    if n_observations >= 126:
-        return {"momentum": [10, 21, 42], "moving_average": [10, 21], "volatility": 10}
-    return {"momentum": [5, 10, 21], "moving_average": [5, 10], "volatility": 5}
-
-
-FEATURE_CONFIG = select_feature_config(len(close_prices))
+FEATURE_CONFIG = {
+    "momentum": MOMENTUM_WINDOWS,
+    "moving_average": MOVING_AVERAGE_WINDOWS,
+    "volatility": VOLATILITY_WINDOW,
+}
 FEATURE_SUFFIXES = [
     *(f"_mom_{window}d" for window in FEATURE_CONFIG["momentum"]),
     *(f"_ma_dist_{window}d" for window in FEATURE_CONFIG["moving_average"]),
@@ -301,7 +323,7 @@ def fit_ridge_model(x_train, y_train):
     """Fit one cross-sectional Ridge model and return scaler + model."""
     scaler = StandardScaler()
     x_train_scaled = scaler.fit_transform(x_train)
-    model = Ridge(alpha=1.0, random_state=42)
+    model = Ridge(alpha=1.0, random_state=SEED)
     model.fit(x_train_scaled, y_train)
     return scaler, model
 
@@ -422,29 +444,20 @@ def generate_ml_signals(
 
 # %%
 print("Generating ML signals (this may take a minute)...")
-if len(close_prices) >= 504:
-    LOOKBACK, REBALANCE_FREQ, TOP_N, BOTTOM_N = 252, 21, 10, 10
-elif len(close_prices) >= 180:
-    LOOKBACK, REBALANCE_FREQ, TOP_N, BOTTOM_N = 126, 10, 5, 5
-else:
-    LOOKBACK, REBALANCE_FREQ, TOP_N, BOTTOM_N = 42, 5, 3, 3
-
 max_side = max(1, close_prices.shape[1] // 4)
-TOP_N = min(TOP_N, max_side)
-BOTTOM_N = min(BOTTOM_N, max_side)
-
+TOP_N = BOTTOM_N = min(MAX_SIDE_POSITIONS, max_side)
 print(
-    "Signal config:",
-    {
-        "lookback": LOOKBACK,
-        "rebalance_freq": REBALANCE_FREQ,
-        "top_n": TOP_N,
-        "bottom_n": BOTTOM_N,
-    },
+    f"Fitting on {SIGNAL_LOOKBACK} sessions of history, rebalancing every {REBALANCE_FREQ}; "
+    f"each side holds {TOP_N} of the {close_prices.shape[1]} funds in the panel "
+    f"(the {MAX_SIDE_POSITIONS}-position ceiling, or a quarter of the universe, whichever binds)."
 )
 
 ml_signals = generate_ml_signals(
-    close_prices, lookback=LOOKBACK, top_n=TOP_N, bottom_n=BOTTOM_N, rebalance_freq=REBALANCE_FREQ
+    close_prices,
+    lookback=SIGNAL_LOOKBACK,
+    top_n=TOP_N,
+    bottom_n=BOTTOM_N,
+    rebalance_freq=REBALANCE_FREQ,
 )
 print(f"Generated {len(ml_signals):,} signal records")
 
@@ -452,18 +465,12 @@ if len(ml_signals) == 0:
     raise ValueError(
         "No ML signals generated from the available ETF panel.\n"
         f"Observations: {len(close_prices)}, assets: {close_prices.shape[1]}, "
-        f"feature windows: {FEATURE_CONFIG}, lookback: {LOOKBACK}.\n"
+        f"feature windows: {FEATURE_CONFIG}, lookback: {SIGNAL_LOOKBACK}.\n"
         "This notebook requires enough history to estimate features and fit the walk-forward "
         "cross-sectional ridge model."
     )
 
-# Pivot to wide format
-if len(ml_signals) > 0:
-    signal_dates = ml_signals["timestamp"].unique()
-    print(f"Signal dates: {len(signal_dates)}")
-else:
-    signal_dates = []
-    print("[TEST] No signal dates available")
+print(f"Signal dates: {ml_signals['timestamp'].nunique()}")
 
 # %% [markdown]
 # ## 4. Portfolio Allocation Methods
@@ -619,7 +626,7 @@ def hrp_allocation(
 
     # Correlation distance and clustering
     corr = subset_returns.corr().values
-    dist = np.sqrt(0.5 * (1 - corr))
+    dist = np.sqrt(np.clip(0.5 * (1 - corr), 0.0, 1.0))
     link = linkage(squareform(dist, checks=False), method="ward")
     sorted_idx = list(leaves_list(link))
 
@@ -718,7 +725,9 @@ def _build_backtest_result(
     metrics["avg_turnover"] = average_rebalance_turnover(turnover_list)
     annual_vol = float(np.std(returns_arr, ddof=1) * np.sqrt(252)) if len(returns_arr) > 1 else 0.0
     return {
-        "dates": dates_list,
+        # datetime64 rather than a list of pandas Timestamps: the static-image writer
+        # that renders each figure's PNG cannot serialize a Timestamp.
+        "dates": np.asarray(dates_list, dtype="datetime64[ns]"),
         "returns": returns_arr,
         "cumulative_return": np.cumprod(1 + returns_arr),
         "turnover": np.asarray(turnover_list, dtype=float),
@@ -819,13 +828,13 @@ for name, fn in allocation_methods.items():
     print(f"  {name}...")
     selection_results[name] = run_backtest(returns, selection_signals, fn, name)
 
-print("Running the sealed holdout diagnostics...")
+print("Running the holdout diagnostics...")
 results = {}
 for name, fn in allocation_methods.items():
     print(f"  {name}...")
     results[name] = run_backtest(returns, holdout_signals, fn, name)
 
-print("Done!")
+print("Both regions complete.")
 
 portfolio_analyses = {
     name: PortfolioAnalysis(returns=result["returns"], dates=result["dates"], periods_per_year=252)
@@ -879,6 +888,20 @@ comparison_df
 # mean per-rebalance half-turnover, $0.5\sum_i|w_{i,t}-w_{i,t-1}|$, over the union of current and
 # prior ETFs. It includes the initial allocation from cash; a switches-only convention would omit
 # the first observation. These four rows remain gross of explicit commission and slippage.
+#
+# The turnover column is the one to read carefully, because it measures two things at once and
+# the table does not separate them. Every rebalance replaces the selected set with whatever the
+# ridge signal now ranks first, and each allocator then sizes what it holds. Both contribute.
+#
+# It is tempting to treat the equal-weight row as the selection's share and the excess as the
+# allocator's, and that does not hold: what a replacement costs depends on the weights being
+# replaced. Dropping a name held at a fifth for another held at a fifth is a fifth of
+# half-turnover; dropping a name held at one percent for another at one percent is one percent.
+# A concentrated allocator therefore has a different selection cost from equal weight's, not the
+# same one plus a margin. Equal weight is a benchmark for what this rebalance schedule costs a
+# book that makes no sizing decision, and separating the two shares for any other row would take
+# turnover computed twice - once over the names entering and leaving, once over the weight
+# changes among the names retained.
 
 # %%
 # Same numbers, formatted for readability
@@ -896,8 +919,8 @@ comparison_df.style.format(
 ).hide(axis="index")
 
 # %% [markdown]
-# **Trading implication**: If a method only marginally improves Sharpe but materially increases
-# turnover, the live edge is likely negative after costs.
+# **Trading implication**: an improvement in Sharpe has to be weighed against the turnover bought
+# with it, and this table reports that turnover gross of any cost. Chapter 18 prices it.
 
 # %% [markdown]
 # ### Practitioner Interpretation
@@ -938,13 +961,16 @@ for name, result in results.items():
 fig.add_hline(y=1.0, line_dash="dot", line_color=COLORS["neutral"])
 
 fig.update_layout(
-    title=f"{holdout_leader} leads the descriptive holdout paths",
+    title="Four allocators on one signal, over the holdout",
     xaxis_title="Date",
     yaxis_title="Cumulative Return",
     height=550,
     legend=dict(orientation="h", x=0, y=1.08),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four cumulative return paths over the holdout, one per allocation method, with the allocator chosen before the holdout drawn thicker.",
+)
 
 # %% [markdown]
 # **Finding**: Sustained curve separation, not short-lived spikes, is the evidence that one
@@ -976,7 +1002,10 @@ fig.update_layout(
     height=400,
     yaxis_tickformat=".0%",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four underwater curves over the holdout, one per allocation method, all at or below zero.",
+)
 
 # %% [markdown]
 # **Trading implication**: Lower and shallower drawdowns can dominate small Sharpe differences
@@ -1021,7 +1050,10 @@ fig.update_layout(
     yaxis_title="Sharpe Ratio",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four rolling 252-day Sharpe ratios against date, crossing each other repeatedly, with reference lines at zero and one.",
+)
 
 # %% [markdown]
 # **Finding**: Rolling Sharpe is a persistence diagnostic. It does not by itself define a regime
@@ -1119,7 +1151,10 @@ fig.update_layout(
     yaxis_title="Relative Return",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three ratio curves against date, each optimized allocation's cumulative return divided by equal weight's, with a dashed line at parity.",
+)
 
 # %% [markdown]
 # **Trading implication**: Relative-performance drift below parity suggests keeping equal-weight
@@ -1138,59 +1173,29 @@ selected_row = comparison_df.loc[comparison_df["Method"] == selected_method].ilo
 equal_row = comparison_df.loc[comparison_df["Method"] == "Equal Weight"].iloc[0]
 selected_gap_vs_ew = float(selected_row["Sharpe Ratio"] - equal_row["Sharpe Ratio"])
 
-print("\n" + "=" * 60)
-print("ALLOCATOR COMPARISON: FROZEN SELECTION READING")
-print("=" * 60)
-print(f"\n  Selected before holdout: {selected_method}")
-print(f"  Holdout Sharpe:          {selected_row['Sharpe Ratio']:.3f}")
-print(f"  IID Sharpe SE:           {selected_row['Sharpe SE (IID)']:.3f}")
-print(f"  Gap vs equal weight:     {selected_gap_vs_ew:+.3f}")
-print(f"  Descriptive leader:      {descriptive_leader['Method']}")
-print("  The descriptive leader is not reselected.")
-print("\n" + "=" * 60)
+print(f"Selected before the holdout: {selected_method}")
+print(f"  its holdout Sharpe:            {selected_row['Sharpe Ratio']:.3f}")
+print(f"  IID standard error:            {selected_row['Sharpe SE (IID)']:.3f}")
+print(f"  gap against equal weight:      {selected_gap_vs_ew:+.3f}")
+print(f"Highest holdout Sharpe:        {descriptive_leader['Method']}")
 
-# %% [markdown]
-# ## Conclusion
+# %% [markdown] tags=["results"]
+# ### What this comparison produced
 #
-# Under identical ML signals, the sealed holdout shows whether a preselected allocator generalizes.
-# Gross return, drawdown, turnover, and uncertainty must be read together.
-
-# %% [markdown]
-# ## Summary
+# Four allocators, one signal, one holdout. The four rows differ only in how capital is spread
+# across the same selected ETFs on the same dates, so the spread between them is the allocation
+# decision and nothing else.
 #
-# The controlled comparison separates selection from evaluation. The four-way holdout table is
-# gross of explicit costs; only the frozen pre-holdout choice enters the execution-aware replay.
-
-# %% [markdown]
-# ## Key Takeaways
+# Read the Sharpe column against three things beside it. The IID standard error says how wide the
+# Sharpe estimate is on this many observations, and it is wide enough that most of the gaps in the
+# table sit inside it. The turnover column says what each allocator would have to trade to hold
+# its weights, and this table is gross of what that trading costs. The `Selected pre-holdout`
+# marker says which allocator was chosen before any of these numbers existed - the only decision
+# the notebook makes, and the only row whose holdout figure is not selected on.
 #
-# ### Allocator Comparison Results:
-#
-# 1. **Same signals, different outcomes**: The allocation method significantly impacts
-#    final performance, even with identical trading signals.
-#
-# 2. **Complexity tradeoffs**: HRP and MVO-LW estimate covariance structure; the
-#    estimation error competes with the signal advantage over equal-weight and inverse
-#    volatility, which is why the ordering across allocators depends on the universe
-#    and sample.
-#
-# 3. **Turnover matters**: Higher-turnover methods incur more transaction costs in live trading.
-#
-# 4. **Regime diagnostics are not a switching rule**: The frozen volatility threshold reveals
-#    conditional performance without reselecting an allocator on the holdout.
-#
-# ### Practical Recommendations:
-#
-# - **Start simple**: Equal weight or inverse volatility are strong baselines
-# - **Test multiple methods**: No single allocation dominates all market conditions
-# - **Consider turnover**: Account for transaction costs when comparing methods
-# - **Diagnose regimes**: Predeclare a rule before using regimes to change allocations
-#
-# ### What's Next (Chapter 19):
-#
-# Historical backtests measure realized risk and return but do not characterize forward
-# risk under regime change. Chapter 19 covers **forward-looking risk analysis**: VaR,
-# CVaR, stress testing, and factor attribution.
+# The regime slice is descriptive in the same way. It splits the holdout at a volatility
+# threshold frozen before it, so the two Sharpe ratios per allocator describe conditional
+# behaviour; no allocator is re-chosen from them.
 
 # %%
 # Final descriptive holdout table, sorted for readability but not used for selection
@@ -1401,10 +1406,6 @@ class AllocatorComparisonStrategy(Strategy):
 
 # %%
 # Prepare canonical OHLCV data for ml4t-backtest
-print("\n" + "=" * 70)
-print("ML4T-BACKTEST HOLDOUT EXECUTION DIAGNOSTIC")
-print("=" * 70)
-
 first_engine_signal = pd.Timestamp(holdout_signals["timestamp"].min()).date()
 prices_long = (
     etf_bars.filter(
@@ -1475,9 +1476,9 @@ engine = Engine(
         initial_cash=100_000,
         execution_mode=ExecutionMode.NEXT_BAR,
         commission_type=CommissionType.PERCENTAGE,
-        commission_rate=0.001,
+        commission_rate=COMMISSION_RATE,
         slippage_type=SlippageType.PERCENTAGE,
-        slippage_rate=0.0005,
+        slippage_rate=SLIPPAGE_RATE,
         allow_short_selling=True,
     ),
 )
@@ -1485,9 +1486,7 @@ engine = Engine(
 ml4t_results = engine.run()
 
 # %%
-print("\n" + "=" * 70)
-print(f"ML4T-BACKTEST HOLDOUT RESULTS ({selected_method})")
-print("=" * 70)
+print(f"Execution-aware holdout replay of {selected_method}:")
 print(f"Final Value:     ${ml4t_results['final_value']:,.2f}")
 print(f"Total Return:    {ml4t_results['total_return_pct']:.2f}%")
 print(f"Sharpe Ratio:    {ml4t_results['sharpe']:.3f}")
@@ -1537,10 +1536,39 @@ print("this notebook does not attribute the return difference to individual mech
 # %% [markdown]
 # ## Key Takeaways
 #
-# Simple allocators remain competitive because they avoid the estimation error
-# that destabilizes more expressive optimizers. The execution-aware bridge reports
-# the preselected allocator under one combined cost and fill schedule; it does not
-# isolate individual mechanisms.
+# 1. **The same signal allocated four ways gives four results.** Selection decides what is held
+#    and allocation decides how much of each, and the second is not a detail: the spread across
+#    these four rows comes entirely from it.
+# 2. **The allocators that estimate a covariance pay for the estimate.** Minimum variance and
+#    HRP both read the second moment; equal weight and inverse volatility read little or none of
+#    it. Whether the estimate earns its error depends on the universe width and the sample, which
+#    is why the ordering here is a fact about this run rather than a ranking of methods.
+# 3. **Select once, before the evaluation window opens.** The pre-holdout region makes the choice
+#    and the holdout describes what that choice went on to do. Reading the holdout table and then
+#    picking the top row would turn the holdout into a second selection window, and there would be
+#    nothing left to test the choice against.
+# 4. **The standard error in the table bounds one estimate, not a comparison.** It says how
+#    precisely each allocator's own Sharpe ratio is measured on this many observations, and it
+#    does not say whether two of them differ. The uncertainty of a gap is
+#    $\text{Var}(S_1) + \text{Var}(S_2) - 2\,\text{Cov}(S_1, S_2)$, and these four allocators
+#    hold the same assets on the same dates from one signal, so that covariance term is not
+#    zero and the gap's uncertainty is not read off the two levels. Measuring it takes a paired
+#    block bootstrap: resample blocks of dates, recompute both Sharpe ratios on the same
+#    resampled dates, and read the distribution of their difference. Blocks rather than single
+#    days, because daily returns are serially dependent and the IID formula in the table does
+#    not carry that.
+# 5. **Turnover is the part of an allocator's cost the gross table hides.** A method that improves
+#    Sharpe while trading twice as much has not been shown to be better until the trading is
+#    priced, which Chapter 18 does.
 #
-# **Next**: Ch20's [`05_portfolio_allocation`](../20_strategy_synthesis/05_portfolio_allocation.ipynb)
-# tests whether the same ranking holds across the full case-study set.
+# ### Known limitations
+#
+# - One universe, one signal, one selection region and one holdout. A different split date would
+#   refit the signal and could change which allocator is selected.
+# - The four-way table is gross of commission and slippage. Only the preselected allocator is
+#   replayed through the execution engine, and that replay applies costs and next-bar fills
+#   together, so it does not separate the two.
+# - The universe is a fixed list of funds that exist today, applied backwards over the sample.
+#
+# **Next**: [`11_dl_portfolio_allocation`](11_dl_portfolio_allocation.ipynb) replaces the
+# allocation rule with a network that learns the weights directly from the return series.

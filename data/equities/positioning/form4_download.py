@@ -29,16 +29,20 @@ Output:
     script skips filings already on disk.
 
 Requirements:
-    - edgartools: pip install edgartools
+    - edgartools (installed by `uv sync`)
+    - EDGAR_IDENTITY: your own name and email, on that line of `.env` in the
+      repository root. The SEC requires a real User-Agent on every request.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
 
+# Importing utils loads .env into os.environ, which is where EDGAR_IDENTITY lives.
 from utils.downloading import print_section, resolve_data_dir
 
 
@@ -161,13 +165,27 @@ def main() -> int:
     print(f"Output:   {output_dir}")
     print()
 
+    # The SEC requires a real User-Agent on every request and attributes the
+    # traffic to whoever it names, so this is the reader's own identity rather
+    # than a hardcoded one.
     try:
         from edgar import set_identity
-
-        set_identity("ML4T Book stefan@ml4trading.io")
     except ImportError:
-        print("ERROR: edgartools not installed. Run: pip install edgartools")
+        print("ERROR: edgartools not installed. Run: uv sync")
         return 1
+
+    identity = os.environ.get("EDGAR_IDENTITY", "").strip()
+    if not identity:
+        print(
+            "ERROR: EDGAR_IDENTITY is not set. The SEC requires a real User-Agent\n"
+            "(your name and email) on every EDGAR request and blocks placeholder\n"
+            "addresses. It is free and needs no account: put your own name and\n"
+            "email on the EDGAR_IDENTITY= line of .env in the repository root,\n"
+            "        EDGAR_IDENTITY=Jane Doe jane@example.org\n"
+            "or export it in this shell before re-running."
+        )
+        return 1
+    set_identity(identity)
 
     t0 = time.time()
     total_written = 0

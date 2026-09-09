@@ -18,37 +18,43 @@
 #
 # **Docker image**: `ml4t`
 #
-# When multiple agents produce probability estimates, how do you combine them?
-# Simple averaging is a strong baseline, while extremization and calibration add
-# assumptions that must be validated. This notebook teaches **Neyman
-# extremization** and **Platt scaling** as conditional tools for combining
-# probability forecasts.
+# Several agents have each returned a probability for the same question. Averaging them is the
+# obvious move and it is a strong baseline, but it treats three agents that read the same
+# article as three independent observations, and it treats a panel that split down the middle
+# the same as one that agreed. This notebook is the arithmetic for doing better, and for
+# knowing when the arithmetic is not earning its assumptions.
+#
+# There are no model calls here. Everything is closed-form or a grid search over a few hundred
+# synthetic forecasts, which is why it is worth reading before the multi-agent notebooks rather
+# than after: what a panel is worth is a question about correlation and calibration, not about
+# prompting.
 #
 # **Learning Objectives**:
-# - Understand why simple averaging underweights agreement
-# - Implement Neyman extremization with the diversity factor $d$
-# - Visualize how correlation between forecasters affects the aggregate
-# - Apply Platt scaling for post-hoc probability calibration
+# - Combine several probability forecasts into one, and say what assumption about the
+#   forecasters each combination rule is making
+# - Compute the diversity factor that decides how far a panel's agreement moves the aggregate
+#   away from the base rate
+# - Show how far the aggregate travels when only the assumed correlation changes, and read that
+#   as a bound on how much extremization can be trusted
+# - Fit a calibration exponent on resolved forecasts, freeze it, and score it on observations
+#   it never saw
 #
 # **Book Reference**: Chapter 24, Section 24.7 (Multi-Agent Forecasting Systems:
 # Aggregation)
 #
-# **Prerequisites**: None; this is pure math, with no LLM calls.
+# **Prerequisites**: None. Nothing here calls a model.
 
 # %%
 """From Opinions to Probabilities: aggregation math for multi-agent forecasting."""
 
 import math
-import warnings
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from agent_pipeline import (
     brier_score,
-    find_optimal_d,
+    fit_extremization_exponent,
     logodds_extremize,
     neyman_extremize,
     neyman_extremize_weighted,
@@ -56,10 +62,23 @@ from agent_pipeline import (
 )
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, format_pct_axis, ml4t_palette
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    format_pct_axis,
+    ml4t_palette,
+    show_with_alt,
+)
+
+# %% [markdown]
+# ## Settings
+#
+# `SEED` fixes the simulated forecast panel used in the calibration section, so the fitted
+# exponent and the held-out scores are the same on every machine. Nothing else in the notebook
+# is random.
 
 # %% tags=["parameters"]
-N_FORECASTERS = 3
 SEED = 42
 
 # %%
@@ -68,55 +87,61 @@ set_global_seeds(SEED)
 # %% [markdown]
 # ## The Averaging Problem
 #
-# Suppose three analysts each estimate a 65% probability that NVIDIA beats
-# earnings. Simple averaging gives 65%. Under an exchangeable correlation model,
-# Neyman extremization treats agreement among less-correlated forecasters as
-# additional information.
+# Three analysts each put the probability of the same event at the same level, comfortably
+# above even odds. The mean of three identical numbers is that number, so simple averaging
+# returns exactly what any one of them said and the panel has bought nothing.
 #
-# **Neyman extremization** formalizes that assumption: the aggregate
-# should be pushed away from the base rate (50%) proportional to a **diversity
-# factor** $d$:
+# That is the right answer if the three are the same analyst three times over: three people who
+# read the same wire story and reached the same conclusion are one observation. It is the wrong
+# answer if they worked independently, because three independent routes to the same place is
+# stronger evidence than one, and the aggregate should sit further from the base rate than any
+# individual estimate.
 #
-# $$d = \sqrt{\frac{n}{1 + (n-1)\rho}}$$
+# **Neyman extremization** makes that adjustment explicit. It pushes the mean away from the
+# base rate by a **diversity factor** $d$:
 #
-# where $n$ is the number of forecasters and $\rho$ is their pairwise correlation.
+# $$d = \sqrt{\frac{n}{1 + (n-1)\rho}}, \qquad
+# p_{\text{extreme}} = p_{\text{base}} + d \cdot (\bar{p} - p_{\text{base}})$$
 #
-# $$p_{\text{extreme}} = p_{\text{base}} + d \cdot (\bar{p} - p_{\text{base}})$$
+# where $n$ is the number of forecasters and $\rho$ is the correlation assumed between any two
+# of them. With $\rho$ at zero, $d$ is $\sqrt{n}$ and the panel counts fully; as $\rho$ rises
+# toward one, $d$ falls toward one and the panel counts as a single forecaster. The
+# implementation clamps $d$ to lie between one and three, and clamps the result just inside the
+# unit interval, so an extreme assumption cannot invert the adjustment or return a certainty.
 
 # %%
-# Three forecasters at 65%, with varying correlation assumptions
 probs = [0.65, 0.65, 0.65]
+assumptions = [
+    ("independent", 0.0),
+    ("moderately correlated", 0.3),
+    ("heavily correlated", 0.7),
+]
+correlation_results = [
+    (label, rho, neyman_extremize(probs, base=0.5, correlation=rho)) for label, rho in assumptions
+]
 
-# Independent (rho=0): maximum diversity benefit
-result_independent = neyman_extremize(probs, base=0.5, correlation=0.0)
-print(
-    f"Independent (ρ=0.0): d={result_independent.extremization_factor:.2f}, "
-    f"p={result_independent.extremized_probability:.2f}"
-)
-
-# Moderately correlated (rho=0.3): typical for financial analysts
-result_moderate = neyman_extremize(probs, base=0.5, correlation=0.3)
-print(
-    f"Moderate (ρ=0.3):    d={result_moderate.extremization_factor:.2f}, "
-    f"p={result_moderate.extremized_probability:.2f}"
-)
-
-# Highly correlated (rho=0.7): analysts reading the same research
-result_correlated = neyman_extremize(probs, base=0.5, correlation=0.7)
-print(
-    f"Correlated (ρ=0.7):  d={result_correlated.extremization_factor:.2f}, "
-    f"p={result_correlated.extremized_probability:.2f}"
+pl.DataFrame(
+    {
+        "forecasters assumed": [label for label, _, _ in correlation_results],
+        "rho": [rho for _, rho, _ in correlation_results],
+        "diversity factor d": [r.extremization_factor for _, _, r in correlation_results],
+        "aggregate": [r.extremized_probability for _, _, r in correlation_results],
+    }
 )
 
 # %% [markdown]
-# **Finding**: Under the stated correlation assumptions, lower correlation produces
-# stronger extremization. The result is conditional on $\rho$; the notebook does
-# not estimate forecaster dependence from data.
+# The three correlation assumptions are the same three forecasts read three ways. Treated as
+# independent, they carry three observations and the aggregate moves furthest from the base
+# rate; treated as heavily correlated, they carry barely more than one and the aggregate stays
+# close to what any single analyst said. Nothing about the forecasts changed between the three
+# lines. The whole difference is an assumption, and it is the assumption a real deployment has
+# to earn rather than choose.
 
 # %% [markdown]
-# ## Visualizing the Extremization Factor
+# ## How the Diversity Factor Behaves
 #
-# How does $d$ change with the number of forecasters and their correlation?
+# Two questions decide whether extremization is worth having. How much does $d$ grow as agents
+# are added, and how much does the aggregate move when the correlation assumption changes?
 
 # %%
 correlations = [0.0, 0.1, 0.3, 0.5, 0.7]
@@ -134,9 +159,8 @@ diversity_series = [
 ]
 
 # %% [markdown]
-# ### Aggregate sensitivity
-#
-# The second panel holds the mean forecast fixed and varies the correlation input.
+# The second panel holds the mean forecast and the base rate fixed and sweeps the correlation,
+# so the only thing moving is the assumption.
 
 # %%
 mean_p = 0.65
@@ -158,11 +182,8 @@ for n, color, line_style in zip(
     aggregate_series.append((n, agg_probs, color, line_style))
 
 # %% [markdown]
-# ### Combined sensitivity view
-#
-# Both panels are constructed and displayed in one cell so the saved notebook
-# artifact contains the complete figure.
-
+# Both panels are drawn together because they answer two halves of one question: what the
+# diversity factor does, and what it does to an aggregate.
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
@@ -176,72 +197,93 @@ for rho, values, color, line_style in diversity_series:
         linestyle=line_style,
         label=f"ρ={rho}",
     )
-axes[0].set(xlabel="Number of Forecasters", ylabel="Diversity Factor d")
-add_message_title(axes[0], "Correlation limits diversity")
+axes[0].set(xlabel="Number of forecasters", ylabel="Diversity factor d")
+add_message_title(axes[0], "Correlation, not panel size, sets the ceiling on d")
 axes[0].legend()
 axes[0].axhline(1.0, color=COLORS["neutral"], linestyle="--", alpha=0.6)
 
 for n, values, color, line_style in aggregate_series:
     axes[1].plot(rho_range, values, color=color, linestyle=line_style, label=f"n={n}")
-axes[1].set(xlabel="Forecaster Correlation (ρ)", ylabel="Aggregate Probability")
-add_message_title(axes[1], "Aggregate sensitivity", subtitle="From a 65% mean forecast")
+axes[1].set(xlabel="Assumed forecaster correlation (ρ)", ylabel="Aggregate probability")
+add_message_title(
+    axes[1],
+    "The correlation you assume moves the aggregate more than the panel size",
+    subtitle="Mean forecast held fixed; dashed line marks the unextremized mean",
+)
 axes[1].legend()
-axes[1].axhline(0.65, color=COLORS["neutral"], linestyle="--", alpha=0.6)
+axes[1].axhline(mean_p, color=COLORS["neutral"], linestyle="--", alpha=0.6)
 format_pct_axis(axes[1])
-fig.tight_layout()
-fig.show()
-
-# %% [markdown]
-# **Interpretation**: More forecasters increase $d$ with diminishing returns when
-# correlation is positive. These are sensitivity curves over an assumed common
-# correlation, not estimates of information added by real agents.
-
-# %% [markdown]
-# ## Observed Dispersion Is Not in the Formula
-#
-# This Neyman implementation uses the mean, panel size, and assumed correlation.
-# Two panels with the same mean receive the same aggregate even when their observed
-# dispersion differs.
-
-# %%
-# Same mean, different dispersion
-divergent = [0.80, 0.65, 0.50]
-result_divergent = neyman_extremize(divergent, base=0.5, correlation=0.3)
-
-print(f"Specialist probabilities: {divergent}")
-print(f"Simple mean: {sum(divergent) / len(divergent):.2f}")
-print(
-    f"Neyman (ρ=0.3): {result_divergent.extremized_probability:.2f} "
-    f"(d={result_divergent.extremization_factor:.2f})"
+show_with_alt(
+    fig,
+    "Two panels. On the left, the diversity factor against the number of forecasters for five "
+    "assumed correlations: the independent curve keeps rising while the correlated ones flatten "
+    "early. On the right, the aggregate probability against the assumed correlation for four "
+    "panel sizes, with the mean forecast held fixed: every curve falls toward the unextremized "
+    f"mean of {mean_p:.0%} as the assumed correlation rises.",
 )
 
-# Compare: tight panel with the same mean
-tight = [0.64, 0.65, 0.66]
-result_tight = neyman_extremize(tight, base=0.5, correlation=0.3)
-
-print(f"\nTight agreement: {tight}")
-print(f"Simple mean: {sum(tight) / len(tight):.2f}")
-print(f"Neyman (ρ=0.3): {result_tight.extremized_probability:.2f}")
+# %% [markdown]
+# The left panel is the diminishing return: each additional forecaster adds less than the last,
+# and the curves flatten sooner the higher the correlation. The right panel is the part worth
+# sitting with. Hold the mean forecast fixed and sweep only the assumed correlation, and the
+# aggregate travels a long way. Nothing about the evidence changed along any of those lines.
+# An analyst choosing $\rho$ by feel is choosing the answer, which is why the number has to
+# come from somewhere defensible or the extremization step should be left out.
 
 # %% [markdown]
-# **Finding**: Both panels produce the same aggregate because their means and assumed
-# correlations match. Observed dispersion must inform a separately estimated
-# dependence model or another aggregation rule; this formula does not infer it.
+# ## The Panel's Spread Does Not Enter the Formula
+#
+# The diversity factor reads three things: the panel size, the assumed correlation, and the
+# mean. It does not read how far apart the forecasts are. Two panels can therefore be handed the
+# same aggregate while telling a supervisor completely different stories - one where the agents
+# converged, and one where they split and happened to average out.
+
+# %%
+panels = [("split", [0.80, 0.65, 0.50]), ("agreed", [0.64, 0.65, 0.66])]
+panel_results = [
+    (label, panel, neyman_extremize(panel, base=0.5, correlation=0.3)) for label, panel in panels
+]
+
+pl.DataFrame(
+    {
+        "panel": [label for label, _, _ in panel_results],
+        "forecasts": [str(panel) for _, panel, _ in panel_results],
+        "mean": [r.raw_probability for _, _, r in panel_results],
+        "diversity factor d": [r.extremization_factor for _, _, r in panel_results],
+        "aggregate": [r.extremized_probability for _, _, r in panel_results],
+    }
+)
+# %% [markdown]
+# Identical aggregates from panels a reader would treat very differently. The rule reads three
+# inputs - the mean, the panel size, and the assumed correlation - and the spread is not one of
+# them, so this is a limit on what the formula can be asked rather than a claim that dispersion
+# carries nothing. If the spread should change the answer, it has to enter somewhere else:
+# through a dependence model estimated from the panel, or through a rule that reads the
+# distribution instead of its mean. Spread is not wasted meanwhile:
+# [`07_adversarial_debate`](07_adversarial_debate.ipynb) uses a split panel as the trigger for
+# making the agents argue, which is a use for dispersion that does not require putting it in
+# the aggregation.
 
 # %% [markdown]
 # ## Platt Scaling: Post-Hoc Calibration
 #
-# **Platt scaling** adjusts probabilities based on observed calibration. The formula:
+# Extremization asks how much a panel's agreement is worth. **Calibration** asks a different
+# question: whether this forecaster's stated probabilities mean what they say. A forecaster
+# who says seventy percent on a hundred questions and is right ninety times is systematically
+# under-confident, and the fix is a transformation fitted on resolved forecasts rather than an
+# argument about correlation.
+#
+# **Platt scaling** is that transformation:
 #
 # $$p' = \frac{d \cdot p^a}{d \cdot p^a + (1-p)^a}$$
 #
-# - $a > 1$ pushes probabilities away from 0.5 (under-confident agents)
-# - $a < 1$ pulls probabilities toward 0.5 (over-confident agents)
-# - $d$ shifts the midpoint asymmetrically
+# The exponent $a$ controls how far probabilities are pushed toward the ends: above one they
+# spread out, below one they pull toward the middle, and at one nothing happens. The factor
+# $d$ tilts the whole curve, moving the probability that maps to itself away from even odds,
+# which is what corrects a forecaster biased toward one outcome.
 #
-# This is algebraically equivalent to the chapter's logistic parameterization,
-# $p' = \sigma(a \cdot \text{logit}(p) + \log d)$; the two notations match
-# with $b = \log d$.
+# The chapter's other notebooks write the same function as
+# $p' = \sigma(a \cdot \text{logit}(p) + \log d)$, which is the same map with $b = \log d$.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -277,30 +319,41 @@ add_message_title(ax, "Parameter a controls compression or extremization")
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
 format_pct_axis(ax, axis="both")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Four Platt scaling curves plotted against the identity diagonal on a square axis. The "
+    "curve for an exponent below one bows toward the middle of the range, compressing "
+    "probabilities toward even odds; the curves for exponents above one bow toward the corners, "
+    "pushing probabilities out to the ends.",
+)
 
 # %% [markdown]
-# **Interpretation**: Values above one extremize and values below one compress.
-# Whether either is appropriate must be learned from resolved training forecasts
-# and evaluated on disjoint data. A post-aggregation calibrator is valid when that
-# complete pipeline is fit and tested without reuse.
+# Above one the curve bows away from the diagonal and probabilities move toward the ends;
+# below one it bows toward the middle. Which direction a given forecaster needs is not
+# something the curve can say. It is measured against resolved forecasts, and the measurement
+# has to be made on observations the transformation was not fitted to, or it will report the
+# improvement it was constructed to produce.
 
 # %% [markdown]
-# ## Weighted Neyman Extremization
+# ## Weighting the Panel
 #
-# When a design supplies defensible forecast weights, **Weighted Neyman** uses the
-# Herfindahl index to compute a weight-only effective sample size:
+# Agents are not always interchangeable. When a design can defend giving one more weight than
+# another - a specialist on the sector in question, an agent with a track record on this class
+# of question - the mean becomes a weighted mean, and the panel size has to be adjusted to
+# match. Three agents where one carries most of the weight is not three forecasters.
 #
-# $$\text{HI} = \sum w_i^2, \quad n_{\text{weight}} = \frac{1}{\text{HI}}$$
+# The **Herfindahl index** measures that concentration. It is the sum of the squared normalized
+# weights, and its reciprocal is the number of equally-weighted forecasters that would be as
+# concentrated:
 #
-# A uniform weighting gives $n_{\text{weight}} = n$. Concentrating weight on
-# one agent reduces it toward 1. The assumed common correlation then produces
-# $n_{\text{adjusted}} = n_{\text{weight}} /
-# [1 + (n_{\text{weight}} - 1)\rho]$, which drives extremization.
+# $$\text{HI} = \sum w_i^2, \qquad n_{\text{weight}} = \frac{1}{\text{HI}}$$
+#
+# Uniform weights give back the panel size exactly; putting everything on one agent gives one.
+# The correlation adjustment then applies on top,
+# $n_{\text{adjusted}} = n_{\text{weight}} / [1 + (n_{\text{weight}} - 1)\rho]$, and it is the
+# adjusted figure that becomes $d^2$.
 
 # %%
-# Three agents with different illustrative weights
 probs_w = [0.72, 0.58, 0.65]
 weights_equal = [1.0, 1.0, 1.0]
 weights_skewed = [0.8, 0.3, 0.5]
@@ -334,19 +387,24 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# **Finding**: With skewed weights, the weighted mean shifts toward the most
-# heavily weighted agent (0.72). The weight-only effective size falls from 3.00
-# to 2.61; after the $\rho=0.3$ adjustment, the values are 1.88 and 1.76. The
-# adjusted value drives the smaller extremization push.
-
+# Two things move when the weights are skewed, and they move in opposite directions. The mean
+# shifts toward the agent carrying the most weight, which raises the aggregate. The effective
+# panel size falls, because concentrating weight on one forecaster is closer to consulting one
+# forecaster, which lowers $d$ and pushes the aggregate back toward the base rate. The table
+# above shows both, and the correlation adjustment shrinks the effective size again on top of
 # %% [markdown]
 # ## Log-Odds Extremization
 #
-# An alternative to Neyman: operate in **log-odds space** where the transformation
-# is naturally symmetric around 0.5:
+# The same transformation, written where it is easiest to reason about. **Log-odds**, or the
+# **logit**, is $\log\frac{p}{1-p}$: the log of the ratio of the two outcomes' probabilities.
+# It maps the unit interval onto the whole real line, sends even odds to zero, and is symmetric
+# about it, so "twice as confident" becomes multiplication rather than a curve:
 #
-# $$p' = \sigma(a \cdot \text{logit}(p)), \quad \text{logit}(p) = \log\frac{p}{1-p}$$
+# $$p' = \sigma(a \cdot \text{logit}(p)), \qquad \sigma(x) = \frac{1}{1 + e^{-x}}$$
 #
+# Multiplying the log-odds by $a$ says the aggregate carries $a$ times the evidence the raw
+# probability did. Above one extremizes, below one compresses, and one leaves the probability
+# alone.
 # This has the same effect as Platt scaling but is parameterized more intuitively:
 # $a > 1$ extremizes, $a < 1$ compresses.
 
@@ -376,23 +434,41 @@ add_message_title(ax, "Log-odds scaling preserves symmetry around 50%")
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
 format_pct_axis(ax, axis="both")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Four log-odds transformation curves plotted against the identity diagonal on a square "
+    "axis. Exponents above one bow away from the diagonal toward the corners, exponents below "
+    "one bow toward the middle, and every curve passes through even odds, so the family is "
+    "symmetric about that point.",
+)
 
 # %% [markdown]
-# **Interpretation**: Log-odds extremization produces curves very similar to Platt
-# scaling but operates in a more interpretable space. The parameter $a$ directly
-# controls how aggressively probabilities move toward 0 or 1. The parameter must
-# be fit on resolved forecasts and evaluated out of sample.
+# The curves are the same family as Platt's, and the parameterisation is the one worth keeping:
+# $a$ multiplies the log-odds, so it says directly how much more evidence the aggregate is
+# being credited with than the raw probability carried. Whether $a$ should exceed one is not
+# something the shape of the curve can answer; it comes from resolved forecasts, which is the
+# subject of the next section.
 
 # %% [markdown]
-# ## Finding the Optimal Calibration Parameter
+# ## Fitting the Exponent on Resolved Forecasts
 #
-# Given resolved forecasts, we can fit $a$ on a training panel and evaluate the
-# frozen transformation on a disjoint test panel.
+# Everything above takes $a$ as given. Choosing it needs forecasts whose outcomes are known:
+# grid-search the exponent that minimizes Brier score over a training panel, freeze it, and
+# score it on observations it never saw. `fit_extremization_exponent` does the search; the
+# separation is the caller's job and is the part that gets skipped.
+#
+# A grid search returns where it stopped. If the minimum lies outside the range searched, that
+# is the end of the range rather than a minimum, and the assertion below refuses the fit rather
+# than reporting a bound as an answer. [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb)
+# runs into exactly that case and shows what it costs an evaluation.
+#
+# The panel here is simulated, with the generating process visible: a true probability drawn
+# from a symmetric Beta, an outcome drawn against it, and a forecast that shrinks the true
+# probability toward even odds and adds noise. That shrinkage is the miscalibration the
+# exponent is supposed to undo, so the demonstration has a known right answer, which is what
+# makes it a check on the procedure rather than a result about agents.
 
 # %%
-# Simulated resolved forecasts for a deterministic train/test demonstration
 set_global_seeds(SEED)
 n_questions = 240
 train_size = 160
@@ -406,9 +482,13 @@ train_outcomes = outcomes[:train_size]
 test_forecasts = raw_forecasts[train_size:]
 test_outcomes = outcomes[train_size:]
 
-calibration_fit = find_optimal_d(train_forecasts, train_outcomes)
+calibration_fit = fit_extremization_exponent(train_forecasts, train_outcomes)
+assert not calibration_fit.at_search_boundary, (
+    "the search stopped at an end of its range, so the exponent is a bound and not a minimum"
+)
 test_calibrated = [
-    logodds_extremize(probability, calibration_fit.optimal_d) for probability in test_forecasts
+    logodds_extremize(probability, calibration_fit.optimal_exponent)
+    for probability in test_forecasts
 ]
 test_brier_before = brier_score(test_forecasts, test_outcomes)
 test_brier_after = brier_score(test_calibrated, test_outcomes)
@@ -416,13 +496,19 @@ test_improvement = (test_brier_before - test_brier_after) / test_brier_before
 
 print(f"Train observations: {len(train_forecasts)}")
 print(f"Test observations:  {len(test_forecasts)}")
-print(f"Train-fitted a:     {calibration_fit.optimal_d:.3f}")
+print(f"Fitted exponent a:  {calibration_fit.optimal_exponent:.3f}")
+print(
+    f"Searched range:     {calibration_fit.searched_range[0]} to {calibration_fit.searched_range[1]}"
+)
 print(f"Test Brier before:  {test_brier_before:.4f}")
 print(f"Test Brier after:   {test_brier_after:.4f}")
 print(f"Test improvement:   {test_improvement:.1%}")
 
+# %% [markdown]
+# The comparison below is drawn from the held-out panel alone: the exponent was chosen on the
+# training observations and applied to these unchanged.
+
 # %%
-# Visualize the held-out comparison
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 test_briers = [test_brier_before, test_brier_after]
 bars = ax.bar(
@@ -432,33 +518,45 @@ bars = ax.bar(
     width=0.58,
 )
 ax.bar_label(bars, labels=[f"{value:.3f}" for value in test_briers], padding=3)
-ax.set_xlabel("Held-Out Forecast")
-ax.set_ylabel("Brier Score (Lower Is Better)")
+ax.set_xlabel("Held-out forecasts")
+ax.set_ylabel("Brier score (lower is better)")
 ax.set_ylim(0, max(test_briers) * 1.2)
 add_message_title(
     ax,
-    f"Held-out Brier changes by {test_improvement:.1%}",
-    subtitle=f"Parameter a={calibration_fit.optimal_d:.2f} fit on training observations only",
+    "A calibration fitted on one panel carries to another",
+    subtitle="Exponent fit on the training observations only, then frozen",
 )
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    f"Two bars of Brier score on the held-out panel: {test_brier_before:.3f} for the raw "
+    f"forecasts and {test_brier_after:.3f} after the fitted exponent is applied. Lower is "
+    "better.",
+)
 
 # %% [markdown]
-# **Finding**: The coefficient is selected using training observations only, and
-# the displayed Brier comparison comes only from the held-out panel. This small
-# synthetic example demonstrates evaluation mechanics, not a deployable estimate
-# of future calibration benefit.
-
-# %% [markdown]
-# ## Sensitivity Analysis: How Many Agents Do You Need?
+# The improvement is small, and on this data it should be. The forecasts were simulated by
+# shrinking each probability linearly toward even odds and adding noise. A log-odds exponent
+# does not invert a linear shrinkage: it can only be the single exponent that minimizes Brier
+# score across the range, closer at some probabilities than at others, and the added noise is
+# not correctable at all. So the fit is an approximate correction to an approximate
+# description of the miscalibration, which is the ordinary case.
 #
-# A practical question: given a budget for LLM calls, how many specialist agents
-# should you run?
+# What the comparison establishes is the procedure: fit on one panel, freeze, score on another.
+# Read the same two numbers off a fit evaluated on its own training observations and they say
+# nothing, because the exponent was chosen to make them look that way.
+
+# %% [markdown]
+# ## How Many Agents Are Worth Running
+#
+# Each agent costs model calls, and the previous sections have already said what the answer
+# depends on. Plotting effective panel size against agent count makes the shape of the
+# trade-off explicit: the vertical axis is $d^2$, the number of independent forecasters the
+# panel is worth, against the number actually being paid for.
 
 # %%
+agent_counts = list(range(1, 11))
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 
-# Fixed per-agent probability, varying n and rho
 for rho, color, line_style in zip(
     [0.1, 0.3, 0.5],
     ml4t_palette(3, categorical=True),
@@ -466,7 +564,6 @@ for rho, color, line_style in zip(
     strict=True,
 ):
     effective_n = []
-    agent_counts = list(range(1, 11))
     for n in agent_counts:
         denom = 1 + (n - 1) * rho
         d = math.sqrt(n / denom) if denom > 0 else 1.0
@@ -487,42 +584,64 @@ ax.plot(
     color=COLORS["neutral"],
     linestyle="--",
     alpha=0.6,
-    label="n_eff = n (independent)",
+    label="Independent agents",
 )
-ax.set_xlabel("Number of Agents")
-ax.set_ylabel("Effective N (information content)")
+ax.set_xlabel("Agents run")
+ax.set_ylabel("Effective panel size")
 add_message_title(
     ax,
-    "Positive correlation bounds effective panel size",
-    subtitle=r"For fixed ρ > 0, effective N approaches 1/ρ",
+    "Correlated agents stop adding information long before the budget runs out",
+    subtitle=r"Effective size is $d^2$; for fixed ρ > 0 it approaches 1/ρ",
 )
 ax.legend()
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Line chart of effective panel size against the number of agents run, for three assumed "
+    "correlations. A dashed diagonal marks the independent case where the two are equal. Each "
+    "curve rises steeply for the first few agents and then flattens well below the diagonal, "
+    "each against a ceiling set by its own assumed correlation rather than by the agent count.",
+)
 
 # %% [markdown]
-# **Finding**: For fixed positive $\rho$, effective $N$ approaches $1/\rho$ as
-# the panel grows. At $\rho=0.3$, the limit is about 3.33 and the ten-agent panel
-# reaches 2.70. These are analytical consequences of the assumed correlation.
+# Effective size rises steeply for the first few agents and then flattens against a ceiling
+# that depends only on the correlation: for fixed $\rho > 0$ it approaches $1/\rho$ however
+# many agents are added. That ceiling is where the budget question gets its answer. Agents past
+# the point where the curve bends are paying full price for a fraction of an observation, and
+# the way to buy more information is to lower $\rho$ rather than to raise $n$: different
+# evidence, different framings, different models.
+#
+# This is arithmetic, not a measurement. It says what the formula implies for an assumed
+# correlation, and the correlation is the thing nobody has estimated.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Simple averaging is the baseline**: Extremization must improve on it out of sample
-# 2. **Neyman extremization** formalizes a conditional information model via the
-#    diversity factor $d = \sqrt{n / (1 + (n-1)\rho)}$
-# 3. **Weighted Neyman** accounts for heterogeneous confidence via the Herfindahl
-#    index, preventing over-extremization when one agent dominates
-# 4. **Observed dispersion is separate**: This formula uses assumed correlation,
-#    not the realized spread of panel forecasts
-# 5. **Effective N is bounded**: For fixed $\rho > 0$, it approaches $1/\rho$
-# 6. **Calibration needs separation**: Fit transformations on resolved training
-#    forecasts and evaluate them on held-out observations
+# 1. **The mean is the baseline anything else has to beat, out of sample.** Extremization and
+#    calibration are adjustments to it, and an adjustment fitted on the data it is evaluated on
+#    has not been evaluated.
+# 2. **Extremization is a claim about independence, not about agreement.** Agents that agree
+#    because they read the same three articles carry one observation between them. The whole
+#    question is $\rho$, and this formula takes it as an input rather than estimating it.
+# 3. **The panel's spread does not enter the formula.** Three agents at 20, 65 and 90 percent
+#    and three within a point of each other produce the same aggregate at the same assumed
+#    correlation. If dispersion should matter, it has to enter through an estimated dependence
+#    model or a different rule.
+# 4. **Adding agents runs into a ceiling that depends on the correlation, not the budget.**
+#    Effective size approaches $1/\rho$, so diversity is bought by changing what the agents
+#    read, not by running more of them.
+# 5. **A calibration parameter is fitted, frozen, and then evaluated on observations it never
+#    saw.** Any other order measures how well a curve fits the points it was drawn through.
 #
-# **Next**: [`06_multi_agent_research`](06_multi_agent_research.ipynb), which tests
-# whether running multiple identical research agents on the same question
-# actually produces diversity worth aggregating, or whether the panel
-# collapses to a single mode.
+# **Known limitations of what is built here.** Every result on this page is conditional on a
+# correlation nobody measured, and the panel is assumed exchangeable: one $\rho$ for every
+# pair. The clamps that keep the output well-defined are not part of the theory, so an
+# aggregate near the bounds is partly an artifact of them. The calibration demonstration runs
+# on simulated forecasts drawn from a known generating process, which is the easiest possible
+# case: real forecast panels are small, resolve slowly, and are not identically distributed.
+#
+# **Next**: [`06_multi_agent_research`](06_multi_agent_research.ipynb) asks whether running
+# several identical research agents on one question produces a panel worth aggregating at all,
+# or whether they land in the same place.
 #
 # **Book**: Section 24.7 covers aggregation theory, including connections to
 # Condorcet's jury theorem and prediction market design.

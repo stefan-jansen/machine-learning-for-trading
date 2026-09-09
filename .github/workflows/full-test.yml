@@ -185,7 +185,7 @@ jobs:
         run: |
           python -m pytest tests/test_docker_notebooks.py \
             -v --tb=short \
-            -k "03_sigcwgan or 06_path_signatures or 12_wasserstein \
+            -k "03_sigcwgan or 06_path_signatures \
                 or 01_word2vec or 02_asset_embeddings or 03_sentiment_evolution \
                 or 01_timegan or 07_dp_gan \
                 or 10_shap_nlp_sentiment or 06_conditional_autoencoder \

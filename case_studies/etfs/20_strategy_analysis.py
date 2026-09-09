@@ -111,8 +111,8 @@ from case_studies.utils.strategy_analysis import (
     plot_concentration_curve,
     plot_equity_drawdown,
     plot_sharpe_waterfall,
-    resolve_canonical_rank1_lineage,
     resolve_holdout_self_backtest,
+    resolve_solvent_carrier,
     write_strategy_assessment,
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE, descends_from
@@ -307,10 +307,15 @@ SELECTED_LABEL = top_signal.row(0, named=True)["label"]
 # The resolver is given the same field, not the whole registry: it re-ranks on common timestamp
 # support wherever a conformal candidate is present, so a row this notebook never admitted would
 # otherwise decide how far the intersection reaches and therefore which admitted row wins.
-CARRIER = resolve_canonical_rank1_lineage(CASE_STUDY, admitted=ADMITTED)
+#
+# `resolve_solvent_carrier` rather than the bare lineage resolver, so a selected configuration whose
+# equity reached zero is refused rather than reported. A long-short book with no margin call keeps
+# compounding through zero, so every metric it reports after that point - including a Sharpe high
+# enough to top a ranking - is arithmetic on a balance that no longer exists.
+CARRIER = resolve_solvent_carrier(CASE_STUDY, admitted=ADMITTED)
 if CARRIER["val_backtest_hash"] != TOP_HASH:
     raise RuntimeError(
-        "this notebook's ranking and the canonical resolver disagree on the carrier: "
+        "this notebook's ranking and the canonical resolver disagree on the selected configuration: "
         f"{TOP_HASH} against {CARRIER['val_backtest_hash']}. Everything below reports the "
         "first and the paired rows would be written against the second, so the decay would "
         "compare the right holdout against a different strategy."
@@ -1238,8 +1243,8 @@ print("See Chapter 18 for the transaction-cost framework.")
 # `backtest_paired_metrics`, never from subtracting one Sharpe from another.
 
 # %% [markdown]
-# The anchor is the holdout backtest that replays the selected configuration's **strategy**, not the
-# highest-Sharpe holdout backtest sharing its training hash. Matching on the strategy keeps the
+# The anchor is the holdout backtest that replays the selected configuration's **strategy**, not
+# the highest-Sharpe holdout backtest sharing its training hash. Matching on the strategy keeps the
 # anchor on the lineage that was actually selected, even where an experimental side-channel
 # allocator shares the holdout prediction set and posts a higher holdout Sharpe. The
 # `val_rank1_self` pair is written against the canonical lineage's holdout hash, so it is findable

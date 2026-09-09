@@ -18,40 +18,40 @@ The chapter turns point-in-time correctness from a principle into an implementat
 
 This section turns point-in-time correctness from a principle into an implementation discipline. It shows why restatements, amended filings, taxonomy drift, and corporate actions can silently leak future information into a backtest, and it gives readers the operational tools to prevent that leakage through bitemporal storage, as-of queries, and source-specific timestamp authority. This matters because a fundamentals pipeline is only as good as its historical eligibility logic.
 
-- [`01_academic_characteristics`](01_academic_characteristics.ipynb) — This notebook introduces the Chen-Pelger-Zhu (2020) academic dataset, which provides a standardized benchmark for comparing ML models in asset pricing. With ~1.2M stock-month observations and 46 firm characteristics, this anonymized dataset enables reproducible research without requiring WRDS access.
+- [`01_academic_characteristics`](01_academic_characteristics.ipynb) — Reads the Chen, Pelger and Zhu (2021) panel: fifty years of monthly US equity observations, each carrying 46 rank-normalized firm characteristics and the following month's excess return, published free of the WRDS subscription the underlying data usually needs. Establishes the split boundaries, the normalization and the reach of the anonymous identifiers that every model in the `us_firm_characteristics` case study inherits.
 
 ### 4.2 Entity Resolution and Mapping
 
 This section explains why multi-source financial research fails if issuer, security, and contract identities are not resolved correctly over time. It moves from deterministic joins to fuzzy matching, embedding-based matching, and QA controls, while emphasizing that resolution is not just a name-matching problem but a time-valid mapping problem across layers of the capital structure. Readers should care because a single wrong join can contaminate an entire research pipeline.
 
-- [`02_sec_filing_explorer`](02_sec_filing_explorer.ipynb) — This notebook demonstrates EdgarTools, a high-level Python library for interactive SEC EDGAR analysis. EdgarTools excels at company exploration, financial statement extraction, and working with structured filing data like Form 4 and 13F.
-- [`03_sec_form4_insider_transactions`](03_sec_form4_insider_transactions.ipynb) — This notebook demonstrates parsing and analyzing SEC Form 4 insider transaction filings. Form 4 reports must be filed within 2 business days of an insider trade, making them valuable for detecting informed trading activity.
-- [`04_sec_xbrl_fundamentals`](04_sec_xbrl_fundamentals.ipynb) — This notebook fetches quarterly fundamental data from the SEC EDGAR XBRL API for use in downstream factor engineering (Chapter 6).
-- [`05_entity_resolution`](05_entity_resolution.ipynb) — Entity resolution is the keystone problem in multi-source data integration. Before any data can be combined, we must correctly link disparate real-world names like "IBM Corp" and "International Business Machines" to the same unique security identifier.
+- [`02_sec_filing_explorer`](02_sec_filing_explorer.ipynb) — Works through the EDGAR surface once, through the EdgarTools library: finding a filer by its Central Index Key, filtering its submissions by form, pulling the three financial statements out of a 10-K's XBRL tags, and reading a Form 4 trade and a Form 13F holdings report.
+- [`03_sec_form4_insider_transactions`](03_sec_form4_insider_transactions.ipynb) — Parses Form 4 insider trades from the raw XML, reconciles the extracted rows against the transaction blocks in the files, and separates the trades that reflect a decision from the compensation events that make up most of the volume.
+- [`04_sec_xbrl_fundamentals`](04_sec_xbrl_fundamentals.ipynb) — Reads a quarterly fundamentals panel assembled from the SEC's XBRL Frames API, measures how long after each period end its filing arrived, and builds the as-of query that returns only what was public on a given date.
+- [`05_entity_resolution`](05_entity_resolution.ipynb) — Builds the three stages of a name-to-identifier mapping: a coalescing join on identifiers, a fuzzy string score, and a sentence embedding. The two name-matching stages are scored on one labelled set, and the fuzzy acceptance threshold is swept over it so that it comes from a measured precision and recall rather than a rule of thumb.
 
 ### 4.3 Fundamentals Across the Asset-Class Spectrum
 
 This section broadens the idea of fundamentals beyond equities and shows that the same PIT discipline applies to macro data, commodities, and crypto, even though release mechanics and tradable instruments differ. It gives readers a practical sense of how timestamp authority, revision histories, contract mapping, and chain finality vary by asset class. The payoff is a reusable framework for building time-consistent features across very different domains.
 
-- [`06_fred_macro_eda`](06_fred_macro_eda.ipynb) — This notebook provides first contact with macroeconomic time series from the Federal Reserve Economic Data (FRED) database. Understanding mixed-frequency data handling is critical for building point-in-time correct features.
-- [`07_macro_data_alignment`](07_macro_data_alignment.ipynb) — Macroeconomic data presents unique challenges for trading models: different release cadences (monthly CPI, weekly claims, quarterly GDP), revision histories, and the critical requirement of point-in-time correctness. This notebook demonstrates how to align multi-frequency macro data for daily trading models using pre-downloaded FRED data.
-- [`08_futures_positioning`](08_futures_positioning.ipynb) — This notebook demonstrates how to access CFTC Commitment of Traders (COT) data for tracking institutional positioning in futures markets. COT reports provide weekly snapshots of trader positioning, offering valuable sentiment signals for futures trading strategies and contrarian indicators.
+- [`06_fred_macro_eda`](06_fred_macro_eda.ipynb) — First contact with the FRED macro panel: what grid its rows sit on, and how to recover each series' release frequency from a file that has already carried every value forward onto one daily grid.
+- [`07_macro_data_alignment`](07_macro_data_alignment.ipynb) — Re-dates each macro observation from the period it measures to the day it can be assumed public, derived from each agency's release schedule at the late end of its range, and rebuilds the daily panel with an as-of join on that date. The revisions that remain are measured against an archive of first-published values, which is the one part of the correction a recorded timestamp does supply.
+- [`08_futures_positioning`](08_futures_positioning.ipynb) — Turns the CFTC's weekly Commitment of Traders reports into a positioning signal: resolving the several contract markets that share one product code, standardizing a net position against its own year, and joining the reports onto trading sessions at an assumed availability date set deliberately later than the publication schedule, since the reports carry no timestamp of their own.
 
-### 4.4 Alternative Data: From Evaluation to Integration
+### 4.4 Understanding Alternative Data
 
 This section reframes alternative data as an acquisition and engineering decision, not a buzzword category. It gives a concrete due-diligence framework around incremental signal, data quality, legal risk, and operational cost, and makes clear that many datasets fail not because they are uninteresting but because they are not defensible, reproducible, or deployable. Readers should care because most alternative-data mistakes are expensive and predictable.
 
-- [`09_onchain_fundamentals`](09_onchain_fundamentals.ipynb) — Digital assets provide unprecedented transparency: all transactions are public and verifiable. This "radical transparency" enables analysis of protocol metrics and ecosystem health that would be impossible in traditional markets.
-- [`10_institutional_holdings_13f`](10_institutional_holdings_13f.ipynb) — This notebook demonstrates how to work with SEC Form 13F institutional holdings using the official SEC bulk data sets. Form 13F requires institutional investment managers with >$100M in qualifying securities to disclose their equity holdings quarterly - valuable for tracking "smart money" positioning.
-- [`11_defi_tvl_evaluation`](11_defi_tvl_evaluation.ipynb) — This notebook demonstrates a rigorous alternative data evaluation framework using real data: DeFi Llama's Total Value Locked (TVL) metrics. Rather than theoretical checklists, we compute actual signal quality, assess real data gaps, and calculate whether this free dataset justifies integration into a trading pipeline.
-- [`12_kalshi_prediction_markets`](12_kalshi_prediction_markets.ipynb) — Kalshi is the first CFTC-regulated prediction market in the US, offering binary contracts on economic, market, and policy events. This notebook loads real Kalshi OHLCV data and demonstrates how to build event probability indicators for ML feature engineering and regime detection.
-- [`13_polymarket_prediction_markets`](13_polymarket_prediction_markets.ipynb) — Polymarket is the world's largest prediction market by trading volume, operating on the Polygon blockchain with USDC settlement. This notebook loads pre-downloaded Polymarket OHLCV data from the centralized data pipeline and compares it with the Kalshi data from the previous notebook to illustrate cross-platform differences in liquidity, pricing, and market structure.
+- [`09_onchain_fundamentals`](09_onchain_fundamentals.ipynb) — Takes total value locked, the closest thing decentralized finance has to a fundamental, and tests whether it predicts ether returns — mostly by establishing how little a year of daily observations of a monthly horizon can say, which is the usual outcome of an honest alternative-data test.
+- [`10_institutional_holdings_13f`](10_institutional_holdings_13f.ipynb) — Reads a whole quarter of Form 13F filings — several million positions from around seven thousand managers — and does the screening an aggregate over that file needs first: one filing per manager, filings whose numbers are internally inconsistent set aside, and every grouping on an identifier rather than a typed name.
+- [`11_defi_tvl_evaluation`](11_defi_tvl_evaluation.ipynb) — Runs the four-question alternative-data evaluation on one real dataset — signal, data, legal, commercial — keeping the questions that can block on their own separate from the ones that can only rank, and reaching a decision from the gate that fails rather than from a weighted score.
+- [`12_kalshi_prediction_markets`](12_kalshi_prediction_markets.ipynb) — Reads the first CFTC-designated prediction market: what a binary contract's price means and which price the feed actually carries, how a ladder of thresholds on one event prices a whole distribution, and how much trading sits behind a quote before a feature is built on it.
+- [`13_polymarket_prediction_markets`](13_polymarket_prediction_markets.ipynb) — The unregulated counterpart, settled in a stablecoin on the Polygon blockchain and closed to US persons. Sets out which differences between the two venues change the data rather than the trading, and finds that one of the two feeds' volume columns is not a volume at all.
 
-### 4.5 Case Study: Text Data for NLP Features
+### 4.5 Using Text Data for NLP Features
 
 This section provides a concrete pipeline for turning SEC filing text into a model-ready corpus. It focuses on document selection, section extraction, cleaning, and PIT-correct storage, deliberately stopping short of featurization so the engineering foundation is clear before later NLP chapters build on it. Its significance is that text features only become credible once the extraction and storage layer is auditable and time-correct.
 
-- [`14_text_data_extraction`](14_text_data_extraction.ipynb) — Corporate filings contain valuable information locked in unstructured text. This notebook demonstrates how to extract and structure high-value text blocks (MD&A, Risk Factors) from 10-K and 10-Q filings, creating clean datasets ready for NLP analysis in later chapters.
+- [`14_text_data_extraction`](14_text_data_extraction.ipynb) — Gets from a filing to a section reliably: locating an item heading that appears in the contents, in cross-references and once as the section itself, checking the extraction rather than assuming it, and measuring what changed between two consecutive filings of the same company.
 
 ## Running the Notebooks
 
@@ -69,13 +69,19 @@ Some Chapter 4 notebooks hit external APIs and need credentials or
 identification headers:
 
 - `EDGAR_IDENTITY` — SEC EDGAR mandates a `User-Agent` of the form
-  `"<Name> <email>"` (e.g. `"ML4T Research stefan@applied-ai.com"`).
-  Required by `02_sec_filing_explorer`, `03_sec_form4_insider_transactions`,
-  `04_sec_xbrl_fundamentals`, `10_institutional_holdings_13f`, and
-  `14_text_data_extraction`.
+  `"<Name> <email>"` and blocks placeholder addresses. It is free, needs no
+  account and no sign-up: put your own name and email on the `EDGAR_IDENTITY=`
+  line of the `.env` file in the repository root, before you start Jupyter.
+
+  Two notebooks in this chapter call EDGAR live and refuse to run without it:
+  `02_sec_filing_explorer` and `14_text_data_extraction`. The `form4_download.py`
+  script behind `03_sec_form4_insider_transactions` needs it too, at download
+  time. Everything else here — including `03` once its filings are on disk, plus
+  `04_sec_xbrl_fundamentals` and `10_institutional_holdings_13f` — reads
+  committed snapshots through the `data` loaders and never contacts the SEC.
 - `FRED_API_KEY` — only needed for live FRED downloads; the in-repo
   parquet snapshots used by `06_fred_macro_eda` and
   `07_macro_data_alignment` do not require it at notebook-execution time.
 
-All Chapter 4 notebooks complete in under 20 seconds with peak memory
-under 4 GB; no long-running or high-memory callouts apply.
+Every Chapter 4 notebook completes in well under a minute with peak
+memory under 3 GB; none needs a long-running or high-memory callout.

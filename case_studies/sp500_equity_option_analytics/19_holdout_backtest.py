@@ -46,12 +46,9 @@
 
 import json
 import sqlite3
-import warnings
 
 import matplotlib.pyplot as plt
 import polars as pl
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import CandidateSet, Study, open_selection_field
 from case_studies.research.holdout import build_holdout_training_spec
@@ -74,6 +71,7 @@ from case_studies.utils.registry import (
     resolve_best_backtest_runs,
 )
 from case_studies.utils.registry.specs import training_hash_from_spec
+from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from case_studies.utils.uncertainty import load_daily_returns_with_timestamp
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
@@ -141,15 +139,30 @@ FIELD = open_selection_field(
     resolve_best_backtest_runs=resolve_best_backtest_runs,
 )
 CANDIDATES = FIELD.candidate_set
-SELECTED = FIELD.selected
 FIELD_HASHES = list(FIELD.members)
 FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}" if CANDIDATES is not None else "live ranking"
 SELECTION_SOURCE = FIELD.source
+# The field says which backtests may be chosen from; the resolver says which one is chosen,
+# and it is handed the field rather than the whole registry. `SelectionField.selected` is
+# `CandidateSet.best_validation_sharpe`, which ranks the stored Sharpe column with a hash
+# tie-break and applies nothing else - no re-ranking onto the timestamps every candidate
+# prices, no label or universe restriction, no refusal of a run whose equity reached zero.
+# This case study's field holds a conformal allocator that sits out its warm-up and books it
+# as returns of exactly zero, so the two rankings read two different samples: they name the
+# same backtest on this registry and value it at 2.6087 stored against 2.6329 over the shared
+# sessions. `20_strategy_analysis` resolves the same way, so all three notebooks describe one
+# configuration.
+CARRIER = resolve_solvent_carrier(CASE_STUDY_ID, admitted=frozenset(FIELD_HASHES))
+SELECTED = _study.results.open(CARRIER["val_backtest_hash"])
+print(
+    f"{FIELD_NAME}: {len(FIELD_HASHES)} members, resolver picks {SELECTED.hash}, "
+    f"stored-Sharpe pick {FIELD.selected.hash}"
+)
 
 # The label the stages after the selection run under is the winner's, not the case study's
 # primary. An injected LABEL is a request to run a different one, and it has to agree with what
 # was selected or the holdout backtest would be keyed to a contract the selection does not name.
-HOLDOUT_LABEL = FIELD.label
+HOLDOUT_LABEL = CARRIER["label"]
 if REQUESTED_LABEL and REQUESTED_LABEL != HOLDOUT_LABEL:
     raise RuntimeError(
         f"LABEL={REQUESTED_LABEL!r} was requested but the selection carried forward is "
@@ -189,7 +202,7 @@ print(
 )
 
 # %% [markdown]
-# ## 2. Which holdout prediction set belongs to this carrier
+# ## 2. Which holdout prediction set belongs to this configuration
 #
 # The holdout fit is a different training run from the validation fit by
 # construction - a different interval is a different computation - so the two
@@ -197,7 +210,7 @@ print(
 # configuration name would accept a fit of the same model over the wrong window.
 #
 # Rather than compare fields and hope the list is complete, this derives the
-# identity the carrier's configuration *should* have on the holdout, by the same
+# identity the selected configuration *should* have on the holdout, by the same
 # `build_holdout_training_spec` [`18_holdout_predictions`](18_holdout_predictions.ipynb)
 # fits, and requires a registered prediction under exactly that hash. The
 # derivation is deterministic and costs a dataset read rather than a fit, so the
@@ -241,7 +254,7 @@ EXPECTED_HOLDOUT_SPEC = build_holdout_training_spec(
 EXPECTED_HOLDOUT_TRAINING = training_hash_from_spec(EXPECTED_HOLDOUT_SPEC)
 _expected_fold = EXPECTED_HOLDOUT_SPEC["computation"]["cv"]["folds"][0]
 print(
-    f"The carrier's holdout fit is {EXPECTED_HOLDOUT_TRAINING}: "
+    f"The selected configuration's holdout fit is {EXPECTED_HOLDOUT_TRAINING}: "
     f"train {str(_expected_fold['train_start'])[:10]} to {str(_expected_fold['train_end'])[:10]}, "
     f"evaluate {str(_expected_fold['val_start'])[:10]} to {str(_expected_fold['val_end'])[:10]}"
 )
@@ -250,7 +263,7 @@ matches = [row for row in holdout_rows if row[1] == EXPECTED_HOLDOUT_TRAINING]
 if not matches:
     raise RuntimeError(
         f"no holdout prediction is registered under {EXPECTED_HOLDOUT_TRAINING}, the identity "
-        f"this carrier's configuration derives. Run 18_holdout_predictions. The registry holds "
+        f"this configuration's configuration derives. Run 18_holdout_predictions. The registry holds "
         + (
             ", ".join(f"{row[0]} (training {row[1]})" for row in holdout_rows)
             if holdout_rows
@@ -273,7 +286,7 @@ if (holdout_kind, holdout_value) != carrier_checkpoint:
     )
 print(
     f"Holdout prediction {HOLDOUT_PREDICTION_HASH} from training {HOLDOUT_TRAINING_HASH}, "
-    f"the validation carrier {carrier_training_hash} refitted over the holdout interval "
+    f"the validation configuration {carrier_training_hash} refitted over the holdout interval "
     f"at {holdout_kind}={holdout_value}"
 )
 
@@ -318,13 +331,13 @@ pl.DataFrame(
 # %% [markdown]
 # ## 3. Run the selected strategy on the holdout window
 #
-# The specification is the carrier's own, cloned and re-pointed at the holdout
+# The specification is the selected configuration's own, cloned and re-pointed at the holdout
 # predictions. Nothing about the strategy is re-derived here: re-deriving it
 # would let a change anywhere upstream alter what the holdout evaluates without
 # the change being visible as a different selection.
 #
 # Prices are loaded for the holdout window with the allocator's warmup prefix.
-# The covariance estimator this carrier uses needs history before its first
+# The covariance estimator this configuration uses needs history before its first
 # rebalance, and without the prefix it would fall back to an imputed warmup on
 # exactly the dates the result is read from.
 
@@ -441,11 +454,18 @@ if registered_stage[0] != "holdout":
 # %% [markdown]
 # ## 4. What the holdout says
 #
-# The two rows below are the same strategy on two windows. The validation figure
-# is the one the configuration was chosen on and is optimistic by construction:
-# it is the maximum of a search, and the maximum of a search is a biased estimate
-# of the thing searched over. The holdout figure has no such bias from *this*
-# case study's selection.
+# The two rows below are the same strategy on two windows. Both are read from
+# `backtest_metrics`, so each is measured over the span its own run priced. The
+# validation row is therefore the registered run's own figure and not the number the
+# selection was decided on: the field here holds a conformal allocator that sits out
+# its warm-up and books it as returns of exactly zero, so the ranking re-measures every
+# candidate over the sessions they all price. That figure is printed above the table,
+# and on this registry the two differ - 2.6329 over the shared sessions against 2.6087
+# stored.
+#
+# Either way the validation figure is optimistic by construction: it is the maximum of
+# a search, and the maximum of a search is a biased estimate of the thing searched over.
+# The holdout figure has no such bias from *this* case study's selection.
 #
 # It carries a different one. The window is a single year, and 2021 was a
 # particular year - a broad advance in US equities - so a result this good in a
@@ -454,6 +474,13 @@ if registered_stage[0] != "holdout":
 # window it was tested on, and nothing downstream of here can either.
 
 # %%
+# The metric the configuration was actually selected on, stated before the table so the
+# validation row below is read as what it is - the registered run over its own span.
+print(
+    f"selected on Sharpe={CARRIER['val_sharpe']:.4f} over the "
+    f"{CARRIER['comparison_n_periods'] or 'full'} sessions every candidate prices"
+)
+
 with sqlite3.connect(REGISTRY_DB) as db:
     comparison = pl.read_database(
         """
@@ -472,7 +499,7 @@ if comparison.height != 2:
 comparison = comparison.with_columns(
     pl.when(pl.col("backtest_hash") == HOLDOUT_BACKTEST_HASH)
     .then(pl.lit("holdout (2021)"))
-    .otherwise(pl.lit("validation (selected on)"))
+    .otherwise(pl.lit("validation (registered span)"))
     .alias("window")
 ).sort("window")
 comparison.select(
@@ -510,10 +537,12 @@ comparison.select(
 
 # %%
 _holdout = comparison.filter(pl.col("window") == "holdout (2021)").row(0, named=True)
-_validation = comparison.filter(pl.col("window") == "validation (selected on)").row(0, named=True)
+_validation = comparison.filter(pl.col("window") == "validation (registered span)").row(
+    0, named=True
+)
 _spans_zero = _holdout["sharpe_ci95_lo"] <= 0.0 <= _holdout["sharpe_ci95_hi"]
 print(
-    f"Validation Sharpe {_validation['sharpe']:.3f} "
+    f"Validation Sharpe {_validation['sharpe']:.3f} over the registered span "
     f"[{_validation['sharpe_ci95_lo']:.3f}, {_validation['sharpe_ci95_hi']:.3f}] "
     f"over {int(_validation['n_periods'])} sessions"
 )
@@ -570,11 +599,11 @@ fig.show()
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. The strategy run here is the carrier's own specification, cloned and
+# 1. The strategy run here is the selected configuration's own specification, cloned and
 #    re-pointed at the holdout predictions. Nothing about it was re-derived, so
 #    a change upstream would show up as a different selection rather than as a
 #    quietly different holdout.
-# 2. The holdout prediction set is matched to the carrier by comparing the two
+# 2. The holdout prediction set is matched to the selected configuration by comparing the two
 #    training specifications field by field, because a holdout refit is a
 #    different training identity and cannot be matched on a hash.
 # 3. A validation figure is the maximum of a search and is optimistic. A single

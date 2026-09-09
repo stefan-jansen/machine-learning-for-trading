@@ -48,9 +48,13 @@ def _registry(
                 backtest_hash TEXT PRIMARY KEY, sharpe REAL, max_drawdown REAL
             );
             CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE prediction_metrics (
+                prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_n_days REAL
+            );
             INSERT INTO training_runs VALUES ('train_us', 'owner_config', 'gbm', 'fwd_ret_1m', NULL);
             INSERT INTO prediction_sets VALUES ('pred_us', 'train_us', 'validation', NULL, NULL);
             INSERT INTO fold_metrics VALUES ('pred_us', 0.02);
+            INSERT INTO prediction_metrics VALUES ('pred_us', 0.02, 250);
             """
         )
         for backtest_hash, stage, sharpe, max_drawdown in rows:

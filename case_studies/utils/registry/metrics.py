@@ -300,20 +300,54 @@ def compute_prediction_fold_metrics(
     if not is_classification and direction_labels is not None and direction_col:
         # Never fatal. This is a secondary reading of a run whose own metrics are already
         # computed above, so a schema surprise in a sibling label must not lose the run.
+        #
+        # But a failure has to survive somewhere a reader looks. It used to reach only
+        # `logger.warning`, into a papermill log the harness deletes when the run succeeds,
+        # and the row was left with a NULL `direction_label` - identical to the NULL that
+        # means "this label declares no direction sibling", which `fwd_ret_24h` legitimately
+        # produces in every family. The two are opposite claims wearing the same face, and
+        # the ambiguity hid a real result: every `deep_learning` run in
+        # `crypto_perps_funding` raised here on a time-unit mismatch, and once the join was
+        # repaired 20 of the 21 significant sets turned out to sit BELOW 0.5 with confidence
+        # intervals excluding it.
+        #
+        # So the reason is written beside the absent value. Cleared on the success path
+        # rather than only set on the failure one, so a stored error cannot outlive the
+        # cause it names: a row that computes gets an explicit NULL over whatever a previous
+        # attempt left there, and nobody has to remember to clear it.
         try:
-            headline.update(
-                compute_cross_sectional_direction_auc(
-                    predictions,
-                    direction_labels,
-                    y_score_col=y_score_col,
-                    direction_col=direction_col,
-                    date_col=date_col,
-                    entity_col=_entity,
-                    horizon=int(max(1, horizon)),
-                )
+            computed = compute_cross_sectional_direction_auc(
+                predictions,
+                direction_labels,
+                y_score_col=y_score_col,
+                direction_col=direction_col,
+                date_col=date_col,
+                entity_col=_entity,
+                horizon=int(max(1, horizon)),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("direction AUC against %s not computed: %s", direction_col, exc)
+            # Truncated because this is a diagnostic in a metrics row, not a log: the type
+            # and the first line are what identify the failure, and a polars schema error
+            # carries several hundred characters of frame detail behind them.
+            detail = " ".join(str(exc).split())
+            headline["direction_label_error"] = f"{type(exc).__name__}: {detail}"[:300]
+        else:
+            headline.update(computed)
+            # An empty return is the third state and it was as silent as the raise. The
+            # function declines rather than raises when the joined frame is too small, the
+            # label is degenerate, or fewer than three dates carry a defined AUC - all of
+            # which leave the same NULL. Reaching here at all means a direction sibling WAS
+            # declared and requested, so "declined" is a different claim from "none exists"
+            # and is worth the row it is written on.
+            headline["direction_label_error"] = (
+                None
+                if computed
+                else (
+                    "not computable: fewer than 100 joined rows, a degenerate direction "
+                    "label, or fewer than 3 dates carrying a defined AUC"
+                )
+            )
 
     return headline, fold_results
 
@@ -579,6 +613,18 @@ def compute_backtest_fold_metrics(
     if ts_dtype != pl.Date:
         daily_returns = daily_returns.with_columns(pl.col("timestamp").cast(pl.Date))
 
+    # Where the account ended, read off the whole series before it is cut up.
+    # A fold that begins after ruin is all zeros, and a slice of zeros is
+    # indistinguishable from a fold in which the strategy simply did not trade:
+    # `compute_portfolio_metrics` on it reports `ruin=0`, a Sharpe of 0 and no
+    # drawdown, which is a clean row for a period in which the book did not exist
+    # (ml4t/agent-workspace#920). The fold that contains the ruin finds it for
+    # itself; the folds after it are told.
+    from case_studies.utils.backtest_runner import first_ruin_index
+
+    ruin_index = first_ruin_index(daily_returns["daily_return"].to_numpy())
+    ruin_date = None if ruin_index is None else daily_returns["timestamp"].to_list()[ruin_index]
+
     for split in splits:
         fold_id = split["fold"]
         val_start = str(split["val_start"])[:10]  # "YYYY-MM-DD"
@@ -599,6 +645,14 @@ def compute_backtest_fold_metrics(
 
         returns_arr = fold_returns["daily_return"].to_numpy()
         fold_metrics = compute_portfolio_metrics(returns_arr, periods_per_year=periods_per_year)
+        if ruin_date is not None and start_date > ruin_date:
+            from case_studies.utils.backtest_runner import _apply_ruin_semantics
+
+            # The account was already gone when this fold opened. Report the ruin
+            # rather than the zeros it leaves behind, and carry the whole path's
+            # index so the fold rows agree with the overall row about where it
+            # happened.
+            fold_metrics = _apply_ruin_semantics(fold_metrics, ruin_index)
 
         # Add fold metadata
         fold_metrics["n_days"] = len(fold_returns)
@@ -712,6 +766,44 @@ def compute_classification_metrics_from_predictions(
     return headline, fold_results
 
 
+_CLOCK_UNIT_NS = {"ms": 1_000_000, "us": 1_000, "ns": 1}
+
+
+def _cast_to_label_clock(frame, date_col: str, target):
+    """Put a prediction stamp on the label's clock, refusing a cast that would truncate.
+
+    Only ever applied to the prediction side. The label panel is authoritative because
+    `value_digest` is time-unit sensitive: a prediction frame rewritten to a different unit
+    no longer reproduces the `expected_prediction_keys.digest` its own spec records, which is
+    why `registry/store.py::_timestamps_as_utc` normalised the zone and deliberately left the
+    unit. Casting at read time costs nothing and changes no stored bytes.
+
+    A narrowing cast is silent in polars, so precision that the label genuinely cannot hold is
+    checked here rather than discovered as a join that quietly matches fewer rows.
+    """
+    import polars as pl
+
+    source_unit = getattr(frame.schema[date_col], "time_unit", None)
+    target_unit = getattr(target, "time_unit", None)
+    source_ns = _CLOCK_UNIT_NS.get(source_unit or "", 0)
+    target_ns = _CLOCK_UNIT_NS.get(target_unit or "", 0)
+
+    if source_ns and target_ns and source_ns < target_ns:
+        remainder = target_ns // source_ns
+        lost = frame.select(
+            (pl.col(date_col).dt.timestamp(source_unit) % remainder != 0).sum()
+        ).item()
+        if lost:
+            raise ValueError(
+                f"cannot put {date_col!r} on the label's clock without losing precision: "
+                f"{lost:,} of {frame.height:,} prediction stamps carry sub-{target_unit} "
+                f"detail that {target_unit!r} cannot hold. The label panel is the authority "
+                "on the decision clock, so this is a producer that is stamping finer than "
+                "the panel it is scored against."
+            )
+    return frame.with_columns(pl.col(date_col).cast(target))
+
+
 def compute_cross_sectional_direction_auc(
     predictions,
     direction_labels,
@@ -781,6 +873,28 @@ def compute_cross_sectional_direction_auc(
             left = left.with_columns(pl.col(date_col).cast(pl.Date))
         elif left_dt == pl.Date:
             right = right.with_columns(pl.col(date_col).cast(pl.Date))
+        elif isinstance(left_dt, pl.Datetime) and isinstance(right_dt, pl.Datetime):
+            # Two Datetimes that differ only in time unit or zone are the same instants,
+            # and this is the case that lost the metric entirely: `deep_learning` and
+            # `latent_factors` reach the registry through `flush_fold_predictions`, whose
+            # dates come from a numpy `datetime64` array, so their artifacts carry `us`
+            # where the label panel carries `ms`. 1,548 artifacts across seven case studies
+            # are on the other side of this line.
+            #
+            # The label is authoritative and the cast goes rightwards onto it, never the
+            # other way: `value_digest` is time-unit sensitive, so rewriting a prediction
+            # frame's unit moves `computation.expected_prediction_keys.digest` and the
+            # artifact stops reproducing the digest its own spec records - which is why
+            # `registry/store.py::_timestamps_as_utc` fixed the zone and says in as many
+            # words that it leaves the unit alone. Reading is the only side that may cast.
+            #
+            # Lossless here, and checked rather than assumed: across all 200 `us`
+            # artifacts in `crypto_perps_funding`, no row carries a sub-millisecond
+            # component, so narrowing to the label's unit moves no instant. A stamp that
+            # genuinely carried finer precision than its label would be a different
+            # problem, and `assert_no_precision_loss` below refuses it rather than
+            # silently truncating.
+            left = _cast_to_label_clock(left, date_col, right_dt)
         else:
             raise TypeError(
                 f"cannot align join key {date_col!r}: predictions are {left_dt}, "

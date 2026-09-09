@@ -85,7 +85,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = "4b8eaa6991ec"
+SUPERSEDES_POPULATION: str = ""
 DEVICE: str = ""
 
 # %%

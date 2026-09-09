@@ -49,6 +49,7 @@ warnings.filterwarnings("ignore")
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import (
+    allocation_method_of,
     compute_cost_bps,
     training_run_fitted_for_the_holdout,
 )
@@ -62,8 +63,8 @@ MAX_SYMBOLS = 0
 # full 9-CS aggregation.
 CASE_STUDIES: list[str] = []
 # Test-only: in an isolated test registry, nasdaq's out-of-band cost-feasible
-# carrier is absent, so its spine cannot resolve. Production leaves this False
-# (a missing carrier fails loudly); the test harness sets it True so cost/risk
+# selected configuration is absent, so its spine cannot resolve. Production leaves this False
+# (a missing selection fails loudly); the test harness sets it True so cost/risk
 # for such a case study are reported not-applicable instead of raising.
 ALLOW_MISSING_SPINE = False
 
@@ -79,7 +80,7 @@ ALL_CASE_STUDIES = [
     "us_firm_characteristics",
     # FX rank-1 is linear/ridge_a100.0 on fwd_ret_21d (val Sharpe +0.048,
     # holdout +0.194), resolved after the 2026-06-01 DL-lookback fix. The
-    # earlier deep_learning/tcn carrier (val +0.108 / holdout -1.59) was an
+    # earlier deep_learning/tcn selection (val +0.108 / holdout -1.59) was an
     # artifact of gappy validation folds (lookback=60 warmup consumed each
     # fold's head); those sets were purged and the clean lineage re-resolved.
     # See backtest_audit.md and project_registry_hash_collisions.
@@ -173,7 +174,7 @@ print(f"\nLoaded: {len(explorers)}/{len(ALL_CASE_STUDIES)} case studies")
 #
 # The validation rank-1 for each case study is the highest-Sharpe validation
 # backtest across the three pipeline stages — signal selection, allocation,
-# and risk overlay. The deployed holdout carrier is the same full strategy
+# and risk overlay. The deployed holdout configuration is the same full strategy
 # spec (signal method, allocation method, risk overlay name) retrained on
 # holdout data. When holdout retrain produces no usable backtest at that
 # full spec — degenerate predictions, vol-window-vs-history mismatch,
@@ -181,7 +182,7 @@ print(f"\nLoaded: {len(explorers)}/{len(ALL_CASE_STUDIES)} case studies")
 # back to the next-highest validation Sharpe with a usable holdout, and so
 # on until one succeeds. The `_val_rank1_carrier` helper implements this
 # walk; `query_holdout_rows` and `_holdout_lineage_for` consume its output
-# to pin val/holdout pairs to the same full strategy carrier.
+# to pin val/holdout pairs to the same full strategy configuration.
 
 # %%
 # Label restrictions that align the cluster-diagnostics rank-1 with the
@@ -302,11 +303,11 @@ def _apply_rung_restriction(df: pl.DataFrame, cs: str) -> pl.DataFrame:
     return df.filter(rung["predicate"])
 
 
-# Carrier pin: a validation-time a-priori tie-break, distinct from the rung restrictions
-# above. EMPTY, and that is the normal state. It held
-# `"us_firm_characteristics": pl.col("config_name") == "default_huber"` until 2026-08-25,
-# copied from case_studies.utils.strategy_analysis.CARRIER_PINS and translated into a
-# config-name predicate, under a "keep in sync" comment doing the job a mechanism should.
+# There is no selected configuration pin here, and there is no mechanism for one.
+# `_CARRIER_PIN_PREDICATES` held `"us_firm_characteristics": pl.col("config_name") ==
+# "default_huber"` until 2026-08-25, copied from `case_studies.utils.strategy_analysis.CARRIER_PINS`
+# and translated into a config-name predicate, under a "keep in sync" comment doing the job a
+# mechanism should.
 #
 # It had not been in sync for a rebuild. Against the current registry `default_huber` is the
 # WEAKEST of the ten configs that reached the allocation stage (48 validation backtests, best
@@ -314,29 +315,15 @@ def _apply_rung_restriction(df: pl.DataFrame, cs: str) -> pl.DataFrame:
 # (59 backtests, 3.116). So this restricted one case study to its worst advanced configuration
 # while every notebook inside that case study reported its best.
 #
-# Worse than the hash pin removed from CARRIER_PINS the same day, because a hash pin dies loudly:
-# every hash changes when a sweep is rebuilt, so it resolves to nothing and stops. A config-name
-# predicate survives the rebuild and keeps selecting, silently and wrongly.
+# Worse than the hash pin removed from `CARRIER_PINS` the same day, because a hash pin dies
+# loudly: every hash changes when a sweep is rebuilt, so it resolves to nothing and stops. A
+# config-name predicate survives the rebuild and keeps selecting, silently and wrongly.
 #
-# If a carrier restriction is ever needed here again, call `carrier_pins.carrier_config_name(cs)`,
-# which resolves a pin to its config through the registry - the thing this copy existed to avoid
-# and the thing that would have failed loudly instead of filtering to the wrong config.
-_CARRIER_PIN_PREDICATES: dict[str, pl.Expr] = {}
-
-
-def _apply_carrier_pin(df: pl.DataFrame, cs: str) -> pl.DataFrame:
-    """Restrict candidate rows to the pinned model carrier, if configured.
-
-    Applied alongside `_apply_rung_restriction` at every cross-stage
-    carrier-selection site (signal / allocation / cross-stage spine /
-    holdout-pairing walk). Deliberately NOT applied to the §20.3 rank-cluster
-    diagnostics, which measure the rank-cluster width across the full model
-    space and must stay carrier-agnostic.
-    """
-    pred = _CARRIER_PIN_PREDICATES.get(cs)
-    if pred is None or df.is_empty() or "config_name" not in df.columns:
-        return df
-    return df.filter(pred)
+# The mapping stayed empty behind an `_apply_carrier_pin` that could no longer fire, which is a
+# second implementation of a rule nothing applied. A selected configuration restriction needed here
+# again is `carrier_pins.carrier_config_name(cs)`, which resolves an owner's pin to its config
+# through the registry - the thing the copy existed to avoid, and the thing that would have failed
+# loudly rather than filtering to the wrong config.
 
 
 def _progression_for(
@@ -636,14 +623,13 @@ def build_backtest_rows():
                 pl.col("label").is_in(list(label_restriction))
             )
         signal_candidates = _apply_rung_restriction(signal_candidates, cs)
-        signal_candidates = _apply_carrier_pin(signal_candidates, cs)
         best_signal = signal_candidates.head(1)
         signal_sharpe = best_signal["sharpe"][0] if not best_signal.is_empty() else None
         best_source = best_signal["source"][0] if not best_signal.is_empty() else ""
 
         # Carrier-pred pin for cost/risk. Case studies with a rung restriction
         # (nasdaq cost-feasible ensemble) carry their headline cost/risk on the
-        # carrier prediction only; the full-universe sweep rows are the
+        # selected prediction only; the full-universe sweep rows are the
         # Ch18/Ch19 cost-defeat demonstration and must not pool into the
         # cross-case comparison. Other case studies pass None (no pin) and keep
         # the registry-wide aggregation unchanged.
@@ -670,22 +656,14 @@ def build_backtest_rows():
                     pl.col("label").is_in(list(label_restriction))
                 )
             alloc_candidates = _apply_rung_restriction(alloc_candidates, cs)
-            alloc_candidates = _apply_carrier_pin(alloc_candidates, cs)
             best_alloc = alloc_candidates.head(1)
             alloc_sharpe = best_alloc["sharpe"][0] if not best_alloc.is_empty() else None
-            # When a carrier pin is active, the allocator comparison must run on
-            # the pinned carrier's prediction so the reported best_allocator NAME
-            # matches the pinned alloc_sharpe. Without this, compare_allocators
-            # pools across every prediction (e.g. an experimental conformal run on
-            # a non-carrier model) and can return an allocator that was never run
-            # on the deployed carrier. Non-pinned CSes pass None (unchanged).
-            alloc_comp_pred = (
-                best_alloc["prediction_hash"][0]
-                if cs in _CARRIER_PIN_PREDICATES and not best_alloc.is_empty()
-                else None
+            # The allocator that produced `alloc_sharpe`, read from that row's own spec, so
+            # the name and the number describe one configuration. See
+            # `strategy_analysis.allocation_method_of`.
+            best_allocator = allocation_method_of(
+                cs, best_alloc["backtest_hash"][0] if not best_alloc.is_empty() else None
             )
-            alloc_comp = explorer.compare_allocators(prediction_hash=alloc_comp_pred)
-            best_allocator = alloc_comp["allocator"][0] if not alloc_comp.is_empty() else ""
         else:
             alloc_sharpe = None
             best_allocator = ""
@@ -722,7 +700,6 @@ def build_backtest_rows():
         if label_restriction and "label" in cross_stage.columns and not cross_stage.is_empty():
             cross_stage = cross_stage.filter(pl.col("label").is_in(list(label_restriction)))
         cross_stage = _apply_rung_restriction(cross_stage, cs)
-        cross_stage = _apply_carrier_pin(cross_stage, cs)
         if not cross_stage.is_empty():
             cross_stage = cross_stage.sort("sharpe", descending=True).unique(
                 subset=["prediction_hash"], keep="first", maintain_order=True
@@ -1160,15 +1137,14 @@ def _val_rank1_carrier(cs: str) -> dict | None:
     if label_restriction and "label" in cand.columns:
         cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
     cand = _apply_rung_restriction(cand, cs)
-    cand = _apply_carrier_pin(cand, cs)
     if cand.is_empty():
         return None
     # Do NOT dedup by prediction_hash here. The walk needs to surface every
     # registered (signal, allocation, risk_overlay) tuple — when the val
-    # rank-1 carrier has no matching holdout retrain but a same-prediction
+    # rank-1 configuration has no matching holdout retrain but a same-prediction
     # lower-sharpe variant (different allocator or risk overlay) does, the
     # dedup would silently jump to a *different* prediction instead of
-    # accepting the same-prediction variant as the apples-to-apples carrier.
+    # accepting the same-prediction variant as the apples-to-apples match.
     cand = cand.sort("sharpe", descending=True)
 
     case_dir = get_case_study_dir(cs)
@@ -1186,7 +1162,7 @@ def _val_rank1_carrier(cs: str) -> dict | None:
             #
             # Matching the spec alone made the walk stop at a candidate whose own checkpoint
             # had no holdout whenever a sibling checkpoint had one at the same spec. The
-            # resolver, handed that carrier, then finds nothing for it - and the walk has
+            # resolver, handed that configuration, then finds nothing for it - and the walk has
             # already stopped, so the case study reports no holdout while one exists for a
             # later candidate. Advancing instead is what makes the fall-through the resolver
             # no longer performs unnecessary rather than merely forbidden.
@@ -1584,7 +1560,6 @@ for cs, explorer in explorers.items():
     if label_restriction and "label" in cand.columns:
         cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
     cand = _apply_rung_restriction(cand, cs)
-    cand = _apply_carrier_pin(cand, cs)
     if cand.is_empty():
         continue
     cand = cand.sort("sharpe", descending=True).unique(
@@ -1615,18 +1590,18 @@ for cs, explorer in explorers.items():
     # risk) spec so val→holdout decay isn't measured across different
     # allocators (e.g. score_weighted vs conformal_weighted), different
     # position-sizing parameters, or different risk overlays.
-    # The carrier is whatever the WALK settled on, spec and prediction hash together, and it
+    # The selected configuration is whatever the WALK settled on, spec and prediction hash together, and it
     # is not `leader_phash`. The walk advances past the leader when the leader has no holdout
     # of its own, so passing the leader's hash alongside a later candidate's spec asks for a
     # holdout that matches neither - and the strict pin answers None rather than quietly
-    # falling through, which is how the case study would lose a fallback carrier it has.
+    # falling through, which is how the case study would lose a fallback configuration it has.
     #
     # The prediction hash is what is passed, not the training hash: it pins the checkpoint as
     # well as the configuration, and a correct holdout refit registers a NEW training identity
     # covering the holdout CV interval, so preferring the validation training hash could only
     # ever match a holdout scored from the validation-fitted model. The lookup that used to
     # sit here - prediction hash to training hash, with its own connection and error branch -
-    # is gone with it; the resolver reads the carrier itself.
+    # is gone with it; the resolver reads the selected configuration itself.
     #
     # The refusal is caught here for the same reason `query_holdout_rows` catches it: it is a
     # statement about ONE case study, and letting it propagate would end the loop and drop the
@@ -2011,12 +1986,12 @@ def query_holdout_rows():
         # several candidates survive, and the other eight case studies still have rows to
         # report. The reason is printed rather than swallowed, because a case study silently
         # missing from the holdout table looks like unrun work.
-        # No carrier is an ANSWER here, and the answer is no row.
+        # No selected configuration is an ANSWER here, and the answer is no row.
         #
-        # The carrier IS the selection: the rank-1 validation configuration is the only thing
+        # The selection IS the answer: the rank-1 validation configuration is the only thing
         # that nominates a holdout, and the invariant the resolver exists to hold is that the
         # holdout is never chosen by its own holdout result. Falling through to an unpinned
-        # query when the carrier is missing breaks exactly that - it publishes whatever single
+        # query when the selected configuration is missing breaks exactly that - it publishes whatever single
         # eligible holdout the registry happens to hold, which is a holdout that selected
         # itself. This table is reader-facing, so it takes the pinned answer or none.
         #
@@ -2169,7 +2144,7 @@ if not holdout_df.is_empty():
 # construction contributing variance independent of out-of-sample ranking
 # accuracy.
 #
-# **Crypto carrier note**: Crypto's deployed carrier is the gbm/leaves_7_huber
+# **Crypto selection note**: Crypto's deployed configuration is the gbm/leaves_7_huber
 # signal model on fwd_ret_24h, carried from the validation rank-1 (signal
 # Sharpe 2.09) into the holdout retrain. That retrain posts a holdout Sharpe of
 # -0.13 and a holdout IC of -0.029, so Crypto is the one case study whose

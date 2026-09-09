@@ -1,0 +1,107 @@
+name: Resolve the ml4t image to measure in
+description: >-
+  Load the candidate image this commit produced when there is one, and report the
+  reference to run against. Without this a job takes its environment from
+  ml4t/ml4t:latest, which is whatever was published last rather than what the
+  commit declares.
+
+inputs:
+  candidate-result:
+    description: >-
+      The result of the build-image-candidate job. A failure or cancellation is
+      fatal here: the commit changes what the image installs and no image was
+      produced to measure it in, so falling back to the published image would
+      measure the environment this commit replaces. A skip is normal and means
+      the commit does not move the image.
+    required: true
+
+outputs:
+  ref:
+    description: The image reference to run against.
+    value: ${{ steps.pick.outputs.ref }}
+  is-candidate:
+    description: Non-empty when the reference is an image built from this commit.
+    value: ${{ steps.pick.outputs.is_candidate }}
+
+runs:
+  using: composite
+  steps:
+    - name: The candidate image built
+      if: inputs.candidate-result == 'failure' || inputs.candidate-result == 'cancelled'
+      shell: bash
+      run: |
+        echo "::error::build-image-candidate ${{ inputs.candidate-result }}:"
+        echo "::error::this commit changes what the image installs, and no image was"
+        echo "::error::produced to measure it in. Measuring in ml4t/ml4t:latest would"
+        echo "::error::test the environment this commit replaces."
+        exit 1
+
+    - name: Load the candidate image
+      if: inputs.candidate-result == 'success'
+      uses: actions/download-artifact@v4
+      with:
+        name: ml4t-candidate-image
+        path: /tmp
+
+    # `docker load` on a short tar says `unexpected EOF` and nothing else: not the size it
+    # read, not the space it had, not which of the two went wrong. That is what ch25 failed
+    # on in run 34342897088, 25 minutes into a job that had executed no notebook, while the
+    # same step in the same run succeeded for every other chapter. The artifact is 6.6 GB
+    # and lands on the filesystem the image then loads into, so a truncated download and a
+    # full disk both surface at that line. Read the tar before loading it: `tar -t` walks
+    # the headers to the end, so it fails on a short file and passes on a whole one, and
+    # this step says which happened while the numbers are still available.
+    - name: The candidate image arrived whole
+      id: arrival
+      if: inputs.candidate-result == 'success'
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -u
+        tar=/tmp/ml4t-candidate.tar
+        if [ ! -f "$tar" ]; then
+          echo "::error::build-image-candidate succeeded but no ml4t-candidate.tar was downloaded"
+          exit 1
+        fi
+        echo "candidate tar: $(stat -c%s "$tar") bytes"
+        df -h /tmp /var/lib/docker 2>/dev/null || df -h /tmp
+        tar -tf "$tar" > /dev/null
+
+    # One retry, because a truncated download is the one failure here that a second attempt
+    # fixes and the alternative is losing the whole job to it.
+    - name: Download the candidate image again
+      if: inputs.candidate-result == 'success' && steps.arrival.outcome == 'failure'
+      uses: actions/download-artifact@v4
+      with:
+        name: ml4t-candidate-image
+        path: /tmp
+
+    - name: The retried image arrived whole
+      if: inputs.candidate-result == 'success' && steps.arrival.outcome == 'failure'
+      shell: bash
+      run: |
+        set -u
+        tar=/tmp/ml4t-candidate.tar
+        echo "candidate tar on retry: $(stat -c%s "$tar") bytes"
+        df -h /tmp /var/lib/docker 2>/dev/null || df -h /tmp
+        if ! tar -tf "$tar" > /dev/null; then
+          echo "::error::the candidate image tar is truncated on both attempts."
+          echo "::error::free on /tmp: $(df -h --output=avail /tmp | tail -1 | tr -d ' ')"
+          exit 1
+        fi
+
+    - name: Which image this commit is measured in
+      id: pick
+      shell: bash
+      run: |
+        if [ -f /tmp/ml4t-candidate.tar ]; then
+          docker load -i /tmp/ml4t-candidate.tar
+          ref=ml4t/ml4t:candidate
+          echo "is_candidate=yes" >> "$GITHUB_OUTPUT"
+          echo "::notice::measuring in an image built from this commit"
+        else
+          ref=ml4t/ml4t:latest
+          docker pull "$ref"
+          echo "is_candidate=" >> "$GITHUB_OUTPUT"
+        fi
+        echo "ref=$ref" >> "$GITHUB_OUTPUT"

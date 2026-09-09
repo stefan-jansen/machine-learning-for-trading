@@ -49,9 +49,7 @@
 # %%
 """Ch16 backtest and equal-weight baseline for US Firm Characteristics."""
 
-import sqlite3
 import time
-import warnings
 from collections import Counter
 from itertools import cycle
 
@@ -59,12 +57,15 @@ import polars as pl
 
 from utils.style import COLORS, add_message_title, apply_ml4t_style
 
-warnings.filterwarnings("ignore")
 apply_ml4t_style()
 
 from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
-from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
+from case_studies.utils.backtest_presets import (
+    build_backtest_spec,
+    serializable_backtest_spec,
+    traded_universe_declaration,
+)
 from case_studies.utils.backtest_runner import (
     normalize_prediction_columns,
     run_backtest,
@@ -156,6 +157,32 @@ print(f"""=== Protocol Term Sheet ===
 
 # %%
 prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)
+
+# `MAX_SYMBOLS` reduces the price panel, and until the run says so in its own specification
+# that reduction did not reach `backtest_hash`: a reduced run and the full run over the same
+# predictions hashed alike, so the second was served the first's result and the reduction
+# bought nothing (ml4t/agent-workspace#911). Declaring it here, before anything is hashed,
+# gives a reduced run an identity of its own; `run_backtest` checks the panel against the
+# declaration and narrows the predictions to it, so the sweep ranks the cross-section this
+# says it ranks and `n_assets` above describes that same set. A full run declares nothing and
+# is byte-identical to before.
+# A reduced run is a preview run. Refused on the canonical tier so a narrowed result can
+# never land in the registry the book's numbers come from, and so the two can never sit in
+# one registry to be ranked against each other: `resolve_best_predictions` takes MAX(sharpe)
+# over every backtest of a prediction, and a Sharpe earned over a handful of names would
+# advance a configuration ahead of one earned over the whole panel. `us_equities_panel` 16
+# through 19 already refuse the parameter this way, and `canonically_refused_parameters`
+# reads the refusal out of the source, so the canonical fixture path drops the name rather
+# than handing the notebook something its first cell raises on.
+if EXECUTION_TIER == "canonical" and MAX_SYMBOLS:
+    raise ValueError(
+        "MAX_SYMBOLS narrows the universe this run trades, which makes it a different "
+        "portfolio from the declared one and gives it its own backtest identity "
+        "(ml4t/agent-workspace#911). A canonical run trades the declared universe: set "
+        "MAX_SYMBOLS=0, or run under EXECUTION_TIER='preview' with a WORKSPACE."
+    )
+TRADED_UNIVERSE = traded_universe_declaration(prices) if MAX_SYMBOLS else None
+
 n_assets = prices["symbol"].n_unique()
 print(f"Prices: {len(prices):,} rows, {n_assets} assets")
 
@@ -177,6 +204,7 @@ strategy_spec = build_backtest_spec(
     CASE_STUDY_ID,
     bt_config,
     prices=prices,
+    traded_universe=TRADED_UNIVERSE,
     prediction_hash="plumbing_test",
     initial_cash=bt_config.initial_cash,
     chapter="ch16",
@@ -255,6 +283,22 @@ print(
     f"\nTotal grid: {n_predictions} predictions x {n_schemes} schemes = {total_backtests} backtests"
 )
 
+# A grid with no schemes is a configuration error, not a result, and it is silent at the
+# point it happens: `get_entry_schemes_for` drops each declared k that the cross-section
+# cannot realize and returns the empty list, so the sweep below completes in zero seconds
+# reporting zero failures, and every section after it reads a registry this run never wrote
+# to. Refuse here, where the numbers that explain it are still in hand, rather than several
+# cells later on whatever the first empty read happens to raise
+# (ml4t/agent-workspace#1075).
+if n_schemes == 0:
+    raise RuntimeError(
+        f"No entry scheme in backtest.sweep.top_k_grid[{LABEL!r}] is feasible on "
+        f"{n_assets} assets. A scheme needs k < n_assets, because k == n_assets is the "
+        f"whole universe and that is the equal-weight benchmark rather than a "
+        f"prediction-based portfolio; long-short additionally needs 2k <= n_assets so the "
+        f"two legs stay disjoint. Widen the universe (MAX_SYMBOLS) or declare a smaller k."
+    )
+
 # %%
 results = []
 failures: Counter[str] = Counter()
@@ -283,6 +327,7 @@ for pred_row in pred_index.iter_rows(named=True):
             CASE_STUDY_ID,
             bt_config,
             prices=prices,
+            traded_universe=TRADED_UNIVERSE,
             prediction_hash=pred_hash,
             initial_cash=bt_config.initial_cash,
             chapter="ch16",
@@ -476,22 +521,16 @@ top = (
 # this sweep, so on its own the table cannot tell a five-name portfolio from a fifty-
 # name one - the dimension the sweep exists to vary. The concentration is in the same
 # spec, one key across, and is joined back here.
-with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
-    concentration = (
-        pl.DataFrame(
-            conn.execute(
-                "SELECT backtest_hash, spec_json FROM backtest_runs WHERE stage = 'signal'"
-            ).fetchall(),
-            schema=["backtest_hash", "spec_json"],
-            orient="row",
-        )
-        .with_columns(
-            names_per_side=pl.col("spec_json")
-            .str.json_path_match("$.strategy.signal.top_k")
-            .cast(pl.Int64)
-        )
-        .drop("spec_json")
+concentration = (
+    explorer.specs("signal")
+    .drop("stage")
+    .with_columns(
+        names_per_side=pl.col("spec_json")
+        .str.json_path_match("$.strategy.signal.top_k")
+        .cast(pl.Int64)
     )
+    .drop("spec_json")
+)
 
 top = top.join(concentration, on="backtest_hash", how="left")
 print(top.select("source", "names_per_side", "sharpe", "cagr", "max_drawdown"))
@@ -601,7 +640,9 @@ if not all_signal.is_empty():
         f"| excluded as insolvent: {ruined.height:,}"
     )
 
-fig.tight_layout()
+# No tight_layout(): matplotlibrc sets `figure.constrained_layout.use: True` repo-wide,
+# and calling tight_layout() over it makes matplotlib switch layout engines and say so in
+# a stderr block under the figure. See ml4t/agent-workspace#1106.
 fig.show()
 
 # %% [markdown]
