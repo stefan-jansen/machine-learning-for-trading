@@ -472,19 +472,19 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "Two bar charts over the same five models. On the left, mean cross-sectional IC, where the "
-    f"ensemble is highest at {ensemble['ic']:.4f} against the baseline's {baseline['ic']:.4f}. "
-    "On the right, validation Sharpe ratio with confidence intervals, where the ensemble is "
-    f"{ensemble['sharpe']:.2f} against the baseline's {baseline['sharpe']:.2f} and its interval "
-    "spans zero.",
+    f"Two bar charts over the same {comparison.height} models. On the left, mean "
+    f"cross-sectional IC, where the ensemble is higher at {ensemble['ic']:.4f} against the "
+    f"baseline's {baseline['ic']:.4f}. On the right, validation Sharpe ratio with confidence "
+    f"intervals, where the ensemble is {ensemble['sharpe']:.2f} against the baseline's "
+    f"{baseline['sharpe']:.2f} and its interval spans zero.",
 )
 
 # %%
 display(
     Markdown(
-        f"**What the run found.** The ensemble reaches the highest rank correlation of the "
-        f"five, {ensemble['ic']:.4f} against the baseline's {baseline['ic']:.4f}, and the "
-        f"lowest Sharpe of the two the chapter set out to compare, {ensemble['sharpe']:.2f} "
+        f"**What the run found.** The ensemble reaches the higher rank correlation, "
+        f"{ensemble['ic']:.4f} against the baseline's {baseline['ic']:.4f}, and the "
+        f"lower Sharpe, {ensemble['sharpe']:.2f} "
         f"against {baseline['sharpe']:.2f}, a difference of "
         f"{ensemble['sharpe'] - baseline['sharpe']:+.2f}. Its Sharpe interval "
         f"[{ensemble['sr_lo']:.2f}, {ensemble['sr_hi']:.2f}] spans zero; the baseline's does "
