@@ -24,10 +24,12 @@
 # state - the idea `01_core_architectures` measured the price of, because a state
 # updated one day at a time cannot be computed in parallel across days.
 #
-# A **state space model** takes the recurrence back and changes what is carried. The
-# state is updated by a linear map, so a sweep of the whole sequence costs $O(T)$ and,
-# because the map is linear, the sweep is an associative scan rather than an
-# irreducibly sequential loop. **Mamba** (Gu and Dao, 2023) adds what makes that
+# A **state space model** takes the recurrence back and changes what is carried. Its
+# state has a fixed size and each step does a bounded amount of work, so one sweep is
+# $O(T)$ - which an LSTM also manages. What the *linear* update adds is that the steps
+# compose: the recurrence is affine, and each step's coefficients can be computed
+# without knowing the previous state, so the sweep is an associative scan that runs in
+# parallel across the sequence instead of a loop that waits for its own output. **Mamba** (Gu and Dao, 2023) adds what makes that
 # competitive: the matrices reading the input into the state and the state into the
 # output, and the step size itself, are computed *from the input at that step*. The
 # model decides what to keep as it goes, which a fixed-parameter SSM cannot.
@@ -621,11 +623,13 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## What the budget lets this comparison say
 #
-# The two models were not given the same chance. The ridge fit is closed-form on every
-# sequence in its split; the selective SSM was trained for at most `EPOCHS` epochs on a
-# sample capped at `MAX_TRAIN_SAMPLES`, because the pure-Python scan runs orders of
-# magnitude slower than the production kernel. No hyperparameter search was run for
-# either.
+# Both models see the same data: the subsampling above happens before either is fitted,
+# so the ridge is trained on exactly the sequences the SSM is. What differs is the
+# fitting. The ridge solution is closed-form and fully converged at its penalty; the
+# SSM gets at most `EPOCHS` epochs of gradient descent with early stopping, and the
+# sample is capped at `MAX_TRAIN_SAMPLES` in the first place because the pure-Python
+# scan runs orders of magnitude slower than the production kernel. Neither model got a
+# hyperparameter search.
 #
 # So the figure is a record of what these two models did under this budget, and the
 # subsampling is the constraint that matters most: both scores are computed over the
@@ -637,10 +641,12 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **The work is $O(T)$ because the state update is linear.** Each step multiplies
-#    the state by a matrix and adds a term; nothing looks at any other step. That is
-#    what lets the sweep be reorganised as an associative scan and run in parallel,
-#    and it is the property attention gives up by relating every pair of positions.
+# 1. **Separate the two claims about cost.** A fixed-size state and bounded work per
+#    step give $O(T)$ total work; a recurrent network already has that, and attention
+#    gives it up by making each step look at every other. Linearity is a different
+#    property, and what it buys is parallelism: because the update is affine and each
+#    step's coefficients depend only on that step's input, the sweep composes into an
+#    associative scan instead of waiting for its own previous output.
 # 2. **"Selective" means three quantities move with the input.** $B_t$, $C_t$ and
 #    $\Delta_t$ all come out of `x_proj` applied to the current input, while $A$ is a
 #    learned diagonal fixed for the whole sequence. A fixed-parameter SSM such as S4
