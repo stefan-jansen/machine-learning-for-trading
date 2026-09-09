@@ -108,16 +108,16 @@ def _registered_holdout_backtests(case_dir, prediction_hash):
 # %% [markdown]
 # ## 1. The configuration, and the predictions it produced on the holdout
 #
-# The carrier is resolved the same way [`16_costs`](16_costs.ipynb) and
+# The selected configuration is resolved the same way [`16_costs`](16_costs.ipynb) and
 # [`17_holdout_predictions`](17_holdout_predictions.ipynb) resolve it, so all three run
 # the same configuration by construction rather than by a hash copied between them.
 #
-# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving
-# the holdout training specification reproduces the training identity 15 registered - the
-# derivation is deterministic and the identity covers it - so the prediction set is looked up
-# by that identity and the carrier's checkpoint. A search over holdout prediction sets would
-# have to guess which one belonged to this configuration, and this case study's registry holds
-# an older one that does not.
+# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving the
+# holdout training specification reproduces the training identity 15 registered - the derivation is
+# deterministic and the identity covers it - so the prediction set is looked up by that identity
+# and the selected configuration's checkpoint. A search over holdout prediction sets would have to
+# guess which one belonged to this configuration, and this case study's registry holds an older one
+# that does not.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
@@ -161,34 +161,34 @@ if match is None:
     )
 HOLDOUT_PREDICTION_HASH = match[0]
 
-print(f"Carrier:            {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
+print(f"Selected configuration: {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
 print(f"Holdout training:   {holdout_training_hash}")
 print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 
 # %% [markdown]
 # ## 2. Calibrating the allocator on validation residuals only
 #
-# This carrier sizes positions by a conformal width, and a width is calibrated from the
+# This configuration sizes positions by a conformal width, and a width is calibrated from the
 # errors the model has already made. On the holdout there are none to use: an error is
 # only usable once the return it measures has been realised, and every holdout return
 # realises inside the window being evaluated. So the widths come from the validation
 # residuals of the validation prediction set, which is what the allocator would have had
 # standing at the start of the window.
 #
-# Validation observations ARE dropped at the boundary here, and how many depends on which
-# horizon the carrier was selected on. The embargo exists because a residual observed at `t`
-# measures a return realising over `(t, t+h]`, so the last residuals of the validation span
-# reach into the holdout window and would size holdout positions with holdout price
-# information. This is a daily panel and both labels declare `h > 0`: `fwd_ret_5d` embargoes
-# 5 sessions and `fwd_ret_21d` embargoes 21, read from the reviewed table in `conformal.py`
-# rather than restated here. So the last week or the last month of validation residuals is
-# discarded, against a leak the label makes real rather than one it rules out.
+# Validation observations ARE dropped at the boundary here, and how many depends on which horizon
+# the configuration was selected on. The embargo exists because a residual observed at `t`
+# measures a return realising over `(t, t+h]`, so the last residuals of the validation span reach
+# into the holdout window and would size holdout positions with holdout price information. This is
+# a daily panel and both labels declare `h > 0`: `fwd_ret_5d` embargoes 5 sessions and
+# `fwd_ret_21d` embargoes 21, read from the reviewed table in `conformal.py` rather than restated
+# here. So the last week or the last month of validation residuals is discarded, against a leak the
+# label makes real rather than one it rules out.
 #
-# None of this binds the carrier that was actually selected. It allocates by `hrp`, which
-# sizes from a covariance rather than from an interval width, so `NEEDS_CALIBRATION` is
-# false below and no widths are computed or written. The section stays because the carrier
-# is resolved from the registry and a rebuilt sweep can name a conformal one, at which
-# point the embargo above is what the holdout would be sized under.
+# None of this binds the configuration that was actually selected. It allocates by `hrp`,
+# which sizes from a covariance rather than from an interval width, so `NEEDS_CALIBRATION` is false
+# below and no widths are computed or written. The section stays because the selected configuration
+# is resolved from the registry and a rebuilt sweep can name a conformal one, at which point the
+# embargo above is what the holdout would be sized under.
 #
 # The embargo is derived here because the backtest identity below is built from it. The
 # widths themselves are NOT written here: writing them replaces the artifact the already
@@ -202,23 +202,23 @@ allocation = strategy_view(json.loads(carrier["spec_json"])).get("allocation") o
 NEEDS_CALIBRATION = allocation.get("method") == "conformal_weighted"
 embargo_steps = holdout_conformal_embargo_steps(CASE_STUDY_ID, LABEL) if NEEDS_CALIBRATION else 0
 if NEEDS_CALIBRATION:
-    print(f"Conformal carrier: embargo {embargo_steps} observation(s), widths written below.")
+    print(f"Conformal configuration: embargo {embargo_steps} observation(s), widths written below.")
 else:
     print(f"Allocator {allocation.get('method', 'equal_weight')!r} needs no calibration.")
 
 # %% [markdown]
 # ## 3. The backtest
 #
-# The strategy specification is the carrier's own, re-pointed at the holdout prediction
-# set and the holdout price window. Nothing else about it changes - the commission and
-# slippage are the levels `setup.yaml` declares, the same ones every validation number in
-# this case study was net of, and the same ones sitting inside the swept grid in
+# The strategy specification is the selected configuration's own, re-pointed at the holdout
+# prediction set and the holdout price window. Nothing else about it changes - the commission and
+# slippage are the levels `setup.yaml` declares, the same ones every validation number in this case
+# study was net of, and the same ones sitting inside the swept grid in
 # [`16_costs`](16_costs.ipynb).
 #
 # The run registers under `stage='holdout'`, which the registry derives from the
 # prediction set's split rather than from anything asserted here.
 #
-# One thing the hash does not cover: a conformal carrier reads its widths from an artifact
+# One thing the hash does not cover: a conformal configuration reads its widths from an artifact
 # beside the prediction set, and the backtest identity covers the allocator's declared
 # parameters but not the calibration those widths were built from. Change the embargo and
 # the hash does not move, so a registered run would be served back against inputs that no
@@ -229,18 +229,18 @@ else:
 # generation.
 
 # %% tags=["results"]
-# The warmup prefix is not optional for this carrier. `hrp` sizes from a covariance
+# The warmup prefix is not optional for this configuration. `hrp` sizes from a covariance
 # estimated over a rolling window, and prices loaded from the holdout boundary give it no
 # history to estimate from. `compute_hrp_weights` then falls back to equal weight until
 # enough covariance history has accumulated, so the opening weeks of the holdout would be
 # allocated by a different rule than the one selected - not a degraded version of it, a
-# different allocator - where every validation weight was the carrier's own. That is a
+# different allocator - where every validation weight was the selected configuration's own. That is a
 # difference between the two runs the strategy specification does not record, and the
 # comparison in section 4 would absorb it as decay.
 #
 # `strategy_warmup_periods` reads the resolved allocation and returns 0 for any allocator
 # that does not estimate a moment, so this is unconditional rather than a branch on the
-# carrier: a rebuilt sweep naming an equal-weight carrier gets 0 and the same call.
+# configuration: a rebuilt sweep naming an equal-weight configuration gets 0 and the same call.
 #
 # The prefix does not enter the returns. The loader leaves the window start unconstrained
 # and still caps the end at the canonical window, and the engine aggregates only over the
@@ -419,7 +419,7 @@ print(f"Holdout backtest: {result.backtest_hash}")
 
 # %% tags=["results"]
 metrics = result.metrics
-# The carrier's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports
 # the common-support figure, which re-ranks the conformal field on the timestamps every
 # candidate covers; that is the right number for choosing between candidates and the wrong
 # one to set beside a holdout measured over its own full window. Both are printed, so

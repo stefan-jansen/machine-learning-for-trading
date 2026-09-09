@@ -16,13 +16,13 @@
 # %% [markdown]
 # # CME Futures: Transaction-Cost Sensitivity
 #
-# This notebook prices one configuration: the single carrier the case study ships, resolved
+# This notebook prices one configuration: the single configuration the case study ships, resolved
 # across labels from the immutable union of signal, allocation and risk-overlay results, with
 # its risk overlay carried rather than cleared. It then applies the declared all-in cost grid
 # to that fixed configuration. Commission and slippage each receive half of the grid value.
 #
-# One curve, not one per horizon. The carrier sits on a single label, so the other label
-# produces no cost rows, and that is the intended state rather than a missing run.
+# One curve, not one per horizon. The selected configuration sits on a single label, so the other
+# label produces no cost rows, and that is the intended state rather than a missing run.
 #
 # Cost sensitivity is not a selection stage. Its rows are excluded from the final selection pool.
 # Contract multipliers, tick sizes, margin rates, front-contract position, roll adjustment, and
@@ -83,8 +83,8 @@
 #
 # ### Why the risk overlay is carried rather than cleared
 #
-# The carrier is priced with its risk overlay in place, because the overlay changes the
-# positions and therefore changes what is traded. Pricing a bare signal and then adding an
+# The selected configuration is priced with its risk overlay in place, because the overlay changes
+# the positions and therefore changes what is traded. Pricing a bare signal and then adding an
 # overlay afterwards would cost a strategy nobody runs. This matters more here than it would
 # elsewhere: an overlay that reduces position size in volatile periods also reduces turnover in
 # exactly the periods where slippage is worst, so stripping it out would misstate the cost in a
@@ -123,7 +123,7 @@ SUPERSEDES_COST_POPULATION: str = ""
 # %% [markdown]
 # ## Fixed inputs
 #
-# There is one configuration to price, and the shared carrier selector below decides which
+# There is one configuration to price, and the shared configuration selector below decides which
 # label it is on. `PREVIEW_LABELS` is still validated rather than ignored: a preview run
 # that names a label the case study does not declare is a mistake worth stopping, even
 # though nothing here loops over the set.
@@ -156,7 +156,7 @@ if not cost_grid:
 # support and applies LABEL_RESTRICTIONS, UNIVERSE_RESTRICTIONS and CARRIER_PINS. A plain
 # Sharpe ranking beside it does none of those, and where the two disagree this notebook
 # prices a strategy the chapter does not report while `19_strategy_analysis` finds no cost
-# rows for the carrier it selected. It also refuses a carrier whose equity reached zero,
+# rows for the configuration it selected. It also refuses a configuration whose equity reached zero,
 # whose Sharpe would be computed on a balance that no longer exists.
 #
 # This replaces a per-label loop that ran a cost grid for each label off the pre-overlay

@@ -110,15 +110,15 @@ def _delete_holdout_backtest(case_dir, backtest_hash):
 # %% [markdown]
 # ## 1. The configuration, and the predictions it produced on the holdout
 #
-# The carrier is resolved the same way [`16_costs`](16_costs.ipynb) and
+# The selected configuration is resolved the same way [`16_costs`](16_costs.ipynb) and
 # [`17_holdout_predictions`](17_holdout_predictions.ipynb) resolve it, so all three run the
 # same configuration by construction rather than by a hash copied between them.
 #
-# Which holdout prediction set belongs to it is derived rather than searched for.
-# Re-deriving the holdout training specification reproduces the training identity 17
-# registered - the derivation is deterministic and the identity covers it - so the prediction
-# set is looked up by that identity and the carrier's checkpoint. A search over holdout
-# prediction sets would have to guess which one belonged to this configuration.
+# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving the
+# holdout training specification reproduces the training identity 17 registered - the derivation is
+# deterministic and the identity covers it - so the prediction set is looked up by that identity
+# and the selected configuration's checkpoint. A search over holdout prediction sets would have to
+# guess which one belonged to this configuration.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
@@ -159,14 +159,14 @@ if match is None:
     )
 HOLDOUT_PREDICTION_HASH = match[0]
 
-print(f"Carrier:            {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
+print(f"Selected configuration: {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
 print(f"Holdout training:   {holdout_training_hash}")
 print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 
 # %% [markdown]
 # ## 2. What the allocator needs before the window opens
 #
-# This carrier allocates by `mvo_ledoit_wolf`, which is a moment estimator: it reads a
+# This configuration allocates by `mvo_ledoit_wolf`, which is a moment estimator: it reads a
 # rolling window of underlying prices and produces weights from their covariance. That window
 # does not restart because the evaluation period does. Loading the holdout slice alone would
 # leave the first rebalance with no history to estimate from, and the loader would fall back
@@ -180,12 +180,12 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # window and does not enter return aggregation, because the engine only aggregates over the
 # rebalance timestamps the predictions carry.
 #
-# The conformal branch below is inert for this carrier and is kept because the carrier is
-# resolved rather than fixed. `conformal_weighted` sizes from residuals the model has already
-# made, and on the holdout there are none to use - every holdout return realises inside the
-# window being evaluated - so a conformal carrier would calibrate from validation residuals
-# with an embargo covering the label horizon. This one allocates from price moments and needs
-# no calibration at all.
+# The conformal branch below is inert for this configuration and is kept because the selected
+# configuration is resolved rather than fixed. `conformal_weighted` sizes from residuals the model
+# has already made, and on the holdout there are none to use - every holdout return realises inside
+# the window being evaluated - so a conformal configuration would calibrate from validation residuals
+# with an embargo covering the label horizon. This one allocates from price moments and needs no
+# calibration at all.
 
 # %% tags=["results"]
 strategy = strategy_view(json.loads(carrier["spec_json"]))
@@ -195,17 +195,19 @@ NEEDS_CALIBRATION = allocation.get("method") == "conformal_weighted"
 embargo_steps = holdout_conformal_embargo_steps(CASE_STUDY_ID, LABEL) if NEEDS_CALIBRATION else 0
 print(f"Allocator {allocation.get('method', 'equal_weight')!r}, warmup {warmup} bars")
 if NEEDS_CALIBRATION:
-    print(f"  conformal carrier: embargo {embargo_steps} observation(s), widths written below.")
+    print(
+        f"  conformal configuration: embargo {embargo_steps} observation(s), widths written below."
+    )
 else:
     print("  needs no calibration; sized from price moments over the warmup window.")
 
 # %% [markdown]
 # ## 3. The backtest
 #
-# The strategy specification is the carrier's own, re-pointed at the holdout prediction set
-# and the holdout price window. Nothing else about it changes - the signal, the allocator and
-# the `time_exit_20` overlay are carried across, and the commission and slippage are the
-# levels `setup.yaml` declares, the same ones every validation number in this case study was
+# The strategy specification is the selected configuration's own, re-pointed at the holdout
+# prediction set and the holdout price window. Nothing else about it changes - the signal, the
+# allocator and the `time_exit_20` overlay are carried across, and the commission and slippage are
+# the levels `setup.yaml` declares, the same ones every validation number in this case study was
 # net of and the same ones sitting inside the swept grid in [`16_costs`](16_costs.ipynb).
 #
 # The run registers under `stage='holdout'`, which the registry derives from the prediction
@@ -216,11 +218,11 @@ else:
 # checkpoint - and it cannot see this one: a changed allocator, overlay or cost level
 # produces the same holdout predictions and a different result from them.
 #
-# Two fields are rebuilt rather than carried. `input_identity` records the digests of the
-# data a run actually read - here the price panel and the official funding settlements - and
-# the carrier's copy describes the validation window. Cloning it produces a record that names
-# inputs the run never touched, which is exactly what a consumer checking a price digest
-# against the canonical one would refuse. They are derived from the holdout frames instead.
+# Two fields are rebuilt rather than carried. `input_identity` records the digests of the data a
+# run actually read - here the price panel and the official funding settlements - and the selected
+# configuration's copy describes the validation window. Cloning it produces a record that names
+# inputs the run never touched, which is exactly what a consumer checking a price digest against
+# the canonical one would refuse. They are derived from the holdout frames instead.
 #
 # The funding settlements are also passed to the runner, not merely digested. This case study
 # is about a cashflow that accrues on holding rather than trading, every validation number in
@@ -341,7 +343,7 @@ print(f"Holdout backtest: {result.backtest_hash}")
 
 # %% tags=["results"]
 metrics = result.metrics
-# The carrier's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports
 # the common-support figure, which re-ranks candidates on the timestamps every one of them
 # covers; that is the right number for choosing between candidates and the wrong one to set
 # beside a holdout measured over its own full window. Both are printed, so neither has to be
