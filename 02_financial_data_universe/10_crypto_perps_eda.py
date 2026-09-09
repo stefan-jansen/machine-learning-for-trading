@@ -276,16 +276,16 @@ premium_nulls = premium.null_count().sum_horizontal()[0]
 print(f"Null values: OHLCV={ohlcv_nulls}, Premium={premium_nulls}")
 
 # %% [markdown]
-# ### A null count is not a completeness check
+# ### A point mass, and how to tell what makes one
 #
-# Neither file has a null in it, and that is worth exactly as much as the encoding behind it.
-# Absence recorded as a null is visible to the check above; absence recorded as a valid-looking
-# number is not.
+# Neither file has a null in it. That is worth exactly as much as the encoding behind it,
+# because absence recorded as a null is visible to a null check and absence recorded as a
+# valid-looking number is not. So it is worth looking for the second kind.
 #
-# The premium index gives a way to test for the second kind. It is a continuous quantity stored
-# to eight decimal places, and its standard deviation is around a thousandth. A quantum that
-# small against a spread that large means landing on exactly zero should be vanishingly rare -
-# so if exact zeros are common, they are not measurements.
+# The premium index has an obvious candidate. It is a continuous quantity stored to eight
+# decimal places with a standard deviation around a thousandth, and yet a large share of its
+# closes are exactly zero - a value that a continuous distribution at that resolution should
+# essentially never produce.
 
 # %%
 _close = pl.col("premium_index_close")
@@ -304,19 +304,57 @@ print(
 )
 
 # %% [markdown]
-# Fourteen percent of the observations sit on a value that a continuous distribution at this
-# resolution would essentially never produce. Whatever they are, they are not draws from the
-# same process as the other eighty-six percent.
+# One observation in seven sits on a value the rest of the distribution never visits. The
+# tempting reading is that these are missing values written as zero - a placeholder the schema
+# accepts, which is why the null count sees nothing.
 #
-# The next two cells narrow down what they might be. Neither settles it, and the section says
-# where the evidence stops.
+# **That reading is wrong, and the way it goes wrong is the point of this section.** Before
+# treating a point mass as a data defect, read the definition of the quantity. Binance computes
+# the premium index as
+#
+# $$\frac{\max(0,\ \text{Impact Bid} - \text{Price Index}) - \max(0,\ \text{Price Index} - \text{Impact Ask})}{\text{Price Index}}$$
+#
+# Both numerator terms are zero whenever the price index lies between the impact bid and the
+# impact ask. The formula has a **dead zone** exactly the width of the impact spread, and
+# inside it the output is not approximately zero but exactly zero. A point mass there is
+# what the definition predicts, and it means "no premium is owed", which is a measurement
+# rather than the absence of one.
+#
+# ### Distinguishing a dead zone from missing data
+#
+# Both produce a point mass, so the count cannot separate them. What separates them is what the
+# rate correlates with. Non-publication is an operational failure and has no reason to sort
+# itself by market structure. A dead zone whose width is the impact spread has every reason to:
+# the spread is wide where liquidity is thin, so the zone is easier to sit inside.
 
 # %%
-_shape = _zero_rows.select(
-    (pl.col("premium_index_open") == 0).mean().alias("open_also_zero"),
-    (pl.col("premium_index_high") == 0).mean().alias("high_also_zero"),
-    (pl.col("premium_index_low") == 0).mean().alias("low_also_zero"),
+zero_rate_by_symbol = (
+    premium.group_by("symbol")
+    .agg((_close == 0).mean().alias("zero_rate"))
+    .join(
+        ohlcv.with_columns((pl.col("close") * pl.col("volume")).alias("dollar_volume"))
+        .group_by("symbol")
+        .agg(pl.col("dollar_volume").median().alias("median_hourly_dollar_volume")),
+        on="symbol",
+        how="inner",
+    )
+    .sort("zero_rate")
 )
+print("Share of premium closes at exactly zero, against a liquidity proxy:")
+zero_rate_by_symbol
+
+# %% [markdown]
+# The ordering is close to monotone across the whole universe, from the most liquid contract to
+# the thinnest, and it spans a factor of more than fifty. That is the dead-zone prediction and
+# it is not something an outage would produce.
+#
+# The remaining checks all point the same way once the formula is known. The rate declines
+# steadily year on year, which reads as spreads tightening rather than as a fault being
+# repaired. Fewer than one percent of the affected rows have all four premium fields at zero,
+# so it is not a blank record. And the zeros are present in the exchange's own one-minute
+# source, so nothing in the download or the resampling creates them.
+
+# %%
 _all_four_zero = premium.filter(
     (pl.col("premium_index_open") == 0)
     & (pl.col("premium_index_high") == 0)
@@ -324,70 +362,37 @@ _all_four_zero = premium.filter(
     & (_close == 0)
 ).height
 
-print("On the rows whose close is exactly zero, share where the other prices are also zero:")
-print(_shape)
-print(f"Rows where all four premium fields are zero: {_all_four_zero:,} of {_zero_rows.height:,}")
-print(f"Symbols affected: {_zero_rows['symbol'].n_unique()} of {premium['symbol'].n_unique()}")
-print(f"Spanning {_zero_rows['timestamp'].min()} to {_zero_rows['timestamp'].max()}")
-
-# %% [markdown]
-# It is not a whole bar written as blank: fewer than one percent of the affected rows have all
-# four fields at zero, so whatever produces the zero acts on the close and mostly leaves the
-# other three alone.
-#
-# Note what this does *not* establish. A bar whose premium crossed zero during the period can
-# legitimately close at zero with a non-zero high and low, so a non-zero range is not proof
-# that the close is fabricated. It only rules out the simplest explanation, that the row is a
-# blank record.
-#
-# One more cut. A property of the basis would come and go with market conditions. A capture or
-# publication practice being tidied up would decline steadily as the exchange's plumbing
-# matures.
-
-# %%
 zero_by_year = (
     premium.with_columns(pl.col("timestamp").dt.year().alias("year"))
     .group_by("year")
     .agg(pl.len().alias("observations"), (_close == 0).mean().alias("share_exactly_zero"))
     .sort("year")
 )
+print(f"Rows where all four premium fields are zero: {_all_four_zero:,} of {_zero_rows.height:,}")
+print(f"Symbols affected: {_zero_rows['symbol'].n_unique()} of {premium['symbol'].n_unique()}")
 zero_by_year
 
 # %% [markdown]
-# The high and the low are almost never zero on those rows, so the index moved during the
-# period and then "closed" at a value it never plausibly reached. That is a placeholder written
-# into a price column, not a price.
+# ### What to carry forward
 #
-# The rate falls monotonically, year after year, from a quarter of all observations to under a
-# tenth, and it is a decline rather than a disappearance - the most recent full year still
-# carries the pattern on roughly one observation in twelve, across all nineteen symbols.
+# The zeros are measurements, so nothing should be filtered on them. Treating them as unknown
+# would discard one observation in seven, and a third of the thinnest contracts' history, on
+# the strength of a hypothesis the definition refutes.
 #
-# ### What this establishes, and what it does not
+# What does follow is that `premium_index_close` carries a large tie group at exactly zero,
+# reaching a third of the observations for the least liquid contracts. Any feature built by
+# ranking or standardising this column - a trailing percentile, a z-score - is operating on a
+# distribution with a third of its mass on a single point for those symbols, and rank-based
+# transforms handle ties in ways that are worth choosing deliberately rather than inheriting.
 #
-# **Established.** The exact zeros are far too frequent to be draws from the same continuous
-# process as the rest of the column, at a storage resolution where landing on zero should be
-# vanishingly rare. They are not blank bars. Their frequency falls steadily over six years,
-# which is the shape of a changing practice rather than of a market condition.
-#
-# **Not established.** That a zero means the value is missing. Nothing measured here reveals
-# what the exchange writes when it has no premium to publish, whether the zeros originate at
-# the exchange, in the download, or in the eight-hour resampling, or whether some of them are
-# genuine. Settling that needs the index definition or the source encoding, neither of which is
-# in this file. The pattern is strong enough to make it a question that has to be answered
-# before the column is used as a signal; it is not itself the answer.
-#
-# **What follows regardless.** The null count above is not a completeness check for this
-# column. Whatever the zeros mean, a check written as `is_null()` will report this file
-# complete, and so will any downstream check that inherited that shape. A consumer that needs
-# to know about them has to test for the value, not for the absence.
-#
-# For a strategy that trades the basis, the two possible readings are opposite instructions:
-# "the spread has closed" against "we do not know what the spread is". One observation in seven
-# is affected, so which reading is correct is worth establishing before the column is used,
-# rather than after. That is a question for whoever owns the download path, and it is filed as
-# `ml4t/agent-workspace#1108`.
+# And the general lesson, which outlives this dataset: **a point mass in a derived quantity is
+# a property of its formula before it is a defect in its data.** Reading the definition costs
+# minutes. Every diagnostic computed above is consistent with both explanations, so no amount
+# of measurement on this file alone would have settled it - the frequency, the non-zero
+# extremes, the yearly decline and the null count are all equally compatible with a dead zone
+# and with a placeholder. The one measurement that discriminates is the one the formula tells
+# you to make.
 
-# %% [markdown]
 # ### Gaps in the hourly grid
 #
 # The check runs over every symbol rather than a reference one. Checking BTC alone would sample
@@ -594,14 +599,14 @@ else:
 #    check confined to it samples the contract with least to find and reports that as the
 #    dataset's condition.
 #
-# 7. **A null count is not a completeness check.** Fourteen percent of premium closes are
-#    exactly zero, on a quantity stored to eight decimals whose spread is three orders of
-#    magnitude wider - far too frequent to be draws from the same continuous process as the
-#    rest of the column. Fewer than one percent are blank bars, and the rate declines
-#    monotonically over six years, which is the shape of a changing practice rather than a
-#    market condition. What the zeros encode is not settled here and needs the index definition
-#    or the download path. What is settled is that no `is_null()` check can see them, so a
-#    consumer has to test for the value rather than for absence.
+# 7. **A point mass is a property of a formula before it is a defect in data.** One premium
+#    close in seven is exactly zero, which looks like a placeholder and is not. Binance's
+#    definition has a dead zone the width of the impact spread, and inside it the index is
+#    exactly zero by construction. The measurement that settles it is the one the formula
+#    predicts: the zero rate tracks liquidity across the universe, from well under one percent
+#    on the most traded contract to a third on the thinnest. Frequency, non-zero extremes and
+#    a yearly decline are all equally consistent with a placeholder, so none of them could have
+#    settled it. Read the definition first.
 #
 # 8. **These are raw exchange bars, so the OHLC relations are exact.** The check reports the
 #    number of bars outside each bound rather than a percentage against a tolerance, because on
