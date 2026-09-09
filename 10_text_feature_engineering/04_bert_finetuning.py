@@ -57,7 +57,8 @@
 # ## Related notebooks
 #
 # - `03_sentiment_evolution.py` - lexicon, TF-IDF and static-embedding baselines
-# - `06_finbert_cross_dataset.py` - the same checkpoints evaluated on a different corpus
+# - `06_finbert_cross_dataset.py` - the published FinBERT checkpoint scored zero-shot on a
+#   different corpus
 # - `12_gradient_boosting/10_shap_nlp_sentiment.py` - attributing a text model's decisions
 #
 # ## What it costs to run
@@ -504,10 +505,12 @@ show_with_alt(
 # %% [markdown]
 # A single accuracy figure says how often a model is right, not what it is wrong about. The
 # matrices below say which pair of classes each model confuses, which is the difference
-# between a model that is unsure and one that has collapsed a class. Look for whether the
-# large off-diagonal cells sit in the same places across the three panels: shared error
-# structure is a property of the task and the labels, and it bounds what any of these models
-# can do on it.
+# between a model that is unsure and one that has collapsed a class. Worth noting is whether
+# the large off-diagonal cells fall in the same places across the three panels. That is an
+# observation about these three runs, not a measurement of the task: correlated errors are
+# equally consistent with a shared limitation in the training split or with the class
+# imbalance, and separating those would mean reading the misclassified sentences and their
+# labels rather than the matrices.
 
 # %%
 n_models = len(results)
@@ -569,6 +572,10 @@ show_with_alt(
 # 5. **Fine-tuning cost and fine-tuning benefit are not on the same scale here.** The training
 #    times differ from one another by more than the scores do, so on a task this size the
 #    choice between these checkpoints is closer to an engineering decision than a modelling one.
+# 6. **A confusion matrix says what a model got wrong, not why.** Three models confusing the
+#    same pair of classes is a fact about these three runs. Whether the pair is genuinely
+#    ambiguous, under-represented in the training split, or inconsistently labeled is a
+#    question about the examples, and it is answered by reading them.
 #
 # ### The scope these numbers have
 #
