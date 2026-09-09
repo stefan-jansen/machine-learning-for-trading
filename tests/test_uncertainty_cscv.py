@@ -12,6 +12,7 @@ Covers two pieces P2.5 added:
 
 from __future__ import annotations
 
+import json
 import warnings
 from datetime import date, timedelta
 from math import comb
@@ -518,3 +519,53 @@ def test_a_full_mode_synthesis_refuses_a_registry_set_it_cannot_see() -> None:
 
     # The seeded test registry is not the production store, and that escape is explicit.
     refuse(**{**complete, "empty": ["cs7"], "enforce": False})
+
+
+def test_a_subset_synthesis_run_leaves_the_chapter_artifacts_alone(tmp_path: Path) -> None:
+    """The completeness check and the export block have to agree, and they did not.
+
+    The refusal above tells a reader that a subset run repopulates one case study. The
+    export block wrote every chapter-wide table unconditionally, so taking that route
+    replaced nine case studies' worth of tables with one's - the same reader-facing artifact
+    the check exists to protect (ml4t/agent-workspace#964). Asserted on the files, because
+    the defect was that the files changed.
+    """
+    import ast
+
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (repo_root / "20_strategy_synthesis" / "01_aggregate_synthesis.py").read_text()
+    tree = ast.parse(source)
+    definitions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "write_chapter_artifacts"
+    ]
+    assert len(definitions) == 1, "the notebook no longer routes its exports through one writer"
+    namespace: dict = {"json": json, "pl": pl, "Path": Path}
+    exec(  # noqa: S102 - running the producer itself is the point of the check
+        compile(ast.Module(body=definitions, type_ignores=[]), "01_aggregate_synthesis", "exec"),
+        namespace,
+    )
+    write_chapter_artifacts = namespace["write_chapter_artifacts"]
+
+    complete = pl.DataFrame({"case_study": [f"cs{i}" for i in range(9)], "sharpe": [0.1] * 9})
+    frames = {"backtest_comparison.parquet": complete, "absent.parquet": None}
+    documents = {"all_synthesis.json": {"cs0": 1}}
+
+    written = write_chapter_artifacts(tmp_path, frames, documents, subset=[])
+    assert written == ["backtest_comparison.parquet", "all_synthesis.json"]
+    assert not (tmp_path / "absent.parquet").exists(), "a None frame writes nothing"
+    before = {f.name: f.read_bytes() for f in tmp_path.iterdir()}
+
+    one = pl.DataFrame({"case_study": ["cs0"], "sharpe": [9.9]})
+    assert (
+        write_chapter_artifacts(
+            tmp_path,
+            {"backtest_comparison.parquet": one},
+            {"all_synthesis.json": {"cs0": 2}},
+            subset=["cs0"],
+        )
+        == []
+    )
+    after = {f.name: f.read_bytes() for f in tmp_path.iterdir()}
+    assert after == before, "a subset run overwrote the artifacts that cover every case study"

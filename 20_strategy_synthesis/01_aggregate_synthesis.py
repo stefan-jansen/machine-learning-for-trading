@@ -37,14 +37,12 @@
 
 import json
 import sqlite3
-import warnings
 from functools import cache
+from pathlib import Path
 
 import polars as pl
 import yaml
 from IPython.display import Markdown, display
-
-warnings.filterwarnings("ignore")
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
@@ -208,7 +206,9 @@ def refuse_partial_full_mode(
         f"  no registry.db:      {unreadable or 'none'}\n"
         f"  zero backtest runs:  {empty or 'none'}\n"
         "Run this once every case study has registered its backtests and the fleet has "
-        "stopped writing to them, or pass CASE_STUDIES to repopulate a single case study."
+        "stopped writing to them. Passing CASE_STUDIES is not a way round this: a subset "
+        "run repopulates one case study's paired metrics in its own registry and writes "
+        "none of the chapter-wide artifacts."
     )
 
 
@@ -2544,39 +2544,78 @@ for cs_id, cs_data in synthesis_dict.items():
 # ## Save Aggregated DataFrames
 #
 # Export for use by downstream notebooks (02–06).
+#
+# **A subset run writes none of these.** Downstream notebooks and the chapter figures read
+# every path below as a complete set covering all nine case studies, so a run restricted to
+# one case study would replace nine case studies' worth of tables with one's. Its job is the
+# paired metrics it has already written into that case study's own registry, and it stops
+# here.
+
 
 # %%
-overview_df.write_parquet(OUTPUT_DIR / "overview.parquet")
-if not ic_df.is_empty():
-    ic_df.write_parquet(OUTPUT_DIR / "ic_comparison.parquet")
-bt_df.write_parquet(OUTPUT_DIR / "backtest_comparison.parquet")
-if not prog_df.is_empty():
-    prog_df.write_parquet(OUTPUT_DIR / "sharpe_progression.parquet")
-if not lineage_df.is_empty():
-    lineage_df.write_parquet(OUTPUT_DIR / "lineage.parquet")
-# Written unconditionally, unlike its neighbours above. 04_signal_to_strategy and
-# 08_recommendations both read this path with a bare pl.read_parquet, and 08 already
-# distinguishes "no holdout row for this case study" from "failed a gate" - so an empty
-# table is a state it can report, while an absent file is a FileNotFoundError in cell 5.
-# The CI fixture seeds no holdout rows for any case study, which is the all-empty case.
-holdout_df.write_parquet(OUTPUT_DIR / "holdout_results.parquet")
-if not cluster_df.is_empty():
-    cluster_df.write_parquet(OUTPUT_DIR / "rank1_cluster_diagnostics.parquet")
-measurement_df.write_parquet(OUTPUT_DIR / "measurement_quality.parquet")
-if not variant_df.is_empty():
-    variant_df.write_parquet(OUTPUT_DIR / "variant_analysis.parquet")
+def write_chapter_artifacts(
+    output_dir: Path,
+    frames: dict[str, pl.DataFrame | None],
+    documents: dict[str, object],
+    *,
+    subset: list[str],
+) -> list[str]:
+    """Write the chapter-wide artifacts and return their names, or write none for a subset run.
 
-# Save JSON artifacts
-(OUTPUT_DIR / "stage_attrition.json").write_text(
-    json.dumps({"total": total, "stages": attrition}, indent=2)
+    A ``None`` frame is one there is nothing to write; the caller decides which tables are
+    allowed to be absent and which have to exist even when empty.
+    """
+    if subset:
+        print(
+            "Subset run over "
+            f"{subset}: chapter-wide artifacts left as they are. They cover every case "
+            "study, and a subset cannot produce them."
+        )
+        return []
+    written: list[str] = []
+    for name, frame in frames.items():
+        if frame is None:
+            continue
+        frame.write_parquet(output_dir / name)
+        written.append(name)
+    for name, payload in documents.items():
+        (output_dir / name).write_text(json.dumps(payload, indent=2))
+        written.append(name)
+    return written
+
+
+# `holdout_results.parquet` and `measurement_quality.parquet` are written even when empty,
+# unlike their neighbours. 04_signal_to_strategy and 08_recommendations both read them with a
+# bare `pl.read_parquet`, and 08 already distinguishes "no holdout row for this case study"
+# from "failed a gate" - so an empty table is a state it can report, while an absent file is a
+# FileNotFoundError in its fifth cell. The CI fixture seeds no holdout rows for any case study,
+# which is the all-empty case.
+saved = write_chapter_artifacts(
+    OUTPUT_DIR,
+    {
+        "overview.parquet": overview_df,
+        "ic_comparison.parquet": None if ic_df.is_empty() else ic_df,
+        "backtest_comparison.parquet": bt_df,
+        "sharpe_progression.parquet": None if prog_df.is_empty() else prog_df,
+        "lineage.parquet": None if lineage_df.is_empty() else lineage_df,
+        "holdout_results.parquet": holdout_df,
+        "rank1_cluster_diagnostics.parquet": None if cluster_df.is_empty() else cluster_df,
+        "measurement_quality.parquet": measurement_df,
+        "variant_analysis.parquet": None if variant_df.is_empty() else variant_df,
+    },
+    {
+        "stage_attrition.json": {"total": total, "stages": attrition},
+        "all_synthesis.json": synthesis_dict,
+    },
+    subset=CASE_STUDIES,
 )
-(OUTPUT_DIR / "all_synthesis.json").write_text(json.dumps(synthesis_dict, indent=2))
 
 # Relative to the repository root: an absolute path is specific to the machine
 # that ran the notebook and tells a reader nothing.
-print(f"\nSaved aggregated data to {OUTPUT_DIR.relative_to(REPO_ROOT)}")
-for f in sorted(OUTPUT_DIR.glob("*.parquet")) + sorted(OUTPUT_DIR.glob("*.json")):
-    print(f"  {f.name}: {f.stat().st_size / 1024:.1f} KB")
+if saved:
+    print(f"\nSaved aggregated data to {OUTPUT_DIR.relative_to(REPO_ROOT)}")
+    for name in saved:
+        print(f"  {name}: {(OUTPUT_DIR / name).stat().st_size / 1024:.1f} KB")
 
 # %% [markdown]
 # ## What the Empty Cells Mean
