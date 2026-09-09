@@ -300,20 +300,54 @@ def compute_prediction_fold_metrics(
     if not is_classification and direction_labels is not None and direction_col:
         # Never fatal. This is a secondary reading of a run whose own metrics are already
         # computed above, so a schema surprise in a sibling label must not lose the run.
+        #
+        # But a failure has to survive somewhere a reader looks. It used to reach only
+        # `logger.warning`, into a papermill log the harness deletes when the run succeeds,
+        # and the row was left with a NULL `direction_label` - identical to the NULL that
+        # means "this label declares no direction sibling", which `fwd_ret_24h` legitimately
+        # produces in every family. The two are opposite claims wearing the same face, and
+        # the ambiguity hid a real result: every `deep_learning` run in
+        # `crypto_perps_funding` raised here on a time-unit mismatch, and once the join was
+        # repaired 20 of the 21 significant sets turned out to sit BELOW 0.5 with confidence
+        # intervals excluding it.
+        #
+        # So the reason is written beside the absent value. Cleared on the success path
+        # rather than only set on the failure one, so a stored error cannot outlive the
+        # cause it names: a row that computes gets an explicit NULL over whatever a previous
+        # attempt left there, and nobody has to remember to clear it.
         try:
-            headline.update(
-                compute_cross_sectional_direction_auc(
-                    predictions,
-                    direction_labels,
-                    y_score_col=y_score_col,
-                    direction_col=direction_col,
-                    date_col=date_col,
-                    entity_col=_entity,
-                    horizon=int(max(1, horizon)),
-                )
+            computed = compute_cross_sectional_direction_auc(
+                predictions,
+                direction_labels,
+                y_score_col=y_score_col,
+                direction_col=direction_col,
+                date_col=date_col,
+                entity_col=_entity,
+                horizon=int(max(1, horizon)),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("direction AUC against %s not computed: %s", direction_col, exc)
+            # Truncated because this is a diagnostic in a metrics row, not a log: the type
+            # and the first line are what identify the failure, and a polars schema error
+            # carries several hundred characters of frame detail behind them.
+            detail = " ".join(str(exc).split())
+            headline["direction_label_error"] = f"{type(exc).__name__}: {detail}"[:300]
+        else:
+            headline.update(computed)
+            # An empty return is the third state and it was as silent as the raise. The
+            # function declines rather than raises when the joined frame is too small, the
+            # label is degenerate, or fewer than three dates carry a defined AUC - all of
+            # which leave the same NULL. Reaching here at all means a direction sibling WAS
+            # declared and requested, so "declined" is a different claim from "none exists"
+            # and is worth the row it is written on.
+            headline["direction_label_error"] = (
+                None
+                if computed
+                else (
+                    "not computable: fewer than 100 joined rows, a degenerate direction "
+                    "label, or fewer than 3 dates carrying a defined AUC"
+                )
+            )
 
     return headline, fold_results
 
