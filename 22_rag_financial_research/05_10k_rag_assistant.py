@@ -1008,11 +1008,16 @@ if ragas_metrics:
 #    questions whose answers are known. The calibration is the work; the score
 #    on its own is not a guardrail.
 #
-# 3. **The corpus decides which questions are askable.** These are narrative
-#    excerpts cut around supplier discussion. Questions about fiscal-year
-#    revenue growth and customer concentration have no evidence here, and the
-#    numeric section confirms it by a route that cannot be argued with: zero
-#    dollar figures in the retrieved chunks.
+# 3. **The corpus decides which questions are askable, and establishing that
+#    takes evidence.** These are narrative excerpts cut around supplier
+#    discussion, which is why the three financial questions were expected to
+#    fail - but expecting is not measuring. What this run establishes is
+#    narrower and worth keeping separate: the chunks retrieved for a
+#    dollar-figure question contain no dollar amounts, so the extract step has
+#    nothing to work on. Whether the corpus holds a revenue growth rate stated
+#    as a percentage somewhere it did not retrieve is a different question, and
+#    answering it needs a search for that evidence rather than an absence in
+#    five chunks.
 #
 # 4. **Keep the arithmetic out of the model.** Retrieve, extract into a typed
 #    schema, compute in Python, narrate with the source ids. A model asked to
