@@ -50,9 +50,7 @@
 """Spread estimation from market data with unit-aware validation."""
 
 import logging
-import warnings
 
-warnings.filterwarnings("ignore")
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 import matplotlib.dates as mdates
@@ -482,7 +480,6 @@ for ax, column, estimator, color in plot_specs:
         subtitle="One point per symbol; the dashed line is exact agreement",
     )
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two scatter panels of estimated against quoted spread, one point per symbol, sharing axes. "
@@ -776,7 +773,6 @@ add_message_title(
     "On the equity panels the estimate is zero most of the time",
     subtitle="A zero means the window's volatility hid the spread, not that the spread was zero",
 )
-fig.tight_layout()
 show_with_alt(
     fig,
     "Upper panel: one row per market with a circle for the Corwin-Schultz median, a square for "
@@ -1015,7 +1011,6 @@ add_message_title(
     "On the sessions that do produce one, the estimate more than doubles",
     subtitle="ETF daily panel; quartile boundaries set on the whole VIX history",
 )
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two stacked bar panels across the four VIX quartiles. The upper panel, the share of sessions "
@@ -1066,7 +1061,6 @@ ax_vix.set_ylabel("VIX (index points)")
 ax_vix.set_xlabel("Date")
 ax_vix.xaxis.set_major_locator(mdates.YearLocator(3))
 ax_vix.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two stacked time series over the ETF sample: the daily cross-sectional mean Corwin-Schultz "

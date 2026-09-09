@@ -49,10 +49,6 @@
 # %%
 """ML4T Volume Participation - Realistic execution constraints on real NASDAQ-100 liquidity."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
 import plotly.graph_objects as go
 import polars as pl
 from IPython.display import Markdown, display

@@ -47,10 +47,6 @@
 # %%
 """Cost taxonomy and fee schedules for unit-aware scenario analysis."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl

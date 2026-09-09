@@ -550,14 +550,14 @@ def shares_from_weights(weights: np.ndarray, total: int) -> np.ndarray:
 twap_shares = shares_from_weights(np.ones(N_BUCKETS), order_shares)
 vwap_shares = shares_from_weights(mean_volume, order_shares)
 
+
 # %% [markdown]
 # A static schedule defines a target cumulative trajectory. If the 25% cap prevents
 # a target fill, the missed quantity carries forward. The close requests all remaining
 # inventory, but the cap still applies and any residual becomes explicit shortfall.
 
+
 # %%
-
-
 def execute_static_schedule(target_shares: np.ndarray, sess: dict) -> np.ndarray:
     """Follow a target trajectory while carrying capped fills forward."""
     if not np.isclose(target_shares.sum(), order_shares):
