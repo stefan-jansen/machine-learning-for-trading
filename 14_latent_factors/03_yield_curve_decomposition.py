@@ -782,9 +782,9 @@ for ax, spec in zip(axes, panel_specs, strict=True):
 show_with_alt(
     fig,
     "Two stacked panels comparing the position before and after the hedge, with paired bars in "
-    "each. The upper gives key-rate DV01 in dollars per basis point at each maturity, against a "
-    "line at zero; the lower gives exposure to each of the three factors in dollars per unit of "
-    "factor score.",
+    "each. The upper gives key-rate DV01 in thousands of dollars per basis point at each "
+    "maturity, against a line at zero; the lower gives exposure to each of the three factors in "
+    "thousands of dollars per unit of factor score.",
 )
 
 # %% [markdown]
