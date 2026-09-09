@@ -45,7 +45,7 @@ import time
 
 import polars as pl
 
-from case_studies.research import prediction_rows_at, superseded_members_at
+from case_studies.research import open_study, prediction_rows_at, superseded_members_at
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import (
@@ -76,6 +76,12 @@ TOP_K = 0
 MAX_SYMBOLS = 0
 FORCE_REBACKTEST = False  # Set True to re-backtest even if a complete backtest_hash exists
 TOP_N_PREDICTIONS = None
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical branch regenerates in place, which
+# needs generated-artifact symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
 # ## 1. Setup & Plumbing Test
@@ -91,7 +97,17 @@ TOP_N_PREDICTIONS = None
 # outcome and not a failure. What would fail is profit that persists after
 # costs.
 
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Opening it
+# activates a root and rewrites `ML4T_OUTPUT_DIR` process-wide, and every later
+# `get_case_study_dir`, prediction index and registry write resolves against that variable. A
+# `CASE_DIR` bound before this line points at the released registry while the sweep writes to
+# the workspace, and the two never meet: the sweep finds nothing registered and every reader
+# scoped to hashes from the other root comes back empty.
+
 # %%
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 if TOP_N_PREDICTIONS is None:

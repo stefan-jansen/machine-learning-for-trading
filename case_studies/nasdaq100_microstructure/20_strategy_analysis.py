@@ -78,6 +78,7 @@ from ml4t.diagnostic.integration import (
     generate_tearsheet_from_run_artifacts,
 )
 
+from case_studies.research import Study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.cohort_metrics import compute_and_register
@@ -119,12 +120,27 @@ from case_studies.utils.uncertainty import ENTIRE_REGISTRY, NO_CARRIER
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
+CASE_STUDY = "nasdaq100_microstructure"
 MAX_SYMBOLS = 0
 
+# %% [markdown]
+# This notebook reads; it registers nothing, and that decides how it opens the registry. Every
+# route through `open_study` ends in `Study.activate()`, which rewrites `ML4T_OUTPUT_DIR` for
+# the rest of the process and clears the caches keyed on it, so every later
+# `get_case_study_dir` answers for a different directory than the one resolved here. On the
+# canonical tier with no workspace that route is `Study.regenerate`, which refuses outright
+# unless `features`, `labels` and `run_log` are symlinks - true in a maintainer worktree, false
+# in every clean clone.
+#
+# `Study.at` is the read-only form: one root, no activation, and it points the path helpers at
+# that root rather than clearing the variable. `CASE_DIR` is that root, and every question this
+# notebook asks - the catalog, the lineage, the populations, the artifacts - is answered from
+# it.
+
 # %%
-CASE_STUDY = "nasdaq100_microstructure"
-PERIODS_PER_YEAR = 252  # strategy returns are aggregated to daily before Sharpe
 CASE_DIR = get_case_study_dir(CASE_STUDY)
+study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="20_strategy_analysis")
+PERIODS_PER_YEAR = 252  # strategy returns are aggregated to daily before Sharpe
 OUTPUT_DIR = get_output_dir(20, CASE_STUDY)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
