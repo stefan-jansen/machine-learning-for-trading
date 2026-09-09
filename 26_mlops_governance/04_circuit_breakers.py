@@ -22,22 +22,28 @@
 # **Prerequisites**: Chapter 25 deployment verification and the Chapter 26 monitoring sections.
 #
 # **Learning Objectives**:
-# - Implement a shared CLOSED/OPEN/HALF_OPEN state machine that several
-#   independent breakers can plug into.
-# - Combine four representative breakers (drawdown, daily loss, consecutive
-#   loss, latency) into a single halt decision and audit log.
-# - Drive the demo with real SPY 2020 returns so the market-stress breakers
-#   trip on a recognized real-world episode, not synthetic returns.
+# - Build one state machine that decides when an automated system stops trading, when it may
+#   try again, and when it is back to normal, and reuse it for every rule that can halt.
+# - Write four halt rules that each catch a different way a strategy fails, and combine them
+#   into a single answer to the question the trading engine asks: may I trade right now.
+# - Keep an audit log that records every state change, so an operator can reconstruct after
+#   the fact which rule stopped trading and why.
+# - Tell a market-driven halt apart from an infrastructure-driven one, since the response to
+#   each is different.
 #
-# This notebook demonstrates **four representative circuit breakers** — a
-# drawdown breaker on the equity curve, a daily-loss breaker, a consecutive-loss
-# breaker, and an infrastructure latency breaker. The chapter §26.5 discussion
-# of additional categories (weekly drawdown, position-size, sector, volatility,
-# spread, intraday-move) extends the same state-machine pattern; only these
-# four are implemented here.
+# A **circuit breaker** is a rule that switches a system off when a measurement crosses a
+# limit, and switches it back on only after a defined test. Borrowed from electrical
+# engineering, and used the same way here: the point is not the limit, it is that switching
+# off is automatic and switching back on is not.
+#
+# Four are built below. A drawdown breaker on the equity curve, a daily-loss breaker, a
+# consecutive-loss breaker and a latency breaker. Section 26.5 of the chapter lists more
+# (weekly drawdown, position size, sector, volatility, spread, intraday move); each of them is
+# the same state machine with a different condition, which is the reason the state machine is
+# separated out first.
 
 # %%
-"""Circuit Breakers for Trading Systems — implement multi-level circuit breakers for production trading systems."""
+"""Circuit Breakers for Trading Systems: a shared halt state machine with four independent rules."""
 
 import warnings
 from abc import ABC, abstractmethod
@@ -55,14 +61,60 @@ import polars as pl
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+# Named, not blanket: a bare ignore would also hide the convergence and numerical
+# warnings a reader needs to see.
+warnings.filterwarnings("ignore", category=FutureWarning, module="polars")
 
+
+# %% [markdown]
+# ## Settings
+#
+# **The simulation.** `SIMULATION_START` and `N_STEPS` pick the market history the breakers
+# run over: the first `N_STEPS` sessions of SPY from that date. `INITIAL_VALUE` is the account
+# the simulation starts from, and it only sets the scale of the numbers.
+#
+# **The four limits.** `MAX_DRAWDOWN` is how far below its own running peak the account may
+# fall; `MAX_DAILY_LOSS` how much it may lose within one session, measured from that session's
+# opening value rather than from inception; `MAX_CONSECUTIVE_LOSSES` how many losing sessions
+# in a row are tolerated; and `MAX_LATENCY_MS` how slow the system's own round trip may get.
+# The four are set at levels that a real desk would recognise and are not derived from
+# anything here: what a desk can absorb is a question about its capital and its investors,
+# and no calculation in this notebook answers it.
+#
+# **Coming back on.** Each breaker has its own recovery timeout, and they differ because the
+# conditions clear at different speeds. Latency recovers in minutes if a queue drains; a
+# drawdown does not, so its timeout is hours. After the timeout the breaker does not close, it
+# moves to a half-open state and lets the next observation decide.
+#
+# **What the breakers read.** `LATENCY_WINDOW` is how many recent measurements the latency
+# breaker averages before comparing against its limit, so one slow round trip does not halt
+# trading; `LATENCY_HISTORY` caps what it retains.
+#
+# **The synthetic latency stream.** There is no recorded system-latency series in this
+# repository, so the latency breaker is driven by draws from an exponential distribution:
+# `LATENCY_NORMAL_MS` is its mean while the system is healthy and `LATENCY_STRESSED_MS` after
+# `LATENCY_STRESS_FRACTION` of the run, at which point the rolling average crosses the limit.
+# The market path, by contrast, is real.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+SIMULATION_START = "2020-01-02"
 N_STEPS = 100
+INITIAL_VALUE = 100_000
+MAX_DRAWDOWN = 0.10
+MAX_DAILY_LOSS = 0.02
+MAX_CONSECUTIVE_LOSSES = 5
+MAX_LATENCY_MS = 100.0
+DRAWDOWN_RECOVERY_HOURS = 4
+DAILY_LOSS_RECOVERY_HOURS = 1
+CONSECUTIVE_LOSS_RECOVERY_MINUTES = 30
+LATENCY_RECOVERY_MINUTES = 5
+LATENCY_WINDOW = 10
+LATENCY_HISTORY = 100
+LATENCY_NORMAL_MS = 20.0
+LATENCY_STRESSED_MS = 150.0
+LATENCY_STRESS_FRACTION = 0.8
 SEED = 42
 
 # %%
@@ -70,11 +122,17 @@ set_global_seeds(SEED)
 
 
 # %% [markdown]
-# **Setup**: The notebook uses a compact simulation with deterministic seeds so
-# each breaker's state transition stays easy to inspect.
-
-# %% [markdown]
-# ## 1. Circuit Breaker States and Core Classes
+# ## 1. The state machine every breaker shares
+#
+# A breaker is in one of three states. **Closed** is the electrical sense of the word: the
+# circuit is complete and trading proceeds. **Open** means the circuit is broken and nothing
+# trades. **Half-open** is the state between them: enough time has passed that the breaker is
+# willing to look again, and the next observation either closes it or opens it for another
+# timeout.
+#
+# The half-open state is the part worth building deliberately. A breaker that closed as soon
+# as its timeout elapsed would resume trading into whatever condition tripped it; one that
+# only closed on manual intervention would need a person awake. Half-open resumes on evidence.
 
 
 # %%
@@ -231,10 +289,10 @@ class CircuitBreaker(ABC):
 
 
 # %% [markdown]
-# **Finding**: The shared `CLOSED -> OPEN -> HALF_OPEN` state machine is what
-# makes layered breakers operationally manageable. Once that lifecycle is
-# standardized, each risk rule becomes a small condition rather than a separate
-# control framework.
+# Everything above is shared. A concrete breaker below supplies only `check_condition`, which
+# answers one question - has my limit been crossed - and returns the value and threshold so the
+# audit log can record why. That is the whole extension point: a new rule is a condition, not a
+# framework.
 
 # %% [markdown]
 # ## 2. Specific Circuit Breaker Implementations
@@ -254,7 +312,7 @@ class DrawdownBreaker(CircuitBreaker):
     def __init__(
         self,
         name: str,
-        max_drawdown: float = 0.10,  # 10%
+        max_drawdown: float = MAX_DRAWDOWN,
         **kwargs,
     ):
         super().__init__(name, **kwargs)
@@ -295,7 +353,7 @@ class DailyLossBreaker(CircuitBreaker):
     def __init__(
         self,
         name: str,
-        max_daily_loss: float = 0.02,  # 2%
+        max_daily_loss: float = MAX_DAILY_LOSS,
         **kwargs,
     ):
         super().__init__(name, **kwargs)
@@ -343,7 +401,7 @@ class ConsecutiveLossBreaker(CircuitBreaker):
     def __init__(
         self,
         name: str,
-        max_consecutive: int = 5,
+        max_consecutive: int = MAX_CONSECUTIVE_LOSSES,
         **kwargs,
     ):
         super().__init__(name, **kwargs)
@@ -372,9 +430,10 @@ class ConsecutiveLossBreaker(CircuitBreaker):
 
 
 # %% [markdown]
-# Latency is an infrastructure breaker rather than a market-risk breaker, but it
-# belongs in the same control plane because stale data can be just as dangerous
-# as bad signals.
+# The fourth breaker watches the system rather than the market. A trading system that has
+# become slow is acting on prices that have moved, which is a way to lose money that no
+# market-risk rule sees. It shares the same state machine because the engine asking whether it
+# may trade should get one answer, not two.
 
 
 # %%
@@ -386,7 +445,7 @@ class LatencyBreaker(CircuitBreaker):
     def __init__(
         self,
         name: str,
-        max_latency_ms: float = 100,  # 100ms
+        max_latency_ms: float = MAX_LATENCY_MS,
         **kwargs,
     ):
         super().__init__(name, **kwargs)
@@ -396,8 +455,7 @@ class LatencyBreaker(CircuitBreaker):
     def record_latency(self, latency_ms: float):
         """Record operation latency."""
         self.latency_history.append(latency_ms)
-        # Keep last 100 measurements
-        self.latency_history = self.latency_history[-100:]
+        self.latency_history = self.latency_history[-LATENCY_HISTORY:]
 
     def check_condition(
         self, portfolio_value: float | None = None, **kwargs: object
@@ -405,7 +463,7 @@ class LatencyBreaker(CircuitBreaker):
         if not self.latency_history:
             return False, "", None, None
 
-        avg_latency = np.mean(self.latency_history[-10:])  # Last 10
+        avg_latency = float(np.mean(self.latency_history[-LATENCY_WINDOW:]))
 
         if avg_latency > self.max_latency_ms:
             return (
@@ -419,9 +477,11 @@ class LatencyBreaker(CircuitBreaker):
 
 
 # %% [markdown]
-# **Finding**: These breaker types are intentionally simple. In production, the
-# value comes from combining orthogonal rules rather than making any single rule
-# overly sophisticated.
+# None of the four conditions is sophisticated, and that is deliberate. What protects a desk
+# is that they fail in different circumstances: a single shock trips the daily-loss rule, a
+# slow bleed trips the drawdown rule, a broken signal trips the streak rule, and a degraded
+# system trips the latency rule. A more elaborate single rule covers one of those better and
+# the other three not at all.
 
 # %% [markdown]
 # ## 3. Breaker Manager: Multi-Level Defense
@@ -525,35 +585,40 @@ def alert_handler(event: BreakerEvent):
 manager = BreakerManager(on_any_trip=alert_handler)
 
 # Add breakers at different levels
+DRAWDOWN_BREAKER = f"drawdown_{MAX_DRAWDOWN:.0%}"
+DAILY_LOSS_BREAKER = f"daily_loss_{MAX_DAILY_LOSS:.0%}"
+CONSECUTIVE_LOSS_BREAKER = f"consecutive_{MAX_CONSECUTIVE_LOSSES}"
+LATENCY_BREAKER = f"latency_{MAX_LATENCY_MS:.0f}ms"
+
 manager.add_breaker(
     DrawdownBreaker(
-        name="drawdown_10pct",
-        max_drawdown=0.10,
-        recovery_timeout=timedelta(hours=4),
+        name=DRAWDOWN_BREAKER,
+        max_drawdown=MAX_DRAWDOWN,
+        recovery_timeout=timedelta(hours=DRAWDOWN_RECOVERY_HOURS),
     )
 )
 
 manager.add_breaker(
     DailyLossBreaker(
-        name="daily_loss_2pct",
-        max_daily_loss=0.02,
-        recovery_timeout=timedelta(hours=1),
+        name=DAILY_LOSS_BREAKER,
+        max_daily_loss=MAX_DAILY_LOSS,
+        recovery_timeout=timedelta(hours=DAILY_LOSS_RECOVERY_HOURS),
     )
 )
 
 manager.add_breaker(
     ConsecutiveLossBreaker(
-        name="consecutive_5",
-        max_consecutive=5,
-        recovery_timeout=timedelta(minutes=30),
+        name=CONSECUTIVE_LOSS_BREAKER,
+        max_consecutive=MAX_CONSECUTIVE_LOSSES,
+        recovery_timeout=timedelta(minutes=CONSECUTIVE_LOSS_RECOVERY_MINUTES),
     )
 )
 
 manager.add_breaker(
     LatencyBreaker(
-        name="latency_100ms",
-        max_latency_ms=100,
-        recovery_timeout=timedelta(minutes=5),
+        name=LATENCY_BREAKER,
+        max_latency_ms=MAX_LATENCY_MS,
+        recovery_timeout=timedelta(minutes=LATENCY_RECOVERY_MINUTES),
     )
 )
 
@@ -561,40 +626,48 @@ print(f"Breaker Manager configured with {len(manager.breakers)} breakers.")
 
 
 # %% [markdown]
-# **Finding**: The manager setup makes the defense-in-depth design explicit.
-# Each breaker guards a different failure mode, but all of them feed one halt
-# decision and one event log.
+# Four breakers, four failure modes, one halt decision and one log. `check_all` returns true
+# only when every breaker allows trading, so adding a breaker can only make the system more
+# cautious, never less.
 
 # %% [markdown]
-# ## 4. Simulation: Breaker Behavior
+# ## 4. Run the breakers over a real market shock
+#
+# The market path is SPY's own daily returns from `SIMULATION_START`. Beginning in January 2020
+# puts the February and March selloff inside the window, so the two loss breakers meet real
+# sessions with real magnitudes rather than a distribution chosen to trip them.
+#
+# The latency stream is the exception and is drawn from an exponential distribution, because
+# this repository holds no recorded system-latency series. The seed is set immediately before
+# the loop so those draws are reproducible; nothing else in the run is random.
+#
+# Two limits are recorded from the breakers as the run proceeds, for the figure below. Both
+# move, which is the reason to take them from the breakers rather than draw them as horizontal
+# lines: the drawdown limit tracks the running peak, and the daily-loss limit resets every
+# session to that session's opening value.
 
 # %%
-# Re-seed deterministically before the latency draws; market returns are real
-# SPY data so the SEED only governs the synthetic latency stream below.
 set_global_seeds(SEED)
 
-initial_value = 100_000
-portfolio_values = [initial_value]
+portfolio_values = [INITIAL_VALUE]
 trading_allowed = []
 breaker_states = {name: [] for name in manager.breakers.keys()}
+drawdown_limits: list[float] = []
+daily_loss_limits: list[float] = []
 
 
 # %% [markdown]
-# We drive the demo from real SPY daily returns over the first 100 trading days
-# of 2020. That window includes the February–March COVID crash with multiple
-# −2% (and worse) sessions, so the **market-stress** breakers (daily loss,
-# consecutive losses) trip on a real episode rather than fabricated returns.
-# Latency is an infrastructure event, not a market event — there is no real
-# system-latency dataset in scope here — so the **latency stream remains
-# synthetic** and exists solely to demonstrate the infrastructure breaker
-# transitioning independently of the market path. The SPY series continues as
-# a monitored counterfactual after a halt; it is not executed portfolio P&L.
+# One point about what the account value below is, because it changes how the figure should be
+# read. The series keeps tracking SPY after a breaker halts trading, so from the first halt
+# onward it is a *counterfactual*: what the account would have done had nothing stopped it. It
+# is what makes the halts legible, and it is not money anyone made or lost.
 
 # %%
 covid_returns = (
     load_etfs()
     .filter(
-        (pl.col("symbol") == "SPY") & (pl.col("timestamp") >= pl.lit("2020-01-02").str.to_date())
+        (pl.col("symbol") == "SPY")
+        & (pl.col("timestamp") >= pl.lit(SIMULATION_START).str.to_date())
     )
     .sort("timestamp")
     .with_columns(pl.col("close").pct_change().alias("ret"))
@@ -603,24 +676,25 @@ covid_returns = (
     .select("timestamp", "ret")
 )
 if covid_returns.height < N_STEPS:
-    raise ValueError(f"SPY 2020 window returned {covid_returns.height} returns; need {N_STEPS}")
+    raise ValueError(
+        f"SPY from {SIMULATION_START} returned {covid_returns.height} sessions; "
+        f"the simulation needs {N_STEPS}"
+    )
 
 # %%
 simulation_dates = covid_returns["timestamp"].to_list()
 manager.reset_all(event_time=pd.Timestamp(simulation_dates[0]).to_pydatetime())
 manager.event_log.clear()  # discard CLOSED→CLOSED reset transitions for a clean audit trail
-daily_loss_breaker = cast(DailyLossBreaker, manager.breakers["daily_loss_2pct"])
-consecutive_loss_breaker = cast(ConsecutiveLossBreaker, manager.breakers["consecutive_5"])
-latency_breaker = cast(LatencyBreaker, manager.breakers["latency_100ms"])
+drawdown_breaker = cast(DrawdownBreaker, manager.breakers[DRAWDOWN_BREAKER])
+daily_loss_breaker = cast(DailyLossBreaker, manager.breakers[DAILY_LOSS_BREAKER])
+consecutive_loss_breaker = cast(ConsecutiveLossBreaker, manager.breakers[CONSECUTIVE_LOSS_BREAKER])
+latency_breaker = cast(LatencyBreaker, manager.breakers[LATENCY_BREAKER])
 
 n_steps = N_STEPS
 real_returns = covid_returns["ret"].to_numpy()
 for i in range(n_steps):
     event_time = pd.Timestamp(simulation_dates[i]).to_pydatetime()
-    # Each iteration represents one trading day, so reset the daily-loss
-    # baseline to the start-of-day value BEFORE applying the day's return.
-    # Without this reset_day call the daily-loss breaker would measure
-    # cumulative loss from inception (i.e. duplicate the drawdown breaker).
+    # Before the day's return: without this the breaker measures loss from inception.
     start_of_day_value = portfolio_values[-1]
     daily_loss_breaker.reset_day(start_of_day_value)
 
@@ -628,21 +702,17 @@ for i in range(n_steps):
     new_value = start_of_day_value * (1 + returns)
     portfolio_values.append(new_value)
 
-    # Record trade P&L from the realized SPY change-on-equity
     trade_pnl = new_value - start_of_day_value
     consecutive_loss_breaker.record_trade(trade_pnl)
 
-    # Latency stays synthetic: the infrastructure breaker needs a stressed
-    # regime in the last 20 steps to exhibit its state transitions, and the
-    # repo has no real system-latency series at this scope. The stressed
-    # mean is set so the rolling-10 average crosses the 100 ms breaker
-    # threshold inside the final 20 steps.
-    latency = np.random.exponential(20) if i < 80 else np.random.exponential(150)
+    stressed = i >= int(n_steps * LATENCY_STRESS_FRACTION)
+    latency = np.random.exponential(LATENCY_STRESSED_MS if stressed else LATENCY_NORMAL_MS)
     latency_breaker.record_latency(latency)
 
-    # Check all breakers
     can_trade = manager.check_all(portfolio_value=new_value, event_time=event_time)
     trading_allowed.append(can_trade)
+    drawdown_limits.append(drawdown_breaker.peak_value * (1 - drawdown_breaker.max_drawdown))
+    daily_loss_limits.append(start_of_day_value * (1 - daily_loss_breaker.max_daily_loss))
 
     # Record states
     for name, breaker in manager.breakers.items():
@@ -656,9 +726,9 @@ print(f"Trading halted {sum(not x for x in trading_allowed)} times")
 
 
 # %% [markdown]
-# **Finding**: The simulation separates market stress from infrastructure stress.
-# That matters because the operational response is different even when both
-# cases end with trading halted.
+# The run mixes a real market shock with a synthetic infrastructure one, and they arrive at
+# different times. That separation is the point of the panels below: both end with trading
+# halted, and what an operator does next is different in each case.
 
 # %%
 state_colors = {
@@ -683,12 +753,30 @@ ax1.fill_between(
     alpha=0.18,
     label="Trading halted",
 )
-ax1.axhline(initial_value, color=COLORS["neutral"], linestyle="--", alpha=0.5)
-ax1.axhline(initial_value * 0.98, color=COLORS["amber"], linestyle="--", label="Daily loss limit")
-ax1.axhline(initial_value * 0.90, color=COLORS["negative"], linestyle="--", label="Drawdown limit")
-ax1.set_ylabel("Counterfactual SPY value ($)")
-add_message_title(ax1, "Independent breakers halt trading during the 2020 drawdown")
-ax1.legend(loc="lower left")
+ax1.axhline(INITIAL_VALUE, color=COLORS["neutral"], linestyle="--", alpha=0.5)
+ax1.plot(
+    simulation_dates,
+    daily_loss_limits,
+    color=COLORS["amber"],
+    linestyle="--",
+    linewidth=1,
+    label="Daily-loss limit",
+)
+ax1.plot(
+    simulation_dates,
+    drawdown_limits,
+    color=COLORS["negative"],
+    linestyle="--",
+    linewidth=1,
+    label="Drawdown limit",
+)
+ax1.set_ylabel("Counterfactual account value ($)")
+add_message_title(
+    ax1,
+    "Account value against the two limits that move with it",
+    subtitle="Shaded where the combined control halts trading",
+)
+ax1.legend(loc="lower left", fontsize=8)
 
 ax2 = axes[1]
 for y_pos, (name, states) in enumerate(breaker_states.items()):
@@ -707,7 +795,7 @@ ax2.set_ylim(-0.5, len(breaker_states) - 0.5)
 ax2.set_xlabel("Monitoring date")
 add_message_title(
     ax2,
-    "Recovery probes expose repeated failures before breakers close",
+    "State of each breaker, one row per breaker",
     subtitle=(
         f"{BreakerState.CLOSED.name}=green, {BreakerState.OPEN.name}=red, "
         f"{BreakerState.HALF_OPEN.name}=amber"
@@ -736,20 +824,33 @@ ax3.set_ylim(-0.1, 1.1)
 ax3.set_yticks([0, 1])
 ax3.set_yticklabels(["Halted", "Active"])
 ax3.set_xlabel("Monitoring date")
-add_message_title(ax3, "The combined control stays fail-closed while any breaker is open")
+add_message_title(
+    ax3,
+    "Combined halt decision across all four breakers",
+    subtitle="Trading proceeds only where every breaker allows it",
+)
 ax3.legend()
 
 for ax in axes:
     ax.xaxis.set_major_locator(mdates.MonthLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
 
-fig.show()
+show_with_alt(
+    fig,
+    "Three stacked panels sharing a date axis. Top: the account value as a line, with a "
+    "dashed amber daily-loss limit and a dashed red drawdown limit that both move with it, "
+    "and red shading over the sessions on which trading is halted. Middle: one horizontal "
+    "row per breaker, each session coloured green for closed, red for open and amber for "
+    "half-open. Bottom: a filled band that is green where trading is allowed and red where "
+    "it is halted.",
+)
 
 
 # %% [markdown]
-# **Trading implication**: The visual state timeline is the useful diagnostic,
-# not just the final halt count. It shows which breaker tripped first and
-# whether later breakers were independent confirmations or downstream effects.
+# The middle panel is the diagnostic, not the halt count. Reading across a row shows one
+# breaker's history: how long it stayed open, whether the half-open probe closed it or sent it
+# back. Reading down a column shows which breakers were open at once, which separates a market
+# event that several rules noticed from a sequence in which one breaker's halt caused the next.
 
 # %% [markdown]
 # ## 5. Final Status Report
@@ -757,10 +858,10 @@ fig.show()
 # Simulation outcome at a glance:
 
 # %%
-final_return = portfolio_values[-1] / initial_value - 1
+final_return = portfolio_values[-1] / INITIAL_VALUE - 1
 print(
     f"Simulation: {n_steps} steps | "
-    f"initial ${initial_value:,.0f} -> final ${portfolio_values[-1]:,.0f} "
+    f"initial ${INITIAL_VALUE:,.0f} -> final ${portfolio_values[-1]:,.0f} "
     f"({final_return:+.2%})"
 )
 
@@ -802,16 +903,41 @@ event_log_df
 
 
 # %% [markdown]
-# **Finding**: The event log is the post-mortem artifact. Without it, operators
-# know trading stopped but cannot reconstruct whether the root cause was losses,
-# streak behavior, or infrastructure degradation.
+# The log records every transition, including the half-open probes and the closes, not only
+# the trips. That is what makes it a post-mortem artifact: an operator arriving after the fact
+# can reconstruct the sequence rather than a set of alerts.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. A single CLOSED → OPEN → HALF_OPEN state machine, shared across breakers, gives the trading engine one halt decision and one audit log — each rule becomes a small `check_condition` override rather than its own framework.
-# 2. The four breakers cover orthogonal failure modes (peak-to-trough drawdown, intraday loss, consecutive-loss streak, infrastructure latency); the daily-loss breaker must reset its baseline at the start of each session or it collapses into the drawdown rule.
-# 3. The manager-level event log records **every** transition, not just trips — without that complete trail an operator can see trading stopped but cannot reconstruct whether the root cause was market loss, strategy degradation, or infrastructure stress.
+# 1. Separate the state machine from the conditions. One closed, open and half-open lifecycle
+#    shared by every breaker gives the engine one halt decision and one log, and reduces a new
+#    rule to a `check_condition` method.
+# 2. Resume on evidence, not on a timer. A breaker that closes when its timeout expires
+#    resumes trading into the condition that stopped it. The half-open state is what makes the
+#    next observation, rather than the clock, decide.
+# 3. Choose breakers that fail in different circumstances. A drawdown rule and a daily-loss
+#    rule sound alike and catch different things, and the daily-loss breaker only does so
+#    because its baseline resets each session; leave that reset out and it measures loss from
+#    inception, which is the drawdown rule with a different number.
+# 4. Log every transition, not every trip. The half-open probes and the closes are what let an
+#    operator reconstruct a sequence after the fact, and they are exactly what a trip-only
+#    alert stream throws away.
+# 5. Keep the infrastructure breaker in the same control plane. A system that has gone slow is
+#    trading on stale prices, and no market-risk rule can see that.
+#
+# **Known limitations**
+#
+# - The account path here is SPY, not a strategy, and it keeps being tracked after a halt.
+#   That makes it a counterfactual - what the account would have done had nothing stopped it -
+#   and the returns after the first halt are not returns anyone earned.
+# - The latency stream is drawn from an exponential distribution because this repository has no
+#   recorded system-latency series. It shows the breaker transitioning; it says nothing about
+#   what real latency looks like.
+# - The four limits are plausible and uncalibrated. What a desk can absorb is a question about
+#   its capital and its investors, and nothing here answers it.
+# - One iteration is one trading day, so the daily-loss breaker sees a session's total move
+#   rather than the path within it. A real intraday breaker fires on the path.
 #
 # **Next**: Continue with [`05_feast_feature_store`](05_feast_feature_store.ipynb)
 # to connect these safety controls to the data-governance layer that keeps
