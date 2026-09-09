@@ -1614,14 +1614,25 @@ print(f"  TSTR Ratio: {tstr_results['tstr_ratio']:.3f}")
 # %% [markdown]
 # Daily returns on the left show moment-to-moment behaviour; the cumulative series on
 # the right makes drift visible, which a returns plot hides.
+#
+# The windows to plot are drawn at random rather than taken from the front of the array.
+# The sequences are overlapping rolling windows, so the first ten start on consecutive
+# days: they are one short stretch of history repeated with a nine-day shift, not ten
+# samples of it, and a quiet fortnight would make the real panel look calmer than the
+# data it came from.
 
 # %%
 n_sample_paths = 10
 
+# A separate generator, so this draw does not move the rest of the notebook's randomness.
+path_rng = np.random.default_rng(SEED)
+real_idx = path_rng.choice(len(sequences), size=n_sample_paths, replace=False)
+synth_idx = path_rng.choice(len(synthetic_sequences), size=n_sample_paths, replace=False)
+
 fig, axes = plt.subplots(2, 2, figsize=(12, 6), constrained_layout=True)
 
 # Top row: Real data
-for i in range(n_sample_paths):
+for i in real_idx:
     axes[0, 0].plot(sequences[i, :, 0], color=COLORS["blue"], alpha=0.4, linewidth=0.8)
     axes[0, 1].plot(sequences[i, :, 0].cumsum(), color=COLORS["blue"], alpha=0.4, linewidth=0.8)
 axes[0, 0].set_ylabel("Daily Return")
@@ -1632,7 +1643,7 @@ for ax in axes[0]:
     ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5, alpha=0.5)
 
 # Bottom row: Synthetic data
-for i in range(n_sample_paths):
+for i in synth_idx:
     axes[1, 0].plot(synthetic_sequences[i, :, 0], color=COLORS["copper"], alpha=0.4, linewidth=0.8)
     axes[1, 1].plot(
         synthetic_sequences[i, :, 0].cumsum(), color=COLORS["copper"], alpha=0.4, linewidth=0.8
@@ -1664,13 +1675,12 @@ show_with_alt(
 )
 
 # %% [markdown]
-# **Interpretation**: ten paths from each, on a shared scale per column. The synthetic
-# daily returns swing wider than the real ones here, and the synthetic cumulative paths
-# spread both above and below zero while these ten real ones all drift up.
+# **Interpretation**: ten windows drawn at random from each, on a shared scale per
+# column. Compare the spread rather than any individual line.
 #
-# Do not read a population claim off ten sampled paths, in either direction. The real
-# panel is one draw of ten sequences and can easily be calmer than the sample it came
-# from. The statistical tests above - the KS statistics and the correlation error -
+# Do not read a population claim off ten paths, in either direction: ten windows are a
+# thin sample, and the real ones overlap each other, so they carry less independent
+# information than ten separate lines suggest. The statistical tests above - the KS statistics and the correlation error -
 # are the population comparison for these unconditional samples.
 #
 # Not the regime histograms further down: those plot `regime_samples`, generated
