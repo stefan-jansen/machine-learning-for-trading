@@ -721,7 +721,7 @@ regime_results
 # afterwards. So the gap can move either way between the two variants without contradicting the
 # objective, and whichever way it moves in one seeded run is not an estimate of the SoftMin
 # effect. What the column does test is whether the policy that lifted its weakest training
-# windows also holds up in the volatile half of the holdout.
+# windows also earns its Sharpe ratio in the volatile half of the holdout.
 
 # %% [markdown]
 # ## 12. Drawdown Analysis

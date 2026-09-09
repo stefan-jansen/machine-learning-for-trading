@@ -347,7 +347,7 @@ show_with_alt(
 # being joined become less alike. It is not the correlation distance between them, which is what
 # the leaves were measured on.
 #
-# Only the leaf order survives into the allocation. Step 2 takes the left-to-right sequence this
+# Only the leaf order reaches the allocation. Step 2 takes the left-to-right sequence this
 # tree implies and reorders the covariance matrix by it; step 3 then halves that sequence by
 # count at every level, without consulting the heights again. The halves it forms therefore need
 # not be the clusters the tree draws, which is what section 7 traces through the first two
