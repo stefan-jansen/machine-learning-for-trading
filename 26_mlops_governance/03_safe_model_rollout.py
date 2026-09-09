@@ -422,10 +422,14 @@ historical_ic_context[["role", "model", "mean_daily_spearman_ic"]]
 #
 # The mismatch worth naming is at the other end. The case study decides at a close and enters
 # at the next open, and a close-to-close label includes the overnight move that a next-open
-# entry does not capture. The returns below therefore sit above what such a book earns, by
-# whatever the overnight gaps contributed over these sessions. It is a statement about the
-# level and not about the comparison: both models are scored the same way, so the difference
-# the gate reads is unaffected.
+# entry does not capture. So every return below is a label-based proxy for what such a book
+# earns, not a measurement of it.
+#
+# That reaches the comparison as well as the level. The two models hold different names, so
+# they collect different overnight moves, and removing that portion from both would not shift
+# them by the same amount. The gate's Sharpe difference is therefore a difference between two
+# proxies. Measuring what it would be requires open prices and a label built from them, which
+# is a change to the case study's labelling rather than to this notebook.
 
 
 # %%
@@ -807,6 +811,9 @@ show_with_alt(
 # - A shadow window drawn from stored validation predictions is not live shadow mode. The
 #   candidate never faced a queue, a fill or a data outage, and those are among the things
 #   shadow mode exists to find.
+# - Every return here is a close-to-close label return, and the case study enters at the next
+#   open. Both the level and the difference between the two models are proxies, because the
+#   two hold different names and so collect different overnight moves.
 # - Sixty-three sessions is one quarter of one year on one universe. The gate's thresholds are
 #   defensible in shape and are not calibrated: a desk would set them from its own history of
 #   promotions and their outcomes.
