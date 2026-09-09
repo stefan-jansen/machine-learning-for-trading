@@ -16,36 +16,53 @@
 # %% [markdown]
 # # Regime Detection with Hidden Markov Models
 #
+# **Chapter 9 | Section 9.5**
+#
 # **Docker image**: `ml4t`
 #
-# This notebook provides a thorough introduction to HMMs for financial regime
-# detection, from first principles through production considerations.
+# A **regime** is a period during which the market behaves one way rather than another:
+# calm or stressed, trending or reverting. Nobody observes it. What a regime model does is
+# infer, from what is observable, which of a small number of unobserved states the market is
+# probably in now, and how likely it is to be in a different one tomorrow.
 #
-# **Learning Objectives**:
-# - Understand observable threshold baselines (VIX, moving average cross)
-# - Implement the forward algorithm on a toy example
-# - Compare filtered vs smoothed probabilities and identify look-ahead bias
-# - Address EM estimation pitfalls: local optima, initialization, model selection
-# - Prevent label switching across estimation windows
-# - Fit Markov-Switching AR and compare with HMM
+# The distinction that matters more than the model is between an inference that uses only
+# what had happened by a given session and one that uses the whole sample. The second is
+# better in every way except the one that counts.
 #
-# **Book Reference**: Chapter 9, Section 9.5 (Regime Features)
+# **Learning objectives**
 #
-# **Prerequisites**: `01_visual_diagnostics` for stationarity concepts;
-# basic probability and matrix operations.
+# - Build two regime indicators from observable quantities alone, and treat them as the bar
+#   any estimated model has to clear.
+# - Work through the recursion that infers a hidden state from observations one at a time,
+#   on an example small enough to check by hand.
+# - Say what separates that recursion's answer from the one that reads the whole sample, and
+#   measure the difference on real data.
+# - Fit the model to returns, handle the three things that go wrong when you do, and turn
+#   the result into columns.
+#
+# **Book reference**
+#
+# Chapter 9, Section 9.5 (Regime features).
+#
+# **Prerequisites**
+#
+# `01_visual_diagnostics` for stationarity. Probability and matrix multiplication.
+
+# %% [markdown]
+# ## Setup
 
 # %%
-"""Regime Detection with Hidden Markov Models - thorough tutorial."""
+"""Regime detection with hidden Markov models - filtered inference and its features."""
 
+import logging
 import warnings
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 from hmmlearn.hmm import GaussianHMM
+from IPython.display import display
 from ml4t.engineer.features.regime import (
     choppiness_index,
     fractal_efficiency,
@@ -53,17 +70,29 @@ from ml4t.engineer.features.regime import (
     market_regime_classifier,
     trend_intensity_index,
 )
+from ml4t.engineer.logging import setup_logging
 from scipy import stats
-from sklearn.cluster import KMeans
+from statsmodels.tools.sm_exceptions import ValueWarning
 from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression
 
+from case_studies.utils.temporal import (
+    filtered_state_probs,
+    fit_hmm_kmeans_init,
+    relabel_states,
+    sort_states_by_variance,
+)
 from data import load_etfs, load_macro
-from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, show_with_alt
+
+# The switching model indexes by position and warns once per fit that the date index it was
+# handed carries no declared frequency. Trading days have none to declare.
+warnings.filterwarnings("ignore", category=ValueWarning, module="statsmodels.tsa.base.tsa_model")
+setup_logging(level=logging.ERROR)  # per-call timing notices from the indicator library
 
 # %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
+START_DATE = "2006-01-01"
+END_DATE = "2024-12-31"
 N_INITS = 10
 N_ITER = 200
 SEED = 42
@@ -72,932 +101,775 @@ SEED = 42
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## Load Data
+# ## The data
+#
+# SPY daily bars with two derived series: the log return and a rolling standard deviation
+# of it. Both go into the model, because a regime that differs only in volatility is
+# invisible to a model that reads returns alone at daily frequency, where the mean is
+# almost unidentifiable.
 
 # %%
-CASE_DIR = get_case_study_dir("etfs")
+VOLATILITY_WINDOW = 21
+SESSIONS_PER_YEAR = 252
 
-etfs = load_etfs(symbols=["SPY"])
 spy = (
-    etfs.select(["timestamp", "open", "high", "low", "close", "volume"])
+    load_etfs(symbols=["SPY"])
+    .select(["timestamp", "open", "high", "low", "close", "volume"])
+    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
     .sort("timestamp")
     .with_columns(
         returns=pl.col("close").log().diff() * 100,
-        volatility=pl.col("close").log().diff().rolling_std(window_size=21) * 100 * np.sqrt(252),
+        volatility=pl.col("close").log().diff().rolling_std(VOLATILITY_WINDOW)
+        * 100
+        * np.sqrt(SESSIONS_PER_YEAR),
     )
     .drop_nulls()
 )
 
-spy_pd = spy.to_pandas().set_index("timestamp")
-spy_pd.index = pd.DatetimeIndex(spy_pd.index)
+frame = spy.to_pandas().set_index("timestamp")
+frame.index = pd.DatetimeIndex(frame.index)
+
+print(f"SPY: {len(frame):,} sessions, {frame.index.min().date()} to {frame.index.max().date()}")
+
+# %% [markdown]
+# # Part 1: what a rule can do without estimating anything
+#
+# Two indicators, both computable by hand, both available the moment the data is. They are
+# not a warm-up: an estimated model that does not beat them is not worth its estimation
+# risk, and stating them first is what makes the rest of the notebook a comparison rather
+# than a demonstration.
+#
+# The **volatility index** at a level is the classic stress rule. The index is the option
+# market's expectation of near-term volatility, so it is a forward-looking quantity nobody
+# has to fit, and a level around twenty has been the conventional line between calm and
+# stressed for decades.
+#
+# A price against its own **long moving average** is the classic trend rule. Above the
+# average is an uptrend, below it a downtrend, and the only choice is the length.
+
+# %%
+VOLATILITY_INDEX_THRESHOLD = 20  # the conventional line between calm and stressed
+TREND_WINDOW = 200  # sessions in the moving average: about ten months
+
+macro = load_macro().select(["timestamp", "vixcls"]).drop_nulls().rename({"vixcls": "vix"})
+vix = macro.to_pandas().set_index("timestamp")
+vix.index = pd.DatetimeIndex(vix.index)
+
+frame = frame.join(vix, how="left").ffill()
+frame["stressed_by_index"] = (frame["vix"] > VOLATILITY_INDEX_THRESHOLD).astype(int)
+frame["moving_average"] = frame["close"].rolling(TREND_WINDOW).mean()
+frame["below_average"] = (frame["close"] < frame["moving_average"]).astype(int)
 
 print(
-    f"SPY: {len(spy_pd):,} observations ({spy_pd.index.min().date()} to {spy_pd.index.max().date()})"
+    f"Sessions with the index above {VOLATILITY_INDEX_THRESHOLD}: {frame['stressed_by_index'].mean():.1%}"
+)
+print(f"Sessions below the {TREND_WINDOW}-session average: {frame['below_average'].mean():.1%}")
+print(
+    f"Sessions flagged by both: {(frame['stressed_by_index'] & frame['below_average']).mean():.1%}"
 )
 
-# %% [markdown]
-# # Part 1 - Observable Threshold Baselines
-#
-# Before fitting latent-variable models, establish simple baselines using
-# observable quantities. These are widely used in practice because they are
-# transparent, deterministic, and free from estimation risk.
-
-# %% [markdown]
-# ### Baseline 1: VIX Threshold
-#
-# VIX > 20 is the classic "fear threshold." It requires no estimation and is
-# available in real time from CBOE.
-
 # %%
-macro = load_macro()
-vix = macro.select(["timestamp", "vixcls"]).drop_nulls().rename({"vixcls": "vix"}).sort("timestamp")
-
-# Merge VIX into SPY data
-vix_pd = vix.to_pandas().set_index("timestamp")
-vix_pd.index = pd.DatetimeIndex(vix_pd.index)
-spy_pd = spy_pd.join(vix_pd, how="left").ffill()
-
-spy_pd["vix_regime"] = np.where(spy_pd["vix"] > 20, 1, 0)
-
-pct_high = spy_pd["vix_regime"].mean()
-print(f"VIX > 20: {pct_high:.1%} of trading days classified as high-vol")
-
-# %% [markdown]
-# ### Baseline 2: 200-Day Moving Average Cross
-#
-# Price above 200-day MA = uptrend; below = downtrend. A trend/momentum
-# regime indicator used by CTAs and systematic macro funds.
-
-# %%
-spy_pd["ma_200"] = spy_pd["close"].rolling(200).mean()
-spy_pd["trend_regime"] = np.where(spy_pd["close"] > spy_pd["ma_200"], 0, 1)
-
-pct_downtrend = spy_pd["trend_regime"].dropna().mean()
-print(f"Below 200-day MA: {pct_downtrend:.1%} of trading days classified as downtrend")
-
-# %%
-fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
 
 ax = axes[0]
-ax.plot(spy_pd.index, spy_pd["close"], linewidth=0.8)
-ax.plot(spy_pd.index, spy_pd["ma_200"], linewidth=1, color=COLORS["amber"], label="200-day MA")
-ax.fill_between(
-    spy_pd.index,
-    spy_pd["close"].min(),
-    spy_pd["close"].max(),
-    where=spy_pd["trend_regime"] == 1,
-    alpha=0.1,
-    color=COLORS["negative"],
-    label="Downtrend",
+ax.plot(frame.index, frame["close"], linewidth=0.7, color=COLORS["blue"], label="Close")
+ax.plot(
+    frame.index,
+    frame["moving_average"],
+    linewidth=1,
+    color=COLORS["amber"],
+    label=f"{TREND_WINDOW}-session average",
 )
-ax.set_title("SPY with 200-Day MA Regime")
-ax.set_ylabel("Price")
-ax.legend(loc="upper left")
+ax.fill_between(
+    frame.index,
+    frame["close"].min(),
+    frame["close"].max(),
+    where=frame["below_average"] == 1,
+    alpha=0.12,
+    color=COLORS["negative"],
+)
+ax.set_ylabel("US dollars")
+ax.set_title("Price against its own long average, shaded where it is below")
+ax.legend(fontsize=7)
 
 ax = axes[1]
-ax.fill_between(spy_pd.index, 0, spy_pd["vix"], alpha=0.3, color=COLORS["amber"])
-ax.axhline(20, color=COLORS["neutral"], linestyle="--", linewidth=0.5, label="VIX = 20")
-ax.set_title("VIX with Threshold Regime")
-ax.set_ylabel("VIX")
-ax.legend()
+ax.fill_between(frame.index, 0, frame["vix"], alpha=0.35, color=COLORS["amber"])
+ax.axhline(VOLATILITY_INDEX_THRESHOLD, color=COLORS["negative"], linestyle="--", linewidth=0.7)
+ax.set_ylabel("Index level")
+ax.set_title("The volatility index against the conventional threshold")
 
 ax = axes[2]
-combined = spy_pd["vix_regime"] + spy_pd["trend_regime"]
-ax.fill_between(spy_pd.index, 0, combined.fillna(0), alpha=0.5, color=COLORS["negative"])
-ax.set_title("Combined Stress (VIX>20 + Below 200-MA)")
-ax.set_ylabel("Stress Count (0-2)")
+ax.fill_between(
+    frame.index,
+    0,
+    frame["stressed_by_index"] + frame["below_average"],
+    alpha=0.5,
+    color=COLORS["copper"],
+)
 ax.set_yticks([0, 1, 2])
+ax.set_ylabel("Rules firing")
+ax.set_xlabel("Session")
+ax.set_title("How many of the two rules fire at once")
 
-plt.show()
+fig.suptitle("Two rules that need no fitting, and how often they agree")
+show_with_alt(
+    fig,
+    "Three stacked panels sharing a time axis. The top draws the SPY close with its "
+    "200-session average and shades the periods below it, which cluster around 2008, 2020 "
+    "and 2022. The middle draws the volatility index against a dashed line at twenty, which "
+    "it exceeds in the same periods. The bottom is a step series counting how many of the "
+    "two rules fire, reaching two during the same episodes.",
+)
 
 # %% [markdown]
-# **Takeaway**: Observable baselines are transparent and require zero estimation.
-# They serve as the benchmark that any statistical model should beat.
-
-# %% [markdown]
-# # Part 2 - HMM Tutorial: Forward Algorithm
+# # Part 2: inferring a state you cannot see
 #
-# Before fitting HMMs to financial data, we work through the mechanics on a
-# small toy example. This builds intuition for what the model is actually
-# computing.
-
-# %% [markdown]
-# ### HMM Setup
+# A **hidden Markov model** has three parts. A small number of hidden states; a **transition
+# matrix** giving the probability of moving from each state to each other one; and an
+# **emission** distribution per state saying what observations that state tends to produce.
+# The states are never observed. What is observed is a sequence of numbers, and the model's
+# job is to say which state each of them probably came from.
 #
-# An HMM has:
-# - $K$ hidden states (e.g., bull/bear)
-# - Transition matrix $A$ where $A_{ij} = P(\text{state}_t = j \mid \text{state}_{t-1} = i)$
-# - Emission parameters: $P(\text{observation} \mid \text{state})$
-# - Initial state distribution $\pi$
+# The **forward algorithm** does that one observation at a time. It carries a probability
+# over states, advances it through the transition matrix, multiplies by how likely the new
+# observation is under each state, and renormalises. What comes out at each step is
+# $P(\text{state}_t \mid \text{observations up to } t)$, which is called the **filtered**
+# probability and is the quantity a feature has to be.
 #
-# The **forward algorithm** computes $P(\text{state}_t \mid \text{observations}_{1:t})$
-# - the filtered probability given *only past and current* observations.
+# The example below is ten observations from a two-state model whose parameters are known,
+# small enough to read off the printed table and check.
 
 # %%
-# Toy HMM: 2 states, 10 observations
-# State 0: "Calm" (low vol, positive mean)
-# State 1: "Stressed" (high vol, negative mean)
-K = 2
-T_toy = 10
+N_STATES_TOY = 2
+TOY_LENGTH = 10
 
-# Transition matrix: states are sticky
-A = np.array(
-    [
-        [0.95, 0.05],  # Calm → Calm: 95%, Calm → Stressed: 5%
-        [0.10, 0.90],
-    ]
-)  # Stressed → Calm: 10%, Stressed → Stressed: 90%
-
-# Emission parameters (Gaussian). The distributions overlap: a single
-# observation near the boundary is genuinely ambiguous, which is precisely
-# where filtered and smoothed estimates diverge (the look-ahead effect below).
-means = np.array([0.05, -0.10])  # Calm: +5 bps, Stressed: -10 bps
-stds = np.array([0.06, 0.08])  # Calm: lower vol, Stressed: higher vol
-
-# Initial distribution
-pi = np.array([0.8, 0.2])
+transition = np.array([[0.95, 0.05], [0.10, 0.90]])  # states are sticky in both directions
+state_means = np.array([0.05, -0.10])  # calm drifts up, stressed drifts down
+state_deviations = np.array([0.06, 0.08])  # and stressed is the more volatile
+initial = np.array([0.8, 0.2])
 
 
-# Sample a path from the true HMM. Draw with a local RNG and take the first
-# seed whose path visits BOTH states - a path that never switches has no
-# look-ahead gap to illustrate. This is deterministic and isolated from the
-# global RNG (every model fit below sets its own random_state).
 def sample_toy_path(rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    """Sample (states, observations) of length T_toy from the true HMM."""
-    states = np.zeros(T_toy, dtype=int)
-    obs = np.zeros(T_toy)
-    states[0] = rng.choice(K, p=pi)
-    obs[0] = rng.normal(means[states[0]], stds[states[0]])
-    for t in range(1, T_toy):
-        states[t] = rng.choice(K, p=A[states[t - 1]])
-        obs[t] = rng.normal(means[states[t]], stds[states[t]])
-    return states, obs
+    """One path of hidden states and the observations they emitted."""
+    states = np.zeros(TOY_LENGTH, dtype=int)
+    observations = np.zeros(TOY_LENGTH)
+    states[0] = rng.choice(N_STATES_TOY, p=initial)
+    observations[0] = rng.normal(state_means[states[0]], state_deviations[states[0]])
+    for step in range(1, TOY_LENGTH):
+        states[step] = rng.choice(N_STATES_TOY, p=transition[states[step - 1]])
+        observations[step] = rng.normal(state_means[states[step]], state_deviations[states[step]])
+    return states, observations
 
 
+# A path that never switches state has nothing to illustrate, so the first seed whose path
+# visits both is taken. The generator is local, so nothing else in the notebook moves.
 for toy_seed in range(500):
     true_states, observations = sample_toy_path(np.random.default_rng(toy_seed))
     if true_states.min() == 0 and true_states.max() == 1:
         break
 
-print("True states: ", true_states)
-print("Observations:", np.round(observations, 4))
+print(f"Hidden states: {true_states}")
+print(f"Observations:  {np.round(observations, 4)}")
+
 
 # %% [markdown]
-# ### Forward Algorithm Implementation
+# The recursion in two lines. Start with the initial distribution weighted by how likely
+# the first observation is under each state:
 #
-# The forward variable $\alpha_t(k) = P(\text{obs}_{1:t}, \text{state}_t = k)$
-# is computed recursively:
+# $$\alpha_1(k) = \pi_k\, b_k(o_1)$$
 #
-# $$\alpha_1(k) = \pi_k \cdot b_k(o_1)$$
-# $$\alpha_t(k) = b_k(o_t) \sum_{j=1}^{K} \alpha_{t-1}(j) \cdot A_{jk}$$
+# then advance:
 #
-# where $b_k(o_t) = P(o_t \mid \text{state} = k)$ is the emission probability.
+# $$\alpha_t(k) = b_k(o_t) \sum_{j} \alpha_{t-1}(j)\, A_{jk}$$
+#
+# Normalising $\alpha_t$ across states gives the filtered probability. Nothing after step
+# $t$ enters it, which is the whole point.
 
 
 # %%
 def forward_algorithm(
-    obs: np.ndarray, A: np.ndarray, means: np.ndarray, stds: np.ndarray, pi: np.ndarray
+    observations: np.ndarray,
+    transition: np.ndarray,
+    means: np.ndarray,
+    deviations: np.ndarray,
+    initial: np.ndarray,
 ) -> np.ndarray:
-    """Compute forward probabilities (filtered) for a Gaussian HMM.
-
-    Returns alpha[t, k] = P(obs_{1:t}, state_t = k).
-    """
-    T = len(obs)
-    K = len(pi)
-    alpha = np.zeros((T, K))
-
-    # Initialization
-    for k in range(K):
-        alpha[0, k] = pi[k] * stats.norm.pdf(obs[0], means[k], stds[k])
-
-    # Recursion
-    for t in range(1, T):
-        for k in range(K):
-            emission = stats.norm.pdf(obs[t], means[k], stds[k])
-            alpha[t, k] = emission * np.sum(alpha[t - 1, :] * A[:, k])
-
-    return alpha
+    """Filtered state probabilities, one row per observation."""
+    n_states = len(initial)
+    alpha = np.zeros((len(observations), n_states))
+    alpha[0] = initial * stats.norm.pdf(observations[0], means, deviations)
+    for step in range(1, len(observations)):
+        emission = stats.norm.pdf(observations[step], means, deviations)
+        alpha[step] = emission * (alpha[step - 1] @ transition)
+    return alpha / alpha.sum(axis=1, keepdims=True)
 
 
-alpha = forward_algorithm(observations, A, means, stds, pi)
+toy_filtered = forward_algorithm(observations, transition, state_means, state_deviations, initial)
 
-# Normalize to get filtered probabilities P(state_t | obs_{1:t})
-filtered_probs = alpha / alpha.sum(axis=1, keepdims=True)
-
-print("=== Forward Algorithm Results ===")
-print(f"{'t':>3} {'Obs':>8} {'True':>5} {'P(Calm)':>10} {'P(Stress)':>10} {'Pred':>5}")
-print("-" * 45)
-for t in range(T_toy):
-    pred = np.argmax(filtered_probs[t])
-    print(
-        f"{t:>3} {observations[t]:>8.4f} {true_states[t]:>5} "
-        f"{filtered_probs[t, 0]:>10.4f} {filtered_probs[t, 1]:>10.4f} {pred:>5}"
+display(
+    pd.DataFrame(
+        {
+            "observation": np.round(observations, 4),
+            "true state": true_states,
+            "P(calm)": toy_filtered[:, 0].round(4),
+            "P(stressed)": toy_filtered[:, 1].round(4),
+            "most likely": toy_filtered.argmax(axis=1),
+        }
     )
-
-accuracy = (np.argmax(filtered_probs, axis=1) == true_states).mean()
-print(f"\nFiltered accuracy: {accuracy:.1%}")
+)
+print(
+    f"Sessions where the most likely state is the true one: {(toy_filtered.argmax(axis=1) == true_states).mean():.0%}"
+)
 
 # %% [markdown]
-# ### Filtered vs Smoothed Probabilities
+# ## Filtered against smoothed
 #
-# The **filtered** probability $P(\text{state}_t \mid \text{obs}_{1:t})$ uses only
-# past and current data - it is **causal** and safe for trading.
+# The **smoothed** probability $P(\text{state}_t \mid \text{all observations})$ answers a
+# different question: given everything that eventually happened, what state was the market
+# in at $t$? It is the better estimate of the past and it is unusable as a feature, because
+# at time $t$ the observations it conditions on had not happened.
 #
-# The **smoothed** probability $P(\text{state}_t \mid \text{obs}_{1:T})$ uses the
-# entire sample including *future* data - it has **look-ahead bias**.
-#
-# Using smoothed probabilities as features in a backtest is a common mistake
-# that inflates performance.
+# The difference between the two is not a technicality. A smoothed probability rises before
+# a transition, because the observations after the transition tell it the transition was
+# coming. A model trained on that column learns to predict an event from a feature that
+# already knows the event happened.
 
 # %%
-# Compute smoothed probabilities using hmmlearn for comparison
-toy_hmm = GaussianHMM(n_components=2, covariance_type="diag", n_iter=1)
-# Set parameters manually to match our toy model
-toy_hmm.startprob_ = pi
-toy_hmm.transmat_ = A
-toy_hmm.means_ = means.reshape(-1, 1)
-toy_hmm.covars_ = (stds**2).reshape(-1, 1)
+toy_model = GaussianHMM(n_components=N_STATES_TOY, covariance_type="diag", n_iter=1)
+toy_model.startprob_ = initial
+toy_model.transmat_ = transition
+toy_model.means_ = state_means.reshape(-1, 1)
+toy_model.covars_ = (state_deviations**2).reshape(-1, 1)
 
-# hmmlearn's predict_proba returns smoothed by default
-obs_2d = observations.reshape(-1, 1)
-smoothed_probs = toy_hmm.predict_proba(obs_2d)
+toy_smoothed = toy_model.predict_proba(observations.reshape(-1, 1))
+toy_difference = toy_smoothed[:, 0] - toy_filtered[:, 0]
 
-fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
 
-t_range = np.arange(T_toy)
-
+steps = np.arange(TOY_LENGTH)
 ax = axes[0]
+ax.plot(steps, toy_filtered[:, 0], marker="o", markersize=5, color=COLORS["blue"], label="Filtered")
 ax.plot(
-    t_range,
-    filtered_probs[:, 0],
-    color=COLORS["blue"],
-    marker="o",
-    linestyle="-",
-    label="Filtered P(Calm)",
-    markersize=6,
-)
-ax.plot(
-    t_range,
-    smoothed_probs[:, 0],
-    color=COLORS["copper"],
+    steps,
+    toy_smoothed[:, 0],
     marker="s",
+    markersize=5,
     linestyle="--",
-    label="Smoothed P(Calm)",
-    markersize=6,
+    color=COLORS["copper"],
+    label="Smoothed",
 )
-ax.set_title("Filtered vs Smoothed Probabilities - Toy Example")
-ax.set_ylabel("P(Calm)")
-# Pin to [0, 1] and turn off the scientific-notation offset that matplotlib
-# auto-applies when both series saturate near 1.0 - the +1 offset makes the
-# probability differences look like ~1e-5 noise.
 ax.set_ylim(-0.05, 1.05)
 ax.ticklabel_format(useOffset=False, axis="y")
-ax.legend()
+ax.set_ylabel("Probability of the calm state")
+ax.set_title("The same ten observations, read two ways")
+ax.legend(fontsize=7)
 
-# Highlight look-ahead bias
 ax = axes[1]
-bias = smoothed_probs[:, 0] - filtered_probs[:, 0]
-ax.bar(
-    t_range,
-    bias,
-    color=[
-        COLORS["negative"] if b > 0.01 else COLORS["positive"] if b < -0.01 else COLORS["neutral"]
-        for b in bias
-    ],
+ax.bar(steps, toy_difference, color=COLORS["copper"])
+ax.axhline(0, color=COLORS["neutral"], linewidth=0.6)
+ax.set_ylabel("Smoothed minus filtered")
+ax.set_xlabel("Step")
+ax.set_title("What the future adds, step by step")
+
+fig.suptitle("The smoothed reading knows how the sequence ends")
+show_with_alt(
+    fig,
+    "Two stacked panels over ten steps. The top plots the filtered and smoothed probability "
+    "of the calm state; the two agree at most steps and separate around the transition, "
+    "where the smoothed series has already moved and the filtered one has not. The bottom "
+    "is a bar chart of the difference between them, near zero at most steps with a few "
+    "large bars at and just before the transition.",
 )
-ax.axhline(0, color=COLORS["neutral"], linewidth=0.5)
-ax.set_title("Look-Ahead Bias (Smoothed - Filtered)")
-ax.set_ylabel("Probability Difference")
-ax.set_xlabel("Time Step")
-
-plt.show()
-
-print(f"Mean absolute bias: {np.mean(np.abs(bias)):.4f}")
-print("Smoothed probabilities use future data → look-ahead bias in backtests!")
-
-# %% [markdown]
-# # Part 3 - HMM on Financial Data
-#
-# Now we apply HMMs to SPY returns, addressing practical challenges:
-# initialization, model selection, and label switching.
-
-# %% [markdown]
-# ### Multiple Random Initializations
-#
-# EM is sensitive to initialization. Running multiple starts and selecting
-# the best log-likelihood reduces the risk of local optima.
 
 # %%
-X = spy_pd[["returns", "volatility"]].dropna().values
+print(f"Mean absolute difference across the ten steps: {np.abs(toy_difference).mean():.4f}")
+print(
+    f"Largest at a single step: {np.abs(toy_difference).max():.4f}, at step {np.abs(toy_difference).argmax()}"
+)
 
-n_inits = N_INITS
-best_ll = -np.inf
-best_model = None
-log_likelihoods = []
+# %% [markdown]
+# # Part 3: fitting it to returns
+#
+# Three things go wrong when this model is estimated rather than given, and each has a
+# standard answer.
+#
+# **The optimiser finds a local maximum.** Expectation-maximisation climbs from wherever it
+# starts and stops at the first peak it reaches, so different starts give different models.
+# The answers are to start from several places and keep whichever reached the highest
+# likelihood, or to start somewhere sensible: a clustering of the observations puts the initial emission parameters near
+# where they will end up.
+#
+# **The number of states is a choice.** More states always fit better, so the criterion has
+# to charge for them.
+#
+# **The states have no order.** Nothing in the model says which state is which, so the same
+# fit run twice can return them swapped, and a feature built from a state label means
+# different things in different windows. The answer is to sort them by something the model
+# does define, here the size of each state's variance.
+#
+# All four helpers below live in `case_studies.utils.temporal` rather than in this
+# notebook, because filtered inference in particular needs a private hmmlearn call that is
+# worth having in one place: `predict_proba` returns the smoothed posterior and there is no
+# public method that returns the emission term the forward recursion needs.
 
-for seed in range(n_inits):
-    model = GaussianHMM(
-        n_components=2,
-        covariance_type="full",
-        n_iter=N_ITER,
-        random_state=seed,
-        tol=1e-4,
+# %%
+observations_matrix = frame[["returns", "volatility"]].to_numpy()
+print(
+    f"Observations: {observations_matrix.shape[0]:,} sessions, {observations_matrix.shape[1]} series"
+)
+
+# %%
+restart_scores = []
+for seed in range(N_INITS):
+    restart = GaussianHMM(
+        n_components=2, covariance_type="full", n_iter=N_ITER, random_state=seed, tol=1e-4
+    ).fit(observations_matrix)
+    restart_scores.append(restart.score(observations_matrix))
+
+seeded = fit_hmm_kmeans_init(observations_matrix, n_states=2, random_state=SEED, n_iter=N_ITER)
+seeded_score = seeded.score(observations_matrix)
+
+display(
+    pd.DataFrame(
+        [
+            {
+                "start": f"{N_INITS} random starts",
+                "best log-likelihood": max(restart_scores),
+                "worst": min(restart_scores),
+                "spread": max(restart_scores) - min(restart_scores),
+            },
+            {
+                "start": "seeded from a clustering",
+                "best log-likelihood": seeded_score,
+                "worst": seeded_score,
+                "spread": 0.0,
+            },
+        ]
     )
-    model.fit(X)
-    ll = model.score(X)
-    log_likelihoods.append(ll)
-    if ll > best_ll:
-        best_ll = ll
-        best_model = model
-
-print(f"=== EM Initialization: {n_inits} Random Starts ===")
-print(f"Log-likelihoods: {[f'{ll:.1f}' for ll in log_likelihoods]}")
-print(f"Range: {max(log_likelihoods) - min(log_likelihoods):.1f}")
-print(f"Best: {best_ll:.1f} (seed {np.argmax(log_likelihoods)})")
+)
 
 # %% [markdown]
-# ### K-Means Seeded Initialization
-#
-# Instead of random initialization, use k-means clustering to provide
-# better starting values for the emission parameters.
+# The spread across random starts is the size of the problem: it is how much of the fitted
+# log-likelihood is decided by where the optimiser happened to begin rather than by the
+# data. A seeded start reaches its answer once, which is not the same as reaching a better
+# one, and the two numbers beside each other say which happened here.
 
+# %% [markdown]
+# ## How many states
+#
+# The **Bayesian information criterion** charges each parameter a penalty that grows with
+# the sample size, and the smallest value picks the model. For a Gaussian model with $K$
+# states over $d$ series the parameter count is the initial distribution, the transition
+# matrix, the means and the covariances.
 
 # %%
-def fit_hmm_kmeans_init(X: np.ndarray, n_states: int, random_state: int = 42) -> GaussianHMM:
-    """Fit HMM with k-means-seeded initialization."""
-    # K-means for initial emission parameters
-    kmeans = KMeans(n_clusters=n_states, random_state=random_state, n_init=10)
-    kmeans.fit(X)
+STATE_COUNTS = [2, 3, 4]
 
-    model = GaussianHMM(
-        n_components=n_states,
-        covariance_type="full",
-        n_iter=N_ITER,
-        random_state=random_state,
-        init_params="st",  # Only init startprob and transmat
+
+def parameter_count(n_states: int, n_series: int) -> int:
+    """Free parameters of a Gaussian hidden Markov model with full covariances."""
+    return (
+        (n_states - 1)
+        + n_states * (n_states - 1)
+        + n_states * n_series
+        + n_states * n_series * (n_series + 1) // 2
     )
 
-    # Set emission parameters from k-means
-    model.means_ = kmeans.cluster_centers_
-    model.covars_ = np.array(
-        [np.cov(X[kmeans.labels_ == k].T) + np.eye(X.shape[1]) * 1e-6 for k in range(n_states)]
+
+n_sessions, n_series = observations_matrix.shape
+fitted_models = {}
+selection_rows = []
+for n_states in STATE_COUNTS:
+    model = fit_hmm_kmeans_init(
+        observations_matrix, n_states=n_states, random_state=SEED, n_iter=N_ITER
+    )
+    fitted_models[n_states] = model
+    parameters = parameter_count(n_states, n_series)
+    selection_rows.append(
+        {
+            "states": n_states,
+            "log-likelihood": model.score(observations_matrix),
+            "parameters": parameters,
+            "BIC": -2 * model.score(observations_matrix) + parameters * np.log(n_sessions),
+        }
     )
 
-    model.fit(X)
-    return model
-
-
-hmm_kmeans = fit_hmm_kmeans_init(X, n_states=2)
-ll_kmeans = hmm_kmeans.score(X)
-print(f"K-means init log-likelihood: {ll_kmeans:.1f}")
-print(f"Best random init log-likelihood: {best_ll:.1f}")
-print(f"K-means {'better' if ll_kmeans > best_ll else 'worse'} by {abs(ll_kmeans - best_ll):.1f}")
-
-# Use the better model
-hmm2 = hmm_kmeans if ll_kmeans > best_ll else best_model
-assert hmm2 is not None
+selection = pd.DataFrame(selection_rows)
+display(selection)
+print(f"Lowest BIC at {selection.loc[selection['BIC'].idxmin(), 'states']} states")
 
 # %% [markdown]
-# ### BIC for Number of States
+# The criterion's answer and the choice made here are not the same, and the reason is worth
+# stating rather than hiding. A criterion computed in sample rewards any structure the model
+# can fit, and on a long return series more states always find more volatility clustering to
+# describe. Whether those extra states are regimes a person could act on is a different
+# question that the criterion does not ask.
 #
-# Compare 2, 3, and 4 states using BIC (Bayesian Information Criterion).
-# More states always improve log-likelihood but may overfit.
+# The rest of this notebook uses two states, on the grounds that calm and stressed is the
+# distinction the features are for and that a two-state fit is the one whose labels stay
+# interpretable when the model is refitted. That is a judgement about what the feature is
+# for, and it is stated so a reader can disagree with it.
 
 # %%
-bic_results = []
-models = {}
+N_STATES = 2
 
-for k in [2, 3, 4]:
-    model = fit_hmm_kmeans_init(X, n_states=k)
-    ll = model.score(X)
+model = fitted_models[N_STATES]
+order = sort_states_by_variance(model)
+filtered = filtered_state_probs(model, observations_matrix)[:, order]
+smoothed = model.predict_proba(observations_matrix)[:, order]
+states, _ = relabel_states(model.predict(observations_matrix), smoothed, order)
 
-    # BIC = -2*LL + n_params * log(n_obs)
-    # model.score(X) returns the TOTAL log-likelihood, not per-sample
-    n_obs = len(X)
-    d = X.shape[1]
-    # Parameters: (k-1) initial + k*(k-1) transition + k*d means + k*d*(d+1)/2 covariances
-    n_params = (k - 1) + k * (k - 1) + k * d + k * d * (d + 1) // 2
-    bic = -2 * ll + n_params * np.log(n_obs)
+frame["filtered_stressed"] = filtered[:, -1]
+frame["smoothed_stressed"] = smoothed[:, -1]
+frame["state"] = filtered.argmax(axis=1)
 
-    bic_results.append({"K": k, "LL": ll, "n_params": n_params, "BIC": bic})
-    models[k] = model
-    print(f"K={k}: LL={ll:.1f}, params={n_params}, BIC={bic:.0f}")
-
-# Select best by BIC
-best_k = min(bic_results, key=lambda x: x["BIC"])["K"]
-print(f"\nBest K by BIC: {best_k}")
+display(
+    frame.groupby("state").agg(
+        sessions=("returns", "size"),
+        share=("returns", lambda column: len(column) / len(frame)),
+        mean_return=("returns", "mean"),
+        mean_volatility=("volatility", "mean"),
+    )
+)
 
 # %% [markdown]
-# BIC decreases monotonically through K=4, suggesting the data supports more
-# than two states in-sample. However, BIC is known to over-select states for
-# HMMs on long financial series - more states always capture more volatility
-# clustering patterns, but these additional regimes often fail to persist
-# out-of-sample. We proceed with **K=2** (calm/stressed) for interpretability
-# and robustness, consistent with the common finding that equity returns are
-# well-described by two volatility regimes.
-
-# %% [markdown]
-# ### Label Switching Prevention
+# Sorting by variance is what makes the table above readable, and it is the step most
+# easily skipped. Without it the row labelled zero would be whichever state the optimiser
+# happened to number first, so the same column computed in two windows could carry opposite
+# meanings and a model reading it across a refit would learn nothing.
 #
-# HMM states are unordered - "State 0" might be high-vol in one estimation
-# and low-vol in another. Sort states by a consistent property (variance)
-# to prevent label switching.
-
-
-# %%
-def sort_states_by_variance(model: GaussianHMM) -> np.ndarray:
-    """Sort HMM states by variance (ascending) for consistent labeling.
-
-    Returns (sorted_means, sorted_covars, state_order).
-    """
-    # Compute total variance for each state
-    variances = np.array([np.trace(model.covars_[k]) for k in range(model.n_components)])
-    order = np.argsort(variances)  # Low vol first
-
-    return order
-
-
-# %%
-def relabel_states(states: np.ndarray, probs: np.ndarray, order: np.ndarray) -> tuple:
-    """Relabel states according to the given order."""
-    inv_order = np.argsort(order)
-    new_states = inv_order[states]
-    new_probs = probs[:, order]
-    return new_states, new_probs
-
-
-# Apply to 2-state model
-order_2 = sort_states_by_variance(hmm2)
-states_2 = hmm2.predict(X)
-probs_2 = hmm2.predict_proba(X)
-
-states_sorted, probs_sorted = relabel_states(states_2, probs_2, order_2)
-
-# Verify: State 0 should have lower volatility
-for k in range(2):
-    mask = states_sorted == k
-    label = "Low-Vol" if k == 0 else "High-Vol"
-    mean_vol = spy_pd.loc[spy_pd.index[: len(mask)][mask], "volatility"].mean()
-    mean_ret = spy_pd.loc[spy_pd.index[: len(mask)][mask], "returns"].mean()
-    pct = mask.mean()
-    print(f"State {k} ({label}): {pct:.1%} of time, mean ret={mean_ret:.3f}%, vol={mean_vol:.1f}%")
+# The hard state above is the argmax of the **filtered** probabilities rather than the
+# model's own `predict`, which runs the Viterbi algorithm over the whole sequence and
+# therefore reads the future. Two ways of labelling the same sessions, one of which is a
+# feature.
 
 # %% [markdown]
-# ### Filtered Probabilities for Production
-#
-# In production, use **filtered** (not smoothed) probabilities to avoid
-# look-ahead bias. hmmlearn's `predict_proba` returns smoothed by default.
-# We implement the forward algorithm directly using hmmlearn's internal
-# `_compute_log_likelihood` for per-observation emission probabilities.
-# This is a private API - if it changes between hmmlearn versions, the
-# forward pass logic itself (below) remains correct with any emission source.
-
+# ## The same difference, on real data
 
 # %%
-def compute_filtered_probs(model: GaussianHMM, X: np.ndarray) -> np.ndarray:
-    """Compute filtered probabilities P(state_t | obs_{1:t}).
-
-    Uses the forward algorithm internally, then normalizes.
-    """
-    # hmmlearn provides _compute_log_likelihood for emissions
-    framelogprob = model._compute_log_likelihood(X)
-
-    n_samples = X.shape[0]
-    n_components = model.n_components
-
-    log_startprob = np.log(model.startprob_ + 1e-300)
-    log_transmat = np.log(model.transmat_ + 1e-300)
-
-    # Forward pass (log-domain for numerical stability)
-    fwdlattice = np.zeros((n_samples, n_components))
-
-    # Initialization
-    fwdlattice[0] = log_startprob + framelogprob[0]
-
-    # Recursion
-    for t in range(1, n_samples):
-        for j in range(n_components):
-            fwdlattice[t, j] = framelogprob[t, j] + np.logaddexp.reduce(
-                fwdlattice[t - 1] + log_transmat[:, j]
-            )
-
-    # Normalize to get probabilities
-    log_normalizer = np.logaddexp.reduce(fwdlattice, axis=1, keepdims=True)
-    filtered = np.exp(fwdlattice - log_normalizer)
-
-    return filtered
-
-
-filtered = compute_filtered_probs(hmm2, X)
-smoothed = hmm2.predict_proba(X)
-
-# Apply label sorting
-filtered_sorted = filtered[:, order_2]
-smoothed_sorted = smoothed[:, order_2]
-
-# %% [markdown]
-# ### Filtered vs Smoothed on Real Data
-#
-# The difference is most visible around regime transitions - smoothed
-# probabilities "know" the transition is coming before it happens.
-
-# %%
-fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-
-dates = spy_pd.index[: len(filtered)]
+fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
 
 ax = axes[0]
-ax.plot(dates, spy_pd["close"].values[: len(filtered)], linewidth=0.5)
-ax.set_title("SPY Price")
-ax.set_ylabel("Price")
+ax.plot(frame.index, frame["close"], linewidth=0.6, color=COLORS["blue"])
+ax.set_ylabel("US dollars")
+ax.set_title("SPY close")
 
 ax = axes[1]
-ax.plot(dates, filtered_sorted[:, 1], linewidth=0.8, label="Filtered P(High-Vol)", alpha=0.7)
-ax.plot(dates, smoothed_sorted[:, 1], linewidth=0.8, label="Smoothed P(High-Vol)", alpha=0.7)
-ax.set_title("High-Vol State Probability: Filtered vs Smoothed")
+ax.plot(
+    frame.index, frame["filtered_stressed"], linewidth=0.6, color=COLORS["blue"], label="Filtered"
+)
+ax.plot(
+    frame.index,
+    frame["smoothed_stressed"],
+    linewidth=0.6,
+    alpha=0.75,
+    color=COLORS["copper"],
+    label="Smoothed",
+)
 ax.set_ylabel("Probability")
-ax.legend()
-
-# Show bias in a focused window around COVID
-ax = axes[2]
-covid_mask = (dates >= "2019-06-01") & (dates <= "2020-12-31")
-if covid_mask.sum() > 0:
-    ax.plot(
-        dates[covid_mask], filtered_sorted[covid_mask, 1], linewidth=1.5, label="Filtered (causal)"
-    )
-    ax.plot(
-        dates[covid_mask],
-        smoothed_sorted[covid_mask, 1],
-        linewidth=1.5,
-        label="Smoothed (look-ahead)",
-    )
-    ax.set_title("COVID Period: Smoothed Anticipates Transition")
-    ax.set_ylabel("P(High-Vol)")
-    ax.legend()
-
-plt.show()
-
-# %% [markdown]
-# # Part 4 - Regime Features
-#
-# Extract features from the fitted HMM for downstream ML models.
-
-# %%
-spy_pd["hmm_state"] = states_sorted[: len(spy_pd)]
-spy_pd["regime_prob_high"] = filtered_sorted[: len(spy_pd), 1]
-spy_pd["regime_prob_low"] = filtered_sorted[: len(spy_pd), 0]
-
-# Transition probabilities as features
-transmat = hmm2.transmat_[order_2][:, order_2]
-spy_pd["transition_low_to_high"] = transmat[0, 1]
-spy_pd["transition_high_to_low"] = transmat[1, 0]
-
-# Expected duration in current state
-# E[duration in state k] = 1 / (1 - A_{kk})
-spy_pd["expected_duration"] = np.where(
-    spy_pd["hmm_state"] == 0,
-    1 / (1 - transmat[0, 0]),
-    1 / (1 - transmat[1, 1]),
-)
-
-# Regime entropy: uncertainty about current state
-# High entropy = uncertain, low entropy = confident
-eps = 1e-10
-p = filtered_sorted[: len(spy_pd)]
-spy_pd["regime_entropy"] = -np.sum(p * np.log(p + eps), axis=1)
-
-print("=== Regime Feature Summary ===")
-print("Transition matrix (sorted):")
-print(f"  P(Low→Low):  {transmat[0, 0]:.4f}  P(Low→High):  {transmat[0, 1]:.4f}")
-print(f"  P(High→Low): {transmat[1, 0]:.4f}  P(High→High): {transmat[1, 1]:.4f}")
-print("\nExpected durations:")
-print(f"  Low-vol regime:  {1 / (1 - transmat[0, 0]):.0f} days")
-print(f"  High-vol regime: {1 / (1 - transmat[1, 1]):.0f} days")
-
-# %% [markdown]
-# # Part 5 - Markov-Switching AR (Hamilton)
-#
-# MS-AR provides a complementary approach with different advantages:
-# - Explicitly models AR dynamics within each regime
-# - Provides maximum likelihood with analytical gradients
-# - Includes regime-specific AR coefficients and variances
-
-# %%
-returns_clean = spy_pd["returns"].dropna()
-
-# statsmodels warns that the DatetimeIndex carries no frequency; the index is
-# used only for later alignment, so suppress it locally (statsmodels resets the
-# module-level filter, so a catch_warnings block is needed).
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    msar = MarkovAutoregression(
-        returns_clean,
-        k_regimes=2,
-        order=1,
-        switching_ar=False,
-        switching_variance=True,
-    )
-    msar_result = msar.fit(disp=False)
-
-print("=== MS-AR(1) Model ===")
-print(f"Regime 0 variance: {msar_result.params['sigma2[0]']:.4f}")
-print(f"Regime 1 variance: {msar_result.params['sigma2[1]']:.4f}")
-
-# Extract both filtered and smoothed probabilities
-# Filtered: conditions only on past/current observations given the fitted model (causal)
-# Smoothed: uses the full sample (for diagnostics/comparison only)
-msar_filtered_0 = msar_result.filtered_marginal_probabilities[0]
-msar_filtered_1 = msar_result.filtered_marginal_probabilities[1]
-msar_smoothed_0 = msar_result.smoothed_marginal_probabilities[0]
-msar_smoothed_1 = msar_result.smoothed_marginal_probabilities[1]
-
-# Align indices - MS-AR drops observations due to AR lag
-spy_pd["msar_filtered_0"] = np.nan
-spy_pd["msar_filtered_1"] = np.nan
-spy_pd["msar_smoothed_0"] = np.nan
-spy_pd["msar_smoothed_1"] = np.nan
-
-common_idx = spy_pd.index.intersection(msar_filtered_0.index)
-spy_pd.loc[common_idx, "msar_filtered_0"] = msar_filtered_0.loc[common_idx].values
-spy_pd.loc[common_idx, "msar_filtered_1"] = msar_filtered_1.loc[common_idx].values
-spy_pd.loc[common_idx, "msar_smoothed_0"] = msar_smoothed_0.loc[common_idx].values
-spy_pd.loc[common_idx, "msar_smoothed_1"] = msar_smoothed_1.loc[common_idx].values
-
-# Identify which MS-AR regime is high-vol
-var_0 = msar_result.params["sigma2[0]"]
-var_1 = msar_result.params["sigma2[1]"]
-high_vol_regime = 0 if var_0 > var_1 else 1
-print(f"High-vol regime: {high_vol_regime} (σ²={max(var_0, var_1):.4f})")
-
-# %% [markdown]
-# **Filtered vs smoothed MS-AR**: Like HMMs, MS-AR provides both filtered and
-# smoothed marginal probabilities. The filtered probabilities use only past and
-# current observations - these are the production-safe features. Smoothed
-# probabilities incorporate the full sample and are useful only for historical
-# analysis.
-
-# %% [markdown]
-# ### Method Comparison
-
-# %%
-fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True)
-
-ax = axes[0]
-ax.plot(spy_pd.index, spy_pd["close"], linewidth=0.5)
-ax.set_title("SPY Price")
-ax.set_ylabel("Price")
-
-ax = axes[1]
-ax.fill_between(
-    spy_pd.index, 0, spy_pd["vix_regime"], alpha=0.5, color=COLORS["amber"], label="VIX > 20"
-)
-ax.set_title("Baseline: VIX Threshold")
-ax.set_ylabel("Regime")
-ax.legend()
+ax.set_title("Probability of the higher-variance state, both readings")
+ax.legend(fontsize=7)
 
 ax = axes[2]
-ax.fill_between(spy_pd.index, 0, spy_pd["regime_prob_high"], alpha=0.7, color=COLORS["negative"])
-ax.set_title("HMM: Filtered P(High-Vol)")
-ax.set_ylabel("Probability")
+ax.plot(
+    frame.index,
+    frame["smoothed_stressed"] - frame["filtered_stressed"],
+    linewidth=0.5,
+    color=COLORS["copper"],
+)
+ax.axhline(0, color=COLORS["neutral"], linewidth=0.6)
+ax.set_ylabel("Smoothed minus filtered")
+ax.set_xlabel("Session")
+ax.set_title("What reading the whole sample buys, session by session")
 
-ax = axes[3]
-msar_high = spy_pd[f"msar_filtered_{high_vol_regime}"].fillna(0)
-ax.fill_between(spy_pd.index, 0, msar_high, alpha=0.7, color=COLORS["amber"])
-ax.set_title("MS-AR: Filtered P(High-Vol)")
-ax.set_ylabel("Probability")
-
-plt.show()
-
-# %%
-# Agreement analysis
-valid = spy_pd[["vix_regime", "regime_prob_high"]].dropna()
-hmm_high = (valid["regime_prob_high"] > 0.5).astype(int)
-vix_high = valid["vix_regime"]
-
-agreement = (hmm_high == vix_high).mean()
-print(f"HMM vs VIX agreement: {agreement:.1%}")
-
-# Confusion analysis
-tp = ((hmm_high == 1) & (vix_high == 1)).sum()
-fp = ((hmm_high == 1) & (vix_high == 0)).sum()
-fn = ((hmm_high == 0) & (vix_high == 1)).sum()
-tn = ((hmm_high == 0) & (vix_high == 0)).sum()
-
-print("\nHMM vs VIX Confusion (VIX as 'truth'):")
-print(f"  True Positive:  {tp:>5}  False Positive: {fp:>5}")
-print(f"  False Negative: {fn:>5}  True Negative:  {tn:>5}")
-
-# %% [markdown]
-# **Interpretation**: HMM and VIX-based regimes agree on most days but diverge
-# meaningfully at transitions. False positives (HMM detects stress that VIX
-# misses) often correspond to elevated realized volatility before VIX catches up.
-# False negatives (VIX elevated but HMM calm) may reflect VIX overshooting
-# during event-driven spikes. Neither is "correct" - they measure different
-# aspects of the volatility regime.
-
-# %% [markdown]
-# # Part 6 - Indicator-Based Regime Detection (ml4t-engineer)
-#
-# HMMs are probabilistic and data-driven - they learn regime structure from
-# the data. An alternative approach uses **deterministic indicators** from
-# technical analysis that classify regime based on fixed rules applied to
-# price dynamics.
-#
-# `ml4t-engineer` provides five regime indicators as Polars expressions,
-# plus a composite `market_regime_classifier` that combines them.
+fig.suptitle("Two readings of one fit, and the gap between them")
+show_with_alt(
+    fig,
+    "Three stacked panels sharing a time axis. The top draws the SPY close. The middle "
+    "draws the filtered and smoothed probability of the higher-variance state, which agree "
+    "for long stretches near zero and near one and separate at the edges of each stressed "
+    "period. The bottom draws their difference, near zero most of the time with sharp "
+    "excursions in both directions clustered at those edges.",
+)
 
 # %%
-spy_indicators = spy.with_columns(
-    chop=choppiness_index("high", "low", "close", period=14),
-    hurst=hurst_exponent("close", period=100),
-    fractal_eff=fractal_efficiency("close", period=20),
-    trend_intensity=trend_intensity_index("close", period=30),
-    regime=market_regime_classifier("high", "low", "close", "volume"),
-).drop_nulls(subset=["chop"])
-
-print("=== Indicator-Based Regime Features ===")
-for col in ["chop", "hurst", "fractal_eff", "trend_intensity", "regime"]:
-    vals = spy_indicators[col].drop_nulls()
-    print(f"  {col:<18}: mean={vals.mean():.3f}, std={vals.std():.3f}")
+difference = frame["smoothed_stressed"] - frame["filtered_stressed"]
+print(f"Mean absolute difference: {difference.abs().mean():.4f}")
+print(f"Sessions where it exceeds a tenth: {(difference.abs() > 0.1).mean():.1%}")
+print(
+    "Sessions where the two disagree about which state is more likely: "
+    f"{((frame['smoothed_stressed'] > 0.5) != (frame['filtered_stressed'] > 0.5)).mean():.1%}"
+)
 
 # %% [markdown]
-# ### HMM vs Indicator Comparison
+# The two agree for most of the sample and disagree exactly where a feature would be used:
+# at the edges of a stressed period, where the smoothed reading has already turned and the
+# filtered one has not. The last line is the number to carry: on that share of sessions the
+# two readings would put the market in different states, and a backtest built on the
+# smoothed column gets those sessions right for free.
+
+# %% [markdown]
+# # Part 4: the columns
 #
-# We compare the HMM high-volatility state with indicator-based regimes.
-# These capture **different concepts**: the HMM identifies volatility regimes
-# (calm vs stressed) from return dynamics, while `market_regime_classifier`
-# produces trend regimes (bearish/range-bound = -1, neutral = 0, bullish = 1)
-# from price structure. High volatility and bearish trend often co-occur
-# during sell-offs but can diverge - recovery rallies are high-vol + bullish,
-# and slow grinds can be low-vol + bearish. The comparison measures overlap,
-# not equivalence.
+# Four features come out of a fitted model, and they are different kinds of thing. The
+# probability changes every session. The transition probabilities and the expected duration
+# they imply are properties of the fit, so they change only when the model is refitted. The
+# entropy of the state distribution is the model's own statement about how sure it is,
+# which is the uncertainty feature `10_uncertainty_features` is about, available here for
+# free.
 
 # %%
-# Align indicator regimes with HMM period
-ind_pd = (
-    spy_indicators.select(
-        ["timestamp", "chop", "hurst", "fractal_eff", "trend_intensity", "regime"]
+transition_matrix = model.transmat_[order][:, order]
+expected_duration = 1 / (1 - np.diag(transition_matrix))
+
+display(
+    pd.DataFrame(
+        transition_matrix,
+        index=[f"from state {k}" for k in range(N_STATES)],
+        columns=[f"to state {k}" for k in range(N_STATES)],
     )
-    .to_pandas()
-    .set_index("timestamp")
 )
-ind_pd.index = pd.DatetimeIndex(ind_pd.index)
-
-# Align to common dates
-common = spy_pd.index.intersection(ind_pd.index)
-hmm_high_vol = (spy_pd.loc[common, "regime_prob_high"] > 0.5).astype(int)
-ind_bearish = (ind_pd.loc[common, "regime"] == -1).astype(int)  # -1 = bearish/range-bound
-
-agreement = (hmm_high_vol == ind_bearish).mean()
-print(f"HMM high-vol vs Indicator bearish overlap: {agreement:.1%}")
-print("(These are different regime definitions - overlap, not equivalence)")
+print(
+    "Expected sessions in each state before leaving: "
+    + ", ".join(f"state {k} {duration:.0f}" for k, duration in enumerate(expected_duration))
+)
 
 # %%
-fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+frame["expected_duration"] = expected_duration[frame["state"].to_numpy()]
+frame["state_entropy"] = -(filtered * np.log(np.clip(filtered, 1e-12, None))).sum(axis=1)
 
-ax = axes[0]
-ax.plot(common, spy_pd.loc[common, "close"], linewidth=0.5)
-ax.set_title("SPY Price")
-ax.set_ylabel("Price")
-
-ax = axes[1]
-ax.fill_between(
-    common, 0, spy_pd.loc[common, "regime_prob_high"], alpha=0.7, color=COLORS["negative"]
+display(
+    frame[["filtered_stressed", "state_entropy", "expected_duration"]]
+    .describe()
+    .loc[["mean", "std", "min", "max"]]
+    .round(4)
 )
-ax.set_title("HMM: Filtered P(High-Vol) - Probabilistic")
-ax.set_ylabel("Probability")
-
-ax = axes[2]
-ax.fill_between(
-    common,
-    0,
-    ind_pd.loc[common, "chop"] / 100,
-    alpha=0.5,
-    color=COLORS["blue"],
-    label="Choppiness Index / 100",
-)
-ax.plot(common, ind_pd.loc[common, "hurst"], linewidth=0.8, color=COLORS["positive"], label="Hurst")
-ax.axhline(0.5, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
-ax.set_title("Indicator Regime Features - Deterministic")
-ax.set_ylabel("Value")
-ax.legend(loc="upper right")
-
-plt.show()
 
 # %% [markdown]
-# **Comparison**: HMM captures regime switches through latent-state inference -
-# it adapts to the data but requires estimation and is sensitive to initialization.
-# Indicator-based regimes are transparent and deterministic but use fixed rules
-# that may not adapt to structural changes. In practice, combining both (e.g.,
-# using indicators as additional HMM features) often works best.
+# The expected duration follows from the diagonal of the transition matrix and nothing
+# else: a state the model leaves with probability $p$ each session lasts $1/p$ sessions on
+# average. It takes exactly as many distinct values as there are states, so as a column it
+# is the state label wearing a unit, and it is worth carrying only where the model is
+# refitted often enough for the diagonal to move.
+#
+# The entropy is the column with the most to say. It is near zero when the filtered
+# probability is close to zero or one and at its maximum when the model cannot tell, so it
+# marks the sessions on which the regime feature should not be trusted. A model given both
+# the probability and its entropy can learn to ignore the first when the second is high.
 
 # %% [markdown]
-# ## Save Regime Features
+# # Part 5: a second model of the same idea
 #
-# Save regime states as a chapter demonstration artifact (see the caveat below
-# for why case-study pipelines must not read it).
-# The cross-join below broadcasts SPY-derived regime states to all symbols
-# in the case study universe - a simplification appropriate for market-level
-# regime features. Per-asset regime models would require individual HMM fits.
+# **Markov switching autoregression** describes the same picture with a different mechanism.
+# Instead of a state that emits observations, it fits an autoregression whose variance, and
+# optionally whose coefficients, switch between regimes. It is estimated by maximum
+# likelihood rather than by expectation-maximisation, and it produces the same two readings.
 #
-# Both the probability columns and the hard `regime_hmm`/`vol_regime` labels are
-# **filtered** (causal): each date uses only past and current observations. The
-# hard label is the argmax of the filtered probabilities, not `hmm3.predict`
-# (Viterbi), which would look ahead. One honest caveat remains: the HMM
-# **parameters** are estimated by EM over the whole sample, so these features are
-# point-in-time in their state inference but not in their parameter estimation. A
-# strictly live pipeline re-fits the model walk-forward; here we keep a single fit
-# for clarity, and the filtered inference is the part that most affects backtest
-# realism.
-#
-# Because of that parameter-level look-ahead, the artifact filename carries a
-# `_fullsample_demo` suffix: it is a chapter demonstration and **must not be
-# consumed by case-study or holdout-evaluated pipelines** — its EM parameters
-# saw the sealed holdout period. The lookahead-safe version of these features
-# (HMM refit per CV fold, filtered probabilities extracted per fold) is built
-# in `case_studies/etfs/04_model_based_features.py`; downstream chapters should
-# read that per-fold artifact instead.
+# Fitting both is worth the cell it costs, because agreement between two differently
+# specified models is much better evidence that a regime is in the data than either one's
+# own confidence.
 
 # %%
-MODEL_DIR = CASE_DIR / "models" / "time_series"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
+switching = MarkovAutoregression(
+    frame["returns"], k_regimes=N_STATES, order=1, switching_ar=False, switching_variance=True
+).fit(disp=False)
 
-# 3-state HMM for richer regime information
-hmm3 = fit_hmm_kmeans_init(X, n_states=3)
-order_3 = sort_states_by_variance(hmm3)
+variances = np.array([switching.params[f"sigma2[{k}]"] for k in range(N_STATES)])
+higher_variance_regime = int(np.argmax(variances))
+print(f"Fitted variance by regime: {np.round(variances, 4)}")
+print(f"The higher-variance regime is regime {higher_variance_regime}")
 
-# Filtered (causal) probabilities: the point-in-time regime evidence at each date,
-# using only past and current observations (see the filtered-vs-smoothed discussion
-# above). These are the columns we save as features.
-filtered_3 = compute_filtered_probs(hmm3, X)
-filtered_3_sorted = filtered_3[:, order_3]
+switching_filtered = switching.filtered_marginal_probabilities[higher_variance_regime]
+frame["switching_stressed"] = switching_filtered.reindex(frame.index)
 
-# Hard regime label = argmax of the FILTERED probabilities, so the saved state
-# feature is causal and consistent with the probability columns. We deliberately do
-# NOT use hmm3.predict(X): that is the Viterbi global decode, which conditions on the
-# entire sample (including the future) and would embed look-ahead bias in a feature
-# meant for backtesting.
-states_3_causal = filtered_3_sorted.argmax(axis=1)
+# %% [markdown]
+# ## Where the four readings agree
+#
+# Four statements about the same sessions: the two rules from Part 1, the hidden Markov
+# model's filtered probability, and the switching model's. They are not measuring the same
+# thing. The index threshold reads an option market's expectation, the moving average reads
+# a trend, and the two fitted models read the size of recent moves. Agreement between them
+# is informative and disagreement is not an error in any of them.
 
 # %%
-# Build output with all symbols
-all_symbols = load_etfs().select("symbol").unique().sort("symbol").get_column("symbol")
-
-vol_regime_map = {0: "low", 1: "normal", 2: "high"}
-
-base_df = pl.DataFrame(
+comparison = frame[
+    ["stressed_by_index", "below_average", "filtered_stressed", "switching_stressed"]
+].dropna()
+indicators = pd.DataFrame(
     {
-        "timestamp": spy_pd.index[: len(states_3_causal)].values,
-        "regime_hmm": states_3_causal,
-        "regime_prob_0": filtered_3_sorted[:, 0],
-        "regime_prob_1": filtered_3_sorted[:, 1],
-        "regime_prob_2": filtered_3_sorted[:, 2],
-        "vol_regime": [vol_regime_map[s] for s in states_3_causal],
-        "trend_regime": spy_pd["trend_regime"].values[: len(states_3_causal)],
+        "volatility index above the threshold": comparison["stressed_by_index"].astype(bool),
+        "price below its long average": comparison["below_average"].astype(bool),
+        "hidden Markov model, filtered": comparison["filtered_stressed"] > 0.5,
+        "switching model, filtered": comparison["switching_stressed"] > 0.5,
     }
 )
 
-symbols_df = pl.DataFrame({"symbol": all_symbols})
-regime_df = base_df.join(symbols_df, how="cross")
-regime_df = regime_df.select(
-    [
-        "timestamp",
-        "symbol",
-        "regime_hmm",
-        "regime_prob_0",
-        "regime_prob_1",
-        "regime_prob_2",
-        "vol_regime",
-        "trend_regime",
-    ]
+display(
+    pd.DataFrame(
+        {
+            "share of sessions flagged": indicators.mean(),
+            "agreement with the hidden Markov model": indicators.apply(
+                lambda column: (column == indicators["hidden Markov model, filtered"]).mean()
+            ),
+        }
+    ).round(3)
+)
+print(f"Sessions flagged by all four: {indicators.all(axis=1).mean():.1%}")
+print(f"Sessions flagged by none: {(~indicators).all(axis=1).mean():.1%}")
+
+# %%
+fig, axes = plt.subplots(4, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
+
+ax = axes[0]
+ax.plot(frame.index, frame["close"], linewidth=0.6, color=COLORS["blue"])
+ax.set_ylabel("US dollars")
+ax.set_title("SPY close")
+
+for ax, column, color, title in [
+    (axes[1], "stressed_by_index", COLORS["amber"], "Volatility index above the threshold"),
+    (axes[2], "filtered_stressed", COLORS["blue"], "Hidden Markov model, filtered probability"),
+    (axes[3], "switching_stressed", COLORS["copper"], "Switching model, filtered probability"),
+]:
+    ax.fill_between(frame.index, 0, frame[column].fillna(0), alpha=0.7, color=color)
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Flag" if column == "stressed_by_index" else "Probability")
+    ax.set_title(title)
+axes[-1].set_xlabel("Session")
+
+fig.suptitle("Three readings of stress, on the same sessions")
+show_with_alt(
+    fig,
+    "Four stacked panels sharing a time axis. The top draws the SPY close. Below it, three "
+    "filled series: a binary flag from the volatility index, and the filtered probabilities "
+    "from the hidden Markov model and the switching model. All three fill in during 2008, "
+    "2011, 2020 and 2022, with the two model-based series switching more often and more "
+    "briefly than the index flag.",
 )
 
-# `_fullsample_demo`: EM parameters saw the full sample (see caveat above) —
-# not for case-study/holdout-evaluated consumption.
-output_path = MODEL_DIR / "regime_states_fullsample_demo.parquet"
-regime_df.write_parquet(output_path)
-print(f"Saved regime states (full-sample demo): {regime_df.shape}")
+# %% [markdown]
+# # Part 6: regime without a model
+#
+# `ml4t.engineer.features.regime` supplies indicators that classify a regime from price
+# structure alone, by fixed rules. They are deterministic, need no fitting, and are
+# available the same session. What they classify is a trend regime rather than a volatility
+# regime, so they answer a different question from the models above and the overlap between
+# them is a measurement rather than a validation.
+
+# %%
+INDICATOR_WINDOWS = {"choppiness": 14, "hurst": 100, "efficiency": 20, "trend": 30}
+
+indicator_frame = (
+    spy.with_columns(
+        choppiness=choppiness_index("high", "low", "close", period=INDICATOR_WINDOWS["choppiness"]),
+        hurst=hurst_exponent("close", period=INDICATOR_WINDOWS["hurst"]),
+        efficiency=fractal_efficiency("close", period=INDICATOR_WINDOWS["efficiency"]),
+        trend_intensity=trend_intensity_index("close", period=INDICATOR_WINDOWS["trend"]),
+        classification=market_regime_classifier("high", "low", "close", "volume"),
+    )
+    .drop_nulls()
+    .to_pandas()
+    .set_index("timestamp")
+)
+indicator_frame.index = pd.DatetimeIndex(indicator_frame.index)
+
+display(
+    indicator_frame[["choppiness", "hurst", "efficiency", "trend_intensity"]]
+    .describe()
+    .loc[["mean", "std", "min", "max"]]
+    .round(3)
+)
+print(
+    "Share of sessions in each classification: "
+    + ", ".join(
+        f"{value} {share:.1%}"
+        for value, share in indicator_frame["classification"].value_counts(normalize=True).items()
+    )
+)
+
+# %%
+shared = frame.index.intersection(indicator_frame.index)
+model_stressed = frame.loc[shared, "filtered_stressed"] > 0.5
+classifier_bearish = indicator_frame.loc[shared, "classification"] == -1
+
+print(f"Sessions the model calls stressed: {model_stressed.mean():.1%}")
+print(f"Sessions the classifier calls bearish or range-bound: {classifier_bearish.mean():.1%}")
+print(f"Sessions where the two agree: {(model_stressed == classifier_bearish).mean():.1%}")
+joint = float((model_stressed & classifier_bearish).mean())
+independent = float(model_stressed.mean() * classifier_bearish.mean())
+print(f"Stressed and bearish together: {joint:.1%}")
+print(f"What independence would give: {independent:.1%}")
+print(f"Ratio of the two: {joint / independent:.2f}")
 
 # %% [markdown]
-# ## Key Takeaways
+# The agreement rate is the number to ignore. The two labels flag very different shares of
+# the sample, so most of their agreement is both saying no, and a rate above a half here
+# means almost nothing.
 #
-# 1. **Observable baselines** (VIX > 20, 200-day MA) are transparent and
-#    require no estimation - they set the bar any statistical model must clear
-# 2. **The forward algorithm** computes filtered probabilities using only past
-#    data - essential for avoiding look-ahead bias in trading
-# 3. **Smoothed probabilities use future data** - never use them as features
-#    in a backtest or live trading system
-# 4. **EM is sensitive to initialization** - use multiple random starts or
-#    k-means seeding to find better optima
-# 5. **BIC selects the number of states** - more states always improve fit
-#    but risk overfitting; 2-3 states usually suffice for financial data
-# 6. **Sort states by variance** to prevent label switching across
-#    estimation windows
-# 7. **Regime probabilities are better features than hard classifications** -
-#    they preserve uncertainty and degrade gracefully
-# 8. **Indicator-based regime detection** (choppiness, Hurst, fractal efficiency)
-#    via ml4t-engineer provides transparent, deterministic alternatives to HMM -
-#    combine both approaches for robust regime features
+# The last three lines are the ones with content, and they are worth reading twice. The two
+# labels co-occur *less* often than they would if they were unrelated. Whatever the model's
+# stressed state is picking up, it is not the same thing as the classifier's bearish label,
+# and the intuition that high volatility and a falling price go together does not survive
+# contact with these two definitions of them.
 #
-# **Next**: See `12_wasserstein_regimes` for distribution-based clustering
-# and `13_regime_as_feature` for integrating regime features into ML pipelines.
+# That is a reason to carry both rather than either. One says how large the moves are and
+# the other says which way they are going; a conditioning rule usually wants each
+# separately, and a single label that has collapsed them into one is the thing to avoid.
+
+# %% [markdown]
+# ## The features this notebook produces
+#
+# | Column | What it is | Causal |
+# |---|---|---|
+# | `filtered_stressed` | probability of the higher-variance state, from the forward recursion | in its inference, not in its parameters |
+# | `state` | which state that probability favours | same |
+# | `state_entropy` | how undecided the model is between states | same |
+# | `expected_duration` | how long the model expects the current state to last | a property of the fit |
+# | `switching_stressed` | the same probability from the switching model | same |
+# | `stressed_by_index`, `below_average` | the two rules from Part 1 | fully, they estimate nothing |
+#
+# The middle column of that table needs its qualifier read. Every probability here is
+# filtered, so its **inference** uses only observations up to its own session. But the
+# **parameters** were estimated by fitting the model to the whole sample, so a session's
+# probability was produced by a transition matrix that had seen every later session. A
+# strictly point-in-time pipeline refits the model on each fold's training block and
+# extracts the filtered probabilities per fold, which is what
+# `case_studies/etfs/04_model_based_features.py` does and what a backtest should read.
+#
+# This notebook keeps a single fit because the point being taught is the difference between
+# filtered and smoothed inference, and refitting per fold would put a second thing in the
+# same figure. Nothing here is written to disk, so nothing downstream can read a column
+# whose parameters saw its own future.
+
+# %% [markdown]
+# ## Key takeaways
+#
+# 1. **Two rules that need no fitting set the bar.** An index threshold and a long moving
+#    average are transparent, immediate, and free of estimation risk. A fitted model earns
+#    its place by beating them at something.
+# 2. **Filtered, never smoothed.** The forward recursion conditions on the past; the
+#    smoothed posterior conditions on everything. They disagree exactly at the transitions a
+#    regime feature exists to catch, and the notebook measures on what share of sessions.
+# 3. **A hard label needs the same care as a probability.** The model's own `predict` runs
+#    a decode over the whole sequence, so a state label taken from it reads the future even
+#    when the probabilities beside it do not.
+# 4. **Three things break a fitted regime model, and each has an answer.** Local optima,
+#    answered by seeded or repeated starts; the number of states, answered by a criterion
+#    that charges for them and then by judgement about what the feature is for; and the
+#    arbitrary ordering of states, answered by sorting them on something the model defines.
+# 5. **Filtered inference is not the same as a point-in-time feature.** The parameters are
+#    fitted too, and a fit over the whole sample puts every later session into every earlier
+#    probability. Refitting per fold closes that, at the cost of one fit per fold, and
+#    `case_studies/etfs/04_model_based_features.py` is where it is done.
+#
+# **Known limitations.** One symbol, one fit, one sample. The two-state choice is made
+# against the criterion rather than by it, on stated grounds a reader may reject. The
+# comparison between the model and the indicators measures overlap between two different
+# definitions of a regime and establishes nothing about either. And nothing here evaluates
+# whether a regime feature improves a downstream model, which is the only question that
+# decides whether any of it is worth carrying; `13_regime_as_feature` is where that is
+# asked.
+#
+# **Next**: `12_wasserstein_regimes` clusters whole distributions instead of fitting a
+# state model, and `13_regime_as_feature` puts a regime probability into a model and
+# measures what it does.
