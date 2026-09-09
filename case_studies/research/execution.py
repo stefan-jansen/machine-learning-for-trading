@@ -83,6 +83,38 @@ class BacktestExecution:
         """Backtests served from the registry without being run."""
         return sum(1 for entry in self.diagnostics if entry["status"] == "reused")
 
+    def disclosure(self, n_failed: int = 0) -> str:
+        """One clause saying what this execution computed and what it reused."""
+        return reuse_disclosure(self.n_computed, self.n_reused, n_failed)
+
+
+def reuse_disclosure(n_computed: int, n_reused: int, n_failed: int = 0) -> str:
+    """What this execution computed and what the registry already held, in one clause.
+
+    A notebook that serves results from the registry without saying so is a silent skip,
+    so the disclosure itself is required. What it must not do is open on a zero: against a
+    warm registry the count-pair phrasing rendered as ``0 computed, 262 served from the
+    registry``, and a reader of the chapter rather than of the run reads that first clause
+    as a backtest section that computed nothing. It reused 262, which is the intended
+    idempotent behaviour and the opposite of doing nothing.
+
+    So the all-reused case leads with what exists and names who produced it, the all-computed
+    case leads with the work, and only the mixed case shows both counts. Failures are
+    appended rather than folded in, because a failure is not a third kind of reuse.
+    """
+    total = n_computed + n_reused
+    if total == 0:
+        text = "nothing to compute"
+    elif n_computed == 0:
+        text = f"reused all {n_reused} from the registry, computed by an earlier run"
+    elif n_reused == 0:
+        text = f"computed all {n_computed}"
+    else:
+        text = f"computed {n_computed}, reused {n_reused} from the registry"
+    if n_failed:
+        text += f", {n_failed} failed"
+    return text
+
 
 @dataclass(frozen=True)
 class PlannedBacktest:

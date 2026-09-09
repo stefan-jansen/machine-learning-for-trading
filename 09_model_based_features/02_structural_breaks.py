@@ -201,7 +201,7 @@ for bp in breaks["pelt_breaks"]:
             fontsize=8,
             color="red",
         )
-ax.set_title(f"PELT: {len(breaks['pelt_breaks'])} Break Points Detected")
+ax.set_title("PELT segments the series at the marked break points")
 ax.set_ylabel("Price")
 
 # BinSeg results

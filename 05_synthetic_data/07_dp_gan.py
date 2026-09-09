@@ -572,7 +572,7 @@ print(f"Generated {len(synthetic_data)} synthetic samples with DP guarantees")
 fig = plot_fidelity_comparison(
     real_data[:N_GENERATE],
     synthetic_data,
-    title=f"DP-GAN: Real vs Synthetic (ε={history['epsilon'][-1]:.1f})",
+    title="DP-GAN: real against synthetic at the spent privacy budget",
     n_samples=min(1000, N_GENERATE),
 )
 plt.show()
@@ -712,7 +712,7 @@ for i, (row, col) in enumerate(positions[:n_features_to_plot]):
     )
 
 fig.update_layout(
-    title=f"Real vs DP-Synthetic Distributions (ε={history['epsilon'][-1]:.2f})",
+    title="Real against DP-synthetic distributions at the spent budget",
     height=500,
     showlegend=True,
     legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
