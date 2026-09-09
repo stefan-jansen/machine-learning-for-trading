@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -81,7 +82,7 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 # ML4T configuration
 from data import DataNotFoundError, iter_sec_filings
 from utils.paths import get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 VECTOR_STORE_DIR = get_output_dir(22, "10k_rag_assistant") / "vector_store"
 VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
@@ -249,8 +250,8 @@ if documents:
 # %% [markdown]
 # ### Configure LlamaIndex settings
 #
-# Sets the LLM, embedding model, and chunk strategy. ChromaDB provides
-# persistent storage so the index survives notebook restarts.
+# Sets the LLM, embedding model, and chunk strategy. ChromaDB persists the
+# index, so a restart does not re-embed the corpus.
 
 
 # %% [markdown]
@@ -394,22 +395,31 @@ def create_query_engine(index, top_k: int = 5):
 query_engine = create_query_engine(index, TOP_K)
 
 # %% [markdown]
-# ## 5. Demonstration Queries
+# ## 5. Demonstration queries
 #
-# We test the system with progressively complex queries:
-# 1. **Simple extraction**: Single-fact lookup
-# 2. **Multi-hop reasoning**: Synthesizing across sections
-# 3. **Comparative analysis**: Connecting related concepts
+# Five questions, of which the first and the last are controls rather than
+# demonstrations. They are there so section 6 has something to compare the
+# middle three against.
+#
+# 1. **Answerable.** The corpus is narrative text cut around each filing's
+#    discussion of competitors and suppliers, so it holds evidence for this.
+# 2. **A figure from the financial statements.** The corpus stores no
+#    financial-statement tables, so it holds no evidence for this.
+# 3. **Multi-section synthesis**, across sections that were never ingested.
+# 4. **A customer-concentration disclosure**, likewise absent.
+# 5. **Out of domain entirely.** A physics question, with no financial
+#    vocabulary and nothing in the corpus that bears on it.
+#
+# If a retriever can report failure, questions 2 through 5 should look
+# different from question 1.
 
 # %%
-# Test queries
 TEST_QUERIES = [
-    # Simple extraction
+    "How does the company compete against low-cost competitors and protect its intellectual property?",
     "What was the revenue growth percentage in fiscal year 2023?",
-    # Multi-section synthesis
     "Based on the MD&A and Risk Factors sections, what were the primary drivers of revenue growth, and what risks could threaten this growth?",
-    # Specific detail extraction
     "What percentage of revenue comes from the top 10 customers?",
+    "What is the boiling point of helium at standard atmospheric pressure?",
 ]
 
 
@@ -496,20 +506,27 @@ for i, query in enumerate(TEST_QUERIES, 1):
     print("\n")
 
 # %% [markdown]
-# **Interpretation**: Multi-hop queries (query 2) are the hardest for RAG
-# systems because relevant evidence spans multiple filing sections.
-# This run verifies retrieval mechanics. Citation and abstention behavior are
-# scored only when `RUN_LIVE_LLM=True`; retrieval-only output is not an answer.
+# Every query reports `Status: success` and five chunks, the helium question
+# included. The next section is about what "success" means here.
 
 # %% [markdown]
-# ## 6. Lightweight Harness Metrics
+# ## 6. What a retriever's success means
 #
-# Section 22.7 uses a broader evaluation harness. Here we compute lightweight
-# operational checks directly from query outputs:
+# The obvious operational check is retrieval coverage: the share of queries
+# that came back with at least one source chunk. It is also worthless here, and
+# the reason is worth understanding before writing any similar metric.
 #
-# - retrieval coverage (did we retrieve any source chunks),
-# - citation presence in answers,
-# - abstention behavior on unanswerable queries.
+# `index.as_retriever(similarity_top_k=k)` ranks every node by similarity and
+# returns the top k. It applies no relevance threshold, so for a non-empty
+# index and any query at all it returns exactly `min(k, n_nodes)` chunks.
+# Coverage is therefore one whenever the index built and zero only when it did
+# not. It measures the ingestion step and reports it in the vocabulary of
+# retrieval quality.
+#
+# It is computed below anyway, because seeing it come out whole for a question
+# about helium is the point. Beside it are two checks that can fail: the similarity
+# the retriever gave its best chunk, and which of the question's distinctive
+# terms that chunk contains.
 
 
 # %%
@@ -571,6 +588,103 @@ def evaluate_query_outputs(query_results: list[dict], llm_active: bool) -> dict:
     )
 
 
+# %% [markdown]
+# ### Two checks that can fail
+#
+# `top_similarity` is the score the retriever gave its best chunk.
+# `matched_terms` lists the words of the question, longer than four characters
+# and outside a short stop list, that appear in that chunk - the crudest
+# possible test of whether the passage is about what was asked.
+
+
+# %%
+QUERY_STOPWORDS = {
+    "about",
+    "based",
+    "comes",
+    "could",
+    "does",
+    "primary",
+    "sections",
+    "their",
+    "there",
+    "these",
+    "those",
+    "what",
+    "which",
+    "whose",
+}
+
+
+def query_terms(query: str) -> set[str]:
+    """Distinctive words of a question - long enough to carry meaning."""
+    return {
+        token
+        for token in re.findall(r"[A-Za-z]+", query.lower())
+        if len(token) > 4 and token not in QUERY_STOPWORDS
+    }
+
+
+retrieval_checks = []
+for position, result in enumerate(query_results, 1):
+    sources = result.get("sources") or []
+    top = sources[0] if sources else None
+    top_text = (top or {}).get("text_preview", "").lower()
+    score = top.get("score") if top else None
+    retrieval_checks.append(
+        {
+            "query": position,
+            "chunks": result.get("source_count", 0),
+            "top_similarity": round(score, 3) if score is not None else None,
+            "matched_terms": sorted(
+                term for term in query_terms(result["query"]) if term in top_text
+            ),
+        }
+    )
+
+for check in retrieval_checks:
+    matched = ", ".join(check["matched_terms"]) or "none"
+    print(
+        f"Query {check['query']}: {check['chunks']} chunks, "
+        f"top similarity {check['top_similarity']}, "
+        f"question terms present in the top chunk: {matched}"
+    )
+
+scores = [c["top_similarity"] for c in retrieval_checks if c["top_similarity"] is not None]
+if scores:
+    print(
+        f"\nTop similarity across all {len(scores)} queries: {min(scores):.3f} to "
+        f"{max(scores):.3f}, a spread of {max(scores) - min(scores):.3f}."
+    )
+
+# %% [markdown]
+# Every query returned the retriever's full `top_k`, the helium question
+# included, so the coverage figure below is uninformative exactly as described.
+# The two checks beside it are not, and they do not say the same thing.
+#
+# **The similarity carries signal.** The five top scores order the way a reader
+# would order the questions: the answerable one highest, the three financial
+# questions the corpus cannot answer in the middle, the physics question
+# lowest. The embedding is not confused about which passage is nearest to what.
+#
+# **The signal has no zero and no natural cut.** The whole range is narrow -
+# the spread is printed above - and the score for a question this corpus could
+# not answer under any circumstances is not obviously low, it is just lower. A
+# production system needs a number to compare against and nothing in the score
+# supplies one: a threshold placed anywhere inside that range changes which of
+# these five are accepted, and where to put it is a property of this corpus and
+# this embedding model, established by calibrating against questions whose
+# answers are known.
+#
+# **The term check is decisive at one end and useless at the other.** It
+# separates the physics question cleanly, because a passage about competition
+# and suppliers contains none of its words. It does not separate the three
+# unanswerable financial questions from the answerable one, because each of
+# them shares a generic term with whatever came back. And it fails on
+# paraphrase, which is what an embedding was brought in to handle. It is a
+# smoke alarm, not a metric.
+
+
 # %%
 def _full_mode_metrics(
     retrieval_coverage: float, citation_rate: float, abstention_rate: float, n_queries: int
@@ -600,26 +714,63 @@ for metric, value in ragas_metrics.items():
     else:
         print(f"  {metric}: {value}")
 
+# %% [markdown]
+# Charting the chunk counts would draw five bars of the same height, which is
+# the metric's whole content. The similarity scores have something in them, so
+# that is what the figure shows: one bar per query on the full cosine range,
+# labelled with how many of the question's own terms the top chunk contained.
+
 # %%
-source_counts = [result.get("source_count", 0) for result in query_results]
+QUERY_LABELS = [
+    "answerable",
+    "FY revenue",
+    "MD&A synthesis",
+    "customer concentration",
+    "out of domain",
+]
+labels = QUERY_LABELS[: len(retrieval_checks)] + [
+    f"query {check['query']}" for check in retrieval_checks[len(QUERY_LABELS) :]
+]
+top_scores = [check["top_similarity"] or 0.0 for check in retrieval_checks]
+term_counts = [len(check["matched_terms"]) for check in retrieval_checks]
+
 fig = go.Figure(
     go.Bar(
-        x=[f"Query {index}" for index in range(1, len(source_counts) + 1)],
-        y=source_counts,
+        x=labels,
+        y=top_scores,
         marker_color=COLORS["blue"],
-        text=source_counts,
+        text=[
+            f"{score:.2f}<br>{count} term{'' if count == 1 else 's'}"
+            for score, count in zip(top_scores, term_counts, strict=True)
+        ],
         textposition="outside",
     )
 )
 fig.update_layout(
-    title=f"All {len(source_counts)} due-diligence queries retrieve source chunks",
+    title="Top-chunk similarity by query, with question terms matched",
     xaxis_title="Analyst query",
-    yaxis_title="Retrieved chunks (count)",
-    height=400,
+    yaxis_title="Cosine similarity of the top-ranked chunk",
+    height=430,
     showlegend=False,
+    margin=dict(t=80, b=90),
 )
-fig.update_yaxes(range=[0, max(source_counts + [1]) * 1.2])
-fig.show()
+fig.update_yaxes(range=[0, 1])
+show_plotly_with_alt(
+    fig,
+    "Five bars on a cosine-similarity axis running from zero to one. All five stand in the "
+    "lower half of it, between roughly a third and a little over half the height of the "
+    "axis. The answerable query is the tallest and carries four matched terms; the three "
+    "financial queries follow at similar heights with one matched term each; the "
+    "out-of-domain query is the shortest and matched none. The gap between the tallest and "
+    "the shortest bar is smaller than the empty space above all of them.",
+)
+
+# %% [markdown]
+# The bars occupy the lower half of the axis and differ from each other by less
+# than they differ from either end of it. That compression is the reason a raw
+# score cannot be a guardrail: the ordering is right, and the distance between
+# "this corpus answers your question" and "this corpus is about something else
+# entirely" is a fraction of the scale the number is reported on.
 
 # %% [markdown]
 # ## 7. Numeric Workflow: Retrieve → Extract → Compute → Narrate
@@ -677,12 +828,16 @@ def extract_dollar_figures(items) -> list[ExtractedFigure]:
 # %% [markdown]
 # ### What the narrative corpus contains
 #
-# The canonical SP100 10-K corpus loaded above stores the *narrative* sections
-# (business description, risk factors), which carry almost no dollar figures -
-# the financial-statement tables live in a separate exhibit a production system
-# would ingest for numeric questions. We confirm that directly: retrieving a
-# numeric question against the narrative index returns chunks with no
-# `$`-denominated figures, so there is nothing to compute from them.
+# The corpus loaded above stores narrative text - business description and
+# risk factors, cut around each filing's mention of suppliers - and carries
+# almost no dollar figures. The financial-statement tables live in a separate
+# exhibit a production system would ingest for numeric questions.
+#
+# This is the same failure section 6 measured, in a form that can be checked
+# without judgment. Retrieve a numeric question against this index and it
+# returns its `top_k` chunks as always; count the `$`-denominated figures in
+# them and there are none. The retriever reported nothing wrong either time.
+# What differs is that a figure count is falsifiable and a hit count is not.
 
 # %%
 NUMERIC_QUESTION = (
@@ -759,12 +914,14 @@ assert abs(segment_sum - total_2023) < 1e8
 assert abs(yoy_growth - ((383.3 - 394.3) / 394.3)) < 1e-12
 
 # %% [markdown]
-# **Interpretation**: The arithmetic above is done by Python on values parsed
-# into `ExtractedFigure`, and every figure carries its source id. A production
-# assistant retrieves the financial-statement exhibit, extracts figures the same
-# way, computes in code, and feeds the cited result back to the LLM only for
-# narration - the model formats the answer but never performs the math, which is
-# what keeps numeric RAG answers auditable.
+# The language model is kept out of exactly one step: the arithmetic. It may
+# retrieve, it may extract into the typed schema, and it may narrate the
+# result, but the subtraction and the division happen in Python on values that
+# each carry a source id. A model asked to compute a growth rate will produce a
+# plausible number whether or not it computed anything, and no amount of
+# prompting makes that checkable. Moving the arithmetic out makes it checkable
+# by construction - the reconciliation assertion above either holds or stops
+# the notebook.
 
 # %% [markdown]
 # ## 8. Summary
@@ -780,9 +937,10 @@ assert abs(yoy_growth - ((383.3 - 394.3) / 394.3)) < 1e-12
 # | **Generation** | Retrieval-only default; GPT-4o-mini only when `RUN_LIVE_LLM=True` |
 # | **Evaluation** | Lightweight harness diagnostics |
 #
-# **Interpretation**: The lightweight diagnostics summarize whether the assistant
-# is retrieving evidence, citing it, and abstaining when needed. That is the
-# minimum operating bar before moving to the broader Chapter 22 harness.
+# The Evaluation row is the weakest in the table and the summary below shows
+# why: coverage cannot fail, and the citation and abstention rates have no
+# generated answer to score. What the run does establish is the retrieval half,
+# and section 6 establishes it is not working on two of three questions.
 
 # %%
 print("=== 10-K RAG Assistant Summary ===\n")
@@ -803,29 +961,41 @@ if ragas_metrics:
             print(f"  {metric}: {value}")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# **Interpretation**: The closing summary shows that this assistant is only as
-# reliable as the ingestion, chunking, and citation contract underneath it. The
-# result is a verifiable due-diligence workflow, not just a fluent QA demo.
+# 1. **A hit count is not a retrieval metric.** `similarity_top_k` has no
+#    relevance threshold, so it returns k chunks for every query an index can
+#    be asked, including ones about companies and years the corpus does not
+#    hold. Retrieval coverage therefore comes out whole in this run, including
+#    for a question about the boiling point of helium. Any check
+#    whose failing case is "the index did not build" is checking ingestion.
 #
-# 1. **The implemented parser is deliberately bounded**: Sentence-window
-#    chunking exercises retrieval mechanics but does not claim section or table
-#    preservation.
+# 2. **A similarity score ranks; it does not decide.** The five top scores
+#    order the questions correctly, answerable highest and out-of-domain
+#    lowest, so the embedding is doing its job. But they fall in a narrow band
+#    with no zero in it, and the score for a question about helium is lower
+#    than the others rather than absent. Turning that ordering into an
+#    accept-or-abstain decision needs a threshold, and the threshold is a
+#    property of the corpus and the model that has to be calibrated against
+#    questions whose answers are known. The calibration is the work; the score
+#    on its own is not a guardrail.
 #
-# 2. **Constraint prompting defines a testable contract**: The prompt requires
-#    citations and abstention. A separate evaluation run must verify compliance;
-#    the prompt alone cannot guarantee it.
+# 3. **The corpus decides which questions are askable.** These are narrative
+#    excerpts cut around supplier discussion. Questions about fiscal-year
+#    revenue growth and customer concentration have no evidence here, and the
+#    numeric section confirms it by a route that cannot be argued with: zero
+#    dollar figures in the retrieved chunks.
 #
-# 3. **Isolated indexes protect comparisons**: Rebuilding the Chroma collection
-#    prevents stale or duplicated nodes from changing a candidate run.
+# 4. **Keep the arithmetic out of the model.** Retrieve, extract into a typed
+#    schema, compute in Python, narrate with the source ids. A model asked to
+#    compute produces a plausible number either way, and the difference is not
+#    visible in the answer.
 #
-# 4. **Lightweight diagnostics complement full evaluation**: The harness
-#    metrics here (retrieval coverage, citation presence, abstention rate)
-#    provide quick operational checks between full evaluation runs.
+# 5. **The citation and abstention contract is stated here and not exercised.**
+#    `RUN_LIVE_LLM` is off, so `CITATION_PROMPT` is never sent and both rates
+#    report as unavailable rather than as passing.
+#    [`04_ragas_evaluation`](04_ragas_evaluation.ipynb) is where those checkers
+#    are run against fixtures that make them fire.
 #
-# **Next**: `06_esg_rag_vs_finetune` compares this RAG approach against
-# fine-tuned classification for ESG analysis.
-#
-# **Book reference**: Section 22.8 discusses the 10-K assistant as a
-# flagship RAG application and Section 22.6 covers constraint prompting.
+# **Next**: [`06_esg_rag_vs_finetune`](06_esg_rag_vs_finetune.ipynb) compares
+# retrieval against a fine-tuned classifier on ESG analysis.
