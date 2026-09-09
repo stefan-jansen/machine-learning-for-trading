@@ -35,7 +35,7 @@
 # 3. **Retrain** a Ridge regressor with the regularisation strength the
 #    case study identified, using the financial-only feature subset.
 # 4. **Persist** the deployment artefacts under
-#    `25_live_trading/live_artifacts/etfs/`.
+#    `25_live_trading/output/etfs_deployment/`.
 # 5. **Predict** the live window's cross-sections.
 # 6. **Replay** the live window through `ml4t.backtest.Engine` to produce
 #    the offline reference signal tape - the trade record a deterministic
