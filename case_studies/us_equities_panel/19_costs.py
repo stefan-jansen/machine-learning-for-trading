@@ -128,17 +128,13 @@ MAX_SYMBOLS = 0
 #
 # `STAGE_SEQUENCE` is the order the backtest stages run in: signal, allocation, risk overlay, then
 # cost sensitivity. Everything before the last one is a stage a strategy can come from, so the pool
-# is the sequence minus the terminal stage. Naming the stages by hand instead is how
-# `risk_overlay` came to be missing from this notebook while four of the seven completed case
-# studies carry a risk overlay as their leading validation strategy - and a risk overlay shares its
-# allocation parent's prediction hash, so the omission does not raise. It silently joins the
-# un-overlaid cost curve to a strategy that has an overlay, and Chapter 20 then describes a
-# different strategy from the one it names.
-
-# %% [markdown]
-# **The pool is every stage a strategy can be carried forward from**, which is the backtest
-# sequence without its own terminal stage. It is derived from `STAGE_SEQUENCE` rather than listed,
-# so a stage added there reaches this pool without anyone remembering to come here.
+# is the sequence minus the terminal stage.
+#
+# **A stage left out of that pool does not raise.** A risk overlay shares its allocation parent's
+# prediction hash, so a pool missing `risk_overlay` still resolves a source for every label - the
+# un-overlaid one - and the cost curve it draws is then a curve for a different strategy from the
+# one it is named after. Deriving the pool is what makes a stage added later reach it without
+# anyone remembering to come here.
 #
 # Both tiers resolve the study through `open_study`. It reads the labels, features and earlier
 # results in place and redirects only writes, so a preview run sweeps the same inputs a canonical
