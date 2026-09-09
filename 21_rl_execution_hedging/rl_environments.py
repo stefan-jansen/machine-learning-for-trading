@@ -293,6 +293,7 @@ class ExecutionEnv(gym.Env):
 
         # The action controls pace around a reference schedule rather than
         # allowing immediate liquidation of all remaining inventory.
+        max_trade_shares = self.max_trade_size(market)
         shares_to_sell = self.action_to_target_shares(action, market)
 
         execution_price, shortfall, perm_impact = self._trade_metrics(market, shares_to_sell)
@@ -314,8 +315,8 @@ class ExecutionEnv(gym.Env):
                 "remaining": self.remaining_shares,
                 "regime": market.regime,
                 "depth": market.depth,
-                "reference_shares": self.reference_trade_size(),
-                "max_trade_shares": self.max_trade_size(market),
+                "reference_shares": reference_shares,
+                "max_trade_shares": max_trade_shares,
                 "risk_penalty": 0.0,
             }
         )
