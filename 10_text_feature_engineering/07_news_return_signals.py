@@ -1120,17 +1120,21 @@ if len(factor_with_returns) > 100:
     # Compute daily cross-sectional IC for both news_surprise and weighted_surprise
     ic_surprise = []
     ic_weighted = []
-    for date, group in factor_with_returns.group_by("trade_date_str"):
+    # `group_by` yields the key as a one-element tuple, so it is unpacked here. Storing the
+    # tuple gives a column that sorts and prints plausibly and is not a date, which only
+    # shows up when something tries to use it as one.
+    for (trade_date,), group in factor_with_returns.group_by("trade_date_str"):
         if len(group) >= 10:  # Minimum stocks per day
             ic1, _ = spearmanr(group["news_surprise"], group["fwd_ret_1d"])
             ic2, _ = spearmanr(group["weighted_surprise"], group["fwd_ret_1d"])
             if not np.isnan(ic1):
-                ic_surprise.append({"timestamp": date, "ic": ic1})
+                ic_surprise.append({"timestamp": trade_date, "ic": ic1})
             if not np.isnan(ic2):
-                ic_weighted.append({"timestamp": date, "ic": ic2})
+                ic_weighted.append({"timestamp": trade_date, "ic": ic2})
 
-    ic_surprise_df = pl.DataFrame(ic_surprise).sort("timestamp")
-    ic_weighted_df = pl.DataFrame(ic_weighted).sort("timestamp")
+    date_column = pl.col("timestamp").str.to_date("%Y-%m-%d")
+    ic_surprise_df = pl.DataFrame(ic_surprise).with_columns(date_column).sort("timestamp")
+    ic_weighted_df = pl.DataFrame(ic_weighted).with_columns(date_column).sort("timestamp")
 else:
     ic_surprise_df = pl.DataFrame()
     ic_weighted_df = pl.DataFrame()
@@ -1298,8 +1302,8 @@ if len(factor_with_returns) > 100:
     q1_ret = _safe_scalar(quintile_returns.filter(pl.col("quintile") == "Q1")["mean_ret_1d"][0])
     spread = q5_ret - q1_ret
 
-    # Per day, not annualized: scaling by 252 makes a difference indistinguishable from zero
-    # read like a return.
+    # Per day, not annualized: scaling a one-day difference by 252 states it in units nothing
+    # here measured, and this difference carries no uncertainty estimate at all.
     print(f"Top bucket minus bottom bucket, one-day forward return: {spread * 10000:.2f} bps")
 else:
     print("Insufficient data for quintile analysis")
@@ -1392,10 +1396,13 @@ print(high_coverage.head(10))
 #    direction. It moves it from one value indistinguishable from zero to another, which is
 #    not evidence for the construction, and the bucket sort - which the construction predicts
 #    the shape of - contradicts it.
-# 3. **Report a spread per period, not annualized.** Scaling a daily long-short difference by
-#    the number of sessions in a year turns a quantity this notebook has shown to be
-#    indistinguishable from zero into something that reads like a return. The annualized
-#    figure carries no evidence the daily one does not.
+# 3. **Report a spread per period, not annualized, and not without an interval.** The bucket
+#    difference here is a difference between two pooled means with no uncertainty attached -
+#    the t-statistics above test the mean daily coefficient, which is a different quantity and
+#    cannot stand in for it. Scaling such a number by the sessions in a year states it in
+#    units nothing measured. Getting an interval for it means forming the long-short return
+#    per day and treating that series as the sample, which is what `08_text_feature_evaluation`
+#    does.
 # 4. **Deduplicate before aggregating anything per document.** Wire services syndicate one
 #    article to many outlets, and a mean sentiment or a coverage count over the raw feed
 #    counts the same story repeatedly. Exact plus prefix hashing within ticker-date groups is
