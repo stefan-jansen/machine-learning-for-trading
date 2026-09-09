@@ -686,7 +686,8 @@ show_plotly_with_alt(
     "Grouped bar chart of permitted fill against realized bar volume, with one bar for the "
     "ungated rule and one for the minimum-volume rule at each volume. On the two thinnest bars "
     "only the ungated rule fills at all; from the threshold volume upward the two rules permit "
-    "the same fill, and both flatten at the same ceiling on the deepest bar.",
+    "the same fill, and that fill keeps growing in proportion to bar volume, so the tallest pair "
+    "is at the deepest bar.",
 )
 
 # %% [markdown]

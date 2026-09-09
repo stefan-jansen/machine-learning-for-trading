@@ -527,7 +527,7 @@ show_plotly_with_alt(
 # than offset. This full-period comparison is descriptive, not a holdout ranking.
 #
 # The two panels are nearly identical, and that is worth reading rather than skipping: the
-# high- and medium-friction stacks differ by half a basis point per round trip, which at this
+# high- and medium-friction stacks differ by a single basis point per round trip, which at this
 # strategy's turnover is far too little to separate the net lines. What moves the Sharpe here is
 # the cadence, not the cost assumption. The stacks have to differ by more than that before the
 # choice between them changes an answer.
@@ -845,8 +845,8 @@ show_plotly_with_alt(
     "A slope chart with one line per signal running between two ranking columns, raw IC on the "
     "left and the persistence-cost score on the right, with rank one at the top and every line "
     "labelled at both ends. The lines cross heavily: the signal ranked first on raw IC falls to "
-    "last, the one ranked last rises to second, and the two remaining signals swap places by one "
-    "rank each.",
+    "last, the one ranked last rises to second, the one ranked third rises to first, and only "
+    "the second-ranked signal stays near where it started, slipping one place to third.",
 )
 
 # %% [markdown]
