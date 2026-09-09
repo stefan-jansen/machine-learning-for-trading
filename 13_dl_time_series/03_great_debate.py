@@ -593,16 +593,21 @@ for name, model in models.items():
 
     mse_orig = float(np.mean((pred_orig - y_test) ** 2))
     mse_shuf = float(np.mean((pred_shuf - y_test) ** 2))
-    # How much the error moved, and separately how much the predictions themselves
-    # moved. A model can miss by a similar amount while predicting something else.
-    pred_corr = float(np.corrcoef(pred_orig.ravel(), pred_shuf.ravel())[0, 1])
+    # How much the error moved, and separately how far the predictions themselves
+    # moved: the root-mean-square gap between the two prediction sets, divided by the
+    # root-mean-square size of the original predictions. Zero means the model emitted
+    # the same numbers; one means it disagreed with itself by as much as it was
+    # predicting in the first place.
+    pred_shift = float(
+        np.sqrt(np.mean((pred_shuf - pred_orig) ** 2)) / np.sqrt(np.mean(pred_orig**2))
+    )
     shuffle_results.append(
         {
             "Model": name,
             "MSE (original)": round(mse_orig, 6),
             "MSE (shuffled)": round(mse_shuf, 6),
             "Delta (%)": round(100 * (mse_shuf - mse_orig) / mse_orig, 1),
-            "Prediction correlation": round(pred_corr, 3),
+            "Prediction shift": round(pred_shift, 3),
         }
     )
 
@@ -612,7 +617,7 @@ shuffle_df
 fig = make_subplots(
     rows=1,
     cols=2,
-    subplot_titles=["Change in error", "Agreement between the two prediction sets"],
+    subplot_titles=["Change in error", "How far the predictions moved"],
 )
 fig.add_trace(
     go.Bar(
@@ -628,9 +633,9 @@ fig.add_trace(
 fig.add_trace(
     go.Bar(
         x=shuffle_df["Model"],
-        y=shuffle_df["Prediction correlation"],
+        y=shuffle_df["Prediction shift"],
         marker_color=COLORS["amber"],
-        text=[f"{value:.3f}" for value in shuffle_df["Prediction correlation"]],
+        text=[f"{value:.3f}" for value in shuffle_df["Prediction shift"]],
         textposition="outside",
     ),
     row=1,
@@ -641,21 +646,21 @@ fig.add_hline(
     y=1.0,
     line_dash="dot",
     line_color=COLORS["neutral"],
-    annotation_text="identical predictions",
+    annotation_text="disagreement as large as the forecast",
     annotation_position="bottom right",
     row=1,
     col=2,
 )
 fig.update_yaxes(title_text="Change in test MSE (%)", row=1, col=1)
-fig.update_yaxes(title_text="Correlation of predictions", range=[0, 1.1], row=1, col=2)
+fig.update_yaxes(title_text="Prediction shift (0 = unchanged)", row=1, col=2)
 fig.update_layout(title="Two different questions about the same shuffle", showlegend=False)
 show_plotly_with_alt(
     fig,
     "Two bar charts over the same four trained models. The left gives the percentage "
     "change in test mean squared error when the days inside every input window are "
-    "randomly reordered. The right gives the correlation between each model's original "
-    "and shuffled predictions, with a dotted line at one marking predictions that did "
-    "not move at all.",
+    "randomly reordered. The right gives how far each model's predictions moved, as the "
+    "root-mean-square gap between its original and shuffled predictions divided by the "
+    "root-mean-square size of the originals, with zero meaning unchanged.",
 )
 
 # %% [markdown]
@@ -668,27 +673,38 @@ show_plotly_with_alt(
 # disagreeing completely with each other. A bar near zero here means shuffling cost the
 # model little accuracy. It does not mean the model produced the same forecast.
 #
-# **The right panel asks whether the forecast changed at all.** It correlates each
-# model's original predictions with the ones it made from the shuffled windows. A
-# correlation of one means the model emitted the *same numbers* from reordered input -
-# it does not read position, and no accuracy comparison was needed to establish that. A
-# correlation near zero means the reordering changed the output entirely, whatever the
-# error did.
+# **The right panel asks whether the forecast changed at all.** It measures the
+# root-mean-square gap between each model's original and shuffled predictions, divided
+# by the root-mean-square size of the original predictions. Zero means the model
+# emitted the same numbers from the reordered window and therefore did not read
+# position - within these test windows and this one shuffle. A value of one means the
+# reordering moved the forecast by as much as the whole forecast is worth, and a value
+# above one means the two disagree by more than that, which is what happens when the
+# reordered prediction is not merely different but points the other way.
 #
-# Read the two together and check them against what the critique predicts. Its claim is
-# that the linear models depend on position and the Transformer does not, so it
-# predicts a specific and lopsided picture on the right - the linear bars low, the
-# Transformer's bar close to one - while the left panel may show very little for
-# anybody. If that is what the chart shows, then a Transformer's attention layers,
-# whose entire justification is modelling relations between positions, are producing an
-# output that barely depends on position, and the accuracy table alone would never have
-# revealed it.
+# It is a gap and not a correlation on purpose. A correlation of one would be satisfied
+# by predictions that are twice the originals plus a constant, which is a model whose
+# output very much depends on position; correlation measures linear association and not
+# agreement, and only a distance answers "did the numbers change".
 #
-# **What this does not settle.** A model whose predictions move while its error does
-# not is reading position and getting nothing for it, which on daily equity returns is
-# the expected outcome and is a statement about the series rather than the
-# architecture. Small changes in the left panel, in either direction, are noise: a
-# couple of percent on an average over a few hundred windows is not a measured effect.
+# Read the two panels together and check them against what the critique predicts. Its
+# claim is that the linear models depend on position and the Transformer does not, so
+# it predicts a lopsided picture on the right - the linear bars high, the Transformer's
+# near zero - while the left panel may show very little for anybody. If that is what
+# the chart shows, then attention layers whose entire justification is modelling
+# relations between positions are producing an output that barely depends on position,
+# and no accuracy table would have revealed it.
+#
+# **What this does not settle.** No uncertainty has been estimated for the left panel,
+# so a small bar there is not established as a real effect and neither is a large one.
+# Estimating it would take more than counting windows, because these windows overlap:
+# consecutive examples share `HORIZON - 1` of their target days, so their errors are
+# heavily dependent and the effective number of independent observations is far below
+# the number of rows. A test that ignored that would report a confidence interval far
+# narrower than the evidence supports. And a model whose predictions move while its
+# error does not is reading position and getting nothing for it, which on daily equity
+# returns is the expected outcome and is a statement about the series rather than the
+# architecture.
 #
 # The general lesson holds whatever the dataset: a claim that an architecture exploits
 # some structure is testable by destroying that structure in the input and re-scoring.
@@ -827,12 +843,11 @@ show_plotly_with_alt(
 #    said to exploit temporal order, shuffle the order inside each input and run it
 #    again. It costs one forward pass, and no accuracy table implies it.
 # 4. **Score that test on the predictions, not only on the error.** An average squared
-#    error over a few hundred windows can sit still while the predictions underneath it
-#    change completely, so a flat error bar answers nothing. Correlating a model's
-#    original predictions against its shuffled ones asks the question directly: a
-#    correlation near one is a model that does not read position, and it is visible
-#    whatever the error does. The two panels here are built to be read against each
-#    other for exactly that reason.
+#    error can sit still while the predictions underneath it change completely, so a
+#    flat error bar answers nothing on its own. Measuring the distance between the
+#    original and shuffled predictions asks the question directly, and a distance is
+#    what it has to be: a correlation of one is satisfied by any affine rescaling, so
+#    it cannot tell you the numbers did not change.
 # 5. **Choose settings on the validation partition and say that you did.** The window
 #    sweep here is model selection, and reporting it as a result would spend the
 #    held-back stretch on a choice already made.
