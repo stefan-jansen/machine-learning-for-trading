@@ -1070,10 +1070,12 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# **Interpretation**: both losses flatten well before the last epoch, so training has
-# converged in the sense that neither network is still moving - which says nothing
-# about whether it converged to a good generator. The two scatter panels answer that,
-# and the per-strategy numbers printed above quantify what they show: the correlation
+# **Interpretation**: both losses plateau well before the last epoch. In an adversarial
+# game a plateau does not mean either network has stopped changing - the two are scored
+# against each other, so the weights and the generated distribution can keep moving
+# while the losses stay flat. Establishing that would take comparing parameters or
+# checkpoint outputs, which this notebook does not do. What the plateau does not tell
+# you, the two scatter panels and the per-strategy numbers above do: the correlation
 # and the median per-strategy error are the honest summary, and the aggregate relative
 # error is flattered by cancellation between strategies the model overstates and
 # strategies it understates.
@@ -1100,8 +1102,11 @@ print(f"ES relative error: {es_re:.1f}%")
 # 2. **Constraint projection**: Hard projection onto $W \cdot v \leq e$ ensures
 #    the discriminator's VaR/ES estimates remain economically consistent
 # 3. **Tail risk preservation**: training on a tail-risk objective gets the
-#    *aggregate* VaR and ES into the right neighbourhood, which general-purpose
-#    distributional matching does not do on its own
+#    *aggregate* VaR and ES into the right neighbourhood. Tail-GAN optimises those
+#    metrics directly; a general-purpose distributional objective would reach them
+#    only as a by-product of matching the joint distribution, and does not
+#    prioritise their accuracy. This notebook trains no such baseline, so it shows
+#    what the targeted objective achieves, not that the alternative fails
 # 4. **An aggregate can hide the disagreement it averages**: the mean VaR and ES
 #    across strategies agree far better than any individual strategy does, because
 #    strategies the generator overstates cancel strategies it understates. Read the
