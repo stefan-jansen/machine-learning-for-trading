@@ -42,28 +42,33 @@
 # local sensitivity analysis. It contains no target, model selection, backtest,
 # or performance claim, so a train/validation/test split is not applicable.
 #
-# **Key Concepts (Litterman & Scheinkman, 1991):**
-# - PC1 (Level): Parallel shift of the entire curve (~82% of variance in this sample)
-# - PC2 (Slope): Steepening/flattening, with opposite moves at short and long maturities (~12%)
-# - PC3 (Curvature): Butterfly twist, with the middle moving opposite to the ends (~3%)
+# **Key Concepts (Litterman & Scheinkman, 1991):** the first three components of a
+# yield-curve panel take a recognisable form, and the loading figure below is where each
+# is read off rather than taken on trust.
+#
+# - PC1 (Level): a shift of the whole curve in one direction, so its loadings share a sign
+# - PC2 (Slope): steepening or flattening, so its loadings change sign between the short
+#   and long ends
+# - PC3 (Curvature): a butterfly twist, so the middle of the curve loads opposite to both
+#   ends
+#
+# The share of variance each carries is printed with the loadings, alongside a bootstrap
+# interval, because it is a property of this sample rather than of the yield curve.
 #
 # **Prerequisites**: Complete [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb); requires FRED macro data.
 #
 # **Data Source**: FRED macro parquet (canonical data, no API calls). Uses 8
 # Treasury constant-maturity series (1Y, 2Y, 3Y, 5Y, 7Y, 10Y, 20Y, 30Y), a
 # dense enough grid for the classical Level / Slope / Curvature pattern to
-# emerge clearly, with PC1/PC2/PC3 explaining ~82/12/3 % of the variance in
-# this 2000–2024 sample.
+# emerge clearly.
 #
-# **Book Reference**: Chapter 14, Section 14.4 (The Yield Curve Decoded)
+# **Book Reference**: Chapter 14, Section 14.4 (Decoding the yield curve)
 
 # %% [markdown]
 # ## 1. Setup and Imports
 
 # %%
 """Yield Curve Decomposition: Level, Slope, and Curvature via PCA."""
-
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -72,8 +77,6 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-warnings.filterwarnings("ignore")
-
 from data import load_macro
 from utils.style import (
     COLORS,
@@ -81,6 +84,7 @@ from utils.style import (
     add_message_title,
     label_line_ends,
     ml4t_palette,
+    show_with_alt,
     zero_line,
 )
 
@@ -186,10 +190,15 @@ ax.set_xticklabels(["1Y", "5Y", "10Y", "20Y", "30Y"])
 label_line_ends(ax, expand_right=0.16)
 add_message_title(
     ax,
-    "Curve shapes span flat, steep, and inverted regimes",
+    "Treasury yield by maturity, on five selected dates",
     subtitle="Five observed Treasury curves across eight maturities, 2000-2024",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A line chart of Treasury yield in percent against maturity in years, one line per selected "
+    "date, each labelled at its right end with that date. The lines differ in level and in shape, "
+    "some rising with maturity and some falling.",
+)
 
 # %% [markdown]
 # ## 4. Yield Changes for PCA
@@ -250,15 +259,20 @@ var_explained = pca.explained_variance_ratio_
 cumvar_explained = np.cumsum(var_explained)
 
 n_meaningful = 3
+
+# %% [markdown]
+# An eigenvector's sign is arbitrary - $v$ and $-v$ describe the same direction - so the
+# signs below are fixed to make each component's name mean what it says: all-positive
+# loadings for Level, so the component is a parallel shift up; long-end positive and
+# short-end negative for Slope, so a positive score is a steepening; and a positive
+# middle for Curvature, so a positive score lifts the belly against the wings. Without
+# this, half the runs would name a flattening a steepening.
+
+# %%
 loadings = pca.components_[:n_meaningful].copy()  # numpy array (n_meaningful x n_rates)
 loading_names = ["PC1 (Level)", "PC2 (Slope)", "PC3 (Curvature)"]
 scores_np = pca.transform(changes_scaled)
 
-# PCA component signs are arbitrary. Flip so each PC's economic interpretation
-# matches its name:
-#   Level: all-positive loadings (parallel shift up)
-#   Slope: long-end positive, short-end negative (positive PC2 = steepening)
-#   Curvature: middle of curve positive (butterfly upward)
 signs = np.ones(n_meaningful)
 if loadings[0].mean() < 0:
     signs[0] = -1.0
@@ -390,9 +404,9 @@ print(
 
 # %%
 loading_messages = [
-    "Level is a parallel shift",
-    "Slope pivots the curve",
-    "Curvature bends the belly",
+    "PC1 loading across maturities: the level factor",
+    "PC2 loading across maturities: the slope factor",
+    "PC3 loading across maturities: the curvature factor",
 ]
 component_colors = ml4t_palette(3, categorical=True)
 loading_limit = 1.08 * np.max(np.abs([loading_ci_low, loading_ci_high]))
@@ -430,13 +444,20 @@ for i, (ax, message, color) in enumerate(
     add_message_title(
         ax,
         message,
-        subtitle=(
-            f"PC{i + 1}: {var_explained[i] * 100:.1f}% "
-            f"[95% CI {variance_ci_low[i]:.1f}-{variance_ci_high[i]:.1f}%]"
-        ),
+        subtitle="Point estimate with its block-bootstrap interval",
     )
 axes[-1].set_xlabel("Maturity (years)")
-fig.show()
+show_with_alt(
+    fig,
+    "Three stacked panels sharing a maturity axis in years and a common loading scale. "
+    "Each plots one component's loading at each maturity as a marked line, with a "
+    "shaded block-bootstrap interval around it and a dashed line at zero.",
+)
+for i in range(3):
+    print(
+        f"PC{i + 1}: {var_explained[i] * 100:.1f}% of variance "
+        f"[95% CI {variance_ci_low[i]:.1f}-{variance_ci_high[i]:.1f}%]"
+    )
 
 # %% [markdown]
 # **PC1 (Level)**: Approximately equal positive loadings across all maturities,
@@ -471,7 +492,7 @@ ax1.set_ylabel("Variance Explained (%)")
 ax1.set_xticks(range(1, n_components + 1))
 add_message_title(
     ax1,
-    "Level dominates variance",
+    "Variance explained per principal component",
     subtitle="Individual correlation-PCA shares",
 )
 
@@ -494,11 +515,17 @@ ax2.set_ylim(0, 105)
 ax2.legend()
 add_message_title(
     ax2,
-    "Three PCs reach 97.8%",
-    subtitle="Cumulative share with 95% and 99% references",
+    "Cumulative variance explained by component count",
+    subtitle="With dashed references at the 95% and 99% levels",
 )
 
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels. The upper is a bar chart of the share of variance each principal "
+    "component explains, in percent, against component number. The lower plots the cumulative "
+    "share against the number of components retained, with dashed horizontal references at the 95 "
+    "and 99 percent levels.",
+)
 
 # %% [markdown]
 # The first component dominates, three components capture essentially all of
@@ -543,9 +570,9 @@ fig, axes = plt.subplots(
     constrained_layout=True,
 )
 shock_messages = [
-    "Level shocks alternate between easing and tightening",
-    "Slope shocks isolate steepening and flattening",
-    "Curvature shocks move the belly against the wings",
+    "Level factor score over time",
+    "Slope factor score over time",
+    "Curvature factor score over time",
 ]
 shock_limit = 1.05 * np.max(np.abs(rolling_factor_shocks))
 
@@ -560,7 +587,11 @@ for i, (ax, name, message, color) in enumerate(
     add_message_title(ax, message, subtitle="63-observation mean standardized shock")
 
 axes[-1].set_xlabel("Date", fontsize=12)
-fig.show()
+show_with_alt(
+    fig,
+    "Three stacked panels sharing a date axis, one per component, each plotting that component's "
+    "standardized factor score over time against a dashed line at zero.",
+)
 
 # %% [markdown]
 # The rolling Level shock turns strongly negative during rapid easing and positive
@@ -627,8 +658,8 @@ axes[0].set_xticks(recent_tick_dates, recent_tick_labels)
 axes[0].legend()
 add_message_title(
     axes[0],
-    "Three PCs track 10Y changes",
-    subtitle=f"Latest {recent_observations} observed changes",
+    "Observed and three-component reconstructed 10Y changes",
+    subtitle="The most recent stretch of the sample",
 )
 
 rmse_positions = np.arange(len(yield_names))
@@ -642,19 +673,30 @@ for position, ratio in zip(rmse_positions, rmse_ratio_pct, strict=True):
     axes[1].text(position, ratio + 0.5, f"{ratio:.1f}", ha="center", fontsize=7)
 add_message_title(
     axes[1],
-    "Error stays below 20%",
-    subtitle="RMSE / observed-change volatility",
+    "Reconstruction error by maturity",
+    subtitle="RMSE as a percentage of that maturity's observed-change volatility",
 )
 
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels. The left plots the observed daily change in the 10-year yield in basis points "
+    "against date, over the most recent stretch of the sample, with the three-component "
+    "reconstruction drawn over it. The right is a bar chart of reconstruction RMSE as a "
+    "percentage of observed-change volatility, one bar per maturity, each labelled with its "
+    "value.",
+)
 
 # %% [markdown]
-# **Finding**: Three PCs reconstruct every maturity's daily changes with RMSE
-# between roughly 7% and 20% of the maturity's standard deviation (the 1Y is
-# the tightest at ~7%, most maturities fall in the 13-20% range). The recent
-# 10Y overlay shows where the approximation misses individual daily moves. The
-# remaining residual is maturity-specific variation that the three-factor basis
-# does not represent; PCA alone cannot identify its economic cause.
+# **Reading it**: the right panel's bars are the question - each is a maturity's
+# reconstruction error as a share of how much that maturity actually moves, so a low bar
+# means the three factors carry most of that maturity's variation and a high one means
+# they do not. Comparing bars across maturities is what the normalisation makes possible;
+# comparing raw RMSE would just rank maturities by volatility.
+#
+# The left panel is the same fact at daily resolution, and it is worth looking at
+# alongside the bars: a maturity can have a respectable aggregate error and still miss
+# individual days badly. Whatever is left over is variation the three-factor basis does
+# not represent, and PCA on its own says nothing about what causes it.
 
 # %% [markdown]
 # ## 10. Practical Application: Generalized Duration
@@ -672,9 +714,12 @@ fig.show()
 # specific yield curve movements. See Chapter 14, Section 14.4 for the full
 # hedging discussion.
 
+# %% [markdown]
+# Each loading is in standardized-yield space, which is the wrong unit for a hedge. The
+# conversion below puts it back into basis points, which is what a key-rate DV01 profile
+# is quoted in, so the two can be multiplied to get an exposure per unit of factor score.
+
 # %%
-# Each PCA loading is expressed in standardized-yield space. Convert it back to
-# basis-point moves so a key-rate DV01 profile can be mapped into factor exposure.
 factor_moves_bps = loadings * scaler.scale_[None, :] * 100
 
 # Illustrative portfolio key-rate DV01 profile, in $1,000 per basis point.
@@ -703,7 +748,7 @@ panel_specs = [
         "After hedge",
         "Key-rate maturity",
         "Key-rate DV01 ($1,000 per bp)",
-        "Hedge reshapes key-rate DV01",
+        "Key-rate DV01 by maturity, before and after the hedge",
     ),
     (
         factor_positions,
@@ -713,7 +758,7 @@ panel_specs = [
         "After hedge",
         "Factor",
         "Factor exposure ($1,000 per score unit)",
-        "Factor exposure closes to zero",
+        "Factor exposure by component, before and after the hedge",
     ),
 ]
 
@@ -734,7 +779,13 @@ for ax, spec in zip(axes, panel_specs, strict=True):
     ax.tick_params(axis="x", labelsize=8)
     ax.legend()
     add_message_title(ax, title)
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels comparing the position before and after the hedge, with paired bars in "
+    "each. The upper gives key-rate DV01 in dollars per basis point at each maturity, against a "
+    "line at zero; the lower gives exposure to each of the three factors in dollars per unit of "
+    "factor score.",
+)
 
 # %% [markdown]
 # **Finding**: In this local linear example, positions in three independent
@@ -746,13 +797,11 @@ fig.show()
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Three-dimensional yield curve**: PC1 (Level), PC2 (Slope), and PC3
-#    (Curvature) together explain 97.8% of the variance in observed daily
-#    yield-change cross-sections, an 82/12/3% split in this correlation-PCA sample. A
-#    moving-block bootstrap preserves the loading shapes while quantifying their
-#    sampling variation. This is the same
-#    Level/Slope/Curvature structure documented in Litterman & Scheinkman
-#    (1991). The yield curve's effective dimension is three, not eight.
+# 1. **Eight maturities, three directions that matter.** The cumulative variance figure
+#    is where that claim is checked, and the printed shares say how the total splits
+#    across the three. The loading shapes are the Level, Slope and Curvature structure
+#    Litterman and Scheinkman documented in 1991, and the moving-block bootstrap says how
+#    much of each shape is pinned down by this sample rather than by the resampling.
 #
 # 2. **Low-dimensional macro drivers**: The yield curve's compressibility
 #    reflects that its underlying drivers (inflation expectations, business
