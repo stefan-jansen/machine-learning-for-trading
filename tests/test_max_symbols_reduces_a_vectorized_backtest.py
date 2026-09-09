@@ -456,25 +456,28 @@ def test_the_reduced_and_the_full_run_now_disagree(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_precomputed_weights_are_narrowed_with_the_predictions(monkeypatch) -> None:
+def test_precomputed_and_ordinary_execution_agree_on_a_reduced_book(monkeypatch) -> None:
     """The Ch19 risk sweep brings its own weights and skips weight construction.
 
-    Narrowing only the predictions would let a reduced overlay hold names its own parent
-    backtest does not, under one identity - the two execution paths disagreeing about what
-    the portfolio is.
+    Both paths have to narrow at the same point, and that point is before ranking. Narrowing
+    the finished weights instead is a different operation and a worse one: `top_k=2` over the
+    full cross-section picks A and B at half each, and dropping B from that leaves a book half
+    in cash - an overlay holding a different portfolio from its own parent, under one
+    identity. Narrowing first picks A and C at half each, which is what ordinary execution
+    does.
     """
     from copy import deepcopy
 
     import case_studies.utils.backtest_runner as br
     import case_studies.utils.conformal as conformal
 
-    weights = pl.DataFrame(
-        {
-            "timestamp": [datetime(2024, 1, 1)] * 4,
-            "symbol": ["A", "B", "C", "D"],
-            "weight": [0.25, 0.25, 0.25, 0.25],
-        }
+    spec = _declared_spec(["A", "C"])
+    prices = _prices(["A", "C"])
+
+    precomputed = br.precompute_weights(
+        _predictions(), deepcopy(spec), prices, case_study="us_firm_characteristics"
     )
+
     captured: dict = {}
     monkeypatch.setattr(br, "get_backtest_config", lambda _: object())
     monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kw: args[2])
@@ -494,114 +497,57 @@ def test_precomputed_weights_are_narrowed_with_the_predictions(monkeypatch) -> N
     br.run_backtest(
         "us_firm_characteristics",
         "pred1",
-        deepcopy(_declared_spec(["A", "C"])),
-        prices=_prices(["A", "C"]),
+        deepcopy(spec),
+        prices=prices,
         predictions=_predictions(),
-        precomputed_weights=weights,
         register=False,
     )
-    assert sorted(captured["weights"]["symbol"].to_list()) == ["A", "C"]
-    assert sorted(captured["predictions"]["symbol"].to_list()) == ["A", "C"]
+    ordinary = captured["weights"]
+
+    key = ["timestamp", "symbol"]
+    assert sorted(precomputed["symbol"].to_list()) == ["A", "C"]
+    assert (
+        precomputed.sort(key)
+        .select(key + ["weight"])
+        .equals(ordinary.sort(key).select(key + ["weight"]))
+    ), (precomputed.sort(key).to_dicts(), ordinary.sort(key).to_dicts())
+    # Fully invested, which is the half that catches narrowing after allocation.
+    assert precomputed["weight"].sum() == pytest.approx(ordinary["weight"].sum())
 
 
-def _registry_with_a_full_and_a_reduced_backtest(case_dir, reduced_digest: str) -> None:
-    """One prediction, backtested twice: once full and once over a declared universe."""
-    import json
-    import sqlite3
+def test_a_reduced_run_is_refused_on_the_canonical_tier() -> None:
+    """Coexistence is made impossible rather than filtered for.
 
-    run_log = case_dir / "run_log"
-    run_log.mkdir(parents=True)
-    with sqlite3.connect(run_log / "registry.db") as db:
-        db.executescript(
-            """
-            CREATE TABLE training_runs (
-                training_hash TEXT PRIMARY KEY, family TEXT, config_name TEXT, label TEXT
-            );
-            CREATE TABLE prediction_sets (
-                prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT,
-                checkpoint_value REAL
-            );
-            CREATE TABLE prediction_metrics (
-                prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_mean_daily REAL,
-                ic_ci_lo REAL, ic_ci_hi REAL, ic_n_days REAL
-            );
-            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
-            CREATE TABLE backtest_runs (
-                backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT, spec_json TEXT, stage TEXT
-            );
-            CREATE TABLE backtest_metrics (
-                backtest_hash TEXT PRIMARY KEY, sharpe REAL, cagr REAL, max_drawdown REAL,
-                total_return REAL, volatility REAL, num_trades REAL
-            );
-            CREATE TABLE backtest_fold_metrics (
-                backtest_hash TEXT, fold_id INTEGER, sharpe REAL
-            );
-            """
-        )
-        db.execute("INSERT INTO training_runs VALUES ('train', 'gbm', 'cfg', 'fwd_ret_5d')")
-        db.execute("INSERT INTO prediction_sets VALUES ('pred', 'train', 'validation', 0)")
-        db.execute("INSERT INTO prediction_metrics VALUES ('pred', 0.1, 0.1, 0.0, 0.2, 10.0)")
-        full_spec = {"strategy": {"signal": {"method": "equal_weight_top_k"}}}
-        reduced_spec = {
-            "strategy": {
-                "signal": {
-                    "method": "equal_weight_top_k",
-                    "traded_universe": {"n_symbols": 2, "digest": reduced_digest},
-                }
-            }
-        }
-        # The reduced run carries the higher Sharpe on purpose: MAX(sharpe) is what ranks,
-        # so if the two are pooled the reduced row is the one that wins and advances.
-        db.execute(
-            "INSERT INTO backtest_runs VALUES ('bt_full', 'pred', ?, 'signal')",
-            (json.dumps(full_spec),),
-        )
-        db.execute("INSERT INTO backtest_metrics VALUES ('bt_full', 0.5, 0.1, -0.1, 0.2, 0.1, 1)")
-        db.execute(
-            "INSERT INTO backtest_runs VALUES ('bt_reduced', 'pred', ?, 'signal')",
-            (json.dumps(reduced_spec),),
-        )
-        db.execute(
-            "INSERT INTO backtest_metrics VALUES ('bt_reduced', 9.0, 0.1, -0.1, 0.2, 0.1, 1)"
-        )
+    A reduced run now has a backtest identity of its own, so where it used to be skipped as
+    already-done it would register a row beside the full one. Nothing downstream distinguishes
+    them: `resolve_best_predictions` takes MAX(sharpe) over every backtest of a prediction and
+    `resolve_best_backtest_runs` the top Sharpe at a stage, and a Sharpe earned over a handful
+    of names would advance a configuration ahead of one earned over the whole panel.
 
-
-def test_ranking_does_not_mix_a_reduced_backtest_with_a_full_one(tmp_path) -> None:
-    """A reduced row must not advance a configuration into a full-universe sweep.
-
-    Before this change a reduced run hashed like the full one and was skipped, so the two
-    could not coexist in a registry. Now they can, and `MAX(sharpe)` over both would rank a
-    Sharpe earned on two names against one earned on the whole panel. Ranking two universes
-    against each other is not a comparison, so `resolve_best_predictions` asks which of the
-    two populations it is ranking and defaults to the full run.
+    Filtering at those ten call sites cannot have one right default - excluding reduced rows is
+    correct for the canonical registry and empties a preview workspace, where every row is
+    reduced. So the two are never allowed into one registry instead: a reduced run is a preview
+    run, and every notebook that hashes a specification off a reducible panel says so. The
+    refusal is read out of the source by `canonically_refused_parameters`, which is what makes
+    the canonical fixture path drop the name rather than raise on it.
     """
-    from case_studies.utils.registry import resolve_best_predictions
+    import re
+    from pathlib import Path
 
-    digest = _declaration(["A", "C"])["digest"]
-    case_dir = tmp_path / "case"
-    _registry_with_a_full_and_a_reduced_backtest(case_dir, digest)
+    from tests.pm_helpers import canonically_refused_parameters
+    from utils.paths import REPO_ROOT
 
-    default = resolve_best_predictions(
-        "test", "fwd_ret_5d", split="validation", case_dir=case_dir, top_n=10
+    missing = []
+    for path in sorted((Path(REPO_ROOT) / "case_studies").glob("*/[0-9]*.py")):
+        text = path.read_text()
+        if "max_symbols=MAX_SYMBOLS" not in text or "build_backtest_spec(" not in text:
+            continue
+        if "MAX_SYMBOLS" not in canonically_refused_parameters(path):
+            missing.append(f"{path.parent.name}/{path.stem}")
+        n_calls = len(re.findall(r"build_backtest_spec\(", text))
+        if len(re.findall(r"traded_universe=", text)) < n_calls:
+            missing.append(f"{path.parent.name}/{path.stem} (undeclared universe)")
+    assert not missing, (
+        "these hash a specification off a reducible panel without refusing the reduction "
+        f"canonically, so a reduced row could reach the canonical registry: {missing}"
     )
-    assert default["sharpe"].to_list() == [0.5], "the default ranking took the reduced run's Sharpe"
-
-    named = resolve_best_predictions(
-        "test",
-        "fwd_ret_5d",
-        split="validation",
-        case_dir=case_dir,
-        top_n=10,
-        traded_universe_digest=digest,
-    )
-    assert named["sharpe"].to_list() == [9.0]
-
-    other = resolve_best_predictions(
-        "test",
-        "fwd_ret_5d",
-        split="validation",
-        case_dir=case_dir,
-        top_n=10,
-        traded_universe_digest=_declaration(["A", "D"])["digest"],
-    )
-    assert other.is_empty(), "a different universe's digest must not match these rows"

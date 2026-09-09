@@ -110,6 +110,22 @@ TOP_N_COMBOS = None
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 
+# A reduced run is a preview run. Refused on the canonical tier so a narrowed result can
+# never land in the registry the book's numbers come from, and so the two can never sit in
+# one registry to be ranked against each other: `resolve_best_backtest_runs` takes the top
+# Sharpe over every backtest at a stage, and a Sharpe earned over a handful of names would
+# outrank one earned over the whole panel. `us_equities_panel` 16 through 19 already refuse
+# the parameter this way, and `canonically_refused_parameters` reads the refusal out of the
+# source, so the canonical fixture path drops the name rather than handing the notebook
+# something its first cell raises on (ml4t/agent-workspace#911).
+if EXECUTION_TIER == "canonical" and MAX_SYMBOLS:
+    raise ValueError(
+        "MAX_SYMBOLS narrows the universe this run trades, which makes it a different "
+        "portfolio from the declared one and gives it its own backtest identity "
+        "(ml4t/agent-workspace#911). A canonical run trades the declared universe: set "
+        "MAX_SYMBOLS=0, or run under EXECUTION_TIER='preview' with a WORKSPACE."
+    )
+
 # %% [markdown]
 # The study is opened before anything resolves a path or reads the registry. Opening it
 # activates a root and rewrites `ML4T_OUTPUT_DIR` process-wide, and every later

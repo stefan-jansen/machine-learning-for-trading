@@ -745,6 +745,13 @@ def precompute_weights(
     strategy = strategy_view(strategy_spec)
     signal_config = strategy["signal"]
     rebal_spec = strategy.get("rebalance", {})
+    # Before ranking, not after allocating. `run_backtest` narrows the predictions it is
+    # handed and then ranks them, so a caller that brings its own weights has to narrow at
+    # the same point or the two paths build different portfolios under one identity. Doing
+    # it to the finished weights is not the same operation and is worse than not doing it:
+    # with `top_k=2` picking A and B, dropping B leaves a book half in cash, where narrowing
+    # first picks A and C at the intended weight each (ml4t/agent-workspace#911).
+    predictions = apply_traded_universe(predictions, prices, signal_config, case_study=case_study)
     weights = build_target_weights_from_config(predictions, signal_config)
     alloc_spec = strategy.get("allocation")
     if alloc_spec:
@@ -1537,18 +1544,6 @@ def run_backtest(
         predictions = apply_traded_universe(
             predictions, prices, strategy.get("signal") or {}, case_study=case_study
         )
-        # And the weights, when the caller brought its own. `precompute_weights` ranks the
-        # whole prediction set and `precomputed_weights=` bypasses weight construction
-        # entirely, so narrowing only the predictions would let a reduced overlay hold names
-        # its own parent backtest does not - the two paths would disagree under one identity.
-        # The Ch19 risk sweep is the caller that takes this route.
-        if precomputed_weights is not None:
-            precomputed_weights = apply_traded_universe(
-                precomputed_weights,
-                prices,
-                strategy.get("signal") or {},
-                case_study=case_study,
-            )
 
     # A price panel that does not cover the predictions does not reduce a
     # vectorized run, it just makes the parameter read as if it did - see
