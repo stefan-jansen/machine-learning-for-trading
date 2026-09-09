@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -76,7 +76,7 @@ from ml4t.backtest.execution.result import ExecutionResult
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, show_plotly_with_alt
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -320,7 +320,7 @@ for label, impacts, color, dash in comparison_specs:
         line=dict(width=2.5, color=color, dash=dash),
     )
 fig.update_layout(
-    title="Illustrative parameters produce sharply different cost levels",
+    title="Signed buy impact against participation rate, by impact model",
     xaxis_title="Participation rate (% of volume)",
     yaxis_title="Signed buy impact (bps)",
     height=500,
@@ -329,8 +329,11 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Three impact curves against participation rate. All rise and flatten, but they sit at "
-    "visibly different levels despite two of them sharing the same square-root shape.",
+    "Three impact curves against participation rate. The linear one is a straight line through "
+    "the origin; the square-root and power-law ones share the same concave shape, rising fast "
+    "near zero participation and flattening after it. The power-law curve is the highest of the "
+    "three across the whole range and the square-root curve the lowest, even though it is the "
+    "power-law curve that shares the square root's shape.",
 )
 
 # %% [markdown]
@@ -349,10 +352,11 @@ show_plotly_with_alt(
 
 # %%
 volatility_fig = go.Figure()
+VOLATILITY_COLORS = ml4t_palette(3, categorical=True)
 vol_specs = (
-    ("σ=1%", sqrt_impacts_low, COLORS["blue"], "solid"),
-    ("σ=2%", sqrt_impacts_mid, COLORS["slate"], "dash"),
-    ("σ=4%", sqrt_impacts_high, COLORS["amber"], "dot"),
+    ("σ=1%", sqrt_impacts_low, VOLATILITY_COLORS[0], "solid"),
+    ("σ=2%", sqrt_impacts_mid, VOLATILITY_COLORS[1], "dash"),
+    ("σ=4%", sqrt_impacts_high, VOLATILITY_COLORS[2], "dot"),
 )
 for label, impacts, color, dash in vol_specs:
     volatility_fig.add_scatter(
@@ -363,7 +367,7 @@ for label, impacts, color, dash in vol_specs:
         line=dict(width=2.5, color=color, dash=dash),
     )
 volatility_fig.update_layout(
-    title="With c=0.5 fixed, volatility rescales square-root impact",
+    title="Square-root impact against participation rate, by volatility",
     xaxis_title="Participation rate (% of volume)",
     yaxis_title="Signed buy impact (bps)",
     height=460,
@@ -385,11 +389,12 @@ show_plotly_with_alt(
 # misread as convexity when a curve is close to straight.
 
 # %%
+EXPONENT_COLORS = ml4t_palette(4, categorical=True)
 exponent_specs = (
-    ("exp=1.0 (linear)", power_impacts_linear, COLORS["neutral"], "solid"),
-    ("exp=0.8", power_impacts_mild_concave, COLORS["blue"], "dash"),
-    ("exp=0.5", power_impacts_sqrt, COLORS["copper"], "dot"),
-    ("exp=0.3", power_impacts_concave, COLORS["amber"], "dashdot"),
+    ("exp=1.0 (linear)", power_impacts_linear, EXPONENT_COLORS[0], "solid"),
+    ("exp=0.8", power_impacts_mild_concave, EXPONENT_COLORS[1], "dash"),
+    ("exp=0.5", power_impacts_sqrt, EXPONENT_COLORS[2], "dot"),
+    ("exp=0.3", power_impacts_concave, EXPONENT_COLORS[3], "dashdot"),
 )
 exponent_fig = go.Figure()
 for label, impacts, color, dash in exponent_specs:
@@ -403,7 +408,7 @@ for label, impacts, color, dash in exponent_specs:
 
 # %%
 exponent_fig.update_layout(
-    title="With c=0.1 fixed, positive exponents below one are concave",
+    title="Power-law impact against participation rate, by exponent",
     xaxis_title="Participation rate (% of volume)",
     yaxis_title="Signed buy impact (bps)",
     height=480,
@@ -543,12 +548,13 @@ sequence_summary
 # %%
 # Visualize execution paths
 fig = go.Figure()
-sequence_colors = {
-    "NoImpact": COLORS["neutral"],
-    "LinearImpact": COLORS["blue"],
-    "SquareRootImpact": COLORS["amber"],
-    "PowerLawImpact": COLORS["copper"],
-}
+sequence_colors = dict(
+    zip(
+        ["NoImpact", "LinearImpact", "SquareRootImpact", "PowerLawImpact"],
+        ml4t_palette(4, categorical=True),
+        strict=True,
+    )
+)
 sequence_dashes = {
     "NoImpact": "solid",
     "LinearImpact": "solid",
@@ -582,7 +588,7 @@ fig.add_hline(
 )
 
 fig.update_layout(
-    title="Carrying impact forward turns single fills into a rising path",
+    title="Fill price by child order, four impact models",
     xaxis_title="Child order",
     yaxis_title="Fill price (USD)",
     height=520,
@@ -591,9 +597,11 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Fill price against child-order number for four models, all starting at the dashed decision "
-    "price. NoImpact stays flat; the other three rise steadily, with the linear and square-root "
-    "paths lying exactly on top of each other.",
+    "Fill price against child-order number for four models, over a dashed horizontal line at "
+    "the decision price. The no-impact path sits on that line for every child. The other three "
+    "already start above it on the first child and climb steadily from there, the power-law path "
+    "far above the other two, whose linear and square-root paths lie exactly on top of each "
+    "other for the whole sequence.",
 )
 
 # %% [markdown]
@@ -870,7 +878,7 @@ impact_fig.add_bar(
 )
 impact_fig.update_layout(
     title=(
-        "At fixed participation, volatility alone moves modeled impact"
+        "Model-implied buy impact per ETF at a fixed participation rate"
         "<br><sup>Trailing 365 days; 5% ADV; illustrative library-default c=0.5</sup>"
     ),
     xaxis_title="Model-implied buy impact (bps)",

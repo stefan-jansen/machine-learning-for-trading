@@ -476,7 +476,7 @@ for line_style, lambda_ in zip(trajectory_styles, TRAJECTORY_RISK_AVERSIONS):
     )
 
 fig.update_layout(
-    title="Aversion to timing risk bends the schedule forward",
+    title="Remaining position over the execution horizon, by risk aversion",
     xaxis_title="Elapsed execution time (days)",
     yaxis_title="Remaining position",
     yaxis_tickformat=".0%",
@@ -488,13 +488,14 @@ show_plotly_with_alt(
     fig,
     "Five curves of remaining position against elapsed time, all starting fully invested and "
     "ending at zero. The zero-aversion curve is a straight diagonal; each higher aversion bows "
-    "further above it early and flattens along the bottom, selling most of the position in the "
-    "first part of the horizon.",
+    "further below it, dropping away from the start and then running along the bottom of the "
+    "plot, so most of the position is gone in the first part of the horizon. The legend gives "
+    "each curve's half-life.",
 )
 
 # %% [markdown]
 # **Reading the chart**: The straight diagonal is the even schedule, which sells the same number of
-# shares every period and has no opinion about risk. Each curve above it sells faster early and
+# shares every period and has no opinion about risk. Each curve below it sells faster early and
 # holds a smaller position through the rest of the horizon, which is exactly what reduces the
 # exposure the variance term charges for. The half-lives in the legend say how much faster, in
 # days, without reference to the units $\lambda$ happens to be measured in.
@@ -575,7 +576,7 @@ for color, (lambda_, name) in zip(ml4t_palette(3, categorical=True), strategies_
         name=name,
     )
 fig.update_layout(
-    title="Lower timing risk requires accepting higher expected cost",
+    title="Expected implementation shortfall against its standard deviation",
     xaxis_title="Implementation-shortfall standard deviation (bps)",
     yaxis_title="Expected implementation shortfall (bps)",
     height=500,
@@ -767,7 +768,7 @@ dispersion_reduction = risk_neutral_row["is_std_bps"] - risk_averse_row["is_std_
 mean_cost_increase = risk_averse_row["is_mean_bps"] - risk_neutral_row["is_mean_bps"]
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"], line_width=1)
 fig.update_layout(
-    title="Trading sooner narrows the range of outcomes and shifts it right",
+    title="Cumulative distribution of implementation shortfall, by schedule",
     xaxis_title="Implementation shortfall (bps; positive is worse)",
     yaxis_title="Cumulative probability",
     yaxis_tickformat=".0%",
