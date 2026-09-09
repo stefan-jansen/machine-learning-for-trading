@@ -889,12 +889,19 @@ comparison_df
 # prior ETFs. It includes the initial allocation from cash; a switches-only convention would omit
 # the first observation. These four rows remain gross of explicit commission and slippage.
 #
-# The turnover column is the one to read carefully, because most of what it measures is not the
-# allocator's. Every rebalance replaces the selected set with whatever the ridge signal now ranks
-# first, and that replacement is identical across the four rows - so equal weight, which makes no
-# further decision, measures that floor exactly. What each other allocator adds is the gap
-# between its own number and equal weight's, and that gap is the only part of the column its
-# sizing rule is responsible for.
+# The turnover column is the one to read carefully, because it measures two things at once and
+# the table does not separate them. Every rebalance replaces the selected set with whatever the
+# ridge signal now ranks first, and each allocator then sizes what it holds. Both contribute.
+#
+# It is tempting to treat the equal-weight row as the selection's share and the excess as the
+# allocator's, and that does not hold: what a replacement costs depends on the weights being
+# replaced. Dropping a name held at a fifth for another held at a fifth is a fifth of
+# half-turnover; dropping a name held at one percent for another at one percent is one percent.
+# A concentrated allocator therefore has a different selection cost from equal weight's, not the
+# same one plus a margin. Equal weight is a benchmark for what this rebalance schedule costs a
+# book that makes no sizing decision, and separating the two shares for any other row would take
+# turnover computed twice - once over the names entering and leaving, once over the weight
+# changes among the names retained.
 
 # %%
 # Same numbers, formatted for readability
@@ -913,8 +920,7 @@ comparison_df.style.format(
 
 # %% [markdown]
 # **Trading implication**: an improvement in Sharpe has to be weighed against the turnover bought
-# with it, and the turnover to weigh is the gap above the equal-weight floor rather than the
-# column's absolute value. Chapter 18 prices that gap; nothing in this table does.
+# with it, and this table reports that turnover gross of any cost. Chapter 18 prices it.
 
 # %% [markdown]
 # ### Practitioner Interpretation

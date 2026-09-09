@@ -1273,11 +1273,14 @@ print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each 
 # assets outnumber the observations.
 #
 # The turnover column carries a second reading, and it is the one that survives a different
-# sample. Clustering is often described as producing more stable allocations. Most of the
-# turnover in every row here comes from the monthly re-selection of five names out of fifteen,
-# which is identical across allocators, so equal weight measures that floor directly; what each
-# other row adds on top of the floor is its own reshuffling. Read the gap between each allocator
-# and the equal-weight row rather than its absolute turnover.
+# sample. Clustering is often described as producing more stable allocations, and the column is
+# where that claim would be tested - but it measures two things at once. Every row pays for the
+# monthly re-selection of five names out of fifteen, and every row then pays for whatever its
+# own sizing rule does with the names it keeps. The equal-weight row shows what the schedule
+# costs an allocator that makes no sizing decision at all, which is a useful benchmark and not a
+# floor the others sit on top of: what a replacement costs depends on the weights being
+# replaced, so a concentrated allocator's selection cost is a different number rather than the
+# same one plus a margin.
 #
 # ### What is true regardless of the ranking
 #

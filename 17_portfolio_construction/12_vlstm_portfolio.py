@@ -789,10 +789,12 @@ show_with_alt(
 # The right panel is where the cost lives, and it is worth being precise about whose change it
 # plots. A position is the inverse-volatility scaling multiplied by the signal, so it moves when
 # either term moves. The volatility estimate is a rolling standard deviation over `VOL_LOOKBACK`
-# sessions, which drifts rather than jumps, so it supplies the slow component and the signal
-# supplies the fast one. A spike is the network changing its mind. A level that stays high says
-# the positions are being churned every day, whichever term is doing it, and section 15 prices
-# what that would cost.
+# sessions, so it usually drifts - but a rolling window is not smooth: a large return entering
+# or leaving it moves the estimate at once, and the position moves with it. So a spike in this
+# panel is the network changing its mind or the volatility estimate jumping, and the panel alone
+# cannot say which. Separating them would take the two series plotted apart. A level that stays
+# high says the positions are being churned every day whichever term is doing it, and section 15
+# prices what that would cost.
 
 # %% [markdown]
 # ## 14. Variable Selection Weights
