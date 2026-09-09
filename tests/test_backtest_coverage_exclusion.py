@@ -156,13 +156,19 @@ def test_a_set_whose_coverage_cannot_be_evaluated_is_withheld_not_admitted(wide_
     assert excluded[0]["coverage"] is None
 
 
-def test_a_key_only_one_panel_offers_is_not_achievable(case_dir):
-    """The panels are intersected because `load_modeling_dataset` joins them.
+def test_a_key_only_the_financial_panel_offers_is_still_achievable(case_dir):
+    """The denominator is the financial panel, because that is the side the join keeps.
 
-    Unioned, a key present in `financial` and absent from `model_based` counts as offered,
-    and a family that delivered everything the join could produce reads as short. Measured
-    across the seven case studies, that gap was up to 20 points and would have refused
-    every prediction set in three of them for a shortfall no model caused.
+    `load_modeling_dataset` LEFT-joins the model-based panel onto financial
+    (`utils/modeling.py:969` and `:987`) and only then inner-joins labels, so a key present
+    in `financial` and absent from `model_based` survives into the design matrix carrying
+    nulls in the model-based columns. Every family has a missing-value policy for those -
+    gbm passes them through, linear medians, the sequence families mean-fill - so the row is
+    handed to the model rather than dropped, and a family that never scores it lost a key it
+    was given.
+
+    Intersecting the panels instead would make that key unachievable and report the family
+    whole. `CCC` here is exactly that key: `deep_learning` never scores it and reads 66.7%.
     """
     features = case_dir / "features"
     features.mkdir(parents=True, exist_ok=True)
@@ -174,5 +180,30 @@ def test_a_key_only_one_panel_offers_is_not_achievable(case_dir):
     ).write_parquet(features / "model_based.parquet")
 
     _, _, entries, excluded = _load(case_dir, 0.98)
-    assert excluded == []
-    assert sorted(entry["family"] for entry in entries) == ["deep_learning", "gbm"]
+    assert [entry["family"] for entry in entries] == ["gbm"]
+    assert [row["family"] for row in excluded] == ["deep_learning"]
+    assert excluded[0]["coverage"] == pytest.approx(2 / 3)
+    assert "CCC" in excluded[0]["reason"]
+
+
+def test_a_model_based_panel_narrower_than_financial_does_not_shrink_the_denominator(case_dir):
+    """The same fixture read as a measurement rather than as an exclusion.
+
+    Pinning the count separately from the exclusion is what makes the previous test say
+    which rule produced it: an intersected denominator is 2 entities and a financial one is
+    3, and only the second charges `deep_learning` for `CCC`.
+    """
+    from case_studies.utils.coverage import feature_panel_keys
+
+    features = case_dir / "features"
+    features.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        [{"timestamp": ts, "symbol": sym, "x": 1.0} for ts in SESSIONS for sym in UNIVERSE]
+    ).write_parquet(features / "financial.parquet")
+    pl.DataFrame(
+        [{"timestamp": ts, "symbol": sym, "z": 1.0} for ts in SESSIONS for sym in ("AAA", "BBB")]
+    ).write_parquet(features / "model_based.parquet")
+
+    panel = feature_panel_keys(case_dir)
+    assert panel is not None
+    assert sorted(panel.get_column("entity").unique().to_list()) == sorted(UNIVERSE)
