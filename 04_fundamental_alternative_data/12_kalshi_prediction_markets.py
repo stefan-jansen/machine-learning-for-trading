@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -280,7 +280,7 @@ fig = px.line(
     x="threshold",
     y="probability",
     markers=True,
-    title="The threshold ladder prices the whole distribution, not one outcome",
+    title="A ladder of thresholds prices the whole distribution of outcomes",
     labels={
         "threshold": "Rate threshold (%)",
         "probability": "Probability the rate is above the threshold",

@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -400,10 +400,13 @@ for left in range(len(regimes)):
         contrasts.append(
             {
                 "comparison": f"{regimes[left]} minus {regimes[right]}",
-                "difference": float(test.effect[0]),
-                "standard_error": float(test.sd[0]),
-                "t_statistic": float(test.tvalue),
-                "p_value": float(test.pvalue),
+                # `t_test` returns each of these as an array; ravel before converting, or numpy
+                # warns about turning an array into a scalar and the warning ships inside the
+                # executed notebook.
+                "difference": float(np.ravel(test.effect)[0]),
+                "standard_error": float(np.ravel(test.sd)[0]),
+                "t_statistic": float(np.ravel(test.tvalue)[0]),
+                "p_value": float(np.ravel(test.pvalue)[0]),
             }
         )
 pl.DataFrame(contrasts)

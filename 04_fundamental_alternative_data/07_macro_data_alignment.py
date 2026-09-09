@@ -309,13 +309,13 @@ fig = px.line(
     y="cpi",
     color="panel",
     color_discrete_map={"as_shipped": COLORS["copper"], "as_published": COLORS["blue"]},
-    title="The shipped panel steps up about six weeks before the release it reports",
+    title="The shipped panel steps up seven weeks before the release it reports",
     labels={"timestamp": "Date", "cpi": "CPI index level", "panel": ""},
 )
 fig.update_layout(height=420, legend=dict(orientation="h", y=1.02, yanchor="bottom"))
 show_plotly_with_alt(
     fig,
-    "Two staircase lines of the CPI index level from 2020, one from the panel as shipped and one re-dated to publication. They have the same shape and the published line steps up about six weeks later at every step.",
+    "Two staircase lines of the CPI index level from 2020, one from the panel as shipped and one re-dated to publication. They have the same shape and the published line steps up about seven weeks later at every step.",
 )
 
 # %% [markdown]

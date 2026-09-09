@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -269,10 +269,10 @@ by_security.head(15).select(
 # ### Breadth and size are different questions
 #
 # The number of managers holding a security says how widely it is owned; the aggregate value says
-# how much is in it. They rank differently, and the difference is the point: an index fund's
-# largest positions are enormous and held by one manager, while a stock every institution owns a
-# little of is held by thousands. Crowding, in the sense that matters when everyone reaches for
-# the exit at once, is the breadth measure.
+# how much is in it, and the two are only loosely related. Among the most widely held names below,
+# securities sitting within a few managers of each other differ by several times in the value
+# behind them. Crowding, in the sense that matters when everyone reaches for the exit at once, is
+# the breadth measure; size is what decides how much has to go through the exit.
 
 # %%
 breadth_leaders = by_security.head(15).with_columns(
@@ -283,7 +283,7 @@ fig = px.bar(
     x="issuer",
     y="aggregate_value",
     color="managers_holding",
-    title="The most widely held names are not the largest institutional positions",
+    title="Names held by as many managers differ several-fold in size",
     labels={
         "aggregate_value": "Aggregate reported value (USD)",
         "issuer": "",

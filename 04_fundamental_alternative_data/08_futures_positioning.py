@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -578,14 +578,14 @@ for column, label, color in [
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(
     height=450,
-    title="Asset managers are long every week; the rest of the market is short",
+    title="Asset managers are long every week; the other two are usually short",
     xaxis_title="Report date",
     yaxis_title="Net contracts",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of the net position of three trader categories over time. The asset manager line stays above zero throughout while the leveraged money and dealer lines stay below it.",
+    "Line chart of the net position of three trader categories over time. The asset manager line stays above zero throughout, while the leveraged money and dealer lines spend nearly all of it below zero.",
 )
 
 # %%

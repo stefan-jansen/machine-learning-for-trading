@@ -77,5 +77,5 @@ identification headers:
   parquet snapshots used by `06_fred_macro_eda` and
   `07_macro_data_alignment` do not require it at notebook-execution time.
 
-All Chapter 4 notebooks complete in under 20 seconds with peak memory
-under 4 GB; no long-running or high-memory callouts apply.
+Every Chapter 4 notebook completes in well under a minute with peak
+memory under 3 GB; none needs a long-running or high-memory callout.
