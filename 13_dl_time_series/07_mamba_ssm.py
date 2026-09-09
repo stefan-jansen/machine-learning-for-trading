@@ -526,8 +526,20 @@ print(f"  (defined on {mamba_ic['n_defined']} of {mamba_ic['n_total']} test date
 # %% [markdown]
 # ## Ridge Baseline Comparison
 #
-# Flattening the 3D input to 2D and fitting Ridge regression provides a
-# simple linear baseline to gauge whether the selective scan adds value.
+# Flattening the window into one vector and fitting a penalised linear map gives the
+# baseline the selective scan has to beat.
+#
+# The flattened design is `LOOKBACK` x `len(FEATURE_COLS)` columns of overlapping
+# trailing returns, which are strongly collinear: on this capped sample the Gram
+# matrix has a condition number around $8 \times 10^6$. scikit-learn's default solver
+# forms and factorises that matrix and warns that it is ill-conditioned, so `svd` is
+# requested instead. It computes the same ridge estimator without forming the normal
+# equations - the two agree to four significant figures on test MSE - and the warning
+# has no cause rather than being filtered away.
+#
+# Note also that `alpha` is fixed at 1, not tuned. That keeps the baseline identical
+# across this section's notebooks, and it means the bars below compare an untuned
+# linear map with an under-trained network. Neither is at its best.
 
 # %%
 X_train_flat = X_train.reshape(len(X_train), -1)
@@ -537,7 +549,7 @@ scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train_flat)
 X_test_scaled = scaler.transform(X_test_flat)
 
-ridge = Ridge(alpha=1.0)
+ridge = Ridge(alpha=1.0, solver="svd")
 ridge.fit(X_train_scaled, y_train)
 y_ridge_pred = ridge.predict(X_test_scaled)
 
