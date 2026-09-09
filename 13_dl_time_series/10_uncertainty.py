@@ -1110,13 +1110,18 @@ conformal_df
 # widths.
 #
 # What decides the outcome is how much $\hat\sigma$ varies, and whether it varies
-# where the errors are. The coefficients of variation printed above are the first
-# thing to read: a $\hat\sigma$ that barely varies leaves the normalized variant
-# doing what plain conformal already does, and one that varies without tracking error
-# has to take a quantile large enough to cover the points where the ratio is worst,
-# widening the confident points without narrowing anything. The scale invariance does
-# break at the bottom, where $\hat\sigma$ approaches `EPS` - the printed minima say
-# whether that is in play.
+# where the errors are. The coefficients of variation printed above are the first thing
+# to read. A $\hat\sigma$ that barely varies leaves the normalized variant doing what
+# plain conformal already does. A $\hat\sigma$ that varies without tracking error
+# still redistributes width - some test points get a narrower interval and some a wider
+# one - but it allocates that width by something unrelated to where the model is
+# actually wrong. Marginal coverage survives, because the quantile is chosen to make it
+# survive; what degrades is coverage *per point*, which is the property a position
+# sizer built on these intervals would rely on. The widths and coverage in the table
+# are the evidence, not the size of $\hat\sigma$.
+#
+# The scale invariance does break at the bottom, where $\hat\sigma$ approaches `EPS`.
+# The printed minima say whether that is in play.
 #
 # The marginal coverage guarantee is distribution-free (Vovk et al. 2005), but it is
 # not assumption-free: it needs calibration and test residuals to be exchangeable,
