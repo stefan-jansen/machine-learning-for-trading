@@ -840,7 +840,12 @@ def collapse_diagnostics(sample: np.ndarray) -> dict:
 print("\n" + "=" * 60)
 print("PRIVACY-UTILITY TRADE-OFF ANALYSIS")
 print("=" * 60)
-print(f"Real data, for reference: {collapse_diagnostics(real_data[:1000])}")
+_real_collapse = collapse_diagnostics(real_data[:1000])
+print(
+    f"Real data, for reference: mean |off-diagonal corr| "
+    f"{_real_collapse['mean_abs_offdiag_corr']:.3f}, "
+    f"dims for 99% of variance {_real_collapse['dims_for_99pct_variance']}"
+)
 
 for eps in epsilon_values:
     print(f"\n--- Testing ε = {eps} ---")
@@ -864,11 +869,27 @@ for eps in epsilon_values:
     # Evaluate
     synth = generate_samples(gen, 1000)
     q = evaluate_quality(real_data[:1000], synth)
-    tradeoff_results.append({"epsilon": eps, **q, **collapse_diagnostics(synth)})
+    collapse = collapse_diagnostics(synth)
+    tradeoff_results.append({"epsilon": eps, **q, **collapse})
+    print(
+        f"  mean |off-diagonal corr|: {collapse['mean_abs_offdiag_corr']:.3f}"
+        f"   dims for 99% of variance: {collapse['dims_for_99pct_variance']}"
+    )
 
 # %%
-# Plot trade-off
 results_df = pl.DataFrame(tradeoff_results)
+
+# The whole sweep in one table, so the two collapse diagnostics sit beside the two
+# distances the figure plots and can be read against the real-data row printed above.
+print(
+    results_df.select(
+        "epsilon",
+        "mean_diff",
+        "corr_diff",
+        "mean_abs_offdiag_corr",
+        "dims_for_99pct_variance",
+    )
+)
 
 fig = make_subplots(
     rows=1,
