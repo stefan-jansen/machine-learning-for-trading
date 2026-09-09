@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
@@ -301,7 +302,7 @@ def prediction_members_in_force(
     # Dropped rather than refused, because unlike an unfinished run this is a property of
     # the model and the pool is still rankable without it - but never silently, so the note
     # names every member and its shortfall.
-    short = undercovered_prediction_members(root, members)
+    short = undercovered_prediction_members(root, members, case_study=study.case_study)
     if short:
         members = frozenset(members - short.keys())
         listed = "; ".join(
@@ -322,10 +323,31 @@ def prediction_members_in_force(
     return members, notes
 
 
+def _declared_expected_rows(spec_json: str | None) -> int | None:
+    """How many prediction rows a training run declared its inputs let it score.
+
+    ``None`` where the run recorded no expectation, which leaves the caller comparing
+    against the feature panel instead. A malformed or partial spec is read as no
+    expectation rather than as zero: zero would pass every member unconditionally.
+    """
+    if not spec_json:
+        return None
+    try:
+        spec = json.loads(spec_json)
+    except (TypeError, ValueError):
+        return None
+    expected = ((spec or {}).get("computation") or {}).get("expected_prediction_keys") or {}
+    n_rows = expected.get("n_rows")
+    if not isinstance(n_rows, int) or n_rows <= 0:
+        return None
+    return n_rows
+
+
 def undercovered_prediction_members(
     root: Path,
     members: Iterable[str],
     *,
+    case_study: str,
     minimum: float | None = None,
 ) -> dict[str, str]:
     """Which in-force members cover too little of the cross-section they were offered.
@@ -364,8 +386,12 @@ def undercovered_prediction_members(
 
     with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
         placeholders = ",".join("?" * len(wanted))
+        # `training_runs` has no `case_study` column - one registry belongs to one case
+        # study, so the id is a property of the directory being read, not of a row in it.
+        # Selecting it here raised `sqlite3.OperationalError` on every populated registry,
+        # which is every call that had anything to check.
         rows = db.execute(
-            f"""SELECT p.prediction_hash, p.split, t.label, t.family, t.config_name, t.case_study
+            f"""SELECT p.prediction_hash, p.split, t.label, t.family, t.config_name, t.spec_json
                 FROM prediction_sets p JOIN training_runs t ON t.training_hash = p.training_hash
                 WHERE p.prediction_hash IN ({placeholders})""",
             wanted,
@@ -373,10 +399,30 @@ def undercovered_prediction_members(
 
     panel = feature_panel_keys(root)
     short: dict[str, str] = {}
-    for phash, split, label, family, config, case_study in rows:
+    for phash, split, label, family, config, spec_json in rows:
         path = root / "run_log" / "predictions" / phash / "predictions.parquet"
         if not path.is_file():
             continue
+
+        # A run declares, before it fits anything, which keys its inputs let it score:
+        # `expected_prediction_keys` is built by the family's own key builder from the panel
+        # and the fold geometry, not from what the model chose to emit. A member that
+        # delivered all of them lost nothing, and that is the question here.
+        #
+        # It is not the same question as the panel comparison below, and for the sequence
+        # families it is the only one with a defensible answer. A sequence model cannot
+        # score a window that starts before its lookback or spans a gap wider than its gap
+        # policy, so its scoreable set is strictly narrower than the panel and always will
+        # be. Measured 2026-09-09 on sp500_equity_option_analytics: 143 of 947 members in
+        # force carry 65% of the panel's keys and 100% of their own declared keys - the
+        # panel comparison alone would drop every deep-learning member of the pool for a
+        # shortfall that is the window builder working as specified.
+        declared_rows = _declared_expected_rows(spec_json)
+        if declared_rows is not None:
+            delivered_rows = pl.scan_parquet(path).select(pl.len()).collect().item()
+            if delivered_rows >= declared_rows:
+                continue
+
         try:
             report = check_prediction_cross_section(
                 pl.read_parquet(path),

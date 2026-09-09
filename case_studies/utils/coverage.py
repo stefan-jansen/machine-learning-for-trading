@@ -1063,54 +1063,49 @@ BACKTEST_COVERAGE_MINIMUM = 0.98
 
 
 def feature_panel_keys(case_dir: Path | str) -> pl.DataFrame | None:
-    """The ``(entity, session)`` pairs every one of the case study's feature panels offers.
+    """The ``(entity, session)`` pairs the case study's modeling panel offers a model.
 
     This is the ceiling the model families share: a pair carrying a label but no feature
     row is one no model was in a position to score, and charging it to the models hides
     the families that lost rows they were given. Returns ``None`` when the case study has
-    no ``features/`` directory, which leaves the caller measuring against the label alone.
+    no ``features/financial.parquet``, which leaves the caller measuring against the
+    label alone.
 
-    **Intersected, not unioned**, because `load_modeling_dataset` joins the panels and a
-    key present in only one of them survives no join. Measured 2026-09-08 on the first
-    registered `gbm` validation set of each case study, which is a family that loses no
-    rows of its own:
+    **The financial panel alone, not an intersection across ``features/``.**
+    ``load_modeling_dataset`` builds the dataset by scanning ``features/financial.parquet``
+    and LEFT-joining ``features/model_based.parquet`` onto it (``utils/modeling.py``, the
+    two ``how="left"`` joins), so a key the financial panel carries survives whether or not
+    the model-based panel has a row for it - with null model-based columns, which every
+    family imputes. Those rows are in the dataset and every family is asked to score them.
 
-        case study                       union    intersection
-        crypto_perps_funding            92.51%         100.00%
-        etfs                            94.77%         100.00%
-        sp500_equity_option_analytics   79.42%         100.00%
-        sp500_options                   99.74%         100.00%
-        cme_futures                    100.00%         100.00%
+    Intersecting the two panels therefore removes keys the models were handed, and it
+    removes them from the DENOMINATOR: a family that dropped exactly the rows
+    ``model_based`` lacks reads as complete. Measured 2026-09-09 on the registered panels,
+    as the share of financial keys the intersection discards:
 
-    The union reads a complete family as short by up to 20%, and a threshold set against
-    it would refuse every prediction set in three of the seven case studies for a
-    shortfall no model caused. The intersection resolves to exactly 100% for a family
-    that delivered everything, which is what makes a threshold near 1.0 meaningful.
+        case study                      financial   model_based   intersection   discarded
+        sp500_equity_option_analytics     481,184       480,938        378,789      21.28%
+        crypto_perps_funding               99,877        98,741         92,125       7.76%
+        etfs                              404,500       470,662        404,500       0.00%
+
+    A guard that exists to catch a family scoring two thirds of its cross-section cannot
+    be measured against a universe 21% narrower than the one the family was given.
     """
-    directory = Path(case_dir) / "features"
-    panels = sorted(directory.glob("*.parquet")) if directory.is_dir() else []
-    frames: list[pl.DataFrame] = []
-    for path in panels:
-        names = pl.scan_parquet(path).collect_schema().names()
-        entity = _first_present(names, _ENTITY_ALIASES)
-        time_col = _first_present(names, _TIME_ALIASES)
-        if entity is None or time_col is None:
-            continue
-        frame = (
-            pl.scan_parquet(path)
-            .select(
-                pl.col(entity).cast(pl.String).alias("entity"),
-                pl.col(time_col).alias("session"),
-            )
-            .unique()
-            .collect()
-        )
-        frames.append(
-            frame.with_columns(_normalize_time(frame.get_column("session")).alias("session"))
-        )
-    if not frames:
+    path = Path(case_dir) / "features" / "financial.parquet"
+    if not path.is_file():
         return None
-    offered = frames[0]
-    for frame in frames[1:]:
-        offered = offered.join(frame, on=["entity", "session"], how="semi")
-    return offered
+    names = pl.scan_parquet(path).collect_schema().names()
+    entity = _first_present(names, _ENTITY_ALIASES)
+    time_col = _first_present(names, _TIME_ALIASES)
+    if entity is None or time_col is None:
+        return None
+    offered = (
+        pl.scan_parquet(path)
+        .select(
+            pl.col(entity).cast(pl.String).alias("entity"),
+            pl.col(time_col).alias("session"),
+        )
+        .unique()
+        .collect()
+    )
+    return offered.with_columns(_normalize_time(offered.get_column("session")).alias("session"))
