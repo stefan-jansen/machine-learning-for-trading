@@ -555,6 +555,9 @@ class HitRecord:
     # context, so they are not independent and anything resampling them has to resample
     # portfolios rather than positions.
     portfolio: int
+    # The asset that was masked. Kept so a rival predictor can be scored on exactly these
+    # trials rather than on its own sample of positions.
+    target: str
     bucket: str  # Position range label
     hit1: int  # 1 if rank <= 1, else 0
     hit5: int  # 1 if rank <= 5, else 0
@@ -626,6 +629,7 @@ def evaluate_benchmark(
                     hit_records.append(
                         HitRecord(
                             portfolio=portfolio_index,
+                            target=true_asset,
                             bucket=label,
                             hit1=int(rank <= 1),
                             hit5=int(rank <= 5),
@@ -637,6 +641,7 @@ def evaluate_benchmark(
                     hit_records.append(
                         HitRecord(
                             portfolio=portfolio_index,
+                            target=true_asset,
                             bucket=label,
                             hit1=0,
                             hit5=0,
@@ -855,33 +860,33 @@ print(
 # only knows popularity.
 #
 # It is the simplest thing possible: ignore the portfolio entirely and always answer with the
-# five most widely held stocks in the sample. Scored on exactly the masked positions the
-# model was scored on.
+# five most widely held stocks in the sample.
+#
+# It is scored from the hit records themselves rather than by walking the portfolios again.
+# The benchmark samples a bounded number of positions per bucket per portfolio and skips any
+# whose context window is empty, so re-deriving the trials would produce a different set with
+# different bucket weights - and a comparison across two populations says nothing.
 
 # %%
 most_popular = sorted(occurrence_counts, key=occurrence_counts.get, reverse=True)[:10]
 popular_top5, popular_top10 = set(most_popular[:5]), set(most_popular)
 
-popularity_hits5, popularity_hits10 = [], []
-for portfolio in sentences:
-    for start, end in POSITION_RANGES:
-        for i in range(start, min(end, len(portfolio))):
-            if portfolio[i] in model.wv:
-                popularity_hits5.append(int(portfolio[i] in popular_top5))
-                popularity_hits10.append(int(portfolio[i] in popular_top10))
+popularity_hits5 = np.array([int(r.target in popular_top5) for r in hit_records])
+popularity_hits10 = np.array([int(r.target in popular_top10) for r in hit_records])
+popularity_rate5 = float(popularity_hits5.mean())
+popularity_rate10 = float(popularity_hits10.mean())
 
-popularity_rate5 = float(np.mean(popularity_hits5)) if popularity_hits5 else 0.0
-popularity_rate10 = float(np.mean(popularity_hits10)) if popularity_hits10 else 0.0
+assert len(popularity_hits5) == len(pooled_hits5), "the two predictors must score the same trials"
 
+print(f"Trials scored by both predictors: {len(pooled_hits5):,}")
 print(f"Always answering the five most-held stocks: Hits@5 = {popularity_rate5:.1%}")
 print(f"Always answering the ten most-held stocks:  Hits@10 = {popularity_rate10:.1%}")
-print(f"The embeddings, pooled over the same buckets: Hits@5 = {pooled_rate:.1%}")
+print(f"The embeddings, on the same trials:         Hits@5 = {pooled_rate:.1%}")
 
 # %% [markdown]
-# The popularity predictor is far better than a uniform draw and far worse than the
-# embeddings, which is what the comparison was for. Whatever the model has learned, it is not
-# only that some stocks are common - it uses the rest of the portfolio, because a rule that
-# cannot see the portfolio does much worse on the same positions.
+# Both predictors answer the same masked positions, so the two rates are comparable directly.
+# Read the gap between them rather than either one alone: it is what the rest of the
+# portfolio is worth, over and above knowing which stocks are widely held.
 
 # %%
 # Visualize benchmark results
