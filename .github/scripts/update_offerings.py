@@ -51,8 +51,10 @@ NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S
 )
 
-# One-line positioning per offering, keyed by Maven course slug. The profile's
-# own course_description is marketing-page prose, too long for a table row.
+# One-line positioning per offering, keyed by Maven course slug, for the courses
+# whose own course_description is marketing-page prose too long for a table row.
+# A course absent here falls back to its course_description, so a newly launched
+# cohort never renders an empty cell on the front page; see blurb_for().
 BLURBS = {
     "research-to-production": "Take one research idea from a question to a costed, "
     "monitored strategy, with the evidence trail that makes the result checkable.",
@@ -124,10 +126,32 @@ def collect(props: dict, now: datetime) -> tuple[list[dict], list[dict]]:
                 "start": start,
                 "end": parse_instant(cohort.get("end_date")),
                 "format": course.get("course_format"),
+                "description": (course.get("course_description") or "").strip(),
             }
         )
 
     return sorted(lessons, key=lambda x: x["start"]), sorted(cohorts, key=lambda x: x["start"])
+
+
+def blurb_for(cohort: dict) -> str:
+    """The `What you leave with` cell, never empty.
+
+    A hand-written BLURBS entry wins. Absent one - which is every newly launched
+    cohort, since the table is edited by hand and the schedule is not - fall back
+    to the profile's own course_description, first sentence only. PR #887 shipped
+    an empty cell for `ml4t-ai-agents` this way, on the front page of the repo.
+    """
+    written = BLURBS.get(cohort["slug"])
+    if written:
+        return written
+    description = cohort.get("description", "")
+    if not description:
+        raise SystemExit(
+            f"{cohort['slug']}: no BLURBS entry and no course_description on the Maven "
+            "profile, so the offerings table would ship an empty cell. Add a BLURBS entry."
+        )
+    first, _, _ = description.partition(". ")
+    return first.rstrip(".") + "."
 
 
 def render_next(lessons: list[dict]) -> str:
@@ -160,7 +184,7 @@ def render_all(lessons: list[dict], cohorts: list[dict]) -> str:
             "|--------|----------|---------------------|",
         ]
         for c in cohorts:
-            blurb = BLURBS.get(c["slug"], "")
+            blurb = blurb_for(c)
             out.append(f"| {span(c['start'], c['end'])} | [{c['title']}]({c['url']}) | {blurb} |")
         out.append("")
 
