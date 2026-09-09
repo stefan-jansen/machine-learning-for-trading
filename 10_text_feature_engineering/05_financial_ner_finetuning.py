@@ -689,9 +689,9 @@ show_with_alt(
     fig,
     "A grouped bar chart with one pair of bars per entity type, the left bar of each pair "
     "counting the entities in the test labels and the right bar counting those the model "
-    "predicted. The two bars in each pair are indistinguishable in height, so the chart reads "
-    "as five single bars of differing heights rather than as a comparison, and the types "
-    "differ from one another by up to a factor of three.",
+    "predicted. There are five pairs, ten bars in two colors, and the two bars of each pair "
+    "are the same height as each other, so no pair shows a gap between labeled and predicted. "
+    "The pairs differ from one another by up to a factor of three.",
 )
 
 # %% [markdown]
