@@ -472,11 +472,11 @@ fig.suptitle(f"Two monitors against a {BURN_IN}-session reference")
 show_with_alt(
     fig,
     "Three stacked panels sharing a time axis. Top: SPY daily log returns, with visible "
-    "bursts of large moves in 2008 and 2020. Middle: the CUSUM statistic, which falls "
-    "steeply through 2008 and then stays far below zero for the remaining fifteen years "
-    "without recovering. Bottom: two MOSUM series at twenty and fifty session windows, "
-    "both oscillating around zero with sharp excursions at the crisis dates and a return "
-    "to zero within a few months afterwards.",
+    "bursts of large moves in 2008 and 2020. Middle: the CUSUM statistic, which turns "
+    "sharply downward through 2008 and then stays far below zero for the remaining "
+    "fifteen years without recovering. Bottom: two MOSUM series at twenty and fifty "
+    "session windows, both oscillating around zero with sharp excursions at the crisis "
+    "dates and a return to zero within a few months afterwards.",
 )
 
 # %% [markdown]

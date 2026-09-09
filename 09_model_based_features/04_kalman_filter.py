@@ -773,8 +773,8 @@ show_with_alt(
     "over the sample and the regression estimate swings far more widely. The middle draws "
     "the residual spread against dotted bands at plus and minus two expanding standard "
     "deviations, which settle within a few months. The bottom draws the standard deviation "
-    "of the hedge-ratio estimate, which falls steeply at first, rises again through 2022, "
-    "and reaches its lowest level at the end of the sample.",
+    "of the hedge-ratio estimate, which narrows sharply at first, widens again through "
+    "2022, and is at its narrowest at the end of the sample.",
 )
 
 # %% [markdown]

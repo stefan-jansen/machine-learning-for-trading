@@ -227,11 +227,11 @@ ax.set_title("How many of the two rules fire at once")
 fig.suptitle("Two rules that need no fitting, and how often they agree")
 show_with_alt(
     fig,
-    "Three stacked panels sharing a time axis. The top draws the SPY close with its "
-    "200-session average and shades the periods below it, which cluster around 2008, 2020 "
-    "and 2022. The middle draws the volatility index against a dashed line at twenty, which "
-    "it exceeds in the same periods. The bottom is a step series counting how many of the "
-    "two rules fire, reaching two during the same episodes.",
+    "Three stacked panels sharing a time axis. The upper panel draws the SPY close with "
+    "its 200-session average and shades the periods below it, which cluster around 2008, "
+    "2020 and 2022. The middle draws the volatility index against a dashed line at twenty, "
+    "which it exceeds in the same periods. The bottom is a step series counting how many "
+    "of the two rules fire, reaching two during the same episodes.",
 )
 
 # %% [markdown]

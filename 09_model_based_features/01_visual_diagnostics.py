@@ -414,8 +414,8 @@ def plot_correlogram(series: pd.Series, claim: str, lags: int = 40):
 fig = plot_correlogram(returns, "Small autocorrelations, heavy tails: daily equity returns")
 show_with_alt(
     fig,
-    "Four panels for SPY daily returns. Top left: the daily series with a 21-session "
-    "rolling mean that stays close to zero. Top right: a quantile-quantile plot against "
+    "Four panels for SPY daily returns. Upper left: the daily series with a 21-session "
+    "rolling mean that stays close to zero. Upper right: a quantile-quantile plot against "
     "the normal that bends away from the reference line at both ends. Bottom left and "
     "right: the ACF and PACF, whose bars sit near zero at every lag with a handful "
     "reaching just past the confidence band.",
