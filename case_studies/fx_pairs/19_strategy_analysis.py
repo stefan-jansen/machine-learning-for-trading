@@ -334,6 +334,10 @@ def _comparison_projection(
     metadata = projected.get("backtest_config", {}).get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("chapter", None)
+        # Absolute filesystem path, excluded from the identity hash by
+        # `case_studies/utils/registry/specs.py` for the same reason it is excluded here:
+        # comparing it makes the projection depend on which checkout wrote the row.
+        metadata.pop("preset_path", None)
     if omit_costs:
         config = projected.get("backtest_config", {})
         config.pop("commission", None)

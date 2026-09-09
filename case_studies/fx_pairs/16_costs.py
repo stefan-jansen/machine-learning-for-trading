@@ -79,6 +79,7 @@ from case_studies.research import (
     run_backtests,
     superseded_members,
 )
+from case_studies.utils.strategy_analysis import selectable_validation_candidates
 from case_studies.utils.sweep_config import (
     get_allocators,
     get_cost_grid_bps,
@@ -100,14 +101,14 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
-SUPERSEDES_COST_BACKTESTS: str = "fa1d30ceb0f8"
+SUPERSEDES_COST_BACKTESTS: str = "9bde35fd49cb"
 # The same rule the populations follow: a candidate set is immutable under its name, so a rebuilt
 # upstream generation must name the set it replaces. Keyed by the full set name, which is what the
 # refusal prints. `15_risk_management` states the reasoning once.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "fx_pairs:fwd_ret_1d:pre-cost-strategies": "7da3c99d1e71",
-    "fx_pairs:fwd_ret_5d:pre-cost-strategies": "cd5141886b53",
-    "fx_pairs:fwd_ret_21d:pre-cost-strategies": "16892238f4f8",
+    "fx_pairs:fwd_ret_1d:pre-cost-strategies": "f00c76cb8eac",
+    "fx_pairs:fwd_ret_5d:pre-cost-strategies": "44a36cb15c0f",
+    "fx_pairs:fwd_ret_21d:pre-cost-strategies": "dd42622a6c5b",
 }
 
 # %% [markdown]
@@ -308,21 +309,51 @@ else:
             f"upstream {upstream_labels}, "
             f"catalog {sorted(catalog.get_column('label').unique())}"
         )
+    # Eligibility and order both come from `selectable_validation_candidates`, which is the
+    # function `resolve_solvent_carrier` ranks. Re-deriving them here is what put the cost curve
+    # on the wrong strategy: the three populations above are read whole, and the retired-prediction
+    # filter a few cells up is applied to the *catalog* and never to *them*. `56070f34dff1` is a
+    # published risk-overlay backtest whose prediction `9eb5f506a0ee` was superseded by a refit, so
+    # it survived here, won on raw Sharpe, and eleven cost points were swept over a strategy the
+    # case study does not report - while `19_strategy_analysis`, which asks the resolver, reported
+    # `747e7e47abaa`. Nothing raised, because a cost sweep over the wrong parent is a valid sweep.
+    #
+    # The ordering matters too, not only the eligibility. Where a conformal candidate is in the
+    # field the resolver re-ranks every member on the timestamps they all price, because a
+    # calibration that abstains through its warm-up books those decisions as zero and is otherwise
+    # compared against allocators measured over a longer span. `best_validation_sharpe()` sorts on
+    # the stored number and does neither.
+    _eligible_order = {
+        row["backtest_hash"]: position
+        for position, row in enumerate(
+            selectable_validation_candidates(CASE_STUDY_ID, labels=[LABEL] if LABEL else None)
+        )
+    }
     for label in upstream_labels:
         members = [result for result in upstream if _label(result) == label]
+        eligible = [result for result in members if result.hash in _eligible_order]
+        if not eligible:
+            raise RuntimeError(
+                f"none of the {len(members)} upstream backtests for {label} is selectable: "
+                "every one is retired on the backtest or the prediction side, or belongs to no "
+                "population its producer publishes. Re-run the validation stages rather than "
+                "sweeping costs over a strategy nothing reports."
+            )
         _set_name = research_name(
             CASE_STUDY_ID, f"{label}:pre-cost-strategies", scope=POPULATION_NAME
         )
+        # The frozen set records the field the selection actually saw, so it holds the
+        # selectable members and not every row the three populations list.
         candidates = CandidateSet.create(
             study,
             name=_set_name,
-            members=members,
+            members=eligible,
             supersedes=candidate_set_supersedes(
                 study, name=_set_name, declared=SUPERSEDES_CANDIDATE_SETS.get(_set_name)
             ),
         )
         candidate_sets[label] = candidates
-        leader = candidates.best_validation_sharpe()
+        leader = min(eligible, key=lambda result: _eligible_order[result.hash])
         if not isinstance(leader, BacktestResult):
             raise TypeError("strategy selection did not return a backtest")
         selected_by_label[label] = leader
@@ -431,6 +462,12 @@ def _non_cost_projection(spec: dict[str, Any]) -> dict[str, Any]:
     metadata = config.get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("chapter", None)
+        # An absolute filesystem path, and `case_studies/utils/registry/specs.py` already
+        # excludes it from the identity hash for that reason. Comparing it here made the
+        # check fail on where the notebook was run from rather than on what it produced:
+        # a sibling written in one worktree never matches a parent registered in another,
+        # and the message says a strategy field moved when none did.
+        metadata.pop("preset_path", None)
     return projected
 
 
