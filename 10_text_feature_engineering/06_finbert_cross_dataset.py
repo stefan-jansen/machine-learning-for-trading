@@ -312,11 +312,16 @@ print(f"Always answering the majority class: accuracy {majority_rate:.1%}")
 # and from one answering a different question, and nothing in a table of counts separates
 # those. What settles it here is the label definition printed earlier, not this figure.
 #
-# One column is worth reading closely. The model predicts neutral far less often than the
-# labels call for it, and that is the two definitions of "neutral" coming apart. A market
-# neutral is a small move, which is common. A sentiment neutral is a sentence expressing no
-# view, which a headline written to be read almost never is. Two classes with one name, doing
-# different jobs, in the same three-way problem.
+# One column is worth reading closely, and then stopping. The model predicts neutral far less
+# often than the labels use it. That is an observed disagreement about how often the middle
+# class applies, and it is all these counts establish.
+#
+# Several things could produce it. The model may be poorly calibrated on this kind of text
+# and reach for a polarity when it should abstain. Or the two neutrals may simply not be the
+# same category - a market neutral is a small move and a sentiment neutral is a sentence
+# expressing no view, and those need not occur at the same rate on the same headlines.
+# Distinguishing them needs sentiment annotations on these headlines, which nobody has made,
+# so the notebook records the disagreement and does not attribute it.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
