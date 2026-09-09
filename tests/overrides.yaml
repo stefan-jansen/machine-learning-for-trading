@@ -933,6 +933,12 @@
     # Isolated test registry has no nasdaq out-of-band cost-feasible carrier,
     # so its spine can't resolve; report cost/risk N/A instead of raising.
     ALLOW_MISSING_SPINE: true
+    # The notebook refuses a full-mode run unless all nine registries are present and
+    # hold backtests, so a partial aggregation cannot overwrite the nine-case-study
+    # artifacts as if it were complete (ml4t/agent-workspace#964). The seeded test
+    # registry is not the production store and is not expected to satisfy that, so the
+    # precondition is relaxed here and nowhere else.
+    REQUIRE_ALL_REGISTRIES: false
   timeout: 600
 20_strategy_synthesis/02_feature_evaluation:
   timeout: 300

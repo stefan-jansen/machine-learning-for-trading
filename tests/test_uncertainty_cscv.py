@@ -467,3 +467,54 @@ def test_the_overlay_trim_starts_at_the_earlier_of_the_two_first_sessions() -> N
     assert c.size == b.size == 5
     np.testing.assert_allclose(c, challenger[1:])
     np.testing.assert_allclose(b, baseline[1:])
+
+
+def test_a_full_mode_synthesis_refuses_a_registry_set_it_cannot_see() -> None:
+    """The bad run was indistinguishable from a good one in its own output.
+
+    On 2026-08-28 a synthesis run from a worktree carrying three of the nine registries
+    stamped itself production and published a holdout Sharpe under prose describing nine
+    case studies (ml4t/agent-workspace#964). The notebook printed a ``[MISSING]`` line per
+    absent registry and carried on; the push gate caught it, several hours later.
+
+    The refusal is lifted out of the notebook rather than reimplemented, because a test that
+    rebuilds the condition by hand cannot see what the producer does with it.
+    """
+    import ast
+
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (repo_root / "20_strategy_synthesis" / "01_aggregate_synthesis.py").read_text()
+    tree = ast.parse(source)
+    definitions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "refuse_partial_full_mode"
+    ]
+    assert len(definitions) == 1, "the notebook no longer defines its full-mode precondition"
+    namespace: dict = {}
+    exec(  # noqa: S102 - running the producer itself is the point of the check
+        compile(ast.Module(body=definitions, type_ignores=[]), "01_aggregate_synthesis", "exec"),
+        namespace,
+    )
+    refuse = namespace["refuse_partial_full_mode"]
+
+    nine = [f"cs{i}" for i in range(9)]
+    complete = {"expected": nine, "subset": [], "unreadable": [], "empty": []}
+
+    # A complete set is what the notebook exists to aggregate.
+    refuse(**complete)
+
+    # An absent registry and a present-but-empty one each stop a full-mode run, and the
+    # message names which case studies and which of the two problems they have.
+    for field, offenders in (("unreadable", ["cs3"]), ("empty", ["cs7", "cs8"])):
+        with pytest.raises(RuntimeError) as raised:
+            refuse(**{**complete, field: offenders})
+        for cs in offenders:
+            assert cs in str(raised.value)
+
+    # A subset run is the per-case-study driver path, not a full-mode publish, so the same
+    # incomplete registry set goes through.
+    refuse(**{**complete, "subset": ["cs0"], "empty": ["cs7"]})
+
+    # The seeded test registry is not the production store, and that escape is explicit.
+    refuse(**{**complete, "empty": ["cs7"], "enforce": False})
