@@ -429,6 +429,35 @@ def test_stamping_a_run_that_never_wrote_the_notebook_is_refused(
     assert "never wrote this file" in str(exc.value)
 
 
+def test_a_refusal_about_a_notebook_outside_the_repo_prints_the_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The three refusals name the notebook, and a notebook may not be under REPO_ROOT.
+
+    `relative_to` raises for a path outside the root, so the caller who most needs the
+    message - the one being refused - got a `ValueError` traceback out of the error path
+    instead of the error. `clear` already carried a local `try`/`except` for this, which is
+    what says it happens rather than that it might. A notebook is outside the worktree
+    whenever it is executed somewhere else: a scratch copy, a staging path under `/tmp`.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(notebook_provenance, "REPO_ROOT", tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+
+    py = outside / "nb.py"
+    py.write_text("# %%\nprint(1)\n")
+    nb_path = outside / "nb.ipynb"
+    nb_path.write_text(json.dumps(_notebook([_code_cell("print(1)\n", [], execution_count=None)])))
+
+    with pytest.raises(SystemExit) as exc:
+        stamp_notebook(nb_path, executor="test", parameters={})
+
+    message = str(exc.value)
+    assert "nothing in it was executed" in message
+    assert str(nb_path) in message
+
+
 def test_a_deterministic_notebook_can_say_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The refusal is a heuristic, so it has to be answerable.
 
