@@ -699,8 +699,16 @@ def iter_raw_folds(
 
         # Only the design matrix has its dtype pinned. A classification label is integral and
         # coercing it to float would change what the family is asked to fit.
-        X_train = _contiguous(train_df.select(feature_names).to_numpy(), design_dtype)
-        X_val = _contiguous(val_df.select(feature_names).to_numpy(), design_dtype)
+        #
+        # `order="c"` is asked for rather than fixed afterwards. polars defaults to Fortran
+        # order, so `_contiguous` was allocating a second full design matrix and holding both
+        # until the F-order original fell out of scope: measured on a 4,000,000 x 88 float32
+        # frame, 2.63 GB of transient for a 1.31 GB matrix against 1.31 GB asking polars for
+        # the layout directly. The values are bit-identical either way - checked against
+        # float32 with nulls, float64, and mixed-precision frames cast both ways - so this is
+        # not a preparation change and `FOLD_PREPARATION_VERSION` does not move.
+        X_train = _contiguous(train_df.select(feature_names).to_numpy(order="c"), design_dtype)
+        X_val = _contiguous(val_df.select(feature_names).to_numpy(order="c"), design_dtype)
         y_train = np.ascontiguousarray(train_df[label_col].to_numpy())
         y_val = np.ascontiguousarray(val_df[label_col].to_numpy())
         y_eval = np.ascontiguousarray(val_df[eval_label_col].to_numpy()) if eval_label_col else None
