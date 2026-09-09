@@ -72,6 +72,7 @@
 import json
 import time
 import warnings
+from functools import partial
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -100,11 +101,20 @@ from transformers import (
 from transformers import (
     set_seed as set_transformers_seed,
 )
+from transformers import utils as transformers_utils
+
+transformers_logging = transformers_utils.logging
 
 from data import load_financial_phrasebank
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, show_with_alt
+
+# The sentencepiece-to-fast conversion warns about byte fallback once per tokenizer built
+# that way. It reports a property of the conversion, not of this notebook's data.
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="transformers.convert_slow_tokenizer"
+)
 
 # %% [markdown]
 # The two parameters below are what a reduced run overrides. `MAX_TRAIN_STEPS` caps the total
@@ -325,8 +335,10 @@ def fine_tune_model(model_name: str, spec: dict, dataset: DatasetDict) -> dict:
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
     # Tokenize dataset
+    # `partial`, not a lambda: `datasets` pickles the transform to fingerprint it, and a
+    # lambda defined here cannot be pickled, so the cache never hits.
     tokenized = dataset.map(
-        lambda x: tokenize_function(x, tokenizer),
+        partial(tokenize_function, tokenizer=tokenizer),
         batched=True,
         remove_columns=["sentence"],
     )
@@ -417,6 +429,18 @@ def fine_tune_model(model_name: str, spec: dict, dataset: DatasetDict) -> dict:
 
 # %% [markdown]
 # ## Fine-tuning the three
+#
+# One thing `transformers` reports at load is worth knowing before the log is quieted. Each
+# checkpoint arrives without a classification head for this task, so the library builds one
+# with random weights and says so - "some weights were newly initialized ... you should
+# probably TRAIN this model". That is the fine-tuning step in one sentence: the encoder
+# arrives trained and the head does not, and what follows trains the head while adjusting the
+# encoder underneath it. The message is correct and expected here, and it is silenced below
+# only because it repeats once per model and would otherwise be the loudest thing in the
+# output.
+
+# %%
+transformers_logging.set_verbosity_error()
 
 # %%
 results = {name: fine_tune_model(name, spec, dataset) for name, spec in MODELS.items()}
@@ -471,8 +495,8 @@ ax.set_ylabel("Score")
 ax.set_title("Test accuracy and macro F1 by model")
 ax.set_xticks(x)
 ax.set_xticklabels(bar_labels, fontsize=7)
-ax.legend(fontsize=7)
-ax.set_ylim(0, 1)
+ax.set_ylim(0, 1.18)
+ax.legend(fontsize=7, loc="upper right", framealpha=0.9)
 
 ax = axes[1]
 times = [results[m]["train_time"] for m in model_names]
@@ -542,10 +566,10 @@ fig.suptitle("Test-set confusion matrices by model")
 show_with_alt(
     fig,
     "Three heatmaps side by side, one per model, each a three-by-three grid of counts with "
-    "the true class down the side and the predicted class across the bottom. In all three "
-    "the diagonal cells carry much larger counts than anything off it, and the off-diagonal "
-    "counts that are not near zero sit in the same cells in each panel rather than in "
-    "different places.",
+    "the true class down the side and the predicted class across the bottom. In all three the "
+    "diagonal cells carry far larger counts than any cell off it. Two of the panels have "
+    "their largest off-diagonal count in the same cell, true neutral predicted positive; the "
+    "third has no cell that stands out from the other off-diagonal counts.",
 )
 
 # %% [markdown]
