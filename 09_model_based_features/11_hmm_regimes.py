@@ -348,13 +348,13 @@ print(
 # already knows the event happened.
 
 # %%
-toy_model = GaussianHMM(n_components=N_STATES_TOY, covariance_type="diag", n_iter=1)
-toy_model.startprob_ = initial
-toy_model.transmat_ = transition
-toy_model.means_ = state_means.reshape(-1, 1)
-toy_model.covars_ = (state_deviations**2).reshape(-1, 1)
+toy_hmm = GaussianHMM(n_components=N_STATES_TOY, covariance_type="diag", n_iter=1)
+toy_hmm.startprob_ = initial
+toy_hmm.transmat_ = transition
+toy_hmm.means_ = state_means.reshape(-1, 1)
+toy_hmm.covars_ = (state_deviations**2).reshape(-1, 1)
 
-toy_smoothed = toy_model.predict_proba(observations.reshape(-1, 1))
+toy_smoothed = toy_hmm.predict_proba(observations.reshape(-1, 1))
 toy_difference = toy_smoothed[:, 0] - toy_filtered[:, 0]
 
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
@@ -493,17 +493,17 @@ n_sessions, n_series = observations_matrix.shape
 fitted_models = {}
 selection_rows = []
 for n_states in STATE_COUNTS:
-    model = fit_hmm_kmeans_init(
+    candidate = fit_hmm_kmeans_init(
         observations_matrix, n_states=n_states, random_state=SEED, n_iter=N_ITER
     )
-    fitted_models[n_states] = model
+    fitted_models[n_states] = candidate
     parameters = parameter_count(n_states, n_series)
     selection_rows.append(
         {
             "states": n_states,
-            "log-likelihood": model.score(observations_matrix),
+            "log-likelihood": candidate.score(observations_matrix),
             "parameters": parameters,
-            "BIC": -2 * model.score(observations_matrix) + parameters * np.log(n_sessions),
+            "BIC": -2 * candidate.score(observations_matrix) + parameters * np.log(n_sessions),
         }
     )
 
@@ -526,11 +526,11 @@ print(f"Lowest BIC at {selection.loc[selection['BIC'].idxmin(), 'states']} state
 # %%
 N_STATES = 2
 
-model = fitted_models[N_STATES]
-order = sort_states_by_variance(model)
-filtered = filtered_state_probs(model, observations_matrix)[:, order]
-smoothed = model.predict_proba(observations_matrix)[:, order]
-states, _ = relabel_states(model.predict(observations_matrix), smoothed, order)
+spy_hmm = fitted_models[N_STATES]
+order = sort_states_by_variance(spy_hmm)
+filtered = filtered_state_probs(spy_hmm, observations_matrix)[:, order]
+smoothed = spy_hmm.predict_proba(observations_matrix)[:, order]
+states, _ = relabel_states(spy_hmm.predict(observations_matrix), smoothed, order)
 
 frame["filtered_stressed"] = filtered[:, -1]
 frame["smoothed_stressed"] = smoothed[:, -1]
@@ -632,7 +632,7 @@ print(
 # free.
 
 # %%
-transition_matrix = model.transmat_[order][:, order]
+transition_matrix = spy_hmm.transmat_[order][:, order]
 expected_duration = 1 / (1 - np.diag(transition_matrix))
 
 display(
