@@ -78,7 +78,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from gensim.models import Word2Vec
-from sklearn.manifold import TSNE
 
 from data import load_financial_phrasebank as load_financial_phrasebank_canonical
 from utils.paths import get_chapter_dir
@@ -374,108 +373,104 @@ pl.DataFrame(comparison_rows)
 # %% [markdown]
 # ## The same finding, drawn
 #
-# The neighbor table showed the effect one word at a time. Projecting a set of words to two
-# dimensions shows whether it holds across the set. Three groups go in - words a reader would
-# call positive, words they would call negative, and topical financial nouns - and the
-# question is whether the model's geometry recovers that grouping.
+# The neighbor table showed the effect one probe word at a time. To see whether it holds
+# across a set, take three groups a reader would separate without hesitation - words they
+# would call positive, words they would call negative, and topical financial nouns - and
+# measure every pair.
 #
-# t-SNE preserves which points are near which; it does not preserve distance, direction or
-# scale, so the axes carry no units and only adjacency is readable.
+# The measurement is cosine similarity in the model's own hundred-dimensional space, drawn as
+# a matrix with the words ordered by group. If the geometry encoded polarity, the two blocks
+# on the diagonal covering positive-with-positive and negative-with-negative would be
+# brighter than the off-diagonal block pairing one against the other.
+#
+# A projection to two dimensions would be the more familiar picture and it is the wrong tool
+# here. t-SNE preserves neighborhoods only approximately and distorts exactly the points that
+# sit at the edge of a cloud: run on these words it puts `profit` and `loss` at opposite
+# corners of the plot, which is the reverse of what cosine says about them and would make the
+# figure argue against the notebook's own printed table.
 
 # %%
 categories = {
     "positive": ["profit", "growth", "increase", "gain", "strong", "positive", "improved"],
     "negative": ["loss", "decline", "decrease", "weak", "negative", "dropped", "fell"],
-    "financial": ["revenue", "earnings", "dividend", "shares", "market", "stock", "company"],
+    "topical": ["revenue", "earnings", "dividend", "shares", "market", "stock", "company"],
 }
 
-words_to_plot = []
-embeddings_to_plot = []
-colors = []
-
-color_map = {
-    "positive": COLORS["positive"],
-    "negative": COLORS["negative"],
-    "financial": COLORS["blue"],
-}
-
+selected_words = []
+selected_groups = []
 for category, word_list in categories.items():
     for word in word_list:
         if word in model.wv:
-            words_to_plot.append(word)
-            embeddings_to_plot.append(model.wv[word])
-            colors.append(color_map[category])
+            selected_words.append(word)
+            selected_groups.append(category)
 
-embeddings_array = np.array(embeddings_to_plot)
-print(f"Visualizing {len(words_to_plot)} words")
+vectors = np.array([model.wv[w] for w in selected_words])
+unit_vectors = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
+similarity = unit_vectors @ unit_vectors.T
+print(
+    f"{len(selected_words)} of {sum(len(v) for v in categories.values())} words are in vocabulary"
+)
 
 # %% [markdown]
-# t-SNE needs more points than its perplexity setting, so a vocabulary too small to supply
-# them skips the figure rather than drawing a misleading one.
-
+# Before the picture, the two numbers it has to be consistent with. Mean similarity within a
+# polarity group against mean similarity across the two, with each word's similarity to
+# itself excluded. If polarity were encoded, the first would be clearly the larger.
 
 # %%
-if len(words_to_plot) < 5:
-    print(f"Too few words for t-SNE visualization (need at least 5, have {len(words_to_plot)})")
-    print("Skipping visualization - train with more data or check vocabulary coverage")
-    embeddings_2d = None
-else:
-    tsne = TSNE(
-        n_components=2, perplexity=min(5, len(words_to_plot) - 1), random_state=SEED, max_iter=1000
-    )
-    embeddings_2d = tsne.fit_transform(embeddings_array)
+groups = np.array(selected_groups)
+polarity = np.isin(groups, ["positive", "negative"])
+polarity_similarity = similarity[np.ix_(polarity, polarity)]
+polarity_groups = groups[polarity]
 
-if embeddings_2d is not None:
-    from matplotlib.patches import Patch
+same = polarity_groups[:, None] == polarity_groups[None, :]
+off_diagonal = ~np.eye(len(polarity_groups), dtype=bool)
 
-    fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
-    ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=colors, s=60, alpha=0.8)
+print(f"Mean cosine within a polarity group: {polarity_similarity[same & off_diagonal].mean():.3f}")
+print(f"Mean cosine across the two groups:   {polarity_similarity[~same].mean():.3f}")
 
-    for i, word in enumerate(words_to_plot):
-        ax.annotate(word, (embeddings_2d[i, 0], embeddings_2d[i, 1]), fontsize=7, alpha=0.9)
+# %%
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
+image = ax.imshow(similarity, cmap="Blues", vmin=0, vmax=1)
 
-    legend_elements = [
-        Patch(facecolor=COLORS["positive"], label="Reader calls positive"),
-        Patch(facecolor=COLORS["negative"], label="Reader calls negative"),
-        Patch(facecolor=COLORS["blue"], label="Topical noun"),
-    ]
-    ax.legend(handles=legend_elements, loc="upper right", fontsize=7)
+ax.set_xticks(range(len(selected_words)))
+ax.set_yticks(range(len(selected_words)))
+ax.set_xticklabels(selected_words, rotation=90, fontsize=6)
+ax.set_yticklabels(selected_words, fontsize=6)
 
-    ax.set_xlabel("t-SNE axis 1, no units")
-    ax.set_ylabel("t-SNE axis 2, no units")
-    ax.set_title("Word vectors in two t-SNE dimensions, colored by category")
-    show_with_alt(
-        fig,
-        "A scatter of about twenty labeled words in two t-SNE dimensions, colored by whether "
-        "a reader would call them positive, negative or topical. The three colors are "
-        "interleaved rather than grouped: the closest pair in the plot is a green word and a "
-        "red one at the bottom right, a red word sits between two green ones at the top, and "
-        "the dark topical words are spread from one corner to the other with no region of "
-        "their own.",
-    )
+# Boundaries between the three groups, so the blocks are readable without counting words.
+boundary = 0
+for category in list(categories)[:-1]:
+    boundary += sum(1 for g in selected_groups if g == category)
+    ax.axhline(boundary - 0.5, color=COLORS["amber"], linewidth=1)
+    ax.axvline(boundary - 0.5, color=COLORS["amber"], linewidth=1)
+
+fig.colorbar(image, ax=ax, shrink=0.7, label="Cosine similarity")
+ax.set_title("Cosine similarity between word vectors, grouped by category")
+show_with_alt(
+    fig,
+    "A square matrix of cosine similarities between about twenty word vectors, shaded from "
+    "white at zero to dark at one, with the words ordered into three groups marked by amber "
+    "lines. Apart from the dark diagonal where each word meets itself, the shading is fairly "
+    "even across the whole matrix: the blocks pairing a group with itself are no darker than "
+    "the blocks pairing it with a different group, and the darkest off-diagonal cell lies in "
+    "the block pairing the positive words against the negative ones.",
+)
 
 # %% [markdown]
-# The three colors do not separate, and the figure is worth more for that than it would be
-# if they did.
+# The blocks do not separate, and the two printed means say the same thing without needing
+# the picture: words within a polarity group are no more similar to each other than they are
+# to words of the opposite polarity. The darkest cell away from the diagonal is `profit`
+# against `loss`, in the block that pairs the two opposite groups.
 #
-# The closest pair in the plot is `profit` and `loss`, which is the neighbor table's finding
-# holding across the whole set rather than at one probe word. `weak` sits among `strong` and
-# `positive`. The topical nouns are scattered rather than grouped: `revenue` is at one edge
-# and `earnings` and `dividend` at the opposite one, which says the model has placed
-# `revenue` by the sentences it appears in rather than by what it denotes.
+# The topical nouns behave the same way. They do not form a block of their own, because
+# `revenue` is placed by the sentences it appears in rather than by what it denotes, and
+# those sentences are the ones `profit` and `growth` appear in too.
 #
 # What the geometry does encode is which words are used in the same frames. That is a real
 # and useful signal - it is what makes a nearest-neighbor lookup a good way to expand a query
-# or find a substitutable term - and it is the wrong feature for a sentiment model. A
-# classifier handed these vectors would be asked to separate two words the representation has
-# placed on top of each other.
+# or find a substitutable term - and it is the wrong feature to hand a sentiment model
+# expecting the distance to mean agreement.
 #
-# Two caveats on the picture itself. t-SNE run on about twenty points with a perplexity of
-# five is a crude summary of a hundred-dimensional space, and a different seed moves the
-# layout. Neither changes the finding, which is already visible in the neighbor table at full
-# dimensionality; the figure only shows that it is general rather than anecdotal.
-
-# %% [markdown]
 # ## The same machinery, on portfolios
 #
 # `02_asset_embeddings` does not adapt this technique to assets; it runs the same one on a
