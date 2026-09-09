@@ -100,11 +100,15 @@ from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 # that day. Set it to `True` to run all three variants live against a current question, which
 # costs money and reproduces nothing.
 #
-# `N_AGENTS`, `MAX_STEPS`, `DEBATE_ROUNDS` and `SUPERVISOR_QUERIES` configure the pipeline
-# identically across the three variants, which is what makes the orchestration the thing being
-# compared. The turn budget matters more here than elsewhere: an agent that runs out of turns
-# returns the loop's no-answer value, and three of those would make a variant look decisive
-# when it had said nothing.
+# `N_AGENTS` is the only setting all three variants read. `MAX_STEPS`, `DEBATE_ROUNDS` and
+# `SUPERVISOR_QUERIES` configure the chapter's specialist classes, which the native and
+# LangGraph variants compose and the CrewAI variant replaces with one bull task, one bear task
+# and one supervisor task. So changing them moves two of the three, which is one more reason
+# the final probabilities are not a comparison and the statement count is.
+#
+# The turn budget matters more here than elsewhere on the two variants that read it: an agent
+# that runs out of turns returns the loop's no-answer value, and three of those would make a
+# variant look decisive when it had said nothing.
 #
 # `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set, and it
 # reaches variants A and C only. CrewAI drives its own LiteLLM layer.
