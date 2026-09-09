@@ -465,8 +465,9 @@ show_with_alt(
 # %% [markdown]
 # The blocks do not separate, and the two printed means say the same thing without needing
 # the picture: under cosine similarity these words do not group by polarity, and a word is no
-# closer to others of its own polarity than to its opposites. The darkest cell away from the
-# diagonal is `profit` against `loss`, in the block pairing the two opposite groups.
+# closer to others of its own polarity than to its opposites. The two darkest cells away from
+# the diagonal both sit in the block pairing the two opposite groups - `improved` against
+# `negative`, and `profit` against `loss`.
 #
 # The topical nouns behave the same way. They do not form a block of their own, because
 # `revenue` is placed by the sentences it appears in rather than by what it denotes, and
