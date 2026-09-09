@@ -14,45 +14,76 @@
 # ---
 
 # %% [markdown]
-# # Feature Store with Feast — Live Integration
+# # Feature Store with Feast: Live Integration
 #
 # **Chapter 26: MLOps and Governance**
 # **Docker image**: `ml4t`
 # **Book Reference**: Chapter 26, Section 26.6
-# **Companion to**: `05_feast_feature_store` (manual Polars implementation)
+# **Companion to**: [`05_feast_feature_store`](05_feast_feature_store.ipynb), which does the
+# same work in Polars
 #
 # **Learning Objectives**:
-# - Bring up a local Feast repository from the same `us_equities_panel`
-#   feature artifacts NB05 uses, declaring entity and feature views in code.
-# - Run an offline historical retrieval against an event DataFrame and use the
-#   same API for a single-as-of snapshot that simulates an online request.
-# - Validate exact parity with the manual Polars implementation after selecting
-#   the fitted feature vintage that was valid at each decision time.
+# - Stand up a local Feast repository from Parquet files already on disk, declaring the
+#   entity, the sources and the feature views in code.
+# - Ask Feast for a training set by handing it the entity-timestamp pairs it should answer
+#   for, and ask it for a single moment the way a live system would.
+# - Check Feast's answers against the hand-written join from `05`, feature by feature, and
+#   read a disagreement as a configuration defect rather than a rounding difference.
 #
-# Notebook `05` demonstrates feature-store concepts — offline joins,
-# as-of retrieval, training-serving skew — using pure Polars. This companion
-# notebook shows how **Feast** automates the same workflow against the same
-# `us_equities_panel` artifacts.
+# `05` builds the offline join, the as-of retrieval and the skew measurement by hand, which
+# is what makes the rules visible. This notebook hands the same job to **Feast**, an
+# open-source feature store, and then checks that the two agree.
+#
+# The check is the point. A feature store is configured, not written: the timestamp field,
+# the entity key and the time to live are declarations, and a wrong one produces a store that
+# runs, answers every query, and answers them wrong. Comparing against an implementation whose
+# rules you can read is how you find that out.
 #
 # **Prerequisites**: `pip install 'feast>=0.40'` (included in the `[mlops]` extra).
 
 # %%
-"""Feature Store with Feast — Live Integration."""
+"""Feature Store with Feast: the same retrievals as notebook 05, checked against it."""
+
+# %% [markdown]
+# ## Settings
+#
+# `TRAINING_START`, `TRAINING_END` and `AS_OF_DATE` bound the two retrievals. Left unset they
+# are derived from the case study's fold geometry, as in `05` and for the same reason: a date
+# typed here is a claim about where a fold boundary falls, and rebuilding the case study moves
+# every boundary while the literal does not.
+#
+# `FEATURE_TTL_DAYS` is the time to live declared on both Feast views, and it is worth reading
+# carefully. Two days on a daily feature table means a value from the previous session is
+# still servable, so Feast answers a query for a date with no row of its own by carrying the
+# previous row forward. That behaviour is what a store is for and it is also what makes the
+# parity check below non-trivial: the hand-written join matches on exact keys and returns
+# nothing for such a date, so the two paths only agree where the event set is restricted to
+# keys both sources actually hold.
+#
+# `SOURCE_PAD_DAYS` widens the Parquet copies handed to Feast on both sides of the training
+# window, so the time-to-live lookback and the as-of query have rows to reach.
+#
+# `PARITY_TOLERANCE` is how far apart the two implementations may be per feature. It is set
+# well below anything a correct join could produce, because the difference being looked for is
+# a wrong row, not a rounding error: a store that picked a different date is off by whatever
+# the feature moved that day, which is many orders of magnitude larger than this.
+#
+# `N_SAMPLE_ASSETS`, `LIQUIDITY_WINDOW_DAYS` and `LIQUIDITY_RANK_DAYS` pick the names the as-of
+# retrieval asks about, by average dollar volume over the tail of the training window.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 PRIMARY_LABEL = "fwd_ret_1d"
-# Left unset so the offline window and the serving date are derived from the fixture's
-# own fold geometry. The literals that stood here - 2015-10-01 / 2015-12-30 / 2016-01-04
-# - were not independent choices: TRAINING_END equalled the then-final validation fold's
-# `val_end` to the day. #819 restored this case study to 16 folds and moved every
-# boundary. Set any of them to a date string to pin it by hand.
 TRAINING_START = None
 TRAINING_END = None
 AS_OF_DATE = None
-# How much of the final validation window the offline join draws on, when derived.
 TRAINING_LOOKBACK_DAYS = 91
 N_SAMPLE_ASSETS = 8
+FEATURE_TTL_DAYS = 2
+SOURCE_PAD_DAYS = 30
+LIQUIDITY_WINDOW_DAYS = 21
+LIQUIDITY_RANK_DAYS = 30
+PARITY_TOLERANCE = 1e-10
 
 # %%
 import shutil
@@ -69,25 +100,28 @@ import yaml
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 
-warnings.filterwarnings("ignore")
+# Named, not blanket: a bare ignore would also hide the convergence and numerical
+# warnings a reader needs to see.
+warnings.filterwarnings("ignore", category=FutureWarning, module="feast")
 
-CODE_ROOT = Path.cwd()
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 
 FINANCIAL_FEATURES = ["past_ret_21d", "vol_21d", "rsi_14", "sharpe_21d"]
 MODEL_FEATURES = ["garch_cond_vol", "ffd_log_price", "ffd_log_volume"]
 ALL_FEATURES = FINANCIAL_FEATURES + MODEL_FEATURES
 
-print("Feature Store with Feast — Live Integration")
+print("Feature Store with Feast: Live Integration")
 print("=" * 60)
 
 
 # %% [markdown]
 # ## 1. Import Feast
 #
-# Feast provides `Entity`, `FeatureView`, `FileSource`, and `FeatureStore` — the
-# building blocks of a feature store declaration. The `Field` class defines
-# feature schemas with typed columns.
+# Four classes carry the declaration. `Entity` names the thing rows are about and the column
+# that identifies it. `FileSource` points at a table and says which of its columns is the
+# event timestamp. `FeatureView` binds a source to a typed list of features and a time to
+# live. `FeatureStore` is the repository those declarations are registered into and the object
+# every query goes through.
 
 # %%
 from feast import Entity, FeatureStore, FeatureView, Field, FileSource
@@ -101,10 +135,11 @@ print("Feast imported successfully")
 # %% [markdown]
 # ## 2. Prepare Feast-compatible source files
 #
-# Our case study parquet files store `timestamp` as a `Date` column. Feast's
-# offline store requires datetime timestamps for point-in-time joins. We create
-# temporary copies with the timestamp cast to `Datetime` — in production this
-# conversion would happen at materialization time.
+# Feast's offline store needs a datetime timestamp for its point-in-time joins, and these
+# Parquet files carry a `Date`. Temporary copies are written with the column cast, and only
+# over the padded window, so nothing here writes into the case study's own artifacts. In
+# production the cast happens in the job that materializes the source, once, rather than
+# beside every query.
 
 # %%
 feast_tmp = tempfile.mkdtemp(prefix="feast_ml4t_")
@@ -116,11 +151,11 @@ feast_data_dir.mkdir()
 def folds_by_coverage(path, windows: list[tuple]) -> list[object]:
     """Pair each evaluation window with the artifact fold that covers it, by date.
 
-    Never by fold id. `ml4t-diagnostic` 0.1.4 reversed what a fold number means, and a
-    legacy artifact was written under the older convention, so pairing a stored id with
-    a freshly generated one joins each date against the wrong vintage - invisibly, since
-    both ids exist and the join succeeds. Ordering both sides by date is the one pairing
-    that does not depend on which convention wrote the file.
+    A fold id is a label the writer chose, not a property of the data, and two tools can
+    number the same folds in opposite directions. Joining a stored id to a freshly
+    generated one then pairs each date with the wrong fitted state and still succeeds,
+    because both ids exist. Ordering both sides by the dates they cover is the pairing
+    that holds whatever numbering wrote the file.
     """
     coverage = (
         pl.scan_parquet(path)
@@ -155,58 +190,50 @@ holdout_start = pd.Timestamp(setup["evaluation"]["holdout_start"])
 holdout_end = pd.Timestamp(setup["evaluation"]["holdout_end"])
 timeline = pl.scan_parquet(financial_src).select("timestamp").unique().collect()
 cv_splits = generate_cv_splits(timeline, case_study_id=CASE_STUDY_ID, label_buffer="1D")
-# `model_based.parquet` carries one row per stock-date and no `fold` column: stage 04
-# fits on a rolling refit schedule, so a date's value is the same whichever fold reads
-# it. The windows still decide the date range served - a feature value is only servable
-# for a session the model was evaluated on.
+# A feature value is servable for a session the model was evaluated on, so the date range
+# handed to Feast is the union of the validation windows and the holdout.
 validation_spans = [
     (pd.Timestamp(split["val_start"]).date(), pd.Timestamp(split["val_end"]).date())
     for split in cv_splits
 ]
 model_windows = [*validation_spans, (holdout_start.date(), holdout_end.date())]
-# Whether a window also names a fold depends on which artifact vintage is on disk, and
-# both are in circulation. Stage 04 now writes one row per stock-date. A fixture built
-# before that conversion writes one row per (key, fold) with genuinely different values
-# per fold, so there the fold is still how a date is addressed.
+# Where the table carries a fold column each stock-date appears once per fold, so the
+# window and the fold are applied together; where it does not, the date range selects it.
 FOLD_KEYED_ARTIFACT = "fold" in pl.scan_parquet(model_src).collect_schema().names()
 model_folds = (
     folds_by_coverage(model_src, model_windows)
     if FOLD_KEYED_ARTIFACT
     else [None] * len(model_windows)
 )
-# By date rather than by position: `ml4t-diagnostic` 0.1.4 reversed fold numbering, so
-# which end of the list holds the latest window is the thing that moved.
+# By date rather than by list position: which end of the list holds the latest window
+# depends on the numbering convention, and the dates do not.
 last_validation_span = max(validation_spans)
 
-# Derived from the geometry rather than pinned, for the reason in the parameters cell.
-if TRAINING_END is None:
-    TRAINING_END = str(last_validation_span[1])
-if TRAINING_START is None:
-    TRAINING_START = str(
-        max(
-            last_validation_span[0],
-            pd.Timestamp(TRAINING_END).date() - pd.Timedelta(days=TRAINING_LOOKBACK_DAYS),
-        )
+training_end = TRAINING_END or str(last_validation_span[1])
+training_start = TRAINING_START or str(
+    max(
+        last_validation_span[0],
+        pd.Timestamp(training_end).date() - pd.Timedelta(days=TRAINING_LOOKBACK_DAYS),
     )
-if AS_OF_DATE is None:
-    AS_OF_DATE = str(
-        pl.scan_parquet(financial_src)
-        .filter(pl.col("timestamp") >= holdout_start.date())
-        .select(pl.min("timestamp"))
-        .collect()
-        .item()
-    )
-assert pd.Timestamp(TRAINING_END) < holdout_start, (
-    f"TRAINING_END {TRAINING_END} must precede sealed holdout {holdout_start.date()}"
 )
-print(f"Offline training window {TRAINING_START} to {TRAINING_END}; serving as of {AS_OF_DATE}")
+as_of_date = AS_OF_DATE or str(
+    pl.scan_parquet(financial_src)
+    .filter(pl.col("timestamp") >= holdout_start.date())
+    .select(pl.min("timestamp"))
+    .collect()
+    .item()
+)
+assert pd.Timestamp(training_end) < holdout_start, (
+    f"training window ends {training_end}, on or after the holdout opens "
+    f"{holdout_start.date()}; the offline join would mix data the model may not see"
+)
+print(f"Offline training window {training_start} to {training_end}; serving as of {as_of_date}")
 
-train_start = pd.Timestamp(TRAINING_START).date()
-train_end = pd.Timestamp(TRAINING_END).date()
-# Pad 30 days before training start so TTL lookback has data
-filter_start = train_start - timedelta(days=30)
-# Pad 30 days after to cover as-of retrieval demo
-filter_end = train_end + timedelta(days=30)
+train_start = pd.Timestamp(training_start).date()
+train_end = pd.Timestamp(training_end).date()
+# Padded on both sides so the lookback and the as-of query have rows to reach.
+filter_start = train_start - timedelta(days=SOURCE_PAD_DAYS)
+filter_end = train_end + timedelta(days=SOURCE_PAD_DAYS)
 
 (
     pl.scan_parquet(financial_src)
@@ -222,11 +249,11 @@ filter_end = train_end + timedelta(days=30)
 def window_terms(clipped: list[tuple]) -> list[pl.Expr]:
     """One predicate per evaluation window, to be OR-ed into a single filter.
 
-    Against a fold-free artifact a window is a date range and nothing else. Against a
-    fold-keyed one the same window also names the fold whose fitted state that range is
-    evaluated under, and the two must be applied together: those vintages hold different
-    values for the same stock-date, so a date range alone would return one row per fold
-    and no rule for choosing between them.
+    Where the artifact carries no fold column a window is a date range and nothing else.
+    Where it does, the same window also names the fold whose fitted state that range is
+    evaluated under, and the two are applied together: each fold holds its own value for
+    the same stock-date, so a date range alone returns one row per fold with no rule for
+    choosing between them.
     """
     if FOLD_KEYED_ARTIFACT:
         return [
@@ -236,11 +263,12 @@ def window_terms(clipped: list[tuple]) -> list[pl.Expr]:
     return [pl.col("timestamp").is_between(start, end) for _, start, end in clipped]
 
 
+# %% [markdown]
+# The model-based copy is built with one filter over the union of the evaluation windows,
+# rather than one frame per window concatenated: a concat would double-count any date two
+# windows cover, and would do it silently.
+
 # %%
-# One filter over the union of the evaluation windows, not one frame per window
-# concatenated. A concat double-counts any date two windows cover, and would do it
-# silently; under a single filter the only duplication that can reach the result is the
-# artifact's own, which `collapse_fold_replication` resolves or refuses.
 _span_lo = pd.Timestamp(filter_start).date()
 _span_hi = pd.Timestamp(filter_end).date()
 model_spans = [
@@ -250,7 +278,7 @@ model_spans = [
 ]
 if not model_spans:
     raise ValueError(
-        f"No validation window and not the sealed holdout covers {_span_lo}..{_span_hi}; "
+        f"No validation window and not the holdout covers {_span_lo}..{_span_hi}; "
         "the materialization range lies outside every window this model was evaluated on"
     )
 model_features = (
@@ -299,10 +327,15 @@ print(yaml.dump(feast_config, default_flow_style=False))
 # %% [markdown]
 # ## 4. Define entity and feature views
 #
-# The entity is `symbol` — the universal identifier across all case study
-# artifacts. Each feature view maps to one parquet source file and declares a
-# typed schema. The `ttl` (time-to-live) of 2 days prevents stale features
-# from leaking into point-in-time joins.
+# The entity is `symbol`, which is the identifier every case-study artifact in this repository
+# uses. Each view maps to one Parquet source and declares its features with types, because
+# Feast validates the schema at registration rather than at query time.
+#
+# The time to live is what bounds how far back a query may reach. At `FEATURE_TTL_DAYS` a
+# request for a date with no row of its own is answered from the most recent row within that
+# many days, and a request older than that returns nothing rather than a stale value. Set it
+# too short and legitimate queries come back empty; too long and the store answers with data
+# that no longer describes the moment asked about.
 
 # %%
 symbol_entity = Entity(
@@ -329,7 +362,7 @@ financial_fv = FeatureView(
     entities=[symbol_entity],
     schema=[Field(name=col, dtype=Float64) for col in FINANCIAL_FEATURES],
     source=financial_source,
-    ttl=timedelta(days=2),
+    ttl=timedelta(days=FEATURE_TTL_DAYS),
 )
 
 model_fv = FeatureView(
@@ -337,7 +370,7 @@ model_fv = FeatureView(
     entities=[symbol_entity],
     schema=[Field(name=col, dtype=Float64) for col in MODEL_FEATURES],
     source=model_source,
-    ttl=timedelta(days=2),
+    ttl=timedelta(days=FEATURE_TTL_DAYS),
 )
 
 print("Defined:")
@@ -366,35 +399,39 @@ for fv in registered_views:
 
 
 # %% [markdown]
-# ## 6. Offline retrieval — point-in-time join
+# ## 6. Offline retrieval: the point-in-time join
 #
-# This is the core feature-store operation: given an entity DataFrame with
-# `(symbol, event_timestamp)` pairs, retrieve the latest valid feature values
-# at or before each timestamp. Feast handles the point-in-time join internally
-# using the TTL constraint. Features become available after the session close;
-# the forward label resolves on the next session, and a position can act no
-# earlier than that next tradable bar.
+# The query Feast is built around. It is handed a frame of `(symbol, event_timestamp)` pairs -
+# the moments a training set needs answered - and returns, for each pair, the most recent
+# feature values at or before that moment, within the time to live. The features here are
+# known after the session close, the label is the next session's return, and a position acts
+# no earlier than that next session, so the pairing is a next-bar decision.
+#
+# ### Restricting the event set, and why the parity check needs it
+#
+# The two implementations answer differently for a date that has no feature row of its own.
+# Feast carries the previous row forward, within its time to live; the exact-key join in `05`
+# returns nothing. Both are right for what they are, so comparing them on such a date would
+# report a disagreement that is a property of the question rather than of either
+# implementation.
+#
+# Dates like that exist wherever the training window spans an embargo gap between consecutive
+# validation windows, or runs past the last one. Whether this particular window contains any
+# is a fact about the fold geometry, and the counts printed below say so: the events dropped
+# are split by which source was missing, because a key absent from the model features is the
+# gap this restriction exists for, while one absent from the financial features is a
+# different problem arriving in the same total.
 
 # %%
-# Consecutive validation windows are separated by the label embargo, so the dates
-# inside a gap carry no fitted model-feature vintage at all, and the same holds
-# after the last window ends. Asking for a decision date there is answerable only
-# by carrying the previous fold forward: Feast does so within its TTL, the manual
-# exact-key join does not, and the two stop agreeing. Restrict the event set to
-# the (symbol, timestamp) keys the producer actually fitted, which removes the
-# trailing edge and every interior gap rather than only the last date.
 requested = (
     pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
     .filter(
-        (pl.col("timestamp") >= pl.lit(pd.Timestamp(TRAINING_START).date()))
-        & (pl.col("timestamp") <= pl.lit(pd.Timestamp(TRAINING_END).date()))
+        (pl.col("timestamp") >= pl.lit(pd.Timestamp(training_start).date()))
+        & (pl.col("timestamp") <= pl.lit(pd.Timestamp(training_end).date()))
     )
     .select("symbol", "timestamp", pl.col(PRIMARY_LABEL).alias("label"))
     .collect()
 )
-# Both feature views carry a TTL, so a key missing from either source can be
-# answered by Feast from an earlier row while the exact-key join drops it. The
-# event set has to be restricted to the keys present in both.
 financial_keys = (
     pl.scan_parquet(financial_feast_path)
     .select(pl.col("symbol"), pl.col("timestamp").cast(pl.Date))
@@ -406,14 +443,11 @@ labels = requested.join(
 ).join(financial_keys, on=["symbol", "timestamp"])
 if labels.is_empty():
     raise ValueError(
-        f"No event in {TRAINING_START}..{TRAINING_END} has a row in both feature sources. "
+        f"No event in {training_start}..{training_end} has a row in both feature sources. "
         "Both join paths would return nothing, and the parity check below reads an "
         "empty difference as a match, so it would report every feature matching."
     )
 if labels.height < requested.height:
-    # Split by source: a key missing from the model features is the embargo gap
-    # this clip exists for, while one missing from the financial features is a
-    # different problem wearing the same total.
     dropped = requested.join(
         labels.select("symbol", "timestamp"), on=["symbol", "timestamp"], how="anti"
     )
@@ -421,8 +455,7 @@ if labels.height < requested.height:
         model_features.select("symbol", "timestamp"), on=["symbol", "timestamp"], how="anti"
     ).height
     no_financial = dropped.join(financial_keys, on=["symbol", "timestamp"], how="anti").height
-    # An event can be missing from both, so the two counts overlap. Report the
-    # overlap rather than letting the parts add up to more than the whole.
+    # The two counts overlap where an event is missing from both sources.
     both = no_model + no_financial - dropped.height
     print(
         f"Dropped {dropped.height:,} of {requested.height:,} events: "
@@ -459,11 +492,17 @@ feast_training.head()
 
 
 # %% [markdown]
-# ## 7. Compare with Polars offline join
+# ## 7. Check Feast against the hand-written join
 #
-# The manual Polars join in notebook `05` produces the same result. We verify
-# that the Feast retrieval matches: same rows and same feature values. Any
-# discrepancy would indicate a point-in-time join misconfiguration.
+# The same event set, answered twice: once by Feast's point-in-time join and once by the exact
+# key join `05` builds. Both should return the same rows with the same values.
+#
+# A disagreement here is a configuration defect, not a numerical one. The two paths read the
+# same Parquet files, so a difference means one of them selected a different row: a wrong
+# timestamp field, a time to live reaching further than intended, or a fold vintage picked by
+# id rather than by date. Each of those produces a store that runs and answers wrongly, which
+# is why the comparison is per feature and the tolerance is set far below anything a correct
+# join could produce.
 
 
 # %%
@@ -517,7 +556,9 @@ mismatches = []
 for col in ALL_FEATURES:
     diff = (merged[f"{col}_polars"] - merged[f"{col}_feast"]).abs()
     max_diff = float(diff.max()) if len(diff) else 0.0
-    mismatches.append({"feature": col, "max_abs_diff": max_diff, "match": max_diff < 1e-10})
+    mismatches.append(
+        {"feature": col, "max_abs_diff": max_diff, "match": max_diff < PARITY_TOLERANCE}
+    )
 
 match_df = pd.DataFrame(mismatches)
 match_df
@@ -526,49 +567,62 @@ match_df
 n_match = int(match_df["match"].sum())
 n_total = len(match_df)
 mismatch_cols = match_df.loc[~match_df["match"], "feature"].tolist()
-print(f"Parity: {n_match}/{n_total} features match within 1e-10.")
+print(f"Parity: {n_match}/{n_total} features match within {PARITY_TOLERANCE:g}.")
 if mismatch_cols:
     print(f"Differing columns: {mismatch_cols}")
 assert n_match == n_total, f"Feast parity failed for {mismatch_cols}"
 
 
 # %% [markdown]
-# **Finding**: Feast and the manual Polars join reproduce all seven features
-# exactly. The source contains one fitted model-feature vintage per walk-forward
-# fold, so both paths first select the fold valid at each decision date. The
-# explicit selection prevents duplicate-key fan-out and future-fitted state.
+# The assertion above is what makes this a check rather than a display: the notebook stops if
+# any feature disagrees, so a reader who sees the cells below knows the two paths agreed.
+#
+# What the agreement establishes is narrower than it looks. The source holds one fitted
+# model-feature vintage per walk-forward fold, and both paths select the vintage valid at each
+# decision date before comparing. That selection is the part that had to be got right in both;
+# without it, one stock-date resolves to several rows and the join fans out, or resolves to a
+# vintage fitted on later data. Agreement says the two implementations made the same
+# selection. It does not say the selection is the correct one - that is what the fold-by-date
+# pairing above is for.
 
 
 # %% [markdown]
 # ## 8. Online-style as-of retrieval
 #
-# In production, `get_online_features` serves the latest feature vector from a
-# materialized online store. This notebook does not create or query that store.
-# It uses `get_historical_features` with one as-of timestamp per entity to
-# simulate the request shape while retaining point-in-time historical semantics.
+# A live system calls `get_online_features`, which reads a key-value store that a
+# materialization job keeps current. Standing that up needs infrastructure this notebook does
+# not have, so the request shape is reproduced with `get_historical_features` and one
+# timestamp per entity: the same query, answered from the offline store.
+#
+# The shape is what matters here - a handful of names, one moment, one row each - because it
+# is the shape a model server issues per decision. What it does not reproduce is the latency
+# or the consistency question, which is whether the online store holds what the offline store
+# would have answered.
 
 
 # %%
 def sample_assets(n_assets: int) -> list[str]:
     from data import load_us_equities
 
-    # Rank on prior dollar liquidity, not nominal share volume. Ranked over the tail of
-    # the offline training window rather than a pinned calendar month, so the sample
-    # follows the derived window instead of silently drifting away from it.
-    rank_from = pd.Timestamp(TRAINING_END).date() - pd.Timedelta(days=30)
-    prices = load_us_equities(start_date=TRAINING_START, end_date=TRAINING_END)
+    rank_from = pd.Timestamp(training_end).date() - pd.Timedelta(days=LIQUIDITY_RANK_DAYS)
+    prices = load_us_equities(start_date=training_start, end_date=training_end)
     return (
         prices.lazy()
         .sort("symbol", "timestamp")
         .with_columns((pl.col("adj_close") * pl.col("adj_volume")).alias("dollar_volume"))
-        .with_columns(pl.col("dollar_volume").rolling_mean(21).over("symbol").alias("adv_21d"))
+        .with_columns(
+            pl.col("dollar_volume")
+            .rolling_mean(LIQUIDITY_WINDOW_DAYS)
+            .over("symbol")
+            .alias("avg_dollar_volume")
+        )
         .filter(
             (pl.col("timestamp") >= rank_from)
-            & (pl.col("timestamp") <= pd.Timestamp(TRAINING_END).date())
+            & (pl.col("timestamp") <= pd.Timestamp(training_end).date())
         )
         .group_by("symbol")
-        .agg(pl.col("adv_21d").mean().alias("avg_adv_21d"))
-        .sort("avg_adv_21d", descending=True)
+        .agg(pl.col("avg_dollar_volume").mean().alias("mean_dollar_volume"))
+        .sort("mean_dollar_volume", descending=True)
         .head(n_assets)
         .collect()
         .get_column("symbol")
@@ -580,7 +634,7 @@ sampled = sample_assets(N_SAMPLE_ASSETS)
 as_of_entity_df = pd.DataFrame(
     {
         "symbol": sampled,
-        "event_timestamp": pd.Timestamp(AS_OF_DATE),
+        "event_timestamp": pd.Timestamp(as_of_date),
     }
 )
 
@@ -589,15 +643,16 @@ online_style = store.get_historical_features(
     features=feature_refs,
 ).to_df()
 
-print(f"Online-style snapshot for {len(sampled)} assets as of {AS_OF_DATE}:")
+print(f"Online-style snapshot for {len(sampled)} assets as of {as_of_date}:")
 online_style.sort_values("symbol")
 
 
 # %% [markdown]
 # ## 9. Feature registry introspection
 #
-# Feast maintains a registry of all entities, feature views, and their metadata.
-# This is the library equivalent of the lineage table built manually in NB05.
+# The registry is Feast's own record of what has been declared, and reading it back is how an
+# operator answers "where does this served value come from" without opening the code that
+# declared it. It is the library's version of the lineage table `05` assembles by hand.
 
 # %%
 registry_rows = []
@@ -605,7 +660,7 @@ for fv in store.list_feature_views():
     registry_rows.append(
         {
             "feature_view": fv.name,
-            "entity": ", ".join(str(e) for e in fv.entity_columns),
+            "entity": ", ".join(field.name for field in fv.entity_columns),
             "features": len(fv.features),
             "ttl": str(fv.ttl),
             "source_type": type(fv.batch_source).__name__,
@@ -620,8 +675,9 @@ registry_df
 # %% [markdown]
 # ## 10. Clean up
 #
-# Remove the temporary Feast repository. In production, the registry and online
-# store would persist across sessions.
+# The repository was written under a temporary directory, so removing it leaves nothing
+# behind. A production registry and online store persist across sessions and across the
+# services that read them, which is most of what makes them shared infrastructure.
 
 # %%
 shutil.rmtree(feast_tmp, ignore_errors=True)
@@ -631,9 +687,36 @@ print(f"Cleaned up temporary Feast repo: {feast_tmp}")
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Feast automates the historical workflow**: entity, FeatureView, and TTL declarations replace bespoke timestamp-rule plumbing, while `get_historical_features` supplies both the training set and the single-as-of simulation shown here. A deployed online store would instead be materialized and queried with `get_online_features`, which this notebook does not execute.
-# 2. **Parity is a vintage-tracking diagnostic**: all seven features reproduce exactly after both paths select the fitted fold valid at each decision date.
-# 3. **Registry as governance**: `store.list_feature_views()` is the library equivalent of the lineage table built manually in NB05; both make feature sources auditable.
-# 4. **Trade-off**: Feast requires infrastructure setup (registry, online store) and datetime-typed timestamps; the manual approach in NB05 works directly with the existing parquet files. Pick the library when you need multi-team isolation, on-demand transforms, or an online store.
+# 1. A feature store is configured rather than written. The entity, the timestamp field and
+#    the time to live are declarations, and a wrong one produces a store that runs, answers
+#    every query and answers them wrongly. That is why the check below the retrieval exists.
+# 2. Check a store against an implementation whose rules you can read, feature by feature, and
+#    set the tolerance far below anything a correct join could produce. The failure being
+#    looked for is a wrong row, which is off by whatever the feature moved that day, not a
+#    rounding difference.
+# 3. Compare the two on questions they answer the same way. A store carries the last value
+#    forward within its time to live and an exact-key join does not, so a date with no row of
+#    its own makes them disagree by construction; restrict the event set first, and print what
+#    was dropped and why.
+# 4. Reading agreement correctly is as important as getting it. Agreement says both paths
+#    selected the same fitted vintage for each decision date. It does not say the selection
+#    was the right one, which is a separate argument the fold-by-date pairing makes.
+# 5. The library buys shared infrastructure, not correctness. Feast supplies a registry, an
+#    online store and multi-team isolation, and needs them stood up and their timestamps typed
+#    for it; `05` needs none of that and does the same retrievals on the Parquet files
+#    directly. Choose on which of those you need.
+#
+# **Known limitations**
+#
+# - The online retrieval here is `get_historical_features` with one timestamp per entity. It
+#   reproduces the request shape and not the online store, so nothing here exercises the
+#   materialization job or the consistency between the two tiers, which is where a live
+#   feature store's own failures are.
+# - The registry, the online store and the source copies all live in a temporary directory
+#   that this notebook deletes. A production registry persists and is shared, and most of what
+#   makes it governance is that other services read the same one.
+# - The parity check covers one training window on one case study. It establishes that the two
+#   implementations agree on those events, not that the Feast declaration is correct for a
+#   window with a different fold geometry.
 #
 # **Next**: See `06_mlflow_experiments` for experiment tracking with MLflow.
