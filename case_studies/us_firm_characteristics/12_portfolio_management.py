@@ -456,7 +456,6 @@ if not plottable.is_empty():
             "net of the declared commission and slippage"
         ),
     )
-    fig.tight_layout()
     show_with_alt(
         fig,
         "Horizontal bar chart of average validation Sharpe over the solvent runs, for "
