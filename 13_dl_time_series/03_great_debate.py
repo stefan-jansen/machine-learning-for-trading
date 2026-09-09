@@ -612,7 +612,6 @@ for name, model in models.items():
     )
 
 shuffle_df = pl.DataFrame(shuffle_results)
-shuffle_df
 
 fig = make_subplots(
     rows=1,
