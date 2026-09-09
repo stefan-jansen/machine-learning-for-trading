@@ -608,7 +608,9 @@ if not all_signal.is_empty():
         f"| excluded as insolvent: {ruined.height:,}"
     )
 
-fig.tight_layout()
+# No tight_layout(): matplotlibrc sets `figure.constrained_layout.use: True` repo-wide,
+# and calling tight_layout() over it makes matplotlib switch layout engines and say so in
+# a stderr block under the figure. See ml4t/agent-workspace#1106.
 fig.show()
 
 # %% [markdown]
