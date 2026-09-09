@@ -120,9 +120,10 @@ except ImportError as exc:
 # coordinate over the window. For a price coordinate that is the window's return.
 #
 # **Level two** has $d^2$ terms. The pair $S^{i,j}$ and its mirror $S^{j,i}$ differ by twice
-# the area the path sweeps out in the plane of coordinates $i$ and $j$, and the sign of that
-# area says which of the two moved first. This is the level that carries information no
-# summary statistic has: whether volume rose before the price did or after it.
+# the signed area the path sweeps out in the plane of coordinates $i$ and $j$, and the sign
+# of that area is the direction the path went round that loop. This is the level that
+# carries information no summary statistic has, because a summary statistic of each
+# coordinate separately cannot see a loop at all.
 #
 # **Level three and beyond** carry finer path geometry at a cost that grows as $d^k$.
 #
@@ -157,9 +158,14 @@ except ImportError as exc:
 # same level-one signature as a window that never moved: total change zero, in every
 # coordinate. Adding a coordinate that increases steadily from zero to one over the window
 # fixes this. The two level-two terms pairing time with price differ by twice the signed
-# area between the price path and the straight line from its start to its end, so a window
-# that spent its time above that line and one that spent it below are told apart by a sign.
-# A peak early and a peak late are told apart the same way.
+# area between the price path and the straight line from its start to its end. That is an
+# integrated displacement from the chord, so it separates a window that spent its time
+# above the line from one that spent it below, and its size says how far and for how long.
+#
+# It does not say when the move happened. A triangular path of a given height that starts
+# and ends where it began encloses the same area whether it peaks early or late, so the
+# term is the same for both. Timing shows up at level three, which is one reason a depth
+# past two is ever worth its columns.
 #
 # The path built below has three coordinates: time, the price relative to where the window
 # opened, and the traded volume relative to where the window opened. Both of the last two
@@ -188,9 +194,10 @@ def level_two(signature: np.ndarray, first: int, second: int, dimension: int) ->
 def signed_area(signature: np.ndarray, first: int, second: int, dimension: int) -> float:
     """Twice the signed area the path sweeps in the plane of the two coordinates.
 
-    Positive when the first coordinate moved before the second. Paired with a monotone
-    time coordinate as the *second* argument, it is positive when the first coordinate
-    spent the window above the straight line joining its own endpoints.
+    The sign is the orientation of the loop the two coordinates trace together, so it
+    combines the order of their moves with their directions. Paired with a monotone time
+    coordinate as the *second* argument, that reduces to something simpler: positive when
+    the first coordinate spent the window above the straight line joining its own endpoints.
     """
     return level_two(signature, first, second, dimension) - level_two(
         signature, second, first, dimension
@@ -512,9 +519,11 @@ display(results.pivot(index="symbol", columns="features", values="test R2").roun
 # %% [markdown]
 # ## Where the model looks
 #
-# Impurity importance says which columns the trees split on. It is a statement about this
-# fitted model and these windows, not about which features cause returns, and a column can
-# score low because another column carries the same information.
+# Impurity importance is the total reduction in the split criterion that a column achieved,
+# weighted by how many samples reached each split. It is not a count of splits: a column
+# used once at the root can outscore one used ten times deep in the trees. It is a statement
+# about this fitted model and these windows, not about which features cause returns, and a
+# column can score low because another column carries the same information.
 
 # %%
 combined_model = fitted[("SPY", "both")]
@@ -532,8 +541,8 @@ ax.bar(
     [importances[:n_hand].sum(), importances[n_hand:].sum()],
     color=[COLORS["blue"], COLORS["copper"]],
 )
-ax.set_ylabel("Total impurity importance")
-ax.set_title("Share of the splits by feature family")
+ax.set_ylabel("Total impurity reduction")
+ax.set_title("Share of the impurity reduction by family")
 
 ax = axes[1]
 TOP_TERMS = 15
@@ -543,11 +552,11 @@ ax.barh(
     importances[order],
     color=[COLORS["blue"] if i < n_hand else COLORS["copper"] for i in order],
 )
-ax.set_xlabel("Impurity importance")
-ax.set_title(f"The {TOP_TERMS} most-split columns")
+ax.set_xlabel("Impurity reduction")
+ax.set_title(f"The {TOP_TERMS} highest-importance columns")
 ax.tick_params(axis="y", labelsize=6)
 
-fig.suptitle("Both families are used, and neither dominates the splits")
+fig.suptitle("Both families are used, and neither dominates the importance")
 per_column = {
     "hand-built": importances[:n_hand].sum() / n_hand,
     "log-signature": importances[n_hand:].sum() / (len(importances) - n_hand),
@@ -555,30 +564,67 @@ per_column = {
 show_with_alt(
     fig,
     "Two panels for the SPY model fitted on both feature families. The left panel has two "
-    "bars, one per family, of comparable height. The right panel is a horizontal bar chart "
-    "of the fifteen most-split columns, with hand-built and signature columns interleaved "
-    "rather than separated.",
+    "bars, one per family, of comparable height with the signature family somewhat taller. "
+    "The right panel is a horizontal bar chart of the fifteen highest-importance columns, "
+    "with hand-built and signature columns interleaved rather than separated.",
 )
 
 # %%
 print(
-    "Mean impurity importance per column: "
+    "Mean impurity reduction per column: "
     + ", ".join(f"{name} {value:.4f}" for name, value in per_column.items())
 )
 
 # %% [markdown]
 # Read the left panel against the column counts before reading it as a ranking. The
 # log-signature family contributes twice as many columns as the hand-built one, so a larger
-# share of the splits is partly a statement about how many columns it brought. The mean
-# importance per column above is the comparison that does not have the count in it.
+# share of the total is partly a statement about how many columns it brought. The mean per
+# column above is the comparison that does not have the count in it.
 
 # %% [markdown]
 # ## Across assets, not just across time
 #
 # The same construction applied to several assets at once puts each asset's cumulative
 # return in its own coordinate. Level two then pairs two assets, and the same signed area
-# used above becomes a lead-lag reading: positive over a window in which the first asset
-# moved before the second.
+# describes the loop the pair traces in the plane of their two cumulative returns.
+#
+# Its sign is not simply which asset moved first. Orientation combines the order of the two
+# moves with their directions: a window in which the first asset falls and then the second
+# rises traces the loop the opposite way round from one in which both rise, order
+# unchanged. The four cases below make that concrete, and they are why the count reported
+# afterwards is a count of positive areas rather than a count of windows one asset led.
+
+# %%
+CASE_STEPS = 40
+case_time = np.linspace(0, 1, CASE_STEPS).reshape(-1, 1)
+
+
+def two_step_path(first_move: float, second_move: float) -> np.ndarray:
+    """A path where coordinate one moves over the first half and coordinate two over the second."""
+    half = CASE_STEPS // 2
+    one, two = np.zeros(CASE_STEPS), np.zeros(CASE_STEPS)
+    one[:half] = np.linspace(0, first_move, half)
+    one[half:] = first_move
+    two[half:] = np.linspace(0, second_move, CASE_STEPS - half)
+    return np.hstack([case_time, one.reshape(-1, 1), two.reshape(-1, 1)])
+
+
+display(
+    pd.DataFrame(
+        [
+            {
+                "first coordinate moves": "up" if a > 0 else "down",
+                "second coordinate moves": "up" if b > 0 else "down",
+                "order": "first, then second",
+                "signed area": signed_area(
+                    esig.stream2sig(two_step_path(a, b), 2), 1, 2, PATH_DIMENSION
+                ),
+            }
+            for a in (0.05, -0.05)
+            for b in (0.05, -0.05)
+        ]
+    )
+)
 
 
 # %%
@@ -625,7 +671,7 @@ ax.plot(cross_ends, lead_lag, linewidth=0.6, color=COLORS["blue"])
 ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_ylabel("Signed area, QQQ against SPY")
 ax.set_xlabel("Session the window ends")
-ax.set_title("The lead-lag term changes sign constantly and has no persistent direction")
+ax.set_title("The signed area changes sign constantly and has no persistent direction")
 show_with_alt(
     fig,
     "A single series over the whole sample showing the signed area between the QQQ and SPY "
@@ -634,14 +680,15 @@ show_with_alt(
 )
 
 # %%
-print(f"Windows where QQQ led: {(lead_lag > 0).sum():,} of {len(lead_lag):,}")
+print(f"Windows with a positive signed area: {(lead_lag > 0).sum():,} of {len(lead_lag):,}")
 print(f"Mean signed area: {lead_lag.mean():+.5f}, standard deviation {lead_lag.std():.5f}")
 
 # %% [markdown]
-# The term is informative window by window and averages to almost nothing, which is what a
-# lead-lag reading between two broad equity indices should do: neither leads the other for
-# long. Its usefulness is as a conditioning input that changes sign, not as a standing
-# claim about which index moves first.
+# The areas split almost exactly evenly and average to nearly nothing, which is what two
+# broad equity indices that move together should produce: their paths cross and recross
+# rather than tracing a loop in one direction. The term is a conditioning input that
+# changes sign window by window, and reading a single window's sign as "QQQ led" requires
+# knowing the direction both assets moved, which the sign alone does not carry.
 
 # %% [markdown]
 # ## When a signature is worth the trouble
@@ -674,9 +721,9 @@ print(f"Mean signed area: {lead_lag.mean():+.5f}, standard deviation {lead_lag.s
 # | Column group | What it holds | Causal |
 # |---|---|---|
 # | `log-signature` terms | the shape of the trailing window, normalised inside it | yes |
-# | level-two time-price term | whether the window's move came early or late | yes |
-# | level-two price-volume term | whether volume moved ahead of price | yes |
-# | cross-asset level-two term | which of two assets moved first in the window | yes |
+# | level-two time-price term | how far and how long the path sat off its own chord | yes |
+# | level-two price-volume term | the orientation of the loop price and volume traced | yes |
+# | cross-asset level-two term | the orientation of the loop two assets traced together | yes |
 #
 # Each is computed from a trailing window whose every coordinate is normalised against that
 # window's own first observation, so a value stamped on a session is computable from that
@@ -685,8 +732,10 @@ print(f"Mean signed area: {lead_lag.mean():+.5f}, standard deviation {lead_lag.s
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **A signature keeps the order a summary statistic throws away.** Its first level is
-#    the total change, which any feature set already has; its second level is what it adds.
+# 1. **A signature keeps the joint geometry a summary statistic throws away.** Its first
+#    level is the total change in each coordinate, which any feature set already has; its
+#    second level is the signed area between pairs of coordinates, which nothing computed
+#    coordinate by coordinate can reach.
 # 2. **The time coordinate is not optional.** Without it, a window that rose and fell back
 #    is indistinguishable from one that never moved.
 # 3. **Use the log form.** It carries the same information in far fewer columns, because
