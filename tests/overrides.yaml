@@ -491,6 +491,18 @@
     MAX_SYMBOLS: 10
   timeout: 300
 12_gradient_boosting/09_xai_limitations:
+  # MAX_SYMBOLS is stated because this notebook declares the parameter for the reduced run and
+  # nothing set it, so CI fitted three LightGBMs and a 200-tree RandomForest on the full etfs
+  # panel and then ran TreeSHAP over the whole validation fold for each. It is the same
+  # reduction 11_ml_pipeline/05_shap_analysis takes for the same work.
+  #
+  # The cell is parallel (RandomForest at n_jobs=-1, and LightGBM inside it), which is why this
+  # entry read as green until it did not: unreduced it takes 123s of wall clock and 17m12s of
+  # CPU on 24 cores here, so a runner with a quarter of the cores spends most of the 300s
+  # budget and crosses it whenever it is contended. It passed on run 34318568178 and timed out
+  # on 34342897088 with nothing between them touching this notebook.
+  parameters:
+    MAX_SYMBOLS: 10
   timeout: 300
 12_gradient_boosting/10_shap_nlp_sentiment:
   docker_env: py312
@@ -3456,15 +3468,20 @@ case_studies/us_equities_panel/06_linear:
   # its own name rather than writing a partial member set under the canonical one.
   #
   # The two names are not a free choice. `preset_patches._trim_label_configs` rewrites the
-  # fixture's copy of every `config/training/fwd_*.yaml`, keeping the first
-  # `_MAX_CONFIGS_PER_FAMILY` entries of the `linear` and `gbm` families, and
-  # `load_model_configs` raises on any name the menu does not declare. So a name has to
-  # survive the trim, which for linear leaves `ols` and `ridge_a0.001` - the unpenalized
-  # baseline and the lightest ridge, which still exercises both code paths.
-  # `test_requested_configurations_survive_the_fixture_trim` pins this.
+  # fixture's copy of every `config/training/fwd_*.yaml`, keeping `_MAX_CONFIGS_PER_FAMILY`
+  # entries spanning the `linear` and `gbm` families, and `load_model_configs` raises on any
+  # name the menu does not declare. So a name has to survive the trim, which for this
+  # sixteen-entry linear menu leaves `ols` and `enet_a0.1` - the unpenalized baseline and the
+  # far end of the penalty path.
+  #
+  # It said `ridge_a0.001` while the trim took the head of the menu. That pair fits the same
+  # model twice: a penalty of 0.001 does not reorder predictions, so the two agree on every
+  # statistic the registry records, and the comparison this entry exists to exercise had no
+  # distinguishable outcome. `test_requested_configurations_survive_the_fixture_trim` pins the
+  # names against the trim as it actually runs.
   parameters:
     LABELS: [fwd_ret_1d]
-    CONFIG_NAMES: [ols, ridge_a0.001]
+    CONFIG_NAMES: [ols, enet_a0.1]
     POPULATION_NAME: ci-preview-linear
   # 300s stands. It was set when this entry was believed to fit 48 config-label pairs at two
   # folds each; it was in fact fitting all 48 at every fold, and the narrowing above cuts that
@@ -3482,14 +3499,14 @@ case_studies/us_equities_panel/07_gbm:
   # is set: the reduced run gets its own population rather than writing a partial one under
   # the canonical name.
   #
-  # `default_mae` and not `leaves_31_mse`, for the reason 06_linear gives above: the fixture's
-  # menu is trimmed to the first two of the `gbm` family and `leaves_31_mse` is not among them,
-  # so `load_model_configs` would have raised "configurations not declared" the moment this
-  # stage ran. It never did - 06_linear failed ahead of it on every regeneration that reached
-  # this far - so the entry was wrong and untested at the same time.
+  # `leaves_63_huber` and not `leaves_31_mse` or `default_mae`, for the reason 06_linear gives
+  # above: the fixture's menu keeps two entries spanning the `gbm` family, and
+  # `load_model_configs` raises "configurations not declared" on any other name the moment
+  # this stage runs. The pair varies both axes the family sweeps - leaf count and loss -
+  # where the head of the menu varied only the loss.
   parameters:
     LABELS: [fwd_ret_1d]
-    CONFIG_NAMES: [default_mse, default_mae]
+    CONFIG_NAMES: [default_mse, leaves_63_huber]
     POPULATION_NAME: ci-preview-gbm
   timeout: 300
 case_studies/us_equities_panel/08_tabular_dl:
