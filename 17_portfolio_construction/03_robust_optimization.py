@@ -908,8 +908,9 @@ rc_values = rc_table.to_numpy().T
 target_contribution = 100 / len(SYMBOLS)
 rp_max_deviation = float(np.abs(rc_table["Risk Parity"].to_numpy() - target_contribution).max())
 print(
-    f"Risk parity's target share is {target_contribution:.2f}% per asset; its largest deviation "
-    f"from that target in sample is {rp_max_deviation:.2f} percentage points."
+    f"Risk parity's target share is {target_contribution:.2f}% per asset. Its largest deviation "
+    f"from that target in sample is {rp_max_deviation:.1e} percentage points, which is the "
+    "solver's tolerance rather than a residual imbalance."
 )
 
 fig = go.Figure(

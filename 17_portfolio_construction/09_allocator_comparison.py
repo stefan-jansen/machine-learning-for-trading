@@ -725,7 +725,9 @@ def _build_backtest_result(
     metrics["avg_turnover"] = average_rebalance_turnover(turnover_list)
     annual_vol = float(np.std(returns_arr, ddof=1) * np.sqrt(252)) if len(returns_arr) > 1 else 0.0
     return {
-        "dates": dates_list,
+        # datetime64 rather than a list of pandas Timestamps: the static-image writer
+        # that renders each figure's PNG cannot serialize a Timestamp.
+        "dates": np.asarray(dates_list, dtype="datetime64[ns]"),
         "returns": returns_arr,
         "cumulative_return": np.cumprod(1 + returns_arr),
         "turnover": np.asarray(turnover_list, dtype=float),
@@ -886,6 +888,13 @@ comparison_df
 # mean per-rebalance half-turnover, $0.5\sum_i|w_{i,t}-w_{i,t-1}|$, over the union of current and
 # prior ETFs. It includes the initial allocation from cash; a switches-only convention would omit
 # the first observation. These four rows remain gross of explicit commission and slippage.
+#
+# The turnover column is the one to read carefully, because most of what it measures is not the
+# allocator's. Every rebalance replaces the selected set with whatever the ridge signal now ranks
+# first, and that replacement is identical across the four rows - so equal weight, which makes no
+# further decision, measures that floor exactly. What each other allocator adds is the gap
+# between its own number and equal weight's, and that gap is the only part of the column its
+# sizing rule is responsible for.
 
 # %%
 # Same numbers, formatted for readability
@@ -903,8 +912,9 @@ comparison_df.style.format(
 ).hide(axis="index")
 
 # %% [markdown]
-# **Trading implication**: If a method only marginally improves Sharpe but materially increases
-# turnover, the live edge is likely negative after costs.
+# **Trading implication**: an improvement in Sharpe has to be weighed against the turnover bought
+# with it, and the turnover to weigh is the gap above the equal-weight floor rather than the
+# column's absolute value. Chapter 18 prices that gap; nothing in this table does.
 
 # %% [markdown]
 # ### Practitioner Interpretation

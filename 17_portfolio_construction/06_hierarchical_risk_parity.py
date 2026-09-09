@@ -1236,8 +1236,9 @@ else:
 # %% [markdown]
 # ## 12. Reading the Result
 #
-# The comparison above is the notebook's evidence, so the first thing to do with it is to say
-# where HRP landed rather than to restate what HRP is supposed to achieve.
+# The comparison above is the notebook's evidence. What follows reads it rather than restating
+# what HRP is supposed to achieve, and it reads two columns rather than one: the Sharpe ratio the
+# allocators are ranked on, and the turnover each of them needed to get there.
 
 # %%
 ranked = metrics_df.sort_values("Sharpe Ratio", ascending=False).reset_index(drop=True)
@@ -1251,30 +1252,32 @@ print(f"HRP rank by Sharpe: {int(ranked.index[ranked['Method'] == 'HRP'][0]) + 1
 print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each month: 5")
 
 # %% [markdown] tags=["results"]
-# The ranking printed above splits the four allocators by how much of the covariance each one
-# uses, and the reason is specific.
+# Read the ranking against what each allocator had to estimate, because that is the axis the four
+# differ on. Equal weight estimates nothing. Inverse volatility estimates one variance per asset.
+# HRP reads the correlations to build the tree and order the assets, and each split then compares
+# its two halves on their cluster variances, which `cluster_variance` computes as
+# $w^\top \Sigma w$ over the block - so the off-diagonal entries reach the weights. Minimum
+# variance with Ledoit-Wolf shrinkage reads and inverts the whole matrix.
 #
-# The argument for HRP is that inverting a noisy covariance matrix amplifies estimation error.
-# The argument has force when the estimate is badly under-determined, which means when the number
-# of assets approaches or exceeds the number of observations. This comparison is the opposite
-# case: five selected assets estimated over 252 daily observations. At that ratio the sample
-# covariance is well conditioned, its inverse is not dominated by noise, and Ledoit-Wolf shrinkage
-# cleans up what error remains - so the allocator that does invert it comes out ahead of the one
-# that declines to.
+# Whether estimating more pays depends on how good the estimate is, and the ratio that decides
+# that is not favourable to the elaborate methods here. The argument for HRP is that inverting a
+# noisy covariance matrix amplifies estimation error, and it has force when the estimate is badly
+# under-determined - when the number of assets approaches or exceeds the number of observations.
+# This comparison is the opposite case: five selected assets estimated over 252 daily
+# observations, where the sample covariance is well conditioned and its inverse is not dominated
+# by noise. The regime HRP was designed for is not the regime tested here, so wherever it lands
+# in this table, the table is not evidence about that regime.
 #
-# HRP is not covariance-free, and section 4 says why. It reads the correlations to build the tree
-# and order the assets, and each split then compares its two halves on their cluster variances,
-# which `cluster_variance` computes as $w^\top \Sigma w$ over the block - so the off-diagonal
-# entries reach the weights. What HRP never does is invert the matrix, and that is the property
-# it is chosen for: it returns weights whatever the conditioning, where inversion does not.
-# Inverse volatility and equal weight read no off-diagonal information at all.
+# What HRP never does is invert the matrix, and that is the property it is chosen for: it returns
+# weights whatever the conditioning, where inversion has no unique solution at all once the
+# assets outnumber the observations.
 #
-# The turnover column refuses a second common claim. Clustering is often described as producing
-# more stable allocations; here HRP turns over more than equal weight and more than inverse
-# volatility. Most of the turnover in every row comes from the monthly re-selection of five names
-# out of fifteen, which is identical across allocators - equal weight measures that floor. What
-# each allocator adds on top of the floor is its own reshuffling, and HRP adds more than the two
-# simpler methods do.
+# The turnover column carries a second reading, and it is the one that survives a different
+# sample. Clustering is often described as producing more stable allocations. Most of the
+# turnover in every row here comes from the monthly re-selection of five names out of fifteen,
+# which is identical across allocators, so equal weight measures that floor directly; what each
+# other row adds on top of the floor is its own reshuffling. Read the gap between each allocator
+# and the equal-weight row rather than its absolute turnover.
 #
 # ### What is true regardless of the ranking
 #
@@ -1321,14 +1324,16 @@ else:
 #    correlations and variances, so it reduces the exposure to estimation error rather than
 #    removing it.
 # 2. **Avoiding inversion pays off when the estimate is under-determined.** With five assets and
-#    252 observations it is not, and shrinkage MVO leads this comparison. The case for HRP is
-#    strongest when the number of assets approaches or exceeds the sample length, which is a
-#    regime this notebook does not test.
+#    252 observations it is not, so nothing in this comparison exercises the property HRP is
+#    chosen for. The case for it is strongest when the number of assets approaches or exceeds the
+#    sample length, and that regime is not tested here.
 # 3. **HRP concentrates too, on the low-variance assets.** Section 7 traces a majority weight in a
 #    single bond fund to two successive inverse-variance splits. Risk-based is not the same thing
 #    as diversified.
-# 4. **Clustering did not stabilize the allocation here.** HRP turned over more than equal weight
-#    and inverse volatility, over and above the monthly re-selection every method shares.
+# 4. **Turnover is measured against the floor, not in absolute terms.** Every allocator inherits
+#    the churn of the monthly re-selection, and equal weight measures that floor exactly. What
+#    tests the claim that clustering stabilizes an allocation is the gap between HRP's turnover
+#    and equal weight's, not HRP's own number.
 # 5. **The comparison is conditional in three ways.** A fixed 15-ETF ex-post universe, gross of
 #    costs in the vectorized path, and a selection signal ranked on validation data. It shows
 #    allocation behavior, not an out-of-sample estimate.

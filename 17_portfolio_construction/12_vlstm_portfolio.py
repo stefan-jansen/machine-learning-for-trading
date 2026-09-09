@@ -786,9 +786,13 @@ show_with_alt(
 # signal are held in inverse proportion to their volatilities, and two with the same volatility
 # in proportion to their signals.
 #
-# The right panel is where the cost lives. Occasional spikes as the signal changes sign are what
-# an allocator reacting to new information looks like; a level that stays high says the positions
-# are being churned every day, and section 15 prices what that would cost.
+# The right panel is where the cost lives, and it is worth being precise about whose change it
+# plots. A position is the inverse-volatility scaling multiplied by the signal, so it moves when
+# either term moves. The volatility estimate is a rolling standard deviation over `VOL_LOOKBACK`
+# sessions, which drifts rather than jumps, so it supplies the slow component and the signal
+# supplies the fast one. A spike is the network changing its mind. A level that stays high says
+# the positions are being churned every day, whichever term is doing it, and section 15 prices
+# what that would cost.
 
 # %% [markdown]
 # ## 14. Variable Selection Weights

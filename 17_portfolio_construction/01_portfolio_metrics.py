@@ -431,10 +431,8 @@ for i, dd in enumerate(drawdown.top_drawdowns, 1):
     print(f"      Valley:          {dd.valley_date.date()}")
     print(f"      Recovered:       {dd.recovery_date.date() if dd.recovery_date else 'not yet'}")
     print(f"      Peak to valley:  {dd.duration_days} sessions")
-    print(
-        f"      Valley to peak:  "
-        f"{dd.recovery_days if dd.recovery_days is not None else 'not yet'} sessions"
-    )
+    recovery = f"{dd.recovery_days} sessions" if dd.recovery_days is not None else "still under"
+    print(f"      Valley to peak:  {recovery}")
 
 
 # %% [markdown]

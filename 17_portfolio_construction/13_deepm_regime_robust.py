@@ -715,9 +715,13 @@ regime_results = pd.DataFrame(
 regime_results
 
 # %% [markdown]
-# **Finding**: The calm-versus-crisis gap is the direct diagnostic. A smaller gap in
-# this seeded run is consistent with the SoftMin objective, but attribution requires
-# replication across seeds and samples.
+# Read the gap column against what SoftMin actually optimizes. The penalty raises the Sharpe
+# ratio of the weakest *training* windows, which are consecutive blocks of the training period
+# and have nothing to do with SPY's volatility; the split here is a holdout diagnostic applied
+# afterwards. So the gap can move either way between the two variants without contradicting the
+# objective, and whichever way it moves in one seeded run is not an estimate of the SoftMin
+# effect. What the column does test is whether the policy that lifted its weakest training
+# windows also holds up in the volatile half of the holdout.
 
 # %% [markdown]
 # ## 12. Drawdown Analysis
