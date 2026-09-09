@@ -21,8 +21,8 @@
 #
 # **Docker image**: `ml4t-py312`
 #
-# > **Docker required**: This notebook uses `gensim`, which has no Python 3.14 support.
-# > Run with:
+# > **Docker required**: this notebook uses `gensim`, which does not build against the
+# > Python version the rest of the repository runs on. Run it with:
 # > ```bash
 # > docker compose --profile py312 run --rm py312 python 10_text_feature_engineering/02_asset_embeddings.py
 # > ```
@@ -69,15 +69,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from gensim.models import Word2Vec
-from sklearn.manifold import TSNE
 
 from data import load_13f_stock_features
 from utils.config import ML4T_DATA_PATH
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
-warnings.filterwarnings("ignore")
+# gensim builds its Cython extensions against an older NumPy ABI and reaches scipy through
+# a deprecated path. Both are import-time and neither can report a problem with the
+# arithmetic below, which stays visible.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="gensim")
+warnings.filterwarnings("ignore", category=UserWarning, module="gensim")
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides for CI
@@ -191,11 +194,15 @@ holdings.group_by("company_name").agg(
 # This preserves the key insight: stocks with similar portfolio weights
 # (similar "positions" in the sentence) should have similar embeddings.
 
+# %% [markdown]
+# One sentence per institution, and the deduplication matters. A single filer can submit
+# several 13F-HR filings in one quarter - amendments, or separate subsidiaries - so the same
+# stock appears more than once for the same `cik`. Left in, those duplicates would put a
+# stock next to itself in its own sentence and teach the model that it co-occurs with itself.
+# Collapsing to the largest reported value per pair removes that before the ordering is taken.
+
+
 # %%
-# Build one portfolio sentence per institution.
-# A single cik can submit multiple 13F-HR filings within a quarter (amendments,
-# multiple subsidiaries); collapse to one position per (cik, cusip) by keeping
-# the largest reported holding value, then sort positions descending by value.
 portfolio_positions = (
     holdings.group_by(["cik", "cusip"])
     .agg(pl.col("value_thousands").max())
@@ -388,20 +395,22 @@ subset_cusips = [all_cusips[i] for i in top_indices]
 
 print(f"Selected {len(subset_cusips)} most widely-held stocks for visualization")
 
-# %%
-# t-SNE projection
-print("Running t-SNE dimensionality reduction...")
-tsne = TSNE(n_components=2, perplexity=30, random_state=SEED, max_iter=1000)
-embeddings_2d = tsne.fit_transform(subset_embeddings)
+# %% [markdown]
+# ### Measuring the claim rather than projecting it
+#
+# The claim is that stocks held by the same institutions end up close together. That is a
+# statement about distances in the model's hundred-dimensional space, so measure it there.
+#
+# A two-dimensional projection is the tempting picture and it does not test this. t-SNE
+# distorts the points at the edge of a cloud hardest, and the mega-caps here are exactly
+# those points: run on this subset it presses all ten into a single spot against the left
+# boundary, which looks like strong evidence and is a property of the projection.
+#
+# So: take the recognizable mega-caps, measure every pair among them, and compare that
+# against the same stocks' similarity to a random draw from the rest of the widely-held
+# universe. If co-ownership drives the geometry, the first should exceed the second.
 
 # %%
-# Visualize
-fig, ax = plt.subplots(figsize=(12, 10))
-
-# Plot all points
-ax.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], alpha=0.5, s=20, c=COLORS["neutral"])
-
-# Highlight recognizable stocks
 highlight_keywords = [
     "APPLE",
     "MICROSOFT",
@@ -414,46 +423,67 @@ highlight_keywords = [
     "JPMORGAN",
     "EXXON",
 ]
-highlighted = [
-    (i, cusip_to_name.get(c, ""))
-    for i, c in enumerate(subset_cusips)
+mega_caps = [
+    (c, cusip_to_name.get(c, ""))
+    for c in subset_cusips
     if cusip_to_name.get(c, "")
     and any(kw in cusip_to_name.get(c, "").upper() for kw in highlight_keywords)
 ]
-# Order labels top-to-bottom by 2D y-coordinate, then fan them out to the right
-# with leader lines so they no longer stack at the highlight cluster.
-highlighted.sort(key=lambda t: -embeddings_2d[t[0], 1])
-x_max = embeddings_2d[:, 0].max()
-y_min, y_max = embeddings_2d[:, 1].min(), embeddings_2d[:, 1].max()
-n_h = max(len(highlighted), 1)
-for slot, (i, name) in enumerate(highlighted):
-    x_pt, y_pt = embeddings_2d[i, 0], embeddings_2d[i, 1]
-    ax.scatter(x_pt, y_pt, s=100, c=COLORS["amber"], zorder=5)
-    short_name = name[:20] + "..." if len(name) > 20 else name
-    label_x = x_max + 0.10 * (x_max - embeddings_2d[:, 0].min())
-    label_y = y_max - slot * (y_max - y_min) / max(n_h - 1, 1)
-    ax.annotate(
-        short_name,
-        xy=(x_pt, y_pt),
-        xytext=(label_x, label_y),
-        fontsize=9,
-        alpha=0.9,
-        ha="left",
-        va="center",
-        arrowprops=dict(arrowstyle="-", color=COLORS["amber"], lw=0.6, alpha=0.6),
-    )
+mega_cusips = [c for c, _ in mega_caps]
+mega_labels = [name[:18] for _, name in mega_caps]
+print(f"Recognizable mega-caps found in the vocabulary: {len(mega_cusips)}")
 
-ax.set_xlabel("t-SNE Dimension 1")
-ax.set_ylabel("t-SNE Dimension 2")
-ax.set_title("Stocks with similar institutional ownership cluster together")
-plt.tight_layout()
-plt.show()
+others = [c for c in subset_cusips if c not in set(mega_cusips)]
+rng_pairs = np.random.default_rng(SEED)
+comparison = list(rng_pairs.choice(others, size=min(100, len(others)), replace=False))
+
+within = [
+    model.wv.similarity(a, b) for i, a in enumerate(mega_cusips) for b in mega_cusips[i + 1 :]
+]
+across = [model.wv.similarity(a, b) for a in mega_cusips for b in comparison]
+
+print(f"Mean similarity among the mega-caps:        {np.mean(within):.3f}")
+print(f"Mean similarity to other widely-held stocks: {np.mean(across):.3f}")
+
+# %%
+similarity_matrix = np.array(
+    [[model.wv.similarity(a, b) for b in mega_cusips] for a in mega_cusips]
+)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
+image = ax.imshow(similarity_matrix, cmap="Blues", vmin=0, vmax=1)
+ax.set_xticks(range(len(mega_labels)))
+ax.set_yticks(range(len(mega_labels)))
+ax.set_xticklabels(mega_labels, rotation=90, fontsize=6)
+ax.set_yticklabels(mega_labels, fontsize=6)
+fig.colorbar(image, ax=ax, shrink=0.7, label="Cosine similarity")
+ax.set_title("Cosine similarity among widely recognized holdings")
+
+show_with_alt(
+    fig,
+    "A square matrix of cosine similarities between the embeddings of about ten large, widely "
+    "recognized companies, shaded light at zero and dark at one. Away from the dark diagonal "
+    "where each company meets itself, the cells are uniformly dark, so every pair of these "
+    "companies is close to every other pair rather than a few pairs standing out.",
+)
+
+# %% [markdown]
+# The two printed means are the test and the matrix shows its shape. These companies sit
+# close to one another and further from a random draw of other widely-held stocks, which is
+# what co-ownership predicts: an institution large enough to file a 13F holds most of them,
+# so they appear in the same portfolios in the same region of the ordering.
+#
+# It is worth being clear about what that does not establish. These are the most widely held
+# stocks in the sample, so they co-occur with almost everything, and a method that placed all
+# frequent items together for no other reason would produce the same picture. The benchmark
+# below is the test that separates those, because predicting a masked holding requires the
+# geometry to distinguish among stocks rather than merely group the popular ones.
 
 # %% [markdown]
 # ## Managed Portfolio Benchmark: Masked Asset Prediction
 #
 # This is the key empirical test from Gabaix et al. (2025). The benchmark asks:
-# **Can embeddings predict which stock belongs in a portfolio?**
+# **Given the rest of a portfolio, can the embeddings name the holding that was removed?**
 #
 # Methodology:
 # 1. For each test portfolio, mask one position (e.g., the 5th largest holding)
@@ -746,26 +776,47 @@ for label, stats in boot_stats.items():
         f"(n={stats['n']})"
     )
 
-# Compute improvement over random
-avg_hits5 = np.mean([m["hits@5"] for m in benchmark_results.values() if m["total"] > 0])
-improvement = avg_hits5 / random_hits5
+# %% [markdown]
+# ### One number over all of it, pooled rather than averaged
+#
+# A single rate for the whole benchmark has to be computed over the masked positions, not
+# over the buckets. The buckets hold very different numbers of positions, so averaging their
+# three rates would weight a bucket of four thousand the same as one of twelve thousand and
+# report something no set of trials produced.
+#
+# Its confidence interval has to be bootstrapped on the pooled indicators for the same
+# reason. Averaging the three buckets' interval endpoints yields a pair of numbers with no
+# coverage property at all - it is not an interval for the pooled rate, or for anything else.
+#
+# The pooled figure is the one to quote and the least informative one here. It is dominated by
+# the two large deep-position buckets, where the task is hardest, so it understates what the
+# method does near the top of a portfolio and overstates what it does at the bottom. The
+# per-bucket table above is what carries the finding.
 
-# CI on improvement
-avg_ci_lower = np.mean([s["ci_lower"] for s in boot_stats.values()])
-avg_ci_upper = np.mean([s["ci_upper"] for s in boot_stats.values()])
-improvement_lower = avg_ci_lower / random_hits5
-improvement_upper = avg_ci_upper / random_hits5
+# %%
+pooled_hits5 = np.array([r.hit5 for r in hit_records])
+pooled_rate = pooled_hits5.mean()
 
-print("\nSUMMARY")
-print(f"  Word2Vec Hits@5 (avg over position buckets): {avg_hits5:.1%}")
-print(f"  Random baseline Hits@5:                      {random_hits5:.4%}")
+rng = np.random.default_rng(SEED)
+pooled_boot = np.array(
+    [
+        pooled_hits5[rng.integers(0, len(pooled_hits5), len(pooled_hits5))].mean()
+        for _ in range(CONFIG["benchmark"]["bootstrap_iterations"])
+    ]
+)
+pooled_lower, pooled_upper = np.percentile(pooled_boot, [2.5, 97.5])
+
+print(f"Masked positions scored: {len(pooled_hits5):,}")
+print(f"Pooled Hits@5: {pooled_rate:.1%} [95% CI: {pooled_lower:.1%} - {pooled_upper:.1%}]")
+print(f"Random baseline Hits@5: {random_hits5:.4%}")
 print(
-    f"  Improvement over random: {improvement:.0f}x [95% CI: {improvement_lower:.0f}x - {improvement_upper:.0f}x]"
+    f"Improvement over random: {pooled_rate / random_hits5:.0f}x "
+    f"[95% CI: {pooled_lower / random_hits5:.0f}x - {pooled_upper / random_hits5:.0f}x]"
 )
 
 # %%
 # Visualize benchmark results
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
 
 # Left: Accuracy by position range
 labels = list(benchmark_results.keys())
@@ -780,26 +831,33 @@ ax.bar(x + width / 2, hits10, width, label="Hits@10", color=COLORS["amber"])
 ax.axhline(
     y=random_hits5, color=COLORS["neutral"], linestyle="--", label=f"Random@5 ({random_hits5:.2%})"
 )
-ax.set_xlabel("Position Range")
-ax.set_ylabel("Accuracy")
-ax.set_title("Masked Asset Prediction Accuracy")
+ax.set_xlabel("Position in the portfolio, by holding value")
+ax.set_ylabel("Share of masked positions recovered")
+ax.set_title("Hits@5 and Hits@10 by portfolio position")
 ax.set_xticks(x)
-ax.set_xticklabels(labels, rotation=15)
-ax.legend()
+ax.set_xticklabels(labels, rotation=15, fontsize=7)
+ax.legend(fontsize=7)
 ax.set_ylim(0, max(max(hits10), 0.01) * 1.3)
 
 # Right: MRR by position range
 mrrs = [m["mrr"] for m in benchmark_results.values()]
 ax = axes[1]
 ax.bar(x, mrrs, color=COLORS["blue"])
-ax.set_xlabel("Position Range")
-ax.set_ylabel("Mean Reciprocal Rank")
-ax.set_title("Mean Reciprocal Rank by Position")
+ax.set_xlabel("Position in the portfolio, by holding value")
+ax.set_ylabel("Mean reciprocal rank")
+ax.set_title("Mean reciprocal rank by portfolio position")
 ax.set_xticks(x)
-ax.set_xticklabels(labels, rotation=15)
+ax.set_xticklabels(labels, rotation=15, fontsize=7)
 
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels sharing the same three position buckets on their horizontal axes, ordered "
+    "from the largest holdings in a portfolio to the smallest. The left panel has a pair of "
+    "bars per bucket for the top-5 and top-10 recovery rates against a dashed line near zero "
+    "for the random baseline; both bars fall steeply from the first bucket to the third, and "
+    "by the third they are close to the baseline. The right panel shows mean reciprocal rank "
+    "over the same buckets and falls in the same way.",
+)
 
 # %% [markdown]
 # ## Benchmark Interpretation
@@ -829,14 +887,10 @@ plt.show()
 # 2. **Word2Vec**: Skip-gram on portfolio sentences (what we did here)
 # 3. **BERT**: Transformer with attention for contextualized embeddings
 #
-# Their key findings:
-# - **4D embeddings explain >50% of valuation variation** (vs 15% for characteristics)
-# - Word2Vec excels at the **managed portfolio benchmark** (predicting masked assets)
-# - Text embeddings from OpenAI/Cohere perform **poorly**-portfolio data captures
-#   information that company descriptions cannot
-#
-# Our implementation demonstrates the Word2Vec approach, showing how NLP methods
-# transfer directly to financial data.
+# This notebook implements the second of those and reproduces the masked-holding benchmark
+# protocol on a single-quarter 13F snapshot. The paper's own comparisons between the three
+# methods, and its results on valuation variance, are not reproduced here and are not
+# measured by anything above; the takeaways below say which numbers came from where.
 
 # %% [markdown]
 # ## Applications
@@ -895,12 +949,11 @@ print("(Lower = more diversified in terms of institutional ownership patterns)")
 #    measurements are the Hits@k and MRR values printed above, with
 #    bootstrap CIs and the vs-random improvement multiple.
 #
-# 4. **Paper-reported comparisons (not measured here)**: Gabaix et al. (2025)
-#    report 4D embeddings explaining >50% of valuation variation versus
-#    ~15% for characteristics, and report that text-only embeddings from
-#    OpenAI/Cohere underperform portfolio-derived embeddings on the same
-#    benchmark. These numbers come from the paper, not from this notebook's
-#    benchmark run; see the paper for the full set of comparisons.
+# 4. **Keep the paper's numbers and the notebook's apart.** Gabaix et al. report results on
+#    valuation variance and a comparison against text-only embeddings that nothing here
+#    measures. This notebook's own measurements are the per-bucket recovery rates, the pooled
+#    rate and its bootstrap interval, and the improvement multiple over the random baseline.
+#    Read the paper for the rest rather than inferring it from these.
 #
 # 5. **Practical applications**: Stock substitution, diversification,
 #    crowding detection, and enhanced risk models.
@@ -947,10 +1000,16 @@ results_artifact = {
         }
         for label, stats in boot_stats.items()
     },
+    "pooled_hits5": {
+        "point_estimate": float(pooled_rate),
+        "ci_lower_95": float(pooled_lower),
+        "ci_upper_95": float(pooled_upper),
+        "n_positions": int(len(pooled_hits5)),
+    },
     "improvement_over_random": {
-        "point_estimate": improvement,
-        "ci_lower_95": improvement_lower,
-        "ci_upper_95": improvement_upper,
+        "point_estimate": float(pooled_rate / random_hits5),
+        "ci_lower_95": float(pooled_lower / random_hits5),
+        "ci_upper_95": float(pooled_upper / random_hits5),
     },
 }
 
@@ -988,7 +1047,10 @@ with open(results_file, "w") as f:
     f.write(f"- Vocabulary size: {vocab_size:,} stocks\n")
     f.write(f"- Random Hits@5: {random_hits5:.4%} (= 5/{vocab_size:,})\n")
     f.write(
-        f"- **Improvement over random: {improvement:.0f}x** [95% CI: {improvement_lower:.0f}x - {improvement_upper:.0f}x]\n\n"
+        f"- Pooled Hits@5: {pooled_rate:.1%} "
+        f"[95% CI: {pooled_lower:.1%} - {pooled_upper:.1%}], over {len(pooled_hits5):,} positions\n"
+        f"- **Improvement over random: {pooled_rate / random_hits5:.0f}x** "
+        f"[95% CI: {pooled_lower / random_hits5:.0f}x - {pooled_upper / random_hits5:.0f}x]\n\n"
     )
     f.write("## Key Insight\n")
     f.write("Word2Vec on portfolio data learns stock representations that capture\n")
