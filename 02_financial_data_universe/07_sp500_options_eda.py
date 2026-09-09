@@ -91,6 +91,13 @@ FORWARD_DAYS = 5
 # near-dated chain, which carries many more strikes.
 SURFACE_MAX_DAYS = 180
 
+# The spread section deliberately reaches further out than CHAIN_BAND, because what happens in
+# the wings is its subject.
+SPREAD_BAND = (0.5, 1.5)
+
+# "Near the money" for the spread summary; outside it either way is "away from the money".
+WING_BAND = (0.9, 1.1)
+
 # Options priced below this are quoted in ticks rather than in a spread, so a percentage
 # spread computed from them says more about the tick size than about liquidity.
 MIN_MID_PRICE = 0.10
@@ -352,7 +359,7 @@ aapl_calls = (
         & (pl.col("implied_vol") < 2.0)  # Filter outliers
     )
     .with_columns((pl.col("strike") / pl.col("underlying_price")).alias("moneyness"))
-    .filter(pl.col("moneyness").is_between(0.7, 1.3))  # Focus on tradeable range
+    .filter(pl.col("moneyness").is_between(*CHAIN_BAND))
 )
 
 heatmap_source = aapl_calls.filter(pl.col("days_to_maturity") <= SURFACE_MAX_DAYS)
@@ -413,7 +420,9 @@ show_plotly_with_alt(
 #
 # Read a column from bottom to top and the smile is there as shading rather than as a curve:
 # dark at the low strikes, almost white in a band around the spot line, and darkening again
-# across the high strikes. The two ends are not equally dark, and that asymmetry is the skew.
+# across the high strikes. The two ends are not equally dark, which is the skew - with the
+# caveat developed in the smile section below that these are calls, so the low-strike end is
+# in-the-money calls rather than the out-of-the-money puts the usual explanation names.
 # Read a row from left to right and the variation flattens as the expiration moves out, which
 # is the term structure converging on a long-run level.
 #
@@ -455,15 +464,17 @@ show_plotly_with_alt(
 # The curve is a smile: implied volatility is lowest close to the money and rises on both
 # sides. Strikes far from spot cost more volatility than strikes near it, in either direction.
 #
-# **What this chart cannot show is the skew.** Skew is the asymmetry between downside and
-# upside protection, and the usual statement of it compares out-of-the-money puts with
-# out-of-the-money calls. Every point here is a call. The left half of the curve is therefore
-# in-the-money calls, not out-of-the-money puts, and those two are different instruments even
-# where they share a strike.
+# It is also not symmetric, and that asymmetry is the skew. What needs care is the reading
+# usually attached to it. Skew is normally explained as the market paying more for downside
+# protection than for upside, and that explanation compares out-of-the-money **puts** with
+# out-of-the-money calls. Every point on this curve is a call, so its left half is in-the-money
+# calls rather than out-of-the-money puts.
 #
-# Put-call parity ties their prices together, so the two IVs at one strike should agree closely
-# in a well-behaved chain - which is a claim worth checking rather than assuming, and the next
-# cell checks it.
+# Those are different contracts, and reading one as the other is a step that needs justifying
+# rather than assuming. Put-call parity is the justification: it ties a call and a put at the
+# same strike and expiration together tightly enough that they should imply nearly the same
+# volatility. Whether they do in this file is a question the file can answer, so the next cell
+# asks it.
 
 # %%
 _exp = nearest_exp
@@ -513,7 +524,7 @@ show_plotly_with_alt(
 # %%
 # ATM IV term structure (moneyness 0.98-1.02)
 atm_term = (
-    aapl_calls.filter(pl.col("moneyness").is_between(0.98, 1.02))
+    aapl_calls.filter(pl.col("moneyness").is_between(*ATM_BAND))
     .group_by("expiration")
     .agg(
         [
@@ -598,7 +609,7 @@ converged = options.filter(pl.col("iv_convergence") == "Converged")
 cross_section = (
     converged.filter(pl.col("timestamp") == sample_date)
     .with_columns((pl.col("strike") / pl.col("underlying_price")).alias("moneyness"))
-    .filter(pl.col("moneyness").is_between(0.98, 1.02))
+    .filter(pl.col("moneyness").is_between(*ATM_BAND))
     .filter(pl.col("call_put") == "C")
     .group_by("symbol")
     .agg(
@@ -652,7 +663,7 @@ show_plotly_with_alt(
 # Daily aggregate IV statistics
 daily_iv = (
     converged.with_columns((pl.col("strike") / pl.col("underlying_price")).alias("moneyness"))
-    .filter(pl.col("moneyness").is_between(0.98, 1.02))
+    .filter(pl.col("moneyness").is_between(*ATM_BAND))
     .filter(pl.col("call_put") == "C")
     .group_by("timestamp")
     .agg(
@@ -775,7 +786,7 @@ spread_analysis.select(["spread_abs", "spread_pct"]).describe()
 
 # %%
 spread_by_moneyness = (
-    spread_analysis.filter(pl.col("moneyness").is_between(CHAIN_BAND[0] - 0.2, CHAIN_BAND[1] + 0.2))
+    spread_analysis.filter(pl.col("moneyness").is_between(*SPREAD_BAND))
     .with_columns((pl.col("moneyness") * 20).round() / 20)
     .group_by("moneyness")
     .agg(
@@ -820,28 +831,28 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
+# The two summaries below are computed over the quotes themselves rather than over the chart's
+# buckets. The buckets hold very unequal numbers of quotes, so a median of per-bucket ninetieth
+# percentiles is not the ninetieth percentile of anything, and averaging per-bucket breach
+# shares would weight a thin far-wing bucket the same as a crowded one beside the money.
+
 # %%
-_atm = spread_by_moneyness.filter(pl.col("moneyness") == 1.0)
-_wings = spread_by_moneyness.filter(~pl.col("moneyness").is_between(0.9, 1.1))
-print(
-    f"At the money, median spread {_atm['median_spread'][0]:.1%}, "
-    f"90th percentile {_atm['p90_spread'][0]:.1%}"
-)
-print(
-    f"Away from the money (beyond 10% either side), median spread "
-    f"{_wings['median_spread'].median():.1%}, 90th percentile {_wings['p90_spread'].median():.1%}"
-)
-print(
-    f"Share of quotes wider than half the mid price, at the money: "
-    f"{_atm['share_over_50pct'][0]:.1%}"
-)
-print(f"  and away from the money: {_wings['share_over_50pct'].median():.1%}")
+_in_band = spread_analysis.filter(pl.col("moneyness").is_between(*SPREAD_BAND))
+_near = _in_band.filter(pl.col("moneyness").is_between(*WING_BAND))
+_wings = _in_band.filter(~pl.col("moneyness").is_between(*WING_BAND))
+
+for label, frame in [("Near the money", _near), ("Away from it", _wings)]:
+    print(
+        f"{label:16s} n={len(frame):9,}  median {frame['spread_pct'].median():6.1%}  "
+        f"90th pct {frame['spread_pct'].quantile(0.9):6.1%}  "
+        f"wider than half the mid {(frame['spread_pct'] > 0.5).mean():5.1%}"
+    )
 
 # %% [markdown]
-# The median spread barely moves across the plotted range, and reading only the medians would
+# The median spread barely moves between the two groups, and reading only the medians would
 # suggest that moneyness costs a strategy almost nothing. The ninetieth percentile tells a
-# different story, and it is the one that binds: away from the money a substantial minority of
-# quotes are wider than half the mid price, which at the money almost never happens.
+# different story and it is the one that binds: away from the money it is well over twice what
+# it is near the money, and quotes wider than half the mid price are several times as common.
 #
 # The practical consequence is about which statistic to trade on. A cost model calibrated to
 # the median spread of this universe would be roughly right at the money and badly optimistic
@@ -1017,7 +1028,7 @@ else:
 # Compute ATM IV per symbol/date
 atm_iv = (
     converged.with_columns((pl.col("strike") / pl.col("underlying_price")).alias("moneyness"))
-    .filter(pl.col("moneyness").is_between(0.98, 1.02))
+    .filter(pl.col("moneyness").is_between(*ATM_BAND))
     .filter(pl.col("call_put") == "C")
     .with_columns((pl.col("moneyness") - 1.0).abs().alias("atm_distance"))
     .sort(["timestamp", "symbol", "atm_distance"])
@@ -1277,11 +1288,11 @@ print("=" * 70)
 #    index recovered. The day expected volatility peaked is not the day the index bottomed, and
 #    the chart marks both so the gap between them is visible.
 #
-# 6. **Spread punishes the wings through its tail, not its median.** Median spread is nearly
-#    flat across the plotted moneyness range; the ninetieth percentile is not, and away from
-#    the money a substantial minority of quotes are wider than half the mid price. A cost model
-#    fitted to the median would be roughly right at the money and badly optimistic exactly
-#    where a convexity strategy wants to trade.
+# 6. **Spread punishes the wings through its tail, not its median.** The median spread is
+#    almost the same near the money and away from it; the ninetieth percentile is not, and
+#    quotes wider than half the mid price are several times as common in the wings. A cost
+#    model fitted to the median would be roughly right at the money and badly optimistic
+#    exactly where a strategy buying convexity wants to trade.
 #
 # 7. **The IV-return relationship is a hypothesis, not a finding.** The correlation is small
 #    and negative, and it is much the same figure with the crash window removed and with the
