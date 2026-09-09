@@ -182,9 +182,16 @@ def missing_required_env(overrides: dict) -> list[str]:
 GPU_CAPABILITIES = ("torch", "lightgbm_cuda")
 
 
+# The message LightGBM raises when the build itself lacks CUDA, as opposed to when a build that
+# has it cannot get the card right now. Only the first is a property of the installation, and
+# only the first is a reason to skip: a busy 3090 is a reason to wait or to fail loudly, never to
+# report a notebook as needing hardware it has.
+_NO_CUDA_BUILD = "was not enabled in this build"
+
+
 @functools.lru_cache(maxsize=1)
-def _cuda_lightgbm_available() -> bool:
-    """Whether the installed LightGBM was built with `-DUSE_CUDA=1`.
+def _cuda_lightgbm_probe() -> str | None:
+    """None if a CUDA LightGBM fit works here, else why it did not.
 
     Asked by fitting one stump rather than by reading a version or a build flag, because
     LightGBM exposes no build-configuration attribute and the failure it produces is a
@@ -202,7 +209,7 @@ def _cuda_lightgbm_available() -> bool:
         import lightgbm as lgb
         import numpy as np
     except ImportError:
-        return False
+        return "lightgbm is not installed"
     try:
         saved = os.dup(2)
     except OSError:  # no descriptor 2 to borrow; the noise is not worth failing over
@@ -223,13 +230,15 @@ def _cuda_lightgbm_available() -> bool:
                     lgb.Dataset(np.zeros((20, 2)), label=np.arange(20) % 2),
                     num_boost_round=1,
                 )
-            except Exception:  # noqa: BLE001 - any failure means the build cannot be used
-                return False
+            except Exception as exc:  # noqa: BLE001 - the message is the answer
+                if _NO_CUDA_BUILD in str(exc):
+                    return "the installed LightGBM has no CUDA build"
+                return f"the CUDA LightGBM probe failed for another reason: {exc}"
     finally:
         if saved is not None:
             os.dup2(saved, 2)
             os.close(saved)
-    return True
+    return None
 
 
 def gpu_skip_reason(overrides: dict) -> str | None:
@@ -274,8 +283,10 @@ def gpu_skip_reason(overrides: dict) -> str | None:
                 return "declares gpu: torch, and torch is not installed"
             if not torch.cuda.is_available():
                 return "declares gpu: torch, and torch reports no CUDA device"
-        elif not _cuda_lightgbm_available():
-            return "declares gpu: lightgbm_cuda, and the installed LightGBM has no CUDA build"
+        else:
+            failure = _cuda_lightgbm_probe()
+            if failure is not None:
+                return f"declares gpu: lightgbm_cuda, and {failure}"
     return None
 
 

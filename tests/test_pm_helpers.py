@@ -1732,10 +1732,14 @@ def _capabilities(monkeypatch, *, torch_cuda: bool, lightgbm_cuda: bool) -> None
         types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: torch_cuda)),
     )
     # Already replaced by an earlier call in the same test, so the cache may be gone.
-    clear = getattr(pm_helpers._cuda_lightgbm_available, "cache_clear", None)
+    clear = getattr(pm_helpers._cuda_lightgbm_probe, "cache_clear", None)
     if clear is not None:
         clear()
-    monkeypatch.setattr(pm_helpers, "_cuda_lightgbm_available", lambda: lightgbm_cuda)
+    monkeypatch.setattr(
+        pm_helpers,
+        "_cuda_lightgbm_probe",
+        lambda: None if lightgbm_cuda else "the installed LightGBM has no CUDA build",
+    )
 
 
 def test_no_gpu_declaration_never_skips(monkeypatch) -> None:
@@ -1801,13 +1805,61 @@ def test_the_real_probe_runs_and_stays_quiet_under_pytest_capture(capfd) -> None
     so the probe takes descriptor 2 by number. Every other test here replaces the probe, which
     would leave that exact interaction uncovered. This one calls it.
     """
-    pm_helpers._cuda_lightgbm_available.cache_clear()
+    pm_helpers._cuda_lightgbm_probe.cache_clear()
     try:
-        assert isinstance(pm_helpers._cuda_lightgbm_available(), bool)
+        result = pm_helpers._cuda_lightgbm_probe()
+        assert result is None or isinstance(result, str)
         out, err = capfd.readouterr()
         assert "LightGBM" not in err, f"the probe leaked its own failure to stderr: {err!r}"
         # Descriptor 2 has to be a working descriptor afterwards, or every later test that
         # writes to stderr fails somewhere far from here.
         os.write(2, b"")
     finally:
-        pm_helpers._cuda_lightgbm_available.cache_clear()
+        pm_helpers._cuda_lightgbm_probe.cache_clear()
+
+
+def test_a_busy_card_is_not_reported_as_a_missing_build(monkeypatch) -> None:
+    """A runtime failure on shared hardware must not read as a property of the installation.
+
+    One 3090 carries several lanes here, so a CUDA allocation can fail while the build is
+    perfectly capable. Both cases skip - a notebook that cannot get a card cannot run - but the
+    reason has to say which, or a contention blip is indistinguishable in the log from a wheel
+    built without -DUSE_CUDA=1, and someone re-derives ml4t/agent-workspace#862 from scratch.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True)),
+    )
+    clear = getattr(pm_helpers._cuda_lightgbm_probe, "cache_clear", None)
+    if clear is not None:
+        clear()
+    monkeypatch.setattr(
+        pm_helpers,
+        "_cuda_lightgbm_probe",
+        lambda: "the CUDA LightGBM probe failed for another reason: CUBLAS_STATUS_ALLOC_FAILED",
+    )
+    reason = pm_helpers.gpu_skip_reason({"gpu": "lightgbm_cuda"})
+    assert "no CUDA build" not in reason
+    assert "CUBLAS_STATUS_ALLOC_FAILED" in reason
+
+
+def test_the_missing_build_message_is_the_one_lightgbm_actually_raises() -> None:
+    """The probe keys on LightGBM's own wording, so a version change must not pass silently.
+
+    Only observable where the build lacks CUDA, which is every CI runner and this workstation.
+    Where the build has it there is no message to check and nothing to go stale, so the test
+    skips rather than failing on a machine that is better equipped than the one it was written on.
+    """
+    lgb = pytest.importorskip("lightgbm")
+    np = pytest.importorskip("numpy")
+    pm_helpers._cuda_lightgbm_probe.cache_clear()
+    if pm_helpers._cuda_lightgbm_probe() is None:
+        pytest.skip("this LightGBM has a CUDA build, so it raises no message to key on")
+    with pytest.raises(Exception, match=pm_helpers._NO_CUDA_BUILD) as caught:
+        lgb.train(
+            {"objective": "binary", "device_type": "cuda", "verbose": -1, "num_leaves": 2},
+            lgb.Dataset(np.zeros((20, 2)), label=np.arange(20) % 2),
+            num_boost_round=1,
+        )
+    assert pm_helpers._NO_CUDA_BUILD in str(caught.value)
