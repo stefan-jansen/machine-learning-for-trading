@@ -61,15 +61,10 @@ import pandas as pd
 import polars as pl
 from async_utils import run_async
 
-# Two deprecations fire on import, once each, from dependencies of the live stack: nest_asyncio
-# reaches a deprecated asyncio accessor, and the broker adapters pull in websockets' legacy
-# module. Neither touches a result, so each is silenced by category and module.
-warnings.filterwarnings(
-    "ignore",
-    category=DeprecationWarning,
-    module=r"nest_asyncio",
-    message=r".*get_event_loop_policy.*",
-)
+# The broker adapters pull in websockets' legacy module, which deprecates itself on import. It
+# is the library's business rather than this notebook's and nothing in the result depends on it.
+# The other import-time deprecation, from nest_asyncio, is filtered inside `async_utils.run_async`
+# where the call that triggers it lives.
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets\.legacy")
 
 from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, Strategy
