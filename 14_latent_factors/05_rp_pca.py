@@ -281,9 +281,10 @@ show_with_alt(
     fig,
     "Two stacked panels sharing a horizontal axis of pricing weight kappa, drawn at "
     "equal spacing rather than to scale. The upper plots how well the fitted factors "
-    "represent the training mean; the lower plots the share of evaluation variance they "
-    "reconstruct. Both vertical axes are auto-scaled to their own data, so the lower "
-    "panel magnifies a range of well under one percentage point.",
+    "represent the training mean; the lower plots the share of raw evaluation return "
+    "energy they reconstruct, uncentered so the mean component counts. Both vertical "
+    "axes are auto-scaled to their own data, so the lower panel magnifies a range of "
+    "well under one percentage point.",
 )
 print(
     f"Evaluation reconstruction share ranges {min(reconstruction_shares):.4f} to "
