@@ -83,6 +83,7 @@ END_DATE = "2024-12-31"
 INTRADAY_SYMBOL = "AAPL"
 DAILY_SYMBOL = "SPY"
 MINIMUM_BARS_PER_SESSION = 360  # a full session is about 390 one-minute bars
+MAXIMUM_GAP_DAYS = 4  # calendar days an overnight return may span: a long weekend, no more
 SESSIONS_PER_YEAR = 252
 ROLLING_WINDOW = 20  # sessions in every rolling average below: about one month
 
@@ -128,14 +129,18 @@ print(
 # session. What happens between one session's close and the next one's open is a separate
 # quantity, measured separately here.
 #
-# Two orderings in the cell below are load-bearing. The session's open and close come from
-# the unfiltered bars, because differencing to get minute returns drops each session's
-# first bar; an open read from the differenced frame is the second minute's price, and the
-# overnight return would then swallow the opening minute. And the previous close is taken
-# before any session is dropped for incompleteness, with the sessions that follow a dropped
-# one removed afterwards, so that every overnight return spans exactly one gap. On a
-# reduced test fixture, which keeps separated blocks of sessions, that gap can otherwise be
-# weeks long.
+# Three details in the cell below are load-bearing. The session's open and close come from
+# the bars as loaded, not from a frame reduced to the minutes that have a previous close;
+# an open read from such a frame would be the second minute's price, and the overnight
+# return would then swallow the opening minute. The opening minute keeps its own
+# open-to-close return in the variance sum for the same reason: without it the sum covers
+# one minute less than the session return it is compared against.
+#
+# And an overnight return is only an overnight return if the two sessions are adjacent on
+# the calendar. Bar counts cannot establish that, so the pair is filtered on the number of
+# calendar days between the two dates as well, and the longest surviving gap is printed
+# next to the session count. On a reduced test fixture, which keeps separated blocks of
+# sessions, a gap left unchecked can be weeks long.
 
 # %%
 boundaries = (
@@ -149,8 +154,14 @@ boundaries = (
 )
 
 variances = (
-    minute_bars.with_columns(minute_return=pl.col("last_trade_price").log().diff().over("date"))
-    .drop_nulls(subset=["minute_return"])
+    minute_bars.with_columns(
+        # The first bar of a session has no previous close, and dropping it leaves the
+        # opening minute out of the sum while the aggregate open-to-close return contains
+        # it. Its own open-to-close return is what belongs there.
+        minute_return=pl.when(pl.col("last_trade_price").log().diff().over("date").is_null())
+        .then((pl.col("last_trade_price") / pl.col("first_trade_price")).log())
+        .otherwise(pl.col("last_trade_price").log().diff().over("date"))
+    )
     .group_by("date")
     .agg(minute_variance=pl.col("minute_return").pow(2).sum())
 )
@@ -166,15 +177,18 @@ intraday = (
         overnight_return=(pl.col("session_open") / pl.col("previous_close")).log(),
         close_to_close_return=(pl.col("session_close") / pl.col("previous_close")).log(),
     )
+    .with_columns(gap_days=(pl.col("date") - pl.col("date").shift(1)).dt.total_days())
     .filter(
         (pl.col("bars") >= MINIMUM_BARS_PER_SESSION)
         & (pl.col("previous_bars") >= MINIMUM_BARS_PER_SESSION)
+        & (pl.col("gap_days") <= MAXIMUM_GAP_DAYS)
     )
     .drop_nulls()
     .sort("date")
 )
 
-print(f"Sessions with a complete session before them: {intraday.height:,} of {boundaries.height}")
+print(f"Sessions kept: {intraday.height:,} of {boundaries.height}")
+print(f"Longest gap between kept consecutive sessions: {intraday['gap_days'].max()} calendar days")
 
 # %% [markdown]
 # ## The first trap: these prices are not adjusted
@@ -573,10 +587,11 @@ display(har.select(["timestamp", *HORIZONS, "target"]).tail(3))
 # this shape can have independent innovations. So overlap is a reason to check rather than
 # a proof of a problem.
 #
-# The check is below, and it is the residual autocorrelation itself. **Newey-West**
-# standard errors are then used as protection against whatever is found, over a lag
-# window set to the longest horizon in the model, which is where any dependence the
-# regressors' overlap could induce would reach.
+# Three standard errors for the same coefficients are computed below. The textbook ones
+# assume homoscedastic, serially uncorrelated residuals. `HC3` relaxes only the first
+# assumption. **Newey-West** relaxes both, over a lag window set to the longest horizon in
+# the model, which is where any dependence the regressors' overlap could induce would
+# reach. Comparing them in that order separates what each relaxation contributes.
 
 # %%
 NEWEY_WEST_LAGS = max(HORIZONS.values())
@@ -590,48 +605,39 @@ def fit_har(frame: pl.DataFrame):
     )
 
 
+design = sm.add_constant(har.select(list(HORIZONS)).to_pandas())
+target = har["target"].to_numpy()
+
 har_fit = fit_har(har)
-plain_fit = sm.OLS(
-    har["target"].to_numpy(), sm.add_constant(har.select(list(HORIZONS)).to_pandas())
-).fit()
+plain_fit = sm.OLS(target, design).fit()
+robust_fit = sm.OLS(target, design).fit(cov_type="HC3")
 
 display(
     pd.DataFrame(
         {
             "coefficient": har_fit.params,
+            "standard error, textbook": plain_fit.bse,
+            "standard error, heteroscedasticity only": robust_fit.bse,
             "standard error, Newey-West": har_fit.bse,
-            "standard error, assuming independence": plain_fit.bse,
-            "t statistic, Newey-West": har_fit.tvalues,
-            "t statistic, assuming independence": plain_fit.tvalues,
+            "ratio, heteroscedasticity only to textbook": robust_fit.bse / plain_fit.bse,
+            "ratio, Newey-West to heteroscedasticity only": har_fit.bse / robust_fit.bse,
         }
     )
 )
-residual_autocorrelation = [
-    float(pd.Series(har_fit.resid).autocorr(lag=lag)) for lag in (1, 5, NEWEY_WEST_LAGS)
-]
 print(f"R-squared: {har_fit.rsquared:.4f}")
-print(
-    "Residual autocorrelation at lags 1, 5 and "
-    f"{NEWEY_WEST_LAGS}: " + ", ".join(f"{value:+.3f}" for value in residual_autocorrelation)
-)
-print(
-    "Ratio of the two standard errors, by coefficient: "
-    + ", ".join(f"{name} {ratio:.2f}" for name, ratio in (har_fit.bse / plain_fit.bse).items())
-)
 
 # %% [markdown]
-# The residual autocorrelations printed above say whether the correction was needed, and
-# the ratio of the two standard errors says how much it cost. Nothing about the
-# coefficients changed; what changed is how much confidence the fit reports in them.
+# The two ratios split the widening into its parts. The first is what allowing for unequal
+# residual variance changes on its own. The second is what allowing for serial dependence
+# adds after that. Nothing about the coefficients changed; what changed is how much
+# confidence the fit reports in them.
 #
-# Read the two together, because there are three cases and only one of them is the one
-# people expect. Autocorrelation near zero and standard errors that barely move would say
-# the textbook version was fine. Autocorrelation with a matching change in the standard
-# errors would be the case the overlap story predicts. And autocorrelation near zero with
-# standard errors that move a great deal is the third case: the correction was needed, and
-# what it corrected was heteroscedasticity rather than dependence between rows. Which case
-# this fit is in is in the two numbers above, and it is not the one the overlap story would
-# have predicted.
+# Read the two separately rather than the product. A first ratio well above one and a
+# second near one puts most of the widening in the heteroscedasticity term. Two ratios of
+# similar size would put it in both. What a second ratio near one does not say is that the
+# residuals are serially independent: Newey-West estimates the long-run variance of the
+# regressor-residual products over the lag window, so a ratio near one says that estimate
+# is close to the heteroscedasticity-only one and stops there.
 #
 # The coefficients themselves are the reason to fit HAR rather than GARCH. Each one is the
 # weight the model puts on one horizon, so their relative sizes say which horizon is
@@ -1292,11 +1298,11 @@ print(
 # 2. **HAR is a linear regression, and that is its advantage.** Three lagged averages track
 #    realized volatility about as closely as a fitted GARCH does, and unlike GARCH each
 #    coefficient is readable as the weight one horizon carries.
-# 3. **Overlapping regressors are a reason to check the residuals, not a proof they are
-#    correlated.** A correctly specified model can have independent innovations despite
-#    rolling-average regressors. Measure the residual autocorrelation, and use Newey-West
-#    standard errors as protection against it and against the heteroscedasticity a
-#    volatility series has anyway.
+# 3. **Overlapping regressors are a reason to widen the standard errors, not a proof the
+#    residuals are correlated.** A correctly specified model can have independent
+#    innovations despite rolling-average regressors. Report the textbook,
+#    heteroscedasticity-only and Newey-West standard errors side by side, which shows how
+#    much each relaxed assumption costs without claiming what the residuals do.
 # 4. **Two models forecasting differently-measured targets cannot be ranked by their
 #    errors.** Report the mean of each forecast next to the mean of the target, and read
 #    the correlation, which the level difference does not touch.
