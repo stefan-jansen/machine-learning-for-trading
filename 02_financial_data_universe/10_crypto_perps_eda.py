@@ -313,20 +313,54 @@ _shape = _zero_rows.select(
     (pl.col("premium_index_high") == 0).mean().alias("high_also_zero"),
     (pl.col("premium_index_low") == 0).mean().alias("low_also_zero"),
 )
+_all_four_zero = premium.filter(
+    (pl.col("premium_index_open") == 0)
+    & (pl.col("premium_index_high") == 0)
+    & (pl.col("premium_index_low") == 0)
+    & (_close == 0)
+).height
+
 print("On the rows whose close is exactly zero, share where the other prices are also zero:")
 print(_shape)
+print(f"Rows where all four premium fields are zero: {_all_four_zero:,} of {_zero_rows.height:,}")
 print(f"Symbols affected: {_zero_rows['symbol'].n_unique()} of {premium['symbol'].n_unique()}")
 print(f"Spanning {_zero_rows['timestamp'].min()} to {_zero_rows['timestamp'].max()}")
+
+# %% [markdown]
+# So it is not a whole bar written as blank: fewer than one percent of the affected rows have
+# all four fields at zero. The close specifically is set to a value the bar's own high and low
+# say it never visited.
+#
+# One more cut separates a data-capture practice from a market property. A property of the
+# basis would come and go with market conditions. A capture practice that is being improved
+# would decline steadily as the exchange's plumbing matures.
+
+# %%
+zero_by_year = (
+    premium.with_columns(pl.col("timestamp").dt.year().alias("year"))
+    .group_by("year")
+    .agg(pl.len().alias("observations"), (_close == 0).mean().alias("share_exactly_zero"))
+    .sort("year")
+)
+zero_by_year
 
 # %% [markdown]
 # The high and the low are almost never zero on those rows, so the index moved during the
 # period and then "closed" at a value it never plausibly reached. That is a placeholder written
 # into a price column, not a price.
 #
+# The rate falls monotonically, year after year, from a quarter of all observations to under a
+# tenth. Nothing about the perpetual-spot basis improves on a schedule like that. A capture or
+# publication practice being tidied up over six years does, and that is the reading the trend
+# supports.
+#
+# It is a decline and not a disappearance: the most recent full year still carries the pattern
+# on roughly one observation in twelve, and every one of the nineteen symbols is affected. So
+# it cannot be dismissed as an early-history artifact that later data has outgrown.
+#
 # **This is why the null count passed.** The absence is encoded as a number the schema accepts,
-# so every completeness check that looks for nulls reports the file as complete. It affects
-# every symbol and runs the length of the sample, so it cannot be dismissed as an early-history
-# artifact either.
+# so every completeness check written against nulls reports the file as complete - here, and in
+# anything downstream that inherited the same check.
 #
 # What follows for the case study in `case_studies/crypto_perps_funding/` is that a premium of
 # exactly zero has to be treated as unknown rather than as a basis of zero. The two are opposite
@@ -471,10 +505,12 @@ else:
 # 6. **A file with no nulls is not a complete file.** Fourteen percent of premium closes are
 #    exactly zero, on a quantity stored to eight decimals with a spread three orders of
 #    magnitude wider - a value a smooth distribution would essentially never produce. The same
-#    bars have non-zero highs and lows, so the index moved and then "closed" where it never
-#    traded. Absence is encoded as a number the schema accepts, which is why the null check
-#    reports the file as complete. Downstream, a zero premium has to mean unknown rather than
-#    a basis of zero.
+#    bars have non-zero highs and lows, and fewer than one percent have all four fields at
+#    zero, so the index moved through the period and then "closed" where it never traded. The
+#    rate declines monotonically year by year, which is what a capture practice being tidied up
+#    looks like and not what a market property looks like. Absence encoded as a number the
+#    schema accepts is why the null check reports the file complete. Downstream, a zero premium
+#    has to mean unknown rather than a basis of zero.
 #
 # 7. **These are raw exchange bars, so the OHLC relations are exact.** The check reports the
 #    number of bars outside each bound rather than a percentage against a tolerance, because on
