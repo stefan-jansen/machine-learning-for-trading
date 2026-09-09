@@ -673,12 +673,16 @@ for i in range(N_ENSEMBLE):
     print(f"  Member {i} IC: {m_ic:+.4f}")
 
 # %% [markdown]
-# **Interpretation**: the member ICs printed above are the thing to read. Averaging
-# helps when members make errors that partly cancel, so the ensemble mean's IC against
-# the range of individual members says how much of that happened here. The width of
-# that range is also the ensemble's uncertainty estimate at work: members that agree
-# closely give a narrow spread, and a narrow spread is only informative if the members
-# genuinely learned different functions rather than converging to the same one.
+# **Interpretation**: the member ICs printed above compare how well each member ranks
+# funds, and the ensemble mean's IC against their range says how much averaging
+# helped - it helps when members make errors that partly cancel.
+#
+# Note that this says nothing about the uncertainty estimate. An IC is a rank
+# statistic, so two members can score identically while predicting quite different
+# magnitudes, and the ensemble's uncertainty is `ens_std`: the per-example standard
+# deviation across members, printed above as a mean and plotted as a histogram below.
+# Whether that quantity is informative is the calibration question, and it is answered
+# by the uncertainty-error diagnostics, not by the IC spread.
 
 # %% [markdown]
 # ### Calibration Analysis
@@ -1035,6 +1039,16 @@ EPS = 1e-8
 nominal_levels_conf = [0.50, 0.80, 0.95]
 conf_rows = []
 
+# Normalized conformal is invariant to rescaling sigma by a constant, so what decides
+# whether it differs from plain conformal is how much sigma VARIES, not how large it
+# is. Print that, and how close sigma gets to EPS, before reading the widths.
+for _name, _sd in [("MC Dropout", mc_std_val), ("Deep Ensemble", ens_std_val)]:
+    print(
+        f"{_name} validation sigma: mean {_sd.mean():.3e}, "
+        f"coefficient of variation {_sd.std() / _sd.mean():.3f}, "
+        f"minimum {_sd.min():.3e} (EPS is {EPS:.0e})"
+    )
+
 for level in nominal_levels_conf:
     alpha = 1 - level
 
@@ -1088,14 +1102,21 @@ conformal_df
 # taking the quantile, then multiplies back at test time - which is the only place in
 # this notebook where MC Dropout's or the ensemble's spread does any work.
 #
-# That division is also where the normalized variant is fragile. Its quantile is
-# driven by the *smallest* validation standard deviations, so a method whose
-# $\hat\sigma$ concentrates near zero gives a quantile dominated by a handful of
-# near-degenerate points, and a width that moves sharply between runs. `EPS` keeps the
-# division finite; it does not make the resulting quantile stable. Compare each
-# method's mean predicted standard deviation, printed above, against the label's scale
-# before trusting its normalized widths - if the spread is nearly constant, the
-# normalized variant is adapting to noise and the plain variant is the safer choice.
+# A small $\hat\sigma$ is not itself a problem. Multiplying every $\hat\sigma$ by a
+# constant divides the quantile by that constant and multiplies the width back by it,
+# leaving the intervals unchanged - so the normalized variant is scale-invariant, and a
+# method reporting standard deviations of $10^{-5}$ is on the same footing as one
+# reporting $10^{-1}$. A $\hat\sigma$ that is exactly constant reproduces the plain
+# widths.
+#
+# What decides the outcome is how much $\hat\sigma$ varies, and whether it varies
+# where the errors are. The coefficients of variation printed above are the first
+# thing to read: a $\hat\sigma$ that barely varies leaves the normalized variant
+# doing what plain conformal already does, and one that varies without tracking error
+# has to take a quantile large enough to cover the points where the ratio is worst,
+# widening the confident points without narrowing anything. The scale invariance does
+# break at the bottom, where $\hat\sigma$ approaches `EPS` - the printed minima say
+# whether that is in play.
 #
 # The marginal coverage guarantee is distribution-free (Vovk et al. 2005), but it is
 # not assumption-free: it needs calibration and test residuals to be exchangeable,
