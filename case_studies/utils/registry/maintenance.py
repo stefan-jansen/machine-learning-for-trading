@@ -300,7 +300,22 @@ def migrate_equivalent_training_identity(
     *,
     migrated_fields: tuple[str, ...] = ("computation.source_identity",),
 ) -> TrainingIdentityMigration:
-    """Materialize a proven equivalent training identity without fitting again."""
+    """Materialize a proven equivalent training identity without fitting again.
+
+    **Training rows only. Causal rows have no migration path and refit.** Causal runs are
+    registered by ``register_causal_run`` into ``causal_runs``, whose identity consumes
+    ``CAUSAL_RUNNER_VERSION``, so a declared-version bump moves every causal identity in
+    every case study exactly as it moves the training ones - and nothing here reaches them.
+    Reaching them is not a type widening: this function is built around a ``TrainingResult``,
+    a prediction map, and a proof record in ``training_identity_migrations`` keyed by source
+    and target training hash, and a causal equivalent needs its own migration record, its own
+    identity normalization and a causal counterpart to ``_validate_fitted_state``.
+
+    Say so here because this is the function a session prices a re-run off. Reading "a
+    migration script exists" and concluding a version bump is cheap is short by a full refit
+    for whatever part of the work is causal, and that is discovered after the estimate has
+    been given.
+    """
     from case_studies.research.results import PredictionResult, Result, TrainingResult
 
     study.require_writable()
