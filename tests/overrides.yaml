@@ -491,6 +491,18 @@
     MAX_SYMBOLS: 10
   timeout: 300
 12_gradient_boosting/09_xai_limitations:
+  # MAX_SYMBOLS is stated because this notebook declares the parameter for the reduced run and
+  # nothing set it, so CI fitted three LightGBMs and a 200-tree RandomForest on the full etfs
+  # panel and then ran TreeSHAP over the whole validation fold for each. It is the same
+  # reduction 11_ml_pipeline/05_shap_analysis takes for the same work.
+  #
+  # The cell is parallel (RandomForest at n_jobs=-1, and LightGBM inside it), which is why this
+  # entry read as green until it did not: unreduced it takes 123s of wall clock and 17m12s of
+  # CPU on 24 cores here, so a runner with a quarter of the cores spends most of the 300s
+  # budget and crosses it whenever it is contended. It passed on run 34318568178 and timed out
+  # on 34342897088 with nothing between them touching this notebook.
+  parameters:
+    MAX_SYMBOLS: 10
   timeout: 300
 12_gradient_boosting/10_shap_nlp_sentiment:
   docker_env: py312
