@@ -51,6 +51,7 @@
 """News-Based Alpha Signals — construct and evaluate alpha factors from financial news text."""
 
 import json
+import os
 import warnings
 from collections import defaultdict
 
@@ -65,8 +66,13 @@ from transformers import set_seed as set_transformers_seed
 from data import load_fnspid
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
-warnings.filterwarnings("ignore")
+# The tokenizer's Rust parallelism warns on every batch once this process has forked; the
+# embedding pass below does not need it. `spearmanr` warns when a date's cross-section is
+# constant, which the IC code drops explicitly a few cells down.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+warnings.filterwarnings("ignore", message=".*input array is constant.*", module="scipy")
 
 pl.Config.set_fmt_str_lengths(80)
 
@@ -77,9 +83,12 @@ MAX_TICKERS = 50
 LOOKBACK_DAYS = 20
 SIGNAL_LAG_DAYS = 1
 
+# %% [markdown]
+# `set_global_seeds` covers Python, NumPy and Torch. The transformers pipelines draw from
+# their own generator, which needs seeding separately.
+
+
 # %%
-# Reproducibility — set_global_seeds covers Python random / NumPy / Torch.
-# transformers RNG (used by Trainer + pipelines) needs explicit seeding.
 set_global_seeds(SEED)
 set_transformers_seed(SEED)
 
@@ -120,19 +129,16 @@ CONFIG["max_articles"] = MAX_ARTICLES
 CONFIG["max_tickers"] = MAX_TICKERS
 
 # %% [markdown]
-# ## Load Financial News Data
+# ## The news corpus
 #
-# We use the **FNSPID** (Financial News and Stock Price Integration Dataset) from HuggingFace,
-# containing 15.7M financial news articles with stock tickers and dates (1999-2023).
+# FNSPID pairs financial news articles with the tickers they mention and the dates they ran,
+# over more than two decades. The download defaults to a sample rather than the whole thing,
+# which is enough for the construction shown here and small enough to embed in reasonable
+# time.
 #
-# **Dataset sizing**:
-# - Default download: **1M articles** (sufficient for this demonstration)
-# - Full dataset: 15.7M articles (requires more processing time)
-#
-# To download or change sample size:
 # ```bash
-# python data/text/fnspid_download.py              # Default: 1M sample
-# python data/text/fnspid_download.py --sample 0   # Full 15.7M dataset
+# python data/text/fnspid_download.py              # the default sample
+# python data/text/fnspid_download.py --sample 0   # the complete dataset
 # ```
 #
 # Reference: [FNSPID on HuggingFace](https://huggingface.co/datasets/Zihan1004/FNSPID)
@@ -163,9 +169,13 @@ for col in news_df.columns:
 #
 # Clean and structure the news data for factor construction.
 
+# %% [markdown]
+# FNSPID's column names have changed between releases, so the text, date and ticker columns
+# are identified by looking for known names in priority order rather than assumed. Headline
+# is preferred over any summary field, because a generated summary is not what a reader saw.
+
+
 # %%
-# Standardize column names and extract key fields
-# Column mapping depends on actual FNSPID structure
 print("Preparing news data...")
 
 # Identify the text, date, and ticker columns
@@ -270,12 +280,7 @@ news_clean.head(5)
 # | Entity resolution | Normalize tickers to canonical symbols |
 
 # %%
-# ============================================================================
-# TEXT-TO-SIGNAL PIPELINE DEMONSTRATION
-# ============================================================================
-print("=" * 70)
 print("TEXT-TO-SIGNAL PIPELINE CHECKLIST")
-print("=" * 70)
 
 # --- 1. WIRE DEDUPLICATION ---
 # News from different sources often contains near-duplicates from wire services.
@@ -444,10 +449,13 @@ def deduplicate_news_tfidf(
     return df, (n_before - n_after) / max(n_before, 1)
 
 
+# %% [markdown]
+# The two deduplication strategies run side by side on the same corpus so their disagreement
+# is visible. The pipeline keeps the hash result; this comparison exists so the cosine cutoff
+# can be set by looking at what it removes rather than by taste.
+
+
 # %%
-# Side-by-side comparison on the same raw corpus. The pipeline keeps the hash
-# result (news_clean); this cell is informational so the two strategies can be
-# compared and the cosine cutoff tuned.
 _cmp = news_pre_dedup.with_row_index("_rid")
 _hash_kept, _ = deduplicate_news(_cmp, "headline", "timestamp", "ticker")
 news_tfidf, tfidf_dup_rate = deduplicate_news_tfidf(
@@ -890,36 +898,45 @@ features_df.head(10)
 print("\nNews Surprise Factor Statistics:")
 print(surprise_df["news_surprise"].describe())
 
-# Distribution plot
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
 
-# Histogram
-axes[0].hist(surprise_df["news_surprise"].to_numpy(), bins=50, edgecolor="black", alpha=0.7)
-axes[0].set_xlabel("News Surprise (cosine distance)")
-axes[0].set_ylabel("Frequency")
-axes[0].set_title("Distribution of News Surprise Factor")
-axes[0].axvline(surprise_df["news_surprise"].mean(), color="red", linestyle="--", label="Mean")
-axes[0].legend()
+axes[0].hist(surprise_df["news_surprise"].to_numpy(), bins=50, color=COLORS["blue"])
+axes[0].set_xlabel("News surprise, cosine distance from the ticker's recent coverage")
+axes[0].set_ylabel("Ticker-days")
+axes[0].set_title("Distribution of the surprise measure")
+axes[0].axvline(
+    surprise_df["news_surprise"].mean(), color=COLORS["amber"], linestyle="--", label="Mean"
+)
+axes[0].legend(fontsize=6)
 
-# Time series of average surprise — plot the full available date range and let
-# matplotlib autoscale rather than hardcoding a calendar cutoff that may sit
-# outside the loaded FNSPID sample window (FNSPID 1M sample spans roughly
-# 2009–2017; older 2019-anchored filters silently emptied this panel).
+# The date range comes from the data rather than a hardcoded cutoff: an earlier calendar
+# filter sat outside the loaded FNSPID window and silently emptied this panel.
 daily_surprise = (
     surprise_df.group_by("timestamp")
     .agg(pl.col("news_surprise").mean().alias("avg_surprise"))
     .sort("timestamp")
 )
 
-axes[1].plot(daily_surprise["timestamp"].to_numpy(), daily_surprise["avg_surprise"].to_numpy())
-axes[1].set_xlabel("Date")
-axes[1].set_ylabel("Average News Surprise")
-axes[1].set_title("News Surprise Over Time")
+axes[1].plot(
+    daily_surprise["timestamp"].to_numpy(),
+    daily_surprise["avg_surprise"].to_numpy(),
+    linewidth=0.5,
+    color=COLORS["blue"],
+)
+axes[1].set_xlabel("Session")
+axes[1].set_ylabel("Cross-sectional mean surprise")
+axes[1].set_title("The same measure averaged across tickers each day")
 fig.autofmt_xdate()
 
-plt.suptitle("News Surprise Factor Analysis")
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels. The left is a histogram of the surprise measure over ticker-days, a single "
+    "broad hump rising from near zero, peaking left of centre and trailing off to the right, "
+    "with a dashed mean line just right of the peak. The right plots the daily cross-"
+    "sectional average of the same measure across the sample: a dense noisy band of roughly "
+    "constant width and level from the first year to the last, with no trend and no stretch "
+    "that is quieter or more volatile than the rest.",
+)
 
 # %% [markdown]
 # ## Look-Ahead Bias Considerations
@@ -1001,10 +1018,17 @@ prices = prices.sort(["ticker", "timestamp"]).with_columns(
 prices = prices.with_columns(pl.col("timestamp").dt.strftime("%Y-%m-%d").alias("date_str"))
 print(f"Price date range: {prices['timestamp'].min()} to {prices['timestamp'].max()}")
 
+# %% [markdown]
+# ### Getting the lag onto a tradable date
+#
+# A signal formed from date `t`'s news can first be acted on at `t + 1`, and `t + 1` is often
+# not a trading day. Adding a calendar day and joining on equality would silently drop every
+# Friday's news and every day before a holiday; adding one and taking the next session that
+# exists keeps them. `join_asof` with a forward strategy is that operation, and it is the
+# step where a look-ahead would enter if the direction were reversed.
+
+
 # %%
-# Map signal_date to next trading date (avoids weekend/holiday issues)
-# Using join_asof with forward strategy ensures we get the next valid trading date
-# Cast datetime to date for compatibility with signal_date
 trading_dates = (
     prices.select(pl.col("timestamp").dt.date().alias("trade_date")).unique().sort("trade_date")
 )
@@ -1067,9 +1091,11 @@ else:
 # The Information Coefficient measures the cross-sectional rank correlation between
 # the factor and forward returns. A consistent positive IC indicates predictive power.
 #
-# **IC Interpretation:**
-# - |IC| > 0.03: Economically meaningful signal
-# - ICIR (IC / std(IC)) > 0.5: Statistically robust signal
+# Two conventions from the screening literature give the numbers below a scale to be read
+# against. An absolute IC of a few hundredths is the point at which a signal is usually
+# called economically interesting, and an information ratio of about a half is the usual
+# threshold for calling one robust. Both are conventions rather than tests, and the useful
+# thing about them here is the order of magnitude they set.
 
 # %%
 # Merge features with returns and compute IC
@@ -1168,41 +1194,48 @@ else:
     ic_mean, ic_std, icir, wt_mean, wt_icir = 0, 0, 0, 0, 0
 
 # %%
-# Plot IC time series
 if len(ic_surprise_df) > 0:
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+    fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
 
-    # IC time series (use weighted_surprise)
     axes[0].plot(
-        range(len(ic_weighted_df)), ic_weighted_df["ic"].to_numpy(), alpha=0.7, linewidth=0.5
+        ic_weighted_df["timestamp"].to_numpy(),
+        ic_weighted_df["ic"].to_numpy(),
+        linewidth=0.5,
+        color=COLORS["blue"],
     )
-    axes[0].axhline(0, color="black", linestyle="-", linewidth=0.5)
-    axes[0].axhline(wt_mean, color="red", linestyle="--", label=f"Mean IC: {wt_mean:.4f}")
+    axes[0].axhline(0, color=COLORS["neutral"], linewidth=0.5)
+    axes[0].axhline(wt_mean, color=COLORS["amber"], linestyle="--", label="Mean")
     axes[0].fill_between(
-        range(len(ic_weighted_df)),
+        ic_weighted_df["timestamp"].to_numpy(),
         wt_mean - wt_std,
         wt_mean + wt_std,
         alpha=0.2,
-        color="red",
-        label="±1 std",
+        color=COLORS["amber"],
+        label="Mean plus and minus one standard deviation",
     )
-    axes[0].set_xlabel("Trading Day")
-    axes[0].set_ylabel("Information Coefficient")
-    axes[0].set_title("Daily Cross-Sectional IC (Weighted Surprise)")
-    axes[0].legend()
+    axes[0].set_xlabel("Session")
+    axes[0].set_ylabel("Information coefficient")
+    axes[0].set_title("Daily cross-sectional IC of the directional signal")
+    axes[0].legend(fontsize=6)
+    fig.autofmt_xdate()
 
-    # IC histogram
-    axes[1].hist(ic_weighted_df["ic"].to_numpy(), bins=50, edgecolor="black", alpha=0.7)
-    axes[1].axvline(0, color="black", linestyle="-", linewidth=0.5)
-    axes[1].axvline(wt_mean, color="red", linestyle="--", label=f"Mean: {wt_mean:.4f}")
-    axes[1].set_xlabel("Information Coefficient")
-    axes[1].set_ylabel("Frequency")
-    axes[1].set_title("IC Distribution (Weighted Surprise)")
-    axes[1].legend()
+    axes[1].hist(ic_weighted_df["ic"].to_numpy(), bins=50, color=COLORS["blue"])
+    axes[1].axvline(0, color=COLORS["neutral"], linewidth=0.5)
+    axes[1].axvline(wt_mean, color=COLORS["amber"], linestyle="--", label="Mean")
+    axes[1].set_xlabel("Information coefficient")
+    axes[1].set_ylabel("Sessions")
+    axes[1].set_title("Distribution of the same daily values")
+    axes[1].legend(fontsize=6)
 
-    plt.suptitle("Directional News Surprise Factor IC Analysis")
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Two panels. The left plots one information coefficient per session across the "
+        "sample, a dense band swinging between large positive and large negative values with "
+        "no trend, around a dashed mean line that sits on the zero line at this scale, inside "
+        "a shaded band one standard deviation wide. The right is a histogram of the same "
+        "values: one broad hump spanning most of the range from minus one to plus one and "
+        "centered so close to zero that its dashed mean line and the zero line coincide.",
+    )
 
 # %% [markdown]
 # ## Quintile Spread Analysis
@@ -1265,45 +1298,54 @@ if len(factor_with_returns) > 100:
     q1_ret = _safe_scalar(quintile_returns.filter(pl.col("quintile") == "Q1")["mean_ret_1d"][0])
     spread = q5_ret - q1_ret
 
-    print("\nLong-Short Spread (Q5 - Q1):")
-    # Decimal returns → bps (×10,000), so a -0.000874 spread is -8.74 bps/day.
-    # Express the annualized figure as a percentage; -22.0% annualized is more
-    # readable than -2,200 bps.
-    print(f"  1-day: {spread * 10000:.2f} bps")
-    print(f"  Annualized: {spread * 252 * 100:.2f}%")
+    # Per day, not annualized: scaling by 252 makes a difference indistinguishable from zero
+    # read like a return.
+    print(f"Top bucket minus bottom bucket, one-day forward return: {spread * 10000:.2f} bps")
 else:
     print("Insufficient data for quintile analysis")
     spread = 0
 
 # %%
-# Plot quintile returns
 if len(factor_with_returns) > 100:
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 
     quintiles = quintile_returns["quintile"].to_list()
     returns_1d = [_safe_scalar(r) * 10000 for r in quintile_returns["mean_ret_1d"].to_list()]
 
-    # Sequential blue gradient for ordinal quintile encoding (greyscale-safe)
-    quintile_colors = ["#cfe2f3", "#9fc5e8", "#6fa8dc", "#3d85c6", "#0b5394"]
+    # A sequential ramp encodes the ordering of the buckets, darkest at the highest signal.
+    quintile_colors = [
+        COLORS["silver_muted"],
+        COLORS["recede"],
+        COLORS["slate"],
+        COLORS["blue_light"],
+        COLORS["blue"],
+    ]
     bars = ax.bar(quintiles, returns_1d, color=quintile_colors)
-    ax.axhline(0, color="black", linestyle="-", linewidth=0.5)
-    ax.set_xlabel("Weighted Surprise Quintile (Q1=Bearish, Q5=Bullish)")
-    ax.set_ylabel("Average 1-Day Forward Return (bps)")
-    ax.set_title("Directional News Factor Quintile Returns")
+    ax.axhline(0, color=COLORS["neutral"], linewidth=0.5)
+    # The axis names the signal, not the direction the construction hoped for: labeling the
+    # buckets bearish and bullish would assert on the axis what the bars are the test of.
+    ax.set_xlabel("Weighted surprise bucket, lowest at the left")
+    ax.set_ylabel("Mean 1-day forward return, basis points")
+    ax.set_title("Forward return by weighted-surprise bucket")
 
-    # Add value labels
-    for bar, val in zip(bars, returns_1d, strict=False):
+    for bar, val in zip(bars, returns_1d, strict=True):
         ax.annotate(
             f"{val:.1f}",
             xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
             xytext=(0, 3),
             textcoords="offset points",
             ha="center",
-            fontsize=10,
+            fontsize=6,
         )
 
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Five bars, one per signal bucket, ordered from the lowest signal values at the left "
+        "to the highest at the right, each labeled with its mean forward return in basis "
+        "points. The heights do not rise or fall across the buckets: the tallest is the "
+        "fourth, the leftmost is the second tallest, and the rightmost - the bucket the "
+        "signal ranks highest - is by some way the shortest.",
+    )
 
 # %%
 # Factor summary
@@ -1339,53 +1381,39 @@ print(f"\nHigh coverage events (top 5%): {len(high_coverage):,}")
 print(high_coverage.head(10))
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Text → Embeddings → Factors**: Sentence transformers convert text to dense
-#    vectors that capture semantic meaning beyond keywords.
+# 1. **The signal does not work on this sample, and that is the result.** The information
+#    ratio for the directional signal is far below any screening threshold, its t-statistic
+#    is inside the range noise produces, and the bucket sort does not order forward returns.
+#    The pipeline is sound and what it produced carries no measurable edge here.
+# 2. **A construction step that raises a statistic has not thereby worked.** Multiplying the
+#    surprise measure by the sign of sentiment does move the coefficient in the intended
+#    direction. It moves it from one value indistinguishable from zero to another, which is
+#    not evidence for the construction, and the bucket sort - which the construction predicts
+#    the shape of - contradicts it.
+# 3. **Report a spread per period, not annualized.** Scaling a daily long-short difference by
+#    the number of sessions in a year turns a quantity this notebook has shown to be
+#    indistinguishable from zero into something that reads like a return. The annualized
+#    figure carries no evidence the daily one does not.
+# 4. **Deduplicate before aggregating anything per document.** Wire services syndicate one
+#    article to many outlets, and a mean sentiment or a coverage count over the raw feed
+#    counts the same story repeatedly. Exact plus prefix hashing within ticker-date groups is
+#    linear where pairwise similarity is quadratic.
+# 5. **A lookback measured in event days is not a lookback in time.** The surprise measure
+#    looks back over a ticker's own news days, so a thinly covered ticker either reaches
+#    years back or drops out entirely. What is left is the high-attention names, and every
+#    number here is conditioned on that selection.
+# 6. **Only past information may enter today's signal, and the discipline is per step.**
+#    Embedding, aggregation, the lookback and the return alignment each have to respect it;
+#    one careless join anywhere makes every downstream number meaningless rather than
+#    optimistic.
 #
-# 2. **Direction step**: Raw `news_surprise` (semantic deviation) alone yields a
-#    1-day cross-sectional IC of 0.0026 (ICIR 0.01, t-stat 0.27, n=867 dates).
-#    Multiplying by `sign(sentiment)` to form `weighted_surprise = surprise ×
-#    sign(sentiment)` raises 1-day IC to 0.0127 (ICIR 0.04, t-stat 1.29). The
-#    directional construction moves IC and t-stat up, but the t-stat is below
-#    any conventional significance threshold on this 50-ticker FNSPID subset
-#    (2009-2017).
+# ### The scope these numbers have
 #
-# 3. **FinBERT adds sentiment direction**: Using `yiyanghkust/finbert-tone`, we score
-#    each headline as Negative (-1), Neutral (0), or Positive (+1), then aggregate
-#    by ticker-date.
-#
-# 4. **ICIR > 0.5 threshold**: A common heuristic in the screening literature
-#    is that ICIR > 0.5 marks a robust signal. The `weighted_surprise` ICIR
-#    of 0.04 measured here is an order of magnitude below that threshold.
-#    Conclusions: the signal is not statistically distinguishable from zero
-#    on this sample; the notebook does not establish tradeability.
-#
-# 5. **Quintile spread is wrong-signed**: Sorting by `weighted_surprise` into
-#    quintiles, the 1-day forward returns are Q1 0.001012, Q2 0.000454,
-#    Q3 0.000462, Q4 0.001156, Q5 0.000139. The predicted bullish quintile
-#    (Q5) earns LESS than the predicted bearish quintile (Q1) — the Q5−Q1
-#    spread is −8.74 bps/day (≈ −22.0% annualized). The bullish/bearish
-#    framing implied by `weighted_surprise` is **not** confirmed by the
-#    quintile ordering on this sample. The signal is not tradeable as
-#    constructed.
-#
-# 6. **Look-ahead bias is critical**: Every step must respect temporal ordering—
-#    only past information can inform today's signal.
-#
-# 7. **Multiple factors from one source**: The same news data yields surprise,
-#    coverage, sentiment momentum, and topic factors—each capturing different aspects.
-#
-# 8. **Deduplication matters**: Wire services syndicate the same article to multiple
-#    outlets. Without dedup, sentiment_mean and coverage_count are inflated by
-#    duplicate content. We use fast exact + 50-char prefix hashing within
-#    (ticker, date) groups — O(n) rather than O(n²) similarity matching.
-#
-# 9. **Coverage bias**: The 20-day lookback uses NEWS days (not trading days),
-#    which drops low-coverage tickers entirely. The resulting factor is biased
-#    toward high-attention stocks. Production systems should handle missing news
-#    explicitly (e.g., carry-forward, missingness indicator).
+# One subset of tickers from one news corpus over one sample window, evaluated at horizons
+# from one to twenty days. `08_text_feature_evaluation` re-runs the diagnostics on the
+# features this notebook writes and reaches the same conclusion by a different route.
 
 # %% [markdown]
 # ## Save Features + Labels Dataset
@@ -1511,13 +1539,16 @@ print(f"\nResults saved to: {results_file}")
 # %% [markdown]
 # ## Summary
 #
-# This notebook constructed and evaluated news-based alpha signals from FNSPID
-# data on a 50-ticker subset spanning 2009-2017. Daily cross-sectional IC on
-# 1-day forward returns is 0.0025 (ICIR 0.01, t-stat 0.26) for `news_surprise`
-# and 0.0127 (ICIR 0.04, t-stat 1.29) for `weighted_surprise = surprise ×
-# sign(sentiment)`. The directional transformation moves IC and t-stat up,
-# but the t-stat does not clear any conventional significance threshold, and
-# the 1-day quintile spread is wrong-signed: Q5 (predicted bullish) 0.000139
-# vs Q1 (predicted bearish) 0.001012. The signal is **not** tradeable as
-# constructed on this sample. `08_text_feature_evaluation` evaluates the
-# same signal family across a wider horizon set.
+# This notebook builds two news-derived signals on a subset of tickers and evaluates them
+# against forward returns. Neither is distinguishable from zero: the information ratios sit
+# far below the screening convention set out above, the t-statistics are inside the range
+# noise produces, and the bucket sort does not order returns in the direction the
+# construction predicts.
+#
+# The transformation that multiplies surprise by the sign of sentiment does raise the
+# coefficient. It raises it from one value indistinguishable from zero to another, which is
+# not evidence for the construction, and the bucket sort - the one test whose shape the
+# construction predicts in advance - runs the other way.
+#
+# `08_text_feature_evaluation` reads the features written here and applies the same
+# diagnostics over a wider horizon set.
