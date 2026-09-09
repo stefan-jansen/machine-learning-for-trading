@@ -18,26 +18,38 @@
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook compares two modern Transformer variants for time series:
-# **PatchTST** (patching along time) and **iTransformer** (attention over features).
-# Both address limitations identified in the Great Debate (Section 13.4).
+# `03_great_debate` left a Transformer that was not reading position. Attention
+# compares every token to every other and has no built-in notion of order, so what a
+# token *is* decides what attention can find. The vanilla design makes one day one
+# token, which gives attention 60 nearly interchangeable scalars to relate.
 #
-# **Learning Objectives**:
-# - Implement PatchTST with channel-independent patching
-# - Implement iTransformer with inverted attention (features as tokens)
-# - Compare both approaches on ETF return prediction
-# - Understand when each architecture excels
+# Both architectures here answer that by changing the token. **PatchTST** makes a token
+# a short run of consecutive days, so each one carries a piece of local shape rather
+# than a single number. **iTransformer** goes further and makes a token an entire
+# feature's history, so attention relates whole variables to each other and temporal
+# order lives inside a token rather than between tokens. Neither is a bigger
+# Transformer; both are a different answer to what should be compared with what.
 #
-# **Book Reference**: Chapter 13, Section 13.5 (The Transformer's Evolution).
+# **Learning objectives**:
+# - Build a patched Transformer over one feature at a time, and say what patching buys
+#   in attention cost as the window grows.
+# - Build an inverted Transformer whose tokens are features, and explain why it needs
+#   no positional encoding when the vanilla design does.
+# - Score both against a ridge regression on the same flattened window, and against
+#   forecasting zero, so a difference between architectures is read against a
+#   difference from nothing.
+# - Read an attention matrix per head, and say what such a matrix does and does not
+#   establish about which inputs matter.
+#
+# **Book Reference**: Chapter 13, Section 13.5 (Modern transformer variants).
 # PatchTST: Nie et al. (2023); iTransformer: Liu et al. (2024).
 #
-# **Prerequisites**: ETF features (`case_studies/etfs/`)
+# **Prerequisites**: `03_great_debate`; ETF features from `case_studies/etfs/`.
 
 # %%
 """Compare PatchTST and iTransformer on ETF returns."""
 
 import os
-import warnings
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -58,9 +70,7 @@ from sklearn.preprocessing import StandardScaler
 
 from case_studies.config.patchtst.patchtst import PatchTST
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -85,9 +95,19 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
 # %% [markdown]
-# ## Data Loading
+# ## The data
 #
-# Load ETF features and labels from the case study pipeline.
+# This is the first notebook in the chapter to read the ETF **case study** rather than
+# raw prices: a panel of momentum features and a forward-return label, built by the
+# pipeline in `case_studies/etfs/` and shared with the Chapter 11 and 12 notebooks that
+# fit tabular models to the same target. Using it means the comparison here can be read
+# against those.
+#
+# The eight features are trailing returns over horizons from a week to a year. They are
+# already the kind of input a Transformer is supposed to relate to each other, which is
+# what makes the inverted design applicable at all - a token has to be something worth
+# comparing, and "this fund's momentum over 252 days" is. The label is the forward
+# 21-day return, so this is a monthly-horizon problem on a daily grid.
 
 # %%
 mds = load_dl_dataset("etfs")
@@ -114,6 +134,41 @@ print(f"Target: {TARGET_COL}")
 print(f"Rows after dropna: {len(df):,}")
 
 # %% [markdown]
+# ### What is in the panel
+#
+# A row per fund per date, so the panel has two extents worth knowing before anything
+# is fitted: how far back it goes, and how many funds are quoting on a given date. The
+# second one moves - funds launch - and it matters here because the ranking metric is
+# computed across whatever funds exist on each date. A date with six funds and a date
+# with ninety contribute equally to the average, and a rank correlation over six names
+# is a much noisier number.
+#
+# The table gives each input feature its horizon in trading days and its coverage, and
+# the label its spread. The horizons span a week to a year over the same window, which
+# is what gives attention over features something to relate.
+
+# %%
+horizon_days = {c: int(c.removeprefix("ret_").removesuffix("d")) for c in FEATURE_COLS}
+profile = pl.DataFrame(
+    {
+        "Feature": FEATURE_COLS,
+        "Trailing horizon (days)": [horizon_days[c] for c in FEATURE_COLS],
+        "Standard deviation": [round(float(df[c].std()), 4) for c in FEATURE_COLS],
+    }
+)
+per_date = df.group_by(mds.date_col).len().sort(mds.date_col)
+print(
+    f"{df[mds.date_col].min()} to {df[mds.date_col].max()}, "
+    f"{df[mds.entity_cols[0]].n_unique()} funds; funds per date "
+    f"{per_date['len'].min()} to {per_date['len'].max()}, median {per_date['len'].median():.0f}"
+)
+print(
+    f"Label {TARGET_COL}: mean {df[TARGET_COL].mean():+.5f}, "
+    f"standard deviation {df[TARGET_COL].std():.5f}"
+)
+profile
+
+# %% [markdown]
 # ## Sequence Creation
 #
 # Both models consume standard `(batch, lookback, n_features)` tensors. PatchTST does
@@ -137,11 +192,14 @@ timestamps = timestamps[sequence_order]
 symbols = symbols[sequence_order]
 print(f"Sequences: {X_reg.shape}")
 
+# %% [markdown]
+# The split is by **date**, at fixed fractions of the trading days, and an example is
+# placed by the date it carries. The label is a 21-day forward return, so an example
+# within `LABEL_HORIZON` days of a boundary resolves on the far side of it; those are
+# dropped. Input windows may still reach back across a boundary, and should - at
+# decision time a model has all of the past available to it.
+
 # %%
-# Date-based 60/20/20 temporal split. The target is a 21-day forward return,
-# so training and validation labels whose outcome windows cross the next
-# boundary are purged. Input windows may use earlier observations, as they
-# would at inference time.
 unique_dates = np.sort(np.unique(timestamps))
 train_boundary_idx = int(len(unique_dates) * 0.6)
 val_boundary_idx = int(len(unique_dates) * 0.8)
@@ -167,12 +225,17 @@ print(
 
 
 # %% [markdown]
-# ### Cross-sectional IC helper
+# ### Scoring: the information coefficient
 #
-# We evaluate every model on the same cross-sectional metric: per-date Spearman
-# rank correlation between predictions and forward returns, then averaged across
-# dates. The helper takes flat NumPy arrays so it can be called identically
-# for the Transformer variants and the Ridge baseline.
+# Every model is scored the same way. On each date, rank the funds by prediction, rank
+# them by what they actually returned, and correlate the two rankings - the Spearman
+# rank correlation, averaged over dates. It measures whether the ordering was useful,
+# which is what a cross-sectional strategy acts on, and it is a different question from
+# whether the predicted return levels were close, which squared error measures. Both
+# are reported below because a model can do well on one and badly on the other.
+#
+# The helper takes flat arrays so the Transformers and the ridge baseline go through
+# exactly the same scoring path.
 
 
 # %%
@@ -193,16 +256,21 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 
 # %% [markdown]
-# > **Note**: This fixed 60/20/20 split is a pedagogical simplification. Its
-# > 21-day purge keeps forward-label windows disjoint, but production deployment
-# > still requires the expanding walk-forward protocol from Chapter 6.
+# The label is a 21-day forward return, so an example dated within 21 trading days of a
+# boundary has an outcome that lands on the far side of it. Those examples are dropped -
+# the purge printed above - which is what keeps a training label from being resolved by
+# days the validation set is being asked about. Input windows may still reach back
+# across a boundary, and should: at decision time a model has all of the past.
+#
+# One chronological cut is a simplification. Chapter 6 sets out the expanding
+# walk-forward protocol that a deployment estimate needs.
 
 # %% [markdown]
 # ## PatchTST
 #
 # The paper's PatchTST has three structural properties that must be preserved, or
-# the model loses its inductive bias and collapses to a generic Transformer on
-# tokens:
+# the model loses the structure that distinguishes it and reduces to a generic
+# Transformer over tokens:
 #
 # 1. **Channel-independent patching.** Each feature channel is treated as its own
 #    univariate sequence and passed through the same shared Transformer weights.
@@ -221,8 +289,6 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 
 # %%
-# PatchTST imported at the top; instantiate with teaching-scale dimensions.
-# The backbone does patching internally - input is raw `(batch, lookback, n_features)`.
 
 
 # %% [markdown]
@@ -289,9 +355,9 @@ def _chunked_forward(model, X_t, batch_size):
 # ### Training loop
 #
 # AdamW + cosine schedule + gradient clipping. Early stopping on val loss
-# with patience=5; we restore the best state before returning. Memory is
-# released after training so the next model's allocations don't stack on
-# stale tensors.
+# with a patience of five epochs, and the weights from the lowest-scoring epoch are
+# restored before returning. GPU memory is released after training so the next
+# model's allocations do not stack on stale tensors.
 
 
 # %%
@@ -393,11 +459,16 @@ for name, hist in [("PatchTST", hist_patch), ("iTransformer", hist_itrans)]:
     )
 
 fig.update_layout(
-    title=f"Both architectures stop within {max(len(hist_patch['val_loss']), len(hist_itrans['val_loss']))} epochs",
+    title="Validation error per epoch, with early stopping deciding the length",
     xaxis_title="Epoch",
-    yaxis_title="MSE (validation)",
+    yaxis_title="Mean squared error on the validation windows",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two lines, one per architecture, plotting validation mean squared error against "
+    "training epoch. Each line ends where early stopping halted that architecture, so "
+    "the lines are of different lengths and the legend names each one's epoch count.",
+)
 
 # %% [markdown]
 # ## Evaluation
@@ -426,9 +497,14 @@ def _predict_chunked(model, X, batch_size=BATCH_SIZE):
 pred_patch = _predict_chunked(patchtst, X_test)
 pred_itrans = _predict_chunked(itrans, X_test)
 
+# %% [markdown]
+# The ridge baseline flattens each window into one long vector and fits a single
+# penalised linear map. Ridge shrinks coefficients towards zero by a penalty on their
+# size, which makes it sensitive to the scale of each input, so the pipeline
+# standardises first - fitted on the training inputs alone and applied unchanged to the
+# held-back ones, so no test statistic reaches the transform.
+
 # %%
-# Ridge baseline on flattened sequences. Its penalty is scale-sensitive, so the
-# scaler is fit on training inputs only and applied unchanged to the test set.
 X_flat_train = X_train.reshape(len(X_train), -1)
 X_flat_test = X_test.reshape(len(X_test), -1)
 ridge = make_pipeline(StandardScaler(), Ridge(alpha=1.0))
@@ -447,19 +523,18 @@ zero_mse = float(np.mean(y_test**2))
 for result in results.values():
     result["mse_ratio"] = result["mse"] / zero_mse
 
-best_ic_name = max(results, key=lambda name: results[name]["ic"])
-both_transformers_beat_ridge = all(
-    results[name]["ic"] > results["Ridge"]["ic"] for name in ("PatchTST", "iTransformer")
+summary_df = pl.DataFrame(
+    [
+        {
+            "Model": name,
+            "Mean daily rank IC": round(r["ic"], 4),
+            "Test MSE": round(float(r["mse"]), 6),
+            "MSE / zero forecast": round(float(r["mse_ratio"]), 3),
+        }
+        for name, r in results.items()
+    ]
 )
-comparison_title = (
-    "Transformers edge Ridge on IC; only iTransformer beats zero-return MSE"
-    if both_transformers_beat_ridge
-    else f"{best_ic_name} leads rank IC; the single split does not favor both Transformers"
-)
-print(
-    f"Best cross-sectional rank IC: {best_ic_name} ({results[best_ic_name]['ic']:.3f}). "
-    f"Zero-return test MSE: {zero_mse:.6f}."
-)
+summary_df
 
 # %% [markdown]
 # **Interpretation**: Cross-sectional IC asks whether a model ranks ETFs well
@@ -507,36 +582,64 @@ for name, r in results.items():
     )
 
 fig.update_layout(
-    title=comparison_title,
+    title="Ranking skill and calibration are scored separately",
 )
 fig.update_yaxes(title_text="Mean daily Spearman IC", row=1, col=1)
 fig.update_yaxes(title_text="Test MSE relative to zero forecast", row=1, col=2)
 fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
-fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
-fig.show()
+fig.add_hline(
+    y=1,
+    line_dash="dot",
+    line_color=COLORS["neutral"],
+    annotation_text="zero forecast",
+    annotation_position="bottom right",
+    row=1,
+    col=2,
+)
+show_plotly_with_alt(
+    fig,
+    "Two bar charts over PatchTST, iTransformer and the ridge baseline. The left gives "
+    "each one's mean daily cross-sectional rank correlation with a line at zero; the "
+    "right gives its test mean squared error as a multiple of the zero forecast's, "
+    "with a dotted line at one.",
+)
 
 # %% [markdown]
-# Both Transformer variants share the same raw lookback tensor; they differ in
-# which axis attention is applied over - features (iTransformer) or time-patch
-# tokens (PatchTST). The scaled Ridge baseline on the flattened sequence is the
-# null model: a linear map with no attention structure at all.
-
-# %% [markdown]
-# ### iTransformer Attention Weights
+# The two panels answer the two questions separately, and they can disagree: ranking
+# the funds correctly on each date and predicting the right return levels are not the
+# same achievement, and a model that shrinks its predictions towards zero improves one
+# while doing nothing for the other.
 #
-# Because iTransformer applies attention over features (not time steps), the
-# attention matrix reveals which feature pairs the model considers related.
-# We extract weights from the first encoder layer and compare them with the
-# uniform 1/N reference. Attention weights are a model diagnostic, not a causal
-# feature-importance measure.
+# The ridge regression is the reference that matters. It sees the identical window,
+# flattened into one long vector, and fits a single penalised linear map - no attention,
+# no patches, no tokens. Whatever the two Transformers do differently has to show up as
+# a difference from that, not merely as a difference from each other. The zero forecast
+# on the right panel plays the same role for the error column.
+
+# %% [markdown]
+# ### What the iTransformer's attention looks like
+#
+# Because a token here is a whole feature, the attention matrix is
+# feature-by-feature: row $i$, column $j$ is how much weight the model put on
+# feature $j$ while producing feature $i$'s output. Each row is a softmax and so sums
+# to one, which means the reference point is not zero but $1/N$ - the weight a row
+# would give every column if it favoured none of them. The heatmaps below plot the
+# distance from that uniform reference, in percentage points.
+#
+# **One matrix per attention head.** A layer with `N_HEADS` heads computes that many
+# separate attention patterns and concatenates their outputs, and PyTorch's
+# `need_weights=True` returns the mean across heads *by default*. That average is not
+# what any head did: two heads attending to complementary halves of the feature set
+# average to something flatter than either, so a head-averaged matrix can look
+# near-uniform when no head is. `average_attn_weights=False` returns them separately,
+# which is what is drawn here.
+
+# %% [markdown]
+# The encoder is fed the input it actually sees: instance-normalised, transposed so
+# features become tokens, then projected. These layers have `norm_first` set to False,
+# so `self_attn` receives that projection unnormalised, which is what the cell passes.
 
 # %%
-# Extract first-layer attention from iTransformer's self_attn module. Calling
-# self_attn with need_weights=True is the supported way to read attention from
-# the standard PyTorch TransformerEncoderLayer; we feed the input the encoder
-# itself sees after instance normalization and input projection, so the weights correspond to the same
-# computation the model is performing during evaluation. Evenly spaced holdout
-# rows cover the panel rather than taking one contiguous asset block.
 itrans.eval()
 sample_idx = np.linspace(0, len(X_test) - 1, num=min(512, len(X_test)), dtype=int)
 X_sample = torch.FloatTensor(X_test[sample_idx]).to(DEVICE)
@@ -544,68 +647,113 @@ with torch.no_grad():
     means = X_sample.mean(dim=1, keepdim=True)
     variances = X_sample.var(dim=1, keepdim=True, unbiased=False)
     x_normalized = (X_sample - means) / torch.sqrt(variances + 1e-5)
-    x_inv = x_normalized.permute(0, 2, 1)  # (batch, n_features, lookback)
-    x_proj = itrans.input_proj(x_inv)
+    x_proj = itrans.input_proj(x_normalized.permute(0, 2, 1))
     first_layer = itrans.encoder.layers[0]
-    _, attn = first_layer.self_attn(x_proj, x_proj, x_proj, need_weights=True)
-avg_attn = attn.mean(dim=0).cpu().numpy()  # (n_features, n_features)
-uniform_attention = 1 / len(FEATURE_COLS)
-attention_deviation_pp = 100 * (avg_attn - uniform_attention)
-
-fig = go.Figure(
-    go.Heatmap(
-        z=attention_deviation_pp,
-        x=FEATURE_COLS,
-        y=FEATURE_COLS,
-        zmid=0,
-        colorscale=[
-            [0, COLORS["negative"]],
-            [0.5, COLORS["silver"]],
-            [1, COLORS["positive"]],
-        ],
-        colorbar_title="Deviation<br>from uniform<br>(percentage points)",
-        hovertemplate=(
-            "Query: %{y}<br>Key: %{x}<br>Deviation from uniform: %{z:.2f} pp<extra></extra>"
-        ),
+    _, attn = first_layer.self_attn(
+        x_proj, x_proj, x_proj, need_weights=True, average_attn_weights=False
     )
+# (batch, heads, features, features) -> averaged over the sampled windows only.
+per_head_attn = attn.mean(dim=0).cpu().numpy()
+uniform_attention = 1 / len(FEATURE_COLS)
+head_deviation_pp = 100 * (per_head_attn - uniform_attention)
+span = float(np.max(np.abs(head_deviation_pp)))
+print(
+    f"{head_deviation_pp.shape[0]} heads, {len(FEATURE_COLS)} feature tokens; "
+    f"uniform weight is {100 * uniform_attention:.1f}%"
 )
-max_attention_deviation = float(np.max(np.abs(attention_deviation_pp)))
+
+# %%
+fig = make_subplots(
+    rows=1,
+    cols=head_deviation_pp.shape[0],
+    subplot_titles=[f"Head {h + 1}" for h in range(head_deviation_pp.shape[0])],
+    shared_yaxes=True,
+)
+for h in range(head_deviation_pp.shape[0]):
+    fig.add_trace(
+        go.Heatmap(
+            z=head_deviation_pp[h],
+            x=FEATURE_COLS,
+            y=FEATURE_COLS,
+            zmid=0,
+            zmin=-span,
+            zmax=span,
+            colorscale=[
+                [0, COLORS["negative"]],
+                [0.5, COLORS["silver"]],
+                [1, COLORS["positive"]],
+            ],
+            showscale=h == head_deviation_pp.shape[0] - 1,
+            colorbar_title="Deviation<br>from uniform<br>(pp)",
+            hovertemplate=(
+                "Query: %{y}<br>Key: %{x}<br>Deviation from uniform: %{z:.2f} pp<extra></extra>"
+            ),
+        ),
+        row=1,
+        col=h + 1,
+    )
 fig.update_layout(
-    title=f"Attention stays within {max_attention_deviation:.2f} pp of uniform across momentum horizons",
-    xaxis_title="Key feature",
-    yaxis_title="Query feature",
-    width=700,
-    height=520,
+    title="Each head's attention over the momentum horizons, against uniform",
+    height=460,
 )
-fig.show()
+fig.update_xaxes(title_text="Key feature")
+fig.update_yaxes(title_text="Query feature", row=1, col=1)
+show_plotly_with_alt(
+    fig,
+    "One heatmap per attention head of the iTransformer's first encoder layer, on a "
+    "shared colour scale. Each cell is how far that query-key feature pair's attention "
+    "weight sits from the uniform weight, in percentage points, with the momentum "
+    "horizons on both axes.",
+)
 
 # %% [markdown]
-# Near-uniform attention means this first layer does not sharply favor a few
-# momentum horizons on the sampled holdout panel. That is a useful negative
-# result. It does not prove that the features are unrelated, and the weights
-# should not be read as causal importance.
+# Read the heads separately and compare them. Heads that concentrate on different
+# feature pairs are the layer doing what multi-head attention is for; heads that look
+# alike mean the extra head is buying little. A head close to uniform everywhere is
+# passing its inputs through roughly evenly, which is a real observation about that
+# head on these windows.
+#
+# Three limits on what any of this establishes. It is the **first** layer of two, so it
+# is not the model's overall view of the features. It is averaged over the sampled
+# holdout windows, so a head that behaves differently in different market conditions
+# shows up here as its average behaviour. And attention weight is not importance: a
+# feature can receive little attention and still dominate the output through the
+# residual path around the attention block, which is why these matrices are a
+# description of one internal computation and not a feature-importance ranking, causal
+# or otherwise.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **PatchTST** patches along the time axis, reducing attention complexity from
-#    $O(L^2)$ to $O((L/P)^2)$ - a dramatic speedup enabling longer lookback windows
-# 2. **iTransformer** inverts the attention dimension: features become tokens, enabling
-#    direct cross-variate dependency modeling without positional embeddings
-# 3. **Rank IC and MSE answer different questions**: compare the architecture panel
-#    with both Ridge and the zero-return squared-error reference
-# 4. **One split cannot rank architectures**: the purged holdout illustrates the
-#    mechanics; Section 13.9 supplies the walk-forward comparison
-# 5. Both represent improvements over vanilla Transformer designs by incorporating
-#    temporal inductive biases (patching) or sidestepping the temporal order problem
-#    entirely (inverted attention)
-# 6. **Attention is descriptive, not causal**: near-uniform weights here do not
-#    establish feature importance or the absence of dependence
-# 7. This notebook evaluates a single ETF universe; cross-dataset comparison in
-#    `12_case_study_insights` tests whether these patterns generalize
+# 1. **What a token is decides what attention can do.** Self-attention relates tokens
+#    to each other and has no notion of order beyond what the tokens carry, so the
+#    vanilla choice of one day per token gives it 60 interchangeable scalars. Patching
+#    puts local shape inside a token; inverting puts a whole variable inside one. Both
+#    architectures are that one decision, not a larger model.
+# 2. **Patching cuts the cost of attention quadratically in the patch size.** Attention
+#    is $O(L^2)$ in the number of tokens, so tokens of `PATCH_SIZE` days over a window
+#    of $L$ make it $O((L/P)^2)$ - which is what makes a long window affordable, and the
+#    reason to reach for patching before reaching for a smaller window.
+# 3. **The inverted design needs no positional encoding, and that is a consequence
+#    rather than a saving.** Its tokens are features, and features have no natural
+#    order to encode; temporal order lives inside a token, where the projection handles
+#    it. Ask what a design's tokens are before asking what it does about position.
+# 4. **Read an attention matrix per head, and read it as a description.** PyTorch
+#    averages heads by default, and an average across heads is not what any head did.
+#    Even per head, attention weight is not importance - the residual path routes
+#    around the attention block - so these matrices say what one internal computation
+#    did and not which inputs mattered.
+# 5. **Score ranking and calibration separately, and both against something that is
+#    not a Transformer.** A ridge regression on the same flattened window is the
+#    comparison that decides whether the architecture bought anything; the two
+#    Transformers against each other cannot answer that.
 #
-# PyTorch deterministic algorithms and a fixed cuBLAS workspace make repeated
-# executions reproducible on the same software and GPU stack; another environment
-# may still produce small floating-point differences.
+# **Known limitations.** One chronological split of one ETF panel, one label horizon,
+# one seed, and teaching-scale dimensions throughout - both models here are small
+# enough to train in minutes and neither is the size its paper used. Nothing here ranks
+# the architectures; `12_case_study_insights` is where the same families are compared
+# across case studies under walk-forward validation. The attention read-out is the
+# first of two encoder layers, averaged over sampled holdout windows.
 #
-# **Next**: See `05_tcn` for temporal convolutional networks.
+# **Next**: `05_tcn` drops attention entirely and gets a long receptive field from
+# dilated causal convolutions instead.
