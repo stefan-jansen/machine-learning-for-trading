@@ -1134,7 +1134,12 @@ case_studies/nasdaq100_microstructure/04_model_based_features:
     # The quarter has to reach past 2020-06-30 10:48, which is where fold 1's validation window
     # opens: every readout in sections C, D and F is taken on validation rows, and a panel that
     # stops short of them computes features nothing reports on.
-    MAX_SYMBOLS: 3
+    # Twelve, not three, because the downstream sweep needs names to rank: `top_k_grid` for
+    # every nasdaq label is [5, 10, 20] and the case study is long-short, so the smallest
+    # declared k of 5 needs ten tradeable names. At three symbols 14_backtest refuses before it
+    # starts. The cost of the extra nine is per bar and bounded by the quarter below; roughly
+    # 55 s of this notebook's 76 is fixed and neither lever touches it.
+    MAX_SYMBOLS: 12
     START_DATE: "2020-05-01"
     END_DATE: "2020-07-31"
     # WORKSPACE is appended by smoke-chain.sh, which supplies the throwaway directory. It is
@@ -1160,7 +1165,7 @@ case_studies/nasdaq100_microstructure/06_linear:
     EXECUTION_TIER: preview
     LABELS: ["fwd_ret_15m"]
     POPULATION_NAME: smoke-linear
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5}
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 12}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 83
   # 6.6 GB measured on 2026-09-05T22:00Z, a five-symbol preview that exited 0 in 83 s. The full
@@ -1178,7 +1183,7 @@ case_studies/nasdaq100_microstructure/07_gbm:
     # rest of the run is predicting the intraday validation rows once per checkpoint, and at the
     # default interval of 50 over 500 trees that is 150 models. At 250 it is 30. Thinning rows
     # instead would attack the wrong half and change the panel this case study is about.
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, checkpoint_interval: 250}
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 12, checkpoint_interval: 250}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 228
   # 8.2 GB measured on 2026-09-05T22:01Z, a five-symbol preview that exited 0. Its full sweep is
@@ -1190,7 +1195,7 @@ case_studies/nasdaq100_microstructure/08_dl_nlinear:
     EXECUTION_TIER: preview
     LABELS: ["fwd_ret_15m"]
     POPULATION_NAME: smoke-nlinear
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, max_train_sequences: 2000}
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 12, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 145
 
@@ -1199,7 +1204,7 @@ case_studies/nasdaq100_microstructure/09_dl_lstm:
     EXECUTION_TIER: preview
     LABELS: ["fwd_ret_15m"]
     POPULATION_NAME: smoke-lstm
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, max_train_sequences: 2000}
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 12, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 146
 
@@ -1208,7 +1213,7 @@ case_studies/nasdaq100_microstructure/10_dl_tcn:
     EXECUTION_TIER: preview
     LABELS: ["fwd_ret_15m"]
     POPULATION_NAME: smoke-tcn
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, max_train_sequences: 2000}
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 12, max_train_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 149
 
@@ -1220,7 +1225,7 @@ case_studies/nasdaq100_microstructure/11_dl_patchtst:
     # max_predict_sequences for the same reason 07_gbm caps its checkpoints: the training half
     # is already small and the run's cost is scoring the intraday validation window. Its three
     # siblings here come in at 146-149 s without it and are left alone.
-    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 5, max_train_sequences: 2000, max_predict_sequences: 2000}
+    PREVIEW_REDUCTIONS: {folds: [0], max_symbols: 12, max_train_sequences: 2000, max_predict_sequences: 2000}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 78
 
@@ -1308,7 +1313,7 @@ case_studies/etfs/11d_stochastic_discount_factor:
     LABELS: ["fwd_ret_21d"]
     POPULATION_NAME: smoke-sdf
     PREVIEW_REDUCTIONS:
-      {folds: [0], max_symbols: 5, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
+      {folds: [0], max_symbols: 12, n_epochs_cond: 1, n_epochs_moment: 1, n_epochs_unc: 1}
   writes: [training_runs, prediction_sets, prediction_metrics, prediction_coverage, fold_metrics]
   measured_s: 36
   headroom_gb: 4
@@ -1387,72 +1392,81 @@ case_studies/us_equities_panel/04_model_based_features:
     entry therefore does NOT demonstrate criterion 13, self-containment; the sidecar gap is the
     fixture's and is owned by the session that regenerates it.
 
-# nasdaq100_microstructure 13 through 17 and 20 are blocked for one reason with two halves, and
-# both halves were measured on 2026-09-06 rather than inferred from the notebooks' age.
+# nasdaq100_microstructure 13 through 17 and 20 were blocked for one reason with two halves.
+# Both halves are gone; what follows records why, because the entries below are only correct if
+# they are.
 #
-# The first half is that these notebooks are not on the research boundary. 14, 15, 16, 17 and 20
-# call no `open_study` at all - they import `run_backtest` and open `run_log/registry.db` with
-# `sqlite3` directly - and 13_model_analysis reads through `Study.at`, which takes one root and
-# performs no activation. So none of the six declares EXECUTION_TIER or WORKSPACE, there is no
-# preview tier to ask for, and a reduced run would register into the case study's own artifacts.
-# That is the production path, which is what the tier boundary exists to keep a smoke run out of.
+# The first half was that these notebooks were not on the research boundary. 14, 15, 16, 17 and
+# 20 called no `open_study` at all - they imported `run_backtest` and opened
+# `run_log/registry.db` with `sqlite3` directly - so none declared EXECUTION_TIER or WORKSPACE,
+# there was no preview tier to ask for, and a reduced run would have registered into the case
+# study's own artifacts. 14 through 17 now open through `open_study`. 13 and 20 read and
+# register nothing, so they take `read_only_study`, which resolves the root for a tier and
+# workspace without activating one.
 #
-# The second half is that there would be nothing for them to read. Measured against
-# ~/ml4t/artifacts/case_studies/nasdaq100_microstructure/run_log/registry.db, the registry this
-# case study writes to and these notebooks select from: 13 training_runs, and 0 rows in
-# prediction_sets, backtest_runs, decision_artifacts, candidate_sets and fold_metrics. The one
-# official population, nasdaq100_microstructure-linear-validation-v1, declares 61 prediction
-# members and none of them exists. So the selection each of these six opens with resolves to an
-# empty set whatever reduction is declared above it.
-#
-# Each entry names its own completion issue rather than a shared one, because finishing that
-# notebook is what unblocks it and the issues are already per-notebook.
+# The second half was that there would be nothing for them to read: measured on 2026-09-06, the
+# canonical registry held 13 training_runs and 0 rows in prediction_sets, backtest_runs,
+# decision_artifacts, candidate_sets and fold_metrics. That was never a property of these
+# notebooks. The chain runs 06 through 12 into the same workspace first, and those eight now
+# pass, so the populations 13 compares and the prediction sets 14 sweeps are written by the
+# jobs ahead of them. 13 reads its population names from parameters, so the smoke run passes
+# the names a reduced run publishes under rather than the canonical ones, which resolve to
+# nothing in a workspace.
 
 case_studies/nasdaq100_microstructure/13_model_analysis:
+  parameters:
+    EXECUTION_TIER: preview
+    LINEAR_POPULATION: smoke-linear
+    GBM_POPULATION: smoke-gbm
+    NLINEAR_POPULATION: smoke-nlinear
+    LSTM_POPULATION: smoke-lstm
+    TCN_POPULATION: smoke-tcn
+    PATCHTST_POPULATION: smoke-patchtst
   writes: []
-  blocked_by: 466
-  blocked_reason: >-
-    Reads through Study.at with no EXECUTION_TIER or WORKSPACE parameter, so there is no preview
-    tier to declare, and the six populations it compares resolve to 0 prediction_sets in the
-    canonical registry.
+  headroom_gb: 8
 
 case_studies/nasdaq100_microstructure/14_backtest:
-  writes: []
-  blocked_by: 467
-  blocked_reason: >-
-    Not on the research boundary: it calls run_backtest and sqlite3 directly rather than
-    open_study, so a reduced run has no workspace and would write into the case study's own
-    registry, which holds no prediction_sets to back a sweep.
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_15m
+    MAX_SYMBOLS: 12
+    TOP_N_PREDICTIONS: 3
+  writes: [backtest_runs, backtest_metrics, backtest_fold_metrics]
+  headroom_gb: 12
 
 case_studies/nasdaq100_microstructure/15_portfolio_management:
-  writes: []
-  blocked_by: 468
-  blocked_reason: >-
-    Same shape as 14_backtest - run_backtest and resolve_best_predictions against the case
-    study's own registry, no tier parameter - and it ranks the backtests 14 would have
-    registered, of which there are none.
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_15m
+    MAX_SYMBOLS: 12
+    TOP_N_PREDICTIONS: 3
+  writes: [backtest_runs, backtest_metrics]
+  headroom_gb: 12
 
 case_studies/nasdaq100_microstructure/16_risk_management:
-  writes: []
-  blocked_by: 470
-  blocked_reason: >-
-    Same shape as 14_backtest, and it overlays risk on the allocation combinations 15 selects,
-    so it is blocked by both halves of that entry and by 15's.
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_15m
+    MAX_SYMBOLS: 12
+    TOP_N_COMBOS: 2
+    MAX_RISK_VARIANTS: 2
+  writes: [backtest_runs, backtest_metrics]
+  headroom_gb: 12
 
 case_studies/nasdaq100_microstructure/17_costs:
-  writes: []
-  blocked_by: 469
-  blocked_reason: >-
-    Same shape as 14_backtest, and it prices the combinations 15 and 16 select, so it cannot
-    run before either of them does.
+  parameters:
+    EXECUTION_TIER: preview
+    LABEL: fwd_ret_15m
+    MAX_SYMBOLS: 12
+    TOP_N_COMBOS: 2
+  writes: [backtest_runs, backtest_metrics]
+  headroom_gb: 12
 
 case_studies/nasdaq100_microstructure/20_strategy_analysis:
+  parameters:
+    EXECUTION_TIER: preview
   writes: []
-  blocked_by: 471
-  blocked_reason: >-
-    Reads the registry with sqlite3 and declares no tier, and it interprets the strategy results
-    14 through 17 would have registered. The completion issue is filed under this notebook's
-    former number, 18_strategy_analysis.
+  headroom_gb: 8
 
 # --- us_equities_panel: the two stages that cannot have a smoke run ----------------------------
 #

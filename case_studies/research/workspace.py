@@ -324,6 +324,7 @@ class Study:
         entry_point: str | None = None,
     ) -> Study:
         """Open the canonical generated-artifact links for maintainer regeneration."""
+        _refuse_incidental_regeneration(release_root)
         release_root = _resolve_release_root(release_root)
         case_dir = release_root / "case_studies" / case_study
         if not case_dir.is_dir():
@@ -485,6 +486,37 @@ class Study:
         return CausalRequest.from_request(self, request)
 
 
+def _refuse_incidental_regeneration(release_root: str | Path | None) -> None:
+    """Refuse the in-place production path when a test harness is in control.
+
+    `Study.regenerate` writes through the generated-artifact symlinks, so in a maintainer
+    worktree it writes `~/ml4t/artifacts/case_studies/<cs>/run_log/registry.db` - the published
+    registry. That is correct for a production run and catastrophic for a test: on 2026-08-16 a
+    test run of `fx_pairs` 13-16 wrote 269 `backtest_runs`, 13 `official_populations` and a
+    candidate set into the published registry, and one of those populations froze **incomplete**
+    under a name that is immutable, blocking re-runs under it.
+
+    `_refuse_preview_activation` in `population.py` guards the mirror-image case, a preview run
+    reaching canonical storage. This is the direction that had no counterpart.
+    `require_writable` is not it: the production study is writable by design.
+
+    The discriminator is `release_root`, not pytest alone. Every test that legitimately
+    regenerates seeds its own release tree and passes it -
+    `test_regeneration_writes_through_resolved_directory_symlinks` and its two siblings do
+    exactly that - while the destructive call is the one that takes the default and resolves to
+    the real repository. So an explicit root is always allowed and the default is refused only
+    under a test runner, which cannot fire on a production run.
+    """
+    if release_root is not None:
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        raise PermissionError(
+            "canonical in-place regeneration is refused under a test runner: it writes the "
+            "published registry through the generated-artifact symlinks. Pass an explicit "
+            "release_root, or open a workspace with open_study(workspace=...)."
+        )
+
+
 def _resolve_preview_workspace(workspace: str | Path) -> Path:
     """Place a relative preview workspace outside the checkout.
 
@@ -503,6 +535,58 @@ def _resolve_preview_workspace(workspace: str | Path) -> Path:
         Path(declared).expanduser() if declared else Path.home() / "ml4t" / "artifacts" / "preview"
     )
     return (base / path).resolve()
+
+
+def read_only_study(
+    case_study: str,
+    *,
+    workspace: str | Path | None = None,
+    execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
+    release_root: str | Path | None = None,
+    entry_point: str | None = None,
+) -> Study:
+    """The read-only study a reporting notebook should read for its tier.
+
+    A notebook that registers nothing must not go through :func:`open_study`, because every
+    route there ends in :meth:`Study.activate`, which rewrites ``ML4T_OUTPUT_DIR`` for the rest
+    of the process. :meth:`Study.at` is the form that does not, but it takes a root, and until
+    this existed a notebook had no way to name the root of a *reduced* run: `storage_root`
+    refuses a preview path on a read-only study, so the alternative was to spell `.preview`
+    into the notebook and couple it to a layout it has no business knowing.
+
+    That is what kept the analysis notebooks out of the smoke chain. `smoke-chain.sh` skips any
+    notebook with no ``WORKSPACE`` parameter, because a notebook whose outputs cannot be
+    redirected writes onto the canonical artifact store - it overwrote fx_pairs'
+    `model_based.parquet` that way on 2026-09-07. A reporting notebook has nothing to redirect
+    and still needs the parameter, to say which registry it is reading.
+
+    The preview placement mirrors :meth:`Study.activate`, which appends ``.preview`` to the
+    output root before the case-study name. `test_read_only_study_agrees_with_activation`
+    holds the two together.
+    """
+    tier = ExecutionTier(execution_tier)
+    if workspace is None:
+        root = _resolve_release_root(release_root) / "case_studies" / case_study
+    else:
+        root = _resolve_preview_workspace(workspace)
+        if tier is ExecutionTier.PREVIEW:
+            root = root / ".preview"
+        root = root / case_study
+    study = Study.at(root, case_study=case_study, entry_point=entry_point)
+    # Activating a READ-ONLY study is not the thing `Study.at` exists to avoid. Its read-only
+    # branch writes no output root and moves nothing: it points `ML4T_OUTPUT_DIR` at the root
+    # this study already answers for, and clears the caches keyed on it.
+    #
+    # Without it a notebook holds two answers at once. `study` reads the root resolved above,
+    # while every helper that takes a case-study *name* rather than a study - `load_all_metrics`,
+    # `load_predictions`, anything reaching `get_case_study_dir` - resolves through
+    # `ML4T_OUTPUT_DIR` and reads the canonical registry. Measured on 2026-09-09:
+    # nasdaq100_microstructure's `13_model_analysis` read a smoke workspace holding 126 scored
+    # prediction sets, asked `load_all_metrics` for them, and got the canonical registry's zero.
+    # It raised, which is the good case; the same split silently compares one registry's catalog
+    # against another's metrics wherever both are non-empty.
+    study.activate()
+    return study
 
 
 def open_study(

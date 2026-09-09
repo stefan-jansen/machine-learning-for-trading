@@ -188,6 +188,13 @@ def _on_canonical_universe(frame: pl.DataFrame) -> pl.DataFrame:
     """
     if CANONICAL_UNIVERSE is None:
         return frame
+    # An empty resolver result carries no columns at all, so reading `spec_json` off it raises
+    # `ColumnNotFoundError: "spec_json" not found`, which names a column rather than the absence
+    # that produced it. Measured 2026-09-09 on the smoke chain: 14_backtest had registered
+    # nothing and this notebook reported a schema problem. The stage-empty case is diagnosed
+    # below, on the assembled frame, where it can say which stage is missing.
+    if frame.is_empty():
+        return frame
     keep = [
         strategy_view(json.loads(spec)).get("signal", {}).get("universe_filter")
         == CANONICAL_UNIVERSE

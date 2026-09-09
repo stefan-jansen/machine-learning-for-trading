@@ -8,10 +8,11 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import PredictionResult, Result, Strategy, Study
+from case_studies.research import PredictionResult, Result, Strategy, Study, read_only_study
 from case_studies.utils import conformal
 from tests.test_research_registry import _predictions, _training_spec
 from tests.test_research_workspace import _seed_release
+from utils.paths import get_case_study_dir
 
 
 def _prices() -> pl.DataFrame:
@@ -500,3 +501,39 @@ def test_conformal_holdout_requires_widths_calibrated_on_validation_residuals(
     # And the artifact the writer produced still runs, so the guard admits what it should.
     widths.write_parquet(widths_path)
     assert study.strategy(prediction=holdout_prediction, **request).run().complete
+
+
+def test_read_only_study_agrees_with_activation(tmp_path: Path) -> None:
+    """The read-only resolver names the directory a writing preview actually writes to.
+
+    `read_only_study` recomputes the preview placement rather than asking a Study object,
+    because `storage_root` refuses a preview path on a read-only study and `Study.at` never
+    activates. Recomputing is what lets an analysis notebook name a reduced run's registry
+    without spelling `.preview` into the notebook, and it is also how the two can drift: if
+    `activate` ever moves the preview root, a reporting notebook would silently read the
+    canonical registry and report on it while claiming to be a smoke run. That failure is
+    invisible - the notebook succeeds - so it is asserted here rather than left to a reviewer.
+    """
+    release = _seed_release(tmp_path)
+    workspace = tmp_path / "workspace"
+    writing = Study.open("etfs", workspace=workspace, release_root=release)
+    written = writing.storage_root("preview")
+
+    reading = read_only_study(
+        "etfs", workspace=workspace, execution_tier="preview", release_root=release
+    )
+    assert reading.root == written
+    assert reading.read_only
+
+    # The failure this guards is not that `study` reads the wrong root - it reads the right one
+    # either way - but that every helper taking a case-study NAME resolves through
+    # ML4T_OUTPUT_DIR and reads a different registry than the study in the same notebook.
+    # nasdaq100_microstructure's 13_model_analysis did exactly that on 2026-09-09: a smoke
+    # workspace with 126 scored prediction sets, and `load_all_metrics` answering 0 from the
+    # canonical registry.
+    assert get_case_study_dir("etfs") == written
+
+    canonical = read_only_study("etfs", release_root=release)
+    assert canonical.root == release / "case_studies" / "etfs"
+    assert canonical.root != written
+    assert get_case_study_dir("etfs") == canonical.root
