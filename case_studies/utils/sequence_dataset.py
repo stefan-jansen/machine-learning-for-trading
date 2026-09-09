@@ -157,10 +157,29 @@ def materialize_sequences(
 def _sample_sequence_positions(
     counts: np.ndarray,
     max_sequences: int,
+    stride: int = 0,
 ) -> list[np.ndarray | None]:
-    """Sample sequence endpoints while preserving full symbol coverage."""
+    """Sample sequence endpoints while preserving full symbol coverage.
+
+    ``stride`` spaces the endpoints and lets the count follow, which is what
+    ``modeling.dl.train_sequence_stride_horizons`` declares. It is applied per symbol and
+    counts valid endpoints of that symbol, not panel rows: a symbol that is missing bars has
+    no window ending in the gap, so spacing its endpoints is the closest thing to spacing them
+    in time that a per-symbol index supports. Every symbol with any valid endpoint keeps at
+    least its first, so striding never drops a symbol from the universe.
+
+    ``max_sequences`` is the other form. It fixes the total and derives the spacing from it, so
+    two folds of different length get different spacing; that is the price of a fixed budget.
+    """
 
     sampled_positions: list[np.ndarray | None] = [None] * len(counts)
+    if stride > 1:
+        for idx, n_seq in enumerate(counts):
+            if n_seq > stride:
+                sampled_positions[idx] = np.arange(0, int(n_seq), stride, dtype=np.int64)
+            elif n_seq > 1:
+                sampled_positions[idx] = np.zeros(1, dtype=np.int64)
+        return sampled_positions
     if max_sequences <= 0 or int(counts.sum()) <= max_sequences:
         return sampled_positions
 
@@ -459,11 +478,12 @@ def _build_sequence_index(
     valid_positions_list: list[np.ndarray],
     entities: list[str],
     max_sequences: int,
+    stride: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build flat symbol/end-position indices for a sequence store."""
 
     counts = np.asarray([len(positions) for positions in valid_positions_list], dtype=np.int64)
-    sampled_offsets = _sample_sequence_positions(counts, max_sequences)
+    sampled_offsets = _sample_sequence_positions(counts, max_sequences, stride)
     symbol_parts: list[np.ndarray] = []
     end_parts: list[np.ndarray] = []
 
@@ -731,6 +751,7 @@ def prepare_fold_sequence_stores(
     lookback: int,
     max_train_sequences: int = 0,
     max_predict_sequences: int = 0,
+    train_sequence_stride: int = 0,
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
@@ -866,7 +887,7 @@ def prepare_fold_sequence_stores(
     _normalize_feature_arrays(val_features, means, stds)
 
     train_symbol_idx, train_end_idx = _build_sequence_index(
-        train_positions, train_entities, max_train_sequences
+        train_positions, train_entities, max_train_sequences, train_sequence_stride
     )
     val_symbol_idx, val_end_idx = _build_sequence_index(
         val_positions, val_entities, max_predict_sequences

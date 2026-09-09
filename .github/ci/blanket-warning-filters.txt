@@ -1,0 +1,202 @@
+# Notebooks still carrying the blanket `warnings.filterwarnings("ignore")`.
+#
+# The standard used to prescribe it. `rules/notebook-standards.md` clause M2 was narrowed on
+# 2026-09-08 (ml4t/agent-workspace#1096): suppress the noisy messages by name, filtered by
+# category and module, and leave visible anything that may report a real problem -
+# ConvergenceWarning and other optimization failures, RuntimeWarning for overflow,
+# divide-by-zero and invalid value, and anything the notebook's own result depends on.
+#
+# These files predate that ruling and conform to the old one. They are listed rather than
+# fixed because removing the call is a code-cell change: the provenance gate marks the
+# notebook STALE and it has to be re-executed before it can be committed, which is correct -
+# the point of the change is that renders start showing warnings, so the render has to be
+# regenerated. 204 of the 243 files carrying the call are stamped, so this is a re-execution
+# programme rather than a text sweep, and it proceeds a notebook at a time.
+#
+# HOW TO USE THIS FILE: when you re-execute a notebook for any reason, drop its blanket call
+# first, name whatever noise the run then shows, and delete its line here. The list may only
+# ever shrink - tests/test_blanket_warning_filters.py fails on an entry whose file no longer
+# carries the call, so a stale line cannot sit here unnoticed, and it fails on a file that
+# carries the call and is not listed, so a new notebook cannot add one.
+#
+# The four stage-04 notebooks in ml4t/agent-workspace#1095 are the sharpest case: they fork a
+# worker pool from a process holding a BLAS thread pool and filter the 3.14 warning that says
+# the child may deadlock. Two of the four are already fixed on this branch; cme_futures and
+# fx_pairs are stamped and wait for a re-execution, and theirs must not regenerate
+# features/model_based.parquet, whose sha256 keys every model fitted against it.
+
+02_financial_data_universe/13_data_quality_framework.py
+02_financial_data_universe/21_storage_benchmark_database.py
+02_financial_data_universe/22_pandas_polars_benchmark.py
+03_market_microstructure/01_itch_parser.py
+03_market_microstructure/02_itch_lob_reconstruction.py
+03_market_microstructure/03_itch_lob_analysis.py
+03_market_microstructure/04_itch_order_lifecycle_analysis.py
+03_market_microstructure/05_itch_trading_activity.py
+03_market_microstructure/06_itch_intraday_patterns.py
+03_market_microstructure/07_itch_stylized_facts.py
+03_market_microstructure/08_databento_lob_reconstruction.py
+03_market_microstructure/09_databento_mbo_analysis.py
+03_market_microstructure/10_iex_lob_reconstruction.py
+03_market_microstructure/13_algoseek_minute_bars_eda.py
+03_market_microstructure/14_itch_bar_sampling.py
+03_market_microstructure/15_itch_lee_ready.py
+03_market_microstructure/16_itch_information_bars.py
+03_market_microstructure/17_databento_bar_sampling.py
+03_market_microstructure/18_algoseek_jump_detection.py
+05_synthetic_data/02_tailgan_tail_risk.py
+05_synthetic_data/05_diffusion_ts.py
+06_strategy_definition/02_cv_foundations.py
+06_strategy_definition/03_case_study_overview.py
+07_defining_the_learning_task/01_data_quality_diagnostics.py
+07_defining_the_learning_task/02_preprocessing_pipeline.py
+07_defining_the_learning_task/03_label_methods.py
+07_defining_the_learning_task/04_maximum_favorable_adverse_excursion.py
+07_defining_the_learning_task/05_signal_evaluation.py
+07_defining_the_learning_task/06_ic_inference.py
+07_defining_the_learning_task/07_multiple_testing.py
+07_defining_the_learning_task/08_causal_sanity_checks.py
+07_defining_the_learning_task/10_ml4t_library_ecosystem.py
+07_defining_the_learning_task/_benchmark_utils.py
+08_financial_features/01_price_volume_features.py
+08_financial_features/02_microstructure_features.py
+08_financial_features/03_structural_cross_instrument_features.py
+08_financial_features/04_fundamentals_macro_calendar.py
+08_financial_features/05_feature_selection.py
+08_financial_features/06_robustness_sensitivity.py
+08_financial_features/07_event_studies.py
+08_financial_features/case_study_feature_summary.py
+10_text_feature_engineering/01_word2vec_training.py
+10_text_feature_engineering/02_asset_embeddings.py
+10_text_feature_engineering/04_bert_finetuning.py
+10_text_feature_engineering/05_financial_ner_finetuning.py
+10_text_feature_engineering/06_finbert_cross_dataset.py
+10_text_feature_engineering/07_news_return_signals.py
+10_text_feature_engineering/08_text_feature_evaluation.py
+10_text_feature_engineering/09_filing_text_signals.py
+11_ml_pipeline/01_ols_inference.py
+11_ml_pipeline/02_regularization_paths.py
+11_ml_pipeline/03_logistic_classification.py
+11_ml_pipeline/04_nested_cv_hpo.py
+11_ml_pipeline/05_shap_analysis.py
+11_ml_pipeline/06_conformal_prediction.py
+11_ml_pipeline/08_ml_backtest_intro.py
+12_gradient_boosting/02_gbm_comparison.py
+12_gradient_boosting/03_dl_vs_gbm.py
+12_gradient_boosting/04_optuna_tuning.py
+12_gradient_boosting/06_optuna_multi_asset.py
+12_gradient_boosting/07_hpo_comparison.py
+12_gradient_boosting/08_shap_analysis.py
+12_gradient_boosting/09_xai_limitations.py
+12_gradient_boosting/11_conformal_gbm.py
+12_gradient_boosting/12_case_study_insights.py
+14_latent_factors/01_pca_equity_sectors.py
+14_latent_factors/02_eigenportfolios.py
+14_latent_factors/03_yield_curve_decomposition.py
+15_causal_estimation/01_library_overview.py
+15_causal_estimation/02_dowhy_causal_graph.py
+15_causal_estimation/03_econml_dml.py
+15_causal_estimation/04_dml_crypto_regime.py
+15_causal_estimation/05_momentum_causal_trading.py
+15_causal_estimation/06_fed_announcement_bsts.py
+15_causal_estimation/07_tigramite_time_series.py
+15_causal_estimation/08_neural_causal_discovery.py
+15_causal_estimation/09_adia_causal_benchmark.py
+15_causal_estimation/11_factor_zoo_validation.py
+16_strategy_simulation/01_backtest_first_principles.py
+16_strategy_simulation/02_futures_backtesting.py
+16_strategy_simulation/08_signal_method_comparison.py
+18_transaction_costs/01_cost_taxonomy.py
+18_transaction_costs/02_spread_estimation.py
+18_transaction_costs/07_ml4t_volume_participation.py
+18_transaction_costs/08_ml_dynamic_execution.py
+19_risk_management/01_var_cvar.py
+19_risk_management/02_exit_strategies.py
+20_strategy_synthesis/00_holdout_predictions.py
+20_strategy_synthesis/01_aggregate_synthesis.py
+20_strategy_synthesis/02_feature_evaluation.py
+20_strategy_synthesis/03_signal_quality.py
+20_strategy_synthesis/04_signal_to_strategy.py
+20_strategy_synthesis/05_portfolio_allocation.py
+20_strategy_synthesis/06_cost_survival.py
+20_strategy_synthesis/07_regime_risk.py
+20_strategy_synthesis/08_recommendations.py
+22_rag_financial_research/01_sec_filing_pipeline.py
+22_rag_financial_research/03_hybrid_retrieval.py
+22_rag_financial_research/04_ragas_evaluation.py
+22_rag_financial_research/05_10k_rag_assistant.py
+22_rag_financial_research/06_esg_rag_vs_finetune.py
+22_rag_financial_research/07_institutional_holdings_graph.py
+22_rag_financial_research/08_rag_security.py
+26_mlops_governance/01_drift_monitoring.py
+26_mlops_governance/02_online_drift_detection.py
+26_mlops_governance/04_circuit_breakers.py
+26_mlops_governance/05_feast_feature_store.py
+26_mlops_governance/05b_feast_live.py
+26_mlops_governance/06_mlflow_experiments.py
+case_studies/cme_futures/01_feasibility_analysis.py
+case_studies/cme_futures/02_labels.py
+case_studies/cme_futures/03_financial_features.py
+case_studies/cme_futures/04_model_based_features.py
+case_studies/cme_futures/17_holdout_predictions.py
+case_studies/cme_futures/18_holdout_backtest.py
+case_studies/crypto_perps_funding/01_feasibility_analysis.py
+case_studies/crypto_perps_funding/02_labels.py
+case_studies/crypto_perps_funding/03_financial_features.py
+case_studies/crypto_perps_funding/04_model_based_features.py
+case_studies/crypto_perps_funding/05_evaluation.py
+case_studies/crypto_perps_funding/17_holdout_predictions.py
+case_studies/crypto_perps_funding/18_holdout_backtest.py
+case_studies/crypto_perps_funding/_archive/11_autoencoder.py
+case_studies/etfs/01_feasibility_analysis.py
+case_studies/etfs/02_labels.py
+case_studies/etfs/03_financial_features.py
+case_studies/etfs/13_model_analysis.py
+case_studies/etfs/14_backtest.py
+case_studies/etfs/15_portfolio_management.py
+case_studies/etfs/16_risk_management.py
+case_studies/etfs/17_costs.py
+case_studies/etfs/18_holdout_predictions.py
+case_studies/etfs/19_holdout_backtest.py
+case_studies/etfs/20_strategy_analysis.py
+case_studies/fx_pairs/01_feasibility_analysis.py
+case_studies/fx_pairs/02_labels.py
+case_studies/fx_pairs/03_financial_features.py
+case_studies/fx_pairs/04_model_based_features.py
+case_studies/nasdaq100_microstructure/01_feasibility_analysis.py
+case_studies/nasdaq100_microstructure/02_labels.py
+case_studies/nasdaq100_microstructure/03_financial_features.py
+case_studies/nasdaq100_microstructure/04_model_based_features.py
+case_studies/nasdaq100_microstructure/13_model_analysis.py
+case_studies/nasdaq100_microstructure/18_holdout_predictions.py
+case_studies/nasdaq100_microstructure/20_strategy_analysis.py
+case_studies/sp500_equity_option_analytics/01_feasibility_analysis.py
+case_studies/sp500_equity_option_analytics/02_labels.py
+case_studies/sp500_equity_option_analytics/03_financial_features.py
+case_studies/sp500_equity_option_analytics/04_model_based_features.py
+case_studies/sp500_equity_option_analytics/13_model_analysis.py
+case_studies/sp500_equity_option_analytics/15_portfolio_management.py
+case_studies/sp500_equity_option_analytics/16_risk_management.py
+case_studies/sp500_equity_option_analytics/17_costs.py
+case_studies/sp500_equity_option_analytics/18_holdout_predictions.py
+case_studies/sp500_equity_option_analytics/20_strategy_analysis.py
+case_studies/sp500_options/01_feasibility_analysis.py
+case_studies/sp500_options/02_labels.py
+case_studies/sp500_options/03_financial_features.py
+case_studies/sp500_options/04_model_based_features.py
+case_studies/sp500_options/16_holdout_predictions.py
+case_studies/sp500_options/17_holdout_backtest.py
+case_studies/sp500_options/18_strategy_analysis.py
+case_studies/us_equities_panel/01_feasibility_analysis.py
+case_studies/us_equities_panel/02_labels.py
+case_studies/us_equities_panel/03_financial_features.py
+case_studies/us_firm_characteristics/01_feasibility_analysis.py
+case_studies/us_firm_characteristics/02_labels.py
+case_studies/us_firm_characteristics/03_financial_features.py
+case_studies/us_firm_characteristics/10_model_analysis.py
+case_studies/us_firm_characteristics/13_risk_management.py
+case_studies/us_firm_characteristics/14_costs.py
+case_studies/us_firm_characteristics/15_holdout_predictions.py
+case_studies/us_firm_characteristics/16_holdout_backtest.py
+case_studies/us_firm_characteristics/17_strategy_analysis.py
+utils/storage_benchmarks.py

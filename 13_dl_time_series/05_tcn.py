@@ -14,31 +14,44 @@
 # ---
 
 # %% [markdown]
-# # Temporal Convolutional Network (TCN)
+# # Temporal Convolutional Network
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook implements a Temporal Convolutional Network for predicting
-# forward returns on ETFs. TCNs use dilated causal convolutions to capture
-# long-range temporal dependencies without the sequential bottleneck of
-# recurrent networks.
+# `01_core_architectures` measured the cost of walking a window one day at a time, and
+# `04_transformers` answered it with attention. This notebook takes the third route:
+# convolution, which reads the whole window in parallel like the fully connected
+# network but, unlike it, respects the ordering of the days.
 #
-# **Learning Objectives**:
-# - Implement causal convolutions that prevent information leakage from the future
-# - Build a TCN with exponentially growing dilations (1, 2, 4, 8) for efficient
-#   receptive field coverage
-# - Understand the tradeoff between receptive field size and model depth
-# - Compare TCN predictions against a Ridge regression baseline
+# A plain convolution has two problems for forecasting. Its filter reads in both
+# directions from each position, so the output at day $t$ mixes in days after $t$; and
+# its reach is the width of that filter, so covering sixty days would take a very wide
+# filter or very many layers. A **temporal convolutional network** answers both. Its
+# convolution is *causal* - the output at day $t$ is a function of days up to $t$ and
+# no later - which is what makes every position a legitimate forecast for its own date.
+# And it multiplies the gap between the positions each filter reads by two at every
+# layer - a *dilation* - so the reach grows geometrically with depth rather than
+# linearly.
 #
-# **Book Reference**: Chapter 13, Section 13.6 (The Full Practitioner Toolkit)
+# **Learning objectives**:
+# - Build a causal convolution and check which inputs each output can actually see,
+#   rather than trusting the word "causal" in the class name.
+# - Stack dilated blocks so the receptive field - the span of input one output depends
+#   on - covers the whole window, and compute that span rather than assuming it.
+# - Explain what a residual connection is doing in a stack this deep, and why the block
+#   normalises weights rather than activations.
+# - Score the result against a penalised linear map on the same window, which is the
+#   comparison that decides whether the convolutional structure earned anything.
 #
-# **Prerequisites**: ETF features (`case_studies/etfs/`)
+# **Book Reference**: Chapter 13, Section 13.6 (Alternative architectures and foundation
+# models).
+#
+# **Prerequisites**: `04_transformers`; ETF features from `case_studies/etfs/`.
 
 # %%
 """Build a TCN with dilated causal convolutions for return prediction."""
 
 import os
-import warnings
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -47,6 +60,7 @@ import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
+from dl_sequences import create_sequences_multi_asset, load_dl_dataset, train_model
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from plotly.subplots import make_subplots
 from sklearn.linear_model import Ridge
@@ -54,11 +68,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.nn.utils.parametrizations import weight_norm
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
-
-from dl_sequences import create_sequences_multi_asset, load_dl_dataset, train_model
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -82,10 +92,16 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
 # %% [markdown]
-# ## Data Loading
+# ## The data
 #
-# We use ETF features from the case study pipeline, providing diverse
-# time series characteristics for testing TCN architectures.
+# The same ETF case-study panel `04_transformers` used: eight trailing-return features
+# per fund per date, and a 21-day forward return as the label. Keeping the data fixed
+# across the chapter's architecture notebooks is what lets their results be read
+# against each other at all, and it is why `12_case_study_insights` can aggregate them.
+#
+# The panel's breadth is worth printing before anything is fitted, because the scoring
+# metric is computed across whatever funds exist on each date, and that count moves as
+# funds launch.
 
 # %%
 mds = load_dl_dataset("etfs")
@@ -115,6 +131,16 @@ print(f"Target: {TARGET_COL}")
 # %%
 df = mds.dataset.drop_nulls(subset=FEATURE_COLS + [TARGET_COL])
 print(f"Rows after dropping nulls: {len(df):,}")
+per_date = df.group_by(mds.date_col).len().sort(mds.date_col)
+print(
+    f"{df[mds.date_col].min()} to {df[mds.date_col].max()}, "
+    f"{df[mds.entity_cols[0]].n_unique()} funds; funds per date "
+    f"{per_date['len'].min()} to {per_date['len'].max()}, median {per_date['len'].median():.0f}"
+)
+print(
+    f"Label {TARGET_COL}: mean {df[TARGET_COL].mean():+.5f}, "
+    f"standard deviation {df[TARGET_COL].std():.5f}"
+)
 
 X, y, timestamps, symbols = create_sequences_multi_asset(
     df,
@@ -132,9 +158,17 @@ y = np.nan_to_num(y[sequence_order], nan=0.0).astype(np.float32)
 timestamps = timestamps[sequence_order]
 symbols = symbols[sequence_order]
 
+# %% [markdown]
+# ### Splitting by date, with a gap for the label horizon
+#
+# The split is by date, at fixed fractions of the trading days, and an example belongs
+# to the partition the date it carries falls in. The label is a `LABEL_HORIZON`-day
+# forward return, so an example dated within that many days of a boundary has an
+# outcome resolved by days on the far side; those examples are dropped. Input windows
+# may still reach back over a boundary, which is right - at decision time the model has
+# every past observation available.
+
 # %%
-# Date-based 60/20/20 temporal split. The target is a 21-day forward return,
-# so labels whose outcome windows cross the next boundary are purged.
 unique_dates = np.sort(np.unique(timestamps))
 train_boundary_idx = int(len(unique_dates) * 0.6)
 val_boundary_idx = int(len(unique_dates) * 0.8)
@@ -165,11 +199,23 @@ print(
 # Mean cross-sectional Spearman IC by date - TCN evaluation is on cross-asset
 # ranking, not pooled point error, so the same date/entity-aware metric used in
 # `01_core_architectures` and `04_transformers` is the right comparison anchor.
+#
+# A date's IC is undefined when a model predicts the same number for every fund on
+# it: the predicted ranks are all tied and there is nothing to correlate. The library
+# returns `NaN` for such a date, and polars treats `NaN` and null as different values,
+# so `drop_nulls` alone leaves it in place and one of them makes the whole mean `NaN`.
+# Both are filtered here, and the count of dates the mean was actually taken over is
+# printed beside it, so a model that ties often is visible rather than averaged over
+# whichever dates happened to survive.
 
 
 # %%
 def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
-    """Mean cross-sectional Spearman IC across dates."""
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    Returns the mean and the defined/total date counts. Filters both null and NaN,
+    since polars `drop_nulls` leaves NaN in place.
+    """
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "prediction": y_pred})
     ret_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "forward_return": y_true})
     ic_per_date = cross_sectional_ic_series(
@@ -180,8 +226,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
+    defined = ic_per_date.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+    mean_ic = float(defined["ic"].mean()) if defined.height else float("nan")
+    return {"ic": mean_ic, "n_defined": defined.height, "n_total": ic_per_date.height}
 
 
 # %% [markdown]
@@ -195,8 +242,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 # The TCN consists of stacked causal convolution blocks with exponentially
 # increasing dilation factors. Each block uses:
 #
-# 1. **Causal padding**: Left-pad the input so the convolution only sees past
-#    and present timesteps, never the future
+# 1. **Causal padding**: pad both ends by $(k-1)d$ and drop the right-hand
+#    overhang, which is identical to padding only on the left - the output at $t$
+#    depends on inputs up to $t$ and no later, and the sequence keeps its length
 # 2. **Dilated convolutions**: Dilation factors of 1, 2, 4, 8 give an
 #    exponentially growing receptive field
 # 3. **Residual connections**: Enable training deeper networks
@@ -213,9 +261,10 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
 
 # %%
 class CausalConv1d(nn.Module):
-    """1D convolution with causal (left) padding.
+    """1D convolution whose output at time t depends only on inputs at times <= t.
 
-    Ensures the output at time t depends only on inputs at times <= t.
+    ``nn.Conv1d`` pads both ends, so the right-hand overhang is dropped; the result
+    is identical to padding only on the left, and the sequence keeps its length.
     """
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int):
@@ -359,13 +408,17 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=f"TCN stops after {len(epochs_axis)} epochs with no sustained validation gain",
+    title="Training and validation error per epoch",
     xaxis_title="Epoch",
     yaxis_title="Mean squared error",
-    width=820,
     height=470,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two lines plotting the temporal convolutional network's training and validation "
+    "mean squared error against epoch. The lines stop where early stopping halted "
+    "training.",
+)
 
 # %% [markdown]
 # ## Evaluate on Test Set
@@ -377,11 +430,13 @@ with torch.no_grad():
     y_pred = model(X_test_t).cpu().numpy()
 
 test_mse = np.mean((y_pred - y_test) ** 2)
-test_ic = cross_sectional_ic_mean(y_test, y_pred, test_dates, test_symbols)
+tcn_ic = cross_sectional_ic_mean(y_test, y_pred, test_dates, test_symbols)
+test_ic = tcn_ic["ic"]
 
 print("\nTCN Test Results:")
 print(f"  MSE: {test_mse:.6f}")
-print(f"  Spearman IC: {test_ic:.4f}")
+print(f"  Spearman IC: {test_ic:.4f}", end="")
+print(f"  (defined on {tcn_ic['n_defined']} of {tcn_ic['n_total']} test dates)")
 
 # %% [markdown]
 # ## Ridge Baseline Comparison
@@ -399,15 +454,28 @@ ridge.fit(X_train_scaled, y_train)
 y_ridge_pred = ridge.predict(X_test_scaled)
 
 ridge_mse = np.mean((y_ridge_pred - y_test) ** 2)
-ridge_ic = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+ridge_ic_result = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+ridge_ic = ridge_ic_result["ic"]
 zero_mse = float(np.mean(y_test**2))
 
 print("\nRidge Baseline Results:")
 print(f"  MSE: {ridge_mse:.6f}")
-print(f"  Spearman IC: {ridge_ic:.4f}")
+print(f"  Spearman IC: {ridge_ic:.4f}", end="")
+print(f"  (defined on {ridge_ic_result['n_defined']} of {ridge_ic_result['n_total']} test dates)")
 
 # %% [markdown]
-# ## Summary
+# ## The convolutional network against the linear baseline
+#
+# Two questions, two panels. The left asks whether the model ordered the funds usefully
+# on each date; the right asks whether its predicted return levels were closer than
+# predicting zero. A model can do better on one and worse on the other, and both are
+# reported because acting on a forecast uses the ordering while fitting one minimises
+# the squared error.
+#
+# The ridge regression is the comparison that decides anything. It sees the same window
+# flattened into one vector and fits a penalised linear map - no causality constraint,
+# no dilation, no notion that the columns are ordered in time. Whatever the dilated
+# causal structure is worth has to appear as a difference from that.
 
 # %%
 model_names = ["TCN", "Ridge"]
@@ -448,18 +516,29 @@ for model_name, ic_value, mse_ratio in zip(model_names, ic_values, mse_ratios, s
         col=2,
     )
 
-ic_leader = model_names[int(np.argmax(ic_values))]
-mse_winners = sum(ratio < 1 for ratio in mse_ratios)
 fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
-fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
+fig.add_hline(
+    y=1,
+    line_dash="dot",
+    line_color=COLORS["neutral"],
+    annotation_text="zero forecast",
+    annotation_position="bottom right",
+    row=1,
+    col=2,
+)
 fig.update_layout(
-    title=f"{ic_leader} leads on rank IC; {mse_winners} of 2 models beat zero-return MSE",
-    width=950,
+    title="The convolutional network against a penalised linear map",
     height=480,
 )
-fig.update_yaxes(title_text="Spearman IC", row=1, col=1)
-fig.update_yaxes(title_text="MSE / zero-return MSE", row=1, col=2)
-fig.show()
+fig.update_yaxes(title_text="Mean daily Spearman IC", row=1, col=1)
+fig.update_yaxes(title_text="Test MSE relative to the zero forecast", row=1, col=2)
+show_plotly_with_alt(
+    fig,
+    "Two bar charts comparing the temporal convolutional network with the ridge "
+    "baseline. The left gives each one's mean daily cross-sectional rank correlation "
+    "against a line at zero; the right gives its test mean squared error as a multiple "
+    "of the zero forecast's, against a dotted line at one.",
+)
 
 # %% [markdown]
 # The left panel measures cross-sectional ranking, while the right panel asks
@@ -469,12 +548,21 @@ fig.show()
 # walk-forward comparison across datasets.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Causal convolutions prevent lookahead bias**: Left-padding ensures
-#    each output depends only on past and present inputs
-# 2. **Exponential dilations are efficient**: Dilations of 1, 2, 4, 8 cover
-#    a receptive field of 61 timesteps with only 4 layers
+# 1. **Causality is a property of the trim, and it is checkable.** `nn.Conv1d` pads
+#    both ends, so dropping the last $(k-1)d$ outputs is what leaves the output at day
+#    $t$ a function of days up to $t$ and no later; differentiate an output position
+#    with respect to the inputs to confirm that, rather than trusting the argument
+#    name. It is not what keeps the target out of the input - the window does that,
+#    because every day in the window precedes the target date and the head reads only
+#    the final position. Causality is what would make each intermediate position a
+#    forecast for its own date, and this notebook uses only the last.
+# 2. **Doubling the dilation each layer buys reach geometrically.** Stacking blocks
+#    whose dilation doubles makes the receptive field grow like $2^{\text{layers}}$
+#    rather than linearly, which is how four blocks reach across the whole window.
+#    The arithmetic is printed above rather than restated here, so it follows
+#    `KERNEL_SIZE` and the dilation schedule if either changes.
 # 3. **Fully parallelizable**: Unlike LSTMs, all timesteps are processed
 #    simultaneously during both training and inference
 # 4. **Fixed receptive field**: The maximum lookback is determined at design
@@ -483,10 +571,13 @@ fig.show()
 #    dropout, and the final causal state preserve the TCN block's intended
 #    inductive bias without mixing batch statistics
 #
-# Deterministic PyTorch algorithms and a fixed cuBLAS workspace make repeated
-# executions reproducible on the same software and GPU stack; another environment
-# may still produce small floating-point differences.
+# **Known limitations.** One chronological split of one ETF panel, one label horizon,
+# one seed, and a single dilation schedule - the receptive field was designed to cover
+# the window rather than searched for. The comparison is against one baseline, and a
+# single split cannot rank architectures; `12_case_study_insights` is where these
+# families are compared across case studies under walk-forward validation. Repeated
+# execution reproduces on the same software and GPU; another environment will differ in
+# the final decimals.
 #
-# **Next**: See `06_tsmixer` for an MLP-only alternative that achieves
-# competitive results without convolutions or attention.
-# **Book**: Section 13.6 compares TCN with other non-attention architectures.
+# **Next**: `06_tsmixer` drops convolution too, and gets at the same structure with
+# nothing but fully connected layers applied along one axis at a time.

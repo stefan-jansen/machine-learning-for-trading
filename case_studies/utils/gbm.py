@@ -652,175 +652,6 @@ def _extract_feature_importance(
 # ---------------------------------------------------------------------------
 
 
-def prepare_gbm_folds(
-    dataset_pd,
-    splits: list[dict[str, Any]],
-    feature_names: list[str],
-    label_col: str,
-    date_col: str,
-    entity_col: str = "symbol",
-    task_type: str = "regression",
-    class_values: list | None = None,
-    temporal_by_fold=None,
-    temporal_keys: list[str] | None = None,
-    temporal_feature_names: list[str] | None = None,
-    train_sample_frac: float = 1.0,
-    eval_label_col: str | None = None,
-    seed: int = RANDOM_SEED,
-) -> list[dict[str, Any]]:
-    """Prepare CV fold data for GBM training.
-
-    Unlike linear folds, GBM folds:
-    - Use float32 (LightGBM native precision)
-    - No imputation or scaling (GBM handles NaN natively)
-    - Include remapped labels for classification (0-indexed for LightGBM)
-
-    Parameters
-    ----------
-    dataset_pd : pandas DataFrame
-        Full dataset.
-    splits : list[dict]
-        Walk-forward splits.
-    feature_names : list[str]
-        Feature column names.
-    label_col, date_col, entity_col : str
-        Column names.
-    task_type : str
-        "regression" or "classification".
-    class_values : list, optional
-        Sorted unique class values for classification.
-    temporal_by_fold : pd.DataFrame, optional
-        Per-fold temporal features with a 'fold' column.
-    temporal_keys : list[str], optional
-        Join keys for temporal features.
-    temporal_feature_names : list[str], optional
-        Temporal feature column names to replace per fold.
-    train_sample_frac : float, optional
-        Fraction of training rows to keep per fold (1.0 = keep all).
-        Walk-forward CV structure is preserved (date ranges unchanged);
-        only the within-fold row density is reduced. Validation set is
-        NEVER sampled — OOS IC is always computed on the full val slice.
-        Seed is tied to fold_id for reproducibility. Use < 1.0 for
-        memory/compute-constrained runs on large datasets (e.g.,
-        nasdaq100 minute bars). Default 1.0.
-    eval_label_col : str, optional
-        Continuous return used for classification IC. The discrete label
-        remains the fitting target and is retained as ``y_val``.
-    seed : int
-        Base seed for optional within-fold training subsampling.
-
-    Returns
-    -------
-    list[dict]
-        Each dict has: fold, X_train, y_train, y_train_lgb, X_val, y_val,
-        y_val_lgb, dates, entities, n_train, n_val.
-    """
-    from utils.modeling import replace_temporal_columns
-
-    dates_series = dataset_pd[date_col]
-    entity_series = dataset_pd.get(entity_col)
-    is_classification = task_type == "classification" and class_values
-    has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
-
-    folds = []
-    for split in splits:
-        fold_id = split["fold"]
-        train_mask = (dates_series >= split["train_start"]) & (dates_series <= split["train_end"])
-        val_start = split.get("val_start", split.get("test_start"))
-        val_end = split.get("val_end", split.get("test_end"))
-        val_mask = (dates_series >= val_start) & (dates_series <= val_end)
-
-        if has_fold_temporal:
-            assert temporal_by_fold is not None
-            assert temporal_keys is not None
-            assert temporal_feature_names is not None
-            train_rows = replace_temporal_columns(
-                dataset_pd,
-                train_mask,
-                temporal_by_fold,
-                temporal_keys,
-                temporal_feature_names,
-                fold_id,
-            )
-            val_rows = replace_temporal_columns(
-                dataset_pd,
-                val_mask,
-                temporal_by_fold,
-                temporal_keys,
-                temporal_feature_names,
-                fold_id,
-            )
-            X_train = train_rows[feature_names].values.astype(np.float32)
-            y_train = train_rows[label_col].values.astype(np.float32)
-            X_val = val_rows[feature_names].values.astype(np.float32)
-            y_val = val_rows[label_col].values.astype(np.float32)
-            y_eval = val_rows[eval_label_col].values.astype(np.float32) if eval_label_col else None
-            val_dates = val_rows[date_col].values
-            del train_rows, val_rows
-        else:
-            X_train = dataset_pd.loc[train_mask, feature_names].values.astype(np.float32)
-            y_train = dataset_pd.loc[train_mask, label_col].values.astype(np.float32)
-            X_val = dataset_pd.loc[val_mask, feature_names].values.astype(np.float32)
-            y_val = dataset_pd.loc[val_mask, label_col].values.astype(np.float32)
-            y_eval = (
-                dataset_pd.loc[val_mask, eval_label_col].values.astype(np.float32)
-                if eval_label_col
-                else None
-            )
-            val_dates = dataset_pd.loc[val_mask, date_col].values
-
-        # Drop NaN labels
-        tv = ~np.isnan(y_train)
-        vv = ~np.isnan(y_val)
-        X_train, y_train = X_train[tv], y_train[tv]
-        X_val, y_val = X_val[vv], y_val[vv]
-        if y_eval is not None:
-            y_eval = y_eval[vv]
-        val_dates = val_dates[vv]
-        val_entities = (
-            dataset_pd.loc[val_mask, entity_col].values[vv] if entity_series is not None else None
-        )
-
-        # Optional train subsample (never touch val — OOS IC uses full val slice).
-        # The seed is the fold's number added to the base, so which rows a reduced run
-        # keeps changes when the windows are renumbered. See `folds.fold_seed`.
-        if 0.0 < train_sample_frac < 1.0 and len(X_train) > 0:
-            n_keep = max(1, int(len(X_train) * train_sample_frac))
-            rng = np.random.default_rng(fold_seed(seed, fold_id))
-            keep_idx = rng.choice(len(X_train), size=n_keep, replace=False)
-            keep_idx.sort()  # preserve row order
-            X_train = X_train[keep_idx]
-            y_train = y_train[keep_idx]
-
-        # Classification: remap labels to 0-indexed for LightGBM
-        if is_classification:
-            assert class_values is not None
-            y_train_lgb, _ = _remap_labels_for_lgb(y_train.astype(int), class_values)
-            y_val_lgb, _ = _remap_labels_for_lgb(y_val.astype(int), class_values)
-        else:
-            y_train_lgb = y_train
-            y_val_lgb = y_val
-
-        folds.append(
-            {
-                "fold": split["fold"],
-                "X_train": X_train,
-                "y_train": y_train,
-                "y_train_lgb": y_train_lgb,
-                "X_val": X_val,
-                "y_val": y_val,
-                "y_val_lgb": y_val_lgb,
-                "y_eval": y_eval,
-                "dates": val_dates,
-                "entities": val_entities,
-                "n_train": len(X_train),
-                "n_val": len(X_val),
-            }
-        )
-
-    return folds
-
-
 def _checkpoint_metrics_from_predictions(
     predictions: list[dict[str, Any]],
     checkpoints: list[int] | tuple[int, ...],
@@ -1037,7 +868,7 @@ def train_gbm_config(
     config : dict
         Preset dict with config_name, params, max_iterations, checkpoint_interval.
     fold_data : list[dict]
-        From prepare_gbm_folds().
+        From prepare_gbm_folds_from_mds().
     feature_names : list[str]
         For feature importance extraction.
     device : str
@@ -1706,7 +1537,7 @@ def _load_gbm_batch_base(
     study: Study,
     request: dict[str, Any],
     *,
-    inputs: tuple[Any, Any, Any] | None = None,
+    inputs: tuple[Any, Any] | None = None,
 ) -> dict[str, Any]:
     from utils.modeling import load_modeling_dataset
 
@@ -1724,9 +1555,8 @@ def _load_gbm_batch_base(
     if inputs is None:
         label_ref = study.labels.get(request["label"], execution_tier=tier)
         mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=max_symbols)
-        dataset_pd = mds.dataset.to_pandas()
     else:
-        label_ref, mds, dataset_pd = inputs
+        label_ref, mds = inputs
     if mds.date_col != "timestamp" or not mds.entity_cols:
         raise ValueError("GBM runner requires timestamp and an entity key")
     entity_col = mds.entity_cols[0]
@@ -1747,7 +1577,6 @@ def _load_gbm_batch_base(
     return {
         "label_ref": label_ref,
         "mds": mds,
-        "dataset_pd": dataset_pd,
         "splits": splits,
         "cv_record": cv_record,
         "expected": _gbm_expected_keys_from_dataset(mds, splits),
@@ -2163,22 +1992,7 @@ def reconstruct_locked_request(
         )
     expected = _gbm_expected_keys_from_dataset(mds, [split])
     validate_locked_expected_keys(spec, expected)
-    folds = prepare_gbm_folds(
-        mds.dataset.to_pandas(),
-        [split],
-        mds.feature_names,
-        mds.label_col,
-        mds.date_col,
-        entity_col,
-        task_type=mds.task_type,
-        class_values=mds.class_values,
-        temporal_by_fold=mds.temporal_by_fold,
-        temporal_keys=mds.temporal_keys,
-        temporal_feature_names=mds.temporal_feature_names,
-        train_sample_frac=1.0,
-        eval_label_col=mds.eval_label_col,
-        seed=RANDOM_SEED,
-    )
+    folds = prepare_gbm_folds_from_mds(mds, [split], train_sample_frac=1.0, seed=RANDOM_SEED)
     if len(folds) != 1 or not folds[0]["n_train"] or not folds[0]["n_val"]:
         raise ValueError("locked GBM holdout fold could not be prepared")
     if not isinstance(model, dict):
@@ -2928,7 +2742,7 @@ def plan_model_requests(
 
     ordered: list[dict[str, Any] | None] = [None] * len(requests)
     planned_groups = []
-    input_cache: dict[tuple[str, str, int], tuple[Any, Any, Any]] = {}
+    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
     for key, indexed_requests in groups.items():
         input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
         base = _load_gbm_batch_base(
@@ -2938,7 +2752,7 @@ def plan_model_requests(
         )
         input_cache.setdefault(
             input_key,
-            (base["label_ref"], base["mds"], base["dataset_pd"]),
+            (base["label_ref"], base["mds"]),
         )
         mds = base["mds"]
         placeholder_folds = tuple({"fold": int(split["fold"])} for split in base["splits"])
@@ -3017,7 +2831,7 @@ def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[Mo
 
     ordered: list[ModelRun | None] = [None] * len(requests)
     failures = []
-    input_cache: dict[tuple[str, str, int], tuple[Any, Any, Any]] = {}
+    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
     for key, indexed_requests in groups.items():
         input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
         base = _load_gbm_batch_base(
@@ -3027,7 +2841,7 @@ def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[Mo
         )
         input_cache.setdefault(
             input_key,
-            (base["label_ref"], base["mds"], base["dataset_pd"]),
+            (base["label_ref"], base["mds"]),
         )
         candidates = _run_gbm_batch_group(
             study,

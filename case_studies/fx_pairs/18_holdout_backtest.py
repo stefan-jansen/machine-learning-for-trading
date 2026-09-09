@@ -16,11 +16,12 @@
 # %% [markdown]
 # # Holdout Backtest - FX Pairs
 #
-# This notebook runs the carrier's own backtest configuration against the holdout predictions
-# `17_holdout_predictions` registered. It changes nothing about the strategy: signal, allocation,
-# risk controls, rebalance rule, costs and account configuration are the carrier's registered
-# specification. What does change is what the specification points at - the prediction set, and
-# the price frame identity, which names the holdout frame the run actually reads.
+# This notebook runs the selected configuration's own backtest specification against the holdout
+# predictions `17_holdout_predictions` registered. It changes nothing about the strategy: signal,
+# allocation, risk controls, rebalance rule, costs and account configuration are the selected
+# configuration's registered specification. What does change is what the specification points at -
+# the prediction set, and the price frame identity, which names the holdout frame the run actually
+# reads.
 #
 # Keeping this separate from the refit is what makes the holdout diagnosable. While the two ran
 # as one transaction, a failure in the backtest half discarded the model half with it, and the
@@ -37,7 +38,7 @@
 # **Prerequisite**: `17_holdout_predictions`.
 
 # %%
-"""Run the carrier's registered strategy against its holdout predictions."""
+"""Run the selected configuration's registered strategy against its holdout predictions."""
 
 import json
 import sqlite3
@@ -73,12 +74,12 @@ WORKSPACE: str = ""
 CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 
 # %% [markdown]
-# ## Resolve the same carrier, and require its holdout predictions
+# ## Resolve the same configuration, and require its holdout predictions
 #
-# The carrier is re-resolved here rather than handed over from the previous notebook. The
-# resolution is a query against registered validation backtests, so it returns the same
-# configuration; passing it through a file or a parameter would add a way for the two notebooks
-# to disagree without either being wrong about anything it did itself.
+# The selected configuration is re-resolved here rather than handed over from the previous
+# notebook. The resolution is a query against registered validation backtests, so it returns the
+# same configuration; passing it through a file or a parameter would add a way for the two
+# notebooks to disagree without either being wrong about anything it did itself.
 #
 # What this notebook cannot derive is whether the refit has run. When it has not, the missing
 # result is named rather than reported as an empty query.
@@ -98,12 +99,12 @@ LABEL = str(carrier["label"])
 validation_prediction = study.results.open(carrier["val_prediction_hash"])
 validation_record = validation_prediction.registry_record()
 
-# The holdout prediction is resolved by DERIVING the holdout training identity here and querying
-# for it exactly, not by matching the carrier's family, configuration name and label. Those names
-# do not identify a training specification: an earlier refit against different folds, features or
-# CV geometry carries the same three names, and when it is the only row present it is selected
-# silently. Deriving the specification the same way `17` does and hashing it means this notebook
-# accepts the run `17` would produce and nothing else.
+# The holdout prediction is resolved by DERIVING the holdout training identity here and querying for
+# it exactly, not by matching the selected configuration's family, configuration name and label.
+# Those names do not identify a training specification: an earlier refit against different folds,
+# features or CV geometry carries the same three names, and when it is the only row present it is
+# selected silently. Deriving the specification the same way `17` does and hashing it means this
+# notebook accepts the run `17` would produce and nothing else.
 observation_timeline = (
     pl.read_parquet(study.root / "labels" / f"{LABEL}.parquet")
     .get_column("timestamp")
@@ -154,8 +155,8 @@ HOLDOUT_PREDICTION_HASH = _rows[0][0]
 pl.DataFrame(
     {
         "field": [
-            "carrier backtest",
-            "carrier stage",
+            "selected backtest",
+            "selected stage",
             "family",
             "configuration",
             "label",
@@ -175,21 +176,21 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ## Run the carrier's configuration on the holdout
+# ## Run the selected configuration on the holdout
 #
-# The specification is the carrier's own registered one with the prediction set re-pointed and
-# the chapter re-tagged. Nothing else is rebuilt from this notebook's defaults, because a
-# holdout number is only comparable to its validation number when the only difference between
-# the two runs is the interval they cover.
+# The specification is the selected configuration's own registered one with the prediction set
+# re-pointed and the chapter re-tagged. Nothing else is rebuilt from this notebook's defaults,
+# because a holdout number is only comparable to its validation number when the only difference
+# between the two runs is the interval they cover.
 #
 # The price frame is loaded with the strategy's own warmup, read from the specification rather
 # than assumed. `run_backtest` does not trim the lower bound for exactly this reason - it names
-# `mvo_ledoit_wolf`, which is this carrier's allocator, among the rolling estimators whose
+# `mvo_ledoit_wolf`, which is this configuration's allocator, among the rolling estimators whose
 # callers are expected to load a prefix - and it slices the returns frame to the window
 # afterwards, so the warmup rows extend what the allocator can see without extending what is
 # measured.
 #
-# On this carrier they change nothing: the holdout return series is bit-identical with and
+# On this configuration they change nothing: the holdout return series is bit-identical with and
 # without the 63-observation prefix, so the number below does not depend on this. It is loaded
 # anyway because the specification asks for it, and a run that silently ignores a declared
 # warmup is only correct by accident.
@@ -215,13 +216,13 @@ spec = ensure_backtest_spec(
 )
 spec["chapter"] = "ch20"
 # `ensure_backtest_spec` returns an already-canonical specification untouched apart from the
-# prediction hash, so the carrier's `input_identity.prices` survives into the holdout run and
-# the registered lineage then names the validation price frame for a run that never read it.
+# prediction hash, so the selected configuration's `input_identity.prices` survives into the holdout
+# run and the registered lineage then names the validation price frame for a run that never read it.
 # The digest is of the frame this notebook actually passes to the engine.
 spec.setdefault("input_identity", {})["prices"] = value_digest(prices)
 
-# fx's carrier allocates by `mvo_ledoit_wolf`, so this does not fire today. It is here because
-# selection can move: a `conformal_weighted` carrier is sized by widths calibrated from the
+# fx's configuration allocates by `mvo_ledoit_wolf`, so this does not fire today. It is here because
+# selection can move: a `conformal_weighted` configuration is sized by widths calibrated from the
 # validation residuals, and with no widths beside the holdout prediction the runner generates
 # them from the holdout's own outcomes - which is the holdout deciding its own position sizes.
 allocation = spec.get("strategy", {}).get("allocation", {})
@@ -318,10 +319,10 @@ pl.DataFrame(
 # %% [markdown]
 # ## Key takeaways
 #
-# - The configuration run here is the carrier's registered specification, not a strategy rebuilt
-#   from this notebook's own defaults.
+# - The configuration run here is the selected configuration's registered specification, not
+#   a strategy rebuilt from this notebook's own defaults.
 # - The holdout prediction set is matched by the training identity derived here, not by the
-#   carrier's family and configuration name, which several training specifications share.
+#   configuration's family and name, which several training specifications share.
 # - The price frame carries the strategy's declared warmup. It makes no difference to this
-#   carrier's result, which is a measurement rather than an assumption.
+#   configuration's result, which is a measurement rather than an assumption.
 # - Nothing here revises the selection, which was made on validation and is already registered.

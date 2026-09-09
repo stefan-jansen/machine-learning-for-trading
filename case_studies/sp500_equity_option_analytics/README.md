@@ -62,9 +62,11 @@ the two result versions are not mixed.
 
 Run the pipeline from the repository root in the locked environment. Set `ML4T_DATA_PATH` to a
 directory containing `equities/market/sp500/daily_bars.parquet` and
-`equities/market/sp500/options_surface_daily.parquet`. The equity bars require an AlgoSeek license;
-the options-surface loader provides the materialized research file when available. Missing data
-raises an error with acquisition instructions.
+`equities/market/sp500/options_surface_daily.parquet`. The equity bars ship in this repository at
+`data/equities/market/sp500/daily_bars.parquet`, redistributed with AlgoSeek's permission, so no
+account, key or license request is needed; cite [algoseek.com](https://algoseek.com) as the source
+in anything you publish from them. The options-surface loader provides the materialized research
+file when available. Missing data raises an error with acquisition instructions.
 
 ```bash
 uv sync --frozen

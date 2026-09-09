@@ -991,6 +991,10 @@ def load_modeling_dataset(
 
     # Inner-join with labels (drops rows without labels)
     dataset = dataset.join(labels, on=join_cols, how="inner")
+    # Neither operand is read again, and until they were dropped here the function returned
+    # holding three panels: the joined dataset, the feature panel it was built from, and the
+    # labels. On the full nasdaq100_microstructure panel the feature panel alone is 5.6 GB.
+    del features, labels
 
     # Drop any meta columns that leaked in
     drop_cols = [c for c in dataset.columns if c in META_LEAK]
@@ -1897,7 +1901,7 @@ def prepare_single_fold(
     ----------
     train_sample_frac : float, optional
         Fraction of training rows to keep (1.0 = all). Same semantics
-        as ``prepare_cv_folds`` / ``prepare_gbm_folds``: validation is
+        as ``folds.iter_raw_folds``: validation is
         never sampled, seed is tied to fold_id for reproducibility.
 
     Returns None if the fold is empty (no train or val rows).

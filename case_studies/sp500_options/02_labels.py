@@ -73,6 +73,7 @@ from case_studies.sp500_options._htm_backtest import SPLIT_GUARD_HIGH, SPLIT_GUA
 from case_studies.sp500_options._label_artifacts import accrued_hedge_pnl, ensure_label_artifacts
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_sp500_daily_bars, load_sp500_options_straddles
 from utils.artifact_specs import resolve_label_horizon
@@ -943,6 +944,129 @@ for name in LABEL_NAMES:
         f"\n  consumed by  {READERS.get(name, 'nothing downstream; written for comparison here')}"
     )
 
+# %% [markdown]
+# ## What the labels hold, and what they owe
+#
+# Two questions about the files this stage just wrote, and the rows that are there answer only one
+# of them. The first is what is in each column - nulls, how much sits at exactly zero, how far the
+# extreme values are from the body, whether anything is constant. A threshold crossed there asks
+# for a sentence and settles nothing on its own: a delta-hedged option return is *supposed* to be
+# heavy-tailed and asymmetric, and saying so is not the same as measuring it.
+#
+# The second is coverage, and it needs a denominator that is not the labels themselves. **The
+# reference is `panel`** - every decision date on which a straddle could be opened on an
+# underlying, which is the set a label could in principle have been written for. Comparing one
+# label to the other six would hide any date where all seven are absent together.
+#
+# What each label is entitled to be short by differs across the seven, and the difference is the
+# point. The variants hold a fixed number of sessions and owe nothing in the last `horizon` of an
+# underlying's history. **The primary label does not have a fixed horizon at all** - each row
+# resolves at its own contract's settlement, so its forward window is as long as that contract
+# needed, and the honest budget is the longest window observed rather than a median that would
+# report two thirds of a real seal as a defect. The count is per underlying. What the sign-off then
+# answers for is the residual: keys missing inside an underlying's own span.
+
+# %%
+expected_keys = (
+    panel.select(["timestamp", "symbol"])
+    .unique()
+    .with_columns(pl.lit(INSTRUMENT_ID).alias("instrument_id"))
+)
+print(
+    f"contract panel: {expected_keys.height:,} (session, underlying) decision keys across "
+    f"{expected_keys['symbol'].n_unique()} underlyings and "
+    f"{expected_keys['timestamp'].n_unique()} sessions\n"
+)
+for name in LABEL_NAMES:
+    written = panel.drop_nulls(name).select(
+        "timestamp", "symbol", pl.lit(INSTRUMENT_ID).alias("instrument_id"), name
+    )
+    budget, why = (
+        (LONGEST_WINDOW, f"variable settlement, longest observed window {LONGEST_WINDOW} sessions")
+        if name == PRIMARY_LABEL
+        else (HORIZONS[name], f"{HORIZONS[name]}-session forward window past the end of the sample")
+    )
+    report = quality_report(
+        written,
+        name=name,
+        key_columns=KEYS,
+        expected=expected_keys,
+        keys=KEYS,
+        entity=["symbol", "instrument_id"],
+        session="timestamp",
+        expected_missing={
+            "trailing": (budget, why),
+            "interior": (None, "the same contract carries no mid at the far end of the window"),
+        },
+    )
+    render_quality_report(report)
+
+    # The interior declaration is a claim, and section D already built the instrument that
+    # checks it: `CAUSES` attributes every unlabelled row to exactly one reason, and for a
+    # fixed-horizon label the reason that matters here is `no quote at exit` - the contract
+    # entered was not quoted on the session the window closes on. Whether the panel carries a
+    # row at that date proves nothing, because that row is a newly rolled straddle and not the
+    # one held. So the attribution is what the interior keys are measured against.
+    interior = report.get("missing_classified")
+    if name != PRIMARY_LABEL and interior is not None:
+        interior = interior.filter(pl.col("where") == "interior")
+        if interior.height:
+            # A delta-hedged label needs the contract quoted every day of the path as well, so
+            # both of its causes count here; the plain labels have only the one.
+            reasons = [CAUSES[name]["no quote at exit"]]
+            if "incomplete hedge path" in CAUSES[name]:
+                reasons.append(CAUSES[name]["incomplete hedge path"])
+            unquoted = (
+                panel.filter(pl.any_horizontal(*reasons))
+                .select("timestamp", "symbol")
+                .unique()
+                .join(
+                    interior.select("timestamp", "symbol"), on=["timestamp", "symbol"], how="semi"
+                )
+                .height
+            )
+            print(
+                f"  interior: {interior.height:,} key(s) across "
+                f"{interior['symbol'].n_unique()} underlyings; the contract entered is unquoted "
+                f"where the window needs it for {unquoted:,} of them"
+            )
+    print()
+
+# %% [markdown]
+# ### Sign-off
+#
+# **All seven labels are complete, and this is the one case study where the shortfall is not at the
+# ends of the sample.** The contract panel offers 360,837 decision keys across 627 underlyings and
+# 1,258 sessions. Coverage runs from 98.14% on `fwd_ret_5d` down to 89.75% on `fwd_ret_dh_10d`, and
+# almost all of what is missing sits *inside* an underlying's own span rather than after its last
+# session - the opposite of every other case study here, and the thing a coverage percentage on its
+# own would have hidden.
+#
+# The reason is what a straddle return needs: the **same contract** priced at both ends of the
+# window, and for the hedged variants quoted on every session in between. An underlying whose
+# straddle is quoted on the decision date and not ten sessions later yields no label, and the panel
+# row sitting at that later date is a newly rolled contract rather than the one held, so its
+# presence proves nothing. Section D's attribution is what settles it, and against that table
+# **the interior keys are explained for 95.6% of `fwd_ret_5d`, 99.2% of `fwd_ret_10d`, and 100% of
+# both delta-hedged labels**, whose hedge path has to be quoted daily and therefore fails more
+# often and more completely.
+#
+# **The horizons order exactly as the mechanism predicts.** Ten sessions lose more than five
+# because a longer window has more chances to find its contract unquoted, and the hedged variants
+# lose more than the plain ones at the same horizon because they need every session and not two.
+# `fwd_ret_dh_10d` at 89.75% is the compound of both, and it is a property of what an option panel
+# quotes rather than of anything this stage did.
+#
+# **The primary label is measured against the longest window observed rather than the median.**
+# `ret_to_expiry` resolves at its own contract's settlement, so it has no fixed horizon; budgeting
+# it at the median would report two thirds of a correct seal as a defect. At the longest observed
+# window it reaches 98.03% with 29 keys unaccounted for.
+#
+# **No column crossed a distribution threshold in any of the seven.** None is constant and none
+# carries a non-finite value. A short straddle return is bounded above by the premium collected and
+# unbounded below, so the asymmetry and the left tail are the instrument rather than an outlier to
+# winsorize; nothing is clipped here.
+#
 # %% [markdown]
 # ## Key takeaways
 #

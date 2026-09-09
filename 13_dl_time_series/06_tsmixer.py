@@ -14,21 +14,37 @@
 # ---
 
 # %% [markdown]
-# # TSMixer: MLP-Based Time Series Mixing
+# # TSMixer: mixing one axis at a time
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook implements TSMixer (Google, 2023) for predicting forward ETF
-# returns. TSMixer uses MLPs only - no attention or convolutions - alternating
-# between **time-mixing** (a per-feature MLP over the time axis) and
-# **feature-mixing** (a per-timestep MLP over the feature axis).
+# `04_transformers` let one position in the window depend on another through
+# attention, and `05_tcn` did the same through dilated convolution. Both are devices
+# for relating positions. A fully connected layer already relates every input to every
+# other, so the question TSMixer (Chen et al., 2023) asks is not whether to use one but
+# along which axis to apply it.
 #
-# **Learning Objectives**:
-# - Implement the TSMixer architecture: alternating time and feature mixing MLPs
-# - Understand how transposing the input tensor enables mixing along different axes
-# - Compare pure-MLP mixing against a Ridge regression baseline
+# Its answer is to alternate, and never to mix both axes in a single layer. A
+# **time-mixing** layer applies one shared linear map across the `LOOKBACK` days, the
+# same map for every feature. A **feature-mixing** layer applies a small MLP across the
+# features, separately at each day. Stacking the two lets a representation depend on
+# both axes at a cost of $T^2$ mixing weights along time and $2FH$ across features,
+# where a single dense layer over the flattened window would cost $(TF)^2$. The model
+# prints its parameter count below, so the arithmetic is checkable.
 #
-# **Book Reference**: Chapter 13, Section 13.6 (The Full Practitioner Toolkit)
+# **Learning objectives**:
+# - Read a tensor's axes well enough to say what a permutation before a `Linear` layer
+#   changes about which numbers get combined.
+# - Build the two mixing layers and say what each one can and cannot represent: the
+#   time-mixing map is the same for every feature, and the feature-mixing MLP is the
+#   same at every day.
+# - Say what the residual connection and the pre-normalisation are for in a stack that
+#   has no recurrence and no convolution to stabilise.
+# - Score the result against a penalised linear map on the same flattened window,
+#   which is the comparison that decides whether the mixing structure earned
+#   anything.
+#
+# **Book Reference**: Chapter 13, Section 13.6 (Alternative architectures and foundation models)
 #
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
@@ -36,7 +52,6 @@
 """Build TSMixer with alternating time and feature mixing for return prediction."""
 
 import os
-import warnings
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -45,17 +60,14 @@ import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
+from dl_sequences import create_sequences_multi_asset, load_dl_dataset, train_model
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from plotly.subplots import make_subplots
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
-
-from dl_sequences import create_sequences_multi_asset, load_dl_dataset, train_model
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -111,6 +123,16 @@ print(f"Target: {TARGET_COL}")
 # %%
 df = mds.dataset.drop_nulls(subset=FEATURE_COLS + [TARGET_COL])
 print(f"Rows after dropping nulls: {len(df):,}")
+per_date = df.group_by(mds.date_col).len().sort(mds.date_col)
+print(
+    f"{df[mds.date_col].min()} to {df[mds.date_col].max()}, "
+    f"{df[mds.entity_cols[0]].n_unique()} funds; funds per date "
+    f"{per_date['len'].min()} to {per_date['len'].max()}, median {per_date['len'].median():.0f}"
+)
+print(
+    f"Label {TARGET_COL}: mean {df[TARGET_COL].mean():+.5f}, "
+    f"standard deviation {df[TARGET_COL].std():.5f}"
+)
 
 X, y, timestamps, symbols = create_sequences_multi_asset(
     df,
@@ -128,9 +150,17 @@ y = np.nan_to_num(y[sequence_order], nan=0.0).astype(np.float32)
 timestamps = timestamps[sequence_order]
 symbols = symbols[sequence_order]
 
+# %% [markdown]
+# ### Splitting by date, with a gap for the label horizon
+#
+# The split is by date, at fixed fractions of the trading days, and an example belongs
+# to the partition the date it carries falls in. The label is a `LABEL_HORIZON`-day
+# forward return, so an example dated within that many days of a boundary has an
+# outcome resolved by days on the far side; those examples are dropped. Input windows
+# may still reach back over a boundary, which is right - at decision time the model has
+# every past observation available.
+
 # %%
-# Date-based 60/20/20 temporal split. The target is a 21-day forward return,
-# so labels whose outcome windows cross the next boundary are purged.
 unique_dates = np.sort(np.unique(timestamps))
 train_boundary_idx = int(len(unique_dates) * 0.6)
 val_boundary_idx = int(len(unique_dates) * 0.8)
@@ -158,15 +188,26 @@ print(
 # %% [markdown]
 # ### Cross-sectional IC helper
 #
-# Mean cross-sectional Spearman IC by date - same metric used in
-# `01_core_architectures` and `04_transformers` so TSMixer's signal-quality
-# comparison anchors on the same per-date Spearman rank correlation as the
-# other Section 13.6 architectures.
+# Mean cross-sectional Spearman IC by date - the same metric used in
+# `01_core_architectures`, `04_transformers` and `05_tcn`, so the comparison anchors
+# on one per-date rank correlation across the section's architectures.
+#
+# A date's IC is undefined when a model predicts the same number for every fund on it:
+# the predicted ranks are all tied and there is nothing to correlate. The library
+# returns `NaN` for such a date, and polars treats `NaN` and null as different values,
+# so `drop_nulls` alone leaves it in place and one of them makes the whole mean `NaN`.
+# Both are filtered here, and the count of dates the mean was taken over is printed
+# beside it, so a model that ties often is visible rather than averaged over whichever
+# dates happened to survive.
 
 
 # %%
 def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
-    """Mean cross-sectional Spearman IC across dates."""
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    Returns the mean and the defined/total date counts. Filters both null and NaN,
+    since polars `drop_nulls` leaves NaN in place.
+    """
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "prediction": y_pred})
     ret_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "forward_return": y_true})
     ic_per_date = cross_sectional_ic_series(
@@ -177,8 +218,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
+    defined = ic_per_date.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+    mean_ic = float(defined["ic"].mean()) if defined.height else float("nan")
+    return {"ic": mean_ic, "n_defined": defined.height, "n_total": ic_per_date.height}
 
 
 # %% [markdown]
@@ -369,13 +411,17 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=f"TSMixer stops after {len(epochs_axis)} epochs with no sustained validation gain",
+    title="Training and validation error per epoch",
     xaxis_title="Epoch",
     yaxis_title="Mean squared error",
-    width=820,
     height=470,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A line chart of mean squared error against epoch, with one line for the training "
+    "set and one for the validation set. Training stops when the validation line has "
+    "gone the required number of epochs without a new minimum.",
+)
 
 # %% [markdown]
 # ## Evaluate on Test Set
@@ -387,11 +433,13 @@ with torch.no_grad():
     y_pred = model(X_test_t).cpu().numpy()
 
 test_mse = np.mean((y_pred - y_test) ** 2)
-test_ic = cross_sectional_ic_mean(y_test, y_pred, test_dates, test_symbols)
+mixer_ic = cross_sectional_ic_mean(y_test, y_pred, test_dates, test_symbols)
+test_ic = mixer_ic["ic"]
 
 print("\nTSMixer Test Results:")
 print(f"  MSE: {test_mse:.6f}")
-print(f"  Spearman IC: {test_ic:.4f}")
+print(f"  Spearman IC: {test_ic:.4f}", end="")
+print(f"  (defined on {mixer_ic['n_defined']} of {mixer_ic['n_total']} test dates)")
 
 # %% [markdown]
 # ## Ridge Baseline Comparison
@@ -412,15 +460,29 @@ ridge.fit(X_train_scaled, y_train)
 y_ridge_pred = ridge.predict(X_test_scaled)
 
 ridge_mse = np.mean((y_ridge_pred - y_test) ** 2)
-ridge_ic = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+ridge_ic_result = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+ridge_ic = ridge_ic_result["ic"]
 zero_mse = float(np.mean(y_test**2))
 
 print("\nRidge Baseline Results:")
 print(f"  MSE: {ridge_mse:.6f}")
-print(f"  Spearman IC: {ridge_ic:.4f}")
+print(f"  Spearman IC: {ridge_ic:.4f}", end="")
+print(f"  (defined on {ridge_ic_result['n_defined']} of {ridge_ic_result['n_total']} test dates)")
 
 # %% [markdown]
-# ## Summary
+# ## The mixer against the linear baseline
+#
+# Two questions, two panels. The left asks whether the model ordered the funds usefully
+# on each date; the right asks whether its predicted return levels were closer than
+# predicting zero. A model can do better on one and worse on the other, and both are
+# reported because acting on a forecast uses the ordering while fitting one minimises
+# the squared error.
+#
+# The ridge regression is the comparison that decides anything. It sees the same window
+# flattened into one vector and fits a penalised linear map straight to the label: $TF$
+# coefficients, no hidden representation, and no notion that one axis is time and the
+# other is features. Whatever the alternating structure is worth has to appear as a
+# difference from that.
 
 # %%
 model_names = ["TSMixer", "Ridge"]
@@ -461,18 +523,20 @@ for model_name, ic_value, mse_ratio in zip(model_names, ic_values, mse_ratios, s
         col=2,
     )
 
-ic_leader = model_names[int(np.argmax(ic_values))]
-mse_winners = sum(ratio < 1 for ratio in mse_ratios)
 fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
 fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
 fig.update_layout(
-    title=f"{ic_leader} leads on rank IC; {mse_winners} of 2 models beat zero-return MSE",
-    width=950,
+    title="TSMixer and ridge on the same test split, ranked and levelled",
     height=480,
 )
 fig.update_yaxes(title_text="Spearman IC", row=1, col=1)
 fig.update_yaxes(title_text="MSE / zero-return MSE", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bar panels, one bar per model. The left panel gives each model's mean "
+    "cross-sectional Spearman IC against a line at zero; the right gives its test MSE "
+    "as a multiple of the zero forecast's, against a dotted line at one.",
+)
 
 # %% [markdown]
 # The left panel measures cross-sectional ranking, while the right panel asks
@@ -482,27 +546,34 @@ fig.show()
 # walk-forward comparison across datasets.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Pure MLP architecture**: TSMixer uses no attention or convolutions; on
-#    this purged single split, it leads Ridge on cross-sectional IC, although
-#    neither model beats the zero-return MSE reference.
-# 2. **Time-mixing via transpose**: By permuting to `(batch, features, time)`,
-#    one shared projection learns fixed temporal weights for every feature channel
-# 3. **Feature-mixing for cross-variate learning**: The alternating design lets
-#    the model learn both temporal dynamics and feature interactions
-# 4. **Architecturally transparent**: Fewer parameters than Transformers and a
-#    clear separation of which block mixes along which axis. "Interpretable"
-#    is too strong for the resulting attention-free representation - the MLP
-#    weights themselves are opaque even though the block geometry is not
-# 5. **Task adapter**: The paper's temporal forecast head supplies one value per
-#    feature; a small feature head maps those values to this notebook's scalar label
+# 1. **A permutation before a `Linear` decides which numbers get combined.** The two
+#    mixing layers hold the same kind of object - a dense matrix - and differ only in
+#    the axis it is applied along. Reading the permutation is how you know what a block
+#    can represent, and it is the one thing to check when adapting this architecture to
+#    a different tensor layout.
+# 2. **Each mixing layer is shared along the axis it does not mix.** One temporal map
+#    serves all features, and one feature MLP serves all days. That sharing is what
+#    keeps the mixing weights at $T^2 + 2FH$ rather than the $(TF)^2$ of a dense layer
+#    over the flattened window, and it is also the assumption to doubt first: it says
+#    the same temporal pattern matters in every feature.
+# 3. **The residual and the pre-normalisation are load-bearing.** With no recurrence
+#    and no convolution, a stack of dense layers over a 60-day axis has nothing else
+#    keeping its scale in range; every mixing layer here is wrapped in both.
+# 4. **The head is an adaptation, not part of the paper.** TSMixer's temporal forecast
+#    head produces one value per feature, because the paper forecasts every channel.
+#    This notebook's label is one cross-sectional return, so a small feature head maps
+#    those per-feature values to a scalar - a modelling choice this notebook makes and
+#    the reader should see.
 #
-# Deterministic PyTorch algorithms and a fixed cuBLAS workspace make repeated
-# executions reproducible on the same software and GPU stack; another environment
-# may still produce small floating-point differences.
+# **Known limitations.** One chronological split of one ETF panel, one label horizon,
+# one seed, and one block count. The comparison is against one baseline, and a single
+# split cannot rank architectures; `12_case_study_insights` is where these families are
+# compared across case studies under walk-forward validation. Deterministic PyTorch
+# algorithms and a fixed cuBLAS workspace make repeated execution reproduce on the same
+# software and GPU; another environment will differ in the final decimals.
 #
-# **Next**: See `07_mamba_ssm` for state space models that offer an alternative
-# to both attention and MLP mixing.
-#
-# **Book**: Section 13.6 discusses TSMixer alongside other non-attention architectures.
+# **Next**: `07_mamba_ssm` recovers a recurrent state, which both mixing and attention
+# gave up, and scales linearly in the sequence length - where this mixer's
+# `Linear(T, T)` costs $T^2$ per feature and attention costs $T^2$ outright.

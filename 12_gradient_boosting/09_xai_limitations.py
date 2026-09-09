@@ -61,7 +61,11 @@ from utils.reproducibility import set_global_seeds
 from utils.style import COLOR_CYCLER
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0  # 0 = full universe (production); test override reduces for a fast smoke run
+# 0 is the full universe, which is what a production run uses. A test override reduces it
+# for a fast run. The note sits above the assignment and not after it: papermill parses a
+# parameters cell line by line and gives up on a line whose trailing comment contains an
+# `=`, so a declared override for a name annotated that way is silently never injected.
+MAX_SYMBOLS = 0
 SEED = 42
 
 

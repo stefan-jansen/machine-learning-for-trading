@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,14 @@ class _Study:
 
 def _prediction_hash(label: str, config: str) -> str:
     return f"p-{label}-{config}"
+
+
+@dataclass
+class _StubResult:
+    """Enough of a ``Result`` for ``label_of``: a hash and the root it was resolved from."""
+
+    hash: str
+    root: Path
 
 
 def _study_at(
@@ -205,14 +214,38 @@ def test_label_comes_from_the_winner_not_the_primary(tmp_path: Path) -> None:
     db.commit()
     db.close()
 
-    @dataclass
-    class _Result:
-        hash: str
-
-    assert label_of(study, _Result("b1")) == "fwd_ret_risk_adj_5d"
+    assert label_of(study, _StubResult("b1", study.root)) == "fwd_ret_risk_adj_5d"
 
     with pytest.raises(RuntimeError, match="no label in this registry"):
-        label_of(study, _Result("absent"))
+        label_of(study, _StubResult("absent", study.root))
+
+
+def test_the_label_is_read_from_the_root_the_result_came_from(tmp_path: Path) -> None:
+    """A result resolved out of the preview root has its label read out of the preview root.
+
+    ``label_of`` read ``study.root`` unconditionally, so under a preview study it asked the
+    canonical registry about a hash only the preview registry holds and raised "has no label
+    in this registry" about the backtest ``open_selection_field`` had just ranked first. The
+    result already carries the root it was resolved from; that is what decides.
+    """
+    study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_risk_adj_5d"])
+
+    preview_root = tmp_path / ".preview" / "fixture"
+    (preview_root / "run_log").mkdir(parents=True)
+    shutil.copy(study.root / "run_log" / "registry.db", preview_root / "run_log" / "registry.db")
+    db = sqlite3.connect(preview_root / "run_log" / "registry.db")
+    db.execute(
+        "INSERT INTO backtest_runs VALUES (?, ?)",
+        ("preview-b1", _prediction_hash("fwd_ret_risk_adj_5d", "c1")),
+    )
+    db.commit()
+    db.close()
+
+    assert label_of(study, _StubResult("preview-b1", preview_root)) == "fwd_ret_risk_adj_5d"
+
+    # The canonical registry never held it, which is exactly what used to be consulted.
+    with pytest.raises(RuntimeError, match="no label in this registry"):
+        label_of(study, _StubResult("preview-b1", study.root))
 
 
 def test_an_unrankable_row_does_not_satisfy_coverage(tmp_path: Path) -> None:
@@ -339,7 +372,7 @@ def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Pa
     plan is what says which rows the published field is made of.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     _record_plan(
         study,
         name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
@@ -376,7 +409,7 @@ def test_a_recorded_plan_decides_which_downstream_rows_are_eligible(tmp_path: Pa
 def test_a_superseded_plan_does_not_admit_its_own_members(tmp_path: Path) -> None:
     """Only the generation in force decides membership; the grid it replaced does not."""
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     _record_plan(
         study,
         name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
@@ -419,6 +452,8 @@ class _Member:
     hash: str
     reason: str | None = None
     kind: str = "backtest"
+    #: The root the result was resolved from - what `label_of` reads its registry out of.
+    root: Path = Path("/nonexistent")
 
     def completeness(self) -> str | None:
         return self.reason
@@ -429,11 +464,19 @@ class _Member:
 
 
 class _Results:
-    def __init__(self, incomplete: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, incomplete: dict[str, str] | None = None, *, root: Path | None = None
+    ) -> None:
         self._incomplete = incomplete or {}
+        #: A real catalog hands back a result that knows its own root; the fake has to too,
+        #: or `label_of` reads a registry the member never came from.
+        self._root = root
 
     def open(self, backtest_hash: str) -> _Member:
-        return _Member(backtest_hash, self._incomplete.get(backtest_hash))
+        member = _Member(backtest_hash, self._incomplete.get(backtest_hash))
+        if self._root is not None:
+            member.root = self._root
+        return member
 
 
 def _register_backtests(study: _Study, rows: list[tuple[str, str]]) -> None:
@@ -453,7 +496,7 @@ def test_open_selection_field_ranks_live_where_no_set_is_recorded(tmp_path: Path
     before reaching this.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_10d"])
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     _register_backtests(
         study,
         [
@@ -490,7 +533,7 @@ def test_open_selection_field_drops_members_it_cannot_open_complete(tmp_path: Pa
     and could select something the published selection never saw.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[])
-    study.results = _Results({"fwd_ret_5d-risk_overlay-c1": "no metrics row"})
+    study.results = _Results({"fwd_ret_5d-risk_overlay-c1": "no metrics row"}, root=study.root)
     _register_backtests(
         study,
         [
@@ -524,7 +567,7 @@ def test_a_live_rebuild_refuses_when_the_predictions_moved_past_the_plans(tmp_pa
     divergence this module exists to close.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     _register_backtests(
         study,
         [
@@ -569,7 +612,7 @@ def test_a_live_rebuild_refuses_a_plan_whose_sweep_is_still_running(tmp_path: Pa
     to make.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
-    study.results = _Results({"fwd_ret_5d-allocation-c2": "no metrics row"})
+    study.results = _Results({"fwd_ret_5d-allocation-c2": "no metrics row"}, root=study.root)
     _record_plan(
         study,
         name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
@@ -609,7 +652,7 @@ def test_the_baseline_grid_is_planned_like_every_other_stage(tmp_path: Path) -> 
     coverage, and both are here: `c2`'s baseline is registered, rankable, and not in the plan.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1", "c2"))
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     _record_plan(
         study,
         name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
@@ -644,7 +687,7 @@ def test_a_case_study_that_publishes_plans_needs_one_for_its_baseline(tmp_path: 
     membership the freeze never published.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1",))
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
         _record_plan(
             study,
@@ -679,7 +722,7 @@ def test_a_complete_plan_whose_sweep_failed_does_not_admit_its_members(tmp_path:
     grid.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1",))
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     _record_plan(
         study,
         name=f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}",
@@ -718,7 +761,7 @@ def test_a_failed_re_run_is_not_covered_by_the_previous_run_s_attestation(tmp_pa
     Attempt 1 succeeded on this exact grid; attempt 2 did not.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1",))
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     name = f"fixture-baseline-fwd_ret_5d-{predictions_identity(None)}"
     _record_plan(study, name=name, members=["fwd_ret_5d-signal-c1"], attempt=1)
     _record_plan(study, name=name, members=["fwd_ret_5d-signal-c1"], attempt=2, attested=False)
@@ -744,7 +787,7 @@ def test_a_failed_re_run_is_not_covered_by_the_previous_run_s_attestation(tmp_pa
 def test_a_re_run_that_succeeds_after_a_failure_is_accepted(tmp_path: Path) -> None:
     """The other direction, so the check above is not simply "any failed attempt, ever"."""
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=[], configs=("c1",))
-    study.results = _Results()
+    study.results = _Results(root=study.root)
     for key, stage in (
         ("baseline", "signal"),
         ("allocation", "allocation"),
@@ -848,7 +891,7 @@ def test_a_label_whose_only_baseline_is_incomplete_does_not_satisfy_coverage(
     check runs before the tally now, so both paths answer the same question.
     """
     study = _study_at(tmp_path, primary="fwd_ret_5d", variants=["fwd_ret_10d"])
-    study.results = _Results({"fwd_ret_10d-signal-c1": "no metrics row"})
+    study.results = _Results({"fwd_ret_10d-signal-c1": "no metrics row"}, root=study.root)
 
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
         return _rows(label, stage)

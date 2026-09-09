@@ -29,10 +29,10 @@ import yaml
 
 from case_studies.utils.registry.metrics import (
     _duration_seconds,
-    _horizon_in_observations,
     _infer_horizon_from_label,
     _observation_step_seconds,
     compute_prediction_fold_metrics,
+    horizon_in_observations,
 )
 
 MINUTE = datetime.timedelta(minutes=1)
@@ -80,15 +80,15 @@ class TestTheHorizonIsCountedInTheSeriesOwnStep:
     )
     def test_the_overlap_follows_the_timestamps(self, buffer, step_minutes, expected):
         dates = _grid(MINUTE * step_minutes, 200)
-        assert _horizon_in_observations(buffer, dates) == expected
+        assert horizon_in_observations(buffer, dates) == expected
 
     def test_a_buffer_shorter_than_one_step_still_overlaps_one_observation(self):
-        assert _horizon_in_observations("5min", _grid(MINUTE * 15, 100)) == 1
+        assert horizon_in_observations("5min", _grid(MINUTE * 15, 100)) == 1
 
     def test_the_name_parse_read_fifteen_minutes_as_fifteen_months(self):
         """The defect this replaces, kept so the fallback is never wired back in."""
         assert _infer_horizon_from_label("fwd_ret_15m") == 315
-        assert _horizon_in_observations("15min", _grid(MINUTE, 200)) == 15
+        assert horizon_in_observations("15min", _grid(MINUTE, 200)) == 15
 
 
 class TestTheStepIsMeasuredNotAssumed:
@@ -130,7 +130,7 @@ class TestEveryDailyAndSlowerLabelKeepsTheNameParse:
     def test_a_declared_buffer_the_calendar_decides_resolves_nothing(self, case_study, label):
         """A day, a week and a month have no fixed length, so no division can be made."""
         buffer = declared_buffer(case_study, label)
-        assert _horizon_in_observations(buffer, _grid(datetime.timedelta(days=1), 200)) is None
+        assert horizon_in_observations(buffer, _grid(datetime.timedelta(days=1), 200)) is None
 
     @pytest.mark.parametrize(
         ("label", "expected"),
@@ -140,9 +140,7 @@ class TestEveryDailyAndSlowerLabelKeepsTheNameParse:
         """The other sub-daily case study: 8-hour funding periods, so the grid is 8-hourly."""
         buffer = declared_buffer("crypto_perps_funding", label)
         grid = _grid(datetime.timedelta(hours=8), 200)
-        assert (
-            _horizon_in_observations(buffer, grid) == expected == _infer_horizon_from_label(label)
-        )
+        assert horizon_in_observations(buffer, grid) == expected == _infer_horizon_from_label(label)
 
     @pytest.mark.parametrize("text", ["21D", "1M", "1W", "", None, "expiry"])
     def test_a_calendar_duration_does_not_parse_to_seconds(self, text):

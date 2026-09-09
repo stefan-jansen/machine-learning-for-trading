@@ -290,7 +290,7 @@ ax.set_xticklabels(labels)
 ax.set_yticklabels(labels)
 ax.set_xlabel("Predicted")
 ax.set_ylabel("Actual")
-ax.set_title(f"ProsusAI/finbert Cross-Dataset Evaluation\nFinMarBa Accuracy: {accuracy:.1%}")
+ax.set_title("ProsusAI/finbert transfers to FinMarBa without fine-tuning")
 
 plt.tight_layout()
 plt.show()

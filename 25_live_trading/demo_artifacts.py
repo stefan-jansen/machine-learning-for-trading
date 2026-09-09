@@ -88,7 +88,7 @@ def load_demo_predictions(strategy_id: str, horizon: int, asset_column: str) -> 
     # is the once-touched out-of-sample set, so it is the only honest thing to
     # ship to an external backtester.
     #
-    # Pick that holdout by the *selected winner*, not by raw IC: the carrier is
+    # Pick that holdout by the *selected winner*, not by raw IC: the selected configuration is
     # the cross-stage validation-Sharpe rank-1 config, pooling the selection
     # stages (signal/allocation/risk_overlay). cost_sensitivity is a
     # perturbation, not a selection axis, and the holdout stage is the sealed

@@ -44,11 +44,8 @@
 
 import json
 import sqlite3
-import warnings
 
 import polars as pl
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
@@ -94,15 +91,15 @@ def _registered_holdout_backtests(case_dir, prediction_hash):
 # %% [markdown]
 # ## 1. The configuration, and the predictions it produced on the holdout
 #
-# The carrier is resolved the same way [`17_costs`](17_costs.ipynb) and
+# The selected configuration is resolved the same way [`17_costs`](17_costs.ipynb) and
 # [`18_holdout_predictions`](18_holdout_predictions.ipynb) resolve it, so all three run the
 # same configuration by construction rather than by a hash copied between them.
 #
-# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving
-# the holdout training specification reproduces the training identity 18 registered - the
-# derivation is deterministic and the identity covers it - so the prediction set is looked up
-# by that identity and the carrier's checkpoint. A search over holdout prediction sets would
-# have to guess which one belonged to this configuration.
+# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving the
+# holdout training specification reproduces the training identity 18 registered - the derivation is
+# deterministic and the identity covers it - so the prediction set is looked up by that identity
+# and the selected configuration's checkpoint. A search over holdout prediction sets would have to
+# guess which one belonged to this configuration.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
@@ -143,7 +140,7 @@ if match is None:
     )
 HOLDOUT_PREDICTION_HASH = match[0]
 
-print(f"Carrier:            {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
+print(f"Selected configuration: {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
 print(f"Holdout training:   {holdout_training_hash}")
 print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 
@@ -152,10 +149,9 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 #
 # An allocator that sizes by a conformal width is calibrated from errors the model has already
 # made, and on the holdout there are none to use: an error is usable only once the return it
-# measures has been realised, and every holdout return realises inside the window being
-# evaluated. Such a carrier takes its widths from the validation residuals of the validation
-# prediction set, which is what the allocator would have had standing at the start of the
-# window.
+# measures has been realised, and every holdout return realises inside the window being evaluated.
+# Such a selected configuration takes its widths from the validation residuals of the validation
+# prediction set, which is what the allocator would have had standing at the start of the window.
 #
 # The embargo matters for this case study's label and would not for every one. A residual
 # observed at `t` is not resolved until `t + h + 1min`, one bar PAST the label's horizon: the
@@ -163,23 +159,23 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # `t + h + 1`. So the last residuals of the validation span reach into the holdout window, and
 # calibrating on them would size holdout positions with holdout price information.
 #
-# The value comes from the reviewed table in `conformal.py`, which records the label BUFFER
-# rather than the horizon for exactly that reason - 6, 16 and 61 for `fwd_ret_5m`,
-# `fwd_ret_15m`/`fwd_dir_15m` and `fwd_ret_60m`. It is read from the carrier's label rather
-# than assumed from the primary, because the carrier is resolved across every declared label.
-# The unit is prediction-data steps, and on this panel a step is one MINUTE, not one decision
-# slot: the modal gap between adjacent prediction timestamps is 0:01:00 for all four labels.
-# Counting in decision slots is what an earlier version of that table did, and it embargoed one
-# minute where the label reaches sixteen.
+# The value comes from the reviewed table in `conformal.py`, which records the label BUFFER rather
+# than the horizon for exactly that reason - 6, 16 and 61 for `fwd_ret_5m`,
+# `fwd_ret_15m`/`fwd_dir_15m` and `fwd_ret_60m`. It is read from the selected configuration's label
+# rather than assumed from the primary, because the selected configuration is resolved across every
+# declared label. The unit is prediction-data steps, and on this panel a step is one MINUTE, not
+# one decision slot: the modal gap between adjacent prediction timestamps is 0:01:00 for all four
+# labels. Counting in decision slots is what an earlier version of that table did, and it embargoed
+# one minute where the label reaches sixteen.
 #
 # The reach is minutes rather than the ETF study's three weeks, and it is the same defect at any
 # width: the residuals that cross the boundary are the ones nearest it, which are the ones a
 # calibration weights most.
 #
-# The branch is here rather than assumed away because the carrier can change. It does not fire
-# for the one this case study currently reports, which sizes by inverse volatility over a
-# declared window and needs no calibration - so the line below prints that rather than staying
-# silent, which is what tells a reader the branch was evaluated.
+# The branch is here rather than assumed away because the selected configuration can change. It
+# does not fire for the one this case study currently reports, which sizes by inverse volatility
+# over a declared window and needs no calibration - so the line below prints that rather than
+# staying silent, which is what tells a reader the branch was evaluated.
 #
 # The widths themselves are NOT written here. Writing them replaces the artifact an already
 # registered run was sized by, and the replacement guard in section 3 can still refuse this run
@@ -191,21 +187,21 @@ allocation = strategy_view(json.loads(carrier["spec_json"])).get("allocation") o
 NEEDS_CALIBRATION = allocation.get("method") == "conformal_weighted"
 embargo_steps = holdout_conformal_embargo_steps(CASE_STUDY_ID, LABEL) if NEEDS_CALIBRATION else 0
 if NEEDS_CALIBRATION:
-    print(f"Conformal carrier: embargo {embargo_steps} observation(s), widths written below.")
+    print(f"Conformal configuration: embargo {embargo_steps} observation(s), widths written below.")
 else:
     print(f"Allocator {allocation.get('method', 'equal_weight')!r} needs no calibration.")
 
 # %% [markdown]
 # ## 3. The backtest
 #
-# The strategy specification is the carrier's own, re-pointed at the holdout prediction set and
-# the holdout price window. Nothing else about it changes - the concentration, the allocator,
-# the risk overlay and the commission and slippage levels are the ones `setup.yaml` declares
-# and every validation number in this case study was net of.
+# The strategy specification is the selected configuration's own, re-pointed at the holdout
+# prediction set and the holdout price window. Nothing else about it changes - the concentration,
+# the allocator, the risk overlay and the commission and slippage levels are the ones `setup.yaml`
+# declares and every validation number in this case study was net of.
 #
-# The run registers under `stage='holdout'`, which the registry derives from the prediction
-# set's split rather than from anything asserted here - and that derivation takes precedence
-# over the risk block the carrier carries, which would otherwise file this as another risk
+# The run registers under `stage='holdout'`, which the registry derives from the prediction set's
+# split rather than from anything asserted here - and that derivation takes precedence over the
+# risk block the selected configuration carries, which would otherwise file this as another risk
 # overlay.
 #
 # **The window carries one backtest**, for the same reason 18 lets it carry one prediction
@@ -301,11 +297,11 @@ if result.backtest_hash != prospective_hash:
     )
 print(f"Holdout backtest: {result.backtest_hash}")
 
-# The stage is checked rather than trusted. This carrier comes from the risk stage and its spec
-# carries a risk block, and stage inference reads the prediction's split before that block - so
-# a holdout run files as `holdout`. If that order ever changes, the whole out-of-sample result
-# lands in `risk_overlay` and `20_strategy_analysis` finds no holdout at all, which is a failure
-# four notebooks away from its cause.
+# The stage is checked rather than trusted. This configuration comes from the risk stage and its
+# spec carries a risk block, and stage inference reads the prediction's split before that block - so
+# a holdout run files as `holdout`. If that order ever changes, the whole out-of-sample result lands
+# in `risk_overlay` and `20_strategy_analysis` finds no holdout at all, which is a failure four
+# notebooks away from its cause.
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
     registered_stage = conn.execute(
         "SELECT stage FROM backtest_runs WHERE backtest_hash = ?", (result.backtest_hash,)
@@ -314,7 +310,7 @@ if registered_stage != "holdout":
     raise RuntimeError(
         f"the holdout backtest registered under stage={registered_stage!r} rather than "
         "'holdout'; the split-based inference in registry.store._infer_stage did not take "
-        "precedence over this carrier's risk block"
+        "precedence over this configuration's risk block"
     )
 
 # %% [markdown]
@@ -330,11 +326,11 @@ if registered_stage != "holdout":
 
 # %% tags=["results"]
 metrics = result.metrics
-# The carrier's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports the
-# common-support figure, which re-ranks candidates on the timestamps every one of them covers;
-# that is the right number for choosing between candidates and the wrong one to set beside a
-# holdout measured over its own full window. Both are printed, so neither has to be inferred
-# from the other.
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier`
+# reports the common-support figure, which re-ranks candidates on the timestamps every one of them
+# covers; that is the right number for choosing between candidates and the wrong one to set beside a
+# holdout measured over its own full window. Both are printed, so neither has to be inferred from
+# the other.
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
     carrier_sharpe, carrier_periods, carrier_trades = conn.execute(
         "SELECT sharpe, n_periods, num_trades FROM backtest_metrics WHERE backtest_hash = ?",
@@ -357,10 +353,10 @@ print(
     f"max drawdown {metrics.get('max_drawdown', float('nan')):.2%}, "
     f"win rate {metrics.get('win_rate', float('nan')):.0%}"
 )
-# This case study runs the bar-by-bar engine - its carrier declares a trailing stop, which a
-# vectorized weight-times-return path cannot express - so trade counts are recorded and can be
-# compared. A holdout that rebalanced far less than the validation run at the same cadence
-# would say the basket stopped changing, which is a different thing from a lower Sharpe.
+# This case study runs the bar-by-bar engine - the configuration it overlays declares a trailing
+# stop, which a vectorized weight-times-return path cannot express - so trade counts are recorded
+# and can be compared. A holdout that rebalanced far less than the validation run at the same
+# cadence would say the basket stopped changing, which is a different thing from a lower Sharpe.
 print(
     f"Trades: {int(metrics.get('num_trades', 0)):,} on the holdout, "
     f"{int(carrier_trades):,} on validation"
@@ -379,8 +375,8 @@ print(
 # optimistic by construction, and this notebook inherits that pool without correcting for it.
 # The deflation is [`20_strategy_analysis`](20_strategy_analysis.ipynb)'s.
 #
-# Re-running this notebook against the same carrier is free and idempotent - the backtest hash
-# is unchanged and the registered run is served back. A different carrier is refused, for the
+# Re-running this notebook against the same configuration is free and idempotent - the backtest hash
+# is unchanged and the registered run is served back. A different configuration is refused, for the
 # reason 18 gives.
 #
 # **Next:** [`20_strategy_analysis`](20_strategy_analysis.ipynb).

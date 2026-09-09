@@ -79,7 +79,6 @@
 
 import multiprocessing
 import os
-import warnings
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import date
@@ -89,16 +88,13 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import yaml
-from numpy.typing import NDArray
-
-warnings.filterwarnings("ignore")
-
 from arch import arch_model
 from IPython.display import display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from ml4t.diagnostic.splitters.calendar import TradingCalendar
 from ml4t.engineer.features.fdiff import ffdiff, get_ffd_weights
+from numpy.typing import NDArray
 from statsmodels.tsa.stattools import adfuller
 
 from case_studies.utils.artifact_digest import read_digest, value_digest
@@ -112,6 +108,7 @@ from case_studies.utils.temporal import (
 )
 from data import load_us_equities
 from utils.artifact_specs import resolve_label_horizon
+from utils.cv_splits import select_folds
 from utils.data_quality import top_entities
 from utils.paths import display_path, get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -491,8 +488,9 @@ SESSIONS = sorted(
     .to_list()
 )
 
-# Ordered by the sessions they score rather than by fold id, so `MAX_FOLDS` keeps the
-# earliest validation windows whichever direction the splitter numbers its folds in.
+# Ordered by the sessions they score, so the printout below reads chronologically. The
+# `MAX_FOLDS` reduction underneath names the fold ids it keeps rather than taking a head
+# slice of that order, which is a count that says nothing about which windows it kept.
 folds = sorted(
     (
         {
@@ -507,7 +505,7 @@ folds = sorted(
     key=lambda f: f["test_start"],
 )
 if MAX_FOLDS > 0:
-    folds = folds[:MAX_FOLDS]
+    folds = select_folds(folds, range(MAX_FOLDS))
 
 print(f"{len(folds)} cross-validation folds, which select rows and bound no estimate:")
 for f in folds:

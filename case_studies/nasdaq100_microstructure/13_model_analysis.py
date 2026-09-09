@@ -64,11 +64,13 @@ import polars as pl
 import yaml
 
 from case_studies.research import (
+    CausalResult,
     Result,
-    Study,
+    read_only_study,
     superseded_members,
 )
 from case_studies.utils.model_analysis import (
+    align_join_clock,
     best_model_per_family_fast,
     fold_performance_matrix,
     load_all_metrics,
@@ -97,7 +99,6 @@ from case_studies.utils.notebook_contracts import (
     filter_active_model_rows,
 )
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
-from utils.paths import get_case_study_dir
 
 warnings.filterwarnings("ignore")
 
@@ -126,6 +127,11 @@ NLINEAR_POPULATION = "nasdaq100_microstructure-nlinear-validation-v1"
 LSTM_POPULATION = "nasdaq100_microstructure-lstm_h64-validation-v1"
 TCN_POPULATION = "nasdaq100_microstructure-tcn-validation-v1"
 PATCHTST_POPULATION = "nasdaq100_microstructure-patchtst-validation-v1"
+# Where this notebook reads. Empty means the canonical registry; a smoke run passes the
+# workspace it wrote to, and the population names above with it, because a reduced run
+# publishes under its own names and the canonical ones resolve to nothing there.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
 # This notebook reads; it registers nothing. That decides how it opens the registry, and the
@@ -139,13 +145,19 @@ PATCHTST_POPULATION = "nasdaq100_microstructure-patchtst-validation-v1"
 # went from 30 registered prediction sets to 0 and the comparison below reported on nothing
 # while reporting success.
 #
-# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
+# `read_only_study` is the form that does not activate: it resolves the root for the tier and
+# workspace it is given and hands back a `Study.at` over it. `CASE_DIR` is that root, and every
 # question this notebook asks - the catalog, the lineage, the populations, the artifacts - is
 # answered from it.
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY)
-study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
+study = read_only_study(
+    CASE_STUDY,
+    workspace=WORKSPACE or None,
+    execution_tier=EXECUTION_TIER,
+    entry_point="13_model_analysis",
+)
+CASE_DIR = study.root
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
@@ -993,9 +1005,15 @@ if gbm_importance is None:
         # Join best linear model predictions with features
         linear_preds = best_preds.filter(pl.col("family") == "linear")
         if linear_preds.height > 0:
-            # Align timestamp types (predictions=datetime[ms], features may be date)
+            # Put both sides of the join on the predictions' own clock. The previous alignment
+            # handled only a `Date` feature column, so it missed the two ways these frames
+            # actually differ: the sequence path returns `us` where the panel is written at
+            # another unit, and a pandas round-trip can drop the zone. Measured 2026-09-09 on
+            # the smoke chain - predictions `datetime[us, UTC]`, features `datetime[us]` naive,
+            # and the join raised rather than matching nothing, which was the good case.
             if features_df[DATE_COL].dtype == pl.Date:
-                features_df = features_df.with_columns(pl.col(DATE_COL).cast(pl.Datetime("ms")))
+                features_df = features_df.with_columns(pl.col(DATE_COL).cast(pl.Datetime("us")))
+            features_df = align_join_clock(features_df, linear_preds.schema[DATE_COL], DATE_COL)
             merged = linear_preds.join(features_df, on=[DATE_COL, ENTITY_COL], how="inner")
 
             # Compute correlation of each feature with y_score per fold
@@ -1252,20 +1270,50 @@ plot_regime_bars(regime_df)
 # confounders: `rel_spread_close`, `rv_5m`, `r1m`; embargo = 1 bar.
 
 # %%
+# `causal_runs` is keyed on `causal_hash`, and that identity covers the fold and placebo
+# geometry, the seed, the horizon, the row cap and the development cutoff - not the label.
+# Re-running the causal notebook under any different design therefore writes a *second* row
+# for the same label rather than replacing the first, so `ORDER BY label` over the whole table
+# lists two estimates with nothing to tell them apart. `CausalResult.one` resolves the single
+# identity currently in force for a label and refuses on an ambiguous registry rather than
+# picking, which is the read this section is about; the superseded rows are counted, not shown.
 import sqlite3 as _sqlite3
 
-with _sqlite3.connect(CASE_DIR / "run_log" / "registry.db") as _con:
-    _cur = _con.cursor()
-    _rows = _cur.execute(
-        "SELECT label, dml_effect, dml_se_hac, p_value_hac, "
-        "naive_effect, confounding_bias_pct, refutation_p, n_obs "
-        "FROM causal_runs ORDER BY label"
-    ).fetchall()
-    _cols = [d[0] for d in _cur.description]
+DECLARED_LABELS = [PRIMARY_LABEL, *[lbl for lbl in REGRESSION_LABELS if lbl != PRIMARY_LABEL]]
 
-causal_df = pl.DataFrame(_rows, schema=_cols, orient="row") if _rows else pl.DataFrame()
+with _sqlite3.connect(CASE_DIR / "run_log" / "registry.db") as _con:
+    _recorded = _con.execute("SELECT count(*) FROM causal_runs").fetchone()[0]
+    _attempted = {r[0] for r in _con.execute("SELECT DISTINCT label FROM causal_runs")}
+
+_causal_rows = []
+_unresolved = {}
+for _label in [lbl for lbl in DECLARED_LABELS if lbl in _attempted]:
+    try:
+        _result = CausalResult.one(study, label=_label, execution_tier="canonical")
+    except ValueError as _exc:
+        _unresolved[_label] = str(_exc)
+        continue
+    _causal_rows.append(
+        {
+            "label": _label,
+            "causal_hash": _result.hash[:12],
+            "dml_effect": _result.metrics["dml_effect"],
+            "dml_se_hac": _result.metrics["dml_se_hac"],
+            "p_value_hac": _result.metrics["p_value_hac"],
+            "naive_effect": _result.metrics["naive_effect"],
+            "confounding_bias_pct": _result.metrics["confounding_bias_pct"],
+            "refutation_p": _result.metrics["refutation_p"],
+            "n_obs": _result.metrics["n_obs"],
+        }
+    )
+
+causal_df = pl.DataFrame(_causal_rows).sort("label") if _causal_rows else pl.DataFrame()
 print("Causal DML on signed_vol_share:")
+print(f"labels carrying a current causal identity: {causal_df.height} of {len(_attempted)} run")
+print(f"superseded rows also in the table: {_recorded - causal_df.height}")
 print(causal_df)
+for _label, _why in _unresolved.items():
+    print(f"unresolved: {_label}: {_why}")
 
 # %% [markdown]
 # **How to read the causal rows.** Each row is an estimated average treatment

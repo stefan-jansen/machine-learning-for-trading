@@ -73,6 +73,7 @@ from case_studies.utils.sequence_dataset import (
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+from utils.artifact_specs import resolve_label_horizon
 from utils.modeling import RANDOM_SEED, seed_everything
 
 if TYPE_CHECKING:
@@ -132,6 +133,8 @@ class SequenceResearchContext:
     # Preview-only, and deliberately absent from `sequence_identity_params`: capping how
     # many validation windows are scored changes what the run covers, never what it fits.
     max_predict_sequences: int = 0
+    # Observations between one training window and the next. Zero leaves every window.
+    train_sequence_stride: int = 0
 
 
 def _sha256(path: Path) -> str:
@@ -386,6 +389,57 @@ def resolve_dl_max_train_sequences(
     return (reduction or declared), reduction
 
 
+def resolve_dl_train_sequence_stride(
+    config: Mapping[str, Any] | None,
+    *,
+    horizon: str | None,
+    dates: Any,
+) -> int:
+    """Resolve the training-window stride, in panel observations, that ``modeling.dl`` declares.
+
+    Returns 0 when nothing is declared, which leaves every valid window in the fold.
+
+    ``train_sequence_stride_horizons`` says how many label horizons separate one training
+    window from the next, so ``1`` draws one window per horizon and no two consecutive
+    windows of a symbol carry overlapping labels. It is stated in horizons rather than in
+    observations because one line then covers every label the case study trains: on a minute
+    panel a five-minute label strides five observations and a sixty-minute label sixty, from
+    the same declaration.
+
+    The observation grid is measured from the timestamps rather than divided out of a declared
+    cadence, because the two need not agree - nasdaq100 declares a fifteen-minute decision
+    cadence and trains on the one-minute grid its features are built on.
+
+    Mutually exclusive with ``max_train_sequences``. One says how far apart windows sit and the
+    other how many there are; a run cannot honour both, and a count is what a case study that
+    wants overlapping windows declares instead.
+    """
+    from case_studies.utils.registry.metrics import horizon_in_observations
+
+    declared_raw = (config or {}).get("train_sequence_stride_horizons")
+    if declared_raw is None:
+        return 0
+    declared = int(declared_raw)
+    if declared <= 0:
+        raise ValueError(
+            "modeling.dl.train_sequence_stride_horizons must be a positive number of label "
+            f"horizons, not {declared}"
+        )
+    if (config or {}).get("max_train_sequences") is not None:
+        raise ValueError(
+            "modeling.dl declares both train_sequence_stride_horizons and max_train_sequences. "
+            "The first spaces training windows and the second counts them; declare one."
+        )
+    periods = horizon_in_observations(horizon, dates)
+    if periods is None:
+        raise ValueError(
+            f"train_sequence_stride_horizons needs a sub-daily label horizon to measure "
+            f"against the observation grid, and {horizon!r} does not resolve to one. A daily, "
+            "weekly or monthly horizon has no fixed length in seconds on a trading calendar."
+        )
+    return declared * int(periods)
+
+
 def _sequence_runtime_spec(
     device: str,
     *,
@@ -481,9 +535,19 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         num_threads=int(request["overrides"].get("num_threads", 8)),
     )
     setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
+    dl_setup = (setup.get("modeling") or {}).get("dl") or {}
     max_train_sequences, sequence_reduction = resolve_dl_max_train_sequences(
-        (setup.get("modeling") or {}).get("dl") or {},
+        dl_setup,
         int(reductions.get("max_train_sequences", 0)),
+    )
+    # Measured against the observations this run actually trains on, which is what
+    # `_select_sequence_observations` just returned rather than the panel it was given.
+    train_sequence_stride = resolve_dl_train_sequence_stride(
+        dl_setup,
+        horizon=resolve_label_horizon(study.case_study, label_ref.name, setup),
+        dates=dataset.get_column(mds.date_col)
+        if isinstance(dataset, pl.DataFrame)
+        else pl.Series(mds.date_col, dataset[mds.date_col].to_numpy()),
     )
     # Preview-only, with no counterpart under `modeling.dl`: a declared cap on the
     # training sample is a property of the model, while a cap on how much of validation
@@ -541,6 +605,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             case_study=study.case_study,
             input_data_spec=mds.input_lineage,
             max_train_sequences=max_train_sequences,
+            train_sequence_stride=train_sequence_stride,
         )
         preprocessing = {
             "class": "fold_train_standardization",
@@ -566,6 +631,10 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "input_data_spec": mds.input_lineage,
             "lookback": lookback,
             "max_train_sequences": max_train_sequences,
+            # Written only when declared. `computation` is hashed whole, so an
+            # unconditional zero would move the training_hash of every sequence run
+            # already registered, none of which strides its windows.
+            **({"train_sequence_stride": train_sequence_stride} if train_sequence_stride else {}),
         }
         preprocessing = {
             "class": "fold_train_standardization",
@@ -657,6 +726,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         expected_keys=expected,
         max_train_sequences=max_train_sequences,
         max_predict_sequences=predict_reduction,
+        train_sequence_stride=train_sequence_stride,
         runtime_provenance=runtime_provenance,
     )
     return spec, context
@@ -898,6 +968,11 @@ def reconstruct_locked_request(
     locked_max_train_sequences = int(
         (computation.get("input_data_spec") or {}).get("max_train_sequences", 0)
     )
+    # Same rule, other form: a run that spaced its training windows has to space them the
+    # same way on the holdout, or the refit fits a different model.
+    locked_train_sequence_stride = int(
+        (computation.get("input_data_spec") or {}).get("train_sequence_stride", 0)
+    )
     inputs = locked_sequence_inputs(study, spec)
     label_ref = inputs.label_ref
     mds = inputs.mds
@@ -967,6 +1042,7 @@ def reconstruct_locked_request(
             case_study=study.case_study,
             input_data_spec=mds.input_lineage,
             max_train_sequences=locked_max_train_sequences,
+            train_sequence_stride=locked_train_sequence_stride,
         )
         expected_preprocessing = {
             "class": "fold_train_standardization",
@@ -982,6 +1058,11 @@ def reconstruct_locked_request(
             "input_data_spec": mds.input_lineage,
             "lookback": lookback,
             "max_train_sequences": locked_max_train_sequences,
+            **(
+                {"train_sequence_stride": locked_train_sequence_stride}
+                if locked_train_sequence_stride
+                else {}
+            ),
         }
         expected_preprocessing = {
             "class": "fold_train_standardization",
@@ -1023,6 +1104,7 @@ def reconstruct_locked_request(
         temporal_feature_names=tuple(mds.temporal_feature_names),
         expected_keys=expected,
         max_train_sequences=locked_max_train_sequences,
+        train_sequence_stride=locked_train_sequence_stride,
         runtime_provenance=_sequence_runtime_provenance(study, config),
         prediction_split="holdout",
         published_checkpoints=(int(checkpoint_value),),
@@ -1155,6 +1237,9 @@ def _reconstruct_pytorch_predictions(
             # assertion from materializing millions of sequences on a minute panel.
             max_train_sequences=int(
                 (computation.get("input_data_spec") or {}).get("max_train_sequences", 0)
+            ),
+            train_sequence_stride=int(
+                (computation.get("input_data_spec") or {}).get("train_sequence_stride", 0)
             ),
             temporal_by_fold=context.temporal_by_fold,
             temporal_keys=list(context.temporal_keys),
@@ -1452,6 +1537,7 @@ def run_resolved_request(
                 save_dir=train_dir / "diagnostics",
                 max_train_sequences=context.max_train_sequences,
                 max_predict_sequences=context.max_predict_sequences,
+                train_sequence_stride=context.train_sequence_stride,
                 register=False,
                 case_study=study.case_study,
                 temporal_by_fold=context.temporal_by_fold,
@@ -1947,6 +2033,7 @@ def sequence_identity_params(
     case_study: str | None,
     max_train_sequences: int,
     device: str,
+    train_sequence_stride: int = 0,
 ) -> dict[str, Any] | None:
     """The identity-bearing fields of one sequence training run.
 
@@ -1979,6 +2066,7 @@ def sequence_identity_params(
                     case_study=case_study,
                     input_data_spec=input_data_spec,
                     max_train_sequences=max_train_sequences,
+                    train_sequence_stride=train_sequence_stride,
                 )
             )
         else:
@@ -1988,6 +2076,13 @@ def sequence_identity_params(
                     "input_data_spec": input_data_spec,
                     "lookback": config.get("params", {}).get("lookback", 60),
                     "max_train_sequences": max_train_sequences,
+                    # Written only when declared: `computation` is hashed whole, and no
+                    # registered sequence run strides its windows.
+                    **(
+                        {"train_sequence_stride": train_sequence_stride}
+                        if train_sequence_stride
+                        else {}
+                    ),
                 }
             )
     return params or None
@@ -2007,6 +2102,7 @@ def run_dl_cv(
     save_dir: Path | None = None,
     max_train_sequences: int = 0,
     max_predict_sequences: int = 0,
+    train_sequence_stride: int = 0,
     register: bool = False,
     case_study: str | None = None,
     notebook: str | None = None,
@@ -2104,6 +2200,7 @@ def run_dl_cv(
             label_col=label_col,
             case_study=case_study,
             max_train_sequences=max_train_sequences,
+            train_sequence_stride=train_sequence_stride,
             device=device,
         )
 
@@ -2242,6 +2339,7 @@ def run_dl_cv(
             device=device,
             save_dir=save_dir,
             max_train_sequences=max_train_sequences,
+            train_sequence_stride=train_sequence_stride,
             register=register,
             case_study=case_study,
             notebook=notebook,
@@ -2325,6 +2423,7 @@ def run_dl_cv(
             lookback=lookback,
             max_train_sequences=max_train_sequences,
             max_predict_sequences=max_predict_sequences,
+            train_sequence_stride=train_sequence_stride,
             temporal_by_fold=temporal_by_fold if _has_fold_temporal else None,
             temporal_keys=temporal_keys,
             temporal_feature_names=temporal_feature_names,
