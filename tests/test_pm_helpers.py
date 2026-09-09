@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -541,21 +543,33 @@ def test_requested_configurations_survive_the_fixture_trim(overrides: dict) -> N
     kept `default_mse` and `default_mae`, and the entry was wrong and untested at the same
     time: `06_linear` failed ahead of it on every regeneration that reached that far, so the
     name was never resolved.
+
+    The trim is *run*, not restated. This test used to keep `configs[:_MAX_CONFIGS_PER_FAMILY]`
+    itself, which is a second copy of the rule rather than a check on it: when the trim changed
+    to span the menu instead of taking its head, the copy went on describing the head and the
+    test passed while `us_equities_panel/06_linear` was asking for a `ridge_a0.001` the menu no
+    longer declared. Copying the menus into a tmp dir and calling `_trim_label_configs` is what
+    makes this fail on a rule the trim no longer follows.
     """
-    from tests.preset_patches import _MAX_CONFIGS_PER_FAMILY, _TRIM_FAMILIES
+    from tests.preset_patches import _trim_label_configs
 
     def declared_after_trim(case_study: str, labels: list[str] | None) -> set[str]:
         menus = REPO_ROOT / "case_studies" / case_study / "config" / "training"
-        names: set[str] = set()
-        for menu in sorted(menus.glob("*.yaml")):
-            if labels and menu.stem not in labels:
-                continue
-            for family, configs in (yaml.safe_load(menu.read_text()) or {}).items():
-                if not isinstance(configs, list):
+        with tempfile.TemporaryDirectory() as scratch:
+            trimmed = Path(scratch) / "training"
+            trimmed.mkdir()
+            for menu in sorted(menus.glob("*.yaml")):
+                shutil.copy2(menu, trimmed / menu.name)
+            _trim_label_configs(Path(scratch))
+
+            names: set[str] = set()
+            for menu in sorted(trimmed.glob("*.yaml")):
+                if labels and menu.stem not in labels:
                     continue
-                keep = configs[:_MAX_CONFIGS_PER_FAMILY] if family in _TRIM_FAMILIES else configs
-                names |= set(keep)
-        return names
+                for configs in (yaml.safe_load(menu.read_text()) or {}).values():
+                    if isinstance(configs, list):
+                        names |= {c["name"] if isinstance(c, dict) else c for c in configs}
+            return names
 
     missing = {}
     for key, value in overrides.items():
