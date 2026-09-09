@@ -45,7 +45,7 @@ import time
 
 import polars as pl
 
-from case_studies.research import prediction_rows_at, superseded_members_at
+from case_studies.research import open_study, prediction_rows_at, superseded_members_at
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import (
@@ -64,6 +64,7 @@ from case_studies.utils.sweep_config import (
     get_entry_schemes_for,
     get_top_k_values_for,
     get_top_n_predictions,
+    get_universe_filters_for,
 )
 from utils.paths import get_case_study_dir
 
@@ -76,6 +77,19 @@ TOP_K = 0
 MAX_SYMBOLS = 0
 FORCE_REBACKTEST = False  # Set True to re-backtest even if a complete backtest_hash exists
 TOP_N_PREDICTIONS = None
+# Zero means every feasible entry scheme. A positive value keeps the first N, which is what makes
+# a reduced run of this notebook finish in minutes: `backtest.sweep.signal_nasdaq100` crosses two
+# selection methods, three quantiles, two directions, three slot counts and three hold windows,
+# and 75 of those combinations are feasible on this panel. At roughly 5.8 s a backtest that is a
+# 21-minute sweep for three prediction sets, which is a production cost and not a smoke one. The
+# same lever as `MAX_RISK_VARIANTS` in 16 and `MAX_COST_POINTS` in the cost notebooks.
+MAX_ENTRY_SCHEMES = 0
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical branch regenerates in place, which
+# needs generated-artifact symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
 # ## 1. Setup & Plumbing Test
@@ -91,7 +105,17 @@ TOP_N_PREDICTIONS = None
 # outcome and not a failure. What would fail is profit that persists after
 # costs.
 
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Opening it
+# activates a root and rewrites `ML4T_OUTPUT_DIR` process-wide, and every later
+# `get_case_study_dir`, prediction index and registry write resolves against that variable. A
+# `CASE_DIR` bound before this line points at the released registry while the sweep writes to
+# the workspace, and the two never meet: the sweep finds nothing registered and every reader
+# scoped to hashes from the other root comes back empty.
+
 # %%
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 if TOP_N_PREDICTIONS is None:
@@ -299,15 +323,39 @@ print(
 entry_schemes = get_entry_schemes_for(
     CASE_STUDY_ID, LABEL, n_assets, long_short=bt_config.long_short
 )
-n_schemes = len(entry_schemes)
+if MAX_ENTRY_SCHEMES:
+    entry_schemes = entry_schemes[:MAX_ENTRY_SCHEMES]
 
-print(f"\nEntry schemes ({n_schemes}):", flush=True)
+# The universe axis, crossed with the entry schemes rather than pinned to one value.
+#
+# `backtest.sweep.universe_filter` declares `cost_feasible` here, and `universe.cost_feasible`
+# names the 50 validation and 50 holdout symbols `apply_universe_filter` restricts to. Nothing
+# in this notebook read either: every registered spec omitted `signal.universe_filter`, so
+# `BacktestExplorer` defaulted all of them to "full". Act 1 worked by that accident, and the
+# two readers that ask for the declared value got nothing - Section 4 below printed an empty
+# table and exited 0, `17_costs` priced nothing and exited 0, and only `20_strategy_analysis`
+# failed. Measured 2026-09-09: 202 signal backtests registered, 0 carrying the key.
+#
+# Both arms are needed rather than the declared one alone. Act 1 compares the full universe;
+# Section 4 and everything downstream of it read the cost-feasible one. A case study that
+# declares no filter gets `[None]` and its sweep is unchanged.
+_declared_universes = [u for u in get_universe_filters_for(CASE_STUDY_ID) if u]
+universe_filters: list[str | None] = [None, *_declared_universes]
+scheme_arms = [(scheme, universe) for universe in universe_filters for scheme in entry_schemes]
+n_schemes = len(scheme_arms)
+
+print(f"\nEntry schemes ({len(entry_schemes)}):", flush=True)
 for es in entry_schemes:
     print(f"  {es['name']}: {es['method']} (top_k={es.get('top_k', '-')})", flush=True)
+print(
+    "Universes: " + ", ".join("full" if u is None else str(u) for u in universe_filters),
+    flush=True,
+)
 
 total_backtests = n_predictions * n_schemes
 print(
-    f"\nTotal grid: {n_predictions} predictions × {n_schemes} schemes = {total_backtests} backtests",
+    f"\nTotal grid: {n_predictions} predictions × {len(entry_schemes)} schemes × "
+    f"{len(universe_filters)} universes = {total_backtests} backtests",
     flush=True,
 )
 
@@ -330,7 +378,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
 
     pending_schemes = []
 
-    for j, scheme in enumerate(entry_schemes):
+    for j, (scheme, universe) in enumerate(scheme_arms):
         idx = i * n_schemes + j + 1
 
         signal = {
@@ -339,6 +387,12 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
             "long_short": bt_config.long_short,
         }
         signal.update({k: v for k, v in scheme.items() if k not in ("name", "method")})
+        # Only when a filter is declared. A `None` written into the spec is not the same as an
+        # absent key: it would move `backtest_hash` for every row registered before this axis
+        # existed, and `get_universe_filters_for` normalizes "full" and "none" to None for that
+        # reason.
+        if universe is not None:
+            signal["universe_filter"] = universe
         spec = build_backtest_spec(
             CASE_STUDY_ID,
             bt_config,

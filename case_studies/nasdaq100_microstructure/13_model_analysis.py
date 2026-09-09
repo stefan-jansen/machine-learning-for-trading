@@ -65,10 +65,11 @@ import yaml
 
 from case_studies.research import (
     Result,
-    Study,
+    read_only_study,
     superseded_members,
 )
 from case_studies.utils.model_analysis import (
+    align_join_clock,
     best_model_per_family_fast,
     fold_performance_matrix,
     load_all_metrics,
@@ -97,7 +98,6 @@ from case_studies.utils.notebook_contracts import (
     filter_active_model_rows,
 )
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
-from utils.paths import get_case_study_dir
 
 warnings.filterwarnings("ignore")
 
@@ -126,6 +126,11 @@ NLINEAR_POPULATION = "nasdaq100_microstructure-nlinear-validation-v1"
 LSTM_POPULATION = "nasdaq100_microstructure-lstm_h64-validation-v1"
 TCN_POPULATION = "nasdaq100_microstructure-tcn-validation-v1"
 PATCHTST_POPULATION = "nasdaq100_microstructure-patchtst-validation-v1"
+# Where this notebook reads. Empty means the canonical registry; a smoke run passes the
+# workspace it wrote to, and the population names above with it, because a reduced run
+# publishes under its own names and the canonical ones resolve to nothing there.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
 # This notebook reads; it registers nothing. That decides how it opens the registry, and the
@@ -139,13 +144,19 @@ PATCHTST_POPULATION = "nasdaq100_microstructure-patchtst-validation-v1"
 # went from 30 registered prediction sets to 0 and the comparison below reported on nothing
 # while reporting success.
 #
-# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
+# `read_only_study` is the form that does not activate: it resolves the root for the tier and
+# workspace it is given and hands back a `Study.at` over it. `CASE_DIR` is that root, and every
 # question this notebook asks - the catalog, the lineage, the populations, the artifacts - is
 # answered from it.
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY)
-study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
+study = read_only_study(
+    CASE_STUDY,
+    workspace=WORKSPACE or None,
+    execution_tier=EXECUTION_TIER,
+    entry_point="13_model_analysis",
+)
+CASE_DIR = study.root
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
@@ -993,9 +1004,15 @@ if gbm_importance is None:
         # Join best linear model predictions with features
         linear_preds = best_preds.filter(pl.col("family") == "linear")
         if linear_preds.height > 0:
-            # Align timestamp types (predictions=datetime[ms], features may be date)
+            # Put both sides of the join on the predictions' own clock. The previous alignment
+            # handled only a `Date` feature column, so it missed the two ways these frames
+            # actually differ: the sequence path returns `us` where the panel is written at
+            # another unit, and a pandas round-trip can drop the zone. Measured 2026-09-09 on
+            # the smoke chain - predictions `datetime[us, UTC]`, features `datetime[us]` naive,
+            # and the join raised rather than matching nothing, which was the good case.
             if features_df[DATE_COL].dtype == pl.Date:
-                features_df = features_df.with_columns(pl.col(DATE_COL).cast(pl.Datetime("ms")))
+                features_df = features_df.with_columns(pl.col(DATE_COL).cast(pl.Datetime("us")))
+            features_df = align_join_clock(features_df, linear_preds.schema[DATE_COL], DATE_COL)
             merged = linear_preds.join(features_df, on=[DATE_COL, ENTITY_COL], how="inner")
 
             # Compute correlation of each feature with y_score per fold
