@@ -18,7 +18,7 @@
 # # Chapter 5: Differential Privacy for Generative Models
 #
 # **Chapter 5: Synthetic Data Generation**
-# **Section Reference**: Section 5.7 (Validation: The Fidelity-Utility-Privacy Framework)
+# **Section Reference**: Section 5.8 (Applying the Fidelity-Utility-Privacy framework)
 #
 # **Docker image**: `ml4t-gpu`
 #
@@ -46,7 +46,7 @@
 # ## Cross-References
 #
 # - **Upstream**: ETF Universe loader (`data`)
-# - **Book**: Section 5.7 discusses differential privacy in the FUP framework
+# - **Book**: Section 5.8 discusses differential privacy in the FUP framework
 #
 # ---
 #
@@ -75,7 +75,12 @@
 # %%
 """Differential Privacy for Generative Models — DP-GAN with Opacus privacy guarantees."""
 
+import warnings
 from datetime import date
+
+# Scoped by category and module, so a warning from this notebook's own code still shows.
+warnings.filterwarnings("ignore", category=UserWarning, module="opacus")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -92,7 +97,7 @@ from tqdm import tqdm
 from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, plot_fidelity_comparison
+from utils.style import COLORS, plot_fidelity_comparison, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
 # DP-GAN parameters (Abadi et al. 2016)
@@ -102,6 +107,10 @@ EPOCHS = 20  # Training epochs
 # 0 = use default list; >0 limits symbol count
 MAX_SYMBOLS = 0
 SEED = 42
+
+# Progress bars write to stderr and papermill records every repaint. The training loop
+# prints its losses and spent budget every few epochs, so nothing is lost with them off.
+PROGRESS_BARS = False
 
 # %%
 set_global_seeds(SEED)
@@ -348,6 +357,13 @@ discriminator = discriminator.to(device)
 # 2. Clip each sample's gradient to `max_grad_norm`
 # 3. Add calibrated Gaussian noise
 # 4. Track privacy budget via moments accountant
+#
+# The Lipschitz constraint the WGAN objective needs is enforced by clipping the
+# discriminator's weights rather than by a gradient penalty. That is a privacy decision,
+# not a modelling preference: a gradient penalty differentiates through interpolations
+# between real and generated samples, which puts real records into a term Opacus is not
+# accounting for. Weight clipping touches only the parameters, so the privacy accounting
+# stays sound.
 
 
 # %%
@@ -402,7 +418,7 @@ def train_dp_gan(
 
     history = {"g_loss": [], "d_loss": [], "epsilon": []}
 
-    for epoch in tqdm(range(epochs), desc="Training DP-GAN"):
+    for epoch in tqdm(range(epochs), desc="Training DP-GAN", disable=not PROGRESS_BARS):
         epoch_g_loss = []
         epoch_d_loss = []
 
@@ -421,17 +437,13 @@ def train_dp_gan(
             d_fake = discriminator_private(fake_data)
 
             # Wasserstein-style loss (more stable than BCE for GANs)
-            # WGAN requires Lipschitz constraint enforcement. We use weight clipping
-            # (not gradient penalty) because GP requires gradients through interpolated
-            # samples, which can leak privacy information. Weight clipping is DP-safe.
             d_loss = -torch.mean(d_real) + torch.mean(d_fake)
 
             opt_d.zero_grad()
             d_loss.backward()
             opt_d.step()  # Opacus handles gradient clipping + noise internally
 
-            # Weight clipping for Lipschitz constraint (WGAN requirement)
-            # Applied AFTER optimizer step to enforce constraint on updated weights
+            # After the step, so the constraint holds on the updated weights.
             clip_value = 0.01
             with torch.no_grad():
                 for p in discriminator_private._module.parameters():
@@ -575,7 +587,13 @@ fig = plot_fidelity_comparison(
     title="DP-GAN: real against synthetic at the spent privacy budget",
     n_samples=min(1000, N_GENERATE),
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two scatter panels comparing real and synthetic rows. In both, the real points "
+    "form a diffuse cloud while the synthetic points lie along thin, sharply defined "
+    "bands: a narrow horizontal streak in the PCA projection and smooth continuous "
+    "arcs in the t-SNE projection, with very little of the area the real points fill.",
+)
 
 # %% [markdown]
 # **Interpretation**: With differential privacy, the generator adds calibrated noise
@@ -663,9 +681,19 @@ fig.add_trace(
 
 fig.update_xaxes(title_text="Epoch")
 fig.update_layout(
-    title="DP-GAN Training with Opacus", height=350, showlegend=False, template="ml4t"
+    title="Generator loss, discriminator loss and spent budget by epoch",
+    height=350,
+    showlegend=False,
+    template="ml4t",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three panels against epoch. Generator loss swings up and down across zero for the "
+    "whole run without settling. Discriminator loss drops from its starting value "
+    "within the first epoch and stays flat near zero after that. The spent privacy "
+    "budget rises from zero and keeps climbing, steeply at first and then more gently, "
+    "reaching its target by the last epoch.",
+)
 
 # %% [markdown]
 # **Interpretation**: The loss curves reveal the tension between adversarial training and
@@ -719,7 +747,13 @@ fig.update_layout(
     barmode="overlay",
     template="ml4t",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Six overlaid histogram panels, one per feature. In each, the real distribution is "
+    "a tall concentrated peak and the DP-synthetic distribution is much lower and "
+    "flatter over the same range. On volatility the synthetic mass sits away from the "
+    "real peak, and on momentum the two overlap most closely.",
+)
 
 # %%
 # Correlation heatmaps
@@ -741,17 +775,36 @@ fig.add_trace(
     col=2,
 )
 
-fig.update_layout(title="Correlation Structure Preservation", height=400, template="ml4t")
-fig.show()
+fig.update_layout(
+    title="Feature correlation matrices, real and DP-synthetic", height=400, template="ml4t"
+)
+show_plotly_with_alt(
+    fig,
+    "Two correlation matrices side by side on a shared red-to-blue scale from minus "
+    "one to one. The real matrix is mostly pale, with weak correlations off the "
+    "diagonal. The DP-synthetic matrix is saturated: nearly every off-diagonal cell is "
+    "at the extreme red or extreme blue end of the scale.",
+)
 
 # %% [markdown]
-# **Interpretation**: The correlation heatmaps show how well DP training preserves
-# cross-feature dependencies. Strong diagonal dominance in the difference would indicate
-# that marginal distributions are captured but joint structure is lost -- a common failure
-# mode when privacy noise drowns out the weaker inter-feature signals. At moderate epsilon
-# values (5-10), the generator typically captures the strongest correlations (e.g.,
-# returns vs. momentum) but struggles with subtle relationships (e.g., volume ratio vs.
-# volatility), which require more training signal than the privacy budget allows.
+# **Interpretation**: read the two matrices against the same colour scale. The real one
+# is mostly pale, because these features are only weakly correlated with each other. The
+# synthetic one is saturated almost everywhere off the diagonal, every pair sitting at
+# one end of the scale or the other.
+#
+# That is not a weak version of the real structure, it is a different kind of object.
+# Correlations of plus or minus one mean each feature is close to a deterministic
+# function of the others, which is what a generator produces once it has collapsed onto
+# a low-dimensional set instead of a distribution. The fidelity figure above shows the
+# same thing geometrically: the synthetic points lie along thin bands and arcs rather
+# than filling the space the real points occupy.
+#
+# So the failure here is not that privacy noise drowned out the subtler correlations
+# while the strong ones survived. Under this budget and this much training the generator
+# has stopped producing a spread at all, and every correlation it reports is an artifact
+# of that collapse. Keep this in view when reading the sweep below: a summary distance
+# between two correlation matrices can sit in a narrow range while one of the two
+# matrices is degenerate.
 
 # %% [markdown]
 # ## 10. Privacy-Utility Trade-off Analysis
@@ -832,45 +885,55 @@ fig.update_xaxes(
 )
 fig.update_yaxes(title_text="Error (lower is better)")
 fig.update_layout(
-    title="Privacy-Utility Trade-off: Lower ε = More Privacy, Higher Error",
+    title="Mean difference and correlation distance by privacy budget",
     height=400,
     showlegend=False,
     template="ml4t",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two line panels against the privacy budget on a categorical axis. Mean difference "
+    "starts high at the tightest budget, falls sharply to the next one, and is then "
+    "nearly flat across the looser budgets. Correlation distance moves within a narrow "
+    "range and is not monotonic: it rises, drops to its lowest point, then rises again.",
+)
 
 # %% [markdown]
-# **Interpretation**: The trade-off reflects the fundamental tension in differential privacy:
-# stronger guarantees (lower epsilon) require more noise per gradient step, which degrades the
-# generator's ability to learn distributional structure. That tension shows up here as one
-# large, robust effect and a great deal of noise around it. The robust effect is the very tight
-# budget: at epsilon=1 the mean absolute difference is 7.5, roughly five times the value at any
-# looser budget, so a strict privacy requirement clearly and severely degrades marginal fidelity.
-# Among the moderate-to-weak budgets, however, the mean absolute difference collapses into a
-# narrow band -- 1.46 at epsilon=5, 1.55 at epsilon=10, and 1.35 at epsilon=50 -- with no clean
-# ordering (epsilon=10 is marginally the worst of the three) and the correlation distance stays
-# essentially flat (0.12-0.15) across the whole sweep. Differences that small are within the
-# run-to-run variance of a single 10-epoch training run per budget: the sweep is too short and
-# unreplicated to resolve a monotonic curve, and reading a smooth "quality improves with epsilon"
-# trend into this nearly flat, slightly jagged line would over-interpret the noise. The honest
-# lesson is that the dominant, reproducible cost lands in the strict-privacy regime (epsilon
-# around 1); the moderate budgets are effectively indistinguishable at this training scale, and
-# separating them would require averaging several independent runs per epsilon, not a single
-# pass. In regulated settings (e.g., sharing client trading data), epsilon <= 10 is a common
-# ceiling on the privacy budget regardless of where the utility optimum sits.
+# **Interpretation**: differential privacy trades utility for guarantees - a tighter
+# budget means more noise per gradient step, and the distribution that reaches the other
+# side of it is coarser. What the sweep shows is one large effect and a great deal of noise around it.
+#
+# The large effect is at the tightest budget, where the mean absolute difference is
+# several times its value anywhere else. That much is clear in the left panel and is
+# the part worth carrying away.
+#
+# Across the looser budgets the same measure lands in a narrow band with no clean
+# ordering, and the correlation distance in the right panel is not even monotonic: it
+# rises, falls to its lowest value, and rises again. Read the printed table for the
+# figures. Differences that small sit inside the run-to-run variation of a single short
+# training run per budget, so this sweep cannot resolve a monotonic curve, and drawing a
+# smooth "quality improves with epsilon" line through it would be reading the noise.
+# Separating the moderate budgets would take several independent runs at each, averaged.
+#
+# One caution carried forward from the correlation matrices: both measures here are
+# summaries, and the correlation distance in particular stays in a narrow range across
+# the sweep while the synthetic correlation structure is degenerate at every budget. A
+# flat curve is evidence that this metric does not separate these settings, not evidence
+# that the settings are equally good.
+#
+# In regulated settings - sharing client trading data, say - a ceiling on the privacy
+# budget is often imposed regardless of where the utility optimum falls.
 
 # %% [markdown]
 # ## Key Takeaways
 #
 # 1. **Privacy-utility tradeoff is real but dominated by the strict-privacy regime**:
-#    Stronger privacy guarantees (lower epsilon) inject more noise into gradients,
-#    degrading synthetic data quality. In this sweep the effect is large and clear at
-#    epsilon=1 (mean absolute difference 7.5, roughly five times any looser budget) but
-#    the moderate budgets collapse into a narrow band (1.46, 1.55, 1.35 at epsilon=5, 10,
-#    50) with no clean ordering, and the correlation distance stays flat across the sweep.
-#    A single 10-epoch run per budget is too noisy to resolve a monotonic curve; the robust
-#    takeaway is that a very tight budget is costly, while separating moderate budgets would
-#    require averaging several runs each.
+#    A tighter budget injects more noise into the gradients and coarsens the synthetic
+#    data. In this sweep the cost is large and unambiguous at the tightest budget, and
+#    the looser ones fall into a narrow band with no clean ordering. One short run per
+#    budget cannot resolve a monotonic curve, so the defensible reading is that a very
+#    tight budget is expensive and the moderate ones are not separated here; separating
+#    them would take several runs at each, averaged.
 #
 # 2. **Per-sample gradients via Opacus are essential**: Standard PyTorch clips the
 #    *batch* gradient, which does not bound any individual sample's contribution.
@@ -889,7 +952,7 @@ fig.show()
 #    and LayerNorm are DP-safe alternatives. Use `ModuleValidator` to check compatibility
 #    before training.
 #
-# **Next**: Section 5.7 covers the full Fidelity-Utility-Privacy evaluation framework
+# **Book**: Section 5.8 places this notebook in the full Fidelity-Utility-Privacy framework
 # that situates DP-GAN against the non-private generators in earlier notebooks.
 #
 # **Book**: Chapter 5, Section 5.7 discusses differential privacy within the broader
