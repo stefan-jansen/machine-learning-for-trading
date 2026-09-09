@@ -59,6 +59,11 @@ from ml4t.backtest import OrderSide, Strategy
 from utils.paths import display_path, get_output_dir
 from utils.reproducibility import set_global_seeds
 
+# The broker adapters pull in websockets' legacy module, which deprecates itself on import, so
+# the filter has to be in force before the import rather than after it. It is the library's
+# business rather than this notebook's and nothing in the result depends on it.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets\.legacy")
+
 # alpaca-py is an optional broker SDK; the simulated path runs without it. The
 # try/except is the only such optional import in the notebook.
 HAS_ALPACA_SDK = False
@@ -71,10 +76,6 @@ try:
     HAS_ALPACA_SDK = True
 except ImportError:
     pass
-
-# The broker adapters pull in websockets' legacy module, which deprecates itself on import. It
-# is the library's business rather than this notebook's and nothing in the result depends on it.
-warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets\.legacy")
 
 # Give this notebook its own logger rather than configuring the root one: basicConfig is a no-op
 # once an imported library has attached a handler, and reconfiguring the root would either do
