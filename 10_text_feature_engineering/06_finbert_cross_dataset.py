@@ -311,6 +311,12 @@ print(f"Always answering the majority class: accuracy {majority_rate:.1%}")
 # It cannot say why they disagree. The same counts would arise from a model that is unsure
 # and from one answering a different question, and nothing in a table of counts separates
 # those. What settles it here is the label definition printed earlier, not this figure.
+#
+# One column is worth reading closely. The model predicts neutral far less often than the
+# labels call for it, and that is the two definitions of "neutral" coming apart. A market
+# neutral is a small move, which is common. A sentiment neutral is a sentence expressing no
+# view, which a headline written to be read almost never is. Two classes with one name, doing
+# different jobs, in the same three-way problem.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -345,9 +351,10 @@ show_with_alt(
     fig,
     "A three-by-three grid of counts, with the label derived from the market move down the "
     "side and FinBERT's reading of the headline across the bottom. The counts are spread "
-    "widely rather than concentrated on the diagonal: every row puts substantial mass in more "
-    "than one column, and the largest column overall is the neutral one, which takes a large "
-    "share of the rows labeled negative and positive as well as the neutral row.",
+    "widely rather than concentrated on the diagonal, and each row puts substantial weight in "
+    "more than one column. The middle column, where the model predicts neutral, is much "
+    "lighter than the two beside it in all three rows, so the model rarely calls a headline "
+    "neutral even on the row whose label says the market barely moved.",
 )
 
 # %% [markdown]
