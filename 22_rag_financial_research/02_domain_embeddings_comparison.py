@@ -578,40 +578,55 @@ def overlap_scores(query: str, documents: list[str]) -> list[int]:
     return [sum(1 for term in terms if term in doc.lower()) for doc in documents]
 
 
-def cutoff_and_ties(query: str, documents: list[str], document_ids: list[str]) -> tuple[int, int]:
-    """Return the overlap score of the last labelled document, and how many share it."""
+def cutoff_and_ties(
+    query: str, documents: list[str], document_ids: list[str]
+) -> tuple[int, int, int]:
+    """Overlap score of the last label, how many documents share it, how many of those got a label."""
     scores = overlap_scores(query, documents)
     labelled = [
         i for i, keep in enumerate(get_relevance_labels(query, documents, document_ids)) if keep
     ]
     cutoff = min(scores[i] for i in labelled)
-    return cutoff, sum(1 for score in scores if score == cutoff)
+    tied = sum(1 for score in scores if score == cutoff)
+    labelled_at_cutoff = sum(1 for i in labelled if scores[i] == cutoff)
+    return cutoff, tied, labelled_at_cutoff
 
 
 cutoffs = [
     cutoff_and_ties(q, FINANCIAL_DOCUMENTS, FINANCIAL_DOCUMENT_IDS) for q, _ in FINANCIAL_QUERIES
 ]
-proxy_ties = pl.DataFrame(
-    {
-        "query_type": [t for _, t in FINANCIAL_QUERIES],
-        "query": [q for q, _ in FINANCIAL_QUERIES],
-        "cutoff_overlap": [c for c, _ in cutoffs],
-        "tied_at_cutoff": [t for _, t in cutoffs],
-    }
-).sort("tied_at_cutoff", descending=True)
+proxy_ties = (
+    pl.DataFrame(
+        {
+            "query_type": [t for _, t in FINANCIAL_QUERIES],
+            "query": [q for q, _ in FINANCIAL_QUERIES],
+            "cutoff_overlap": [c for c, _, _ in cutoffs],
+            "tied_at_cutoff": [t for _, t, _ in cutoffs],
+            "labels_from_tie": [n for _, _, n in cutoffs],
+        }
+    )
+    .with_columns(
+        (pl.col("tied_at_cutoff") - pl.col("labels_from_tie")).alias("tied_but_unlabelled")
+    )
+    .sort("tied_but_unlabelled", descending=True)
+)
 proxy_ties.with_columns(pl.col("query").str.slice(0, 44))
 
 # %% [markdown]
-# `cutoff_overlap` is how many query terms the third labelled document
-# contained, and `tied_at_cutoff` is how many documents in the corpus contain
-# exactly that many. Where the second number is large the label set is three
-# documents picked out of that many equals, by a hash - so a retriever can
-# return a document every bit as good as a labelled one and score zero for it.
+# `cutoff_overlap` is the overlap score of the lowest-scoring labelled
+# document. `tied_at_cutoff` counts every document in the corpus at that score,
+# `labels_from_tie` is how many of the three labels were taken from among them,
+# and `tied_but_unlabelled` is the remainder: documents the rule scored exactly
+# as highly as a label it did award, and did not award, because the tie-break
+# is a hash of the document text.
 #
-# This is the ceiling on what the notebook can conclude, stated before the
-# scores rather than after them. Note that it does not track how common the
-# query's words are: the query matching the most documents here is one of the
-# least arbitrary, because its three labels sit at a score few documents reach.
+# Those are the documents a retriever gets no credit for returning. Where the
+# last column runs into the tens, the label set is not a relevance judgment at
+# the margin - it is a coin toss the retriever has to match.
+#
+# Note what this does not track: how common the query's words are. The query
+# overlapping the most documents in this corpus is among the least arbitrary,
+# because its labels sit at a score few documents reach.
 
 
 # %% [markdown]
@@ -923,7 +938,7 @@ leader_text = ", ".join(
 )
 worst_tie = proxy_ties.row(0, named=True)
 tie_threshold = 8
-arbitrary = proxy_ties.filter(pl.col("tied_at_cutoff") >= tie_threshold).height
+arbitrary = proxy_ties.filter(pl.col("tied_but_unlabelled") >= tie_threshold).height
 per_register = queries_df.group_by("query_type").len().sort("len")["len"].unique().sort().to_list()
 register_count = (
     f"{per_register[0]}" if len(per_register) == 1 else f"{per_register[0]} to {per_register[-1]}"
@@ -938,11 +953,12 @@ display(
    Precision@3 averages for the same two models, {p3[lead["model"]]:.1%} against
    {p3[trail["model"]]:.1%}, are that fact in a form that looks larger than it is.
 2. **Some of the labels are decided by a hash, not by the query.** In {arbitrary} of the
-   {N_QUERIES} queries, {tie_threshold} or more documents carry the same overlap score as
-   the third labelled one, so which three get the label is a tie-break. The worst,
-   "{worst_tie["query"]}", has {worst_tie["tied_at_cutoff"]} documents at the cutoff score
-   of {worst_tie["cutoff_overlap"]}. A retriever that returns one of the other
-   {worst_tie["tied_at_cutoff"] - 1} scores zero for it.
+   {N_QUERIES} queries there are {tie_threshold} or more documents that score exactly as
+   well as a label the rule awarded and did not get one. The worst,
+   "{worst_tie["query"]}", cuts off at an overlap of {worst_tie["cutoff_overlap"]}:
+   {worst_tie["tied_at_cutoff"]} documents reach it, {worst_tie["labels_from_tie"]} of the
+   three labels come out of that tie, and the other {worst_tie["tied_but_unlabelled"]} score
+   nothing for a retriever that returns them.
 3. **Precision@5 has a lower ceiling than Precision@3.** With three labels per query it
    cannot exceed three in five, so a P@5 below a P@3 is arithmetic rather than a decline in
    retrieval.
