@@ -325,7 +325,7 @@
 09_model_based_features/09_har_rough_volatility:
   parameters:
     INTRADAY_SYMBOL: AMD
-    MIN_BARS_PER_DAY: 100
+    MINIMUM_BARS_PER_SESSION: 100
   timeout: 300
 09_model_based_features/10_uncertainty_features:
   parameters:
