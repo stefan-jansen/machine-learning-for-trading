@@ -74,7 +74,7 @@ After completing this chapter, you will be able to:
 
 | # | Notebook | What It Teaches |
 |---|----------|-----------------|
-| 10 | [`10_safety_risk_demo`](10_safety_risk_demo.ipynb) | Drives six of SafeBroker's risk controls into their failure modes: order size limits, position limits, rate limiting, asset restrictions, the kill switch (which persists across restarts), and shadow mode with VirtualPortfolio carrying weighted-average cost basis. Duplicate-order filtering, price-deviation checks and daily-loss monitoring are configured through the same `LiveRiskConfig` and are demonstrated in notebook 13. |
+| 10 | [`10_safety_risk_demo`](10_safety_risk_demo.ipynb) | Drives six of SafeBroker's risk controls into their failure modes: order size limits, position limits, rate limiting, asset restrictions, the kill switch (which persists across restarts), and shadow mode with VirtualPortfolio carrying weighted-average cost basis. Duplicate-order filtering and price-deviation checks are configured through the same `LiveRiskConfig` but are not demonstrated anywhere in the chapter; daily-loss monitoring is driven into its kill-switch trip in notebook 13. |
 | 13 | [`13_runtime_safety_showcase`](13_runtime_safety_showcase.ipynb) | Drives the runtime-safety contract under failure: stale-data rejection via `max_data_staleness_seconds`, automatic kill-switch trip on a simulated daily-loss breach (and latch survival across `SafeBroker` reconstruction), `SafeBroker.connect()` startup reconciliation against a deliberately divergent persisted state file, and `LiveEngine.runtime_status()` health-state transitions (`stopped` → `ok` → `feed_silent`). Closes with an `ml4t-live status` CLI walk-through. No real broker required. |
 
 ## Running Notebooks
