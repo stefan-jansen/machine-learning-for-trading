@@ -732,6 +732,44 @@ def compute_classification_metrics_from_predictions(
     return headline, fold_results
 
 
+_CLOCK_UNIT_NS = {"ms": 1_000_000, "us": 1_000, "ns": 1}
+
+
+def _cast_to_label_clock(frame, date_col: str, target):
+    """Put a prediction stamp on the label's clock, refusing a cast that would truncate.
+
+    Only ever applied to the prediction side. The label panel is authoritative because
+    `value_digest` is time-unit sensitive: a prediction frame rewritten to a different unit
+    no longer reproduces the `expected_prediction_keys.digest` its own spec records, which is
+    why `registry/store.py::_timestamps_as_utc` normalised the zone and deliberately left the
+    unit. Casting at read time costs nothing and changes no stored bytes.
+
+    A narrowing cast is silent in polars, so precision that the label genuinely cannot hold is
+    checked here rather than discovered as a join that quietly matches fewer rows.
+    """
+    import polars as pl
+
+    source_unit = getattr(frame.schema[date_col], "time_unit", None)
+    target_unit = getattr(target, "time_unit", None)
+    source_ns = _CLOCK_UNIT_NS.get(source_unit or "", 0)
+    target_ns = _CLOCK_UNIT_NS.get(target_unit or "", 0)
+
+    if source_ns and target_ns and source_ns < target_ns:
+        remainder = target_ns // source_ns
+        lost = frame.select(
+            (pl.col(date_col).dt.timestamp(source_unit) % remainder != 0).sum()
+        ).item()
+        if lost:
+            raise ValueError(
+                f"cannot put {date_col!r} on the label's clock without losing precision: "
+                f"{lost:,} of {frame.height:,} prediction stamps carry sub-{target_unit} "
+                f"detail that {target_unit!r} cannot hold. The label panel is the authority "
+                "on the decision clock, so this is a producer that is stamping finer than "
+                "the panel it is scored against."
+            )
+    return frame.with_columns(pl.col(date_col).cast(target))
+
+
 def compute_cross_sectional_direction_auc(
     predictions,
     direction_labels,
@@ -801,6 +839,28 @@ def compute_cross_sectional_direction_auc(
             left = left.with_columns(pl.col(date_col).cast(pl.Date))
         elif left_dt == pl.Date:
             right = right.with_columns(pl.col(date_col).cast(pl.Date))
+        elif isinstance(left_dt, pl.Datetime) and isinstance(right_dt, pl.Datetime):
+            # Two Datetimes that differ only in time unit or zone are the same instants,
+            # and this is the case that lost the metric entirely: `deep_learning` and
+            # `latent_factors` reach the registry through `flush_fold_predictions`, whose
+            # dates come from a numpy `datetime64` array, so their artifacts carry `us`
+            # where the label panel carries `ms`. 1,548 artifacts across seven case studies
+            # are on the other side of this line.
+            #
+            # The label is authoritative and the cast goes rightwards onto it, never the
+            # other way: `value_digest` is time-unit sensitive, so rewriting a prediction
+            # frame's unit moves `computation.expected_prediction_keys.digest` and the
+            # artifact stops reproducing the digest its own spec records - which is why
+            # `registry/store.py::_timestamps_as_utc` fixed the zone and says in as many
+            # words that it leaves the unit alone. Reading is the only side that may cast.
+            #
+            # Lossless here, and checked rather than assumed: across all 200 `us`
+            # artifacts in `crypto_perps_funding`, no row carries a sub-millisecond
+            # component, so narrowing to the label's unit moves no instant. A stamp that
+            # genuinely carried finer precision than its label would be a different
+            # problem, and `assert_no_precision_loss` below refuses it rather than
+            # silently truncating.
+            left = _cast_to_label_clock(left, date_col, right_dt)
         else:
             raise TypeError(
                 f"cannot align join key {date_col!r}: predictions are {left_dt}, "
