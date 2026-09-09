@@ -944,8 +944,8 @@ axes[0].set_xlabel("Window length (days)")
 axes[0].set_ylabel("Time for one training step (ms)")
 add_message_title(
     axes[0],
-    "Walking the window costs more as it lengthens",
-    subtitle="Timed on this machine",
+    "Time for one training step against window length",
+    subtitle="Minimum of repeated warmed-up steps, timed on this machine",
 )
 axes[0].legend(frameon=False, fontsize="small")
 
@@ -954,8 +954,8 @@ axes[1].set_xlabel("Window length (days)")
 axes[1].set_ylabel("Mean squared error, log scale")
 add_message_title(
     axes[1],
-    "The extra history is fitted, not learned",
-    subtitle="Training (solid) against validation (dashed) error after the last epoch",
+    "Training and validation error at each window length",
+    subtitle="Training solid, validation dashed, after the last epoch",
 )
 axes[1].legend(frameon=False, fontsize="small")
 
@@ -971,10 +971,13 @@ show_with_alt(
 # The two panels are the notebook's argument in one figure, and they say different
 # things about the same lengthening.
 #
-# On the left, the cost of a step rises with the window for the network that walks it,
-# while the network that reads the window at once absorbs the same lengthening far more
-# cheaply - a wider first layer is one larger matrix multiplication, not more dependent
-# steps.
+# On the left, the recurrent network is slower than the fully connected one at every
+# length measured, which is the sequential cost: a longer window is more dependent steps
+# for it, where for the fully connected network it is one larger matrix multiplication
+# into a wider first layer. Read the levels rather than the slopes. Neither curve is
+# monotonic - a step is a few milliseconds and the measurement is a minimum over
+# repeated warmed-up steps, so kernel selection and occupancy move it between lengths by
+# more than the lengthening does.
 #
 # On the right, the two curves for each architecture separate rather than descend
 # together. A longer window gives the fully connected network more input slots and
