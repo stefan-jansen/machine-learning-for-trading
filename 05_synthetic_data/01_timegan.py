@@ -454,7 +454,12 @@ if CHECKPOINT_PATH.exists() and not RETRAIN:
         for key, value in RUN_CONFIG.items()
         if saved_config.get(key) != value
     }
-    if mismatched:
+    if "history" not in checkpoint:
+        print(
+            f"Checkpoint at {CHECKPOINT_PATH} predates loss-history saving; retraining so "
+            "the training section has its figure."
+        )
+    elif mismatched:
         print(f"Checkpoint at {CHECKPOINT_PATH} does not match this run; retraining.")
         for key, (was, now) in mismatched.items():
             print(f"  {key}: checkpoint has {was!r}, this run needs {now!r}")
@@ -465,6 +470,11 @@ if CHECKPOINT_PATH.exists() and not RETRAIN:
         supervisor.load_state_dict(checkpoint["supervisor"])
         generator.load_state_dict(checkpoint["generator"])
         discriminator.load_state_dict(checkpoint["discriminator"])
+        history = checkpoint["history"]
+        embedding_losses = history["embedding"]
+        supervisor_losses = history["supervisor"]
+        g_losses = history["generator"]
+        d_losses = history["discriminator"]
         print("Checkpoint loaded - skipping training")
         SKIP_TRAINING = True
 
@@ -779,7 +789,7 @@ print(f"TSTR Ratio: {tstr_ratio:.3f} (target: ~1.0)")
 # ### Training Curves
 
 # %%
-if not SKIP_TRAINING and embedding_losses:
+if embedding_losses:
     fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
     axes[0].plot(embedding_losses, color=COLORS["blue"], linewidth=1.5)
@@ -819,6 +829,14 @@ checkpoint = {
     "generator": generator.state_dict(),
     "discriminator": discriminator.state_dict(),
     "config": RUN_CONFIG,
+    # The training section plots these. Without them a checkpoint-loading run renders
+    # that section with no figure, so they travel with the weights they describe.
+    "history": {
+        "embedding": embedding_losses,
+        "supervisor": supervisor_losses,
+        "generator": g_losses,
+        "discriminator": d_losses,
+    },
 }
 torch.save(checkpoint, CHECKPOINT_PATH)
 
