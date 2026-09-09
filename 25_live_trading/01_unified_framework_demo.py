@@ -63,8 +63,7 @@ from async_utils import run_async
 
 # Two deprecations fire on import, once each, from dependencies of the live stack: nest_asyncio
 # reaches a deprecated asyncio accessor, and the broker adapters pull in websockets' legacy
-# module. Both are the libraries' business rather than this notebook's and neither touches a
-# result, so each is silenced by category and module and nothing else is.
+# module. Neither touches a result, so each is silenced by category and module.
 warnings.filterwarnings(
     "ignore",
     category=DeprecationWarning,
@@ -818,7 +817,11 @@ ax.set_xlabel("Date")
 ax.set_ylabel("SPY close (USD)")
 add_message_title(
     ax,
-    "Both engines traded the same crossovers on the same days",
+    (
+        "Both engines traded the same crossovers on the same days"
+        if matches == len(backtest_signals)
+        else "The two engines disagree about when to trade"
+    ),
     subtitle="Filled markers are the backtest, hollow rings the live replay",
 )
 ax.legend(loc="lower right", fontsize=8)
@@ -826,8 +829,12 @@ show_with_alt(
     fig,
     f"SPY close for {START_DATE} to {END_DATE} with its {FAST_MA}-day and {SLOW_MA}-day moving "
     f"averages. {len(backtest_signals)} crossover signals are marked, buys pointing up and sells "
-    "pointing down, each with a hollow ring drawn from the live replay's own signal list. Every "
-    "ring sits on a marker, so the two engines traded the same days at the same prices.",
+    "pointing down, each with a hollow ring drawn from the live replay's own signal list. "
+    + (
+        "Every ring sits on a marker, so the two engines traded the same days at the same prices."
+        if matches == len(backtest_signals)
+        else f"{len(backtest_signals) - matches} of them do not coincide."
+    ),
 )
 
 # %% [markdown]
