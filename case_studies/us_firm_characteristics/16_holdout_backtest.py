@@ -127,16 +127,16 @@ def _delete_holdout_backtest(case_dir, backtest_hash):
 # %% [markdown]
 # ## 1. The configuration, and the predictions it produced on the holdout
 #
-# The carrier is resolved the same way [`14_costs`](14_costs.ipynb) and
+# The selected configuration is resolved the same way [`14_costs`](14_costs.ipynb) and
 # [`15_holdout_predictions`](15_holdout_predictions.ipynb) resolve it, so all three run
 # the same configuration by construction rather than by a hash copied between them.
 #
-# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving
-# the holdout training specification reproduces the training identity 15 registered - the
-# derivation is deterministic and the identity covers it - so the prediction set is looked up
-# by that identity and the carrier's checkpoint. A search over holdout prediction sets would
-# have to guess which one belonged to this configuration, and this case study's registry holds
-# an older one that does not.
+# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving the
+# holdout training specification reproduces the training identity 15 registered - the derivation is
+# deterministic and the identity covers it - so the prediction set is looked up by that identity and
+# the selected configuration's checkpoint. A search over holdout prediction sets would have to guess
+# which one belonged to this configuration, and this case study's registry holds an older one that
+# does not.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
@@ -187,7 +187,7 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # %% [markdown]
 # ## 2. Calibrating the allocator on validation residuals only
 #
-# This carrier sizes positions by a conformal width, and a width is calibrated from the
+# This configuration sizes positions by a conformal width, and a width is calibrated from the
 # errors the model has already made. On the holdout there are none to use: an error is
 # only usable once the return it measures has been realised, and every holdout return
 # realises inside the window being evaluated. So the widths come from the validation
@@ -255,11 +255,10 @@ else:
 # %% [markdown]
 # ## 3. The backtest
 #
-# The strategy specification is the carrier's own, re-pointed at the holdout prediction
-# set and the holdout price window. Nothing else about it changes - the commission and
-# slippage are the levels `setup.yaml` declares, the same ones every validation number in
-# this case study was net of, and the same ones sitting inside the swept grid in
-# [`14_costs`](14_costs.ipynb).
+# The strategy specification is the selected configuration's own, re-pointed at the holdout
+# prediction set and the holdout price window. Nothing else about it changes - the commission and
+# slippage are the levels `setup.yaml` declares, the same ones every validation number in this case
+# study was net of, and the same ones sitting inside the swept grid in [`14_costs`](14_costs.ipynb).
 #
 # What that specification does to a prediction, in order, since this notebook is where a
 # reader arrives wanting the whole strategy in one place rather than assembled from four
@@ -287,8 +286,8 @@ else:
 # The run registers under `stage='holdout'`, which the registry derives from the
 # prediction set's split rather than from anything asserted here.
 #
-# One thing the hash does not cover: a conformal carrier reads its widths from an artifact
-# beside the prediction set, and the backtest identity covers the allocator's declared
+# One thing the hash does not cover: a conformal configuration reads its widths from an
+# artifact beside the prediction set, and the backtest identity covers the allocator's declared
 # parameters but not the calibration those widths were built from. Change the embargo and
 # the hash does not move, so a registered run would be served back against inputs that no
 # longer exist - and the registry refuses the overwrite rather than accepting either, which
@@ -427,11 +426,11 @@ print(f"Holdout backtest: {result.backtest_hash}")
 
 # %% tags=["results"]
 metrics = result.metrics
-# The carrier's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports
-# the common-support figure, which re-ranks the conformal field on the timestamps every
-# candidate covers; that is the right number for choosing between candidates and the wrong
-# one to set beside a holdout measured over its own full window. Both are printed, so
-# neither has to be inferred from the other.
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier`
+# reports the common-support figure, which re-ranks the conformal field on the timestamps every
+# candidate covers; that is the right number for choosing between candidates and the wrong one to
+# set beside a holdout measured over its own full window. Both are printed, so neither has to be
+# inferred from the other.
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
     carrier_sharpe, carrier_periods = conn.execute(
         "SELECT sharpe, n_periods FROM backtest_metrics WHERE backtest_hash = ?",

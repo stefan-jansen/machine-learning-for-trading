@@ -155,22 +155,23 @@ if CASE_STUDY_ID in VECTORIZED_CASE_STUDIES:
 print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TOP_N}; mode: engine")
 
 # %% [markdown]
-# ## 1. Advance the highest-ranked eligible strategy carrier
+# ## 1. Advance the highest-ranked eligible strategy
 #
 # Selection compares the equal-weight baseline with active alternative
 # allocators using validation Sharpe and maximum prediction coverage.
 # Historical rows from removed allocators cannot enter the corrected risk stage.
 
 # %% [markdown]
-# **The carrier is whichever strategy row ranks highest, so the pool it is drawn from decides what
-# is being overlaid.** A population is immutable and the registry keeps every generation of it, so
-# a pool built straight from `backtest_runs` counts retired members beside current ones - nothing
-# in the read path filters on supersession (`case_studies/utils/registry/queries.py` contains no
-# occurrence of `supersed`). A retired generation that outranks its own replacement would carry the
-# risk comparison, and the notebook would report an overlay on a strategy the case study no longer
-# publishes. `prediction_hashes` is passed rather than applied afterwards because it also scopes
-# the full-coverage bar the query ranks against: a retired row with a longer in-window count would
-# otherwise set a bar its live replacement cannot meet.
+# **The selected configuration is whichever strategy row ranks highest, so the pool it is drawn from
+# decides what is being overlaid.** A population is immutable and the registry keeps every
+# generation of it, so a pool built straight from `backtest_runs` counts retired members beside
+# current ones - nothing in the read path filters on supersession
+# (`case_studies/utils/registry/queries.py` contains no occurrence of `supersed`). A retired
+# generation that outranks its own replacement would carry the risk comparison, and the notebook
+# would report an overlay on a strategy the case study no longer publishes. `prediction_hashes` is
+# passed rather than applied afterwards because it also scopes the full-coverage bar the query ranks
+# against: a retired row with a longer in-window count would otherwise set a bar its live
+# replacement cannot meet.
 
 # %%
 # `Study.at` is the read-only form: one root, no activation. These notebooks only read the
@@ -194,10 +195,11 @@ if CURRENT_MEMBERS is not None:
 
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
-# The carrier is chosen out of the baseline and allocation grids, so both are required before
-# either is ranked: their plans say which backtests the current grids contain, and their
-# attestations say the runs that filled them finished. Ranking the registry unrestricted picks
-# the carrier out of whatever historical rows survive, which is not the same question.
+# The selected configuration is chosen out of the baseline and allocation grids, so both are
+# required before either is ranked: their plans say which backtests the current grids contain, and
+# their attestations say the runs that filled them finished. Ranking the registry unrestricted picks
+# the selected configuration out of whatever historical rows survive, which is not the same
+# question.
 UPSTREAM_PLANS = upstream_plan_hashes(
     _study,
     case_study=CASE_STUDY_ID,
@@ -343,7 +345,7 @@ for combo in top_combos.iter_rows(named=True):
     base_specs.append((combo, prediction_hash, base_spec))
 
 # %% [markdown]
-# Each declared rule changes only the position-risk block of its carrier's
+# Each declared rule changes only the position-risk block of the overlaid configuration's
 # strategy specification.
 
 # %%
@@ -385,7 +387,7 @@ print(f"Planned {len(plans)} risk backtests; {cached} already complete")
 # path. Missing rows fail the production run; cached hashes are reused.
 #
 # A shared weight path isolates the position rule as the only difference among
-# a carrier's risk variants.
+# a selected configuration's risk variants.
 
 
 # %%
@@ -447,8 +449,9 @@ def execute_risk_plans(combo: dict, combo_plans: list[dict]) -> list[str]:
 RISK_POPULATION = sweep_plan_name(
     CASE_STUDY_ID, RISK_LABEL, "risk_overlay", predictions_identity(CURRENT_MEMBERS)
 )
-# The generation this run retires, per population name. A plan that has grown - a new carrier
-# advancing, another risk control declared - is a changed population under a live name and has
+# The generation this run retires, per population name. A plan that has grown - a new
+# configuration advancing, another risk control declared - is a changed population under a live
+# name and has
 # to say which one it replaces; the refusal prints the current hash.
 # All five moved with the allocation plans above them: the risk grid is built over the strategy
 # 15_portfolio_management selects, and that selection changed for the labels whose top-ten was
@@ -569,7 +572,7 @@ if risk_results.filter(pl.col("stage") != "risk_overlay").height:
     raise RuntimeError("A planned risk hash was registered under the wrong stage")
 
 # %% [markdown]
-# A paired comparison aligns each overlay with its exact no-overlay carrier,
+# A paired comparison aligns each overlay with its exact no-overlay parent,
 # drops their shared inactive prefix, and resamples both paths together.
 
 
@@ -588,11 +591,12 @@ def paired_overlay_metrics(row: dict) -> dict:
         raise RuntimeError(f"Degenerate return pair for {row['risk_name']}")
     # The leading inactive sessions are dropped inside `compute_paired_uncertainty`, over both
     # series at once. Trimming per series is what broke this cell: an overlay sits out sessions
-    # its carrier trades, so the two sides arrived at different lengths and the paired bootstrap
+    # the configuration it overlays trades, so the two sides arrived at different lengths and the paired bootstrap
     # refused every one of them.
     #
     # `challenger_overlays_baseline` says which pair this is, and here it is an overlay running
-    # on top of its carrier: both are live from the carrier's first traded session, so a session
+    # on top of the configuration it overlays: both are live from that configuration's first
+    # traded session, so a session
     # the overlay sits out is a position it chose to hold and stays in. It is the effect being
     # measured. The default would drop those rows, which is right for a strategy that has a
     # warmup before its first signal and wrong for every rule below.
@@ -630,7 +634,7 @@ risk_results = risk_results.join(pl.DataFrame(paired_rows), on="backtest_hash").
 
 # %% [markdown]
 # The chart below ranks every overlay by its paired Sharpe difference against
-# its own no-overlay carrier. What separates an overlay worth carrying forward
+# its own no-overlay parent. What separates an overlay worth carrying forward
 # from one that is not is whether its bootstrap interval clears zero, not the
 # size of the point difference. With every declared rule scored on a single
 # validation path, a large point difference whose interval spans zero is what
@@ -718,7 +722,7 @@ fig_tradeoff.show()
 # The members are the three stages that competed: the equal-weight baselines,
 # the allocation variants, and the risk overlays laid over them, restricted to
 # the prediction sets currently in force. All three matter. A pool of overlays
-# alone would force an overlay onto the carrier even where every control hurt
+# alone would force an overlay onto the selected configuration even where every control hurt
 # it, because this stage registers a row per named control and none for the
 # strategy it was overlaid on. A pool without the baselines would make a bare
 # equal-weight top-k unreachable, which is a legitimate answer whenever neither
@@ -728,13 +732,13 @@ fig_tradeoff.show()
 # fitted against different labels, features or folds cannot quietly join a set
 # the holdout will pick from.
 #
-# **The field spans every declared label, not the one this run overlaid.** The risk sweep above
-# is per label - it perturbs one carrier, drawn from one label's strategies - but the selection
+# **The field spans every declared label, not the one this run overlaid.** The risk sweep above is
+# per label - it perturbs one configuration, drawn from one label's strategies - but the selection
 # this set exists to make is not: the holdout picks the single highest validation backtest Sharpe
-# the case study produced, and a label that never entered the set cannot be picked no matter how
-# it scored. Resolving the field against `RISK_LABEL` made the membership depend on which label
-# happened to run last, which is both the wrong field and a set that changes under a fixed name
-# on every label - so the second label's run could not publish at all.
+# the case study produced, and a label that never entered the set cannot be picked no matter how it
+# scored. Resolving the field against `RISK_LABEL` made the membership depend on which label
+# happened to run last, which is both the wrong field and a set that changes under a fixed name on
+# every label - so the second label's run could not publish at all.
 
 # %%
 # A candidate set is immutable under its name, so a field whose membership has moved has to name
@@ -898,7 +902,7 @@ else:
 #
 # 1. Risk selection is validation-only. It carries the eligible lineage that
 #    ranks first on validation Sharpe forward without consulting the holdout.
-# 2. Every overlay is scored against its own carrier's no-overlay path, so the
+# 2. Every overlay is scored against its own parent's no-overlay path, so the
 #    position rule is the only difference inside a pair.
 # 3. An overlay earns a claim only where its paired bootstrap interval excludes
 #    zero. The ordering of point differences on its own establishes nothing.
@@ -907,16 +911,16 @@ else:
 #    used to score them.
 # 5. The predeclared overlays are a selection cohort, and the winner of one is a
 #    validation result. The holdout is what says whether it survives, and it is
-#    read on the final carrier rather than used to choose among these.
+#    read on the final configuration rather than used to choose among these.
 # 6. The field is frozen here as an immutable candidate set. That is what stops
 #    the four stages after this one from each re-deriving a selection, and what
 #    makes the configuration the holdout was run on a matter of record rather
 #    than a rule four notebooks apply consistently until one of them does not.
 # 7. The overlay sweep is per label; the field it feeds is not. Each label gets
-#    its own carrier and its own controls, and every label's strategies then
+#    its own configuration and its own controls, and every label's strategies then
 #    compete in one set, because the holdout picks one configuration for the
 #    case study rather than one per label.
 #
 # **Next:** [`17_costs`](17_costs.ipynb) stresses whichever configuration this stage
-# advances - the best overlay, or the un-overlaid carrier where no overlay helped -
+# advances - the best overlay, or the un-overlaid parent where no overlay helped -
 # across the cost surface. See Chapter 20 for the strategy synthesis framework.
