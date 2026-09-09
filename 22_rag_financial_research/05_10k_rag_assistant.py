@@ -20,46 +20,55 @@
 #
 # **Chapter 22: RAG for Financial Research**
 #
-# This notebook builds a 10-K due-diligence RAG (Retrieval-Augmented Generation)
-# assistant on top of LlamaIndex. Key features:
+# A due-diligence assistant over 10-K filings: sentence-window chunking, local
+# BGE-small embeddings, a ChromaDB index, and a query engine under a prompt
+# that requires citations and abstention.
 #
-# 1. **Sentence-window chunking** - `SentenceSplitter` over the canonical 10-K
-#    parquet text (LlamaParse-style structure-aware parsing is a production
-#    upgrade discussed in §22.3, not implemented here)
-# 2. **Dense vector retrieval** - local BGE-small embeddings indexed in ChromaDB
-# 3. **Constraint-Based Prompting** - enforcing grounded, citable answers
-# 4. **Numeric Retrieve→Extract→Compute→Narrate** - code-side arithmetic on
-#    extracted figures so the LLM never does the math itself
-# 5. **Harness Diagnostics** - lightweight retrieval/citation/abstention checks
+# **What the shipped run does and does not exercise.** `RUN_LIVE_LLM` is false
+# by default, so there is no generation: the query engine is a retriever, and
+# the citation prompt is written down and never sent. Everything below about
+# retrieval is measured. Everything about citation and abstention is a contract
+# the notebook states, not behaviour it observes. Turning the flag on needs an
+# OpenAI key and makes the run non-reproducible, which is why it is off.
 #
-# ## Learning Objectives
-# - Build a citation-constrained 10-K assistant with abstention checks.
-# - Run the retrieve-extract-compute-narrate pattern for numeric questions.
-# - Analyze RAG pipeline error sources and select/justify components.
+# The retrieval that is measured is asked one question the corpus can answer,
+# three it cannot, and one about the boiling point of helium. Section 6 is
+# about how a retriever reports the difference.
 #
-# **Book Reference**: Chapter 22, Section 22.8 (Applications)
+# **Learning objectives**
 #
-# ## Prerequisites
-# - SP100 10-K filings (`data/equities/fundamentals/10k/sp100/`)
-# - OpenAI API key for LLM generation (optional - retrieval works without it)
-# - Embeddings use local HuggingFace model (no API key needed)
+# After working through this notebook you will be able to:
+#
+# - Build a filing index end to end: load, chunk, embed, persist, retrieve.
+# - Say why a `similarity_top_k` retriever's hit count cannot detect a bad
+#   retrieval, and what to measure instead.
+# - Say what the score a vector store returns actually is, and what stands
+#   between an ordering and an accept-or-abstain decision.
+# - Run the retrieve-extract-compute-narrate pattern, and say which step the
+#   language model is kept out of and why.
+#
+# **Prerequisites**
+#
+# - The SP100 10-K corpus. Note what
+#   [`01_sec_filing_pipeline`](01_sec_filing_pipeline.ipynb) establishes about
+#   it: the stored text is a window around each filing's first mention of
+#   suppliers, not the whole report. Section 5 is where that starts to matter.
+# - A CUDA GPU for the embeddings. No API key: the embedding model is local and
+#   the LLM path is off.
+#
+# **Book reference**: Section 22.8 on the 10-K assistant, and Section 22.6 on
+# constraint prompting.
 
 # %% [markdown]
-# ## 1. Setup and Imports
-#
-# This setup fixes the document budget, retrieval depth, and optional
-# dependencies that determine whether the notebook runs a full or fallback RAG path.
+# ## 1. Setup
 
 # %%
 """10-K Due Diligence Assistant - RAG pipeline with verifiable citations for SEC filings."""
 
 import os
 import re
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import chromadb
 import plotly.graph_objects as go
@@ -126,9 +135,9 @@ SEC_FILINGS_DIR = get_output_dir(22, "sec_filing_pipeline") / "sec_filings_10k"
 SEC_FILINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
-# **Interpretation**: The parameters shrink the corpus and retrieval breadth for
-# quick tests, but the notebook still exercises the same RAG pipeline that the
-# production chapter discussion describes.
+# `MAX_DOCS` and `TOP_K` set the size of the index and the depth of each
+# retrieval. Both are small so the notebook runs in a minute; neither changes
+# which pipeline is exercised.
 
 # %% [markdown]
 # ## 2. Document Ingestion
@@ -214,12 +223,10 @@ def load_documents(filings_dir: Path, max_docs: int = 10):
 
 
 # %% [markdown]
-# **Interpretation**: `load_documents` is the first grounding checkpoint. The
-# notebook either streams the canonical SP100 parquet corpus or reads flat
-# PDF/TXT/MD files from `SEC_FILINGS_DIR`. If neither path is populated, the
-# loader raises `FileNotFoundError` rather than silently substituting synthetic
-# text - there is no synthetic fallback in the current code path.
-#
+# `load_documents` raises when neither source is populated rather than
+# substituting synthetic text. A RAG demo that invents a corpus when the real
+# one is absent answers questions about nothing and reports success, which is
+# the failure this notebook is about.
 # %%
 # Load documents
 documents = load_documents(SEC_FILINGS_DIR, MAX_DOCS)
@@ -231,9 +238,9 @@ if documents:
     print("-" * 50)
 
 # %% [markdown]
-# **Interpretation**: The loaded filings preserve the key challenge of
-# filing retrieval: long, heterogeneous documents need to retain enough structure
-# for later citations and multi-hop questions to remain grounded.
+# The preview begins mid-word. These are the excerpt windows
+# `01_sec_filing_pipeline` describes, not whole filings, and what they contain
+# bounds what the index can answer.
 
 # %% [markdown]
 # ## 3. Chunking and Embedding
@@ -250,8 +257,9 @@ if documents:
 # %% [markdown]
 # ### Configure LlamaIndex settings
 #
-# Sets the LLM, embedding model, and chunk strategy. ChromaDB persists the
-# index, so a restart does not re-embed the corpus.
+# Sets the LLM, embedding model, and chunk strategy. The Chroma collection is
+# written to disk, and the build step below deletes and rebuilds it on every
+# run, so persistence buys inspectability rather than a warm restart.
 
 
 # %% [markdown]
@@ -315,10 +323,10 @@ def _build_vector_index(documents, persist_dir: Path | None):
 
 
 # %% [markdown]
-# **Interpretation**: Index creation is where chunking and embeddings become a
-# concrete retrieval asset. If this step fails, every later answer should be
-# read as an environment issue rather than a model-quality signal.
-#
+# The collection is deleted and rebuilt on every run, so a node from an earlier
+# corpus cannot reach a later comparison. It costs the embedding pass each
+# time, which is the trade: an index that accumulates is faster and stops being
+# a description of the documents currently in it.
 # %%
 # Create or load index
 index = create_index(documents, VECTOR_STORE_DIR)
@@ -386,10 +394,9 @@ def create_query_engine(index, top_k: int = 5):
 
 
 # %% [markdown]
-# **Interpretation**: The query-engine contract is deliberately constrained. The
-# result should be an answer interface that treats citations and abstention as
-# part of the API, not as optional output formatting.
-#
+# With `RUN_LIVE_LLM` false this returns a bare retriever, and
+# `CITATION_PROMPT` above is never sent to anything. The prompt is here to be
+# read; the committed run contains no generated answer to check it against.
 # %%
 # Create query engine
 query_engine = create_query_engine(index, TOP_K)
@@ -437,8 +444,10 @@ TEST_QUERIES = [
 
 # %%
 def source_records(nodes) -> list[dict]:
+    """Keep the full chunk for scoring and a truncated copy for display."""
     return [
         {
+            "text": node.text,
             "text_preview": node.text[:200] + "..." if len(node.text) > 200 else node.text,
             "score": getattr(node, "score", None),
             "metadata": node.metadata if hasattr(node, "metadata") else {},
@@ -629,7 +638,7 @@ retrieval_checks = []
 for position, result in enumerate(query_results, 1):
     sources = result.get("sources") or []
     top = sources[0] if sources else None
-    top_text = (top or {}).get("text_preview", "").lower()
+    top_text = (top or {}).get("text", "").lower()
     score = top.get("score") if top else None
     retrieval_checks.append(
         {
@@ -662,19 +671,25 @@ if scores:
 # included, so the coverage figure below is uninformative exactly as described.
 # The two checks beside it are not, and they do not say the same thing.
 #
-# **The similarity carries signal.** The five top scores order the way a reader
-# would order the questions: the answerable one highest, the three financial
+# **First, what the number is.** LlamaIndex's Chroma adapter does not return a
+# cosine similarity. It takes the distance Chroma computed and returns
+# `exp(-distance)`, so the score is one at zero distance and falls towards zero
+# as distance grows. It is a monotone re-expression of a distance rather than a
+# quantity with units, and it orders results and nothing more.
+#
+# **The order it produces is right.** The five top scores rank the way a reader
+# would rank the questions: the answerable one highest, the three financial
 # questions the corpus cannot answer in the middle, the physics question
 # lowest. The embedding is not confused about which passage is nearest to what.
 #
-# **The signal has no zero and no natural cut.** The whole range is narrow -
-# the spread is printed above - and the score for a question this corpus could
+# **The ordering does not come with a cut.** The five scores span the fraction
+# of the range printed above, and the score for a question this corpus could
 # not answer under any circumstances is not obviously low, it is just lower. A
-# production system needs a number to compare against and nothing in the score
-# supplies one: a threshold placed anywhere inside that range changes which of
-# these five are accepted, and where to put it is a property of this corpus and
-# this embedding model, established by calibrating against questions whose
-# answers are known.
+# production system needs a number to compare against, and neither the score
+# nor its scale supplies one: a threshold placed anywhere inside that spread
+# changes which of these five are accepted, and where to put it is a property
+# of this corpus, this embedding model and this distance metric together,
+# established by calibrating against questions whose answers are known.
 #
 # **The term check is decisive at one end and useless at the other.** It
 # separates the physics question cleanly, because a passage about competition
@@ -716,9 +731,11 @@ for metric, value in ragas_metrics.items():
 
 # %% [markdown]
 # Charting the chunk counts would draw five bars of the same height, which is
-# the metric's whole content. The similarity scores have something in them, so
-# that is what the figure shows: one bar per query on the full cosine range,
-# labelled with how many of the question's own terms the top chunk contained.
+# the metric's whole content. The retriever's scores have something in them, so
+# that is what the figure shows: one bar per query, labelled with how many of
+# the question's own terms the top chunk contained. The axis runs from zero to
+# one because that is the range of `exp(-distance)`, reached at zero distance
+# and approached as distance grows.
 
 # %%
 QUERY_LABELS = [
@@ -747,9 +764,9 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="Top-chunk similarity by query, with question terms matched",
+    title="Top-chunk retriever score by query, with question terms matched",
     xaxis_title="Analyst query",
-    yaxis_title="Cosine similarity of the top-ranked chunk",
+    yaxis_title="Retriever score, exp(-distance)",
     height=430,
     showlegend=False,
     margin=dict(t=80, b=90),
@@ -757,12 +774,12 @@ fig.update_layout(
 fig.update_yaxes(range=[0, 1])
 show_plotly_with_alt(
     fig,
-    "Five bars on a cosine-similarity axis running from zero to one. All five stand in the "
+    "Five bars on a retriever-score axis running from zero to one. All five stand in the "
     "lower half of it, between roughly a third and a little over half the height of the "
-    "axis. The answerable query is the tallest and carries four matched terms; the three "
-    "financial queries follow at similar heights with one matched term each; the "
-    "out-of-domain query is the shortest and matched none. The gap between the tallest and "
-    "the shortest bar is smaller than the empty space above all of them.",
+    "axis. The answerable query is the tallest and its label reports the most matched "
+    "terms; the three financial queries follow at similar heights with one or two matched "
+    "terms each; the out-of-domain query is the shortest and matched none. The gap between "
+    "the tallest and the shortest bar is smaller than the empty space above all of them.",
 )
 
 # %% [markdown]
@@ -833,11 +850,19 @@ def extract_dollar_figures(items) -> list[ExtractedFigure]:
 # almost no dollar figures. The financial-statement tables live in a separate
 # exhibit a production system would ingest for numeric questions.
 #
-# This is the same failure section 6 measured, in a form that can be checked
-# without judgment. Retrieve a numeric question against this index and it
-# returns its `top_k` chunks as always; count the `$`-denominated figures in
-# them and there are none. The retriever reported nothing wrong either time.
-# What differs is that a figure count is falsifiable and a hit count is not.
+# The check below is narrower than it looks. Retrieve a question about dollar
+# figures against this index and it returns its `top_k` chunks as always; count
+# the `$`-denominated figures in those chunks and there are none.
+#
+# That establishes one thing: these particular chunks carry no dollar amounts,
+# so there is nothing for the extract-and-compute step to work on. It does not
+# establish that the corpus cannot answer the earlier questions - a growth rate
+# or a concentration share can be stated as a percentage with no dollar amount
+# near it - and it says nothing about chunks this query did not retrieve.
+# Answerability is a separate question needing separate evidence.
+#
+# What makes it worth having is that it is falsifiable, and the hit count in
+# section 6 is not.
 
 # %%
 NUMERIC_QUESTION = (
@@ -857,11 +882,11 @@ if numeric_retriever is not None:
         f"extracted {len(narrative_figures)} dollar figures."
     )
     if not narrative_figures:
-        print("Narrative sections carry no financial figures -> route numeric questions")
-        print("to the financial-statement exhibit (illustrated below).")
+        print("These chunks carry no dollar amounts, so there is nothing to extract from")
+        print("them. Numeric questions need the financial-statement exhibit, below.")
     else:
         print(
-            f"Found {len(narrative_figures)} figure(s) in narrative chunks; the "
+            f"Found {len(narrative_figures)} figure(s) in these chunks; the "
             "financial-statement exhibit (below) remains the authoritative source."
         )
 else:
@@ -939,8 +964,10 @@ assert abs(yoy_growth - ((383.3 - 394.3) / 394.3)) < 1e-12
 #
 # The Evaluation row is the weakest in the table and the summary below shows
 # why: coverage cannot fail, and the citation and abstention rates have no
-# generated answer to score. What the run does establish is the retrieval half,
-# and section 6 establishes it is not working on two of three questions.
+# generated answer to score. What the run does establish is on the retrieval
+# side, in section 6: the scores rank the five questions in the order their
+# labels imply, and the term check finds nothing of the out-of-domain question
+# in what came back for it.
 
 # %%
 print("=== 10-K RAG Assistant Summary ===\n")
@@ -967,7 +994,8 @@ if ragas_metrics:
 #    relevance threshold, so it returns k chunks for every query an index can
 #    be asked, including ones about companies and years the corpus does not
 #    hold. Retrieval coverage therefore comes out whole in this run, including
-#    for a question about the boiling point of helium. Any check
+#    for a question about the boiling point of helium. Any check whose failing
+#    case is "the index did not build" is checking ingestion. Any check
 #    whose failing case is "the index did not build" is checking ingestion.
 #
 # 2. **A similarity score ranks; it does not decide.** The five top scores
