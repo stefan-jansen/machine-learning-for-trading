@@ -430,14 +430,26 @@ def fine_tune_model(model_name: str, spec: dict, dataset: DatasetDict) -> dict:
 # %% [markdown]
 # ## Fine-tuning the three
 #
-# One thing `transformers` reports at load is worth knowing before the log is quieted. Each
-# checkpoint arrives without a classification head for this task, so the library builds one
-# with random weights and says so - "some weights were newly initialized ... you should
-# probably TRAIN this model". That is the fine-tuning step in one sentence: the encoder
-# arrives trained and the head does not, and what follows trains the head while adjusting the
-# encoder underneath it. The message is correct and expected here, and it is silenced below
-# only because it repeats once per model and would otherwise be the loudest thing in the
-# output.
+# What `transformers` reports at load is worth reading before the log is quieted, and it does
+# not say the same thing about all three.
+#
+# DeBERTa-v3 and ModernBERT are general checkpoints with no classification head for any task,
+# so the library builds one with random weights and says so: "some weights were newly
+# initialized ... you should probably TRAIN this model". That is fine-tuning in one sentence -
+# the encoder arrives trained, the head does not, and what follows trains the head while
+# adjusting the encoder underneath it.
+#
+# FinBERT is not in that message, because it already carries a trained three-class sentiment
+# head and the shapes match, so those weights are kept. That is not the advantage it sounds
+# like. Its head was trained under its own label order, `0: positive, 1: negative, 2:
+# neutral`, and this notebook assigns `0: negative, 1: neutral, 2: positive` to match the
+# corpus. Keeping the weights while relabeling the outputs leaves a head whose learned
+# meanings are permuted against the labels it is now scored on, so fine-tuning has to undo
+# the permutation before it can improve on anything.
+#
+# Which sharpens what the leakage is. FinBERT's advantage here is not a ready-made head - it
+# starts with a misaligned one - it is an encoder that has already read the sentences this
+# notebook is about to test it on.
 
 # %%
 transformers_logging.set_verbosity_error()

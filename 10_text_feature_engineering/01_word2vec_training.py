@@ -379,9 +379,9 @@ pl.DataFrame(comparison_rows)
 # measure every pair.
 #
 # The measurement is cosine similarity in the model's own hundred-dimensional space, drawn as
-# a matrix with the words ordered by group. If the geometry encoded polarity, the two blocks
-# on the diagonal covering positive-with-positive and negative-with-negative would be
-# brighter than the off-diagonal block pairing one against the other.
+# a matrix with the words ordered by group. Shading runs light at zero to dark at one, so if
+# these words clustered by polarity the two diagonal blocks - positive with positive, negative
+# with negative - would be darker than the off-diagonal block pairing one against the other.
 #
 # A projection to two dimensions would be the more familiar picture and it is the wrong tool
 # here. t-SNE preserves neighborhoods only approximately and distorts exactly the points that
@@ -414,7 +414,13 @@ print(
 # %% [markdown]
 # Before the picture, the two numbers it has to be consistent with. Mean similarity within a
 # polarity group against mean similarity across the two, with each word's similarity to
-# itself excluded. If polarity were encoded, the first would be clearly the larger.
+# itself excluded.
+#
+# Be precise about what this tests. It asks whether these words cluster by polarity under
+# cosine similarity, which is the property any use built on nearest neighbors or distance
+# depends on. It does not ask whether a polarity direction exists anywhere in the space: one
+# can be present and still be swamped by variation that has nothing to do with sentiment,
+# which is why a supervised classifier can find what a similarity ranking cannot.
 
 # %%
 groups = np.array(selected_groups)
@@ -458,9 +464,9 @@ show_with_alt(
 
 # %% [markdown]
 # The blocks do not separate, and the two printed means say the same thing without needing
-# the picture: words within a polarity group are no more similar to each other than they are
-# to words of the opposite polarity. The darkest cell away from the diagonal is `profit`
-# against `loss`, in the block that pairs the two opposite groups.
+# the picture: under cosine similarity these words do not group by polarity, and a word is no
+# closer to others of its own polarity than to its opposites. The darkest cell away from the
+# diagonal is `profit` against `loss`, in the block pairing the two opposite groups.
 #
 # The topical nouns behave the same way. They do not form a block of their own, because
 # `revenue` is placed by the sentences it appears in rather than by what it denotes, and
