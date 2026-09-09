@@ -844,23 +844,30 @@ show_with_alt(
 )
 
 # %% [markdown]
-# What a desk takes from this is a dated queue: on which sessions did which configuration
-# trip which detector, and was the market unusual on those sessions. That is an escalation
-# list, and the next step it points to is an investigation rather than a retrain. An alert
-# says the error stream changed; it does not say whether the data broke, the market moved or
-# the model decayed, and those three call for different responses.
+# What a desk takes from this is a dated queue: on which sessions did which configuration trip
+# which detector, and was the market unusual on those sessions. That is an escalation list, and
+# what it points to is an investigation rather than a retrain. An alert says the error stream
+# changed; it does not say whether the data broke, the market moved or the model decayed, and
+# those three call for different responses.
 #
 # The bottom-right panel is worth reading twice. Colour separates the detectors and the dash
 # pattern separates the configurations, so a pair of curves running together means two
-# configurations that tripped the same detector on nearly the same sessions. Where that
-# happens, the detector is responding to something in the data both models see rather than to
-# either model's own behaviour, which is exactly the case where retraining is the wrong move.
+# configurations tripped the same detector on nearly the same sessions. That narrows the
+# cause: something both models see moved. It does not identify what, and it does not rule out
+# both models degrading together, which two models fitted on the same features and the same
+# history can do.
 #
-# The figure is where the alerts and the market are compared. If a cluster sits on top of a
-# turbulent stretch, the model is behaving differently in conditions that are themselves
-# different, and the sensible response is to check whether the strategy is sized for those
-# conditions. If a cluster sits in a quiet stretch, the market is not the explanation and the
-# data feed is the first thing to check.
+# The same care applies to reading the alerts against the volatility panel. An alert cluster
+# sitting on a turbulent stretch means the error stream changed while conditions changed, which
+# is a coincidence in time and not a cause; it is a reason to ask whether the strategy is sized
+# for those conditions before asking whether the model is broken. A cluster in a quiet stretch
+# removes one candidate explanation and leaves the rest, since the volatility proxy sees the
+# size of market moves and not a change in how features relate to returns.
+#
+# Neither reading is a diagnosis. What the queue supports is an ordering of what to check
+# first, and the checks themselves are elsewhere: data integrity in
+# [`01_drift_monitoring`](01_drift_monitoring.ipynb), and a candidate model in
+# [`03_safe_model_rollout`](03_safe_model_rollout.ipynb).
 
 # %% [markdown]
 # ## Key Takeaways

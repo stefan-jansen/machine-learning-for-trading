@@ -46,6 +46,9 @@
 # validation prediction set covers the sessions the model was selected on, so monitoring one
 # would measure the window the model was chosen to fit and call the result drift.
 #
+# Set it to a label and that label is required: the notebook stops rather than monitoring a
+# different return horizon than the one asked for.
+#
 # `REFERENCE_START` is the beginning of the distribution that everything is compared against.
 # Left unset, it is derived from the case study's own fold geometry rather than typed. A date
 # typed here would be a claim about where a fold boundary falls, and fold boundaries move when a
@@ -163,38 +166,48 @@ def load_holdout_window(setup_path: Path) -> tuple[pd.Timestamp, pd.Timestamp, s
 
 
 # %%
-def load_holdout_prediction_hash(registry_path: Path, preferred: str) -> tuple[str, str, str]:
+def load_holdout_prediction_hash(
+    registry_path: Path, preferred: str, required: bool
+) -> tuple[str, str, str]:
     """The label, prediction hash and model family of a holdout prediction set on disk.
 
     Only a prediction set the registry records as ``split='holdout'`` qualifies, and only
-    one whose parquet has been written. Candidates are ordered so that *preferred* wins
-    when it has one, then by recency, so the notebook monitors the case study's primary
-    label wherever that label has been through the holdout.
+    one whose parquet has been written.
+
+    When *required* is true, *preferred* was named explicitly and nothing else will do:
+    monitoring a different return horizon than the one asked for would produce a dashboard
+    that is correct about a question nobody asked. When it is false, *preferred* came from
+    the case study's configuration and is a preference, so any label with a holdout
+    prediction set is acceptable and the configured one wins if it has one.
     """
     query = """
         SELECT tr.label, ps.prediction_hash, tr.family
         FROM training_runs tr
         JOIN prediction_sets ps ON tr.training_hash = ps.training_hash
-        WHERE ps.split = 'holdout'
+        WHERE ps.split = 'holdout' {label_filter}
         ORDER BY tr.label = ? DESC, tr.created_at DESC
     """
     pred_dir = registry_path.parent / "predictions"
     with sqlite3.connect(registry_path) as conn:
-        rows = conn.execute(query, (preferred,)).fetchall()
+        rows = conn.execute(
+            query.format(label_filter="AND tr.label = ?" if required else ""),
+            (preferred, preferred) if required else (preferred,),
+        ).fetchall()
     for label, pred_hash, family in rows:
         if (pred_dir / str(pred_hash) / "predictions.parquet").exists():
             return str(label), str(pred_hash), str(family)
+    scope = f"for {preferred}" if required else "for any label"
     raise RuntimeError(
-        f"{CASE_STUDY_ID} has no materialized holdout prediction set. Drift can only be "
-        "measured against sessions the model was scored on out of sample, and this case "
-        "study's holdout stage has not written one."
+        f"{CASE_STUDY_ID} has no materialized holdout prediction set {scope}. Drift can "
+        "only be measured against sessions the model was scored on out of sample, and "
+        "this case study's holdout stage has not written one."
     )
 
 
 # %%
 holdout_start, holdout_end, configured_primary_label = load_holdout_window(SETUP_PATH)
 monitored_label, holdout_run_hash, holdout_model_family = load_holdout_prediction_hash(
-    REGISTRY_PATH, LABEL or configured_primary_label
+    REGISTRY_PATH, LABEL or configured_primary_label, required=LABEL is not None
 )
 
 _pred_check_path = CASE_DIR / "run_log" / "predictions" / holdout_run_hash / "predictions.parquet"
@@ -618,7 +631,7 @@ print(f"Prediction K-S p-value: {prediction_ks.pvalue:.4f}")
 daily_metrics = (
     holdout_predictions.group_by("timestamp")
     .agg(
-        pl.corr("score", "actual_return").alias("ic"),
+        pl.corr("score", "actual_return", method="spearman").alias("ic"),
         ((pl.col("score") * pl.col("actual_return")) > 0).mean().alias("hit_rate"),
         ((pl.col("actual_return") - pl.col("score")) ** 2).mean().alias("mse"),
         pl.col("score").mean().alias("score_mean"),
@@ -803,14 +816,24 @@ show_with_alt(
 # %% [markdown]
 # Read the panels against each other rather than one at a time. The top row asks whether the
 # distributions moved: the left panel says which inputs did, the right whether that reached the
-# model's output. The bottom row asks whether the model still works: the information coefficient
-# is the cross-sectional rank correlation between score and realized return, and the hit rate is
-# the share of names whose direction it got right.
+# model's output. The bottom row asks whether the model still works. The information coefficient
+# here is the Spearman rank correlation between each session's scores and the returns they
+# predicted, which is what a long-short book uses, and the hit rate is the share of names whose
+# direction the model got right.
 #
-# The two rows can disagree, and the disagreement is the useful part. Inputs moving while the
-# output sits still means the model was not leaning on those inputs. The output moving while
-# every monitored input looks stable is the alarming direction: whatever changed is not in the
-# set of features being watched.
+# The two rows compare against different reference periods, because the data allows nothing
+# else. Feature values exist before the holdout, so their reference is the model's last
+# validation window. Predictions exist only inside the holdout, so their baseline is its first
+# `LOOKBACK_DAYS` sessions. A feature shift and a prediction shift measured here are therefore
+# changes relative to different starting points, and only their direction is comparable.
+#
+# The rows can disagree, and what a disagreement narrows down is worth being precise about.
+# Features moving while the output distribution sits still is consistent with the model not
+# weighting those features heavily, and it is also consistent with offsetting moves, so it says
+# to look rather than that nothing happened. The output moving while every monitored feature
+# looks stable is the more urgent direction: whatever moved is either outside the monitored set
+# or is a change in how the features relate to each other, which no comparison of one feature
+# at a time can see.
 
 # %% [markdown]
 # ### Persist the dashboard's inputs

@@ -344,11 +344,16 @@ if (prediction_dir / "predictions.parquet").exists():
 # %% [markdown]
 # ## 6. The catalog as a picture
 #
-# Two things in the catalog are judged by shape rather than read off. How the runs within a
-# family are distributed says whether a family's best score sits inside a tight cluster or is
-# one outlier above a spread, which is the difference between a result and a lucky draw. And
-# the spread of baseline Sharpe across configurations says how much of the strategy's
-# performance was a choice rather than a property of the signal.
+# Two things in the catalog are read from their shape rather than off a row. The first is how a
+# family's scores are distributed: whether its best run sits inside a tight cluster or stands
+# well above a spread, and how far apart the families are relative to their own spreads. The
+# second is how far baseline Sharpe ranges across configurations.
+#
+# What either one supports is a question, not an answer. A configuration's score is not an
+# independent draw - configurations within a family share features, folds and much of their
+# fitted state, so a cluster can be several views of one overfit and an isolated high score can
+# be a real improvement. Reading the distribution tells you which of those to go and check; the
+# check itself is a held-out evaluation, and the holdout is spent once.
 
 
 # %%
@@ -455,11 +460,12 @@ best_validation[["training_hash", "family", "label", "config_name", "ic_mean"]]
 family_counts
 
 # %% [markdown]
-# How many configurations each family was given, per label. This is the experiment budget,
-# and it is worth recording because a family that was tried a hundred ways and a family that
-# was tried twice are not comparable on their best score alone. The more configurations a
-# search covers, the higher its best score goes on noise, and a catalog that shows only the
-# leaders hides that entirely.
+# How many configurations each family was given, per label. This is the experiment budget, and
+# it is worth recording because a family tried a hundred ways and a family tried twice are not
+# comparable on their best score alone: the maximum of more draws is higher even when nothing
+# improved. How much higher depends on how correlated the configurations are, which the count
+# does not say - what the count does is make the asymmetry visible, where a catalog showing only
+# the top run per family hides it.
 
 # %% [markdown]
 # ### Selected run manifest
@@ -697,8 +703,9 @@ print(f"Cleaned up tracking store: {MLFLOW_DIR}")
 #    re-running a pipeline cannot produce two rows describing the same experiment, and it
 #    makes a configuration change visible as a new identifier rather than as an edit.
 # 3. Record the experiment budget, not only the results. A family tried a hundred ways and a
-#    family tried twice are not comparable on their best score, because the more
-#    configurations a search covers the higher its best score climbs on noise alone.
+#    family tried twice are not comparable on their best score, because the maximum of more
+#    draws is higher even when nothing improved. The count does not say how much higher; it
+#    makes the asymmetry visible, which a table of top runs per family does not.
 # 4. Keep ranking separate from selection. Ordering the catalog by information coefficient
 #    says which model ranked the cross-section best; it is not what decides deployment, and a
 #    tracker that presents one ordering invites it to become the other.

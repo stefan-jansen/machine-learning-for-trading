@@ -499,10 +499,16 @@ feast_training.head()
 #
 # A disagreement here is a configuration defect, not a numerical one. The two paths read the
 # same Parquet files, so a difference means one of them selected a different row: a wrong
-# timestamp field, a time to live reaching further than intended, or a fold vintage picked by
-# id rather than by date. Each of those produces a store that runs and answers wrongly, which
-# is why the comparison is per feature and the tolerance is set far below anything a correct
-# join could produce.
+# timestamp field, an entity key that does not identify a row uniquely, or a fold vintage
+# picked by id rather than by date. Each of those produces a store that runs and answers
+# wrongly, which is why the comparison is per feature and the tolerance is set far below
+# anything a correct join could produce.
+#
+# One misconfiguration this check cannot reach is a time to live set too long. Every event
+# compared here has a feature row on its own date, so both paths take that row and no lookback
+# happens; the time to live could be a year without moving a single value. Catching that needs
+# events with no row of their own, at ages either side of the declared limit, which is a
+# different test from this one.
 
 
 # %%

@@ -130,9 +130,17 @@ set_global_seeds(SEED)
 # willing to look again, and the next observation either closes it or opens it for another
 # timeout.
 #
-# The half-open state is the part worth building deliberately. A breaker that closed as soon
-# as its timeout elapsed would resume trading into whatever condition tripped it; one that
-# only closed on manual intervention would need a person awake. Half-open resumes on evidence.
+# The half-open state is the part worth building deliberately, and worth being exact about.
+# When the timeout elapses the breaker moves from open to half-open and trading is permitted
+# again on that tick, before the condition is looked at. The next observation then decides: it
+# closes the breaker if the condition has cleared, and re-opens it for another full timeout if
+# it has not.
+#
+# So half-open is a trial, not a verdict, which is what the name says in the electrical
+# original. A breaker that closed outright when its timeout expired would resume normal
+# operation into whatever tripped it and stay there until the condition tripped it again; one
+# that only closed on manual intervention would need a person awake. This one resumes, and the
+# very next observation can revoke it.
 
 
 # %%
@@ -848,9 +856,16 @@ show_with_alt(
 
 # %% [markdown]
 # The middle panel is the diagnostic, not the halt count. Reading across a row shows one
-# breaker's history: how long it stayed open, whether the half-open probe closed it or sent it
-# back. Reading down a column shows which breakers were open at once, which separates a market
-# event that several rules noticed from a sequence in which one breaker's halt caused the next.
+# breaker's history: how long it stayed open, and whether the half-open trial closed it or sent
+# it back. Reading down a column shows which breakers were open at the same time, and repeated
+# overlap is what a single event tripping several rules looks like.
+#
+# What the panel shows is timing and overlap, and that is all it can show. Nothing here
+# propagates one breaker's halt into another's inputs - returns, losses and latency are
+# generated independently of whether trading is permitted - so a co-occurrence in this run is
+# two rules responding to the same session, never one causing the other. In a live system,
+# where a halt stops the trades the next observation would have been computed from, that
+# distinction is real and this timeline is where you would start looking for it.
 
 # %% [markdown]
 # ## 5. Final Status Report
@@ -913,9 +928,10 @@ event_log_df
 # 1. Separate the state machine from the conditions. One closed, open and half-open lifecycle
 #    shared by every breaker gives the engine one halt decision and one log, and reduces a new
 #    rule to a `check_condition` method.
-# 2. Resume on evidence, not on a timer. A breaker that closes when its timeout expires
-#    resumes trading into the condition that stopped it. The half-open state is what makes the
-#    next observation, rather than the clock, decide.
+# 2. Make the return to normal a trial rather than a verdict. When the timeout expires the
+#    breaker goes half-open and trading is permitted again for one observation; that
+#    observation closes it or sends it back for another full timeout. A breaker that closed
+#    outright on its timer would resume normal operation into whatever tripped it.
 # 3. Choose breakers that fail in different circumstances. A drawdown rule and a daily-loss
 #    rule sound alike and catch different things, and the daily-loss breaker only does so
 #    because its baseline resets each session; leave that reset out and it measures loss from

@@ -464,22 +464,32 @@ def max_drawdown(returns: pd.Series) -> float:
 # %% [markdown]
 # ### Measure how far the candidate has moved from the incumbent
 #
-# Two quantities, both used by the gate. *Signal correlation* is the correlation between the two
-# models' scores over every name and session in the shadow window: it says whether they are
-# ranking the cross-section the same way. *Position agreement* is the share of names that both
-# books hold on a session, out of the names either holds: it says whether that ranking produces
+# Two quantities, both used by the gate. *Signal correlation* is the rank correlation between
+# the two models' scores, computed within each session and then averaged: it says whether they
+# order the names the same way on a typical day. *Position agreement* is the share of names both
+# books hold on a session, out of the names either holds: it says whether that ordering produces
 # the same exposures once the top and bottom are taken.
 #
-# They are not the same measurement. Two models can rank almost identically and still select
-# different names at the boundary of a hundred-name leg, and a modest correlation can still
-# produce heavily overlapping books when both models agree about the extremes.
+# Computing the correlation per session and then averaging, rather than pooling every name and
+# session into one correlation, is what makes it a statement about ranking. A pooled correlation
+# is dominated by whether the two models' score levels move together across days, and two models
+# whose daily levels track each other closely can still disagree about the ordering within every
+# session - which is the only thing a long-short book reads.
+#
+# The two are not the same measurement. Models can rank almost identically and still select
+# different names at the boundary of a hundred-name leg, and a modest rank correlation can still
+# produce heavily overlapping books when both agree about the extremes.
 
 
 # %%
 shadow_pair = shadow_predictions.pivot_table(
     index=["timestamp", "symbol"], columns="model", values="score"
 ).dropna()
-signal_correlation = float(shadow_pair[incumbent].corr(shadow_pair[candidate]))
+per_session_rank_correlation = shadow_pair.groupby("timestamp").apply(
+    lambda frame: frame[incumbent].corr(frame[candidate], method="spearman"),
+    include_groups=False,
+)
+signal_correlation = float(per_session_rank_correlation.mean())
 
 shadow_positions = shadow_stream.pivot(
     index="timestamp", columns="model", values=["long_assets", "short_assets"]

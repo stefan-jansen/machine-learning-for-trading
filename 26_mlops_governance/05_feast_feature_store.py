@@ -523,7 +523,9 @@ online_snapshot
 # %%
 def leaked_snapshot(as_of_date: str, assets: list[str]) -> pl.DataFrame:
     cutoff = pd.Timestamp(as_of_date).date()
-    future_end = min((pd.Timestamp(cutoff) + pd.Timedelta(days=7)).date(), holdout_end.date())
+    future_end = min(
+        (pd.Timestamp(cutoff) + pd.Timedelta(days=SKEW_SEARCH_DAYS)).date(), holdout_end.date()
+    )
     financial = (
         pl.scan_parquet(feature_views[0].source_path)
         .filter((pl.col("timestamp") > pl.lit(cutoff)) & pl.col("symbol").is_in(assets))
