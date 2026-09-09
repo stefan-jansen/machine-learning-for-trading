@@ -309,9 +309,11 @@ fig, forest_ax = plot_cross_cs_forest(
 forest_ax.set_xlabel("Average daily IC (HAC 95 % CI)")
 show_with_alt(
     fig,
-    "A forest plot with one row per case study, each showing the average daily "
-    "information coefficient of its highest-IC deep-learning configuration as a point "
-    "with a HAC 95 percent confidence interval, against a vertical line at zero.",
+    "A forest plot, one row per case study, ordered so the largest value is at the top. Each row "
+    "is a horizontal HAC 95 percent interval around the daily-pooled IC of that case study's "
+    "highest-IC deep-learning configuration, with a dashed vertical line at zero. The marker is "
+    "filled where the absolute HAC t-statistic exceeds two and hollow where it does not; the "
+    "legend gives that distinction.",
 )
 
 # %%
@@ -380,9 +382,10 @@ ax.set_title("Highest-IC DL configuration per (case study × architecture)")
 fig.colorbar(im, ax=ax, fraction=0.045, pad=0.04, label="Average daily IC")
 show_with_alt(
     fig,
-    "A heatmap of case study against architecture, each cell shaded by the average daily "
-    "IC of the highest-IC configuration for that pair, with a colour bar. Blank cells are "
-    "pairs with no complete run.",
+    "A heatmap with one row per case study and one column per architecture, on a diverging colour "
+    "scale centred at zero and symmetric about the largest absolute value present. Each cell is "
+    "the highest daily IC that architecture reached on that case study; greyed-out cells are "
+    "pairs the architecture was not trained on. A colour bar gives the scale.",
 )
 
 # %%
@@ -441,8 +444,10 @@ for i, (n, ic) in enumerate(
 fig.tight_layout()
 show_with_alt(
     fig,
-    "A bar chart counting, for each deep-learning architecture, how many case studies it "
-    "achieved the highest IC on.",
+    "A bar chart with one bar per deep-learning architecture, its height the number of case "
+    "studies where that architecture reached the highest IC, sorted from most to fewest. Each bar "
+    "is annotated above with the mean IC across those case studies, so a tall bar built on small "
+    "ICs is visible as such.",
 )
 
 # %%
@@ -516,9 +521,10 @@ if not ckpt_df.is_empty():
     fig.tight_layout()
     show_with_alt(
         fig,
-        "A small-multiple of line charts, one panel per case study, plotting the per-fold "
-        "median IC with an interquartile band against the training epoch of the saved "
-        "checkpoint.",
+        "One set of axes carrying a line per case study: the per-fold median IC against the "
+        "training epoch of the saved checkpoint, each line shaded with its interquartile band and "
+        "drawn in its own colour, marker and dash pattern. A dashed horizontal line marks zero, "
+        "and the legend names each case study with its architecture.",
     )
 else:
     print("No DL checkpoint data available.")
@@ -574,8 +580,10 @@ fig, _ = plot_per_fold_violin(
 )
 show_with_alt(
     fig,
-    "A violin plot with one violin per case study, showing the distribution of per-fold "
-    "ICs for its highest-IC deep-learning configuration, ordered by average daily IC.",
+    "A box plot with one box per case study, ordered by average daily IC, showing the "
+    "distribution of per-fold Spearman ICs for that case study's highest-IC deep-learning "
+    "configuration. Every individual fold is also drawn as a semi-transparent point over its box, "
+    "and a dashed horizontal line marks zero.",
 )
 
 # %% [markdown]
@@ -714,9 +722,12 @@ if not conformal_df.is_empty():
     fig = plot_conformal_coverage(conformal_df)
     show_with_alt(
         fig,
-        "A scatter of empirical coverage against nominal coverage for the cross-fitted "
-        "out-of-fold calibration, one point per case study, coloured by the absolute gap "
-        "between the two.",
+        "A scatter with one labelled point per case study: empirical coverage on the vertical "
+        "axis against mean interval width on the horizontal, the width expressed as a fraction of "
+        "the calibration fold's return standard deviation on a logarithmic scale. A dashed "
+        "horizontal line marks the nominal coverage level, so vertical distance from it is the "
+        "calibration error, and each point is shaded by the absolute size of that error against a "
+        "colour bar.",
     )
 
 # %%
@@ -935,9 +946,11 @@ ax.legend(handles=scatter_legend_elements(), loc="upper left", frameon=False, fo
 fig.tight_layout()
 show_with_alt(
     fig,
-    "A scatter of the deep-learning average daily IC against the strongest tabular "
-    "family's, one point per case study, with a diagonal marking equality and a legend "
-    "identifying the tabular family behind each point.",
+    "A scatter with one labelled point per case study: the deep-learning daily IC on the vertical "
+    "axis against the highest-IC tabular family's on the horizontal, on a common scale with a "
+    "dashed diagonal where the two are equal. Each point is filled green above the diagonal and "
+    "red below it, and its marker shape says which tabular family it was compared against. Labels "
+    "give the case study and its deep-learning architecture.",
 )
 
 # %%
@@ -1041,9 +1054,10 @@ if multi_horizon_cs:
     horizon_ax.set_ylabel("Average daily IC (HAC 95 % CI band)")
     show_with_alt(
         fig,
-        "A chart of average daily IC with HAC confidence bands for the highest-IC "
-        "deep-learning configuration at each regression horizon, one series per case study "
-        "that has more than one horizon.",
+        "A line per case study of daily-pooled IC against forecast horizon in trading days, on a "
+        "logarithmic horizontal axis, each line shaded with its HAC 95 percent band and drawn in "
+        "its own colour, marker and dash pattern. Only case studies with at least two mapped "
+        "horizons appear. A dashed horizontal line marks zero.",
     )
 else:
     print(
@@ -1166,8 +1180,10 @@ ax.legend(frameon=False, fontsize=9, loc="best", ncol=4)
 fig.tight_layout()
 show_with_alt(
     fig,
-    "A grouped chart of average daily IC with HAC 95 percent confidence intervals, one "
-    "group per case study and one bar per architectural class.",
+    "A grouped bar chart with one group per case study and one bar per architectural class - "
+    "recurrent, MLP-style, convolutional and attention - each bar the highest daily IC that class "
+    "reached on that case study, carrying an asymmetric HAC 95 percent error bar. A dashed "
+    "horizontal line marks zero and the legend gives the class colours.",
 )
 
 # %%
