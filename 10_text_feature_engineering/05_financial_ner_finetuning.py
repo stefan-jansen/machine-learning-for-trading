@@ -286,13 +286,16 @@ print(f"Train: {len(split['train'])}, Test: {len(split['test'])}")
 # %% [markdown]
 # ### How much of the test set is already in training
 #
-# A generator drawing from five templates and five options per slot can only produce so many
-# distinct sentences, and this notebook draws more samples than that ceiling. So the draws
-# repeat, a random split puts copies of the same sentence on both sides, and the model is
-# scored partly on sentences it was trained on.
+# The generator can produce a few hundred distinct sentences: four of its templates have
+# three entity slots and one has two, with five options each. Every draw is independent and
+# with replacement, so long before the sample count approaches that ceiling the same
+# sentences come up repeatedly - the collision argument is the birthday problem, not a
+# shortage of possibilities.
 #
-# That is worth measuring rather than assuming, because it is the reason the scores below
-# look the way they do. The count is over exact token sequences.
+# The consequence is what matters here. A random split of a sample containing duplicates puts
+# copies of the same sentence on both sides, so the model is scored partly on sentences it
+# was trained on. That is worth counting rather than assuming, because it is the reason the
+# scores below look the way they do. The count is over exact token sequences.
 
 # %%
 train_sentences = [" ".join(row) for row in split["train"]["tokens"]]
