@@ -441,7 +441,6 @@ for i, (n, ic) in enumerate(
     )
 ):
     ax.text(i, n + 0.1, f"IC={ic:+.3f}", ha="center", fontsize=9)
-fig.tight_layout()
 show_with_alt(
     fig,
     "A bar chart with one bar per deep-learning architecture, its height the number of case "
@@ -518,7 +517,6 @@ if not ckpt_df.is_empty():
     ax.set_ylabel("Per-fold IC median (IQR band)")
     ax.set_title("Checkpoint dynamics for the highest-IC DL configuration per case study")
     ax.legend(loc="best", frameon=False, fontsize=8, ncol=2)
-    fig.tight_layout()
     show_with_alt(
         fig,
         "One set of axes carrying a line per case study: the per-fold median IC against the "
@@ -944,7 +942,6 @@ fig, ax = plt.subplots(figsize=(8.5, 6.5))
 xs, ys = add_scatter_points(ax, delta_df)
 format_scatter_axes(ax, xs, ys)
 ax.legend(handles=scatter_legend_elements(), loc="upper left", frameon=False, fontsize=8)
-fig.tight_layout()
 show_with_alt(
     fig,
     "A scatter with one labelled point per case study: the deep-learning daily IC on the vertical "
@@ -1178,7 +1175,6 @@ ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
 ax.set_ylabel("Average daily IC (HAC 95 % CI)")
 ax.set_title("Highest IC per architectural class per case study")
 ax.legend(frameon=False, fontsize=9, loc="best", ncol=4)
-fig.tight_layout()
 show_with_alt(
     fig,
     "A grouped bar chart with one group per case study and one bar per architectural class - "
