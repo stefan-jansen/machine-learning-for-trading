@@ -593,53 +593,102 @@ for name, model in models.items():
 
     mse_orig = float(np.mean((pred_orig - y_test) ** 2))
     mse_shuf = float(np.mean((pred_shuf - y_test) ** 2))
+    # How much the error moved, and separately how much the predictions themselves
+    # moved. A model can miss by a similar amount while predicting something else.
+    pred_corr = float(np.corrcoef(pred_orig.ravel(), pred_shuf.ravel())[0, 1])
     shuffle_results.append(
         {
             "Model": name,
             "MSE (original)": round(mse_orig, 6),
             "MSE (shuffled)": round(mse_shuf, 6),
             "Delta (%)": round(100 * (mse_shuf - mse_orig) / mse_orig, 1),
+            "Prediction correlation": round(pred_corr, 3),
         }
     )
 
 shuffle_df = pl.DataFrame(shuffle_results)
+shuffle_df
 
-fig = go.Figure(
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=["Change in error", "Agreement between the two prediction sets"],
+)
+fig.add_trace(
     go.Bar(
         x=shuffle_df["Model"],
         y=shuffle_df["Delta (%)"],
-        marker_color=[COLORS["blue"], COLORS["slate"], COLORS["amber"], COLORS["copper"]],
+        marker_color=COLORS["blue"],
         text=[f"{value:+.1f}%" for value in shuffle_df["Delta (%)"]],
         textposition="outside",
-        hovertemplate="%{x}<br>MSE change: %{y:+.1f}%<extra></extra>",
-    )
+    ),
+    row=1,
+    col=1,
 )
-fig.add_hline(y=0, line_color=COLORS["neutral"])
-fig.update_layout(
-    title="What each model loses when the days are put in a random order",
-    xaxis_title="Model",
-    yaxis_title="Change in test MSE after shuffling (%)",
-    showlegend=False,
+fig.add_trace(
+    go.Bar(
+        x=shuffle_df["Model"],
+        y=shuffle_df["Prediction correlation"],
+        marker_color=COLORS["amber"],
+        text=[f"{value:.3f}" for value in shuffle_df["Prediction correlation"]],
+        textposition="outside",
+    ),
+    row=1,
+    col=2,
 )
+fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
+fig.add_hline(
+    y=1.0,
+    line_dash="dot",
+    line_color=COLORS["neutral"],
+    annotation_text="identical predictions",
+    annotation_position="bottom right",
+    row=1,
+    col=2,
+)
+fig.update_yaxes(title_text="Change in test MSE (%)", row=1, col=1)
+fig.update_yaxes(title_text="Correlation of predictions", range=[0, 1.1], row=1, col=2)
+fig.update_layout(title="Two different questions about the same shuffle", showlegend=False)
 show_plotly_with_alt(
     fig,
-    "A bar chart of the four trained models, each bar giving the percentage change "
-    "in test mean squared error when the days inside every input window are randomly "
-    "reordered, with a line at zero for no change.",
+    "Two bar charts over the same four trained models. The left gives the percentage "
+    "change in test mean squared error when the days inside every input window are "
+    "randomly reordered. The right gives the correlation between each model's original "
+    "and shuffled predictions, with a dotted line at one marking predictions that did "
+    "not move at all.",
 )
 
 # %% [markdown]
-# A bar near zero means the model was not using the ordering of the days it was
-# given. What it does not mean is that the model was broken: if the ordering carries
-# nothing, ignoring it is correct, and the same reading applies to a linear model and
-# to an attention layer.
+# The two panels answer different questions, and the difference between them is the
+# point of this section.
 #
-# So this diagnostic is only decisive in one direction. A large drop proves a model
-# uses sequence. A small drop is consistent with two different things - the model does
-# not use the ordering, or the ordering has nothing in it - and telling them apart
-# needs a series where the ordering is known to matter. That is what the original
-# benchmarks supplied and daily equity returns do not, which is worth carrying forward
-# as a caution about the diagnostic rather than a conclusion about attention.
+# **The left panel says only how much the average squared error moved.** Error is an
+# average over every test window, and an average hides what happened inside it: two
+# sets of predictions can both miss a near-zero target by a similar amount while
+# disagreeing completely with each other. A bar near zero here means shuffling cost the
+# model little accuracy. It does not mean the model produced the same forecast.
+#
+# **The right panel asks whether the forecast changed at all.** It correlates each
+# model's original predictions with the ones it made from the shuffled windows. A
+# correlation of one means the model emitted the *same numbers* from reordered input -
+# it does not read position, and no accuracy comparison was needed to establish that. A
+# correlation near zero means the reordering changed the output entirely, whatever the
+# error did.
+#
+# Read the two together and check them against what the critique predicts. Its claim is
+# that the linear models depend on position and the Transformer does not, so it
+# predicts a specific and lopsided picture on the right - the linear bars low, the
+# Transformer's bar close to one - while the left panel may show very little for
+# anybody. If that is what the chart shows, then a Transformer's attention layers,
+# whose entire justification is modelling relations between positions, are producing an
+# output that barely depends on position, and the accuracy table alone would never have
+# revealed it.
+#
+# **What this does not settle.** A model whose predictions move while its error does
+# not is reading position and getting nothing for it, which on daily equity returns is
+# the expected outcome and is a statement about the series rather than the
+# architecture. Small changes in the left panel, in either direction, are noise: a
+# couple of percent on an average over a few hundred windows is not a measured effect.
 #
 # The general lesson holds whatever the dataset: a claim that an architecture exploits
 # some structure is testable by destroying that structure in the input and re-scoring.
@@ -775,12 +824,15 @@ show_plotly_with_alt(
 #    repeating it commits to a path on the strength of one noisy number. A benchmark
 #    taken from a paper on other data has to be re-argued for yours.
 # 3. **Test a structural claim by destroying the structure.** If an architecture is
-#    said to exploit temporal order, shuffle the order in the input and re-score. It
-#    costs one forward pass, no accuracy table implies it, and a large drop is the only
-#    direct evidence that the ordering was used.
-# 4. **That test is decisive in one direction only.** A model that barely reacts to
-#    shuffling either ignores the ordering or was given an ordering with nothing in it,
-#    and separating those needs a series where the ordering is known to matter.
+#    said to exploit temporal order, shuffle the order inside each input and run it
+#    again. It costs one forward pass, and no accuracy table implies it.
+# 4. **Score that test on the predictions, not only on the error.** An average squared
+#    error over a few hundred windows can sit still while the predictions underneath it
+#    change completely, so a flat error bar answers nothing. Correlating a model's
+#    original predictions against its shuffled ones asks the question directly: a
+#    correlation near one is a model that does not read position, and it is visible
+#    whatever the error does. The two panels here are built to be read against each
+#    other for exactly that reason.
 # 5. **Choose settings on the validation partition and say that you did.** The window
 #    sweep here is model selection, and reporting it as a result would spend the
 #    held-back stretch on a choice already made.
