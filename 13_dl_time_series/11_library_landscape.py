@@ -476,6 +476,15 @@ ts = TimeSeries.from_dataframe(
 ts_train = ts[:sk_split]
 ts_test = ts[sk_split : sk_split + HORIZON]
 
+# Re-asserted here rather than only at import: something between the import cell and this
+# one puts the LeafSpec deprecation back, and a filter has to be in force where the
+# warning is raised, not merely where it was first installed.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*LeafSpec.*is deprecated",
+    module=r".*pytorch_lightning.*",
+)
+
 # No output_chunk_length: Darts' RNNModel forecasts one step and rolls it forward, so it
 # overrides any value passed here. `predict(HORIZON)` still returns HORIZON steps.
 darts_model = RNNModel(

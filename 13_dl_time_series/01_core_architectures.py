@@ -781,9 +781,9 @@ for ax in axes[:, 0]:
     ax.set_ylabel("Mean squared error")
 axes.flat[0].legend(frameon=False, fontsize="small")
 
-# The claim goes on the figure; each axes' left title already carries its architecture.
+# A figure-level title, because each axes' left title already carries its architecture.
 fig.suptitle(
-    "Training error falls furthest where validation error rises",
+    "Training and validation error per epoch, by architecture",
     x=0.01,
     ha="left",
     color=COLORS["blue"],
