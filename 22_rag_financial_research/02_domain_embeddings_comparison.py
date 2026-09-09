@@ -515,10 +515,14 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 # Two properties of that rule decide how to read everything below. The first is
 # that it favours literal term coverage, so it rewards a retriever for lexical
 # matching and cannot reward one for understanding a paraphrase - which is the
-# thing an embedding is supposed to add. The second is measured in the cell
-# below: the three labelled documents are picked out of however many have
-# any overlap at all, and when that pool is large the three are close to
-# arbitrary.
+# thing an embedding is supposed to add.
+#
+# The second is that "the three highest" is only a ranking where the scores
+# differ. Overlap is a small integer, so the third-placed document often shares
+# its score with many others and the tie-break decides the label by a hash of
+# the document text. The cell below measures that directly: for each query it
+# records the overlap score the third label was taken at, and how many
+# documents in the corpus carry that same score.
 
 
 # %%
@@ -568,34 +572,46 @@ for query, _query_type in FINANCIAL_QUERIES:
 
 
 # %%
-def overlap_pool_size(query: str, documents: list[str]) -> int:
-    """Count documents with any query-term overlap - the pool the labels come from."""
+def overlap_scores(query: str, documents: list[str]) -> list[int]:
+    """Query-term overlap count for every document, the quantity the labels rank on."""
     terms = [w.lower().strip("?.,") for w in query.split() if w.lower() not in STOPWORDS]
-    return sum(1 for doc in documents if any(term in doc.lower() for term in terms))
+    return [sum(1 for term in terms if term in doc.lower()) for doc in documents]
 
 
-proxy_pool = pl.DataFrame(
+def cutoff_and_ties(query: str, documents: list[str], document_ids: list[str]) -> tuple[int, int]:
+    """Return the overlap score of the last labelled document, and how many share it."""
+    scores = overlap_scores(query, documents)
+    labelled = [
+        i for i, keep in enumerate(get_relevance_labels(query, documents, document_ids)) if keep
+    ]
+    cutoff = min(scores[i] for i in labelled)
+    return cutoff, sum(1 for score in scores if score == cutoff)
+
+
+cutoffs = [
+    cutoff_and_ties(q, FINANCIAL_DOCUMENTS, FINANCIAL_DOCUMENT_IDS) for q, _ in FINANCIAL_QUERIES
+]
+proxy_ties = pl.DataFrame(
     {
         "query_type": [t for _, t in FINANCIAL_QUERIES],
-        "query": [q[:44] for q, _ in FINANCIAL_QUERIES],
-        "pool": [overlap_pool_size(q, FINANCIAL_DOCUMENTS) for q, _ in FINANCIAL_QUERIES],
-        "labelled": [
-            sum(get_relevance_labels(q, FINANCIAL_DOCUMENTS, FINANCIAL_DOCUMENT_IDS))
-            for q, _ in FINANCIAL_QUERIES
-        ],
+        "query": [q for q, _ in FINANCIAL_QUERIES],
+        "cutoff_overlap": [c for c, _ in cutoffs],
+        "tied_at_cutoff": [t for _, t in cutoffs],
     }
-).sort("pool", descending=True)
-proxy_pool
+).sort("tied_at_cutoff", descending=True)
+proxy_ties.with_columns(pl.col("query").str.slice(0, 44))
 
 # %% [markdown]
-# The `pool` column is the number of documents with any term overlap at all,
-# and `labelled` is how many of them the rule calls relevant. Where the pool
-# runs into the hundreds against a corpus of a couple of hundred passages, the
-# rule is choosing three documents out of a near-tie, and a retriever that
-# misses all three has not necessarily retrieved anything worse.
+# `cutoff_overlap` is how many query terms the third labelled document
+# contained, and `tied_at_cutoff` is how many documents in the corpus contain
+# exactly that many. Where the second number is large the label set is three
+# documents picked out of that many equals, by a hash - so a retriever can
+# return a document every bit as good as a labelled one and score zero for it.
 #
-# That is the ceiling on what this notebook can conclude, and it is stated
-# before the scores rather than after them.
+# This is the ceiling on what the notebook can conclude, stated before the
+# scores rather than after them. Note that it does not track how common the
+# query's words are: the query matching the most documents here is one of the
+# least arbitrary, because its three labels sit at a score few documents reach.
 
 
 # %% [markdown]
@@ -763,18 +779,23 @@ available = int(
     )
 )
 lead, trail = top3_hits.row(0, named=True), top3_hits.row(-1, named=True)
+hit_gap = lead["top3_hits"] - trail["top3_hits"]
+p3 = dict(zip(model_summary["model"], model_summary["avg_p@3"], strict=True))
+relative_gap = (p3[lead["model"]] - p3[trail["model"]]) / max(p3[trail["model"]], 1e-9)
 
 display(
     Markdown(f"""
-Across all {N_QUERIES} queries there are **{available}** proxy-labelled documents that could
-be retrieved into a top-3. `{lead["model"]}` retrieves **{lead["top3_hits"]}** of them and
-`{trail["model"]}` retrieves **{trail["top3_hits"]}**.
+Across all {N_QUERIES} queries there are **{available}** proxy-labelled documents that a
+top-3 could contain. `{lead["model"]}` retrieves **{lead["top3_hits"]}** of them and
+`{trail["model"]}` retrieves **{trail["top3_hits"]}**, a gap of
+**{hit_gap}** document{"" if hit_gap == 1 else "s"}.
 
-The gap is **{lead["top3_hits"] - trail["top3_hits"]}** document. Expressed as a ratio of the
-two Precision@3 averages the same gap reads as a double-digit percentage, which is why the
-count is printed next to it: nothing about a corpus of {len(FINANCIAL_DOCUMENTS)} passages and
-{N_QUERIES} queries distinguishes these two models, and a run on a different eight symbols
-could order them the other way.
+The same gap as a ratio of the two Precision@3 averages
+({p3[lead["model"]]:.1%} against {p3[trail["model"]]:.1%}) is
+**{relative_gap:+.1%}**, which is the form it takes in a benchmark table. Both numbers
+describe {hit_gap} document{"" if hit_gap == 1 else "s"} out of {available}, over
+{len(FINANCIAL_DOCUMENTS)} passages, and a run on a different set of symbols could order the
+models the other way.
 """),
 )
 
@@ -860,10 +881,10 @@ show_plotly_with_alt(
 # ### What it does not decide
 #
 # It does not decide which model to deploy. The evidence against that is in
-# the document counts above and in the pool column of the proxy section: the
-# models are separated by
-# one document, and the labels they are scored against are three documents drawn
-# out of a pool that runs to most of the corpus for the broadest queries.
+# the document counts above and in the tie column of the proxy section: the two
+# models are separated by a single document, and for several of the queries the
+# labels they are scored against were settled by a tie-break rather than by the
+# query.
 #
 # ### What would decide it
 #
@@ -900,29 +921,35 @@ leader_text = ", ".join(
     f"{row['query_type']}: {row['model']} at {row['avg_mrr']:.2f}"
     for row in slice_leaders.iter_rows(named=True)
 )
-widest_pool = proxy_pool.row(0, named=True)
-narrowest_pool = proxy_pool.row(-1, named=True)
+worst_tie = proxy_ties.row(0, named=True)
+tie_threshold = 8
+arbitrary = proxy_ties.filter(pl.col("tied_at_cutoff") >= tie_threshold).height
+per_register = queries_df.group_by("query_type").len().sort("len")["len"].unique().sort().to_list()
+register_count = (
+    f"{per_register[0]}" if len(per_register) == 1 else f"{per_register[0]} to {per_register[-1]}"
+)
 
 display(
     Markdown(
         f"""
-1. **The two models are separated by one document.** `{lead["model"]}` puts
-   {lead["top3_hits"]} proxy-labelled documents into a top-3 and `{trail["model"]}` puts
-   {trail["top3_hits"]}, out of {available} available. The Precision@3 averages -
-   {best_model["avg_p@3"]:.1%} against {baseline_model["avg_p@3"]:.1%} - are the same fact in
-   a form that looks larger than it is.
-2. **The labels are drawn out of a pool the retriever cannot be blamed for missing.** The
-   broadest query, "{widest_pool["query"]}", has {widest_pool["pool"]} of
-   {len(FINANCIAL_DOCUMENTS)} passages with some term overlap and gets
-   {widest_pool["labelled"]} labels; the narrowest, "{narrowest_pool["query"]}", has
-   {narrowest_pool["pool"]}. A rule that picks three out of {widest_pool["pool"]} near-ties is
-   not a relevance judgment.
+1. **The two models are separated by {hit_gap} document{"" if hit_gap == 1 else "s"}.**
+   `{lead["model"]}` puts {lead["top3_hits"]} proxy-labelled documents into a top-3 and
+   `{trail["model"]}` puts {trail["top3_hits"]}, out of {available} available. The
+   Precision@3 averages for the same two models, {p3[lead["model"]]:.1%} against
+   {p3[trail["model"]]:.1%}, are that fact in a form that looks larger than it is.
+2. **Some of the labels are decided by a hash, not by the query.** In {arbitrary} of the
+   {N_QUERIES} queries, {tie_threshold} or more documents carry the same overlap score as
+   the third labelled one, so which three get the label is a tie-break. The worst,
+   "{worst_tie["query"]}", has {worst_tie["tied_at_cutoff"]} documents at the cutoff score
+   of {worst_tie["cutoff_overlap"]}. A retriever that returns one of the other
+   {worst_tie["tied_at_cutoff"] - 1} scores zero for it.
 3. **Precision@5 has a lower ceiling than Precision@3.** With three labels per query it
    cannot exceed three in five, so a P@5 below a P@3 is arithmetic rather than a decline in
    retrieval.
 4. **The registers do not agree on an ordering.** Highest MRR by register:
-   {leader_text}. Each of those averages five queries, which is enough to show that one
-   aggregate can hide a reversal and not enough to say which model owns a register.
+   {leader_text}. Each of those averages {register_count} queries, which is enough to show
+   that one aggregate can hide a reversal and not enough to say which model owns a
+   register.
 5. **The run is reproducible and costs nothing.** Pinned BGE-large and MiniLM revisions, a
    hashed corpus and query set, one GPU, no managed API. That is what makes it worth
    rebuilding against labels that mean something.
