@@ -60,6 +60,11 @@ import yaml
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.feature_engineering import (
     EPS,
     assert_values_agree,
@@ -986,6 +991,108 @@ record = write_artifact(
 )
 print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record['digest']}")
 
+# %% [markdown]
+# ## What the matrix holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# how much sits at exactly zero, how far the extreme values are from the body, whether anything is
+# constant. A threshold crossed there asks for a sentence of explanation and settles nothing on its
+# own.
+#
+# The second is the question a null count cannot reach. **Coverage is measured against the keys the
+# labels declare, not against the rows this matrix happens to hold.** A `(symbol, instrument_id,
+# timestamp)` carrying a label and no feature row is one no model can be asked to score, and it is
+# lost to every family at once before any of them is fitted.
+#
+# Two mechanisms decide where this matrix is entitled to be short, and both are the same window
+# seen at different points in an underlying's life. The null policy keeps a row once `vrp_21d` and
+# `rv_21d` have both filled, which costs the 21-session reference window at the front. **A break in
+# an underlying's quoted history costs it again**: the windows cannot span the gap, so the policy
+# refills on the far side and the loss lands inside that underlying's own span rather than before
+# it. The budget is the same 21 sessions in both places, which is a prediction the table can be
+# read against rather than a fit - an interior stretch longer than the window would mean something
+# other than a refill.
+
+# %%
+# `labels/` also holds the contract round-trip and the hedge path, which are inputs to the labels
+# rather than labels themselves, so the universe is built from the declared names instead of from
+# whatever the directory happens to contain.
+DECLARED_LABELS = [setup["labels"]["primary"], *setup["labels"]["variants"]]
+LEADING_BUDGET = FEATURES["windows"]["vrp_reference"]
+print(f"leading budget {LEADING_BUDGET} sessions = the {NULL_POLICY} null policy filling")
+
+report = quality_report(
+    features,
+    name="financial features",
+    key_columns=PANEL_KEY,
+    expected=label_universe(CASE_DIR, labels=DECLARED_LABELS, keys=PANEL_KEY),
+    keys=PANEL_KEY,
+    entity=["symbol", "instrument_id"],
+    session="timestamp",
+    expected_missing={
+        "leading": (LEADING_BUDGET, f"the {NULL_POLICY} null policy filling"),
+        "interior": (LEADING_BUDGET, "the null policy refilling after a break in quoted history"),
+        "absent": (None, f"never {LEADING_BUDGET} quoted sessions to fill the null policy on"),
+    },
+)
+render_quality_report(report)
+
+# %% [markdown]
+# The interior declaration says a break precedes each of those keys, and the `absent` one says the
+# underlying never had the sessions at all. Neither is visible in the table, so both are checked
+# here against the matrix's own rows: count what this stage has in the window a key's features
+# would have read, and a key with fewer rows behind it than the policy needs could not have been
+# produced.
+
+# %%
+sessions = features.select("timestamp").unique().sort("timestamp").with_row_index("i")
+rows_behind = (
+    report["missing_classified"]
+    .filter(pl.col("where") != "leading")
+    .join(sessions, on="timestamp")
+    .join(
+        features.select("symbol", "timestamp").join(sessions, on="timestamp"),
+        on="symbol",
+        suffix="_b",
+    )
+    .filter(pl.col("i_b").is_between(pl.col("i") - LEADING_BUDGET, pl.col("i") - 1))
+    .group_by(["symbol", "i"])
+    .len()
+)
+outside = (
+    report["missing_classified"].filter(pl.col("where") != "leading").join(sessions, on="timestamp")
+)
+if outside.height:
+    starved = outside.join(
+        rows_behind.filter(pl.col("len") >= LEADING_BUDGET), on=["symbol", "i"], how="anti"
+    )
+    print(
+        f"of {outside.height:,} missing keys outside the warmup, {starved.height:,} "
+        f"({starved.height / outside.height:.2%}) have fewer than the {LEADING_BUDGET} rows the "
+        "null policy reads behind them"
+    )
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Coverage is 98.10% of the keys the declared labels carry, and the shortfall is one window
+# appearing twice.** 6,560 of the 6,704 missing keys sit before an underlying's first feature row,
+# a median of 6 sessions apiece against a budget of 21, with a single underlying spending more and
+# 18 keys between them. The other 138 sit inside ten underlyings' own spans at a **maximum of
+# exactly 21** - the null policy refilling after a break in that underlying's quoted history,
+# because the windows cannot span a gap. The check confirms it rather than the table implying it:
+# 97.83% of those keys have fewer than the 21 rows the policy reads behind them.
+#
+# The interior maximum landing exactly on the budget is what makes the declaration worth having.
+# A stretch longer than the window would mean something other than a refill, and there is none, so
+# a later run that produces one is a change to look at rather than a number to absorb.
+#
+# **7,227 keys carry a feature row and no label**, and this is the one stage in this case study
+# where the matrix is *wider* than the labels rather than narrower. A straddle return needs the
+# contract priced at both ends of its window; a feature needs only the sessions behind it, so a
+# decision date the labels had to withhold is one this matrix can still describe. A feature row
+# with no label is never joined, so it is carried rather than dropped.
+#
 # %% [markdown]
 # ## Key takeaways
 #

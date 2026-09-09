@@ -67,6 +67,7 @@ from IPython.display import display
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_cme_futures
 from utils.artifact_specs import resolve_label_horizon
@@ -796,6 +797,77 @@ for label_name, horizon in HORIZONS.items():
         f"\n  consumed by  {readers[label_name]}"
     )
 
+# %% [markdown]
+# ## What the labels hold, and what they owe
+#
+# Two questions about the files this stage just wrote, and the rows that are there answer only one
+# of them. The first is what is in each column - nulls, how much sits at exactly zero, how far the
+# extreme values are from the body, whether anything is constant. A threshold crossed there asks
+# for a sentence and settles nothing on its own.
+#
+# The second is coverage, and it needs a denominator that is not the labels themselves. **The
+# reference is `front`** - every session a product's front contract actually settled on, which is
+# the set a forward return could in principle have been computed on. Comparing one label to the
+# other would hide any session where both are absent together; comparing them to the settlement
+# panel cannot.
+#
+# A percentage alone decides nothing, so each label declares where it is entitled to be short
+# before the number is printed. A forward return owes no value in the last `horizon` settlements
+# of a product's history, because the price that resolves it is past the end of the sample. The
+# count is per `(product, position)` rather than per product, because that pair is what a row
+# describes and the two would otherwise be pooled into one span. What the sign-off then answers
+# for is the residual: keys missing inside a contract's own span, where no horizon explains them.
+
+# %%
+LABEL_KEY = ["product", "position", "timestamp"]
+expected_keys = front.select(LABEL_KEY).unique()
+print(
+    f"settlement panel: {expected_keys.height:,} (product, position, session) keys across "
+    f"{expected_keys['product'].n_unique()} products and "
+    f"{expected_keys['timestamp'].n_unique()} sessions\n"
+)
+for label_name in LABEL_NAMES:
+    written = labels_df.select([*LABEL_KEY, label_name]).drop_nulls()
+    render_quality_report(
+        quality_report(
+            written,
+            name=label_name,
+            key_columns=LABEL_KEY,
+            expected=expected_keys,
+            keys=LABEL_KEY,
+            entity=["product", "position"],
+            session="timestamp",
+            expected_missing={
+                "trailing": (
+                    HORIZONS[label_name],
+                    f"{HORIZONS[label_name]}-settlement forward window past the end of the sample",
+                )
+            },
+        )
+    )
+    print()
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Both labels are complete, and the shortfall is the horizon.** The settlement panel offers
+# 113,476 front-contract keys across 30 products and 3,872 sessions. `fwd_ret_5d` reaches 99.85%
+# and `fwd_ret_21d` 99.39%; every one of the 30 products loses exactly its label's horizon at the
+# end of the sample - 150 keys and 630 - and none spends more. Nothing is emitted that the panel
+# does not have.
+#
+# **The residual is 15 keys at the five-settlement horizon and 63 at the twenty-one, in the same
+# three products both times.** They sit inside a product's own span, and each product loses exactly
+# one horizon's worth: 5 settlements at the short horizon and 21 at the long. That is what a break
+# in a product's settlement sessions costs when the forward window steps across it - the window is
+# incomplete, so the label is withheld rather than measured over a gap. Three products of thirty,
+# and 0.06% of the panel at the longer horizon, so it changes no fold and no ranking; it is
+# printed because a residual nobody states is a residual nobody would notice growing.
+#
+# **No column crossed a distribution threshold in either label.** Neither is constant, neither
+# carries a non-finite value, and neither concentrates at zero. A forward futures return is almost
+# never exactly zero and carries a heavy tail; nothing is winsorized here.
+#
 # %% [markdown]
 # ## Key takeaways
 #

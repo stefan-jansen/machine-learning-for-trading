@@ -83,6 +83,11 @@ from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.utils.artifact_digest import read_digest, value_digest
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
 from case_studies.utils.temporal import (
     garch11_conditional_volatility,
@@ -1311,6 +1316,177 @@ if COMPARABLE:
 # difference rather than on an inference from two tests that were about something else. Taken
 # standalone, none of the three features clears the false-discovery threshold either, the largest
 # being `garch_cond_vol` at an IC of **-0.0065** and a HAC t of **-0.34**.
+
+# %% [markdown]
+# ## G. What the artifact holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# zeros, the distance from the body of the distribution to its tail, whether anything is constant.
+# A threshold crossed there asks for a sentence of explanation and settles nothing on its own.
+#
+# The second is the one a null count cannot reach, and it matters more here than in stage 03. A
+# fitted feature is undefined until its model has an estimation window, so this artifact is
+# *expected* to be shorter than the panel it was estimated on - and an expectation that something
+# is missing is exactly the condition under which nobody notices how much. Coverage is therefore
+# measured against the keys the labels declare, which is the same reference stage 03 answers to,
+# so the two shortfalls can be read side by side and the part this stage adds can be separated
+# from the part it inherited.
+#
+#
+# What separates the two is where the missing keys sit. A fit that owes nothing until its window
+# has filled loses the *start* of every security's history and nothing else, and the length it
+# loses is `GARCH_BURNIN` - a number this notebook declared in section A, not one read off the
+# result. So that is the budget, and a key missing inside a security's own span, after the burn-in
+# has been paid, is the only kind this stage has to answer for.
+
+# %%
+report = quality_report(
+    model_based,
+    name="model-based features",
+    key_columns=PANEL_KEY,
+    expected=label_universe(CASE_DIR, keys=PANEL_KEY),
+    keys=PANEL_KEY,
+    entity="symbol",
+    session="timestamp",
+    expected_missing={
+        "leading": (
+            GARCH_BURNIN + 1,
+            f"{GARCH_BURNIN}-session GJR-GARCH burn-in before the first emitted session",
+        ),
+        "interior": (
+            GARCH_BURNIN + 1,
+            "a break in stage 03's panel, after which the estimation window refills",
+        ),
+        "trailing": (None, "stage 03's rows thin out and the window stops closing"),
+        "absent": (None, f"stage 03 never offers {MIN_OBS} sessions to estimate on"),
+    },
+)
+render_quality_report(report)
+
+# %% [markdown]
+# Three of those four declarations are about the same thing said three ways: a fit needs
+# `MIN_OBS` observations inside a `GARCH_BURNIN`-session window, and a security whose stage-03
+# rows are too sparse to supply them gets no value. Whether that reads as `absent`, `interior` or
+# `trailing` depends only on where in its life the sparsity falls, which is a fact about the
+# security and not about this stage. So one check answers all three: for every missing key outside
+# the burn-in, count the rows stage 03 offers in the window a fit would have been estimated on. A
+# key with fewer than `MIN_OBS` behind it could not have been produced. A key with more could have,
+# and is this stage's to answer for.
+
+# %%
+offered = pl.read_parquet(FINANCIAL_PATH, columns=PANEL_KEY)
+sessions = (
+    label_universe(CASE_DIR, keys=PANEL_KEY)
+    .select("timestamp")
+    .unique()
+    .sort("timestamp")
+    .with_row_index("i")
+)
+supply = offered.join(sessions, on="timestamp").select("symbol", "i")
+outside_burn_in = (
+    report["missing_classified"].filter(pl.col("where") != "leading").join(sessions, on="timestamp")
+)
+depth = (
+    outside_burn_in.join(supply, on="symbol", suffix="_src")
+    .filter(pl.col("i_src").is_between(pl.col("i") - GARCH_BURNIN, pl.col("i") - 1))
+    .group_by(["symbol", "i"])
+    .len()
+    .rename({"len": "rows_behind"})
+)
+checked = outside_burn_in.join(depth, on=["symbol", "i"], how="left").with_columns(
+    pl.col("rows_behind").fill_null(0)
+)
+starved = checked.filter(pl.col("rows_behind") < MIN_OBS)
+print(
+    f"outside the burn-in: {checked.height:,} missing keys, of which {starved.height:,} "
+    f"({starved.height / checked.height:.2%}) have fewer than the {MIN_OBS} rows a fit needs in "
+    f"the {GARCH_BURNIN} sessions behind them"
+)
+if starved.height < checked.height:
+    unexplained = checked.filter(pl.col("rows_behind") >= MIN_OBS)
+    print(
+        f"  {unexplained.height:,} key(s) across {unexplained['symbol'].n_unique()} securities had "
+        f"the rows and carry no value; median {int(unexplained['rows_behind'].median())} behind them"
+    )
+
+# %% [markdown]
+# The `absent` row is declared without a session count, because "this security was never fitted"
+# has no length. That makes it the one declaration the table cannot check itself, so it is checked
+# here: a security is entitled to be absent when stage 03 never offers `MIN_OBS` sessions to
+# estimate on, and any security absent for some other reason is a defect this stage owns.
+
+# %%
+offered = (
+    pl.read_parquet(FINANCIAL_PATH, columns=PANEL_KEY)
+    .group_by("symbol")
+    .len()
+    .rename({"len": "offered"})
+)
+absent = (
+    report["missing_classified"]
+    .filter(pl.col("where") == "absent")
+    .select("symbol")
+    .unique()
+    .join(offered, on="symbol", how="left")
+    .with_columns(pl.col("offered").fill_null(0))
+)
+short = absent.filter(pl.col("offered") < MIN_OBS)
+print(
+    f"absent: {absent.height} securities carry no fitted value anywhere; {short.height} of them "
+    f"are offered fewer than the {MIN_OBS} sessions a fit is attempted on "
+    f"(median {int(absent['offered'].median())} offered, worst {int(absent['offered'].max())})"
+)
+
+financial_keys = pl.read_parquet(FINANCIAL_PATH, columns=PANEL_KEY).unique()
+own_shortfall = financial_keys.join(
+    model_based.select(PANEL_KEY).unique(), on=PANEL_KEY, how="anti"
+)
+print(
+    f"\nAgainst stage 03's matrix rather than the labels: {own_shortfall.height:,} of "
+    f"{financial_keys.height:,} keys it offered carry no fitted value here."
+)
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Coverage: 480,938 of the 629,444 keys the five labels declare, or 76.0%** - within 250 rows of
+# stage 03's 481,184, so almost the whole shortfall is inherited rather than added. A quarter of
+# the universe absent is the kind of number that reads as a defect until it is decomposed, and
+# decomposed it is the estimation window and nothing else.
+#
+# **137,586 of the 151,282 missing keys precede a security's first fitted value, at a median of
+# exactly 253 sessions against the 252-session burn-in declared in section A.** One trading year of
+# a five-year sample, which is what a recursion with no parameters until its first window closes
+# costs, and it is the whole of the shortfall's shape rather than a component of it. Three
+# securities of 546 spend more than the budget, 180 sessions between them.
+#
+# **Every other position is the same mechanism seen from a different angle, and the check above
+# says so rather than asserting it.** 1,267 keys sit inside six securities' own spans at a median
+# of exactly 253 - a break in stage 03's panel, after which the window has to refill - and 1,258
+# sit after four securities' last fitted value, whose stage-03 rows thin out until the window stops
+# closing at all. Of the 13,696 missing keys outside the burn-in, **13,511, or 98.65%, have fewer
+# than the 252 rows a fit needs in the 252 sessions behind them.** The 185 that remain sit at
+# exactly 252 rows behind, which is the check's own boundary rather than a security this stage
+# failed to fit. Of the 65 securities carrying no fitted value anywhere, 61 are offered fewer than
+# 252 sessions to estimate on at all.
+#
+# The consequence worth stating plainly is not the percentage but where it falls: **a model fitted
+# on an early fold sees these three columns as null on most of its training rows**, because the
+# first year of the sample has no fitted values by construction. Any importance they earn there is
+# measured on a fraction of the sample, and the fold-by-fold coverage table in section F is where
+# that shows up per fold.
+#
+# **`garch_ivrv_spread` is null on 21.2% of the rows it appears on, and the other two columns on
+# none.** The difference is the subtraction: the spread needs a fitted conditional volatility
+# *and* an implied volatility from stage 03, so it inherits that matrix's option-surface gaps on
+# top of its own. `garch_cond_vol` and the memory-denominator variant are defined wherever the
+# recursion ran, which is the right reading - a GARCH state is available on every session after
+# the burn-in whether or not an option was quoted.
+#
+# **No column is constant, none carries a non-finite value, and none is zero-heavy.** All three
+# would be flagged unconditionally above. `garch_cond_vol` is strictly positive by construction
+# and its tail ratio of 5.4 is a volatility distribution behaving; `garch_ivrv_spread` at 14.0 is
+# a difference of two volatilities and is heavier for the same reason.
 
 # %% [markdown]
 # ## Key takeaways
