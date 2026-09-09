@@ -29,6 +29,7 @@ from tests.pm_helpers import (
     current_test_tier,
     get_overrides,
     get_tier,
+    gpu_skip_reason,
     missing_required_env,
     run_notebook,
     sole_invocation,
@@ -94,14 +95,9 @@ def test_chapter_notebook(notebook_path, populated_data_dir, seeded_output_dir):
             pytest.skip(f"Requires {pkg} (not installed in this Docker image)")
 
     # Check GPU requirement
-    if overrides.get("gpu"):
-        try:
-            import torch
-
-            if not torch.cuda.is_available():
-                pytest.skip("GPU required but not available")
-        except ImportError:
-            pytest.skip("GPU required but torch not installed")
+    reason = gpu_skip_reason(overrides)
+    if reason:
+        pytest.skip(reason)
 
     timeout = overrides.get("timeout", 300)
     # A chapter notebook is one run. `sole_invocation` raises rather than silently taking

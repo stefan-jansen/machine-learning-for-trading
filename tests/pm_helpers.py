@@ -67,6 +67,7 @@ overrides.yaml schema (per-notebook, all optional):
 """
 
 import ast
+import functools
 import json
 import os
 import re
@@ -176,6 +177,117 @@ def missing_required_env(overrides: dict) -> list[str]:
         return []
     names = [declared] if isinstance(declared, str) else list(declared)
     return [name for name in names if not (os.environ.get(name) or "").strip()]
+
+
+GPU_CAPABILITIES = ("torch", "lightgbm_cuda")
+
+
+# The message LightGBM raises when the build itself lacks CUDA, as opposed to when a build that
+# has it cannot get the card right now. Only the first is a property of the installation, and
+# only the first is a reason to skip: a busy 3090 is a reason to wait or to fail loudly, never to
+# report a notebook as needing hardware it has.
+_NO_CUDA_BUILD = "was not enabled in this build"
+
+
+@functools.lru_cache(maxsize=1)
+def _cuda_lightgbm_probe() -> str | None:
+    """None if a CUDA LightGBM fit works here, else why it did not.
+
+    Asked by fitting one stump rather than by reading a version or a build flag, because
+    LightGBM exposes no build-configuration attribute and the failure it produces is a
+    runtime `LightGBMError` out of `fit()`. Costs about 9ms on twenty rows, and is cached
+    so a session pays it once however many notebooks declare the capability.
+
+    The C library writes its `[LightGBM] [Fatal]` line straight to file descriptor 2, which
+    no Python-level redirect reaches, so the descriptor itself is pointed at the null device
+    for the duration of the probe. Descriptor 2 by number, not `sys.stderr.fileno()`: under
+    pytest's `--capture=sys` that attribute raises `UnsupportedOperation`, and under the
+    default fd capture it names the capture file rather than the stream the C library writes
+    to. A failure here is the answer, not an error to report.
+    """
+    try:
+        import lightgbm as lgb
+        import numpy as np
+    except ImportError:
+        return "lightgbm is not installed"
+    try:
+        saved = os.dup(2)
+    except OSError:  # no descriptor 2 to borrow; the noise is not worth failing over
+        saved = None
+    try:
+        with open(os.devnull, "w") as devnull:
+            if saved is not None:
+                os.dup2(devnull.fileno(), 2)
+            try:
+                lgb.train(
+                    {
+                        "objective": "binary",
+                        "device_type": "cuda",
+                        "verbose": -1,
+                        "num_leaves": 2,
+                        "min_data_in_leaf": 1,
+                    },
+                    lgb.Dataset(np.zeros((20, 2)), label=np.arange(20) % 2),
+                    num_boost_round=1,
+                )
+            except Exception as exc:  # noqa: BLE001 - the message is the answer
+                if _NO_CUDA_BUILD in str(exc):
+                    return "the installed LightGBM has no CUDA build"
+                return f"the CUDA LightGBM probe failed for another reason: {exc}"
+    finally:
+        if saved is not None:
+            os.dup2(saved, 2)
+            os.close(saved)
+    return None
+
+
+def gpu_skip_reason(overrides: dict) -> str | None:
+    """Why this notebook cannot run on this machine, or None if it can.
+
+    `gpu:` names the capability the notebook needs, not the fact that it wants a card.
+    The two in use are different things and are checked differently:
+
+    - ``torch`` - a CUDA device torch can see, which is what a `.to("cuda")` model needs.
+    - ``lightgbm_cuda`` - a LightGBM built with ``-DUSE_CUDA=1``, which is what
+      ``device_type="cuda"`` needs. The PyPI wheel this repo's lockfile resolves is not
+      one, so on a machine with an NVIDIA card and this repo's own environment, torch
+      reports CUDA and LightGBM still raises "CUDA Tree Learner was not enabled in this
+      build" from `fit()`. Checking torch for a LightGBM notebook let those four Ch19
+      notebooks run and fail rather than skip - ml4t/agent-workspace#862.
+
+    ``gpu: true`` is read as ``torch``, which is what it has always meant. A notebook needing
+    both writes a list - ``19_risk_management/07_drift_detection`` fits a LightGBM at
+    ``device_type="cuda"`` and separately reads ``torch.cuda.get_device_name`` - and it runs
+    only where every capability it names is present.
+    """
+    declared = overrides.get("gpu")
+    if not declared:
+        return None
+    if declared is True:
+        names = ["torch"]
+    elif isinstance(declared, str):
+        names = [declared]
+    else:
+        names = [str(name) for name in declared]
+    unknown = [name for name in names if name not in GPU_CAPABILITIES]
+    if unknown:
+        raise ValueError(
+            f"Invalid gpu={declared!r} - {', '.join(unknown)} is not one of "
+            f"{', '.join(GPU_CAPABILITIES)} (or true, which means torch)"
+        )
+    for name in names:
+        if name == "torch":
+            try:
+                import torch
+            except ImportError:
+                return "declares gpu: torch, and torch is not installed"
+            if not torch.cuda.is_available():
+                return "declares gpu: torch, and torch reports no CUDA device"
+        else:
+            failure = _cuda_lightgbm_probe()
+            if failure is not None:
+                return f"declares gpu: lightgbm_cuda, and {failure}"
+    return None
 
 
 def get_reruns(overrides: dict) -> int:

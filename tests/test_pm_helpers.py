@@ -1784,3 +1784,153 @@ def test_a_model_mapping_without_a_fold_count_still_gets_one(tmp_path: Path) -> 
         research_preview=True,
     )
     assert resolved["PREVIEW_REDUCTIONS"]["folds"] == [0, 1]
+
+
+# --- gpu_skip_reason -------------------------------------------------------------------------
+#
+# `gpu:` names a capability, not a wish for a card. The two in use are checked differently and a
+# machine can have one without the other: this repo's lockfile resolves the PyPI LightGBM wheel,
+# which is built without `-DUSE_CUDA=1`, so a box with an NVIDIA card satisfies `torch` and not
+# `lightgbm_cuda`. Checking torch for a LightGBM notebook let four Ch19 notebooks run and fail at
+# `fit()` instead of skipping - ml4t/agent-workspace#862.
+
+
+def _capabilities(monkeypatch, *, torch_cuda: bool, lightgbm_cuda: bool) -> None:
+    """Present a machine with the named capabilities, whatever this one has."""
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: torch_cuda)),
+    )
+    # Already replaced by an earlier call in the same test, so the cache may be gone.
+    clear = getattr(pm_helpers._cuda_lightgbm_probe, "cache_clear", None)
+    if clear is not None:
+        clear()
+    monkeypatch.setattr(
+        pm_helpers,
+        "_cuda_lightgbm_probe",
+        lambda: None if lightgbm_cuda else "the installed LightGBM has no CUDA build",
+    )
+
+
+def test_no_gpu_declaration_never_skips(monkeypatch) -> None:
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({}) is None
+    assert pm_helpers.gpu_skip_reason({"gpu": False}) is None
+
+
+def test_gpu_true_still_means_torch(monkeypatch) -> None:
+    """The spelling that predates capabilities keeps its meaning."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": True}) is None
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=True)
+    assert "torch reports no CUDA device" in pm_helpers.gpu_skip_reason({"gpu": True})
+
+
+def test_a_lightgbm_notebook_skips_where_only_torch_has_a_card(monkeypatch) -> None:
+    """The #862 machine: an NVIDIA card, and a LightGBM that cannot use it."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    reason = pm_helpers.gpu_skip_reason({"gpu": "lightgbm_cuda"})
+    assert reason is not None and "no CUDA build" in reason
+
+
+def test_a_torch_notebook_runs_where_only_torch_has_a_card(monkeypatch) -> None:
+    """The same machine must not skip a notebook that only ever asks torch."""
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": "torch"}) is None
+
+
+def test_a_notebook_naming_both_needs_both(monkeypatch) -> None:
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=True)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is None
+    _capabilities(monkeypatch, torch_cuda=True, lightgbm_cuda=False)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is not None
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=True)
+    assert pm_helpers.gpu_skip_reason({"gpu": ["torch", "lightgbm_cuda"]}) is not None
+
+
+def test_an_unknown_capability_is_refused_rather_than_ignored(monkeypatch) -> None:
+    """A typo must not read as "no GPU needed" and let the notebook run anywhere."""
+    _capabilities(monkeypatch, torch_cuda=False, lightgbm_cuda=False)
+    with pytest.raises(ValueError, match="cude"):
+        pm_helpers.gpu_skip_reason({"gpu": "cude"})
+
+
+def test_every_declared_capability_in_overrides_is_one_the_guard_knows() -> None:
+    """A `gpu:` value nothing implements would raise at collection, one notebook at a time."""
+    overrides = yaml.safe_load((REPO_ROOT / "tests/overrides.yaml").read_text())
+    for key, entry in overrides.items():
+        declared = (entry or {}).get("gpu")
+        if not declared or declared is True:
+            continue
+        names = [declared] if isinstance(declared, str) else list(declared)
+        unknown = [n for n in names if n not in pm_helpers.GPU_CAPABILITIES]
+        assert not unknown, f"{key} declares gpu: {declared!r}, unknown: {unknown}"
+
+
+def test_the_real_probe_runs_and_stays_quiet_under_pytest_capture(capfd) -> None:
+    """The probe redirects descriptor 2, and pytest is also holding it.
+
+    `sys.stderr.fileno()` raises `UnsupportedOperation` under `--capture=sys` and names the
+    capture file rather than the stream LightGBM writes to under the default `--capture=fd`,
+    so the probe takes descriptor 2 by number. Every other test here replaces the probe, which
+    would leave that exact interaction uncovered. This one calls it.
+    """
+    pm_helpers._cuda_lightgbm_probe.cache_clear()
+    try:
+        result = pm_helpers._cuda_lightgbm_probe()
+        assert result is None or isinstance(result, str)
+        out, err = capfd.readouterr()
+        assert "LightGBM" not in err, f"the probe leaked its own failure to stderr: {err!r}"
+        # Descriptor 2 has to be a working descriptor afterwards, or every later test that
+        # writes to stderr fails somewhere far from here.
+        os.write(2, b"")
+    finally:
+        pm_helpers._cuda_lightgbm_probe.cache_clear()
+
+
+def test_a_busy_card_is_not_reported_as_a_missing_build(monkeypatch) -> None:
+    """A runtime failure on shared hardware must not read as a property of the installation.
+
+    One 3090 carries several lanes here, so a CUDA allocation can fail while the build is
+    perfectly capable. Both cases skip - a notebook that cannot get a card cannot run - but the
+    reason has to say which, or a contention blip is indistinguishable in the log from a wheel
+    built without -DUSE_CUDA=1, and someone re-derives ml4t/agent-workspace#862 from scratch.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True)),
+    )
+    clear = getattr(pm_helpers._cuda_lightgbm_probe, "cache_clear", None)
+    if clear is not None:
+        clear()
+    monkeypatch.setattr(
+        pm_helpers,
+        "_cuda_lightgbm_probe",
+        lambda: "the CUDA LightGBM probe failed for another reason: CUBLAS_STATUS_ALLOC_FAILED",
+    )
+    reason = pm_helpers.gpu_skip_reason({"gpu": "lightgbm_cuda"})
+    assert "no CUDA build" not in reason
+    assert "CUBLAS_STATUS_ALLOC_FAILED" in reason
+
+
+def test_the_missing_build_message_is_the_one_lightgbm_actually_raises() -> None:
+    """The probe keys on LightGBM's own wording, so a version change must not pass silently.
+
+    Only observable where the build lacks CUDA, which is every CI runner and this workstation.
+    Where the build has it there is no message to check and nothing to go stale, so the test
+    skips rather than failing on a machine that is better equipped than the one it was written on.
+    """
+    lgb = pytest.importorskip("lightgbm")
+    np = pytest.importorskip("numpy")
+    pm_helpers._cuda_lightgbm_probe.cache_clear()
+    if pm_helpers._cuda_lightgbm_probe() is None:
+        pytest.skip("this LightGBM has a CUDA build, so it raises no message to key on")
+    with pytest.raises(Exception, match=pm_helpers._NO_CUDA_BUILD) as caught:
+        lgb.train(
+            {"objective": "binary", "device_type": "cuda", "verbose": -1, "num_leaves": 2},
+            lgb.Dataset(np.zeros((20, 2)), label=np.arange(20) % 2),
+            num_boost_round=1,
+        )
+    assert pm_helpers._NO_CUDA_BUILD in str(caught.value)

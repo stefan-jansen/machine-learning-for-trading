@@ -467,8 +467,25 @@
     N_TRIALS: 2
   timeout: 600
 12_gradient_boosting/07_hpo_comparison:
-  gpu: true
+  # No `gpu:`, because nothing here asks for a device: the source holds no occurrence of cuda,
+  # device_type, torch or gpu. It fits lightgbm, xgboost and catboost through optuna on whatever
+  # the machine has, and the flag it carried had no relation to why it is slow.
+  #
+  # It cannot be per-commit yet, and the reason is a defect in the notebook rather than a budget.
+  # Measured 2026-09-08 with the card hidden: 2,411s at its declared settings, and it did not
+  # finish. Its parameters cell declares `N_GRID_POINTS = 50` and `N_OPTUNA_TRIALS = 50` and the
+  # notebook reads neither - `pm_helpers.unusable_parameters` names both, "the notebook never
+  # reads it below the parameters cell". What it actually reads is `N_GRID = len(grid)` at line
+  # 200, derived rather than declared, plus `trial_budgets = [10, 25, 50, 75, N_GRID]` at 326,
+  # which runs five more studies. So there is no knob to turn from here: setting the two declared
+  # names reduces nothing, and a run at 6 and 6 took 617s and still timed out.
+  #
+  # `long_running: true` was never what excluded it - no workflow deselects that marker, so the
+  # GPU flag was the whole of it, and removing the flag without this would turn the chapter job
+  # red. Per-commit coverage waits on ml4t/agent-workspace#1101 giving the search a knob the
+  # notebook reads.
   long_running: true
+  tier: on_demand
   timeout: 2400
 12_gradient_boosting/08_shap_analysis:
   env:
@@ -481,7 +498,9 @@
   gpu: true
   timeout: 300
 12_gradient_boosting/11_conformal_gbm:
-  gpu: true
+  # No `gpu:`. This one is stronger than stale: line 229 passes `"device_type": "cpu"`, and
+  # the prose above it says GPU training can be faster but that this uses a fixed thread
+  # count. The declaration contradicted the notebook's own code.
   timeout: 900
 12_gradient_boosting/12_case_study_insights:
   timeout: 300
@@ -849,18 +868,27 @@
 19_risk_management/04_factor_exposure:
   timeout: 300
 19_risk_management/05_trade_shap_diagnostics:
-  gpu: true
+  # `GPU_DEVICE = "cuda"` at line 80, passed as `device_type` at 222 and asserted at 231.
+  # That needs a LightGBM built with -DUSE_CUDA=1, which the PyPI wheel this repo's lockfile
+  # resolves is not; torch seeing a card says nothing about it. ml4t/agent-workspace#862.
+  gpu: lightgbm_cuda
   timeout: 300
 19_risk_management/06_stress_testing:
   timeout: 300
 19_risk_management/07_drift_detection:
-  gpu: true
+  # Both, and separately: `device_type="cuda"` at line 306 needs the CUDA LightGBM build,
+  # and lines 223-226 read `torch.cuda.get_device_name` directly. It runs only where both
+  # are present.
+  gpu: [torch, lightgbm_cuda]
   timeout: 300
 19_risk_management/08_ml_exit_signals:
-  gpu: true
+  # `LGB_DEVICE = "cuda"` at line 64, passed as `device_type` at 303 and read back at 449.
+  gpu: lightgbm_cuda
   timeout: 300
 19_risk_management/09_deep_hedging:
-  gpu: true
+  # torch alone: it refuses at line 105 unless CUDA is available and calls
+  # `torch.cuda.set_device(0)`. No LightGBM here.
+  gpu: torch
   parameters:
     BATCH_SIZE: 64
     N_EPOCHS: 5
@@ -1524,12 +1552,27 @@ case_studies/crypto_perps_funding/07_gbm:
       max_symbols: 10
   timeout: 180
 case_studies/crypto_perps_funding/08_tabular_dl:
-  gpu: true
+# Runs on CPU in CI. This notebook and the two below pin `device: cuda` in their own parameters
+# cell and the runners have no card, so until now all three carried `gpu: true` and skipped -
+# which is why ml4t/agent-workspace#1064 counts them among the notebooks a green
+# `cs-crypto_perps_funding` never covered.
+#
+# `OVERRIDES` replaces the notebook's dict wholesale rather than merging into it
+# (`08_tabular_dl.py:148` passes `overrides=OVERRIDES` straight through), so every key the
+# notebook declares has to be restated here. This one declares `class_weight: balanced` beside
+# the device, and passing the device alone would quietly fit an unweighted model.
+#
+# The timeout is measured, then given room. At ten symbols across both folds with CUDA hidden,
+# these take 16.6s (08), 37.3s (09) and 34.3s (10) on an idle workstation. 600 is that figure with
+# an order of magnitude over it, and it is what every comparable CPU-running sequence notebook in
+# this file already carries; a runner is slower per core than this box but not sixteen times
+# slower. Tighten against the first green `cs-crypto_perps_funding` if it proves generous. If one
+# of them fails on something other than time, the CPU path has surfaced something real and a
+# bigger number is not the answer.
   parameters:
     # Stated for the reason 06_linear records: LABELS is not a reduction, so without this the
-    # harness fallback would fit five names here too. These three skip in CI for want of a GPU,
-    # so the width only shows on a machine that has one - which is where it would otherwise
-    # register a population narrower than the fixture and than its own siblings.
+    # harness fallback would fit five names here too. Without it this would register a
+    # population narrower than the fixture and than its own siblings.
     PREVIEW_REDUCTIONS:
       max_symbols: 10
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS were the pre-migration knobs. This notebook
@@ -1537,31 +1580,36 @@ case_studies/crypto_perps_funding/08_tabular_dl:
     # and CI ran the full population believing it had not. LABELS is what it reads.
     LABELS:
     - fwd_ret_8h
-  timeout: 180
+    OVERRIDES: {class_weight: balanced, device: cpu}
+  timeout: 600
 case_studies/crypto_perps_funding/09_dl_lstm:
-  gpu: true
+# Runs on CPU in CI, and the timeout is headroom rather than a measurement. Both are explained
+# once on `08_tabular_dl` above; this notebook declares `device` alone, so that is all `OVERRIDES`
+# restates.
   parameters:
     # Stated for the reason 06_linear records: LABELS is not a reduction, so without this the
-    # harness fallback would fit five names here too. These three skip in CI for want of a GPU,
-    # so the width only shows on a machine that has one - which is where it would otherwise
-    # register a population narrower than the fixture and than its own siblings.
+    # harness fallback would fit five names here too. Without it this would register a
+    # population narrower than the fixture and than its own siblings.
     PREVIEW_REDUCTIONS:
       max_symbols: 10
     LABELS:
     - fwd_ret_8h
-  timeout: 180
+    OVERRIDES: {device: cpu}
+  timeout: 600
 case_studies/crypto_perps_funding/10_dl_tcn:
-  gpu: true
+# Runs on CPU in CI, and the timeout is headroom rather than a measurement. Both are explained
+# once on `08_tabular_dl` above; this notebook declares `device` alone, so that is all `OVERRIDES`
+# restates.
   parameters:
     # Stated for the reason 06_linear records: LABELS is not a reduction, so without this the
-    # harness fallback would fit five names here too. These three skip in CI for want of a GPU,
-    # so the width only shows on a machine that has one - which is where it would otherwise
-    # register a population narrower than the fixture and than its own siblings.
+    # harness fallback would fit five names here too. Without it this would register a
+    # population narrower than the fixture and than its own siblings.
     PREVIEW_REDUCTIONS:
       max_symbols: 10
     LABELS:
     - fwd_ret_8h
-  timeout: 180
+    OVERRIDES: {device: cpu}
+  timeout: 600
 case_studies/crypto_perps_funding/11_causal_dml:
   parameters:
     # The DML resolver requires every one of its four preview fields, not merely a non-empty
