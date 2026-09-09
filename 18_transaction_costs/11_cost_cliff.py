@@ -467,12 +467,12 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Grouped bars of Sharpe ratio, one group per turnover profile, each holding the gross Sharpe "
-    "and the net Sharpe under three cost structures, every bar labelled with its value. Within "
-    "each group the crossing bar is the shortest and the passive low-cost bar the tallest. The "
-    "spread between them narrows sharply from the high-turnover group to the low-turnover one, "
-    "where all three cost structures land close to the gross bar. A dashed horizontal line marks "
-    "the scenario threshold, and only the high-turnover crossing and worked-order bars sit "
-    "clearly below it.",
+    "and the net Sharpe under three cost structures, every bar labelled with its value. The gross "
+    "bar is the tallest in every group and the crossing bar the shortest, with passive low-cost "
+    "the tallest of the three net bars. The spread between the net bars narrows sharply from the "
+    "high-turnover group to the low-turnover one, where all three land close to the gross bar. A "
+    "dashed horizontal line marks the scenario threshold, and the high-turnover crossing bar is "
+    "the only one that falls below it.",
 )
 
 # %% [markdown]

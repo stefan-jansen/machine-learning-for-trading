@@ -294,10 +294,10 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Two panels of one-way slippage against order participation, sharing a legend. In the left "
-    "panel three models each draw a flat horizontal line across the whole participation range, "
-    "at three different levels. In the right panel the volume-share model rises steeply and "
-    "almost linearly with participation, reaching an order of magnitude above the flat "
-    "percentage line drawn beside it for reference.",
+    "panel four models each draw a flat horizontal line across the whole participation range, at "
+    "four different levels, the lowest of them lying along the zero axis. In the right panel the "
+    "volume-share model rises steeply and almost linearly with participation, reaching an order "
+    "of magnitude above the flat percentage line drawn beside it for reference.",
 )
 
 # %% [markdown]
@@ -486,8 +486,8 @@ show_plotly_with_alt(
     "Four stacked bars, one per asset-class stack, each running the full height of the axis and "
     "split between a slippage share and a commission share, with the one-way total in basis "
     "points annotated above each bar. Slippage is the larger share in three of the four stacks "
-    "and is nearly the whole bar in one of them; the institutional ETF stack is the exception, "
-    "where commission takes the whole bar.",
+    "and is nearly the whole bar in one of them; the institutional ETF stack reverses that, with "
+    "commission taking nearly the whole bar and only a sliver of slippage beneath it.",
 )
 
 # %%

@@ -332,8 +332,9 @@ show_plotly_with_alt(
     "Three impact curves against participation rate. The linear one is a straight line through "
     "the origin; the square-root and power-law ones share the same concave shape, rising fast "
     "near zero participation and flattening after it. The power-law curve is the highest of the "
-    "three across the whole range and the square-root curve the lowest, even though it is the "
-    "power-law curve that shares the square root's shape.",
+    "three over almost the whole range, even though it is the square-root curve that shares its "
+    "shape. The square-root curve starts above the linear one at the smallest participations and "
+    "crosses below it early, staying the lowest of the three from there on.",
 )
 
 # %% [markdown]
