@@ -15,40 +15,55 @@
 # ---
 
 # %% [markdown] tags=[]
-# # Text Feature Signal Evaluation
+# # Does any of this predict anything?
 #
-# **Chapter 10: Text Feature Engineering**
-# **Section Reference**: See Section 10.5 for practitioner workflow and alpha factor design
+# **Chapter 10: text feature engineering**
+# **Section reference**: Section 10.5
 #
 # **Docker image**: `ml4t`
 #
-# ## Purpose
-# This notebook evaluates **text-derived alpha signals** produced by
-# [`07_news_return_signals`](07_news_return_signals.ipynb) using standard factor diagnostics:
-# - Daily cross-sectional Information Coefficient (Spearman rank correlation)
-# - ICIR and t-stats for robustness
-# - Quintile and long-short (Q5 - Q1) spread analysis
+# ## What this notebook is for
 #
-# ## Data Contract
-# - **Input**: `output/fnspid/news_features.parquet` (from notebook 07)
-#   - Contains forward returns (fwd_ret_1d, fwd_ret_5d, fwd_ret_20d) already aligned
-#   - No additional price data or label computation needed
-# - **Output**: `output/text_evaluation/text_signal_summary.parquet`
+# `07_news_return_signals` builds four signals out of news text. This notebook asks whether
+# any of them predicts a return, using the diagnostics a factor is normally judged by: the
+# daily cross-sectional information coefficient, its ratio to its own variability, and what
+# a sort into buckets earns.
 #
-# ## Learning Objectives
-# After completing this notebook, you will be able to:
-# - Evaluate NLP-derived alpha signals using standard factor analysis
-# - Compute daily IC, ICIR, and t-statistics for text signals
-# - Analyze quintile spreads and long-short returns
-# - Understand the predictive power of text-based factors
+# It is worth separating two questions that get run together. Whether the construction is
+# correct - the alignment, the lag, the universe - is `07`'s business and is not re-litigated
+# here. Whether what it produced carries information is this notebook's, and the answer it
+# reaches is no. That is a result rather than a failure of the exercise, and the order
+# matters: build, then evaluate, then decide, rather than deciding on the strength of having
+# built something.
+#
+# ## What it reads and writes
+#
+# Reads `output/fnspid/news_features.parquet` from notebook 07, which already carries forward
+# returns aligned to tradable dates with the lag applied - so no label is recomputed here and
+# nothing in this notebook can introduce a look-ahead that the feature notebook did not have.
+# Writes a signal summary, the daily IC series and the daily long-short series.
+#
+# ## Learning objectives
+#
+# After working through this notebook you will be able to:
+#
+# - Compute a daily cross-sectional information coefficient and say why the date, not the
+#   observation, is the unit its t-statistic counts.
+# - Read an information ratio against the threshold your process uses, and recognize when a
+#   set of values is too small to rank.
+# - Check a signal for ties before sorting it into buckets, and say what ties do to the
+#   buckets' sizes and to the comparison between the extremes.
+# - Report a signal that does not work, in terms that say what was measured and on what.
 #
 # ## Prerequisites
-# - Section 10.5 of the chapter (alpha-factor evaluation: IC, ICIR, quintile spread).
-# - `news_features.parquet` produced by `07_news_return_signals.py`.
 #
-# ## Related Notebooks
-# - `07_news_return_signals.py` — produces the text features evaluated here.
-# - `09_filing_text_signals.py` — analogous IC analysis for 10-Q filing signals.
+# - Section 10.5 of the chapter.
+# - `news_features.parquet`, produced by `07_news_return_signals.py`.
+#
+# ## Related notebooks
+#
+# - `07_news_return_signals.py` - builds the features evaluated here
+# - `09_filing_text_signals.py` - the same diagnostics on signals from 10-Q filings
 #
 # ## Signals Evaluated
 # | Signal | Description | Expected Effect |
@@ -59,7 +74,7 @@
 # | coverage_count | Article frequency | Ambiguous (attention effect) |
 
 # %% tags=[]
-"""Text Feature Signal Evaluation - Evaluate NLP-derived alpha signals."""
+"""Evaluate the news-derived signals from notebook 07 as alpha factors."""
 
 import json
 import warnings
@@ -71,10 +86,14 @@ import numpy as np
 import polars as pl
 from scipy.stats import spearmanr
 
-warnings.filterwarnings("ignore")
-
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, FIGSIZE, show_with_alt
+
+# `spearmanr` warns when a date's cross-section is constant, which makes its coefficient
+# undefined. That is a real condition and the code below drops those dates explicitly, so the
+# warning is suppressed by name rather than the condition being ignored.
+warnings.filterwarnings("ignore", message=".*input array is constant.*", module="scipy")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -375,37 +394,42 @@ if KEY_SIGNAL in AVAILABLE_SIGNALS:
         ic_mean = np.mean(ic_vals)
         ic_std = np.std(ic_vals, ddof=1)
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+        fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
 
-        # IC time series
-        axes[0].plot(range(len(ic_df)), ic_vals, alpha=0.7, linewidth=0.5)
-        axes[0].axhline(0, color="black", linestyle="-", linewidth=0.5)
-        axes[0].axhline(ic_mean, color="red", linestyle="--", label=f"Mean IC: {ic_mean:.4f}")
+        axes[0].plot(ic_df["timestamp"], ic_vals, alpha=0.8, linewidth=0.5, color=COLORS["blue"])
+        axes[0].axhline(0, color=COLORS["neutral"], linewidth=0.5)
+        axes[0].axhline(ic_mean, color=COLORS["amber"], linestyle="--", label="Mean")
         axes[0].fill_between(
-            range(len(ic_df)),
+            ic_df["timestamp"],
             ic_mean - ic_std,
             ic_mean + ic_std,
             alpha=0.2,
-            color="red",
-            label="±1 std",
+            color=COLORS["amber"],
+            label="Mean plus and minus one standard deviation",
         )
-        axes[0].set_xlabel("Trading Day")
-        axes[0].set_ylabel("Information Coefficient")
-        axes[0].set_title(f"Daily Cross-Sectional IC ({KEY_SIGNAL}, {KEY_HORIZON}d)")
-        axes[0].legend()
+        axes[0].set_xlabel("Session")
+        axes[0].set_ylabel("Information coefficient")
+        axes[0].set_title(f"Daily cross-sectional IC, {KEY_SIGNAL} at {KEY_HORIZON} day")
+        axes[0].legend(fontsize=6)
 
-        # IC histogram
-        axes[1].hist(ic_vals, bins=50, edgecolor="black", alpha=0.7)
-        axes[1].axvline(0, color="black", linestyle="-", linewidth=0.5)
-        axes[1].axvline(ic_mean, color="red", linestyle="--", label=f"Mean: {ic_mean:.4f}")
-        axes[1].set_xlabel("Information Coefficient")
-        axes[1].set_ylabel("Frequency")
-        axes[1].set_title("IC Distribution")
-        axes[1].legend()
+        axes[1].hist(ic_vals, bins=50, color=COLORS["blue"])
+        axes[1].axvline(0, color=COLORS["neutral"], linewidth=0.5)
+        axes[1].axvline(ic_mean, color=COLORS["amber"], linestyle="--", label="Mean")
+        axes[1].set_xlabel("Information coefficient")
+        axes[1].set_ylabel("Sessions")
+        axes[1].set_title("Distribution of the same daily values")
+        axes[1].legend(fontsize=6)
 
-        plt.suptitle(f"Text Signal IC Analysis: {KEY_SIGNAL}")
-        plt.tight_layout()
-        plt.show()
+        show_with_alt(
+            fig,
+            "Two panels. The left plots one information coefficient per session across the "
+            "sample, a dense band swinging between roughly plus and minus three quarters with "
+            "no trend and no quiet or turbulent stretches, around a dashed mean line that sits "
+            "on top of the zero line at this scale. The right is a histogram of the same "
+            "values: a single broad hump spanning nearly the full range from minus one to "
+            "plus one, centered close to zero, with its dashed mean line indistinguishable "
+            "from the zero line.",
+        )
 
 # %% tags=[]
 # Quintile returns for key signal
@@ -446,38 +470,89 @@ if KEY_SIGNAL in AVAILABLE_SIGNALS:
         .sort("quintile")
     )
 
-    print(f"\nQuintile Returns ({KEY_SIGNAL}, {KEY_HORIZON}d forward return):")
+    print(f"Forward return by {KEY_SIGNAL} bucket, {KEY_HORIZON}-day horizon:")
     print(quintile_returns)
+
+# %% [markdown]
+# ### Why the buckets are not the same size
+#
+# Five buckets cut at fixed rank percentiles should hold roughly equal numbers, and these do
+# not. The cause is ties. `rank(method="average")` gives every observation sharing a value
+# the same rank, so a signal that is exactly zero on most days - which a news-derived signal
+# is, whenever there is no news for that ticker - puts a large block of observations at one
+# percentile, and the whole block lands in whichever bucket that percentile falls into.
+#
+# That matters for how the bar chart can be read. The buckets are not equal-sized extremes of
+# the signal, and a comparison between the first and the last is between groups of different
+# size and different composition, not between the bottom fifth and the top fifth. The
+# diagnostic below is what to check before reading any quantile sort.
+
+# %%
+if KEY_SIGNAL in AVAILABLE_SIGNALS:
+    signal_values = d[KEY_SIGNAL]
+    modal_share = signal_values.value_counts().sort("count", descending=True)["count"][0] / len(
+        signal_values
+    )
+    print(f"Observations sharing the single most common {KEY_SIGNAL} value: {modal_share:.1%}")
+    print(
+        f"Distinct values across {len(signal_values):,} observations: {signal_values.n_unique():,}"
+    )
+    print(
+        "Bucket sizes: "
+        + str(
+            dict(
+                zip(
+                    quintile_returns["quintile"].to_list(),
+                    quintile_returns["n_obs"].to_list(),
+                    strict=True,
+                )
+            )
+        )
+    )
 
 # %% tags=[]
 # Plot quintile returns
 if KEY_SIGNAL in AVAILABLE_SIGNALS:
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 
     quintiles = quintile_returns["quintile"].to_list()
     returns_bps = [r * 10000 for r in quintile_returns["mean_ret"].to_list()]
+    counts = quintile_returns["n_obs"].to_list()
 
-    # Sequential blue gradient for ordinal quintile encoding (greyscale-safe)
-    quintile_colors = ["#cfe2f3", "#9fc5e8", "#6fa8dc", "#3d85c6", "#0b5394"]
+    # A sequential ramp encodes the ordering of the buckets; the darkest is the highest
+    # signal value, so a reader can see the sort direction without reading the axis.
+    quintile_colors = [
+        COLORS["silver_muted"],
+        COLORS["recede"],
+        COLORS["slate"],
+        COLORS["blue_light"],
+        COLORS["blue"],
+    ]
     bars = ax.bar(quintiles, returns_bps, color=quintile_colors)
-    ax.axhline(0, color="black", linestyle="-", linewidth=0.5)
-    ax.set_xlabel(f"{KEY_SIGNAL} Quintile (Q1=Low, Q5=High)")
-    ax.set_ylabel(f"Average {KEY_HORIZON}-Day Forward Return (bps)")
-    ax.set_title(f"Quintile Returns: {KEY_SIGNAL}")
+    ax.axhline(0, color=COLORS["neutral"], linewidth=0.5)
+    ax.set_xlabel(f"{KEY_SIGNAL} bucket, lowest signal at the left")
+    ax.set_ylabel(f"Mean {KEY_HORIZON}-day forward return, basis points")
+    ax.set_title(f"Forward return by {KEY_SIGNAL} bucket")
 
-    # Add value labels
-    for bar, val in zip(bars, returns_bps, strict=False):
+    for bar, val, count in zip(bars, returns_bps, counts, strict=True):
         ax.annotate(
-            f"{val:.1f}",
+            f"{val:.1f}\nn={count:,}",
             xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
-            xytext=(0, 3 if val >= 0 else -10),
+            xytext=(0, 3 if val >= 0 else -14),
             textcoords="offset points",
             ha="center",
-            fontsize=10,
+            fontsize=6,
         )
 
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Five bars, one per signal bucket, ordered from the lowest signal values on the left "
+        "to the highest on the right, each labeled with its mean forward return in basis "
+        "points and the number of observations behind it. The heights do not rise or fall "
+        "across the buckets: the tallest bar is the leftmost and the shortest is the "
+        "rightmost, with the middle three between them in no order. The observation counts "
+        "differ from one another by more than a factor of two.",
+    )
 
 # %% [markdown] tags=[]
 # ## 5. Save Results
@@ -506,39 +581,42 @@ if daily_ls_rows:
     print(f"Saved daily long-short to: {daily_ls_path}")
 
 # %% [markdown] tags=[]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# ### Measured signal performance on this evaluation set
-# 1. All four text signals produce 1-day cross-sectional ICIRs within ±0.005
-#    of zero (weighted_surprise 0.004, sentiment_mean 0.004,
-#    sentiment_momentum −0.0005, coverage_count −0.004; n≈1,260 dates).
-#    Per-signal t-stats are all in [−0.2, +0.2] at the 1-day horizon. The
-#    construction methodology is demonstrated here; the magnitudes do not
-#    support a ranking claim — none of the four signals is statistically
-#    distinguishable from zero on this sample.
-# 2. The weighted_surprise quintile sort on 1-day forward returns is
-#    non-monotonic and Q5 < Q1 (Q1 0.001008, Q2 0.000409, Q3 0.000604,
-#    Q4 0.000786, Q5 0.000221). The predicted bullish quintile (Q5) earns
-#    less than the predicted bearish quintile (Q1) — the bullish/bearish
-#    framing in NB07 is **not** confirmed.
-# 3. ICIR magnitudes here are an order of magnitude or more below the
-#    ICIR > 0.5 robustness threshold used in NB07's takeaway 4. The
-#    notebook does not establish tradeability for any of the four signals
-#    on the 2009-2017 FNSPID 50-ticker subset.
+# 1. **None of the four signals is distinguishable from zero on this sample.** The
+#    information ratios sit near zero at every horizon tested and the t-statistics are far
+#    inside any threshold that would let you rank them. What this notebook demonstrates is the
+#    construction and evaluation method; it does not produce a signal, and reporting an
+#    ordering among four values this size would be reporting noise.
+# 2. **The quintile sort does not confirm the direction the signals were built to express.**
+#    The bucket the construction calls bullish does not earn more than the bucket it calls
+#    bearish, and the pattern across buckets is not monotone in either direction.
+# 3. **Check for ties before reading a quantile sort at all.** A news-derived signal is
+#    exactly zero whenever there is no news, so a large block of observations shares one
+#    value, average ranking puts the whole block at one percentile, and the buckets come out
+#    unequal in size and mixed in composition. The extremes then are not the extremes.
+# 4. **Compute one coefficient per date and average those.** The unit of observation is the
+#    date, so each session contributes one number and the t-statistic counts sessions. This
+#    keeps a persistent cross-sectional tilt out of the accuracy measure and keeps
+#    overlapping-return autocorrelation out of the standard error.
+# 5. **A negative result is a result, and it is what this evaluation is for.** The pipeline
+#    that produced these features works; what it produces has no measurable edge here. The
+#    order to run these in is construction, then evaluation, then a decision - not a decision
+#    justified by the construction.
 #
-# ### Evaluation Methodology
-# - We use the exact dataset from notebook 07 (no label recomputation)
-# - Forward returns are already aligned to tradable dates with proper lag
-# - Daily cross-sectional IC avoids temporal autocorrelation issues
+# ### How this evaluation is set up
 #
-# ### Limitations
-# 1. **Coverage bias**: Notebook 07 drops low-coverage tickers (see its takeaways)
-# 2. **Data sparsity**: News coverage is uneven across stocks and time
-# 3. **Decay**: Text signals may have shorter predictive horizons than momentum
+# The features come from `07_news_return_signals` unchanged, with no labels recomputed here.
+# Forward returns arrive already aligned to tradable dates with the lag applied, so nothing
+# in this notebook can introduce a look-ahead that the feature notebook did not have.
 #
-# ### Next Steps
-# - Chapter 12: Train ML models on combined feature set (text + price features)
-# - Chapter 17: Backtest text-enhanced strategies
+# ### The scope these numbers have
+#
+# One subset of tickers over one sample period, with news coverage that is uneven across both.
+# `07_news_return_signals` drops low-coverage tickers before this notebook sees them, so the
+# universe here is conditioned on having been covered - which is itself a selection. Nothing
+# here measures whether text signals work at horizons longer than those tested, on a wider
+# universe, or combined with price features, which is Chapter 12's subject.
 
 # %% tags=[]
 # Save run metadata for reproducibility

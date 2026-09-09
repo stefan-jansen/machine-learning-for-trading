@@ -67,7 +67,6 @@
 08_financial_features/07_event_studies.py
 08_financial_features/case_study_feature_summary.py
 10_text_feature_engineering/07_news_return_signals.py
-10_text_feature_engineering/08_text_feature_evaluation.py
 10_text_feature_engineering/09_filing_text_signals.py
 11_ml_pipeline/01_ols_inference.py
 11_ml_pipeline/02_regularization_paths.py
