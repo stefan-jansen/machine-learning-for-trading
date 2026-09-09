@@ -41,6 +41,21 @@ DATA_DIR = ML4T_DATA_PATH
 # the import.
 def _default_plotly_renderer() -> str:
     try:
+        from importlib.metadata import version as _version
+
+        major = int(_version("kaleido").split(".", 1)[0])
+    except Exception:  # noqa: BLE001
+        return "plotly_mimetype"
+
+    # kaleido 0.x ships its own Chromium and needs nothing from the host. Probing for
+    # a system Chrome there answers a question that version does not ask, and answering
+    # it wrongly is how the py312 container came to publish notebooks whose Plotly
+    # figures were absent: the probe failed, PNG was dropped, and every figure landed
+    # as interactive JSON with no image behind it.
+    if major < 1:
+        return "plotly_mimetype+png"
+
+    try:
         from choreographer.browsers.chromium import Chromium
 
         if Chromium.find_browser(skip_local=False):
