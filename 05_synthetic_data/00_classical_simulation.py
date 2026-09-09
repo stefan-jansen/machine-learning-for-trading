@@ -46,7 +46,7 @@
 # 3. **Choose** the appropriate model for your use case
 # 4. **Use** library implementations for production work
 #
-# **Book Reference**: Chapter 5, Section 5.2 (Classical Simulation Baselines)
+# **Book Reference**: Chapter 5, Section 5.3 (Classical simulation baselines)
 #
 # **Prerequisites**: Basic probability and stochastic processes; familiarity
 # with NumPy array operations. Requires ETF data from Chapter 2 (`load_etfs()`).
@@ -88,14 +88,41 @@ from statsmodels.tsa.stattools import acf
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
-# Production defaults (Papermill overrides for testing)
 SEED = 42
+N_PATHS = 200
+N_BOOTSTRAP_REPLICATES = 200
+
+# %% [markdown]
+# Every generator below is spawned from `SEED`, so overriding the parameter
+# moves every simulation in the notebook rather than only the ones that happen
+# to read a global. `STREAMS` names one independent stream per use, and
+# `stream()` hands out its generator.
 
 # %%
 set_global_seeds(SEED)
+
+STREAMS = (
+    "gbm",
+    "jump_diffusion",
+    "mean_reversion",
+    "heston",
+    "garch",
+    "model_paths",
+    "iid_bootstrap",
+    "block_bootstrap",
+    "stationary_bootstrap",
+    "bootstrap_replicates",
+)
+_SEED_SEQUENCES = dict(zip(STREAMS, np.random.SeedSequence(SEED).spawn(len(STREAMS)), strict=True))
+
+
+def stream(name: str) -> np.random.Generator:
+    """Return the independent generator reserved for *name*."""
+    return np.random.default_rng(_SEED_SEQUENCES[name])
+
 
 # %% [markdown]
 # ---
@@ -115,7 +142,7 @@ set_global_seeds(SEED)
 # then show the equivalent library call.
 
 # %% [markdown]
-# ## 1.1 Geometric Brownian Motion (GBM)
+# ## Geometric Brownian Motion
 #
 # The foundation of quantitative finance. Price $S$ follows the stochastic
 # differential equation:
@@ -193,12 +220,15 @@ def simulate_gbm(
 # %% [markdown]
 # ### GBM Simulation
 #
-# Generate 2 years of daily data and inspect the return distribution.
+# Generate two years of daily data (504 trading days) and inspect the return
+# distribution. Excess kurtosis should sit near zero: GBM's log-returns are
+# Gaussian by construction, and any departure is sampling noise from one path.
 
 # %%
-# Example: 2 years of daily data
-gbm_rng = np.random.default_rng(42)
-gbm_prices = simulate_gbm(n_steps=504, mu=0.08, sigma=0.20, rng=gbm_rng)
+GBM_MU, GBM_SIGMA = 0.08, 0.20
+N_STEPS = 504
+
+gbm_prices = simulate_gbm(n_steps=N_STEPS, mu=GBM_MU, sigma=GBM_SIGMA, rng=stream("gbm"))
 gbm_returns = np.diff(np.log(gbm_prices))
 
 print(f"GBM simulation: {len(gbm_prices)} prices")
@@ -210,12 +240,25 @@ print(f"Excess kurtosis: {kurtosis(gbm_returns, fisher=True, bias=False):.4f} (G
 # %% [markdown]
 # ### Library Usage: GBM
 #
-# The `ml4t-data` package provides production implementations via `SyntheticProvider`:
+# `SyntheticProvider` in the `ml4t-data` package generates the same processes
+# behind an OHLCV interface. It draws from its own generator, so a provider path
+# never matches a from-scratch path step for step; what should agree is the
+# distribution the two draw from. GBM is the one model whose full parameter set
+# the provider exposes (`annual_return`, `annual_volatility`), so it is the one
+# case where the two are the same process and the realized moments are
+# comparable.
 
 # %%
-provider = SyntheticProvider(model="gbm", annual_return=0.08, annual_volatility=0.20, seed=42)
+provider = SyntheticProvider(
+    model="gbm", annual_return=GBM_MU, annual_volatility=GBM_SIGMA, seed=SEED
+)
 df = provider.fetch_ohlcv("SYNTH", "2022-01-01", "2023-12-31", "daily")
-print(f"SyntheticProvider GBM: {len(df)} bars, final close={float(df['close'][-1]):.2f}")
+provider_gbm_returns = np.diff(np.log(df["close"].to_numpy()))
+
+print(f"SyntheticProvider GBM: {len(df)} bars")
+print(f"  realized annual volatility: {provider_gbm_returns.std() * np.sqrt(252):.3f}")
+print(f"  from-scratch, same parameters: {gbm_returns.std() * np.sqrt(252):.3f}")
+print(f"  requested: {GBM_SIGMA:.3f}")
 
 # %% [markdown]
 # ### GBM Limitations
@@ -231,7 +274,7 @@ print(f"SyntheticProvider GBM: {len(df)} bars, final close={float(df['close'][-1
 # (Black-Scholes) due to its analytical tractability.
 
 # %% [markdown]
-# ## 1.2 Jump-Diffusion (Merton Model)
+# ## Jump-Diffusion (Merton)
 #
 # Adds occasional extreme moves to GBM via a compound Poisson process:
 #
@@ -329,27 +372,29 @@ def simulate_jump_diffusion(
 # %% [markdown]
 # ### Jump-Diffusion Simulation
 #
-# Simulate with negative jumps (crash scenarios). With `lambda_=5` we expect
-# roughly 5 jumps per year; `mu_jump=-0.03` means each jump averages 3% down.
+# Simulate crash-only jumps: a jump intensity of five per year, and a mean log
+# jump size that is negative, so each jump is a drop on average. The compensator
+# is computed from those same parameters rather than retyped, so changing one
+# cannot leave the printed diagnostic describing a different model.
 
 # %%
-# Example: negative jumps (crash scenarios)
-# lambda=5 means ~5 jumps/year; mu_jump=-0.03 means avg 3% down-jump
-jd_rng = np.random.default_rng(43)
+JD_MU, JD_SIGMA = 0.08, 0.15
+JD_LAMBDA, JD_MU_JUMP, JD_SIGMA_JUMP = 5.0, -0.03, 0.04
+
 jd_prices = simulate_jump_diffusion(
-    n_steps=504,
-    mu=0.08,  # Total expected return
-    sigma=0.15,  # Diffusion volatility
-    lambda_=5.0,
-    mu_jump=-0.03,  # Mean log jump (negative = down)
-    sigma_jump=0.04,
-    rng=jd_rng,
+    n_steps=N_STEPS,
+    mu=JD_MU,
+    sigma=JD_SIGMA,
+    lambda_=JD_LAMBDA,
+    mu_jump=JD_MU_JUMP,
+    sigma_jump=JD_SIGMA_JUMP,
+    rng=stream("jump_diffusion"),
 )
 jd_returns = np.diff(np.log(jd_prices))
 
-# Show jump compensator
-k = np.exp(-0.03 + 0.5 * 0.04**2) - 1
+k = np.exp(JD_MU_JUMP + 0.5 * JD_SIGMA_JUMP**2) - 1
 print(f"Jump-Diffusion simulation: {len(jd_prices)} prices")
+print(f"Mean jump size: {np.exp(JD_MU_JUMP) - 1:.2%}; intensity {JD_LAMBDA:.0f} per year")
 print(f"Jump compensator k: {k:.4f} (subtracted from drift)")
 print(f"Annualized return: {jd_returns.mean() * 252:.2%}")
 print(f"Annualized volatility: {jd_returns.std() * np.sqrt(252):.2%}")
@@ -358,14 +403,27 @@ print(f"Excess kurtosis: {kurtosis(jd_returns, fisher=True, bias=False):.4f} (> 
 
 # %% [markdown]
 # ### Library Usage: Jump-Diffusion
+#
+# The provider's `gbm_jump` model is **not** the model above. It exposes only
+# `annual_return` and `annual_volatility`; the jump process is fixed internally
+# at five jumps per year with a **zero-mean** jump size. Symmetric jumps produce
+# fat tails without skew, while the crash-only jumps above produce both. The
+# printed skewness shows the difference, and it is the reason to implement the
+# jump process yourself when the asymmetry is the point.
 
 # %%
-provider = SyntheticProvider(model="gbm_jump", annual_return=0.08, annual_volatility=0.15, seed=43)
+provider = SyntheticProvider(
+    model="gbm_jump", annual_return=JD_MU, annual_volatility=JD_SIGMA, seed=SEED
+)
 df = provider.fetch_ohlcv("SYNTH", "2022-01-01", "2023-12-31", "daily")
-print(f"SyntheticProvider Jump-Diffusion: {len(df)} bars, final close={float(df['close'][-1]):.2f}")
+provider_jd_returns = np.diff(np.log(df["close"].to_numpy()))
+
+print(f"SyntheticProvider gbm_jump: {len(df)} bars")
+print(f"  skewness, provider (zero-mean jumps):  {skew(provider_jd_returns):+.3f}")
+print(f"  skewness, from scratch (down-jumps):   {skew(jd_returns):+.3f}")
 
 # %% [markdown]
-# ## 1.3 Mean-Reversion (Ornstein-Uhlenbeck)
+# ## Mean-Reversion (Ornstein-Uhlenbeck)
 #
 # Prices gravitate toward a long-term equilibrium $\theta$:
 #
@@ -488,46 +546,63 @@ def simulate_mean_reversion_exact(
 # %% [markdown]
 # ### Mean-Reversion Simulation
 #
-# Compare exact vs Euler discretization. With `kappa=2`, the half-life is
-# $\ln(2)/2 \approx 0.35$ years (87 trading days).
+# The half-life is derived from the reversion speed rather than retyped, so it
+# tracks any change to the parameter. Euler and exact are then run from the
+# **same** stream of shocks: both consume one standard normal per step in the
+# same order, so the two paths differ only by discretization error and the gap
+# between them measures exactly that.
 
 # %%
-# Example: mean-reverting around 100 using exact discretization
-# kappa=2 gives half-life of ln(2)/2 ≈ 0.35 years (87 trading days)
-mr_rng = np.random.default_rng(44)
+MR_KAPPA, MR_SIGMA = 2.0, 0.15
+MR_EQUILIBRIUM = 100.0
+
 mr_prices = simulate_mean_reversion_exact(
-    n_steps=504,
-    kappa=2.0,
-    theta=np.log(100),  # Long-term mean at 100
-    sigma=0.15,
-    rng=mr_rng,
+    n_steps=N_STEPS,
+    kappa=MR_KAPPA,
+    theta=np.log(MR_EQUILIBRIUM),
+    sigma=MR_SIGMA,
+    rng=stream("mean_reversion"),
 )
 mr_returns = np.diff(np.log(mr_prices))
 
-half_life_days = np.log(2) / 2.0 * 252
+half_life_days = np.log(2) / MR_KAPPA * 252
 print(f"Mean-Reversion (exact) simulation: {len(mr_prices)} prices")
 print(f"Half-life: {half_life_days:.0f} trading days")
-print(f"Final price: {mr_prices[-1]:.2f} (equilibrium: 100)")
+print(f"Final price: {mr_prices[-1]:.2f} (equilibrium: {MR_EQUILIBRIUM:.0f})")
 print(f"Return autocorr(1): {np.corrcoef(mr_returns[:-1], mr_returns[1:])[0, 1]:.4f}")
 
-# Compare Euler vs Exact discretization
-mr_rng_euler = np.random.default_rng(44)  # Same seed
 mr_euler = simulate_mean_reversion_euler(
-    n_steps=504, kappa=2.0, theta=np.log(100), sigma=0.15, rng=mr_rng_euler
+    n_steps=N_STEPS,
+    kappa=MR_KAPPA,
+    theta=np.log(MR_EQUILIBRIUM),
+    sigma=MR_SIGMA,
+    rng=stream("mean_reversion"),
 )
 max_diff = np.max(np.abs(mr_prices - mr_euler))
-print(f"Euler vs Exact max difference: {max_diff:.6f}")
+print(f"Euler vs exact, same shocks, max price difference: {max_diff:.4f}")
 
 # %% [markdown]
 # ### Library Usage: Mean-Reversion
+#
+# The provider's `mean_revert` model fixes the reversion speed internally at the
+# same value used above and reverts to its own `base_price`, so neither the speed
+# nor the equilibrium is a parameter you can set. Reversion speed is usually the
+# quantity you want to fit for a spread or a rate, which is why the from-scratch
+# implementation stays useful.
 
 # %%
-provider = SyntheticProvider(model="mean_revert", annual_volatility=0.15, seed=44)
+provider = SyntheticProvider(
+    model="mean_revert", annual_volatility=MR_SIGMA, base_price=MR_EQUILIBRIUM, seed=SEED
+)
 df = provider.fetch_ohlcv("SYNTH", "2022-01-01", "2023-12-31", "daily")
-print(f"SyntheticProvider Mean-Revert: {len(df)} bars, final close={float(df['close'][-1]):.2f}")
+provider_mr_close = df["close"].to_numpy()
+
+print(f"SyntheticProvider mean_revert: {len(df)} bars")
+print(f"  mean price: {provider_mr_close.mean():.2f} (equilibrium {MR_EQUILIBRIUM:.0f})")
+print(f"  from-scratch mean price: {mr_prices.mean():.2f}")
 
 # %% [markdown]
-# ## 1.4 Heston (Stochastic Volatility)
+# ## Heston (Stochastic Volatility)
 #
 # Volatility itself is random, following a separate mean-reverting process:
 #
@@ -643,45 +718,68 @@ def simulate_heston(
 # %% [markdown]
 # ### Heston Simulation
 #
-# Simulate with typical parameters. We verify the Feller condition
-# ($2\kappa\theta > \xi^2$) to ensure variance stays positive.
+# The variance starts at its long-run level, so the long-run volatility is the
+# square root of `HESTON_THETA`. The Feller condition is evaluated from the same
+# named parameters that drive the simulation, and asserted rather than printed as
+# advice: a violated Feller condition means the truncation is doing real work and
+# the path no longer represents the model the prose describes.
 
 # %%
-# Example: typical Heston parameters
-# Feller condition: 2*5*0.04 = 0.4 > 0.3^2 = 0.09 [OK]
-heston_rng = np.random.default_rng(45)
+HESTON_MU = 0.05
+HESTON_KAPPA, HESTON_THETA, HESTON_XI, HESTON_RHO = 5.0, 0.04, 0.3, -0.7
+
+feller_lhs = 2 * HESTON_KAPPA * HESTON_THETA
+feller_rhs = HESTON_XI**2
+assert feller_lhs > feller_rhs, (
+    f"Feller condition violated: 2*kappa*theta={feller_lhs:.3f} <= xi^2={feller_rhs:.3f}"
+)
+
 heston_prices, heston_var = simulate_heston(
-    n_steps=504,
-    mu=0.05,
-    v0=0.04,  # Initial vol = 20%
-    kappa=5.0,  # Fast mean reversion
-    theta=0.04,  # Long-term vol = 20%
-    xi=0.3,  # Vol of vol = 30%
-    rho=-0.7,  # Strong leverage effect
-    rng=heston_rng,
+    n_steps=N_STEPS,
+    mu=HESTON_MU,
+    v0=HESTON_THETA,
+    kappa=HESTON_KAPPA,
+    theta=HESTON_THETA,
+    xi=HESTON_XI,
+    rho=HESTON_RHO,
+    rng=stream("heston"),
 )
 heston_returns = np.diff(np.log(heston_prices))
 
-# Verify Feller condition
-feller_lhs = 2 * 5.0 * 0.04
-feller_rhs = 0.3**2
 print(f"Heston simulation: {len(heston_prices)} prices")
-print(
-    f"Feller condition: 2*kappa*theta = {feller_lhs:.2f} > xi^2 = {feller_rhs:.2f}: "
-    f"{'OK' if feller_lhs > feller_rhs else 'VIOLATED'}"
-)
-print(f"Initial vol: {np.sqrt(heston_var[0]) * 100:.1f}%")
-print(f"Final vol: {np.sqrt(heston_var[-1]) * 100:.1f}%")
-print(f"Min variance (should be >= 0): {heston_var.min():.6f}")
+print(f"Long-run volatility: {np.sqrt(HESTON_THETA):.1%}")
+print(f"Feller: 2*kappa*theta = {feller_lhs:.2f} > xi^2 = {feller_rhs:.2f}")
+print(f"Realized vol range: {np.sqrt(heston_var).min():.1%} to {np.sqrt(heston_var).max():.1%}")
+assert heston_var.min() >= 0, "full truncation should keep variance non-negative"
 print(f"Excess kurtosis: {kurtosis(heston_returns, fisher=True, bias=False):.4f}")
 
 # %% [markdown]
 # ### Library Usage: Heston
+#
+# The provider exposes the full Heston parameter set except the initial variance,
+# which it always starts at the long-run level `heston_theta` — the same choice
+# made above. Passing all four means the provider runs the same process, so the
+# realized volatility of the two paths should agree up to sampling noise. Leaving
+# `heston_kappa` at its default would silently simulate a different, slower
+# reverting variance process.
 
 # %%
-provider = SyntheticProvider(model="heston", annual_volatility=0.20, heston_xi=0.3, seed=45)
+provider = SyntheticProvider(
+    model="heston",
+    annual_return=HESTON_MU,
+    heston_kappa=HESTON_KAPPA,
+    heston_theta=HESTON_THETA,
+    heston_xi=HESTON_XI,
+    heston_rho=HESTON_RHO,
+    seed=SEED,
+)
 df = provider.fetch_ohlcv("SYNTH", "2022-01-01", "2023-12-31", "daily")
-print(f"SyntheticProvider Heston: {len(df)} bars, final close={float(df['close'][-1]):.2f}")
+provider_heston_returns = np.diff(np.log(df["close"].to_numpy()))
+
+print(f"SyntheticProvider heston: {len(df)} bars")
+print(f"  realized annual volatility: {provider_heston_returns.std() * np.sqrt(252):.3f}")
+print(f"  from-scratch, same parameters: {heston_returns.std() * np.sqrt(252):.3f}")
+print(f"  long-run level sqrt(theta): {np.sqrt(HESTON_THETA):.3f}")
 
 # %% [markdown]
 # ---
@@ -837,19 +935,16 @@ def simulate_garch(
 # the resulting moments with the calibrated values.
 
 # %%
-# Simulate using calibrated parameters
-garch_rng = np.random.default_rng(46)
 garch_log_returns_pct, garch_vol = simulate_garch(
-    n_steps=504,
+    n_steps=N_STEPS,
     mu=mu_fit,
     omega=omega_fit,
     alpha=alpha_fit,
     beta=beta_fit,
-    rng=garch_rng,
+    rng=stream("garch"),
 )
 
-# Convert to prices (from log returns in percent)
-garch_log_returns = garch_log_returns_pct / 100  # Convert to decimal log returns
+garch_log_returns = garch_log_returns_pct / 100
 garch_prices = 100 * np.exp(np.cumsum(np.insert(garch_log_returns, 0, 0)))
 
 print(f"GARCH simulation (calibrated to SPY): {len(garch_prices)} prices")
@@ -859,17 +954,35 @@ print(f"Excess kurtosis: {kurtosis(garch_log_returns, fisher=True, bias=False):.
 
 # %% [markdown]
 # ### Library Usage: GARCH
+#
+# The provider takes `garch_alpha` and `garch_beta` but **not** omega: it derives
+# omega from `annual_volatility` and the requested frequency, and a `garch_omega`
+# argument is accepted, ignored, and warned about. Passing the fitted omega
+# therefore does nothing, and the resulting series is calibrated to SPY in its
+# persistence but not in its level.
+#
+# To carry the calibration across, convert the fitted unconditional variance into
+# an annual volatility and pass that instead. Because `arch` is fitted on
+# returns in percent, the conversion divides by 100 before annualizing.
 
 # %%
+uncond_var_pct = omega_fit / (1 - alpha_fit - beta_fit)
+fitted_annual_vol = np.sqrt(uncond_var_pct) / 100 * np.sqrt(252)
+
 provider = SyntheticProvider(
     model="garch",
-    garch_omega=omega_fit,
+    annual_volatility=fitted_annual_vol,
     garch_alpha=alpha_fit,
     garch_beta=beta_fit,
-    seed=46,
+    seed=SEED,
 )
 df = provider.fetch_ohlcv("SYNTH", "2022-01-01", "2023-12-31", "daily")
-print(f"SyntheticProvider GARCH: {len(df)} bars, final close={float(df['close'][-1]):.2f}")
+provider_garch_returns = np.diff(np.log(df["close"].to_numpy()))
+
+print(f"SyntheticProvider garch: {len(df)} bars")
+print(f"  fitted unconditional annual volatility: {fitted_annual_vol:.3f}")
+print(f"  realized, provider:    {provider_garch_returns.std() * np.sqrt(252):.3f}")
+print(f"  realized, from scratch: {garch_log_returns.std() * np.sqrt(252):.3f}")
 
 # %% [markdown]
 # ---
@@ -917,11 +1030,16 @@ for idx, (name, prices) in enumerate(all_models.items()):
     )
 
 fig.update_layout(
-    title_text="Stochastic Models: Price Paths",
+    title_text="One simulated path per model, and the five overlaid",
     height=600,
     width=950,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Six panels: one simulated price path for each of GBM, jump-diffusion, "
+    "mean-reversion, Heston and GARCH, and a sixth panel overlaying all five "
+    "rebased to 100 at the start.",
+)
 
 # %% [markdown]
 # ### Normalized Price Paths (Grayscale-Compatible)
@@ -947,10 +1065,8 @@ LINE_STYLES = [
     },  # GARCH: long-dash-dot gray
 ]
 
-# Create wide-format figure (at least 2:1 aspect ratio). Build and style
-# in a SINGLE cell so the inline backend does not flush the figure mid-
-# construction with no title / labels / legend
-# (feedback_split_cell_figure_bug).
+# Built and styled in one cell so the inline backend cannot flush a
+# half-constructed figure.
 fig, ax = plt.subplots(figsize=(12, 4.5))
 
 # Plot each model normalized to 100
@@ -979,26 +1095,40 @@ ax.axhline(y=100, color="gray", linewidth=0.5, linestyle="-", alpha=0.4)
 # Despine (seaborn style)
 sns.despine(ax=ax)
 
-# Tight layout
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Five simulated price paths rebased to 100, drawn in distinct line styles "
+    "so they stay separable in grayscale, with a reference line at the starting "
+    "level of 100.",
+)
 
 # %% [markdown]
-# **Interpretation**: GBM produces the smoothest paths — a direct consequence of
-# continuous diffusion with constant volatility. Jump-diffusion adds sudden
-# discontinuities mimicking flash crashes or earnings surprises. Heston's
-# stochastic volatility creates volatility clustering: calm periods punctuated
-# by turbulent episodes. GARCH captures similar clustering in discrete time,
-# while mean-reversion pulls prices back toward equilibrium. The normalized
-# comparison (bottom right) shows models diverge most during high-volatility
-# regimes — precisely where model choice matters most for risk estimation.
+# These are five single realizations, one per model, and a picture of five
+# paths cannot separate a model's properties from the draw that produced them.
+# Two things it does show are structural rather than incidental: the
+# jump-diffusion panel contains discontinuities that no diffusion path can
+# produce, and the mean-reversion panel stays inside a band around its
+# equilibrium while the others wander. Everything else — which path looks
+# calmest, which drew the deepest drawdown — is a property of the draw. The
+# next section measures the model properties across many draws instead.
 
 # %% [markdown]
 # ## Model Statistics Comparison
 #
-# Compute standardized metrics across all parametric models to quantify how
-# each captures (or fails to capture) empirical stylized facts: fat tails
-# (excess kurtosis), asymmetry (skewness), and drawdown behavior.
+# Each model is simulated `N_PATHS` times so the comparison describes the
+# **model** rather than one path. The sample excess kurtosis of a Gaussian
+# series of length `N_STEPS` has a standard error of $\sqrt{24/T}$, which at
+# this path length is large relative to the gaps between several of these
+# models, so an ordering read off one path per model is mostly noise. The cell
+# below prints it alongside GBM's measured spread.
+#
+# The models are also **not** run at a common volatility: `GBM_SIGMA` and
+# $\sqrt{\texttt{HESTON\_THETA}}$ set one level, `MR_SIGMA` and `JD_SIGMA`
+# another, and GARCH inherits whatever the SPY fit implies. The volatility
+# column therefore reports the input, not a finding, and drawdown depth is not
+# comparable across rows for the same reason. Excess kurtosis and skewness are
+# the columns that describe the models, because no parameter sets them
+# directly.
 
 
 # %%
@@ -1015,9 +1145,114 @@ def compute_model_stats(prices: np.ndarray, name: str) -> dict:
     }
 
 
-stats_rows = [compute_model_stats(prices, name) for name, prices in all_models.items()]
-stats_df = pl.DataFrame(stats_rows)
-stats_df
+# %% [markdown]
+# ### Simulating a Population of Paths
+#
+# `simulate_path_population` re-runs each generator `N_PATHS` times from
+# independent child streams of the `model_paths` seed, so the paths are
+# independent of each other and of the illustrative paths plotted above.
+
+
+# %%
+def simulate_path_population(n_paths: int) -> dict[str, list[np.ndarray]]:
+    """Simulate *n_paths* independent price paths for each parametric model."""
+    seeds = _SEED_SEQUENCES["model_paths"].spawn(5)
+    draw = {
+        name: [np.random.default_rng(c) for c in seq.spawn(n_paths)]
+        for name, seq in zip(all_models, seeds, strict=True)
+    }
+
+    populations: dict[str, list[np.ndarray]] = {}
+    populations["GBM"] = [
+        simulate_gbm(n_steps=N_STEPS, mu=GBM_MU, sigma=GBM_SIGMA, rng=r) for r in draw["GBM"]
+    ]
+    populations["Jump-Diffusion"] = [
+        simulate_jump_diffusion(
+            n_steps=N_STEPS,
+            mu=JD_MU,
+            sigma=JD_SIGMA,
+            lambda_=JD_LAMBDA,
+            mu_jump=JD_MU_JUMP,
+            sigma_jump=JD_SIGMA_JUMP,
+            rng=r,
+        )
+        for r in draw["Jump-Diffusion"]
+    ]
+    populations["Mean-Reversion"] = [
+        simulate_mean_reversion_exact(
+            n_steps=N_STEPS,
+            kappa=MR_KAPPA,
+            theta=np.log(MR_EQUILIBRIUM),
+            sigma=MR_SIGMA,
+            rng=r,
+        )
+        for r in draw["Mean-Reversion"]
+    ]
+    populations["Heston"] = [
+        simulate_heston(
+            n_steps=N_STEPS,
+            mu=HESTON_MU,
+            v0=HESTON_THETA,
+            kappa=HESTON_KAPPA,
+            theta=HESTON_THETA,
+            xi=HESTON_XI,
+            rho=HESTON_RHO,
+            rng=r,
+        )[0]
+        for r in draw["Heston"]
+    ]
+    populations["GARCH"] = [
+        100
+        * np.exp(
+            np.cumsum(
+                np.insert(
+                    simulate_garch(
+                        n_steps=N_STEPS,
+                        mu=mu_fit,
+                        omega=omega_fit,
+                        alpha=alpha_fit,
+                        beta=beta_fit,
+                        rng=r,
+                    )[0]
+                    / 100,
+                    0,
+                    0,
+                )
+            )
+        )
+        for r in draw["GARCH"]
+    ]
+    return populations
+
+
+path_populations = simulate_path_population(N_PATHS)
+assert all(len(v) == N_PATHS for v in path_populations.values())
+
+stats_df = pl.DataFrame(
+    [compute_model_stats(path, name) for name, paths in path_populations.items() for path in paths]
+)
+
+
+def summarize(column: str) -> pl.DataFrame:
+    """Median and 5th-95th percentile range of *column* by model."""
+    return stats_df.group_by("model", maintain_order=True).agg(
+        pl.col(column).median().alias("median"),
+        pl.col(column).quantile(0.05).alias("p05"),
+        pl.col(column).quantile(0.95).alias("p95"),
+    )
+
+
+print(f"Gaussian excess-kurtosis standard error at T={N_STEPS}: {np.sqrt(24 / N_STEPS):.3f}")
+print("Volatility each model was parameterized at (annualized):")
+print(
+    f"  GBM {GBM_SIGMA:.2f}, Heston {np.sqrt(HESTON_THETA):.2f}, "
+    f"mean-reversion {MR_SIGMA:.2f}, jump-diffusion diffusion part {JD_SIGMA:.2f}"
+)
+
+print(f"\nExcess kurtosis across {N_PATHS} paths per model:")
+print(summarize("excess_kurtosis"))
+print(f"\nSkewness across {N_PATHS} paths per model:")
+print(summarize("skewness"))
 
 # %%
 # Return distribution comparison
@@ -1037,21 +1272,72 @@ for idx, (name, prices) in enumerate(all_models.items()):
     )
 
 fig.update_layout(
-    title="Return Distributions by Model (Log-Returns)",
+    title="Return distributions differ mainly in the tails",
     xaxis_title="Daily Log-Return",
     yaxis_title="Density",
     barmode="overlay",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Overlaid density histograms of daily log-returns from the five simulated "
+    "paths; the bodies largely coincide while the jump-diffusion series extends "
+    "furthest into the negative tail.",
+)
 
 # %% [markdown]
-# **Interpretation**: GBM returns are near-Gaussian by construction (zero excess
-# kurtosis). Jump-diffusion and GARCH produce the heaviest tails, closest to
-# the empirical leptokurtosis observed in real markets. Heston generates moderate
-# tail weight through its stochastic volatility channel. Mean-reversion shows a
-# compressed distribution due to its pull toward equilibrium. For risk management
-# (VaR, ES), models that understate kurtosis — like plain GBM — systematically
-# underestimate tail losses.
+# ### Which Models Separate
+#
+# Rather than reading an ordering off the medians, compare each model's excess
+# kurtosis against GBM's. GBM is the null here: its log-returns are Gaussian by
+# construction, so its spread over `N_PATHS` paths is the sampling noise of the
+# statistic at this path length, and a model separates only if its own spread
+# sits clear of that.
+
+# %%
+kurt_by_model = {
+    name: stats_df.filter(pl.col("model") == name)["excess_kurtosis"].to_numpy()
+    for name in path_populations
+}
+gbm_p95 = np.percentile(kurt_by_model["GBM"], 95)
+
+print(f"GBM excess kurtosis, 5th-95th percentile over {N_PATHS} paths: ")
+print(f"  [{np.percentile(kurt_by_model['GBM'], 5):.3f}, {gbm_p95:.3f}]")
+print("\nShare of paths above the GBM 95th percentile:")
+for name, values in kurt_by_model.items():
+    share = float((values > gbm_p95).mean())
+    print(f"  {name:15s} median {np.median(values):7.3f}   above GBM p95: {share:6.1%}")
+
+
+def dominance(a: str, b: str) -> float:
+    """Share of (a, b) path pairs in which *a* has the higher excess kurtosis."""
+    return float((kurt_by_model[a][:, None] > kurt_by_model[b][None, :]).mean())
+
+
+print("\nPairwise dominance, P(row path exceeds column path):")
+fat_tailed = ["Jump-Diffusion", "GARCH", "Heston"]
+for a in fat_tailed:
+    row = "  ".join(f"{dominance(a, b):.2f}" if a != b else "  - " for b in fat_tailed)
+    print(f"  {a:15s} {row}")
+
+# %% [markdown]
+# **What the comparison establishes.** Three models generate excess kurtosis and
+# they order the same way in every pairwise comparison: jump-diffusion above
+# GARCH above Heston. Jump-diffusion is the clearest, exceeding GBM's 95th
+# percentile on nearly every path, which is what an explicit jump component is
+# for. GARCH exceeds Heston on close to three quarters of path pairs, so the
+# ordering between those two is real even though their ranges overlap and a
+# single path from each would not have shown it.
+#
+# Mean-reversion is indistinguishable from GBM on kurtosis: it clears GBM's 95th
+# percentile at about the rate chance alone would produce. Its visibly narrower
+# price range comes from the lower volatility it was parameterized with and from
+# the pull toward equilibrium, neither of which is a tail property.
+#
+# For risk work: GBM and mean-reversion put no more weight in the tails than a
+# Gaussian, so VaR and ES computed from them understate tail loss by
+# construction. The magnitudes separating the other three are large enough to
+# matter — the jump model's median excess kurtosis is an order of magnitude
+# above the other two — so the choice among them is not a rounding difference.
 
 # %% [markdown]
 # ---
@@ -1091,7 +1377,7 @@ print(
 )
 
 # %% [markdown]
-# ## 3.1 IID Bootstrap
+# ## IID Bootstrap
 #
 # The simplest resampling method: draw individual returns **with replacement**.
 #
@@ -1141,9 +1427,12 @@ def iid_bootstrap(
     return data[indices]
 
 
-# Generate one bootstrap sample
-iid_rng = np.random.default_rng(50)
-iid_sample = iid_bootstrap(spy_log_returns, len(spy_log_returns), rng=iid_rng)
+# %% [markdown]
+# Draw one IID bootstrap sample the same length as the original series and
+# compare its moments with the original's.
+
+# %%
+iid_sample = iid_bootstrap(spy_log_returns, len(spy_log_returns), rng=stream("iid_bootstrap"))
 
 print("IID Bootstrap vs Original (log-returns):")
 print(f"  Mean: {iid_sample.mean():.6f} vs {spy_log_returns.mean():.6f}")
@@ -1154,12 +1443,12 @@ print(f"  Skew: {skew(iid_sample):.4f} vs {skew(spy_log_returns):.4f}")
 # ### Library Usage: IID Bootstrap
 
 # %%
-bs = IIDBootstrap(spy_log_returns, seed=50)
+bs = IIDBootstrap(spy_log_returns, seed=SEED)
 means = [data[0].mean() for data, _ in bs.bootstrap(100)]
 print(f"arch IIDBootstrap (100 samples): mean of means = {np.mean(means):.6f}")
 
 # %% [markdown]
-# ## 3.2 Block Bootstrap
+# ## Block Bootstrap
 #
 # Resample **contiguous blocks** of fixed length to preserve local dependence.
 #
@@ -1221,10 +1510,14 @@ def block_bootstrap(
     return np.array(result[:n_samples])
 
 
-# Generate block bootstrap sample (22-day blocks)
+# %% [markdown]
+# Use 22-day blocks, roughly one trading month.
+
+# %%
 block_size = 22
-block_rng = np.random.default_rng(51)
-block_sample = block_bootstrap(spy_log_returns, block_size, len(spy_log_returns), rng=block_rng)
+block_sample = block_bootstrap(
+    spy_log_returns, block_size, len(spy_log_returns), rng=stream("block_bootstrap")
+)
 
 print(f"Block Bootstrap (block_size={block_size}) vs Original:")
 print(f"  Mean: {block_sample.mean():.6f} vs {spy_log_returns.mean():.6f}")
@@ -1234,12 +1527,12 @@ print(f"  Std: {block_sample.std():.4f} vs {spy_log_returns.std():.4f}")
 # ### Library Usage: Block Bootstrap
 
 # %%
-bs = MovingBlockBootstrap(block_size, spy_log_returns, seed=51)
+bs = MovingBlockBootstrap(block_size, spy_log_returns, seed=SEED)
 means = [data[0].mean() for data, _ in bs.bootstrap(100)]
 print(f"arch MovingBlockBootstrap (100 samples): mean of means = {np.mean(means):.6f}")
 
 # %% [markdown]
-# ## 3.3 Stationary Bootstrap
+# ## Stationary Bootstrap
 #
 # Uses **random block lengths** from a geometric distribution, eliminating
 # artificial block boundaries.
@@ -1310,9 +1603,14 @@ def stationary_bootstrap(
     return np.array(result[:n_samples])
 
 
-# Generate stationary bootstrap sample
-stat_rng = np.random.default_rng(52)
-stat_sample = stationary_bootstrap(spy_log_returns, block_size, len(spy_log_returns), rng=stat_rng)
+# %% [markdown]
+# Use the same expected block length so the two block methods differ only in
+# whether the length is fixed or random.
+
+# %%
+stat_sample = stationary_bootstrap(
+    spy_log_returns, block_size, len(spy_log_returns), rng=stream("stationary_bootstrap")
+)
 
 print(f"Stationary Bootstrap (expected block={block_size}) vs Original:")
 print(f"  Mean: {stat_sample.mean():.6f} vs {spy_log_returns.mean():.6f}")
@@ -1322,7 +1620,7 @@ print(f"  Std: {stat_sample.std():.4f} vs {spy_log_returns.std():.4f}")
 # ### Library Usage: Stationary Bootstrap
 
 # %%
-bs = StationaryBootstrap(block_size, spy_log_returns, seed=52)
+bs = StationaryBootstrap(block_size, spy_log_returns, seed=SEED)
 means = [data[0].mean() for data, _ in bs.bootstrap(100)]
 print(f"arch StationaryBootstrap (100 samples): mean of means = {np.mean(means):.6f}")
 
@@ -1381,21 +1679,91 @@ for idx, (name, sample) in enumerate(bootstrap_samples.items()):
     )
 
 fig.update_layout(
-    title="ACF of Squared Returns: Bootstrap Method Comparison",
+    title="IID resampling removes volatility clustering; block methods keep it",
     xaxis_title="Lag (days)",
     yaxis_title="Autocorrelation",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Autocorrelation of squared returns against lag for the original SPY series "
+    "and three bootstrap resamples; the IID resample sits at zero across all "
+    "lags while the block and stationary resamples track the original.",
+)
+
+# %% [markdown]
+# ### How Much Dependence Each Method Retains
+#
+# The ACF curves above come from one resample each, and one resample cannot rank
+# two methods that differ only in whether the block length is fixed or random.
+# Summarize each resample by the sum of its squared-return autocorrelations over
+# the first `n_lags` lags, divided by the same sum for the original series, and
+# repeat it `N_BOOTSTRAP_REPLICATES` times per method. A value of one means the
+# resample carries as much volatility clustering as SPY; zero means none.
+
+# %%
+original_dependence = acf(spy_log_returns**2, nlags=n_lags, fft=True)[1:].sum()
+
+resamplers = {
+    "IID": lambda rng: iid_bootstrap(spy_log_returns, len(spy_log_returns), rng=rng),
+    "Block": lambda rng: block_bootstrap(
+        spy_log_returns, block_size, len(spy_log_returns), rng=rng
+    ),
+    "Stationary": lambda rng: stationary_bootstrap(
+        spy_log_returns, block_size, len(spy_log_returns), rng=rng
+    ),
+}
+
+method_seeds = dict(
+    zip(resamplers, _SEED_SEQUENCES["bootstrap_replicates"].spawn(len(resamplers)), strict=True)
+)
+
+retention = {}
+for method, resample in resamplers.items():
+    generators = [
+        np.random.default_rng(child) for child in method_seeds[method].spawn(N_BOOTSTRAP_REPLICATES)
+    ]
+    retention[method] = np.array(
+        [
+            acf(resample(rng) ** 2, nlags=n_lags, fft=True)[1:].sum() / original_dependence
+            for rng in generators
+        ]
+    )
+
+print(f"Dependence retained, {N_BOOTSTRAP_REPLICATES} replicates per method")
+print(f"(sum of ACF of squared returns over lags 1-{n_lags}, as a share of SPY's)")
+for method, values in retention.items():
+    print(
+        f"  {method:11s} median {np.median(values):6.3f}  "
+        f"[{np.percentile(values, 5):6.3f}, {np.percentile(values, 95):6.3f}]"
+    )
+
+stationary_beats_block = float(
+    (retention["Stationary"][:, None] > retention["Block"][None, :]).mean()
+)
+print(
+    f"\nP(a stationary replicate retains more than a block replicate) = "
+    f"{stationary_beats_block:.2f}"
+)
 
 # %% [markdown]
 # ### Bootstrap Key Takeaways
 #
-# 1. **IID Bootstrap**: Simple and fast, but **destroys** temporal dependence
-# 2. **Block Bootstrap**: Preserves autocorrelation **within** blocks, has boundary artifacts
-# 3. **Stationary Bootstrap**: Random blocks = **smoother** preservation of dependence
+# 1. **IID bootstrap** reproduces the marginal distribution — the same histogram,
+#    the same fat tails — and retains essentially none of the volatility
+#    clustering, which is what resampling one observation at a time implies.
+# 2. **Block and stationary bootstrap** both retain roughly two thirds of SPY's
+#    squared-return dependence at a 22-day block length. Neither recovers all of
+#    it: dependence that spans a block boundary is destroyed whatever the block
+#    length, and lengthening blocks to keep more of it leaves fewer distinct
+#    blocks to resample.
+# 3. **Random block lengths help, modestly.** The stationary bootstrap retains
+#    more than the moving block bootstrap in the majority of paired draws, but
+#    the two distributions overlap heavily, so the advantage shows up across
+#    replicates and is not something a single resample would establish.
 #
-# For financial returns with volatility clustering, prefer **Block** or
-# **Stationary** bootstrap. The ACF of squared returns shows preservation quality.
+# For financial returns with volatility clustering, either block method is a
+# reasonable default and the choice between them matters less than the block
+# length.
 
 # %% [markdown]
 # ---
@@ -1403,32 +1771,46 @@ fig.show()
 #
 # ## What Each Method Captures
 #
-# | Method | Fat Tails | Volatility Clustering | Beyond History |
-# |--------|----------|----------------------|----------------|
-# | GBM | No | No | Yes |
-# | Jump-Diffusion | Yes | No | Yes |
-# | Mean-Reversion | No | Negative autocorr | Yes |
-# | Heston | Yes | Yes | Yes |
-# | GARCH | Yes | Yes | Yes |
-# | IID Bootstrap | Yes | No | No |
-# | Block Bootstrap | Yes | Partial | No |
-# | Stationary Bootstrap | Yes | Yes | No |
+# Fat tails and volatility clustering are separate properties and are measured
+# separately above: excess kurtosis across `N_PATHS` paths for the parametric
+# models, retained squared-return autocorrelation across
+# `N_BOOTSTRAP_REPLICATES` replicates for the resamplers. "Beyond history" asks
+# whether the method can emit a value larger than any it was given.
+#
+# | Method | Excess kurtosis above Gaussian | Volatility clustering | Beyond history |
+# |--------|-------------------------------|-----------------------|----------------|
+# | GBM | No, by construction | None | Yes |
+# | Jump-Diffusion | Yes, and the only clear separation measured here | None; jumps are i.i.d. | Yes |
+# | Mean-Reversion | No | None; the dependence is negative autocorrelation in returns, not in squared returns | Yes |
+# | Heston | Yes, overlapping with GARCH | Yes, from mean-reverting variance | Yes |
+# | GARCH | Yes, overlapping with Heston | Yes, from the variance recursion | Yes |
+# | IID Bootstrap | Inherits the sample's | None retained | No |
+# | Block Bootstrap | Inherits the sample's | About two thirds retained | No |
+# | Stationary Bootstrap | Inherits the sample's | About two thirds retained, slightly more than fixed blocks | No |
 #
 # ## Key Takeaways
 #
-# 1. **Parametric models** (GBM, Jump-Diffusion, Heston, GARCH) can generate scenarios
-#    beyond historical experience but require choosing or calibrating parameters
-# 2. **Bootstrap methods** (IID, Block, Stationary) preserve the empirical distribution
-#    exactly but cannot produce extremes not seen in the original data
-# 3. **No classical model captures all stylized facts**: Heston and GARCH come closest
-#    with fat tails and volatility clustering, but miss higher-order dependencies
-# 4. **Drift compensation** (Jump-Diffusion) and **full truncation** (Heston) are
-#    critical implementation details that affect simulation correctness
-# 5. **GARCH calibration** via MLE bridges the gap between assumed and observed dynamics,
-#    producing more realistic volatility paths than fixed-parameter models
+# 1. **Parametric models** can emit values beyond anything in the historical
+#    sample, which is what makes them usable for stress scenarios, but every
+#    property they exhibit is one that was chosen or fitted.
+# 2. **Bootstrap methods** reproduce the empirical marginal distribution, fat
+#    tails included, without any distributional assumption, and cannot produce a
+#    return larger than the largest one observed.
+# 3. **No classical model here captures both stylized facts at a magnitude these
+#    runs can separate.** The jump model separates on tails and has no
+#    clustering; Heston and GARCH have clustering and excess kurtosis but their
+#    kurtosis ranges overlap each other across 200 paths.
+# 4. **Drift compensation** (jump-diffusion) and **full truncation** (Heston) are
+#    implementation details that change what is simulated, not stylistic choices;
+#    without the compensator the requested drift is not the realized drift, and
+#    without truncation the variance recursion can go negative.
+# 5. **Fitting GARCH by maximum likelihood** replaces two chosen numbers with two
+#    estimated ones, which is a different claim from producing more realistic
+#    paths: persistence comes from the data, the level still has to be carried
+#    across explicitly, as the library comparison above shows.
 #
 # **Next**: See [`01_timegan`](01_timegan.ipynb) for the first learned generative model, which uses
 # adversarial training to capture temporal dynamics that classical models miss.
 #
-# **Book**: Chapter 5, Section 5.2 covers the generative model taxonomy and explains
+# **Book**: Chapter 5, Section 5.4 covers the generative model taxonomy and explains
 # why learned models complement (rather than replace) classical simulation.
