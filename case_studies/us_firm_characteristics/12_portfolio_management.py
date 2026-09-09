@@ -53,7 +53,7 @@ from collections import Counter
 
 import polars as pl
 
-from case_studies.research import open_study
+from case_studies.research import open_study, reuse_disclosure
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
@@ -268,8 +268,8 @@ for top_k in TOP_K_VALUES:
 stage_total = len(load_existing_backtest_hashes(CASE_STUDY_ID, stage="allocation"))
 print(f"\nAllocation stage: {stage_total} backtests registered.")
 print(
-    f"This execution: {n_done - n_reused - n_failed} computed, {n_reused} reused, "
-    f"{n_failed} failed, over {n_done} cells attempted in "
+    f"This execution: {reuse_disclosure(n_done - n_reused - n_failed, n_reused, n_failed)}, "
+    f"over {n_done} cells attempted in "
     f"{(time.monotonic() - sweep_start) / 60:.1f} minutes."
 )
 for reason, count in failures.most_common():

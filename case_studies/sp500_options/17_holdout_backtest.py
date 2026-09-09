@@ -83,16 +83,16 @@ REGISTRY = CASE_DIR / "run_log" / "registry.db"
 # %% [markdown]
 # ## 1. The configuration, and the predictions it produced on the holdout
 #
-# The carrier is resolved the same way [`15_costs`](15_costs.ipynb) and
+# The selected configuration is resolved the same way [`15_costs`](15_costs.ipynb) and
 # [`16_holdout_predictions`](16_holdout_predictions.ipynb) resolve it, so all three run the
 # same configuration by construction rather than by a hash copied between them.
 #
-# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving
-# the holdout training specification reproduces the training identity 16 registered - the
-# derivation is deterministic and the identity covers it - so the prediction set is looked up
-# by that identity and the carrier's checkpoint. A search over holdout prediction sets would
-# have to guess which one belonged to this configuration, and this registry has held holdout
-# prediction sets that belonged to no refit at all.
+# Which holdout prediction set belongs to it is derived rather than searched for. Re-deriving the
+# holdout training specification reproduces the training identity 16 registered - the derivation is
+# deterministic and the identity covers it - so the prediction set is looked up by that identity
+# and the selected configuration's checkpoint. A search over holdout prediction sets would have to
+# guess which one belonged to this configuration, and this registry has held holdout prediction
+# sets that belonged to no refit at all.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
@@ -133,17 +133,17 @@ if match is None:
     )
 HOLDOUT_PREDICTION_HASH = match[0]
 
-print(f"Carrier:            {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
+print(f"Selected configuration: {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
 print(f"Holdout training:   {holdout_training_hash}")
 print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 
 # %% [markdown]
 # ## 2. The request, and what may run on the window
 #
-# The strategy is the carrier's own, read off its registered specification and re-pointed at
-# the holdout prediction set. `signal` carries the entry schedule, the liquid-universe filter
-# and the concentration; `allocation` carries the sizing. Neither is retyped here, so a
-# rebuilt sweep cannot leave this notebook running last quarter's strategy.
+# The strategy is the selected configuration's own, read off its registered specification and
+# re-pointed at the holdout prediction set. `signal` carries the entry schedule, the
+# liquid-universe filter and the concentration; `allocation` carries the sizing. Neither is retyped
+# here, so a rebuilt sweep cannot leave this notebook running last quarter's strategy.
 #
 # **The window carries one backtest.** 16's guard is on the model - the training identity and
 # the checkpoint - and it cannot see this one: a changed allocator, concentration or cost
@@ -239,10 +239,10 @@ print(f"Holdout backtest: {result.hash}")
 execution.catalog_rows
 
 # %% [markdown]
-# The registered run is read back rather than described from the request. The strategy view of
-# what was registered has to equal the carrier's, or this is a different strategy wearing the
-# carrier's name - the specification is rebuilt from `signal` and `allocation` here, and the
-# rebalance cadence and cost levels it fills in around them come from `setup.yaml`, so the
+# The registered run is read back rather than described from the request. The strategy view of what
+# was registered has to equal the selected configuration's, or this is a different strategy wearing
+# the configuration's name - the specification is rebuilt from `signal` and `allocation` here, and
+# the rebalance cadence and cost levels it fills in around them come from `setup.yaml`, so the
 # comparison is what establishes that they filled in the same way they did on validation.
 
 # %% tags=["results"]
@@ -254,15 +254,15 @@ if registered_stage != "holdout":
     raise RuntimeError(
         f"the holdout backtest registered under stage={registered_stage!r} rather than "
         "'holdout'; the split-based inference in registry.store._infer_stage did not take "
-        "precedence over this carrier's allocation block"
+        "precedence over this configuration's allocation block"
     )
 registered_strategy = strategy_view(json.loads(registered_spec_json))
 if registered_strategy != carrier_strategy:
     raise RuntimeError(
-        "the holdout backtest did not register the carrier's strategy. Carrier: "
+        "the holdout backtest did not register the selected configuration's strategy. Configuration: "
         f"{carrier_strategy}. Registered: {registered_strategy}."
     )
-print(f"stage={registered_stage}, strategy matches the carrier")
+print(f"stage={registered_stage}, strategy matches the selected configuration")
 print(f"Official population {HOLDOUT_POPULATION}: {execution.population.hash}")
 
 # %% [markdown]
@@ -272,7 +272,7 @@ print(f"Official population {HOLDOUT_POPULATION}: {execution.population.hash}")
 # them is not an estimate of decay. The validation figure is the maximum of a ranking over the
 # whole sweep, so it carries the selection; the holdout figure is one measurement over a single
 # year, so it carries that window's sampling error. Both push the pair apart on their own,
-# before any real change in the strategy's edge - and this carrier's validation Sharpe is
+# before any real change in the strategy's edge - and this configuration's validation Sharpe is
 # already negative, so what the holdout can confirm or disturb is a negative result rather than
 # a positive one.
 #
@@ -297,7 +297,7 @@ with sqlite3.connect(str(REGISTRY)) as conn:
         for backtest_hash in (carrier["val_backtest_hash"], result.hash)
     )
 
-# The carrier's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports the
+# The selected configuration's own registered Sharpe, not the resolver's. `resolve_solvent_carrier` reports the
 # common-support figure, which re-ranks candidates on the timestamps every one of them covers;
 # that is the right number for choosing between candidates and the wrong one to set beside a
 # holdout measured over its own full window. Both are printed, so neither has to be inferred
@@ -327,8 +327,8 @@ print(f"  the validation run re-ranked on common support: {carrier['val_sharpe']
 # optimistic by construction, and this notebook inherits that pool without correcting for it.
 # The deflation is [`18_strategy_analysis`](18_strategy_analysis.ipynb)'s.
 #
-# Re-running this notebook against the same carrier is free and idempotent - the backtest
-# identity is unchanged and the registered run is served back. A different carrier is refused,
+# Re-running this notebook against the same configuration is free and idempotent - the backtest
+# identity is unchanged and the registered run is served back. A different configuration is refused,
 # for the reason 16 gives.
 #
 # **Next:** [`18_strategy_analysis`](18_strategy_analysis.ipynb).

@@ -17,19 +17,19 @@
 # # S&P 500 Equity+Options: Strategy Assessment
 #
 # This notebook is the last of the sequence and it creates nothing. It traces one
-# primary-label carrier from the equal-weight baseline through position sizing,
+# primary-label configuration from the equal-weight baseline through position sizing,
 # fixed risk controls and cost sensitivity - the order those stages run in - and
 # then reads the holdout result that `18_holdout_predictions` and
 # `19_holdout_backtest` produced for the configuration that funnel selected.
 #
 # **Learning objectives**
 #
-# 1. Reconstruct the current carrier from configured, full-coverage registry
+# 1. Reconstruct the current configuration from configured, full-coverage registry
 #    rows rather than from the global maximum Sharpe.
 # 2. Read stage progression, cost survival, paired risk uncertainty, and
 #    selection adjustment as distinct diagnostics.
 # 3. Enforce one holdout use when methodology repairs change the validation
-#    carrier after the holdout has already been observed.
+#    configuration after the holdout has already been observed.
 # 4. Produce a publication assessment that distinguishes validation evidence
 #    from unresolved out-of-sample efficacy.
 #
@@ -116,7 +116,7 @@ set_global_seeds(SEED)
 print(f"Case study: {CASE_STUDY}; mode: registry read-only")
 
 # %% [markdown]
-# ## 1. Reconstruct the corrected carrier
+# ## 1. Reconstruct the corrected configuration
 #
 # The funnel advances the full-coverage baseline configurations `setup.yaml`
 # declares for the allocation stage on the primary label, filters allocation rows
@@ -215,7 +215,7 @@ if SELECTED.execution_tier != "canonical":
     raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is not canonical")
 
 # Every later comparison in this notebook is drawn from the frozen set rather than re-queried,
-# so the field the carrier is judged against is the field it was selected from. Sharpe lives in
+# so the field it is judged against is the field it was selected from. Sharpe lives in
 # `backtest_metrics` rather than on the run row, so it is joined here once.
 # `members` is a tuple of hashes, not of results, so each is opened once here.
 _member_hashes = list(FIELD_HASHES)
@@ -250,7 +250,7 @@ if candidate_frame.filter(pl.col("sharpe").is_null()).height:
 strategy_carrier = candidate_frame.filter(pl.col("backtest_hash") == SELECTED.hash).row(
     0, named=True
 )
-# The equal-weight rows inside the frozen set, which is where the carrier's starting point comes
+# The equal-weight rows inside the frozen set, which is where the selected configuration's starting point comes
 # from. Drawing it from the set rather than re-querying keeps baseline and lineage under one
 # eligibility rule - the one the set was frozen under.
 baseline_pool = candidate_frame.filter(
@@ -303,7 +303,7 @@ def canonical_daily_returns(backtest_hash: str) -> pl.DataFrame | None:
 registered_predictions = read_predictions(CASE_STUDY, strategy_carrier["prediction_hash"])
 carrier_predictions = to_canonical_window(registered_predictions)
 if carrier_predictions.is_empty():
-    raise RuntimeError("The strategy carrier has no decisions in the canonical validation window")
+    raise RuntimeError("The selected strategy has no decisions in the canonical validation window")
 latest_decision = carrier_predictions["timestamp"].max()
 latest_decision_date = (
     latest_decision.date() if hasattr(latest_decision, "date") else latest_decision
@@ -312,25 +312,25 @@ registered_returns = load_daily_returns_with_timestamp(
     CASE_STUDY, strategy_carrier["backtest_hash"]
 )
 if registered_returns is None:
-    raise RuntimeError("The strategy carrier has no registered daily-return artifact")
+    raise RuntimeError("The selected strategy has no registered daily-return artifact")
 carrier_returns = to_canonical_window(registered_returns)
 # Measured on the UNSEALED frame. Sealing first makes the comparison one-sided: the
 # min/max of an already-trimmed frame can only fall short of the window, never past
 # it, so a registered artifact that overruns the seal reads as a clean match.
 registered_dates = registered_returns["timestamp"].cast(pl.Date)
 if registered_dates.is_empty():
-    raise RuntimeError("The strategy carrier's registered daily-return artifact is empty")
+    raise RuntimeError("The selected strategy's registered daily-return artifact is empty")
 registered_window = (registered_dates.min(), registered_dates.max())
 if registered_window[0] > validation_window[0] or registered_window[1] < validation_window[1]:
     raise RuntimeError(
-        "The registered strategy carrier does not cover the canonical validation window: "
+        "The registered selected strategy does not cover the canonical validation window: "
         f"registered={registered_window}, canonical={validation_window}"
     )
 dropped = len(registered_predictions) - len(carrier_predictions)
 dropped_returns = len(registered_returns) - len(carrier_returns)
 print(
     f"Canonical validation window: {validation_window[0]} to {validation_window[1]}; "
-    f"carrier latest decision: {latest_decision_date}; "
+    f"configuration latest decision: {latest_decision_date}; "
     f"decisions dropped past the window: {dropped}; "
     f"return days dropped past the window: {dropped_returns}"
 )
@@ -338,9 +338,9 @@ print(
 # %%
 fixed_controls = get_position_risk_controls(CASE_STUDY)
 risk_plans = []
-# The carrier is drawn from a pool that now includes the risk overlays, so it may already carry
+# The selected configuration is drawn from a pool that now includes the risk overlays, so it may already carry
 # one. Every comparison below is against the strategy the overlay was laid over, not against the
-# overlay itself: on an overlaid carrier, reusing it as its own baseline reports a paired
+# overlay itself: on an overlaid configuration, reusing it as its own baseline reports a paired
 # improvement of exactly zero and silently drops the allocation-only figure the reader is shown.
 #
 # The parent is found in the frozen set rather than reconstructed by stripping the risk block.
@@ -353,7 +353,7 @@ CARRIER_SPEC = json.loads(strategy_carrier["spec_json"])
 
 
 def _un_overlaid_parents(frame: pl.DataFrame) -> pl.DataFrame:
-    """Rows in ``frame`` that are this carrier's strategy without the overlay."""
+    """Rows in ``frame`` that are this configuration's strategy without the overlay."""
     return frame.filter(
         (pl.col("prediction_hash") == strategy_carrier["prediction_hash"])
         & (pl.col("allocator") == strategy_carrier["allocator"])
@@ -363,7 +363,7 @@ def _un_overlaid_parents(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 # The field first, because a parent that competed is the right comparison. But the parent is a
-# fact about the carrier rather than about the field - 16_risk_management laid this overlay over
+# fact about the selected configuration rather than about the field - 16_risk_management laid this overlay over
 # it - so where the field does not carry it, the registry is asked directly. The two differ
 # whenever the field is narrower than the registry: a reduced sweep registers the overlay and
 # leaves its un-overlaid sibling outside the eligible set, and requiring field membership would
@@ -400,7 +400,7 @@ if no_overlay_rows.height != 1:
     PARENT_SOURCE = "the registry, outside the eligible field"
 if no_overlay_rows.height != 1:
     raise RuntimeError(
-        f"the carrier {strategy_carrier['backtest_hash']} has {no_overlay_rows.height} "
+        f"the selected configuration {strategy_carrier['backtest_hash']} has {no_overlay_rows.height} "
         "un-overlaid parents, not one, in the frozen field or in the registry, so its overlay "
         "cannot be scored against the strategy it was laid over"
     )
@@ -408,17 +408,17 @@ NO_OVERLAY = no_overlay_rows.row(0, named=True)
 NO_OVERLAY_HASH = NO_OVERLAY["backtest_hash"]
 if strategy_carrier["risk"] is None and strategy_carrier["backtest_hash"] != NO_OVERLAY_HASH:
     raise RuntimeError(
-        "the carrier declares no overlay, so it must be its own un-overlaid parent; got "
+        "the selected configuration declares no overlay, so it must be its own un-overlaid parent; got "
         f"{NO_OVERLAY_HASH} against {strategy_carrier['backtest_hash']}"
     )
 print(
     f"Un-overlaid parent {NO_OVERLAY_HASH} from {PARENT_SOURCE} "
     f"at validation Sharpe {NO_OVERLAY['sharpe']:.3f}"
     + (
-        f"; the carrier adds {strategy_carrier['risk']} for "
+        f"; the selected configuration adds {strategy_carrier['risk']} for "
         f"{strategy_carrier['sharpe'] - NO_OVERLAY['sharpe']:+.3f}"
         if strategy_carrier["risk"]
-        else " (the carrier itself - no overlay was selected)"
+        else " (the selected configuration itself - no overlay was chosen)"
     )
 )
 
@@ -426,7 +426,7 @@ print(
 # notebook reproduces their identities rather than recomputing them.
 #
 # `risk_base` is the un-overlaid parent: `16_risk_management` laid each control over that, so a
-# variant differs from it in the position rule and nothing else. `cost_base` is the carrier
+# variant differs from it in the position rule and nothing else. `cost_base` is the selected configuration
 # itself: `17_costs` stresses whatever survived the risk stage, overlay included. Planning both
 # from one spec reproduces neither set of hashes.
 risk_base = json.loads(NO_OVERLAY["spec_json"])
@@ -449,7 +449,7 @@ if (
     or stops["trail_stop_timing"] != "lagged"
 ):
     raise RuntimeError(
-        "Carrier execution or stop timing permits same-bar information use, or its cadence "
+        "Selected-configuration execution or stop timing permits same-bar information use, or its cadence "
         f"{metadata['cadence']!r} is not the {EXPECTED_CADENCE!r} that {LABEL} declares"
     )
 for control in fixed_controls:
@@ -513,20 +513,20 @@ with sqlite3.connect(REGISTRY_DB) as db:
 _unplanned = _registered - _planned
 if _unplanned:
     raise RuntimeError(
-        f"{len(_unplanned)} risk-overlay row(s) on carrier "
+        f"{len(_unplanned)} risk-overlay row(s) on configuration "
         f"{strategy_carrier['prediction_hash']} are not among the declared controls: "
         + ", ".join(sorted(_unplanned)[:5])
         + ". A rule that is not declared in config/setup.yaml cannot enter this surface."
     )
 if risk_surface.is_empty():
     raise RuntimeError(
-        f"no declared risk control is registered for carrier "
+        f"no declared risk control is registered for configuration "
         f"{strategy_carrier['prediction_hash']}, so there is no risk surface to report"
     )
 if len(risk_surface) != len(risk_plans):
     print(
         f"{len(risk_surface)} of {len(risk_plans)} declared risk controls are registered for "
-        "this carrier; the surface below covers those and says nothing about the rest"
+        "this configuration; the surface below covers those and says nothing about the rest"
     )
 if risk_surface.filter(pl.col("stage") != "risk_overlay").height:
     raise RuntimeError("A corrected risk hash has the wrong registry stage")
@@ -552,7 +552,7 @@ carrier_baselines = baseline_pool.filter(
 )
 # The equal-weight starting point is the first step of the funnel, and it is a fact about the
 # run rather than about the configuration: 14_backtest registers a baseline per prediction and
-# entry scheme it actually swept, and a reduced sweep registers fewer. Where this carrier's
+# entry scheme it actually swept, and a reduced sweep registers fewer. Where this configuration's
 # prediction has none, the funnel starts at the allocation step instead - which is the truth
 # about what was measured, and better than refusing to report the rest of the page over a step
 # that was never run.
@@ -563,13 +563,13 @@ baseline_row = (
 )
 if baseline_row is None:
     print(
-        f"No equal-weight baseline was registered for carrier prediction "
+        f"No equal-weight baseline was registered for selected prediction "
         f"{strategy_carrier['prediction_hash']}, so the funnel below starts at the allocation "
         "step and no equal-weight comparison is shown"
     )
 
 # %% [markdown]
-# The visible carrier path retains the equal-weight starting point, the
+# The visible configuration path retains the equal-weight starting point, the
 # highest-Sharpe pre-risk strategy, and the risk decision only when it improves
 # validation.
 
@@ -585,7 +585,7 @@ carrier_rows = (
     if baseline_row is not None
     else []
 )
-# The allocation step is the un-overlaid parent. Where the carrier is itself an overlay the two
+# The allocation step is the un-overlaid parent. Where the selected configuration is itself an overlay the two
 # differ, and naming the overlay here would show the allocation step already carrying the risk
 # rule's effect and then show the risk step adding nothing.
 if baseline_row is None or baseline_row["backtest_hash"] != NO_OVERLAY_HASH:
@@ -631,7 +631,7 @@ with sqlite3.connect(REGISTRY_DB) as db:
     ).fetchone()
 if carrier_identity is None:
     msg = (
-        f"No validation training_runs row for carrier prediction "
+        f"No validation training_runs row for selected prediction "
         f"{strategy_carrier['prediction_hash']}. The registry is missing the "
         f"training run this prediction was registered under."
     )
@@ -639,7 +639,7 @@ if carrier_identity is None:
 carrier_family, carrier_config = carrier_identity
 
 print(
-    f"Carrier: prediction={strategy_carrier['prediction_hash']}; "
+    f"Selected configuration: prediction={strategy_carrier['prediction_hash']}; "
     f"model={carrier_family}/{carrier_config}; "
     f"allocator={strategy_carrier['allocator']}; top_k={strategy_carrier['top_k']}; "
     f"risk={risk_leader['risk_name']}"
@@ -656,7 +656,7 @@ print(
 carrier
 
 # %% [markdown]
-# The printout above names the corrected primary-label carrier and its Sharpe
+# The printout above names the corrected primary-label configuration and its Sharpe
 # at each stage of the funnel. Read the model, allocator, and risk rule from
 # that line rather than from a fixed description here: eligibility is measured
 # against the canonical window, so what advances is whatever the corrected filter
@@ -712,10 +712,10 @@ fig_stage.show()
 # %% [markdown]
 # ## 2. Cost survival on the strategy the case study selected
 #
-# The cost surface is measured on the carrier itself - the risk overlay included, where one was
-# selected - because that is the strategy `17_costs` stresses and the one this case study would
-# publish. Measuring it on the un-overlaid parent instead would report the friction of a
-# strategy nobody is proposing to trade.
+# The cost surface is measured on the selected configuration itself - the risk overlay included,
+# where one was selected - because that is the strategy `17_costs` stresses and the one this case
+# study would publish. Measuring it on the un-overlaid parent instead would report the friction of
+# a strategy nobody is proposing to trade.
 #
 # Exact planned hashes keep alternate lineages and removed allocators out of the curve.
 
@@ -737,7 +737,7 @@ for cost_bps in get_cost_grid_bps(CASE_STUDY):
     )
 
 # %% [markdown]
-# The per-share companion uses the same carrier and changes only the cost
+# The per-share companion uses the same configuration and changes only the cost
 # convention.
 
 # %%
@@ -787,19 +787,19 @@ with sqlite3.connect(REGISTRY_DB) as db:
 _unplanned_costs = _registered_costs - _planned_costs
 if _unplanned_costs:
     raise RuntimeError(
-        f"{len(_unplanned_costs)} cost row(s) on carrier "
+        f"{len(_unplanned_costs)} cost row(s) on configuration "
         f"{strategy_carrier['prediction_hash']} are not on the declared cost grid: "
         + ", ".join(sorted(_unplanned_costs)[:5])
     )
 if cost_surface.is_empty():
     raise RuntimeError(
-        f"no declared cost level is registered for carrier "
+        f"no declared cost level is registered for configuration "
         f"{strategy_carrier['prediction_hash']}, so there is no cost surface to report"
     )
 if len(cost_surface) != len(cost_plans):
     print(
         f"{len(cost_surface)} of {len(cost_plans)} declared cost levels are registered for this "
-        "carrier; the surface below covers those and says nothing about the rest"
+        "configuration; the surface below covers those and says nothing about the rest"
     )
 if cost_surface.filter(pl.col("stage") != "cost_sensitivity").height:
     raise RuntimeError("A corrected cost hash has the wrong registry stage")
@@ -882,13 +882,13 @@ print(
 # model and allocation search, so it is a lower bound on the total search cost.
 
 # %%
-# The un-overlaid parent, not the carrier. On an overlaid carrier the two are different rows,
-# and using the carrier here would compare the winning overlay with itself and report a paired
+# The un-overlaid parent, not the selected configuration. On an overlaid configuration the two are different rows,
+# and using the selected configuration here would compare the winning overlay with itself and report a paired
 # difference of exactly zero.
 baseline_returns = canonical_daily_returns(NO_OVERLAY_HASH)
 leader_returns = canonical_daily_returns(risk_leader["backtest_hash"])
 if baseline_returns is None or leader_returns is None:
-    raise RuntimeError("Missing daily returns for the corrected carrier")
+    raise RuntimeError("Missing daily returns for the corrected configuration")
 aligned = (
     baseline_returns.rename({"ret": "baseline_ret"})
     .join(leader_returns.rename({"ret": "challenger_ret"}), on="timestamp", how="inner")
@@ -897,8 +897,8 @@ aligned = (
 if aligned.is_empty():
     raise RuntimeError("The overlay and its baseline are flat across the canonical window")
 # `challenger_overlays_baseline` says what a flat session on the challenger means, and here
-# the challenger is a risk overlay running on top of this exact carrier. Both are live from
-# the carrier's first traded session, so a session the overlay sits out is a position it
+# the challenger is a risk overlay running on top of this exact configuration. Both are live from
+# the selected configuration's first traded session, so a session the overlay sits out is a position it
 # chose to hold and belongs in the comparison - it is the effect being measured. The default
 # is for two independent series, where the challenger's leading zeros are a warmup before its
 # first signal, and applying it here would delete the overlay's largest effect and pull
@@ -916,7 +916,7 @@ paired_risk = compute_paired_uncertainty(
 
 # %% [markdown]
 # Selection adjustment uses only the predeclared risk overlays and keeps
-# the no-overlay carrier as the economic benchmark.
+# the no-overlay configuration as the economic benchmark.
 
 # %%
 returns_by_hash = {
@@ -941,7 +941,7 @@ if (
     risk_leader["risk_type"] != "none"
     and risk_cohort.get("leader_hash") != risk_leader["backtest_hash"]
 ):
-    raise RuntimeError("Risk cohort leader does not match the corrected carrier")
+    raise RuntimeError("Risk cohort leader does not match the corrected configuration")
 
 # %%
 risk_diagnostics = pl.DataFrame(
@@ -976,16 +976,15 @@ risk_diagnostics
 # `19_holdout_backtest`, on the configuration this funnel selected. This section reads
 # that result; it does not create one, and it applies no gate to it.
 #
-# There is deliberately no seal here, and an earlier version of this notebook had an
-# elaborate one - a research lock, a four-state ordering check on when the fit ran against
-# when the lock was taken, a field-by-field identity diff between the sealed and published
-# fits, and a `holdout_evaluations` lineage read. All of it existed to make the holdout
-# unrepeatable and to adjudicate what to do when the carrier changed underneath it. The
-# holdout is repeatable: if it is run on the wrong configuration, it is run again on the
-# right one. Machinery whose purpose is to prevent that is machinery whose purpose is to
-# preserve a stale answer, so it is gone rather than parked. What replaces it is a count: the
-# earlier rows stay, and a window carrying more than one holdout fit is reported as one that
-# has been read more than once.
+# There is deliberately no seal here, and an earlier version of this notebook had an elaborate one
+# - a research lock, a four-state ordering check on when the fit ran against when the lock was
+# taken, a field-by-field identity diff between the sealed and published fits, and a
+# `holdout_evaluations` lineage read. All of it existed to make the holdout unrepeatable and to
+# adjudicate what to do when the selected configuration changed underneath it. The holdout is
+# repeatable: if it is run on the wrong configuration, it is run again on the right one. Machinery
+# whose purpose is to prevent that is machinery whose purpose is to preserve a stale answer, so it
+# is gone rather than parked. What replaces it is a count: the earlier rows stay, and a window
+# carrying more than one holdout fit is reported as one that has been read more than once.
 #
 # What remains worth checking is not whether the holdout was allowed to run, but whether the
 # rows on disk describe the configuration this funnel actually selected. That is one join
@@ -1012,10 +1011,10 @@ with sqlite3.connect(REGISTRY_DB) as db:
     ).fetchall()
 
 # %% [markdown]
-# The carrier's holdout fit is a *different training run* from its validation fit, always and
-# by construction: the cross-validation geometry is part of the training identity, and the
-# holdout fold is not the validation folds. So a holdout row cannot be matched to the carrier
-# by training hash.
+# The selected configuration's holdout fit is a *different training run* from its validation fit,
+# always and by construction: the cross-validation geometry is part of the training identity, and
+# the holdout fold is not the validation folds. So a holdout row cannot be matched to the selected
+# configuration by training hash.
 #
 # Five things have to agree instead, and the model name is only one of them.
 #
@@ -1030,8 +1029,8 @@ with sqlite3.connect(REGISTRY_DB) as db:
 #   says the same portfolio was built from those predictions, which is what
 #   [`19_holdout_backtest`](19_holdout_backtest.ipynb) runs.
 #
-# Matching on the model alone would accept a holdout row for this model under some other
-# allocator, or against a stale artifact, and report either as the carrier's own out-of-sample
+# Matching on the model alone would accept a holdout row for this model under some other allocator,
+# or against a stale artifact, and report either as the selected configuration's own out-of-sample
 # result.
 
 # %%
@@ -1045,7 +1044,9 @@ with sqlite3.connect(REGISTRY_DB) as db:
         (strategy_carrier["prediction_hash"],),
     ).fetchone()
 if carrier_source is None or carrier_checkpoint is None:
-    raise RuntimeError(f"the carrier lineage {carrier_training_hash} is not in this registry")
+    raise RuntimeError(
+        f"the selected configuration lineage {carrier_training_hash} is not in this registry"
+    )
 
 
 def _without(value, path: tuple[str, ...]):
@@ -1062,7 +1063,7 @@ def _without(value, path: tuple[str, ...]):
 
 # The whole backtest specification, not the strategy block. `strategy_view` returns signal,
 # allocation and risk and stops there, so a comparison built on it accepts a holdout run at
-# different commissions, slippage, fill timing or stop behaviour as the carrier's own result -
+# different commissions, slippage, fill timing or stop behaviour as the selected configuration's own result -
 # and those are exactly the settings a holdout has to hold fixed for its number to be comparable.
 # What legitimately differs between the two runs is the predictions it consumed and the price
 # panel it was sliced to, so only those are projected out.
@@ -1085,7 +1086,7 @@ CARRIER_BACKTEST = _comparable_backtest(json.loads(strategy_carrier["spec_json"]
 CARRIER_TRAINING_SPEC = json.loads(carrier_source[3])
 
 
-# The identity the carrier's configuration *should* have on the holdout, derived rather than
+# The identity the selected configuration's configuration *should* have on the holdout, derived rather than
 # approximated by comparing fields. `build_holdout_training_spec` is the same derivation
 # 18_holdout_predictions fits and 19_holdout_backtest checks, so every boundary is inside the
 # hash - the label buffer, the feature floor that bounds the training start, the fold identifier
@@ -1099,10 +1100,10 @@ OBSERVATIONS = (
     .to_list()
 )
 # The derivation needs a CURRENT resolved training specification - it re-keys the resolver's
-# per-fold fields onto the holdout fold - so a carrier fitted before that schema cannot be
+# per-fold fields onto the holdout fold - so a selected configuration fitted before that schema cannot be
 # matched this way. Where it can be derived it is the strongest available check and is used;
 # where it cannot, the weaker structural match runs and the notebook says which one answered,
-# because "this is the carrier's holdout" and "this is a holdout of the same configuration" are
+# because "this is the selected configuration's holdout" and "this is a holdout of the same configuration" are
 # different claims and the reader is entitled to know which is being made.
 try:
     EXPECTED_HOLDOUT_TRAINING = training_hash_from_spec(
@@ -1115,13 +1116,13 @@ except (ValueError, KeyError, NotImplementedError) as exc:
     EXPECTED_HOLDOUT_TRAINING = None
     HOLDOUT_MATCH_BASIS = (
         f"family, configuration, label, checkpoint and strategy - the holdout identity could "
-        f"not be derived from this carrier's training specification ({exc})"
+        f"not be derived from this configuration's training specification ({exc})"
     )
-print(f"Holdout rows are matched to the carrier by {HOLDOUT_MATCH_BASIS}")
+print(f"Holdout rows are matched to the selected configuration by {HOLDOUT_MATCH_BASIS}")
 
 
 def is_this_carriers_holdout(row) -> bool:
-    """The carrier's own configuration, refitted for the holdout, at the selected checkpoint.
+    """The selected configuration itself, refitted for the holdout, at the selected checkpoint.
 
     The training identity does most of the work when it can be derived: a fit over different
     dates, at a different seed, in a different tier, or against a retired feature artifact is a
@@ -1148,7 +1149,7 @@ def is_this_carriers_holdout(row) -> bool:
 matching = [r for r in holdout_rows if is_this_carriers_holdout(r)]
 if len(matching) > 1:
     raise RuntimeError(
-        f"{len(matching)} holdout rows match this carrier: "
+        f"{len(matching)} holdout rows match this configuration: "
         + ", ".join(r[0] for r in matching)
         + ". Two holdout results for one configuration cannot both be the out-of-sample "
         "evidence for it, and this notebook will not pick between them. Both rows stay in the "
@@ -1173,7 +1174,7 @@ with sqlite3.connect(REGISTRY_DB) as db:
             (carrier_source[2],),
         )
     }
-print(f"Carrier: {carrier_source[0]}/{carrier_source[1]} on {carrier_source[2]}")
+print(f"Selected configuration: {carrier_source[0]}/{carrier_source[1]} on {carrier_source[2]}")
 if len(WINDOW_READS) > 1:
     print(
         f"The 2021 window carries {len(WINDOW_READS)} holdout training identities "
@@ -1181,7 +1182,9 @@ if len(WINDOW_READS) > 1:
         "configuration. Whichever of them this page reports, it is not a first read of an "
         "unseen window, and the out-of-sample claim below has to be discounted accordingly."
     )
-print(f"Holdout rows in the registry: {len(holdout_rows)}; matching this carrier: {len(matching)}")
+print(
+    f"Holdout rows in the registry: {len(holdout_rows)}; matching this configuration: {len(matching)}"
+)
 if holdout_result is None:
     print(
         "No holdout backtest for this configuration. Run 18_holdout_predictions and "
@@ -1244,7 +1247,7 @@ stress = bps.sort("cost_value").row(len(bps) - 1, named=True)
 assessment = pl.DataFrame(
     [
         {
-            "gate": "Corrected validation carrier",
+            "gate": "Corrected validation configuration",
             "status": "PASS",
             "evidence": (
                 f"{carrier_family}/{carrier_config} / {strategy_carrier['allocator']} / "
@@ -1316,7 +1319,7 @@ assessment
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. The corrected v3.1 validation carrier is the model, allocator, top-k, and
+# 1. The corrected v3.1 validation configuration is the model, allocator, top-k, and
 #    risk rule named in the assessment table above. Eligibility is decided by
 #    coverage of the canonical validation window, so a checkpoint whose extra
 #    decision dates fall outside that window earns no advantage.
