@@ -477,26 +477,46 @@ if KEY_SIGNAL in AVAILABLE_SIGNALS:
 # ### Why the buckets are not the same size
 #
 # Five buckets cut at fixed rank percentiles should hold roughly equal numbers, and these do
-# not. The cause is ties. `rank(method="average")` gives every observation sharing a value
-# the same rank, so a signal that is exactly zero on most days - which a news-derived signal
-# is, whenever there is no news for that ticker - puts a large block of observations at one
-# percentile, and the whole block lands in whichever bucket that percentile falls into.
+# not. Two things can produce that, and they call for different readings:
 #
-# That matters for how the bar chart can be read. The buckets are not equal-sized extremes of
-# the signal, and a comparison between the first and the last is between groups of different
-# size and different composition, not between the bottom fifth and the top fifth. The
-# diagnostic below is what to check before reading any quantile sort.
+# - **Ties.** `rank(method="average")` gives every observation sharing a value the same rank,
+#   so a block of tied observations lands at one percentile and goes into one bucket whole.
+#   `weighted_surprise` is a surprise multiplied by the *sign* of sentiment, so it is exactly
+#   zero whenever sentiment is exactly zero, and a discrete surprise measure repeats values on
+#   its own.
+# - **Small cross-sections.** A date with a handful of covered tickers cannot be split into
+#   five equal parts at all, and the rounding goes the same way on every such date.
+#
+# The diagnostic below reports both per date, because the ranking happens per date and a
+# pooled count over all dates would answer a different question. Whichever dominates, the
+# consequence for the chart is the same: the first and last buckets are not the bottom and
+# top fifths of the signal, and comparing them compares groups of different size and
+# composition.
 
 # %%
 if KEY_SIGNAL in AVAILABLE_SIGNALS:
-    signal_values = d[KEY_SIGNAL]
-    modal_share = signal_values.value_counts().sort("count", descending=True)["count"][0] / len(
-        signal_values
+    per_date = (
+        d.group_by("timestamp")
+        .agg(
+            [
+                pl.len().alias("n"),
+                pl.col(KEY_SIGNAL).n_unique().alias("distinct"),
+            ]
+        )
+        .with_columns((1 - pl.col("distinct") / pl.col("n")).alias("tied_share"))
     )
-    print(f"Observations sharing the single most common {KEY_SIGNAL} value: {modal_share:.1%}")
+
+    print(f"Dates evaluated: {len(per_date):,}")
     print(
-        f"Distinct values across {len(signal_values):,} observations: {signal_values.n_unique():,}"
+        "Cross-section size per date: "
+        f"min {per_date['n'].min()}, median {per_date['n'].median():.0f}, "
+        f"max {per_date['n'].max()}"
     )
+    print(
+        "Share of a date's observations that share a value with another: "
+        f"median {per_date['tied_share'].median():.1%}, max {per_date['tied_share'].max():.1%}"
+    )
+    print(f"Dates with at least one tie: {(per_date['tied_share'] > 0).mean():.1%}")
     print(
         "Bucket sizes: "
         + str(
@@ -591,14 +611,20 @@ if daily_ls_rows:
 # 2. **The quintile sort does not confirm the direction the signals were built to express.**
 #    The bucket the construction calls bullish does not earn more than the bucket it calls
 #    bearish, and the pattern across buckets is not monotone in either direction.
-# 3. **Check for ties before reading a quantile sort at all.** A news-derived signal is
-#    exactly zero whenever there is no news, so a large block of observations shares one
-#    value, average ranking puts the whole block at one percentile, and the buckets come out
-#    unequal in size and mixed in composition. The extremes then are not the extremes.
-# 4. **Compute one coefficient per date and average those.** The unit of observation is the
-#    date, so each session contributes one number and the t-statistic counts sessions. This
-#    keeps a persistent cross-sectional tilt out of the accuracy measure and keeps
-#    overlapping-return autocorrelation out of the standard error.
+# 3. **Check the bucket sizes before reading a quantile sort at all.** Equal-percentile cuts
+#    do not produce equal buckets when values repeat or when a date has too few names to
+#    split five ways, and both are ordinary in a signal derived from news coverage. When the
+#    buckets come out unequal, the extremes are not the bottom and top fifths and the
+#    comparison between them is between groups of different size and composition.
+# 4. **Compute one coefficient per date and average those.** The unit of observation becomes
+#    the date, so a persistent cross-sectional tilt cannot masquerade as predictive accuracy
+#    the way it can when observations are pooled across dates.
+#    It does not fix the standard error. The t-statistics here are the plain
+#    `std / sqrt(n)` over the daily series, and at the five- and twenty-day horizons adjacent
+#    dates read overlapping returns, so those daily coefficients are serially correlated and
+#    the interval is narrower than it should be. Nothing in this notebook turns on that,
+#    because none of the signals is near a threshold - but a signal that was would need a
+#    Newey-West or a block bootstrap before the t-statistic could be quoted.
 # 5. **A negative result is a result, and it is what this evaluation is for.** The pipeline
 #    that produced these features works; what it produces has no measurable edge here. The
 #    order to run these in is construction, then evaluation, then a decision - not a decision
