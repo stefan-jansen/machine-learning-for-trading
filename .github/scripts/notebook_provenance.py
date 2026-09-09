@@ -681,6 +681,30 @@ def _percent_cells(src: str) -> list[tuple[str, str, str]]:
     return [(m, k, "".join(b)) for m, k, b in cells]
 
 
+def _code_bodies(src: str) -> list[str]:
+    """Code-cell bodies of *src*, aligned one-to-one with a notebook's code cells.
+
+    ``_percent_cells`` always emits a leading entry for whatever precedes the first
+    ``# %%`` marker - in a jupytext percent file that is the YAML header comment - and
+    labels it ``code`` because no marker said otherwise. It is not a cell and the notebook
+    has no counterpart for it, so anything zipping source bodies against notebook cells is
+    off by one and rejects every notebook. Dropping it is the only difference from
+    ``_percent_cells``, and it is the difference between a working alignment and one that
+    silently declines to do its job.
+    """
+    cells = _percent_cells(src)
+    # Marker-less AND codeless. A jupytext percent file opens with the YAML header comment
+    # before its first `# %%`, which is what this drops. A bare snippet with no markers at
+    # all also has an empty marker, and its body IS the first cell - dropping that one
+    # misaligns every later cell by one, which does not produce a wrong answer so much as
+    # a blanket refusal, and a blanket refusal here reads as "no notebook qualifies".
+    if cells and cells[0][0] == "":
+        body = cells[0][2]
+        if all(not ln.strip() or ln.lstrip().startswith("#") for ln in body.splitlines()):
+            cells = cells[1:]
+    return [body for _, kind, body in cells if kind == "code"]
+
+
 def _alt_literal_spans(arg: ast.expr) -> list[ast.Constant] | None:
     """The string constants of an alt argument, each flagged standalone or in-f-string.
 
@@ -904,13 +928,30 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
     if old_cells is None or new_cells is None or old_cells != new_cells:
         return False
 
-    for cell in nb.get("cells", []):
-        if cell.get("cell_type") != "code":
-            continue
+    # The alts to require come from the NEW .py, not from the notebook's own cell source.
+    # Reading them off the notebook compared the executed source against the outputs that
+    # same execution produced - true of every executed notebook, and silent about the edit
+    # actually being adjudicated. Measured on 2026-09-08: appending a sentence to a plain
+    # literal alt in cme_futures/03_financial_features.py was reported ALT-TEXT ONLY and
+    # allowed, with the output metadata still carrying the old sentence, which is the exact
+    # thing the paragraph above says is stale. The first half of this function already
+    # establishes that the two sources have the same code cells in the same order once alts
+    # are blanked, so zipping them by order is safe.
+    new_code_bodies = _code_bodies(new_source)
+    nb_code_cells = [c for c in nb.get("cells", []) if c.get("cell_type") == "code"]
+    alt_bearing = [
+        c for c in nb_code_cells if any(fn in "".join(c.get("source", [])) for fn in ALT_FUNCS)
+    ]
+    # Only an alt-bearing notebook needs the two lined up. A notebook with no alt calls has
+    # nothing for this half to check, and requiring the counts to match there would reject
+    # the papermill-cleanup and markdown-only cases this function also serves.
+    if alt_bearing and len(new_code_bodies) != len(nb_code_cells):
+        return False
+    for cell, new_body in zip(nb_code_cells, new_code_bodies, strict=False):
         src = "".join(cell.get("source", []))
         if not any(fn in src for fn in ALT_FUNCS):
             continue
-        blanked = _blank_alts(src)
+        blanked = _blank_alts(new_body)
         if blanked is None:
             return False
         carried = [
@@ -1489,6 +1530,229 @@ def sync_prose(nb_path: Path) -> str:
     return stamp["source_py_blob"]
 
 
+def _splice_alt(
+    old_segments: tuple[str, ...], new_segments: tuple[str, ...], carried: str
+) -> str | None:
+    """*carried* with its prose replaced by *new_segments*, keeping the interpolated values.
+
+    A computed alt renders as ``seg0 + value0 + seg1 + value1 + ...`` and only the values
+    need a kernel to produce. They are already in the executed output, so a prose fix to an
+    f-string alt does not need one: find the values in the gaps between the OLD segments,
+    then rebuild around the NEW ones.
+
+    None when the two sources interpolate a different number of times - that is a change to
+    what the alt asserts about the data, not to its wording, and it needs the run.
+    """
+    if len(old_segments) != len(new_segments):
+        return None
+    values: list[str] = []
+    position = 0
+    for index, segment in enumerate(old_segments):
+        found = carried.find(segment, position)
+        if found < 0:
+            return None
+        if index:
+            values.append(carried[position:found])
+        elif found != 0:
+            return None  # the carried alt does not start where the source says it does
+        position = found + len(segment)
+    values.append(carried[position:])
+    rebuilt = new_segments[0]
+    for segment, value in zip(new_segments[1:], values[:-1], strict=True):
+        rebuilt += value + segment
+    return rebuilt + values[-1]
+
+
+def _image_outputs(cell: dict) -> list[dict]:
+    """The cell's image outputs, in the order the alt calls that produced them appear."""
+    return [out for out in cell.get("outputs", []) if "image/png" in (out.get("data") or {})]
+
+
+def sync_alt(nb_path: Path) -> str:
+    """Fold an alt-text correction into an executed notebook, without re-running it.
+
+    ``sync_prose`` deliberately refuses this: it keeps the outputs, so an alt the output
+    metadata does not carry would be stamped as current while the notebook still renders
+    the old sentence. ``alt_text_only_drift`` accepts a corrected alt, but only once the
+    outputs carry it - and nothing wrote it there. That left the cheap path documented and
+    unreachable: the band correcting an alt on a 40-second notebook just re-ran it, and the
+    band that would have needed it most, on a notebook priced in hours, had no way in.
+
+    This is the missing half. ``show_plotly_with_alt`` publishes the alt as
+    ``metadata["image/png"]["alt"]`` and takes the image from ``fig._repr_mimebundle_()``,
+    which never sees the string - so writing the corrected alt into the output metadata
+    produces exactly the bytes a re-run would, and the gate's claim stays true rather than
+    being talked around.
+
+    Refuses unless every code cell is identical once the alt literals are blanked, which is
+    the same test ``alt_text_only_drift`` applies, and unless every alt it must rewrite is
+    one it can rewrite: a plain literal is copied, a computed alt keeps the values already
+    in the output and takes the new prose around them, and an alt passed as a variable is
+    refused because its rendered text is not in the source at all.
+    """
+    py = paired_py(nb_path)
+    rel = nb_path.relative_to(REPO_ROOT)
+    if py is None:
+        raise SystemExit(f"no paired .py for {rel}")
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    stamp = nb.get("metadata", {}).get(STAMP_KEY)
+    if not stamp:
+        raise SystemExit(
+            f"{rel} carries no provenance stamp, so there is no executed state to preserve. Run it."
+        )
+    stamped_blob = stamp["source_py_blob"]
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        raise SystemExit(
+            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
+            "so the code cells cannot be compared. Re-run it."
+        )
+    old_source = old.stdout
+    before = code_cells_only(_comparable(old_source, blank_alts=True))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=True))
+    if before is None or after is None:
+        raise SystemExit(f"{rel}: could not parse one of the two sources - refusing")
+    if before != after:
+        where = next(
+            (i for i, (a, b) in enumerate(zip(before, after)) if a != b),
+            min(len(before), len(after)),
+        )
+        detail = f"code cell {where + 1} differs"
+        if len(before) != len(after):
+            detail = f"{len(before)} code cells in the executed source, {len(after)} now"
+        raise SystemExit(
+            f"{rel}: {detail} for something other than an alt literal, so the outputs on disk "
+            "are not the ones this source produces. Re-run the notebook."
+        )
+
+    # Plan every rewrite against the notebook AS EXECUTED before touching anything, so a
+    # cell this cannot rewrite refuses the whole command instead of leaving half a notebook
+    # updated - the failure the atomicity rule exists for.
+    old_bodies = _code_bodies(old_source)
+    new_bodies = _code_bodies(py.read_text(encoding="utf-8"))
+    nb_code_cells = [c for c in nb.get("cells", []) if c.get("cell_type") == "code"]
+    if not (len(old_bodies) == len(new_bodies) == len(nb_code_cells)):
+        raise SystemExit(
+            f"{rel}: {len(old_bodies)} code cells in the executed source, {len(new_bodies)} now, "
+            f"{len(nb_code_cells)} in the notebook. Cannot line them up - re-run the notebook."
+        )
+    plan: list[str] = []
+    for cell, old_body, new_body in zip(nb_code_cells, old_bodies, new_bodies, strict=True):
+        src = "".join(cell.get("source", []))
+        if not any(fn in src for fn in ALT_FUNCS):
+            continue
+        old_alts = _blank_alts(old_body)
+        new_alts = _blank_alts(new_body)
+        if old_alts is None or new_alts is None:
+            raise SystemExit(f"{rel}: an alt-bearing cell does not parse - refusing")
+        outputs = _image_outputs(cell)
+        if not (len(old_alts[1]) == len(new_alts[1]) == len(outputs)):
+            raise SystemExit(
+                f"{rel}: {len(new_alts[1])} alt call(s) in the source against {len(outputs)} "
+                "image output(s). The notebook is not the render of this source. Re-run it."
+            )
+        for old_alt, new_alt, output in zip(old_alts[1], new_alts[1], outputs, strict=True):
+            carried = ((output.get("metadata") or {}).get("image/png") or {}).get("alt")
+            if isinstance(new_alt, str):
+                plan.append(new_alt)
+            elif isinstance(new_alt, tuple) and isinstance(old_alt, tuple):
+                if carried is None:
+                    raise SystemExit(
+                        f"{rel}: a computed alt has no text in the executed output, so its "
+                        "interpolated values cannot be recovered. Re-run the notebook."
+                    )
+                spliced = _splice_alt(old_alt, new_alt, carried)
+                if spliced is None:
+                    raise SystemExit(
+                        f"{rel}: a computed alt interpolates a different number of values than "
+                        "the executed one, which changes what it asserts about the data rather "
+                        "than how it is worded. Re-run the notebook."
+                    )
+                plan.append(spliced)
+            else:
+                raise SystemExit(
+                    f"{rel}: an alt is passed as a variable, so its rendered text is not in the "
+                    "source and cannot be written into the output. Re-run the notebook."
+                )
+
+    if not plan:
+        raise SystemExit(
+            f"{rel}: no alt text to write. If the edit was markdown only, use sync-prose."
+        )
+
+    before_counts = _output_counts(nb)
+    result = subprocess.run(
+        [sys.executable, "-m", "jupytext", "--to", "ipynb", "--update", str(py)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if "No module named jupytext" in result.stderr:
+            raise SystemExit(
+                f"{rel}: jupytext is not installed in {sys.executable}. Run this command through "
+                "the repository environment with `uv run python`."
+            )
+        raise SystemExit(f"{rel}: jupytext --update failed:\n{result.stderr}")
+
+    updated = json.loads(nb_path.read_text(encoding="utf-8"))
+    after_counts = _output_counts(updated)
+    if after_counts != before_counts:
+        raise SystemExit(
+            f"{rel}: the update changed the outputs, which is the one thing it exists to avoid. "
+            "The file has been left as jupytext wrote it; restore it with `git checkout`."
+        )
+
+    # Re-derive the plan's targets in the file jupytext just wrote: the plan holds objects
+    # from the notebook as it was read, and writing into those would be discarded.
+    written = 0
+    position = 0
+    for cell in updated.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        src = "".join(cell.get("source", []))
+        if not any(fn in src for fn in ALT_FUNCS):
+            continue
+        for output in _image_outputs(cell):
+            output.setdefault("metadata", {}).setdefault("image/png", {})["alt"] = plan[position]
+            position += 1
+            written += 1
+    if written != len(plan):
+        raise SystemExit(
+            f"{rel}: planned {len(plan)} alt rewrite(s) but the updated notebook has {written} "
+            "image output(s) under alt calls. The file has been left as jupytext wrote it; "
+            "restore it with `git checkout`."
+        )
+
+    stamp = dict(stamp)
+    stamp["source_py_blob"] = git_blob(py)
+    stamp["notes"] = (
+        f"alt text synced from the .py at {datetime.now(UTC).isoformat()} without re-executing; "
+        f"every code cell is identical to blob {stamped_blob[:12]} once alt literals are blanked, "
+        f"and {written} output alt(s) were rewritten to match"
+    )
+    updated.setdefault("metadata", {})[STAMP_KEY] = stamp
+    nb_path.write_text(json.dumps(updated, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    return stamp["source_py_blob"]
+
+
+def _cmd_sync_alt(args: argparse.Namespace) -> int:
+    for name in args.notebooks:
+        path = Path(name).resolve()
+        if path.suffix == ".py":
+            path = path.with_suffix(".ipynb")
+        blob = sync_alt(path)
+        print(f"alt text synced {path.relative_to(REPO_ROOT)}: source_py_blob={blob[:12]}")
+    return 0
+
+
 def _cmd_sync_prose(args: argparse.Namespace) -> int:
     for name in args.notebooks:
         path = Path(name).resolve()
@@ -1766,6 +2030,22 @@ def main() -> int:
     )
     yp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
     yp.set_defaults(func=_cmd_sync_prose)
+
+    ap_alt = sub.add_parser(
+        "sync-alt",
+        help="fold an alt-text correction into the executed .ipynb, keeping its outputs",
+        description=(
+            "For a change that touches only figure alt text. Writes the corrected alt into "
+            "the output metadata as well as the source, which is what makes the notebook "
+            "genuinely current rather than merely re-stamped: the image bytes never depend "
+            "on the alt string, so the result is the file a re-run would produce. Refuses if "
+            "any code cell moved for any other reason, if an alt is passed as a variable, or "
+            "if a computed alt interpolates a different number of values than the executed "
+            "one. Use sync-prose for a markdown-only edit."
+        ),
+    )
+    ap_alt.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
+    ap_alt.set_defaults(func=_cmd_sync_alt)
 
     args = ap.parse_args()
     return args.func(args)
