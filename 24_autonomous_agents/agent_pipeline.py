@@ -61,7 +61,7 @@ def logodds_extremize(p: float, a: float) -> float:
 # the AIA Forecaster paper. That paper (Alur et al. 2025) recommends a single
 # d = sqrt(3) for all forecasters (Neyman & Roughgarden 2022) and deliberately
 # avoids per-model tuning to prevent overfitting. Tune these on your own resolved
-# forecasts via find_optimal_d; the production path uses find_optimal_d or DEFAULT_D.
+# forecasts via fit_extremization_exponent; the production path uses that or DEFAULT_D.
 MODEL_CALIBRATION_D: dict[str, float] = {
     "claude-sonnet-4-20250514": 1.5,
     "claude-3-5-sonnet": 1.5,
@@ -191,23 +191,42 @@ def neyman_extremize_weighted(
 
 @dataclass
 class CalibrationResult:
-    """Result of calibration parameter optimization."""
+    """Result of fitting the log-odds extremization exponent.
 
-    optimal_d: float
+    `optimal_exponent` is the `a` of `logodds_extremize`, not the `d` of
+    `platt_scale`. The two are different parameters of different functions and
+    only the exponent is fitted here.
+    """
+
+    optimal_exponent: float
     brier_before: float
     brier_after: float
     improvement_pct: float
+    searched_range: tuple[float, float] = (0.5, 3.0)
+
+    @property
+    def at_search_boundary(self) -> bool:
+        """True when the search stopped at an end of its range.
+
+        The minimum is then outside the range searched, so `optimal_exponent` is
+        where the search ran out rather than where the score bottoms out, and
+        reading it as the best exponent overstates what was established.
+        """
+        low, high = self.searched_range
+        return self.optimal_exponent <= low or self.optimal_exponent >= high
 
 
-def find_optimal_d(
+def fit_extremization_exponent(
     forecasts: Sequence[float],
     outcomes: Sequence[int | float],
-    d_range: tuple[float, float] = (0.5, 3.0),
+    exponent_range: tuple[float, float] = (0.5, 3.0),
     n_steps: int = 50,
 ) -> CalibrationResult:
-    """Find optimal calibration d via grid search on historical data.
+    """Grid-search the log-odds exponent that minimizes Brier score.
 
-    Use this to tune calibration parameters when you have resolved forecasts.
+    Fits the `a` of `logodds_extremize` against resolved forecasts. Fit on a
+    training panel and evaluate the frozen exponent on disjoint observations;
+    the Brier figures returned here are in-sample by construction.
     """
     if len(forecasts) != len(outcomes):
         raise ValueError("forecasts and outcomes must have same length")
@@ -220,26 +239,27 @@ def find_optimal_d(
         forecasts
     )
 
-    best_d, best_brier = 1.0, brier_before
-    step = (d_range[1] - d_range[0]) / n_steps
+    best_exponent, best_brier = 1.0, brier_before
+    step = (exponent_range[1] - exponent_range[0]) / n_steps
 
     for i in range(n_steps + 1):
-        d_val = d_range[0] + i * step
-        calibrated = [logodds_extremize(p, d_val) for p in forecasts]
+        candidate = exponent_range[0] + i * step
+        calibrated = [logodds_extremize(p, candidate) for p in forecasts]
         brier = sum(_brier(p, float(o)) for p, o in zip(calibrated, outcomes, strict=False)) / len(
             forecasts
         )
         if brier < best_brier:
             best_brier = brier
-            best_d = d_val
+            best_exponent = candidate
 
     improvement = (brier_before - best_brier) / brier_before * 100 if brier_before > 0 else 0
 
     return CalibrationResult(
-        optimal_d=round(best_d, 3),
+        optimal_exponent=round(best_exponent, 3),
         brier_before=round(brier_before, 4),
         brier_after=round(best_brier, 4),
         improvement_pct=round(improvement, 1),
+        searched_range=exponent_range,
     )
 
 
