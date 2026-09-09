@@ -106,10 +106,6 @@
 16_strategy_simulation/01_backtest_first_principles.py
 16_strategy_simulation/02_futures_backtesting.py
 16_strategy_simulation/08_signal_method_comparison.py
-18_transaction_costs/01_cost_taxonomy.py
-18_transaction_costs/02_spread_estimation.py
-18_transaction_costs/07_ml4t_volume_participation.py
-18_transaction_costs/08_ml_dynamic_execution.py
 19_risk_management/01_var_cvar.py
 19_risk_management/02_exit_strategies.py
 20_strategy_synthesis/00_holdout_predictions.py
