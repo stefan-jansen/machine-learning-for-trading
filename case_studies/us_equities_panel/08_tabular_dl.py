@@ -114,8 +114,8 @@ SUPERSEDES_SETS: dict = {}
 DEVICE = "cuda"
 EXECUTION_TIER = "canonical"
 WORKSPACE = ""
-MAX_SYMBOLS = 0
-MAX_FOLDS = 0
+PREVIEW_MAX_SYMBOLS = 0
+PREVIEW_MAX_FOLDS = 0
 PREVIEW_N_EPOCHS = 0
 PREVIEW_CHECKPOINT_INTERVAL = 0
 
@@ -206,10 +206,10 @@ if EXECUTION_TIER == "canonical" and not is_published_population and not POPULAT
 
 # %%
 preview_reductions = {}
-if MAX_SYMBOLS:
-    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
-if MAX_FOLDS:
-    preview_reductions["folds"] = list(range(int(MAX_FOLDS)))
+if PREVIEW_MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(PREVIEW_MAX_SYMBOLS)
+if PREVIEW_MAX_FOLDS:
+    preview_reductions["folds"] = list(range(int(PREVIEW_MAX_FOLDS)))
 if PREVIEW_N_EPOCHS:
     preview_reductions["n_epochs"] = int(PREVIEW_N_EPOCHS)
 if PREVIEW_CHECKPOINT_INTERVAL:

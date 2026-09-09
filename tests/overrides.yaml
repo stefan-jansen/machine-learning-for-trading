@@ -3519,29 +3519,32 @@ case_studies/us_equities_panel/08_tabular_dl:
     DEVICE: cpu
     CONFIG_NAMES: [tabm_s]
     DIAGNOSTIC_CONFIG_NAMES: [tabm_s]
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 20
+    PREVIEW_MAX_FOLDS: 2
+    PREVIEW_MAX_SYMBOLS: 20
     PREVIEW_N_EPOCHS: 1
   timeout: 180
 case_studies/us_equities_panel/09_dl_nlinear:
+  # n_epochs rides in COMMON_OVERRIDES rather than in a PREVIEW_N_EPOCHS parameter of its own.
+  # SEQUENCE_PREVIEW_FIELDS does not accept an epoch count, so the notebook's old parameter fed
+  # `overrides` while its name promised a preview-tier restriction the shared validation could
+  # not enforce - a canonical run carrying it would have trained one epoch and published it.
+  # An override is refused a canonical population by the notebook's own publish guard.
   # MAX_FOLDS became FOLD_IDS: the sequence runner takes the fold ids it should
   # keep, not a count to slice to.
   parameters:
     DEVICE: cpu
     CONFIG_NAMES: [nlinear]
-    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
-    FOLD_IDS: [0, 1]
-    MAX_SYMBOLS: 5
-    PREVIEW_N_EPOCHS: 1
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5, n_epochs: 1}
+    PREVIEW_FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 5
   timeout: 600
 case_studies/us_equities_panel/10_dl_lstm:
   parameters:
     DEVICE: cpu
     CONFIG_NAMES: [lstm_h64]
-    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
-    FOLD_IDS: [0, 1]
-    MAX_SYMBOLS: 5
-    PREVIEW_N_EPOCHS: 1
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5, n_epochs: 1}
+    PREVIEW_FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 5
   timeout: 600
 case_studies/us_equities_panel/11_dl_tsmixer:
   # The pinned SYMBOLS whitelist this entry used to carry has no parameter to
@@ -3555,10 +3558,9 @@ case_studies/us_equities_panel/11_dl_tsmixer:
   parameters:
     DEVICE: cpu
     CONFIG_NAMES: [tsmixer]
-    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
-    FOLD_IDS: [0, 1]
-    MAX_SYMBOLS: 8
-    PREVIEW_N_EPOCHS: 1
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5, n_epochs: 1}
+    PREVIEW_FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 8
   timeout: 600
 case_studies/us_equities_panel/12_dl_weekly:
   parameters:
@@ -3577,16 +3579,16 @@ case_studies/us_equities_panel/13a_pca:
   # 11b_ipca run under.
   parameters:
     LABELS: [fwd_ret_1d]
-    MAX_SYMBOLS: 5
-    FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 5
+    PREVIEW_FOLD_IDS: [0, 1]
     PREVIEW_N_FACTORS: 2
   timeout: 300
 case_studies/us_equities_panel/13b_ipca:
   # See 13a_pca on why this is no longer skipped.
   parameters:
     LABELS: [fwd_ret_1d]
-    MAX_SYMBOLS: 5
-    FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 5
+    PREVIEW_FOLD_IDS: [0, 1]
     PREVIEW_N_FACTORS: 2
   timeout: 300
 case_studies/us_equities_panel/14_causal_dml:

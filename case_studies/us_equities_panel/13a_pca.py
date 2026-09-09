@@ -87,8 +87,8 @@ SUPERSEDES_POPULATION = ""
 SUPERSEDES_SETS: dict = {}
 EXECUTION_TIER = "canonical"
 WORKSPACE = ""
-MAX_SYMBOLS = 0
-FOLD_IDS = []
+PREVIEW_MAX_SYMBOLS = 0
+PREVIEW_FOLD_IDS = []
 PREVIEW_N_FACTORS = 0
 
 # %% [markdown]
@@ -109,7 +109,7 @@ PREVIEW_N_FACTORS = 0
 # - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
 #   fold. A preview run declares its reductions and carries them in the identity, so its results
 #   can never be compared against canonical ones or reach a holdout decision.
-# - **`FOLD_IDS`** and **`MAX_SYMBOLS`** are the reductions a preview declares.
+# - **`PREVIEW_FOLD_IDS`** and **`PREVIEW_MAX_SYMBOLS`** are the reductions a preview declares.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -171,10 +171,10 @@ if EXECUTION_TIER == "canonical" and not is_published_population and not POPULAT
 
 # %%
 preview_reductions = {}
-if MAX_SYMBOLS:
-    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
-if FOLD_IDS:
-    preview_reductions["folds"] = [int(fold) for fold in FOLD_IDS]
+if PREVIEW_MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(PREVIEW_MAX_SYMBOLS)
+if PREVIEW_FOLD_IDS:
+    preview_reductions["folds"] = [int(fold) for fold in PREVIEW_FOLD_IDS]
 if PREVIEW_N_FACTORS:
     preview_reductions["n_factors"] = int(PREVIEW_N_FACTORS)
 

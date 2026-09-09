@@ -115,10 +115,9 @@ SUPERSEDES_SETS: dict = {}
 DEVICE = "cuda"
 EXECUTION_TIER = "canonical"
 WORKSPACE = ""
-MAX_SYMBOLS = 0
-FOLD_IDS = []
-MAX_TRAIN_SEQUENCES = 0
-PREVIEW_N_EPOCHS = 0
+PREVIEW_MAX_SYMBOLS = 0
+PREVIEW_FOLD_IDS = []
+PREVIEW_MAX_TRAIN_SEQUENCES = 0
 
 # %% [markdown]
 # ## 1. Which configurations, and on which label
@@ -141,9 +140,15 @@ PREVIEW_N_EPOCHS = 0
 #   every fold at the published epoch schedule. A preview run has to declare at least one
 #   reduction and carries it in the identity, so its results can never be compared against
 #   canonical ones or reach a holdout decision.
-# - **`PREVIEW_N_EPOCHS`** shortens the schedule for a preview. It is part of the identity rather
-#   than a runtime detail, because a model trained for fewer epochs is a different model rather
-#   than the same one measured sooner.
+#
+# A shortened training schedule is not among the reductions a preview may declare, and
+# deliberately. This family's preview contract - `SEQUENCE_PREVIEW_FIELDS` in
+# `case_studies/utils/preview_fields.py` - accepts a narrower universe, a fold subset and a cap on
+# training sequences, and no epoch count, because a model trained for fewer epochs is a different
+# model rather than the same one measured sooner. To train a short schedule, pass `n_epochs` in
+# `COMMON_OVERRIDES`. It moves the training identity, so the result registers beside the published
+# one, and a run carrying any override publishes neither the canonical population nor the
+# canonical set names.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -210,12 +215,12 @@ if EXECUTION_TIER == "canonical" and not is_published_population and not POPULAT
 
 # %%
 preview_reductions = {}
-if MAX_SYMBOLS:
-    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
-if FOLD_IDS:
-    preview_reductions["folds"] = [int(fold) for fold in FOLD_IDS]
-if MAX_TRAIN_SEQUENCES:
-    preview_reductions["max_train_sequences"] = int(MAX_TRAIN_SEQUENCES)
+if PREVIEW_MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(PREVIEW_MAX_SYMBOLS)
+if PREVIEW_FOLD_IDS:
+    preview_reductions["folds"] = [int(fold) for fold in PREVIEW_FOLD_IDS]
+if PREVIEW_MAX_TRAIN_SEQUENCES:
+    preview_reductions["max_train_sequences"] = int(PREVIEW_MAX_TRAIN_SEQUENCES)
 
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
@@ -232,8 +237,6 @@ for config_name in selected_names:
         **COMMON_OVERRIDES,
         **dict(CONFIG_OVERRIDES.get(config_name, {})),
     }
-    if PREVIEW_N_EPOCHS:
-        overrides["n_epochs"] = int(PREVIEW_N_EPOCHS)
     requests.append(
         study.model(
             family="deep_learning",
