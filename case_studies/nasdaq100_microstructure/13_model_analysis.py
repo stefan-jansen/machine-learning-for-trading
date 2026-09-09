@@ -64,6 +64,7 @@ import polars as pl
 import yaml
 
 from case_studies.research import (
+    CausalResult,
     Result,
     Study,
     superseded_members,
@@ -1252,20 +1253,50 @@ plot_regime_bars(regime_df)
 # confounders: `rel_spread_close`, `rv_5m`, `r1m`; embargo = 1 bar.
 
 # %%
+# `causal_runs` is keyed on `causal_hash`, and that identity covers the fold and placebo
+# geometry, the seed, the horizon, the row cap and the development cutoff - not the label.
+# Re-running the causal notebook under any different design therefore writes a *second* row
+# for the same label rather than replacing the first, so `ORDER BY label` over the whole table
+# lists two estimates with nothing to tell them apart. `CausalResult.one` resolves the single
+# identity currently in force for a label and refuses on an ambiguous registry rather than
+# picking, which is the read this section is about; the superseded rows are counted, not shown.
 import sqlite3 as _sqlite3
 
-with _sqlite3.connect(CASE_DIR / "run_log" / "registry.db") as _con:
-    _cur = _con.cursor()
-    _rows = _cur.execute(
-        "SELECT label, dml_effect, dml_se_hac, p_value_hac, "
-        "naive_effect, confounding_bias_pct, refutation_p, n_obs "
-        "FROM causal_runs ORDER BY label"
-    ).fetchall()
-    _cols = [d[0] for d in _cur.description]
+DECLARED_LABELS = [PRIMARY_LABEL, *[lbl for lbl in REGRESSION_LABELS if lbl != PRIMARY_LABEL]]
 
-causal_df = pl.DataFrame(_rows, schema=_cols, orient="row") if _rows else pl.DataFrame()
+with _sqlite3.connect(CASE_DIR / "run_log" / "registry.db") as _con:
+    _recorded = _con.execute("SELECT count(*) FROM causal_runs").fetchone()[0]
+    _attempted = {r[0] for r in _con.execute("SELECT DISTINCT label FROM causal_runs")}
+
+_causal_rows = []
+_unresolved = {}
+for _label in [lbl for lbl in DECLARED_LABELS if lbl in _attempted]:
+    try:
+        _result = CausalResult.one(study, label=_label, execution_tier="canonical")
+    except ValueError as _exc:
+        _unresolved[_label] = str(_exc)
+        continue
+    _causal_rows.append(
+        {
+            "label": _label,
+            "causal_hash": _result.hash[:12],
+            "dml_effect": _result.metrics["dml_effect"],
+            "dml_se_hac": _result.metrics["dml_se_hac"],
+            "p_value_hac": _result.metrics["p_value_hac"],
+            "naive_effect": _result.metrics["naive_effect"],
+            "confounding_bias_pct": _result.metrics["confounding_bias_pct"],
+            "refutation_p": _result.metrics["refutation_p"],
+            "n_obs": _result.metrics["n_obs"],
+        }
+    )
+
+causal_df = pl.DataFrame(_causal_rows).sort("label") if _causal_rows else pl.DataFrame()
 print("Causal DML on signed_vol_share:")
+print(f"labels carrying a current causal identity: {causal_df.height} of {len(_attempted)} run")
+print(f"superseded rows also in the table: {_recorded - causal_df.height}")
 print(causal_df)
+for _label, _why in _unresolved.items():
+    print(f"unresolved: {_label}: {_why}")
 
 # %% [markdown]
 # **How to read the causal rows.** Each row is an estimated average treatment
