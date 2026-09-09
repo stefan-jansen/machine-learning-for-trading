@@ -520,13 +520,20 @@ if (
 # **Did the control fire, and did anything move?** Those are two questions and the catalog answers
 # both.
 #
-# `risk_triggers` counts how many times the declared control acted during the backtest, recorded by
-# the engine as it installs each rule. It is what separates a control that fired and changed
-# nothing measurable from a control that was never installed at all: a positive count is the first,
-# a zero count the second, and a null means no control of that kind was declared for this row.
+# `risk_triggers` counts how many times the installed control acted during the backtest, recorded
+# by the engine as it installs each rule. Its three states are what separate the cases nothing else
+# on this page can tell apart:
+#
+# - **A positive count** is a control that fired. Whether that changed anything measurable is the
+#   second question below.
+# - **Zero** is a control that was installed and never reached its threshold. That is a result:
+#   a wide stop on a book that never drew down that far has nothing to do.
+# - **Null** is no control installed at all - the engine records a count for every rule it builds,
+#   so a null where a control was declared means the declaration did not reach the engine.
+#
 # Reading it is what this stage owes, because a sweep of fourteen settings that all report the same
-# numbers is a finding about risk control if they fired and a defect in the wiring if they did not,
-# and nothing else on this page tells the two apart.
+# numbers is a finding about risk control if they were installed and a defect in the wiring if they
+# were not.
 #
 # The second question is whether the numbers moved, and each result is compared against the
 # strategy it was laid on across the two axes the catalog carries: the trade count and the Sharpe.
@@ -600,18 +607,19 @@ print(
 _triggers = overlay_effect.get_column("risk_triggers")
 n_fired = int((_triggers.fill_null(0) > 0).sum())
 n_silent = int((_triggers == 0).sum())
-n_undeclared = int(_triggers.is_null().sum())
+n_uninstalled = int(_triggers.is_null().sum())
 print(
     f"{n_fired} of {overlay_effect.height} controls fired at least once; {n_silent} were installed "
-    f"and never fired; {n_undeclared} registered no trigger count"
+    f"and never reached their threshold; {n_uninstalled} installed no rule at all"
 )
-# A control that never fires is what C17 calls a failure rather than a finding, and it is only
-# visible here.
-if n_silent == overlay_effect.height:
+# The engine records a count for every rule it builds, so a row that declared a control and
+# registered no count is one whose declaration never reached it. That is the failure C17 names,
+# and it is the only one of the three states that is not a result.
+if n_uninstalled:
     raise RuntimeError(
-        "every declared control was installed and fired zero times, so this sweep measured "
-        "nothing about risk control; check that the declared thresholds can be reached on this "
-        "book before reading any row below"
+        f"{n_uninstalled} of {overlay_effect.height} overlay results registered no trigger count, "
+        "so their declared control was never installed and the row is named for behaviour that "
+        "did not run"
     )
 if n_unchanged and not n_changed and not n_unknown:
     print(
@@ -694,8 +702,9 @@ compatible_sets
 # sample, one strategy per label, and no correction for having looked at fourteen. A flat line
 # means the measured Sharpe did not move across the declared settings, which is weaker than it
 # sounds in two directions: two different thresholds can produce the same exits, and two different
-# return paths can share a Sharpe. It is not evidence that the controls never fired, and the
-# `risk_triggers` column above is what settles that rather than the shape of any line here.
+# return paths can share a Sharpe. It is not evidence that the controls never fired; the
+# `risk_triggers` column above is what settles that, and it is read there rather than inferred
+# from the shape of any line here.
 
 # %%
 control_axes = {
@@ -816,10 +825,11 @@ show_with_alt(
 #
 # **Check that the overlays moved something before reading what they did.** A result matching the
 # unprotected book on both compared statistics has not been shown to change anything, and matching
-# across every declared setting is a reason to confirm the controls reach the engine rather than a
-# finding about risk control. The two compared columns do not settle it on their own; the
-# `risk_triggers` count does, and a sweep where every control was installed and fired zero times
-# stops the notebook rather than being reported as a result.
+# across every declared setting is a reason to check that the controls reached the engine rather
+# than a finding about risk control. The two compared columns do not settle it on their own; the
+# `risk_triggers` count does, and a row that declared a control and installed none stops the
+# notebook rather than being reported as a result. A row installed and never triggered is a
+# result: it says the threshold was never reached on this book.
 #
 # **An overlay can only remove, so it reshapes a return distribution rather than shifting it.** It
 # truncates the left tail by closing losing positions early and truncates the right by closing
