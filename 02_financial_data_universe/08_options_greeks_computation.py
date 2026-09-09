@@ -1098,6 +1098,7 @@ tick_by_time_value = (
 print("Volatility spanned by one tick of price uncertainty:")
 tick_by_time_value
 
+# %% [markdown]
 # One tick is worth orders of magnitude more volatility on the thin options than on the rest.
 # On those rows the quote simply does not determine a volatility to any useful precision, and
 # two implementations disagreeing there are not giving different answers to the same question -
