@@ -1897,7 +1897,7 @@ def prepare_single_fold(
     ----------
     train_sample_frac : float, optional
         Fraction of training rows to keep (1.0 = all). Same semantics
-        as ``prepare_cv_folds`` / ``prepare_gbm_folds``: validation is
+        as ``folds.iter_raw_folds``: validation is
         never sampled, seed is tied to fold_id for reproducibility.
 
     Returns None if the fold is empty (no train or val rows).

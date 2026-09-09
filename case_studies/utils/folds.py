@@ -900,7 +900,7 @@ def gbm_fold(
     imputing a median would replace with a fabricated observation.
 
     Only the design matrix is cast. The labels stay float64, which is where this differs from the
-    ``prepare_gbm_folds`` path it replaces: LightGBM converts a label to its own precision anyway,
+    pandas fold preparation it replaced: LightGBM converts a label to its own precision anyway,
     so the fit is identical either way (measured, squared error and huber alike, to zero
     difference), while ``y_eval`` is the target IC is measured against and the standardising
     families keep it float64. Casting it here would have made a GBM IC and a linear IC two
