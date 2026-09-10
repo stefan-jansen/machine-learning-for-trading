@@ -726,13 +726,13 @@ def simulate_heston(
 # square root of `HESTON_THETA`.
 #
 # The Feller condition, $2\kappa\theta > \xi^2$, decides whether zero is attainable.
-# Below it the variance process reaches zero with positive probability, which is a
-# different regime of the same model and not an invalid one; plenty of fitted Heston
-# parameters violate it. The values here satisfy it, so the simulated variance stays
-# strictly positive and the section can talk about clustering without also talking
-# about absorption at zero. The assertion reads the same named parameters that drive
-# the simulation, so an edit that moves them into the other regime fails here rather
-# than quietly changing what the figure shows.
+# Below it the variance reaches zero with positive probability. It is not absorbed
+# there: the drift $\kappa(\theta - v)$ is positive at zero and pushes the variance
+# back up. That is a different regime of the same model rather than an invalid one, and
+# plenty of fitted Heston parameters sit in it. These values satisfy the condition, so
+# the continuous process stays strictly positive. The assertion reads the same named
+# parameters that drive the simulation, so an edit that moves them into the other
+# regime fails here rather than quietly changing what the figure shows.
 #
 # Satisfying the condition is a statement about the continuous process, not about the
 # discretization. An Euler step can propose a negative variance under any parameters,
