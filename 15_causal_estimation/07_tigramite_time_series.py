@@ -69,19 +69,16 @@
 # %%
 """Time Series Causal Discovery with PCMCI - discover lead-lag causal relationships in financial time series."""
 
-import warnings
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from IPython.display import display
 
 from data import load_etfs, load_macro
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, apply_ml4t_style
-
-warnings.filterwarnings("ignore")
-
+from utils.style import COLORS, apply_ml4t_style, show_with_alt
 
 # %% tags=["parameters"]
 MAX_LAG = 5
@@ -90,7 +87,9 @@ N_BOOTSTRAP = 100
 N_SAMPLES = 500
 SEED = 42
 BLOCK_SIZE = 20  # Block size for bootstrap (preserves autocorrelation)
-STABILITY_THRESHOLD = 0.5  # Edge must appear in at least 50% of bootstraps
+STABILITY_THRESHOLD = 0.5  # Edge must appear in at least this share of bootstraps
+# The pairwise comparison tests lag orders 1..GRANGER_MAX_LAG for each pair.
+GRANGER_MAX_LAG = 3
 
 set_global_seeds(SEED)
 apply_ml4t_style()
@@ -114,9 +113,11 @@ print(f"Bootstrap replications: {N_BOOTSTRAP}")
 # %%
 import polars as pl
 
+# %% [markdown]
+# Real data only. A load failure is a fatal error here, so neither CI nor a fresh reader
+# environment without `ML4T_DATA_PATH` can publish synthetic numbers under a real heading.
+
 # %%
-# Real-data only - load failure is a fatal error so CI / a fresh reader
-# environment without ML4T_DATA_PATH cannot silently publish synthetic numbers.
 etf_tickers = ["SPY", "IEF", "GLD"]
 
 etf_df = load_etfs(symbols=etf_tickers, start_date="2020-01-01", end_date="2024-06-01").select(
@@ -197,10 +198,15 @@ ax.axvline(
 )
 ax.set_xlabel("Lag (trading days)")
 ax.set_ylabel("Autocorrelation")
-ax.set_title("Return autocorrelation fades quickly; causal search still spans five trading days")
+ax.set_title("Return autocorrelation by lag, against the causal search window")
 ax.legend(loc="upper right", frameon=False, ncol=2)
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Line chart of autocorrelation against lag in trading days, one line per series, with a "
+    "marker at each lag. A shaded horizontal band marks the region where the absolute "
+    "autocorrelation is below one tenth, a horizontal line marks zero, and a dashed vertical "
+    "line marks the maximum lag the causal search uses.",
+)
 
 # %% [markdown]
 # ## 3. Prepare Data for Tigramite
@@ -292,20 +298,32 @@ else:
 
 
 # %%
-def block_bootstrap_indices(n, block_size):
-    """Generate block bootstrap indices preserving autocorrelation."""
+def block_bootstrap_blocks(values, block_size, rng):
+    """Draw overlapping blocks with replacement, stacked as separate datasets.
+
+    The blocks are returned as an array of shape (blocks, block_size, variables) rather
+    than concatenated into one series. Concatenating them would put the last row of one
+    block next to the first row of another, and every lagged test PCMCI runs would then
+    read those adjacencies as time: with a block of twenty and a maximum lag of five, a
+    quarter of the lagged pairs at each seam join rows that are not consecutive. Those
+    pairs carry no dependence, so the contamination pushes every edge toward the null -
+    the same direction as the conclusion the chart is used to draw. Passed as separate
+    datasets to `analysis_mode="multiple"`, tigramite pools the blocks without ever
+    forming a pair across two of them.
+    """
+    n = len(values)
     n_blocks = n // block_size
-    block_starts = np.random.choice(n - block_size + 1, size=n_blocks, replace=True)
-    indices = np.concatenate([np.arange(start, start + block_size) for start in block_starts])
-    return indices[:n]
+    starts = rng.integers(0, n - block_size + 1, size=n_blocks)
+    return np.stack([values[start : start + block_size] for start in starts])
 
 
 print(f"\nBootstrap stability analysis (n={N_BOOTSTRAP}, block_size={BLOCK_SIZE})...")
 
+boot_rng = np.random.default_rng(SEED)
 edge_counts = defaultdict(int)
 for b in range(N_BOOTSTRAP):
-    boot_indices = block_bootstrap_indices(len(returns), BLOCK_SIZE)
-    boot_df = pp.DataFrame(returns.values[boot_indices], var_names=var_names)
+    boot_blocks = block_bootstrap_blocks(returns.values, BLOCK_SIZE, boot_rng)
+    boot_df = pp.DataFrame(boot_blocks, var_names=var_names, analysis_mode="multiple")
     boot_pcmci = PCMCI(
         dataframe=boot_df, cond_ind_test=ParCorr(significance="analytic"), verbosity=0
     )
@@ -341,10 +359,11 @@ for edge, stability in sorted(edge_stability.items(), key=lambda x: -x[1]):
 print(f"\nTotal edges: {len(edge_stability)}, Stable: {len(stable_edges)}")
 
 # %% [markdown]
-# The stability chart is the decisive view of the null: across 100 block-bootstrap
-# resamples, no lagged edge clears the 50% robustness threshold. Even the most
-# frequently recovered BH-adjusted edge appears in a small minority of resamples,
-# so PCMCI's zero-link point estimate is not an artifact of a single sample.
+# The stability chart is what turns a single PCMCI fit into a statement about the sample.
+# Each bar is the share of block-bootstrap resamples that recovered that edge, and the dashed
+# line is the threshold `STABILITY_THRESHOLD` sets. An edge the point estimate found but the
+# resamples rarely recover is a property of this particular sample; an edge recovered in most
+# of them survived being asked the question again.
 
 # %%
 if edge_stability:
@@ -370,10 +389,15 @@ if edge_stability:
     ax.invert_yaxis()
     ax.set_xlabel("Share of block-bootstrap resamples recovering the edge (%)")
     ax.set_xlim(0, 100)
-    ax.set_title("No lagged edge clears the 50% robustness threshold under block bootstrap")
+    ax.set_title("Share of block-bootstrap resamples recovering each lagged edge")
     ax.legend(loc="lower right", frameon=False)
-    fig.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Horizontal bar chart, one bar per candidate lagged edge, ordered by the share of "
+        "block-bootstrap resamples in which the edge was recovered. A dashed vertical line "
+        "marks the robustness threshold, and bars that reach it are drawn in amber against "
+        "blue for the rest.",
+    )
 else:
     print("No edges recovered in any bootstrap resample - the null is unanimous.")
 
@@ -425,12 +449,14 @@ else:
 # cannot eliminate hidden confounding, so discovered links remain hypotheses.
 
 # %%
+from scipy import stats as sp_stats
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
+from statsmodels.stats.multitest import multipletests
 
 
 def simple_granger_test(X, Y, max_lag=5):
-    """Simple pairwise Granger causality test."""
+    """Pairwise Granger F test of X on Y at each lag order, with its p-value."""
     n = len(X)
     results = []
 
@@ -449,30 +475,56 @@ def simple_granger_test(X, Y, max_lag=5):
         model_u = LinearRegression().fit(XY_lags, Y_target)
         mse_u = mean_squared_error(Y_target, model_u.predict(XY_lags))
 
-        # F-test approximation
-        f_stat = (mse_r - mse_u) / mse_u * (n - 3 * lag - 1) / lag
-        results.append({"lag": lag, "f_stat": f_stat, "mse_reduction": (mse_r - mse_u) / mse_r})
+        df_denom = n - 3 * lag - 1
+        f_stat = (mse_r - mse_u) / mse_u * df_denom / lag
+        results.append(
+            {
+                "lag": lag,
+                "f_stat": f_stat,
+                "p_value": float(sp_stats.f.sf(f_stat, lag, df_denom)),
+                "mse_reduction": (mse_r - mse_u) / mse_r,
+            }
+        )
 
     return results
 
+
+# %% [markdown]
+# Every pair and every lag order is a separate test, so the comparison is only fair if the
+# Granger side is corrected the way the PCMCI side is. The F statistics below carry their own
+# p-values, and Benjamini-Hochberg is applied across the whole set at once. Reporting the
+# largest F over the lag orders without a correction is the lag-selection sensitivity this
+# section lists as a Granger weakness, performed rather than described.
 
 # %%
 print("\n" + "=" * 60)
 print("GRANGER CAUSALITY (PAIRWISE) COMPARISON")
 print("=" * 60)
-print("Note: Granger is pairwise and doesn't control for other variables")
+print("Granger is pairwise: it conditions on the target's own past and on nothing else.")
 
 pairs_to_test = [("SPY", "IEF"), ("IEF", "VIX"), ("SPY", "VIX")]
 
+granger_rows = []
 for x_name, y_name in pairs_to_test:
     if x_name in returns.columns and y_name in returns.columns:
-        X = returns[x_name].values
-        Y = returns[y_name].values
-        granger_results = simple_granger_test(X, Y, max_lag=3)
+        for row in simple_granger_test(
+            returns[x_name].values, returns[y_name].values, max_lag=GRANGER_MAX_LAG
+        ):
+            granger_rows.append({"from": x_name, "to": y_name, **row})
 
-        best_lag = max(granger_results, key=lambda x: x["f_stat"])
-        print(f"\n{x_name} -> {y_name}:")
-        print(f"  Best lag: {best_lag['lag']}, F-stat: {best_lag['f_stat']:.2f}")
+if granger_rows:
+    granger_df = pd.DataFrame(granger_rows)
+    granger_df["p_adj_bh"] = multipletests(granger_df["p_value"], method="fdr_bh")[1]
+    granger_df["reject_at_alpha"] = granger_df["p_adj_bh"] < ALPHA_LEVEL
+    display(
+        granger_df[["from", "to", "lag", "f_stat", "p_value", "p_adj_bh", "reject_at_alpha"]].round(
+            4
+        )
+    )
+    print(
+        f"{int(granger_df['reject_at_alpha'].sum())} of {len(granger_df)} pairwise "
+        f"lag-order tests survive BH correction at alpha = {ALPHA_LEVEL}."
+    )
 
 # %% [markdown]
 # ## 9. Results Summary
@@ -515,7 +567,8 @@ for key, value in results_summary.items():
 # 2. **Predeclared Causal Horizon**: Test five trading days based on the weekly
 #    response window; use the ACF only to describe serial dependence.
 #
-# 3. **Bootstrap Stability**: Edges found in at least 50% of bootstraps are more reliable.
+# 3. **Bootstrap Stability**: an edge recovered in a majority of block-bootstrap resamples
+#    is the one worth reporting; `STABILITY_THRESHOLD` sets where the majority starts.
 #
 # 4. **Balanced Interpretation**: Null results have multiple possible explanations,
 #    not just "market efficiency".
