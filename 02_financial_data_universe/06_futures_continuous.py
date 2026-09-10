@@ -1250,7 +1250,7 @@ validation_summary
 #    the resulting difference is an order of magnitude larger than the one being studied. It is
 #    also completely plausible on the page: a mean absolute difference of tens of points on an
 #    index in the thousands reads like an ordinary construction disagreement. Aggregating the
-#    vendor's hours to session closes first is what makes the comparison a comparison.
+#    vendor's hours to UTC day closes first is what makes the comparison a comparison.
 #
 # 4. **Once aligned, the two constructions are identical except during the handover.** Outside
 #    the interval between our roll and the old contract's last trading day, they agree to the

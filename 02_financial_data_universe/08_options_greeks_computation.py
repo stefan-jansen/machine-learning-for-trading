@@ -1097,18 +1097,23 @@ tick_by_time_value = (
 )
 print("Volatility spanned by one tick of price uncertainty.")
 print("`no_solve_at_one_end` counts options where a perturbed price could not be inverted at")
-print("all: below intrinsic value, or outside the solver's bracket. The medians are over the")
-print("rest, so they describe options where both endpoints solved and understate the thin")
-print("bucket, whose hardest cases are the ones that drop out.")
+print("all: below intrinsic value, or outside the solver's bracket. Each median is")
+print("conditional on both endpoints solving; the excluded rows have no width to average.")
 tick_by_time_value
 
 # %% [markdown]
-# One tick is worth orders of magnitude more volatility on the thin options than on the rest,
-# and that is a lower bound on the effect rather than a measurement of it: the options where a
-# perturbed price cannot be inverted at all are counted separately, and they are concentrated
-# in the same bucket. On those rows the quote does not determine a volatility to any useful
-# precision, so two implementations disagreeing there are not giving different answers to the
-# same question - they are answering one the price leaves open.
+# One tick is worth orders of magnitude more volatility on the thin options than on the rest.
+# Each median is conditional on both perturbed prices inverting, and the rows where one of
+# them does not are counted in their own column and concentrated in the same bucket. Those
+# rows have no interval width at all: a price below intrinsic value corresponds to no
+# volatility, and a root outside the solver's bracket is not located, so neither can be
+# averaged in and neither says which side of the reported median it would have fallen on.
+# The direction of that exclusion is not measured here, so the medians are read as what they
+# are - the spread of the rows that solved - and the counts are read beside them.
+#
+# What both columns say together is that on the thin bucket the quote does not determine a
+# volatility to any useful precision. Two implementations disagreeing there are not giving
+# different answers to the same question; they are answering one the price leaves open.
 #
 # The vendor's rows show a related pattern, measured next.
 
