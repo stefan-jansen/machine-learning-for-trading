@@ -27,7 +27,7 @@
 # - Evaluate selected latent and supervised models with paired per-date IC
 # - Measure whether neural latent estimators produce complementary rankings
 #
-# **Book reference**: Section 14.8 (Cross-Case-Study Synthesis).
+# **Book reference**: Section 14.8 (Case study insights)
 #
 # **Prerequisites**: the case-study pipelines have populated their
 # `run_log/registry.db` files and prediction artifacts. This notebook reads
@@ -48,6 +48,7 @@ import polars as pl
 
 # Load torch before ml4t.diagnostic so its bundled CUDA runtime wins.
 import torch  # noqa: F401
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from ml4t.diagnostic.metrics import compute_ic_uncertainty
 
 from case_studies.utils.analytics import CASE_STUDY_IDS, PRIMARY_LABELS, SHORT_NAMES
@@ -58,6 +59,8 @@ from utils.style import (
     COLORS,
     FIGSIZE,
     add_message_title,
+    ml4t_diverging,
+    show_with_alt,
     zero_line,
 )
 
@@ -124,14 +127,15 @@ for case_study in qualifying_case_studies:
 coverage = pl.DataFrame(coverage_rows)
 
 # %% [markdown]
-# The coverage map shows a deliberately uneven experiment grid. Broad panels
-# carry conditional or neural estimators, while the narrow CME panel contains
-# only PCA and SDF in the current registry snapshot.
+# The coverage map shows an uneven experiment grid: the broader panels carry
+# the conditional and neural estimators, and the narrower ones carry fewer.
+# Which cells are filled is a property of the current registry snapshot.
 
 # %%
 coverage_values = coverage.select(ESTIMATORS).to_numpy()
+coverage_cmap = ListedColormap([COLORS["silver_muted"], COLORS["blue"]])
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-ax.imshow(coverage_values, cmap="Blues", vmin=0, vmax=1, aspect="auto")
+ax.imshow(coverage_values, cmap=coverage_cmap, vmin=0, vmax=1, aspect="auto")
 ax.set_xticks(range(len(ESTIMATORS)), [ESTIMATOR_NAMES[e] for e in ESTIMATORS])
 ax.set_yticks(range(coverage.height), coverage["case_study"].to_list())
 ax.set_xlabel("Latent-factor estimator")
@@ -143,10 +147,17 @@ for row in range(coverage.height):
         ax.text(col, row, label, ha="center", va="center", fontsize=8, color=color)
 add_message_title(
     ax,
-    "Estimator coverage varies with the panel",
+    "Latent-factor estimator coverage by case study",
     subtitle="Registered validation results at each case study's primary label",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Grid with one row per case study and one column per latent-factor estimator (PCA, "
+    "IPCA, CAE, SDF, SAE). Each cell is shaded dark where a validation result is "
+    "registered and pale where it is not, and carries the word 'available' or 'not run'. "
+    "The broader panels are filled across most or all of the row; the narrowest panel has "
+    "only two filled cells.",
+)
 
 # %% [markdown]
 # ## 2. Highest mean daily IC by case study
@@ -163,6 +174,13 @@ latent_winners = collect_rank1_per_cs(qualifying_case_studies, family=FAMILY).wi
     )
 )
 latent_winners = latent_winners.sort("ic_mean_daily")
+print("Highest-IC latent estimator per case study (primary label, validation):")
+for winner in latent_winners.sort("ic_mean_daily", descending=True).iter_rows(named=True):
+    print(
+        f"  {winner['short_name']:<14} {winner['estimator']:<5} "
+        f"IC={winner['ic_mean_daily']:+.4f} "
+        f"[{winner['ic_ci_lo']:+.4f}, {winner['ic_ci_hi']:+.4f}]"
+    )
 
 # %%
 names = latent_winners["short_name"].to_list()
@@ -188,28 +206,38 @@ for y, row in enumerate(latent_winners.iter_rows(named=True)):
         fontsize=8,
     )
 ax.set_yticks(range(len(names)), names)
+ax.set_ylim(-0.6, len(names) - 1 + 0.8)
 ax.set_xlabel("Mean daily Spearman IC (HAC 95% interval)")
 ax.set_ylabel("Case study")
 zero_line(ax, axis="x")
 add_message_title(
     ax,
-    "The strongest latent estimator depends on the panel",
+    "Highest validation IC per case study, with HAC intervals",
     subtitle="Highest registered validation IC at the primary label",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal error-bar chart with one row per case study, ordered so the highest mean "
+    "daily Spearman IC is at the top. Each row is a point with its HAC 95% interval, "
+    "annotated with the leading estimator's name and its IC, against a dashed line at "
+    "zero. The intervals are wide relative to the gaps between panels, and the "
+    "lowest-scoring rows have intervals that reach across zero.",
+)
 
 # %% [markdown]
-# SDF leads on the ETF, equity-option, and futures panels. SAE leads on US
-# Firms, while IPCA leads on US Equities. The result rejects a universal
-# estimator ranking: the objective that works best depends on panel structure
-# and the prediction target.
+# The printed table above names the leading estimator on each panel and the
+# figure shows the same values with their HAC intervals. No single estimator
+# leads everywhere. Read the intervals before the ordering: where an interval
+# spans zero, that panel's leader is not separated from no ranking skill at
+# all, and which objective works best is a property of the panel and the
+# prediction target rather than of the estimator alone.
 
 # %% [markdown]
-# ## 3. The US Firms objective ladder
+# ## 3. Training objectives on one panel
 #
-# US Firms is the only registered primary-label panel with IPCA and all three
-# neural objectives. Comparing their best checkpoints isolates the role of the
-# training objective while keeping the dataset and target fixed.
+# Holding the dataset and the target fixed at the US Firms panel and its
+# primary label, the highest-IC registered checkpoint of each estimator differs
+# from the others only in the objective it was trained against.
 
 # %%
 us_firms_metrics = (
@@ -230,6 +258,12 @@ us_firms_metrics = (
     )
     .sort("ic_mean_daily")
 )
+print("US Firms estimators by mean daily IC (best checkpoint each):")
+for objective in us_firms_metrics.sort("ic_mean_daily", descending=True).iter_rows(named=True):
+    print(
+        f"  {objective['estimator']:<5} IC={objective['ic_mean_daily']:+.4f} "
+        f"[{objective['ic_ci_lo']:+.4f}, {objective['ic_ci_hi']:+.4f}]"
+    )
 
 # %%
 objective_names = us_firms_metrics["estimator"].to_list()
@@ -249,21 +283,30 @@ ax.errorbar(
 for y, value in enumerate(objective_means):
     ax.annotate(f"{value:+.3f}", (value, y), xytext=(5, 5), textcoords="offset points")
 ax.set_yticks(range(len(objective_names)), objective_names)
+ax.set_ylim(-0.6, len(objective_names) - 1 + 0.8)
 ax.set_xlabel("Mean daily Spearman IC (HAC 95% interval)")
 ax.set_ylabel("Estimator")
 zero_line(ax, axis="x")
 add_message_title(
     ax,
-    "Supervised reconstruction leads the US Firms objective ladder",
+    "US Firms validation IC by latent-factor estimator",
     subtitle="Best checkpoint per estimator, monthly primary label",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal error-bar chart with one row per latent-factor estimator on the US Firms "
+    "panel, ordered with the highest mean daily Spearman IC at the top. Each point "
+    "carries its value as a label and a HAC 95% interval, against a dashed line at zero. "
+    "Most of the intervals span zero; the lowest row is the one that lies entirely on the "
+    "negative side.",
+)
 
 # %% [markdown]
-# SAE's joint reconstruction and prediction objective leads this panel. CAE's
-# reconstruction-only score points in the opposite direction, and IPCA and SDF
-# sit between them. This is a validation comparison, so it diagnoses objective
-# alignment rather than estimating final holdout performance.
+# The printed ordering above is the result; the figure adds each estimator's
+# HAC interval to it. Those intervals overlap each other heavily, so the
+# objectives are separated far less than the point estimates suggest. It is a
+# validation comparison in any case: it diagnoses objective alignment on this
+# panel and does not estimate holdout performance.
 
 # %% [markdown]
 # ## 4. Latent factors versus supervised models
@@ -382,8 +425,8 @@ def paired_daily_ic(latent: pl.DataFrame, supervised: pl.DataFrame) -> pl.DataFr
 
 # %% [markdown]
 # Select the strongest supervised registry row for each panel using
-# `ic_mean_daily`, the same column used for the latent winners and all displayed
-# rankings.
+# `ic_mean_daily`, the same column used for the latent selections and all
+# displayed rankings.
 
 # %%
 supervised_winners = {}
@@ -429,6 +472,14 @@ for latent_row in latent_winners.iter_rows(named=True):
         }
     )
 comparison = pl.DataFrame(comparison_rows).sort("delta")
+print("Latent minus supervised, paired on common dates and entities:")
+for pair in comparison.sort("delta", descending=True).iter_rows(named=True):
+    print(
+        f"  {pair['short_name']:<14} {pair['latent_name']:<5} vs "
+        f"{pair['supervised_name']:<14} delta={pair['delta']:+.4f} "
+        f"[{pair['delta_lo']:+.4f}, {pair['delta_hi']:+.4f}] "
+        f"dates={pair['n_dates']}, rows={pair['n_common']:,}"
+    )
 
 # %% [markdown]
 # The left panel compares paired-sample mean IC. The right panel isolates the
@@ -453,7 +504,7 @@ axes[0].set_xlabel("Mean daily Spearman IC")
 axes[0].set_ylabel("Case study")
 axes[0].legend(loc="lower right", ncol=2)
 zero_line(axes[0], axis="x")
-add_message_title(axes[0], "Panel structure determines the stronger model class")
+add_message_title(axes[0], "Selected latent and supervised validation IC by panel")
 
 delta = comparison["delta"].to_numpy()
 delta_lo = delta - comparison["delta_lo"].to_numpy()
@@ -470,17 +521,28 @@ axes[1].errorbar(
 for idx, value in enumerate(delta):
     axes[1].annotate(f"{value:+.3f}", (value, idx), xytext=(4, 5), textcoords="offset points")
 axes[1].set_yticks(y, comparison["short_name"].to_list())
+axes[1].set_ylim(-0.6, comparison.height - 1 + 0.8)
 axes[1].set_xlabel("Latent minus supervised mean daily IC (HAC 95% interval)")
 axes[1].set_ylabel("Case study")
 zero_line(axes[1], axis="x")
-add_message_title(axes[1], "Only paired dates and entities enter each difference")
-fig.show()
+add_message_title(axes[1], "Latent minus supervised IC with HAC 95% intervals")
+show_with_alt(
+    fig,
+    "Two stacked panels, one row per case study in both. The upper panel places two "
+    "points on a shared mean-daily-IC axis for each case study, amber for the selected "
+    "supervised model and navy for the selected latent model, joined by a light line, "
+    "against a dashed zero line; the two sit close together on most panels and far apart "
+    "on one. The lower panel plots the latent-minus-supervised difference for each case "
+    "study with its HAC 95% interval and a value label, against a dashed zero line. Most "
+    "differences are small with intervals spanning zero; one is a large negative value "
+    "whose whole interval lies to the left of zero.",
+)
 
 # %% [markdown]
 # Latent models lead on some panels and lag on others. The paired construction
 # makes this comparison interpretable: each difference uses the same assets on
-# the same dates. The intervals still reflect validation uncertainty after
-# winner selection and therefore should not be read as final holdout tests.
+# the same dates. The intervals still reflect validation uncertainty after that
+# selection and therefore should not be read as holdout tests.
 
 # %% [markdown]
 # ## 5. Neural estimator agreement on US Firms
@@ -543,8 +605,16 @@ for i, left_name in enumerate(neural_names):
         agreement[j, i] = agreement[i, j]
 
 # %%
+off_diagonal = agreement[np.triu_indices(len(neural_names), k=1)]
+print(
+    f"Neural estimator agreement on US Firms: {len(off_diagonal)} pairs, mean monthly "
+    f"rank correlation {off_diagonal.min():+.2f} to {off_diagonal.max():+.2f}"
+)
+
+# %%
+correlation_cmap = LinearSegmentedColormap.from_list("ml4t_diverging", ml4t_diverging())
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-image = ax.imshow(agreement, cmap="RdBu_r", vmin=-1, vmax=1)
+image = ax.imshow(agreement, cmap=correlation_cmap, vmin=-1, vmax=1)
 display_names = [ESTIMATOR_NAMES[name] for name in neural_names]
 ax.set_xticks(range(len(display_names)), display_names)
 ax.set_yticks(range(len(display_names)), display_names)
@@ -552,34 +622,49 @@ ax.set_xlabel("Neural latent estimator")
 ax.set_ylabel("Neural latent estimator")
 for row in range(len(display_names)):
     for col in range(len(display_names)):
-        ax.text(col, row, f"{agreement[row, col]:+.2f}", ha="center", va="center")
+        value = agreement[row, col]
+        ax.text(
+            col,
+            row,
+            f"{value:+.2f}",
+            ha="center",
+            va="center",
+            color="white" if abs(value) > 0.6 else COLORS["neutral"],
+        )
 colorbar = fig.colorbar(image, ax=ax, shrink=0.8)
 colorbar.set_label("Mean monthly Spearman correlation")
 add_message_title(
     ax,
-    "Neural objectives produce distinct US Firms rankings",
+    "Rank agreement between neural latent estimators",
     subtitle="Per-month correlations, averaged over common validation months",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Square heatmap of the mean monthly Spearman correlation between the neural latent "
+    "estimators, with the same estimator names on both axes, a diverging color scale from "
+    "-1 to 1, a colorbar, and every cell labeled. The diagonal is fixed at +1.00 by "
+    "construction. The off-diagonal pairs all sit well short of one, in the low positive "
+    "range.",
+)
 
 # %% [markdown]
-# The off-diagonal correlations are far from one, so the neural objectives do
-# not merely repackage the same ranking. This supports testing them as separate
-# ensemble inputs, but the eventual portfolio decision belongs in Chapter 20
-# and must use its sealed evaluation protocol.
+# The printed off-diagonal range is well short of one, so the neural objectives
+# do not merely repackage the same ranking. That supports testing them as
+# separate ensemble inputs. Chapter 20 makes the portfolio decision, under the
+# holdout protocol defined there.
 
 # %% [markdown]
 # ## Key takeaways
 #
 # - Registry coverage is uneven, so missing cells are not performance results.
-# - No latent estimator wins across every panel; SDF, SAE, and IPCA each lead
-#   somewhere on the primary-label validation results.
-# - SAE leads the US Firms objective ladder, while reconstruction-only CAE
-#   points in the opposite direction on that panel.
+# - No latent estimator leads every panel. Which one leads where is printed in
+#   Section 2 and moves with the registry snapshot.
+# - With the panel and target held fixed, the estimators separate by training
+#   objective, but their intervals overlap heavily (Section 3).
 # - Paired per-date comparisons show that neither latent nor supervised models
 #   dominate everywhere. These are post-selection validation diagnostics.
 # - Neural objectives create distinct monthly firm rankings, making model
 #   diversity a testable input to Chapter 20 rather than an assumption.
 #
 # **Next**: Chapter 15 studies causal effects; Chapter 20 evaluates how these
-# predictive signals combine under a sealed portfolio protocol.
+# predictive signals combine under the holdout protocol defined there.
