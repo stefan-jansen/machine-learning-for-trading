@@ -45,8 +45,6 @@
 # %%
 """Factor-spanning validation with post-double-selection LASSO."""
 
-import warnings
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -59,9 +57,7 @@ from sklearn.preprocessing import StandardScaler
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 START_DATE = "2006-01-01"
@@ -89,7 +85,7 @@ set_global_seeds(SEED)
 #
 # This eligibility rule uses the current curated ETF list and is not a point-in-time
 # historical universe. The result is an in-sample teaching exercise, not a
-# survivorship-free backtest or a sealed holdout estimate.
+# survivorship-free backtest, and nothing here is held out.
 
 # %%
 etf_data = load_etfs(start_date=START_DATE, end_date=END_DATE).sort(["symbol", "timestamp"])
@@ -307,7 +303,9 @@ def fit_lasso_selector(target: np.ndarray, pca_inputs: np.ndarray) -> dict:
         {"lasso__alpha": alpha_grid},
         cv=TimeSeriesSplit(n_splits=N_CV_SPLITS),
         scoring="neg_mean_squared_error",
-        n_jobs=-1,
+        # The grid is small and the design is a few thousand rows; a worker per core would
+        # take the whole machine from every other notebook executing beside this one.
+        n_jobs=1,
     )
     search.fit(pca_inputs, target)
     coefficients = search.best_estimator_.named_steps["lasso"].coef_
@@ -386,9 +384,9 @@ post_table
 # %% [markdown]
 # ## 7. Compare uncertainty and selection breadth
 #
-# The left panel compares the same SPY loading before and after PCA conditioning;
-# error bars are Newey-West 95% intervals. The right panel shows how many of the ten
-# PCA controls enter the post-selection union.
+# The left panel compares the same SPY loading before and after PCA conditioning, with
+# Newey-West intervals at the conventional two-sided level. The right panel shows how many
+# of the ten PCA controls enter the post-selection union.
 
 # %%
 factor_positions = np.arange(len(candidate_names))
@@ -439,10 +437,17 @@ axes[1].invert_yaxis()
 
 add_message_title(
     axes[0],
-    "PCA controls erase naive SPY loadings",
+    "SPY loading before and after PCA conditioning",
     subtitle=figure_subtitle,
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels sharing a vertical axis of candidate factor names. The left panel plots each "
+    "factor's SPY loading twice, the naive estimate and the post-double-selection estimate at "
+    "slightly offset heights with different marker shapes, each with a horizontal "
+    "Newey-West interval and a vertical line at zero. The right panel is a horizontal bar "
+    "chart of how many of the ten PCA controls entered the selection union for that factor.",
+)
 
 # %% [markdown]
 # **Interpretation**: the naive slopes mix each managed factor's association with
