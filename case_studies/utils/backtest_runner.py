@@ -83,6 +83,16 @@ def observed_periods_per_year(daily_returns) -> float:
     if n <= 2:
         return 0.0
     all_ts = daily_returns["timestamp"].unique().sort()
+    # `total_seconds()` returns whole seconds, so a gap under one second truncates to 0 and the
+    # filter below deletes it. That is safe here because of the grids this is called on, not
+    # because of the unit: the finest return grid any case study evaluates on is minute-level,
+    # so the smallest real gap is 60. It would go false the day something evaluates on seconds,
+    # and it would fail quietly - every gap zeroed, the array emptied, 0.0 returned, and
+    # `reconcile_periods_per_year` keeping the declared constant with nothing saying why.
+    # Switch to `dt.total_nanoseconds()` at that point rather than widening the filter.
+    # Found 2026-09-10 by the sweep behind
+    # 03_market_microstructure/04_itch_order_lifecycle_analysis, where the same pair of calls
+    # zeroed every sub-second order lifetime and then dropped the whole population.
     gaps = all_ts.diff().drop_nulls().dt.total_seconds().to_numpy().astype(float)
     gaps = gaps[gaps > 0]
     if gaps.size == 0:

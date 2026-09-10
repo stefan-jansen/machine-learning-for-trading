@@ -21,14 +21,14 @@
 # **Purpose**: Before we freeze a setup or fit a model, we test whether one concrete
 # idea — **cross-asset momentum** on the 100-ETF universe — actually leaves a
 # footprint in the data. This is the exploratory step that sits between a *story*
-# ("recent winners keep winning") and a *strategy*. We use the single most
+# ("what rose recently keeps rising") and a *strategy*. We use the single most
 # informative EDA tool in this domain: **sort by the signal, then look at forward
 # returns per bucket.**
 #
 # ## The idea and its mechanism
 #
-# The idea: assets that went up over the past year tend to keep outperforming over
-# the next month, *across* asset classes (equities, sectors, countries, bonds,
+# The idea: assets that went up over the past year tend to keep earning more than the
+# rest of the universe over the next month, *across* asset classes (equities, sectors, countries, bonds,
 # commodities). Before any statistics, name the mechanism — *who is on the other
 # side, and why are they happy to trade with us?* This idea sits in the "behind"
 # family: we are betting others are slow or a step behind, not that we are paid to
@@ -51,7 +51,7 @@
 # - Run the **quintile conditional-return sort** and read it for *monotonicity,
 #   magnitude, and shape*.
 # - Stress the result by **era** — the difference between a footprint and an artifact.
-# - Leave with a measured verdict that motivates the rest of the chapter: freeze the
+# - Leave with a measured reading that motivates the rest of the chapter: freeze the
 #   setup, validate walk-forward, and respect costs and effective sample size.
 #
 # **Book reference**: Chapter 6 §6.1–§6.2 (from idea to evidence; mapping strategies
@@ -69,7 +69,7 @@ import numpy as np
 import polars as pl
 
 from data import load_etfs
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -147,11 +147,14 @@ monthly = monthly.with_columns(
 # - **Shape** — is the effect smooth (premium-like) or concentrated in the tails
 #   (event-like)?
 
+# %% [markdown]
+# The eligible cross-section keeps the months where both the signal and the outcome are
+# present and at least `MIN_NAMES` ETFs qualify. Sorting by `(timestamp, momentum,
+# symbol)` breaks a tie in the signal by symbol, so the rank is stable from run to run.
+# The quintile is then cut at the rank quantiles $1 + k(n-1)/5$, which is what pandas'
+# `qcut` does on a rank: buckets stay balanced and no tie merges two of them.
+
 # %%
-# Eligible cross-section: both signal and outcome present, in months with >= MIN_NAMES
-# names. Sorting by (timestamp, momentum, symbol) breaks any signal ties by symbol so the
-# rank is stable; the quintile then replicates pandas' `qcut` on the rank via its
-# quantile edges (1 + 0.2k(n-1)), so buckets stay balanced and no tie collapses one.
 elig = (
     monthly.drop_nulls(["momentum", "fwd_ret"])
     .filter(pl.len().over("timestamp") >= MIN_NAMES)
@@ -166,12 +169,15 @@ elig = elig.with_columns(quintile=quintile)
 qs = list(range(1, N_QUANTILES + 1))
 print(f"Cross-sectional observations: {elig.height:,} over {elig['timestamp'].n_unique()} months")
 
+# %% [markdown]
+# Each bucket becomes an equal-weight portfolio in each month, alongside the equal-weight
+# universe as a benchmark, and both are averaged across months. The horizon reported is
+# the one the design uses: the sort ranks once a month and holds for one month, so a
+# monthly return is the honest unit. Raising a single-month cross-sectional sort to the
+# twelfth power would assume the edge recurs in every month of the year, and the by-era
+# split below is the reason not to assume it.
+
 # %%
-# Monthly equal-weight bucket portfolios and the equal-weight benchmark, then each averaged
-# across months. We report at the native monthly horizon: the sort ranks once a month and
-# holds for one month, so a monthly return is the honest unit. Annualizing a single-month
-# cross-sectional sort by ^12 would assume the edge recurs every month — which the by-era
-# split below shows it does not.
 benchmark = elig.group_by("timestamp").agg(bench=pl.col("fwd_ret").mean())
 buckets = elig.group_by(["timestamp", "quintile"]).agg(ret=pl.col("fwd_ret").mean())
 wide = (
@@ -213,7 +219,11 @@ labels = [str(q) for q in qs]
 bg = axg.bar(labels, gross, color=COLORS["slate"], width=0.68)
 bg[-1].set_color(COLORS["amber"])
 axg.axhline(bench_pct, ls="--", lw=1, color="grey")
-add_message_title(axg, "Raw (gross): every bucket rides the market up")
+add_message_title(
+    axg,
+    "Forward 1-month return by momentum quintile, gross",
+    subtitle="100-ETF universe, monthly rebalance; dashed line is the equal-weight universe",
+)
 axg.set_xlabel("Momentum quintile")
 axg.set_ylabel("Forward 1-month return, %")
 for x, v in zip(labels, gross):
@@ -223,7 +233,11 @@ axg.margins(y=0.16)
 bn = axn.bar(labels, net_bps, color=COLORS["slate"], width=0.68)
 bn[-1].set_color(COLORS["amber"])
 axn.axhline(0, ls="--", lw=1, color="grey")
-add_message_title(axn, "Net of the market: the momentum tilt")
+add_message_title(
+    axn,
+    "The same buckets net of the equal-weight universe",
+    subtitle="Bucket return minus the universe return in the same month, in basis points",
+)
 axn.set_xlabel("Momentum quintile  (1 = worst  →  5 = best)")
 axn.set_ylabel("Net of market, bps / month")
 for x, v in zip(labels, net_bps):
@@ -236,25 +250,33 @@ for x, v in zip(labels, net_bps):
         fontsize=10,
     )
 axn.margins(y=0.20)
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two bar panels over the five momentum quintiles. The left panel plots each "
+    "bucket's gross forward 1-month return in percent against a dashed line at the "
+    "equal-weight universe return; the right panel plots the same buckets net of that "
+    "universe, in basis points, against a dashed zero line. The top quintile is "
+    "highlighted in amber in both panels and every bar is labelled with its value.",
+)
 
 # %% [markdown]
-# **Read it.** In raw (gross) terms every bucket earns 0.5–0.8% a month — but that is
-# mostly beta: they all sit around the dashed benchmark line, because the whole
-# universe drifted up. Strip the market out (right panel) and what is left is the
-# *tilt*: the bottom buckets are slightly negative, the top two slightly positive,
-# ordering roughly with past momentum. The spread from worst to best is the same
-# either way (~26 bps a month) — the benchmark cancels — and it is **modest**. The
-# tradable long-short is thin (t ≈ 0.9, before costs). On the full sample this looks
-# like a small footprint; a single average can still hide a lot, so we stress it by era.
+# **Read it.** Gross, all five buckets sit close together and close to the dashed
+# benchmark line: most of what they earn is beta, the return for being invested at all
+# while the universe drifted up. The right panel takes the universe out and leaves the
+# *tilt*: the lower buckets net negative, the upper ones net positive, ordering roughly
+# with past momentum. The printed table above carries the levels; what the figure is for
+# is the ordering and the size of the gaps against the benchmark. The top-minus-bottom
+# spread is identical gross or net, because the benchmark cancels, and the long-short
+# t-statistic is printed beside it - read it before reading the spread. On the full
+# sample the footprint is there and it is small, and one average over two decades can
+# hide a lot, so the next section cuts the sample by era.
 
 # %% [markdown]
 # ## 4. Is it lumpy but present, or an artifact? Split by era
 #
-# A real mechanism is usually *lumpy but present* — it survives being cut by time,
-# even if it isn't equally strong everywhere. An effect that lives entirely in one
-# period is telling you what it actually is. We split the sample in half and rerun
+# A real mechanism is usually *lumpy but present*: still there when the sample is cut
+# by time, even if it is not equally strong everywhere. An effect that lives entirely in
+# one period is telling you what it actually is. We split the sample in half and rerun
 # the sort. Recall the mechanism's own warning: information-based edges **decay** as
 # everyone learns to read the same price history.
 
@@ -307,34 +329,45 @@ ax.axhline(0, lw=0.8, color="grey")
 ax.set_xticks(x)
 ax.set_xticklabels(eras)
 ax.set_ylabel("Forward 1-month return, net of market, bps / month")
-add_message_title(ax, "Net of the market: the spread collapses across eras")
+add_message_title(
+    ax,
+    "Quintile 1 and quintile 5 net of the universe, by decade",
+    subtitle="Monthly average in basis points; the labelled gap is quintile 5 minus quintile 1",
+)
 ax.legend(frameon=False, loc="lower right")
 ax.margins(y=0.2)
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "A grouped bar chart with one pair of bars per decade: the worst momentum quintile "
+    "in slate and the best in amber, each plotted as its monthly average net of the "
+    "equal-weight universe in basis points, against a zero line. Every bar is labelled "
+    "with its value and the quintile 5 minus quintile 1 gap is annotated above each pair.",
+)
 
 # %% [markdown]
-# **Read it.** Net of the market, the tilt is clear in the first decade (a wide
-# Q5-over-Q1 gap) and much smaller in the second — the spread falls to roughly a fifth
-# of its first-decade level (about 45 bps to about 9 bps a month).
-# That is consistent with an information-based edge decaying as it becomes widely
-# known. Two cautions keep this at "suggestive," not "proven": the tradable
-# long-short is not statistically significant in either era (see `ls_t`), and a
-# two-bucket split is itself a coarse cut — the exercises push you to move the
-# boundary and watch how stable the fade really is.
+# **Read it.** Net of the market, the gap between the top and bottom quintile is wide
+# in the first decade and much narrower in the second; both spreads are in the printed
+# table. An information-based edge fading as it becomes widely known is one reading of
+# that, and it is the reading the mechanism named at the top of the notebook predicts.
+# Two things keep it at suggestive rather than shown: the tradable long-short is not
+# statistically significant in either era, which the `ls_t` column reports, and a
+# two-bucket split is itself a coarse cut. The exercises move the boundary and ask how
+# stable the fade is.
 
 # %% [markdown]
 # ## 5. One feasibility check: how fast does the signal turn over?
 #
 # Costs are decided by turnover, and turnover is governed by how much the ranking
 # changes month to month. We measure the month-over-month rank autocorrelation of
-# the signal: high autocorrelation means today's winners are mostly last month's
-# winners, so we trade little.
+# the signal: a high autocorrelation means this month's ranking is largely last month's
+# ranking, so we trade little.
+
+# %% [markdown]
+# The Spearman rank correlation is the Pearson correlation of the ranks. Each pair of
+# adjacent months is joined on the symbols present in both, kept only where at least
+# `MIN_NAMES` symbols survive the join, and the per-pair correlations are averaged.
 
 # %%
-# Spearman rank correlation = Pearson correlation of the ranks. For each pair of adjacent
-# months we join on the symbols present in both, require >= MIN_NAMES, and average the
-# per-pair correlations.
 mom = monthly.select("timestamp", "symbol", "momentum").drop_nulls("momentum")
 months = mom["timestamp"].unique().sort().to_list()
 month_index = {t: i for i, t in enumerate(months)}
@@ -356,19 +389,20 @@ print(f"Mean month-over-month rank autocorrelation: {autocorr:.3f}")
 print("(High → the ranking is persistent → turnover and costs are modest.)")
 
 # %% [markdown]
-# ## 6. Verdict — and what comes next
+# ## 6. What the EDA established, and what comes next
 #
-# What the EDA established, and what it did **not**:
+# What it established, and what it did **not**:
 #
-# - Net of the market, the mechanism leaves a **modest, top-concentrated** tilt —
-#   enough to be worth engineering, not enough to trade on its own. The tradable
-#   long-short is thin and **not statistically significant** (t ≈ 0.9), and all of
-#   this is **before costs**.
-# - It is **regime-dependent**: the spread collapses from about 45 bps a month in
-#   2006–2015 to about 9 bps in 2016–2025. Evaluation must respect *when* the edge lived, which is why we validate
-#   **walk-forward**, not on a shuffled or full-sample average.
-# - The signal is **persistent** (low turnover), so costs are unlikely to erase it
-#   outright — but again, we have not yet subtracted a single basis point.
+# - Net of the market, the mechanism leaves a **top-concentrated** tilt: enough to be
+#   worth engineering, not enough to trade on its own. The tradable long-short is
+#   **not statistically significant** at the t-statistic printed above, and all of this
+#   is **before costs**.
+# - It is **regime-dependent**: the spread is much narrower in the second decade than
+#   in the first. Evaluation must respect *when* the edge lived, which is why we
+#   validate **walk-forward** rather than on a shuffled or full-sample average.
+# - The signal is **persistent**, at the rank autocorrelation printed above, so
+#   turnover is low and costs are unlikely to erase the tilt outright. We have still
+#   not subtracted a single basis point.
 #
 # Nothing here is a backtest. It is visual confirmation that there is *something* to
 # model, plus a set of cautions. The rest of the chapter turns this into a disciplined

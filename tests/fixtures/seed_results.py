@@ -1934,11 +1934,19 @@ def _seed_demo_predictions(cs_dir: Path, cs_id: str, primary_label: str) -> None
 def _seed_news_features(output_dir: Path) -> None:
     """Seed a minimal news_features.parquet for Ch10/08_text_feature_evaluation.
 
-    The panel is produced by 10/07_news_return_signals, which declares `gpu: true` and so
-    skips on a CI runner. 08 is the only chapter-10 notebook that runs there, so without this
-    seed it fails on a missing input rather than exercising anything. The notebook is right to
-    raise on the missing file - a notebook that tolerates absent input reports success for a
-    run that computed nothing - which is why the fixture supplies it instead.
+    The panel is produced by 10/07_news_return_signals, which is marked `skip` because the
+    FNSPID fixture sample (2020-2023) does not overlap the us_equities fixture (ends
+    2018-03-27), so its price join drops every row. 08 is then the only chapter-10 notebook
+    that runs on a CI runner, and without this seed it fails on a missing input rather than
+    exercising anything. The notebook is right to raise on the missing file - a notebook that
+    tolerates absent input reports success for a run that computed nothing - which is why the
+    fixture supplies it instead.
+
+    This seed cited 07's `gpu: true` until 2026-09-10. That flag was wrong: 07 runs to
+    completion on CPU in 28s. Removing it made 07 execute ahead of 08 and overwrite this panel
+    with the empty one its own join produces, which is how the real reason surfaced. Once the
+    fixture's news and price windows overlap (ml4t/agent-workspace#1116), 07 runs, writes a
+    real panel, and this seed can go - `if path.exists()` already yields to it.
 
     The notebook loads from get_output_dir(10, "fnspid") / "news_features.parquet"; in test
     mode that is {ML4T_OUTPUT_DIR}/ch10_fnspid/news_features.parquet. This directory name is
