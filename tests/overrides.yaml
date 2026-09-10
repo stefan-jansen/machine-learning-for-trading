@@ -384,22 +384,28 @@
     SAMPLE_SIZE: 1500
   timeout: 300
 10_text_feature_engineering/07_news_return_signals:
-  # Not a GPU notebook - it ran to completion on CPU in 28s with the card hidden. What it cannot
-  # do is produce a row against this fixture: the news sample spans 2020-01-02..2023-12-28 and
-  # `load_us_equities` ends 2018-03-27, so the price join drops all 109 feature rows and the
-  # notebook writes an empty news_features.parquet. It reports that ("Overlapping dates: 0",
-  # "Observations: 0") and still exits 0, so with the GPU flag off it silently replaced the panel
-  # `tests/fixtures/seed_results.py::_seed_news_features` puts there for 08, which then failed on
-  # the empty file. Production overlaps for nine years (news 2009-02..2020-06, prices to
-  # 2018-03), so this is the fixture's sampling window, not the notebook.
-  # ml4t/agent-workspace#1116.
+  # Runs on CPU: the embedding pass is the cost, not the card. ml4t/agent-workspace#1116 was a
+  # fixture with no builder - hand-placed synthetic headlines for tickers and years the price
+  # panel does not carry, so every feature row dropped at the join and the notebook wrote an
+  # empty panel that 08 then failed on. `tests/create_test_data.py`'s `fnspid_news` dataset now
+  # generates it from production, and `test_the_news_fixture_lands_inside_the_price_panel` is
+  # what keeps the two in the same window.
+  #
+  # MAX_ARTICLES is the cost knob, and it is set from a measurement rather than a guess:
+  # `tests/pm_helpers.py`'s KERNEL_THREAD_CAP pins the kernel to one thread, and the notebook
+  # makes two transformer passes over every headline, so the uncapped 5,599-headline fixture
+  # takes ~15 minutes. The floor is not the article count. `MAX_ARTICLES` caps per ticker, and
+  # the cross-sectional IC loop needs days carrying at least ten tickers: at 1200 there are none
+  # even with 254 merged observations, at 3000 there are 20. 3000 keeps 2,304 articles and 955
+  # merged observations, well clear of the `len(factor_with_returns) > 100` branch and of the
+  # `lookback_days + 1` news dates each ticker needs for a surprise row. Measured at 3000:
+  # 420s and 1.7 GB, taken under load, so idle is faster. That is cheaper than the two
+  # chapter-10 notebooks that still overrun 600s, 04_bert_finetuning and 09_filing_text_signals.
+  #
+  # MAX_TICKERS is left at its default: the fixture carries 28 and the notebook's 50 does not
+  # bind, and lowering it is what would take the IC loop's days below ten tickers.
   parameters:
-    MAX_ARTICLES: 500
-    MAX_TICKERS: 5
-  skip: true
-  skip_reason: >-
-    The FNSPID fixture sample (2020-2023) has no overlap with the us_equities fixture
-    (ends 2018-03-27), so every feature row drops at the price join. ml4t/agent-workspace#1116.
+    MAX_ARTICLES: 3000
   timeout: 600
 10_text_feature_engineering/08_text_feature_evaluation:
   parameters:
