@@ -710,7 +710,7 @@ ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.8)
 ax.set_yticks(y_pos)
 ax.set_yticklabels(coef_plot["feature"].to_list())
 ax.set_xlabel("Coefficient estimate (standardized feature, 21-day forward return)")
-ax.set_title("Coefficient estimates with clustered confidence intervals")
+ax.set_title("Coefficient estimates with Driscoll-Kraay confidence intervals")
 ax.grid(axis="x", alpha=0.3)
 show_with_alt(
     fig,
@@ -722,15 +722,17 @@ show_with_alt(
 # %% [markdown]
 # Sorting by size and drawing the interval is what makes the point legible: the estimates
 # with the largest magnitudes are mostly not distinguishable from zero once the estimator
-# admits that observations sharing a date move together. A ranking of coefficients by size is
-# a ranking of point estimates, and the interval is what says whether the ordering means
-# anything.
-#
-# n_crosses_zero = int((np.abs(coef_values) <= CONF_Z * cluster_se).sum())
-# print(
-#     f"Of the {TOP_COEFS} largest coefficients, {n_crosses_zero} have a "
-#     f"Driscoll-Kraay interval that includes zero."
-# )
+# admits both that observations sharing a date move together and that a symbol's errors
+# persist over time. A ranking of coefficients by size is a ranking of point estimates, and
+# the interval is what says whether the ordering means anything.
+
+
+# %%
+n_crosses_zero = int((np.abs(coef_values) <= CONF_Z * cluster_se).sum())
+print(
+    f"Of the {TOP_COEFS} largest coefficients, {n_crosses_zero} have a "
+    f"Driscoll-Kraay interval that includes zero."
+)
 
 # %% [markdown]
 # Robust standard errors are typically *larger* than OLS standard errors, making
