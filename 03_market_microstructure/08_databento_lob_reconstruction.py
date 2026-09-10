@@ -24,15 +24,15 @@
 #
 # ## Book reference
 #
-# Section §3.3, *From Raw Messages to the Limit Order Book* — Figure 3.2
-# (Nasdaq-visible spread distribution) is sourced from this notebook.
+# Section §3.3, *From raw messages to the limit order book*; Figure 3.2, the distribution
+# of the NASDAQ-visible spread, is drawn from this notebook.
 #
 # ## Prerequisites
 #
 # - DataBento XNAS-ITCH MBO parquets at
 #   `data/equities/market/microstructure/market_by_order/{SYMBOL}/`.
 #
-# ## Key Insight: T vs F Messages
+# ## Why an execution arrives twice
 #
 # DataBento MBO generates **two messages per execution**:
 #
@@ -54,44 +54,46 @@
 
 from __future__ import annotations
 
-import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-warnings.filterwarnings("ignore")
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-import seaborn as sns
 
 # Import loader for MBO data
 from data import load_mbo_data
 
 # ML4T imports - path resolution
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
+from utils.style import show_with_alt
 
-# Polars display configuration
-
+# %% [markdown]
+# ### Declared parameters
+#
+# `SYMBOL` is the one symbol whose book is reconstructed. MBO is per-symbol data and a
+# book describes one instrument, so this is a choice of subject rather than a sample
+# size.
+#
+# `SNAPSHOT_FREQ_MS` is how often the book is written down. The message stream updates
+# continuously; five seconds is often enough to see liquidity change and coarse enough
+# that a window of messages produces a frame a reader can look at.
+#
+# `N_LEVELS` is how many price levels each side of the snapshot records. One gives the
+# touch; five reaches far enough in that depth means more than the size sitting at the
+# highest bid and the lowest ask, which is what the depth panels below are about.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-MAX_SYMBOLS = 0  # 0 = all
+SYMBOL = "NVDA"
+SNAPSHOT_FREQ_MS = 5000
+N_LEVELS = 5
 
 # %%
-sns.set_style("whitegrid")
-
-# %%
-# =============================================================================
-# Configuration
-# =============================================================================
-
 OUTPUT_DIR = get_output_dir(3, "databento")
 
-SYMBOL = "NVDA"
-# Get file paths from the canonical loader (handles legacy/new path resolution)
+# The loader resolves the on-disk layout, which has changed once.
 data_files = load_mbo_data(symbols=[SYMBOL], list_files=True)
 SYMBOL_DATA_DIR = data_files[0].parent if data_files else None
 
@@ -250,12 +252,12 @@ if mbo is not None and len(mbo) > 0:
         print(f"\n  Usable for imbalance bars: {usable:,} ({usable / total_trades * 100:.1f}%)")
 
 # %% [markdown]
-# ## 2. LOB Reconstruction Engine
+# ## 2. The reconstruction engine
 #
 # We build the LOB reconstruction as modular components. This design is more
 # maintainable and testable than a monolithic function.
 #
-# ### 2.1 Order State Tracking
+# ### Tracking one order
 #
 # Each order in the book is tracked with its current state.
 
@@ -279,7 +281,7 @@ class OrderState:
 
 
 # %% [markdown]
-# ### 2.2 Price Level Aggregation
+# ### Aggregating orders into a price level
 #
 # A price level aggregates all orders at a single price point.
 
@@ -301,7 +303,7 @@ class PriceLevel:
 
 
 # %% [markdown]
-# ### 2.3 Book Side Management
+# ### One side of the book
 #
 # Each side (bid/ask) of the book is managed separately with a sorted structure.
 
@@ -382,7 +384,7 @@ class BookSide:
 
 
 # %% [markdown]
-# ### 2.4 Limit Order Book
+# ### The book itself
 #
 # The complete LOB combines both sides and computes features.
 
@@ -541,7 +543,7 @@ LimitOrderBook.apply = _apply
 
 
 # %% [markdown]
-# ### 2.4b Feature Computation Methods
+# ### Reading features off the book
 #
 # BBO, spread, and depth features are added to `LimitOrderBook` as methods.
 
@@ -644,7 +646,7 @@ LimitOrderBook.get_features = _get_features
 
 
 # %% [markdown]
-# ### 2.5 LOB Reconstructor
+# ### Driving the reconstruction
 #
 # The reconstructor processes a stream of MBO messages and takes periodic snapshots.
 # It uses **numpy arrays** for iteration instead of `to_dicts()` for better performance.
@@ -660,7 +662,7 @@ class LOBReconstructor:
     - Processes messages in a tight loop with minimal Python overhead
 
     Usage:
-        reconstructor = LOBReconstructor(snapshot_freq_ms=5000, n_levels=5)
+        reconstructor = LOBReconstructor(snapshot_freq_ms=SNAPSHOT_FREQ_MS, n_levels=N_LEVELS)
         snapshots_df = reconstructor.process(mbo_dataframe)
     """
 
@@ -821,10 +823,15 @@ def _process(self, messages: pl.DataFrame) -> pl.DataFrame:
                 snapshots.append(features)
             last_snapshot_ns = now_ns
 
+    # Two counts a reader has to see, because both are ordinary on a window that starts
+    # mid-session and both would be alarming anywhere else.
     if book.unknown_order_count > 0:
-        print(f"  Warning: {book.unknown_order_count:,} unknown order IDs encountered")
+        print(f"  {book.unknown_order_count:,} messages named an order the book had not seen added")
     if book.negative_size_count > 0:
-        print(f"  Warning: {book.negative_size_count:,} size clamps (data gaps)")
+        print(
+            f"  {book.negative_size_count:,} messages would have driven a resting size "
+            f"below zero and were clamped"
+        )
 
     return pl.DataFrame(snapshots)
 
@@ -833,7 +840,7 @@ LOBReconstructor.process = _process
 
 
 # %% [markdown]
-# ## 3. Run LOB Reconstruction
+# ## 3. Running it
 #
 # We reconstruct the LOB from a sample of MBO messages and analyze the results.
 
@@ -857,7 +864,7 @@ if mbo is not None and len(mbo) > 0:
 
     # Reconstruct LOB
     print("\nReconstructing LOB...")
-    reconstructor = LOBReconstructor(snapshot_freq_ms=5000, n_levels=5)
+    reconstructor = LOBReconstructor(snapshot_freq_ms=SNAPSHOT_FREQ_MS, n_levels=N_LEVELS)
     lob = reconstructor.process(mbo_sample)
     print(f"Snapshots: {len(lob):,}")
 
@@ -865,10 +872,14 @@ if mbo is not None and len(mbo) > 0:
     print(lob.head())
 
 # %% [markdown]
-# ## 4. Spread Analysis
+# ## 4. What the spread did
 #
-# The bid-ask spread is the most fundamental measure of transaction costs.
-# We analyze its distribution and dynamics.
+# The spread is what a round trip costs before any price impact: buy at the ask, sell at
+# the bid, and the difference is gone. Four views of it follow - how it moved through the
+# window, how its values were distributed, where the mid price went, and whether it
+# varied with the price level. The last is worth checking because a spread quoted in
+# basis points has the price in its denominator, so any relationship between the two is
+# a statement about the tick size rather than about liquidity.
 
 # %%
 if lob is not None and len(lob) > 0:
@@ -887,8 +898,8 @@ if lob is not None and len(lob) > 0:
     ax = axes[0, 0]
     ax.plot(lob_pd["timestamp"], lob_pd["spread_bps"], alpha=0.7, linewidth=0.8)
     ax.axhline(lob_pd["spread_bps"].mean(), color="red", linestyle="--", label="Mean", alpha=0.7)
-    ax.set_title("Bid-Ask Spread Over Time")
-    ax.set_xlabel("Time")
+    ax.set_title("Spread through the window")
+    ax.set_xlabel("Time (US/Eastern)")
     ax.set_ylabel("Spread (bps)")
     ax.legend()
 
@@ -897,7 +908,7 @@ if lob is not None and len(lob) > 0:
     ax.hist(lob_pd["spread_bps"], bins=50, edgecolor="white", alpha=0.7)
     ax.axvline(lob_pd["spread_bps"].mean(), color="red", linestyle="--", label="Mean")
     ax.axvline(lob_pd["spread_bps"].median(), color="green", linestyle="--", label="Median")
-    ax.set_title("Spread Distribution")
+    ax.set_title("Distribution of the spread across snapshots")
     ax.set_xlabel("Spread (bps)")
     ax.set_ylabel("Frequency")
     ax.legend()
@@ -905,25 +916,35 @@ if lob is not None and len(lob) > 0:
     # Mid price
     ax = axes[1, 0]
     ax.plot(lob_pd["timestamp"], lob_pd["mid_price"], alpha=0.7, linewidth=0.8)
-    ax.set_title("Mid Price Over Time")
-    ax.set_xlabel("Time")
+    ax.set_title("Mid price through the window")
+    ax.set_xlabel("Time (US/Eastern)")
     ax.set_ylabel("Price ($)")
 
     # Spread vs price
     ax = axes[1, 1]
     ax.scatter(lob_pd["mid_price"], lob_pd["spread_bps"], alpha=0.3, s=10)
-    ax.set_title("Spread vs Price Level")
-    ax.set_xlabel("Mid Price ($)")
+    ax.set_title("Spread against the price level it was quoted at")
+    ax.set_xlabel("Mid price ($)")
     ax.set_ylabel("Spread (bps)")
 
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Four panels in a two-by-two grid. Top left plots the spread in basis points against time as a thin line with a dashed horizontal line at its mean. Top right is a histogram of the same spreads with dashed vertical lines at the mean and the median. Bottom left plots the mid price against time. Bottom right scatters the spread in basis points against the mid price in dollars, one point per snapshot.",
+    )
 
 # %% [markdown]
-# ## 5. Depth Analysis
+# ## 5. What was resting behind the touch
 #
-# Market depth measures liquidity available at various price levels.
-# Depth imbalance (bid depth vs ask depth) is a predictor of short-term price movements.
+# Depth is the size resting at each price. Its imbalance - bid depth minus ask depth over
+# their total - is bounded between minus one and one, and is one of the oldest candidate
+# predictors of the next price move: more size on the bid than the ask is read as more
+# willingness to buy than to sell.
+#
+# The last of the four panels below is where that reading is put to the test, scattering
+# each snapshot's imbalance against the mid-price change that followed it. Read the shape
+# of the cloud rather than any single point: a relationship would show as a tilt, and its
+# absence as a round blob. One symbol over one window cannot settle the question either
+# way, which is why `03_itch_lob_analysis` asks it across a cross-section.
 
 # %%
 # Depth statistics and data preparation
@@ -951,8 +972,8 @@ if lob is not None and len(lob) > 0:
         range(len(lob_pd)), -lob_pd["ask_depth"], alpha=0.5, label="Ask Depth", color="red"
     )
     ax.axhline(0, color="black", linewidth=0.5)
-    ax.set_title("Bid/Ask Depth Over Time")
-    ax.set_xlabel("Snapshot")
+    ax.set_title("Depth resting on each side, by snapshot")
+    ax.set_xlabel("Snapshot number")
     ax.set_ylabel("Depth (shares)")
     ax.legend()
 
@@ -960,14 +981,14 @@ if lob is not None and len(lob) > 0:
     colors = ["green" if x > 0 else "red" for x in lob_pd["depth_imbalance"]]
     ax.bar(range(len(lob_pd)), lob_pd["depth_imbalance"], color=colors, alpha=0.5, width=1.0)
     ax.axhline(0, color="black", linewidth=0.5)
-    ax.set_title("Depth Imbalance Over Time")
-    ax.set_xlabel("Snapshot")
-    ax.set_ylabel("Imbalance (bid-ask)/total")
+    ax.set_title("Depth imbalance, by snapshot")
+    ax.set_xlabel("Snapshot number")
+    ax.set_ylabel("(bid depth - ask depth) / total depth")
 
     ax = axes[1, 0]
     ax.hist(lob_pd["depth_imbalance"], bins=50, edgecolor="white", alpha=0.7)
     ax.axvline(0, color="black", linestyle="--")
-    ax.set_title("Depth Imbalance Distribution")
+    ax.set_title("Distribution of depth imbalance")
     ax.set_xlabel("Imbalance")
     ax.set_ylabel("Frequency")
 
@@ -977,21 +998,23 @@ if lob is not None and len(lob) > 0:
     )
     ax.axhline(0, color="black", linewidth=0.5)
     ax.axvline(0, color="black", linewidth=0.5)
-    ax.set_title("Depth Imbalance vs Next Price Change")
-    ax.set_xlabel("Depth Imbalance (t)")
-    ax.set_ylabel("Price Change (t+1, bps)")
+    ax.set_title("Depth imbalance against the next snapshot's price change")
+    ax.set_xlabel("Depth imbalance at t")
+    ax.set_ylabel("Mid-price change from t to t+1 (bps)")
 
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Four panels in a two-by-two grid, indexed by snapshot number rather than clock time. Top left fills bid depth upward in green and ask depth downward in red about a zero line. Top right is a bar chart of depth imbalance per snapshot, each bar coloured green above zero and red below. Bottom left is a histogram of those imbalances with a dashed line at zero. Bottom right scatters the imbalance at one snapshot against the mid-price change to the next, in basis points, with reference lines at zero on both axes.",
+    )
 
 # %% [markdown]
-# ## 6. Save LOB Snapshots
+# ## 6. Saving the snapshots
 
 # %%
 if lob is not None:
     output_path = OUTPUT_DIR / f"{SYMBOL}_lob_features.parquet"
     lob.write_parquet(output_path)
-    print(f"Saved: {output_path} ({len(lob):,} snapshots)")
+    print(f"Saved {len(lob):,} snapshots to {display_path(output_path)}")
 
 # %% [markdown]
 # ## Key Takeaways
