@@ -127,9 +127,14 @@ MAX_MESSAGES = None
 # path typed here, so the same notebook runs against a local checkout and inside the Docker
 # image. The raw binary sits in a `raw/` directory beside it, which is where the download
 # script puts it.
+#
+# `must_exist=False` is what makes a clean start work. For every other notebook in this
+# chapter an absent `messages/` directory is the download instruction and the loader is
+# right to refuse; this notebook is the one that creates it, and it has to be told where
+# before there is anything there.
 
 # %%
-MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
+MESSAGE_DIR = load_nasdaq_itch(get_base_path=True, must_exist=False)
 MESSAGE_DIR.mkdir(parents=True, exist_ok=True)
 ITCH_RAW_DIR = MESSAGE_DIR.parent / "raw"
 
