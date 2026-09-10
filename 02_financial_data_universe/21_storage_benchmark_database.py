@@ -1903,6 +1903,13 @@ else:
 # so a two-fold difference reads as a much larger one; choosing the axis from the
 # measured spread rather than from a remembered one keeps that from happening when
 # a different set of engines answers.
+#
+# The three panels will not hold the same number of bars, because an engine answers
+# only the operations its interface supports: ArcticDB is timed on the full scan and
+# is deliberately absent from the range query, and only a few engines have a native
+# ASOF join at all. The figure's alt text counts the bars in each panel off the
+# results rather than describing them, so it cannot drift from the image - and the
+# reader it is written for is the one who cannot notice if it does.
 
 # %%
 if results:
@@ -1973,15 +1980,19 @@ if results:
         f"Range query covers the first {range_sessions} of {n_sessions} sessions "
         f"({range_share:.1%} of the panel)."
     )
+    # Counted off the results, not described: see the markdown above this cell.
+    _bars = {op: results_df.filter(pl.col("operation") == op).height for op, _title, _c in _panels}
     show_plotly_with_alt(
         fig,
         "Three horizontal-bar panels titled Full scan, Range query and ASOF join. Each "
         "has one bar per database engine, ordered with the slowest at the top and the "
-        "fastest at the bottom, and every bar is labelled with its time in seconds. The "
-        "full-scan and range-query panels carry every engine that answered; the "
-        "ASOF-join panel carries only those with a native ASOF join, so it holds far "
-        "fewer bars. Each panel's x-axis is seconds, logarithmic where the engines span "
-        "a wide range and linear where they do not, with the axis label saying which.",
+        "fastest at the bottom, and every bar is labelled with its time in seconds. Not "
+        "every engine answers every operation, so the panels differ in height: the "
+        f"full-scan panel has {_bars['read']} bars, the range-query panel "
+        f"{_bars['range_query']}, and the ASOF-join panel {_bars['asof_join']}, that "
+        "last one holding only the engines with a native ASOF join. Each panel's x-axis "
+        "is seconds, logarithmic where the engines span a wide range and linear where "
+        "they do not, with the axis label saying which.",
     )
 
 # %%
