@@ -383,9 +383,22 @@
     SAMPLE_SIZE: 1500
   timeout: 300
 10_text_feature_engineering/07_news_return_signals:
+  # Not a GPU notebook - it ran to completion on CPU in 28s with the card hidden. What it cannot
+  # do is produce a row against this fixture: the news sample spans 2020-01-02..2023-12-28 and
+  # `load_us_equities` ends 2018-03-27, so the join at line 981 drops all 109 feature rows and
+  # the notebook writes an empty news_features.parquet. It reports that ("Overlapping dates: 0",
+  # "Observations: 0") and still exits 0, so with the GPU flag off it silently replaced the panel
+  # `tests/fixtures/seed_results.py::_seed_news_features` puts there for 08, which then failed on
+  # the empty file. Production overlaps for nine years (news 2009-02..2020-06, prices to
+  # 2018-03), so this is the fixture's sampling window, not the notebook.
+  # ml4t/agent-workspace#1116.
   parameters:
     MAX_ARTICLES: 500
     MAX_TICKERS: 5
+  skip: true
+  skip_reason: >-
+    The FNSPID fixture sample (2020-2023) has no overlap with the us_equities fixture
+    (ends 2018-03-27), so every feature row drops at the price join. ml4t/agent-workspace#1116.
   timeout: 600
 10_text_feature_engineering/08_text_feature_evaluation:
   parameters:
