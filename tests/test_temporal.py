@@ -27,12 +27,16 @@ from case_studies.utils.temporal import (
     arima_one_step_forecast,
     filtered_state_probs,
     fit_hmm_kmeans_init,
+    fit_wasserstein_kmeans,
     garch11_conditional_volatility,
+    lift_stream,
     refit_boundaries,
     relabel_states,
     sort_states_by_mean,
     sort_states_by_variance,
     walk_forward_feature,
+    wasserstein_barycenter_1d,
+    wasserstein_distance_1d,
     write_model_based,
 )
 
@@ -1256,3 +1260,90 @@ def test_the_arima_filter_walks_forward_without_reading_its_future() -> None:
         n_features=1,
     )
     assert np.allclose(values[:240, 0], shorter[:, 0], equal_nan=True)
+
+
+# ---------------------------------------------------------------------------
+# The Wasserstein regime estimator.
+# ---------------------------------------------------------------------------
+
+
+def test_lift_stream_advances_by_the_window_less_the_overlap() -> None:
+    """Windows share `overlap` observations, and a trailing partial window is dropped."""
+    returns = np.arange(100, dtype=float)
+    lifted = lift_stream(returns, window_len=21, overlap=5)
+
+    assert lifted.step == 16
+    assert lifted.segments.shape[1] == 21
+    assert np.array_equal(lifted.starts, np.arange(0, lifted.segments.shape[0] * 16, 16))
+    assert np.array_equal(lifted.segments[0], returns[:21])
+    assert np.array_equal(lifted.segments[1], returns[16:37])
+    # 100 observations hold five complete windows opening at 0, 16, 32, 48 and 64; the sixth
+    # would open at 80 and run to 101.
+    assert lifted.segments.shape[0] == 5
+    assert np.array_equal(lifted.sorted_segments, np.sort(lifted.segments, axis=1))
+
+
+def test_the_wasserstein_distance_between_a_sample_and_its_shift_is_the_shift() -> None:
+    """Equal-sized 1D samples match by rank, so a pure translation costs exactly the shift."""
+    rng = np.random.default_rng(0)
+    a = np.sort(rng.normal(size=64))
+    assert wasserstein_distance_1d(a, a) == pytest.approx(0.0)
+    assert wasserstein_distance_1d(a, a + 0.25) == pytest.approx(0.25)
+    assert wasserstein_distance_1d(a, a + 0.25, p=2.0) == pytest.approx(0.25)
+
+
+def test_the_barycenter_is_taken_rank_by_rank() -> None:
+    """The barycenter's smallest atom is the members' smallest atoms combined, not a mean."""
+    members = np.array([[0.0, 1.0, 2.0], [10.0, 11.0, 12.0], [20.0, 21.0, 22.0]])
+    assert np.array_equal(wasserstein_barycenter_1d(members, p=1.0), [10.0, 11.0, 12.0])
+    assert np.array_equal(wasserstein_barycenter_1d(members, p=2.0), [10.0, 11.0, 12.0])
+
+
+def test_a_restart_is_scored_against_the_centroids_it_returns() -> None:
+    """The assignment pass that scores a restart runs after its last centroid update.
+
+    It used to run before: the loop scored `dists` and `labels` from the pass at the top of
+    the final iteration, while the centroids returned were the ones that iteration went on to
+    produce. A restart that converged was unaffected, because the update it broke on moved the
+    centroids by less than `atol` - but one that stopped on `max_iter` returned labels that
+    were the nearest centroids of a set it did not return, and an inertia describing that same
+    stale set, so the wrong restart could win.
+
+    `max_iter=1` makes every restart stop that way, and one unstructured blob makes the
+    partition move on every update rather than settling immediately. Under the previous
+    implementation these labels disagree with the returned centroids.
+    """
+    rng = np.random.default_rng(0)
+    segments = np.sort(rng.normal(size=(40, 12)), axis=1)
+
+    labels, centroids = fit_wasserstein_kmeans(
+        segments, n_clusters=2, max_iter=1, n_init=3, random_state=1
+    )
+    nearest = np.stack(
+        [wasserstein_distance_1d(segments, centroids[k][None, :]) for k in range(2)], axis=1
+    ).argmin(axis=1)
+
+    assert np.array_equal(labels, nearest)
+
+
+def test_wasserstein_kmeans_separates_two_distributions_and_is_reproducible() -> None:
+    """Two well-separated blobs come back as two clusters, identically on the same seed."""
+    # Same mean, so the two are told apart by their spread and not by their level, which is
+    # what the feature claims. The gap is wide because a narrow one is genuinely ambiguous: at
+    # 0.5 against 4.0 one draw of sixteen from the wide blob is calmer than the calm ones and
+    # clusters with them, which is the estimator being right about that window.
+    rng = np.random.default_rng(7)
+    calm = rng.normal(0.0, 0.2, size=(30, 16))
+    turbulent = rng.normal(0.0, 10.0, size=(30, 16))
+    segments = np.sort(np.concatenate([calm, turbulent]), axis=1)
+
+    labels, centroids = fit_wasserstein_kmeans(segments, n_clusters=2, random_state=42)
+
+    assert centroids.shape == (2, 16)
+    assert len(np.unique(labels[:30])) == 1
+    assert len(np.unique(labels[30:])) == 1
+    assert labels[0] != labels[30]
+
+    again, again_centroids = fit_wasserstein_kmeans(segments, n_clusters=2, random_state=42)
+    assert np.array_equal(labels, again)
+    assert np.array_equal(centroids, again_centroids)
