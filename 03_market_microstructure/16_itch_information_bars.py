@@ -650,14 +650,21 @@ print(compare_df)
 # is not on its own evidence that the threshold moved - a run of one-sided signs fills
 # any threshold quickly, and the warm-up bars are short before adaptation has begun.
 #
-# `et_drift` is the direct answer: the sampler records its expected bar size as it goes,
-# and this is the last value over the first. One means the threshold ended where it
-# started; well above one means it ran up over the session, well below that it fell
-# away. That is the column to read for stability, and the bar count is what to read for
-# whether the sampler is producing a usable series.
+# `et_drift` gets closer, and it is worth being exact about what it is: the sampler's
+# expected bar size at the last bar over its value at the first. That is one of the two
+# factors the threshold is built from - the threshold is the expected bar size times the
+# expected imbalance, and both adapt - so `et_drift` far from one is evidence the
+# adaptation moved, while `et_drift` near one is not evidence that it did not: the two
+# factors can move against each other, and an endpoint ratio says nothing about what
+# happened in between.
 #
-# Neither applies to the fixed sampler, which has no adapting threshold to drift. What
-# to check there is whether the bar count it produced is the one its threshold was
+# The threshold itself is what settles it, and the sampler carries the pieces. Reading
+# its recorded expected bar size and expected imbalance bar by bar, rather than at the
+# endpoints, is what distinguishes a threshold that grew, one that fell away, and one
+# that oscillated to a similar-looking endpoint.
+#
+# None of this applies to the fixed sampler, which has no adapting threshold. What to
+# check there is whether the bar count it produced is the one its threshold was
 # calibrated for.
 
 # %%
