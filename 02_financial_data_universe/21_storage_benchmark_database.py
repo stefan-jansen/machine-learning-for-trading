@@ -1943,7 +1943,13 @@ if results:
         spread = max(times) / min(times) if min(times) > 0 else 1.0
         if spread >= LOG_AXIS_RATIO:
             fig.update_xaxes(
-                title_text="Seconds (log, lower is better)", type="log", row=1, col=col
+                title_text="Seconds (log, lower is better)",
+                type="log",
+                # One tick per decade. The default labels the minor ticks as well, which
+                # on a two-decade axis reads "5 0.1 2 5 1 2" - a 5 to the left of a 0.1.
+                dtick=1,
+                row=1,
+                col=col,
             )
         else:
             fig.update_xaxes(title_text="Seconds (lower is better)", type="linear", row=1, col=col)
@@ -1969,12 +1975,13 @@ if results:
     )
     show_plotly_with_alt(
         fig,
-        "Three horizontal-bar panels titled Full scan, Range query and ASOF join, each "
-        "with one bar per database engine, sorted fastest at the top and labelled with "
-        "its time in seconds. The full-scan and range-query panels carry many engines "
-        "and the ASOF-join panel only the few with a native ASOF join. Each panel's "
-        "x-axis is seconds, logarithmic where the engines span a wide range and linear "
-        "where they do not, with the axis label saying which.",
+        "Three horizontal-bar panels titled Full scan, Range query and ASOF join. Each "
+        "has one bar per database engine, ordered with the slowest at the top and the "
+        "fastest at the bottom, and every bar is labelled with its time in seconds. The "
+        "full-scan and range-query panels carry every engine that answered; the "
+        "ASOF-join panel carries only those with a native ASOF join, so it holds far "
+        "fewer bars. Each panel's x-axis is seconds, logarithmic where the engines span "
+        "a wide range and linear where they do not, with the axis label saying which.",
     )
 
 # %%
