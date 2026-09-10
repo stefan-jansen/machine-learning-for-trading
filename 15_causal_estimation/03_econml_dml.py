@@ -433,7 +433,14 @@ print("=" * 60)
 print("\n1. TEMPORAL PLACEBO TEST (lead of treatment)")
 df_placebo = df.sort_values([entity_col, mds.date_col]).copy()
 df_placebo["treatment_lead"] = df_placebo.groupby(entity_col)[treatment_col].shift(-FORWARD_HORIZON)
-df_placebo = df_placebo.dropna(subset=["treatment_lead", outcome_col])
+# Back to date order before the fit. The shift needed entity-major rows; the folds need
+# every row of a decision time adjacent, and `manual_dml_timeseries` rejects groups that
+# are not sorted and contiguous rather than silently splitting one date across two folds.
+df_placebo = (
+    df_placebo.dropna(subset=["treatment_lead", outcome_col])
+    .sort_values(mds.date_col, kind="stable")
+    .reset_index(drop=True)
+)
 
 if len(df_placebo) > 100:
     placebo_result = manual_dml_timeseries(
