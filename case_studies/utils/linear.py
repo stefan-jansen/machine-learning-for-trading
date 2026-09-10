@@ -1514,15 +1514,25 @@ def plan_model_requests(
 
     ordered: list[dict[str, Any] | None] = [None] * len(requests)
     planned_groups = []
-    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
+    # One entry, not a growing dict. The cache is here so two compatibility groups over the same
+    # inputs read the panel once; keeping every group's panel instead is what made a multi-label
+    # plan carry one modeling dataset per label to the end of the run. Measured 2026-09-10 on
+    # nasdaq100_microstructure, one `load_modeling_dataset` per label with nothing released:
+    # 6.71, 12.65, 18.41, 22.53 GiB resident and a 35.79 GiB peak, before a single fit. Its
+    # 06_linear fits four labels in one call and died at 48.6 GB on the third of them.
+    cached_input_key: tuple[str, str, int] | None = None
+    cached_inputs: tuple[Any, Any] | None = None
     for key, indexed_requests in groups.items():
         input_key = _input_compatibility_key(indexed_requests[0][1])
+        if cached_input_key != input_key:
+            # Released before the next panel is read, so the two are never alive together.
+            cached_input_key, cached_inputs = None, None
         base = _load_batch_base(
             study,
             indexed_requests[0][1],
-            inputs=input_cache.get(input_key),
+            inputs=cached_inputs,
         )
-        input_cache.setdefault(input_key, (base["label_ref"], base["mds"]))
+        cached_input_key, cached_inputs = input_key, (base["label_ref"], base["mds"])
         fold_ids = tuple(int(split["fold"]) for split in base["splits"])
         candidates = []
         dependent = []
@@ -1578,6 +1588,16 @@ def plan_model_requests(
                 {candidate.index: candidate.effective_params for candidate in candidates},
             )
         )
+        # The payload outlives planning by the whole length of the run, and `mds` is by far the
+        # largest thing in `base`. `run_model_plan` reloads this group's panel when it reaches
+        # the group and drops it again afterwards, so one is alive at a time instead of one per
+        # group. Nothing else planning derived is rebuilt - the splits, the expected keys and
+        # the provenance in `base` are the planned ones - so no identity can move.
+        base["mds"] = None
+    cached_input_key, cached_inputs = None, None
+    # `_INPUT_MEMO` is left holding the last group's panel rather than cleared. It is a
+    # one-entry memo that clears itself on the next miss, so it costs one panel and not one per
+    # group, and it is what lets a single-group plan reach execution without a second read.
     if any(spec is None for spec in ordered):
         raise RuntimeError("linear batch planner did not resolve every request")
     return tuple(spec for spec in ordered if spec is not None), tuple(planned_groups)
@@ -1589,6 +1609,20 @@ def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ..
     ]
     failures = []
     for key, indexed_requests, base, planned_effective in payload:
+        if base.get("mds") is None:
+            # Planning dropped it rather than carry every group's panel to the end of the run.
+            # One reload per group - a scan, ~18 s on the nasdaq100_microstructure minute panel -
+            # against 22.53 GiB held for the length of a four-label call.
+            request = indexed_requests[0][1]
+            tier = ExecutionTier(request["execution_tier"])
+            study.require_writable()
+            study.activate(tier)
+            _, base["mds"] = _load_inputs(
+                study,
+                request,
+                tier,
+                int(dict(request["preview_reductions"]).get("max_symbols", 0)),
+            )
         try:
             candidates = _run_batch_group(
                 study,
@@ -1601,6 +1635,10 @@ def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ..
         except Exception as error:
             failures.append(error)
             continue
+        finally:
+            # Whatever the group did, its panel goes now: the next group loads its own.
+            base["mds"] = None
+            clear_input_memo()
         for candidate in candidates:
             if candidate.error is not None:
                 failures.append(candidate.error)
@@ -1622,15 +1660,21 @@ def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[Mo
 
     ordered: list[ModelRun | None] = [None] * len(requests)
     failures: list[Exception] = []
-    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
+    # One entry, not a growing dict - see `plan_model_requests`. A dict keyed by input holds
+    # every label's panel to the end of the call; measured at 22.53 GiB over four labels on
+    # nasdaq100_microstructure, before a single fit.
+    cached_input_key: tuple[str, str, int] | None = None
+    cached_inputs: tuple[Any, Any] | None = None
     for key, indexed_requests in groups.items():
         input_key = _input_compatibility_key(indexed_requests[0][1])
+        if cached_input_key != input_key:
+            cached_input_key, cached_inputs = None, None
         base = _load_batch_base(
             study,
             indexed_requests[0][1],
-            inputs=input_cache.get(input_key),
+            inputs=cached_inputs,
         )
-        input_cache.setdefault(input_key, (base["label_ref"], base["mds"]))
+        cached_input_key, cached_inputs = input_key, (base["label_ref"], base["mds"])
         candidates = _run_batch_group(
             study,
             indexed_requests,
