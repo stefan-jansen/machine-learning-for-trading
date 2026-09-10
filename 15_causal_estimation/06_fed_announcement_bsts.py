@@ -21,8 +21,8 @@
 # **Section Reference**: See Section 15.5 for BSTS theory and event study methodology
 #
 # > **`ml4t-py312` image required.** `tfcausalimpact` (the TensorFlow-Probability
-# > BSTS package) caps at Python 3.12, so this notebook runs in the Python-3.12
-# > image rather than the main `ml4t` image:
+# > BSTS package) does not support the Python the main `ml4t` image runs, so this
+# > notebook runs in the `py312` image instead:
 # >
 # > ```bash
 # > docker compose --profile py312 run --rm py312 \
@@ -64,7 +64,6 @@
 
 import importlib
 import os
-import warnings
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 os.environ.setdefault("ABSL_MIN_LOG_LEVEL", "3")
@@ -80,7 +79,7 @@ from matplotlib.patches import Patch
 
 from data.etfs.loader import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
 _saved_stderr_fd = os.dup(2)
 _null_fd = os.open(os.devnull, os.O_WRONLY)
@@ -93,7 +92,6 @@ finally:
     os.close(_null_fd)
     os.close(_saved_stderr_fd)
 
-warnings.filterwarnings("ignore")
 tf.config.set_visible_devices([], "GPU")
 tf.get_logger().setLevel("ERROR")
 
@@ -156,8 +154,8 @@ tf.get_logger().setLevel("ERROR")
 # **Caveat - control affectedness is real**: This is the *plausible* control
 # set, not an unaffected one. FOMC announcements move the dollar, global
 # risk appetite, global yields, and commodities through cross-border
-# capital flows and the dollar funding channel. The §5 placebo and §3
-# per-event spillover tests below quantify the residual contamination; a
+# capital flows and the dollar funding channel. The placebo test and the
+# per-event spillover test below bound the residual contamination; a
 # more conservative design would use non-US sovereign-bond ETFs or a
 # local-level model with no ETF controls and a longer pre-window.
 
@@ -235,10 +233,12 @@ raw_prices = (
     .set_index("timestamp")
 )
 
-# The target and controls are daily log returns. Summing post-period point
-# effects therefore estimates cumulative abnormal log return. A log-price
-# level specification would instead sum level gaps in log-point-days, which
-# is not the estimand declared above.
+# %% [markdown]
+# The target and controls are daily log returns, so summing the post-period point effects
+# estimates a cumulative abnormal log return. A specification on log price *levels* would
+# sum level gaps in log-point-days instead, which is not the estimand declared above.
+
+# %%
 data = np.log(raw_prices).diff().dropna()
 
 # %%
@@ -264,7 +264,7 @@ print(data.tail())
 # used below.
 
 # %% [markdown]
-# ### 2.1 Analysis Window Computation
+# ### The Analysis Window
 #
 # Compute pre/post periods and filter data for the analysis window.
 
@@ -310,7 +310,7 @@ def _compute_analysis_window(data, target, controls, event_date, pre_days, post_
 
 
 # %% [markdown]
-# ### 2.2 Run BSTS via `tfcausalimpact`
+# ### Running BSTS with `tfcausalimpact`
 #
 # Bayesian BSTS engine faithful to the original Google R package. Provides
 # posterior credible intervals - a probability statement about the parameter -
@@ -318,7 +318,7 @@ def _compute_analysis_window(data, target, controls, event_date, pre_days, post_
 
 
 # %% [markdown]
-# #### 2.2a Posterior Effect Extraction Helper
+# #### Extracting the Posterior Effect
 #
 # Normalize column naming differences across `tfcausalimpact` versions.
 
@@ -377,7 +377,7 @@ def _extract_tfp_effect_stats(impact_data, post_start):
 
 
 # %% [markdown]
-# #### 2.2b BSTS Runner
+# #### The BSTS Runner
 #
 # Execute BSTS inference and normalize outputs for downstream validation.
 
@@ -424,7 +424,7 @@ def _run_bsts(
 
 
 # %% [markdown]
-# ### 2.3 Event Study Dispatcher
+# ### The Event Study Dispatcher
 
 
 # %%
@@ -456,15 +456,23 @@ def run_event_study(data, target, controls, event_date, pre_days=60, post_days=2
 
 
 # %% [markdown]
-# ## 3. Spillover Validation (CRITICAL)
+# ## 3. Spillover Validation
 #
-# Before analyzing Fed events, we MUST verify that control series are NOT
-# affected by the intervention. If controls show spillover, our counterfactual
-# is contaminated.
+# The counterfactual is built from the controls, so a control that responds to the
+# announcement carries part of the effect into the thing the effect is measured against.
+# This section runs the same BSTS specification with each control as the target and the
+# remaining controls as its predictors, and flags a control whose own post-period interval
+# excludes zero.
 #
-# **Validation approach**: Run BSTS with each control as target and remaining
-# controls as predictors. If any control shows significant impact during FOMC
-# events, it's contaminated and should be excluded.
+# **What the test can and cannot see.** A control is judged against the other controls, so
+# the flag fires on a control that moves *differently* from them. A Fed announcement that
+# moves all three through the same dollar and global-risk channel moves each one's
+# predictors with it, and none of the three is flagged - which is the contamination that
+# matters most for the target's counterfactual. Read a clean result as "no differential
+# response among the controls", not as "the controls were unaffected". The design that
+# would answer the stronger question needs a control set with no plausible exposure to US
+# policy rates at all, and the caveat under Control Selection Rationale says what that
+# would cost.
 
 
 # %%
@@ -645,7 +653,7 @@ if not event_df.empty:
     ax.set_ylabel("Cumulative abnormal log return")
     ax.set_xlabel("FOMC announcement date")
     ax.set_title(
-        f"{event_df['significant'].sum()} of {len(event_df)} FOMC intervals exclude zero",
+        "Cumulative abnormal log return around each FOMC announcement",
         loc="left",
         color=COLORS["blue"],
         fontweight="bold",
@@ -657,7 +665,13 @@ if not event_df.empty:
         ],
         frameon=False,
     )
-    fig.show()
+    show_with_alt(
+        fig,
+        "Bar chart with one bar per FOMC announcement date, showing the cumulative abnormal "
+        "log return the BSTS counterfactual assigns to that event, each with a vertical "
+        "credible-interval bar. Bars whose interval excludes zero are drawn in amber with "
+        "diagonal hatching, the rest in blue, and a legend states which is which.",
+    )
 
 # %% [markdown]
 # **Interpretation**: The FOMC event results above show whether the target ETF
@@ -675,8 +689,8 @@ if not event_df.empty:
 # Run the same analysis on 12 dates with no Fed announcement. A
 # "significant" cumulative impact on any of these dates means the model
 # is misspecified. With only 12 placebo dates the empirical rate is a
-# coarse diagnostic rather than a precise Type I estimate (a single
-# false positive is already 8.3%); we therefore report it as a
+# coarse diagnostic rather than a precise Type I estimate (one date in
+# twelve is already a rate of eight percent); we therefore report it as a
 # *placebo false-positive rate*, not a multiple-testing FDR.
 #
 # **Caveat - macro contamination of placebo dates**: "No FOMC announcement"
@@ -709,12 +723,31 @@ if DATA_AVAILABLE:
 
         placebo_results.append(result)
 
+# %% [markdown]
+# A placebo date is only a placebo if its post-window is clear of the announcements this
+# notebook is studying. The windows are twenty trading days long and the FOMC meets every
+# six to eight weeks, so a date chosen for being on no announcement can still sit a fortnight
+# ahead of one, and its "false positive" would then be a true effect measured from the wrong
+# origin. The screen below is against `FOMC_EVENTS`, the four dates this notebook treats as
+# events; the wider macro calendar in the caveat above is not screened, so a window this
+# check calls clear is clear of those four dates and nothing more.
+
+
+# %%
+def post_window_events(date, index, post_days, event_dates):
+    """FOMC dates falling inside the post-window a study of `date` would use."""
+    idx = pd.DatetimeIndex(index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    idx = idx.normalize()
+    pos = idx.searchsorted(pd.to_datetime(date))
+    window = idx[pos : pos + post_days]
+    return [d for d in event_dates if pd.to_datetime(d) in window]
+
+
 # %%
 if DATA_AVAILABLE and placebo_results:
-    n_false_positives = sum(1 for r in placebo_results if r.get("significant", False))
-    n_total = len(placebo_results)
-    placebo_false_positive_rate = n_false_positives / n_total
-
+    _fomc_dates = [d for d, _ in FOMC_EVENTS]
     placebo_df = pd.DataFrame(
         [
             {
@@ -724,14 +757,33 @@ if DATA_AVAILABLE and placebo_results:
                 "cum_lower": r["cumulative_lower"],
                 "cum_upper": r["cumulative_upper"],
                 "significant": r["significant"],
+                "window_events": ", ".join(
+                    post_window_events(r["event_date"], data.index, POST_PERIOD_DAYS, _fomc_dates)
+                ),
             }
             for r in placebo_results
         ]
     )
-    print(
-        f"Placebo false-positive rate: "
-        f"{n_false_positives}/{n_total} = {placebo_false_positive_rate:.1%}"
-    )
+    placebo_df["clean_window"] = placebo_df["window_events"] == ""
+
+    clean = placebo_df[placebo_df["clean_window"]]
+    n_false_positives = int(clean["significant"].sum())
+    n_total = len(clean)
+    placebo_false_positive_rate = n_false_positives / n_total if n_total else None
+    n_contaminated = len(placebo_df) - n_total
+
+    if n_contaminated:
+        print(
+            f"{n_contaminated} of {len(placebo_df)} placebo windows contain an FOMC date "
+            f"from this notebook's own event list; the rate below excludes them."
+        )
+    if n_total:
+        print(
+            f"Placebo false-positive rate: "
+            f"{n_false_positives}/{n_total} = {placebo_false_positive_rate:.1%}"
+        )
+    else:
+        print("No placebo window is clear of this notebook's FOMC dates; no rate to report.")
 elif DATA_AVAILABLE:
     placebo_false_positive_rate = None
     placebo_df = pd.DataFrame()
@@ -761,8 +813,16 @@ if not placebo_df.empty:
     _placebo_bars = ax.bar(
         placebo_df["placebo_date"], _placebo_values, color=_placebo_colors, width=0.7
     )
-    for bar, flag in zip(_placebo_bars, placebo_df["significant"], strict=True):
+    for bar, flag, clean in zip(
+        _placebo_bars, placebo_df["significant"], placebo_df["clean_window"], strict=True
+    ):
         bar.set_hatch("//" if flag else "")
+        if not clean:
+            # A window holding an FOMC date is not a placebo; it stays on the chart so the
+            # screen is visible, outlined rather than filled like the dates that count.
+            bar.set_alpha(0.35)
+            bar.set_edgecolor(COLORS["neutral"])
+            bar.set_linewidth(1.5)
     ax.errorbar(
         placebo_df["placebo_date"],
         _placebo_values,
@@ -776,19 +836,33 @@ if not placebo_df.empty:
     ax.set_ylabel("Cumulative abnormal log return")
     ax.set_xlabel("Placebo date")
     ax.set_title(
-        f"{n_false_positives} of {n_total} placebo intervals exclude zero",
+        "Cumulative abnormal log return around each placebo date",
         loc="left",
         color=COLORS["blue"],
         fontweight="bold",
     )
-    fig.show()
+    show_with_alt(
+        fig,
+        "Bar chart with one bar per placebo date, showing the cumulative abnormal log return "
+        "the same BSTS specification assigns to a date with no FOMC announcement, each with a "
+        "vertical credible-interval bar. Bars whose interval excludes zero are drawn in red "
+        "with diagonal hatching, the rest in blue, and bars for windows that contain one of "
+        "the notebook's FOMC dates are faded and outlined because they are excluded from the "
+        "false-positive rate.",
+    )
 
 # %% [markdown]
 # ## 6. Results Summary
 
 # %%
 n_events_significant = sum(1 for r in event_results if r.get("significant", False))
-n_placebo_significant = sum(1 for r in placebo_results if r.get("significant", False))
+# The rate is over the screened windows, so the count reported beside it has to be too.
+n_placebo_screened = int(placebo_df["clean_window"].sum()) if not placebo_df.empty else 0
+n_placebo_significant = (
+    int(placebo_df.loc[placebo_df["clean_window"], "significant"].sum())
+    if not placebo_df.empty
+    else 0
+)
 
 results_summary = {
     "library_used": "tfcausalimpact",
@@ -799,6 +873,7 @@ results_summary = {
     "events_analyzed": len(event_results),
     "events_significant": n_events_significant,
     "placebo_tests_run": len(placebo_results),
+    "placebo_windows_clear_of_fomc": n_placebo_screened,
     "placebo_false_positives": n_placebo_significant,
     "placebo_false_positive_rate": placebo_false_positive_rate,
     "spillover_warnings": spillover_warnings if "spillover_warnings" in dir() else [],
@@ -822,7 +897,7 @@ CONFIGURATION:
 
 VALIDATION:
   Spillover check: {"FLAG: " + str(spillover_warnings) if spillover_warnings else "No interval-based flag"}
-  Placebo tests: {len(placebo_results)} run
+  Placebo tests: {len(placebo_results)} run, {n_placebo_screened} clear of the FOMC dates
   Placebo false-positive rate: {pfpr_str}
 
 EVENT RESULTS:
@@ -848,8 +923,10 @@ INTERPRETATION GUIDANCE:
 #    their interval rules does not establish that global controls are unaffected.
 # 4. **Daily timing remains a limitation**. A close-to-close event-day return mixes
 #    trading before and after the afternoon announcement.
-# 5. **Window and calendar sensitivity remain essential** because the selected
-#    placebo dates are not screened against every market-moving macro release.
+# 5. **A placebo date is only a placebo if its window is one.** The dates here are screened
+#    against the four announcements this notebook studies, and against nothing else; CPI
+#    prints, payrolls and refunding announcements still sit inside some of these windows,
+#    and window length remains untested at a single pre and post setting.
 #
 # Continue with `07_tigramite_time_series` for time-series causal discovery. See
 # Section 15.5 for BSTS identification assumptions and event-study interpretation.
