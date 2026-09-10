@@ -606,9 +606,13 @@ show_with_alt(
 
 # %% [markdown]
 # Reconstruction error diagnoses which ranked inputs the bottleneck preserves;
-# it is not predictive evidence. Every feature carries the same date-local rank
-# distribution, so the errors are on a common scale and can be compared across
-# characteristics.
+# it is not predictive evidence. Date-local ranking puts every feature on the same
+# numeric range, which is what lets the bars share an axis at all. It does not give them
+# the same distribution: average ranks keep ties, and a characteristic like
+# price-to-high sits at its maximum for many stocks on any given date, so it is less
+# spread than a feature with no ties. A less spread feature has less to reconstruct, so
+# read a lower bar as a smaller error rather than as better preservation, and compare
+# bars whose features are shaped alike.
 
 # %%
 final_model.eval()
