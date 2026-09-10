@@ -405,6 +405,7 @@ def darts_training_identity(
     case_study: str,
     input_data_spec: dict[str, Any] | None,
     max_train_sequences: int,
+    train_sequence_stride: int = 0,
 ) -> dict[str, Any]:
     """Return the runtime parameters that define a Darts training run."""
     input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
@@ -428,6 +429,9 @@ def darts_training_identity(
         "lookback": cfg.get("params", {}).get("lookback", input_chunk_length),
         "max_train_sequences": max_train_sequences,
         "output_chunk_length": output_chunk_length,
+        # Written only when declared, because `computation` is hashed whole and no
+        # registered Darts run strides its windows.
+        **({"train_sequence_stride": train_sequence_stride} if train_sequence_stride else {}),
     }
 
 
@@ -529,7 +533,20 @@ def _resolve_sampling(
     input_chunk_length: int,
     output_chunk_length: int,
     max_train_sequences: int,
+    train_sequence_stride: int = 0,
 ) -> tuple[int, int | None]:
+    """Return the ``(stride, max_samples_per_ts)`` this fold draws its training windows on.
+
+    A declared ``train_sequence_stride`` is the stride, and no count is derived from it: the
+    declaration says how far apart windows sit, so the number of them is whatever the fold
+    holds and differs between folds of different length. Deriving a count instead and letting
+    the count reconstruct a stride would round the spacing differently in every fold.
+
+    ``max_train_sequences`` is the other form. It fixes the number of windows and the spacing
+    follows, which is what a case study that wants overlapping windows declares.
+    """
+    if train_sequence_stride > 0:
+        return train_sequence_stride, None
     sample_counts = [
         max(state.n_train_samples - input_chunk_length - output_chunk_length + 1, 0)
         for state in fold_series
@@ -1033,6 +1050,7 @@ def run_darts_cv(
     register: bool,
     case_study: str | None,
     notebook: str | None,
+    train_sequence_stride: int = 0,
     prediction_split: str = "validation",
     identity_params: dict[str, Any] | None = None,
     input_data_spec: dict[str, Any] | None = None,
@@ -1067,6 +1085,7 @@ def run_darts_cv(
             label_col=label_col,
             case_study=case_study,
             max_train_sequences=max_train_sequences,
+            train_sequence_stride=train_sequence_stride,
             device=device,
         )
 
@@ -1171,9 +1190,25 @@ def run_darts_cv(
                 input_chunk_length,
                 output_chunk_length,
                 max_train_sequences,
+                train_sequence_stride,
             )
-            if max_train_sequences > 0:
-                msg = f"  Fold {split['fold']}: {len(fold_series)} series, stride={stride}"
+            if max_train_sequences > 0 or train_sequence_stride > 0:
+                drawn = sum(
+                    (
+                        max(
+                            state.n_train_samples - input_chunk_length - output_chunk_length + 1,
+                            0,
+                        )
+                        + stride
+                        - 1
+                    )
+                    // stride
+                    for state in training_states
+                )
+                msg = (
+                    f"  Fold {split['fold']}: {len(fold_series)} series, stride={stride}, "
+                    f"{drawn:,} training windows"
+                )
                 if max_samples_per_ts is not None:
                     msg += f", max_samples_per_ts={max_samples_per_ts}"
                 print(msg)

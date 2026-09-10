@@ -62,6 +62,7 @@ import yaml
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.artifact_specs import resolve_label_buffer, resolve_label_horizon
@@ -780,6 +781,116 @@ for label_name, horizon in HORIZONS.items():
         f"\n  base rate    mean {frame[label_name].mean():+.5f}, std {frame[label_name].std():.5f}"
         f"\n  consumed by  {readers.get(label_name, 'the model stages, as a variant')}"
     )
+
+# %% [markdown]
+# ## What the labels hold, and what they owe
+#
+# The sections above check each label against its own definition - that the sign matches the
+# return, that no value is fabricated where the source is null, that the last sessions are
+# withheld. This one asks the two questions that are about the file rather than the rule.
+#
+# The first is what each label's distribution looks like: how much is null, how much is exactly
+# zero, how far the extreme values sit from the body. A concentration at zero is a defect in a
+# return and is what a balanced direction label is supposed to look like, so the check reports the
+# number and this notebook says which it is.
+#
+# The second is coverage, and it needs a denominator that is not the labels themselves. **The
+# reference is `bars`** - every session a security in the roster actually traded, which is the set
+# a forward return could in principle have been computed on. Comparing a label to the union of the
+# other labels would hide any session where all five are absent together; comparing it to the
+# price panel cannot.
+#
+# A percentage on its own decides nothing, so each label also declares *where* it is entitled to
+# be short and by how much, and the report is read against that declaration rather than against
+# the raw number. A forward return owes no value in the last `horizon` sessions of a security's
+# history, because the price that would resolve it is past the end of the sample; the
+# risk-adjusted variant additionally owes none until its trailing volatility window has filled.
+# Both are counted per security, so a name that enters late pays its own burn-in on its own dates.
+# What the sign-off then has to speak to is not the shortfall but the residual: keys missing
+# inside a security's own span, where no window length explains them, and securities that spend
+# more than the mechanism allows.
+
+# %%
+expected_keys = bars.select(KEYS).unique()
+print(
+    f"price panel: {expected_keys.height:,} traded (symbol, session) keys across "
+    f"{expected_keys['symbol'].n_unique()} securities and "
+    f"{expected_keys['timestamp'].n_unique()} sessions\n"
+)
+for label_name in LABEL_NAMES:
+    written = labels_df.select([*KEYS, label_name]).drop_nulls()
+    budget: dict[str, tuple[int | None, str]] = {
+        "trailing": (
+            HORIZONS[label_name],
+            f"{HORIZONS[label_name]}-session forward window past the end of the sample",
+        )
+    }
+    if label_name == SCALED_LABEL:
+        budget["leading"] = (
+            RV_WINDOW,
+            f"{RV_WINDOW}-session trailing realized volatility in the denominator",
+        )
+    render_quality_report(
+        quality_report(
+            written,
+            name=label_name,
+            key_columns=KEYS,
+            expected=expected_keys,
+            keys=KEYS,
+            entity="symbol",
+            session="timestamp",
+            expected_missing=budget,
+        )
+    )
+    print()
+
+# %% [markdown]
+# ### Sign-off
+#
+# **The price panel offers 632,602 traded keys over 633 securities and 1,259 sessions, every label
+# emits keys the panel has and nothing else, and no column crossed a distribution threshold.** The
+# three coverage figures differ from each other by amounts each label's own definition predicts,
+# which is the point of declaring the budget before printing the number: 97.53% and 99.50% are
+# both complete, and a reader who only saw the percentages could not know that.
+#
+# - **`fwd_ret_5d` and `fwd_dir_5d` reach 99.50%.** Of the 3,159 keys they lack, 3,071 sit after a
+#   security's last session, a median of 5 apiece against a declared horizon of 5. The forward
+#   window runs past the end of the sample and there is no future price to return; withholding
+#   them is the seal working, and a value there would have to be invented.
+# - **`fwd_ret_10d` and `fwd_dir_10d` reach 99.01%**, and lose 6,087 keys the same way at a median
+#   of 10 apiece against a horizon of 10. Twice the horizon costs twice the history, which is the
+#   trade the horizon choice makes and is worth seeing rather than assuming.
+# - **`fwd_ret_risk_adj_5d` reaches 97.53%**, and it is the only label that pays at *both* ends.
+#   It loses 3,070 keys to its five-session horizon like the plain return, and a further 12,187 to
+#   the front of each security's history at a median of exactly 20 sessions - the trailing
+#   realized volatility in its denominator, undefined until its 20-session window fills. Only two
+#   of 608 securities spend more than the 20, and 27 keys between them. **This is the label the
+#   model stages select on**, so a reader should know it is measured on 2% fewer decisions than the
+#   plain five-session return beside it, and that the decisions it lacks are the earliest ones.
+#
+# **What no mechanism accounts for is 350 keys at the worst label, and 88 at the primary.** Two
+# shapes make it up, and neither reaches a scale that moves anything. A handful of securities -
+# seven at the ten-session horizon, three at the five - carry no label at all, because their entire
+# life in this panel is shorter than the horizon: a name with four traded sessions has no fifth to
+# return to. The rest sit inside a security's own span, a median of one horizon's worth each, which
+# is what a break in a security's traded sessions costs when the forward window steps across it.
+# At 0.06% of the panel at the extreme, neither changes a fold, a fit or a ranking, and the reason
+# to print them is that a residual nobody states is a residual nobody would notice growing.
+#
+# **The direction labels sit near half at each value and nothing flagged them.** A binary down/up
+# indicator is supposed to; a share far from half would say the sign convention or the null
+# handling had gone wrong, which is why the number is printed rather than assumed. It is a little
+# below half in both, which is the equity drift showing through - more sessions up than down over
+# this sample. The zero-share ceiling exists to catch a *return* that is mostly zero, and it is
+# deliberately loose enough not to fire on a label that is meant to be half zeros.
+#
+# **The return labels carry heavy tails and are almost never exactly zero.** That is what a forward
+# equity return looks like at daily frequency, and it is the reason the risk-adjusted variant
+# exists at all. Nothing is winsorized here; how a model handles the tail is a modelling choice
+# made downstream.
+#
+# **No label column is constant and none carries a non-finite value.** Both are flagged
+# unconditionally above, and neither appears in any of the five.
 
 # %% [markdown]
 # ## Key takeaways

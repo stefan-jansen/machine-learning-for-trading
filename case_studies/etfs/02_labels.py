@@ -56,6 +56,7 @@ import yaml
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_etfs
 from utils.artifact_specs import resolve_label_horizon
@@ -640,6 +641,72 @@ audit = pl.DataFrame(
 )
 audit
 
+# %% [markdown]
+# ## What the labels hold, and what they owe
+#
+# Two questions about the files this stage just wrote, and neither is answerable from the rows
+# that are there. The first is what is in each column - nulls, how much sits at exactly zero, how
+# far the extreme values are from the body, whether anything is constant. A threshold crossed
+# there asks for a sentence and settles nothing on its own.
+#
+# The second is coverage, and it needs a denominator that is not the labels themselves. **The
+# reference is `prices`** - every session an ETF in the universe actually traded, which is the set
+# a forward return could in principle have been computed on. Comparing a label to the other label
+# would hide any session where both are absent together; comparing it to the price panel cannot.
+#
+# A percentage alone decides nothing, so each label declares where it is entitled to be short
+# before the number is printed. A forward return owes no value in the last `horizon` sessions of a
+# symbol's history, because the price that resolves it is past the end of the sample. That is
+# counted per symbol, so a fund that lists late or delists early pays on its own dates. What the
+# sign-off then answers for is the residual: keys missing inside a symbol's own span, where no
+# horizon explains them.
+
+# %%
+expected_keys = prices.select(["symbol", "timestamp"]).unique()
+print(
+    f"price panel: {expected_keys.height:,} traded (symbol, session) keys across "
+    f"{expected_keys['symbol'].n_unique()} funds and "
+    f"{expected_keys['timestamp'].n_unique()} sessions\n"
+)
+for label_name in LABEL_NAMES:
+    written = labels_df.select(["symbol", "timestamp", label_name]).drop_nulls()
+    render_quality_report(
+        quality_report(
+            written,
+            name=label_name,
+            key_columns=["symbol", "timestamp"],
+            expected=expected_keys,
+            keys=["symbol", "timestamp"],
+            entity="symbol",
+            session="timestamp",
+            expected_missing={
+                "trailing": (
+                    HORIZONS[label_name],
+                    f"{HORIZONS[label_name]}-session forward window past the end of the sample",
+                )
+            },
+        )
+    )
+    print()
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Both labels are complete, and the shortfall is the horizon and nothing else.** The price
+# panel offers 470,662 traded keys across 100 funds and 5,031 sessions. `fwd_ret_21d` reaches
+# 99.55% of it and `fwd_ret_5d` 99.89%; every missing key sits after a fund's last session, every
+# one of the 100 funds loses exactly its label's horizon - 21 sessions and 5 - and no fund spends
+# more. **Nothing is missing that a mechanism does not account for, and nothing is emitted that
+# the panel does not have.** The two percentages differ because a longer horizon costs
+# proportionally more history at the end of the sample, which is the trade the horizon choice
+# makes rather than a property of the data.
+#
+# **No column crossed a distribution threshold in either label.** Neither is constant, neither
+# carries a non-finite value, and neither concentrates at zero - both are flagged unconditionally
+# above and neither appears. A forward equity return at daily frequency is almost never exactly
+# zero and carries a heavy tail, which is what these two show; nothing is winsorized here, and how
+# a model handles the tail is a modelling choice made in the model stages.
+#
 # %% [markdown]
 # ## Key takeaways
 #

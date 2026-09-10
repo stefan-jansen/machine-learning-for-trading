@@ -62,6 +62,7 @@ from matplotlib.ticker import PercentFormatter
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_firm_characteristics
 from utils.artifact_specs import resolve_label_buffer, resolve_label_horizon
@@ -681,6 +682,71 @@ for name in LABEL_NAMES:
         f"\n  consumed by  {readers.get(name, shared)}"
     )
 
+# %% [markdown]
+# ## What the labels hold, and what they owe
+#
+# Two questions about the files this stage just wrote, and the rows that are there answer only one
+# of them. The first is what is in each column - nulls, how much sits at exactly zero, how far the
+# extreme values are from the body, whether anything is constant. A threshold crossed there asks
+# for a sentence and settles nothing on its own: a winsorized return is *supposed* to pile up at
+# its bounds, and a class label is supposed to concentrate.
+#
+# The second is coverage, and it needs a denominator that is not the labels themselves. **The
+# reference is `firm_chars`** - every firm-month the panel carries, which is the set a label could
+# in principle have been written for. Comparing one label to the other two would hide any month
+# where all three are absent together; comparing them to the panel cannot.
+#
+# What each label is entitled to be short by is unusually easy to state here, and unusually strict:
+# **the outcome horizon is zero.** A row is dated by the month its return was earned in rather
+# than by a month whose outcome is still ahead of it, so there is no forward window running off
+# the end of the sample and no burn-in before a window fills. Every one of these labels owes a
+# value on every firm-month the panel carries a return for, and anything missing is either a null
+# return in the source or something this stage did.
+
+# %%
+expected_keys = firm_chars.select(KEYS).unique()
+print(
+    f"panel: {expected_keys.height:,} (firm, month) keys across "
+    f"{expected_keys['symbol'].n_unique()} firms and "
+    f"{expected_keys['timestamp'].n_unique()} months\n"
+)
+for name in LABEL_NAMES:
+    written = labels_df.select([*KEYS, name]).drop_nulls()
+    render_quality_report(
+        quality_report(
+            written,
+            name=name,
+            key_columns=KEYS,
+            expected=expected_keys,
+            keys=KEYS,
+            entity="symbol",
+            session="timestamp",
+            expected_missing={
+                "trailing": (0, "the outcome horizon is zero, so nothing runs off the end")
+            },
+        )
+    )
+    print()
+
+# %% [markdown]
+# ### Sign-off
+#
+# **All three labels cover the panel exactly: 804,530 of 804,530 firm-months, nothing missing and
+# nothing unexpected, in every one of the three files.** That is the number a zero outcome horizon
+# predicts, and it is worth printing precisely because it is the prediction. Every other case study
+# in this book loses its horizon at the end of the sample and a burn-in at the start; this one
+# dates each row by the month its return was earned in, so there is no forward window to run off
+# the end and no window to fill. A single missing key here would mean a null return in the source
+# or a row this stage dropped, and there are none.
+#
+# **No column crossed a distribution threshold in any of the three.** None is constant and none
+# carries a non-finite value. The winsorized variant is a transform of the primary and shares its
+# keys exactly, which the identical coverage confirms rather than assumes - a transform that lost
+# rows of its own would show a different count. Its distribution is deliberately clipped at the
+# bounds declared above, so its tails read tighter than the raw return's by construction; the
+# class label concentrates because it is a discretisation, and the zero-share ceiling is loose
+# enough not to fire on either.
+#
 # %% [markdown]
 # ## Key takeaways
 #

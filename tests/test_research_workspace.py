@@ -1158,3 +1158,30 @@ def test_absolute_preview_workspace_is_taken_as_given(tmp_path: Path, monkeypatc
     )
 
     assert study.output_root == declared.resolve()
+
+
+def test_regeneration_refuses_the_default_release_root_under_a_test_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A test must not reach the published registry through the in-place path.
+
+    `Study.regenerate` writes through the generated-artifact symlinks, so in a maintainer
+    worktree it writes `~/ml4t/artifacts/case_studies/<cs>/run_log/registry.db`. A test run of
+    `fx_pairs` 13-16 did exactly that on 2026-08-16: 269 `backtest_runs`, 13
+    `official_populations` and a candidate set into the published registry, one of them frozen
+    incomplete under an immutable name.
+
+    The discriminator is the default `release_root`, not pytest alone - the three tests above
+    seed their own release tree and pass it, and they must keep working, which is what the
+    second half of this asserts.
+    """
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_regeneration_refuses::call")
+    with pytest.raises(PermissionError, match="canonical in-place regeneration is refused"):
+        Study.regenerate("etfs")
+
+    # Through the entry point a notebook actually uses. `open_study` resolves the default
+    # release root before calling `Study.regenerate`, so a guard that asks whether the caller
+    # passed one is dead here while looking correct at the other call site. That is what the
+    # first version of this guard did, and only this assertion catches it.
+    with pytest.raises(PermissionError, match="canonical in-place regeneration is refused"):
+        open_study("etfs")

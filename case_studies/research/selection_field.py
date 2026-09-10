@@ -684,8 +684,15 @@ def label_of(study: Study, result: Result) -> str:
     The selection ranges over every declared label, so the label the stages after it must
     use is a property of what won - never ``labels.primary``, which is only the winner's
     label by coincidence.
+
+    The registry read is ``result.root``, not ``study.root``: the result carries the root it
+    was actually resolved from, which under a preview study is ``.preview/<case>`` and under
+    a released baseline is the release root. Reading ``study.root`` asked the canonical
+    registry about a hash that only the preview one holds, and raised "has no label in this
+    registry" about a backtest the line above had just ranked. For a canonical workspace
+    result the two are the same path.
     """
-    registry = study.root / "run_log" / "registry.db"
+    registry = result.root / "run_log" / "registry.db"
     with sqlite3.connect(f"file:{registry}?mode=ro", uri=True) as db:
         row = db.execute(
             """

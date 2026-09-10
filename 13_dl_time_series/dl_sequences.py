@@ -188,7 +188,11 @@ def create_sequences_multi_asset(
     dates_list: list[Any] = []
     symbols_list: list[str] = []
 
-    symbols = df.select(symbol_col).unique().to_series().to_list()
+    # sorted(), not unique() alone: polars does not order the result of unique(),
+    # and it returns a different order on each run. The pooled row order would then
+    # differ between runs, which changes mini-batch composition and makes training
+    # irreproducible even with every seed fixed.
+    symbols = sorted(df.select(symbol_col).unique().to_series().to_list())
 
     for symbol in symbols:
         sym_df = df.filter(pl.col(symbol_col) == symbol).sort(timestamp_col)

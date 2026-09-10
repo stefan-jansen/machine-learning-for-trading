@@ -88,6 +88,31 @@ _MAX_CONFIGS_PER_FAMILY = 2
 _TRIM_FAMILIES = {"linear", "gbm"}
 
 
+def _spread(configs: list, keep: int) -> list:
+    """The ``keep`` configs that span the menu, in menu order.
+
+    Not ``configs[:keep]``. A training menu is written as a path - ``ols``,
+    ``ridge_a0.001``, ``ridge_a0.01``, ... out to ``enet_f0.85`` - so its first two
+    entries are the two whose penalty differs least, and the head is the one slice
+    guaranteed to keep configurations that cannot be told apart. crypto's
+    ``fwd_ret_8h`` menu is 28 long and the head-two trim left ``ols`` and
+    ``ridge_a0.001``, which agree on every statistic the registry records: rank IC
+    reads the ordering of the predictions, and a penalty of 0.001 does not reorder
+    them. The fixture then had a model comparison with no distinguishable outcome,
+    and ``11_ml_pipeline/07_case_study_insights`` was correct to refuse a rank one
+    it could not resolve: that refusal is what failed ch11-12 on main.
+
+    Spanning the menu keeps ``ols`` and ``enet_f0.85`` instead: the same two-config
+    budget, spent on configurations a selection rule can separate.
+    """
+    if keep >= len(configs):
+        return list(configs)
+    if keep == 1:
+        return [configs[0]]
+    step = (len(configs) - 1) / (keep - 1)
+    return [configs[round(i * step)] for i in range(keep)]
+
+
 def _trim_label_configs(cs_config_dir: Path) -> None:
     """Trim training menu YAMLs to at most _MAX_CONFIGS_PER_FAMILY for sweep families.
 
@@ -108,7 +133,7 @@ def _trim_label_configs(cs_config_dir: Path) -> None:
                 and isinstance(configs, list)
                 and len(configs) > _MAX_CONFIGS_PER_FAMILY
             ):
-                data[family] = configs[:_MAX_CONFIGS_PER_FAMILY]
+                data[family] = _spread(configs, _MAX_CONFIGS_PER_FAMILY)
                 trimmed = True
         if trimmed:
             with open(label_yaml, "w") as f:

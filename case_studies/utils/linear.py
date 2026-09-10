@@ -43,6 +43,7 @@ from case_studies.utils.folds import (
     prepare_standardized_folds,
 )
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+from case_studies.utils.registry.registration import _with_prediction_label
 from case_studies.utils.registry.specs import canonical_json
 from case_studies.utils.runtime import cpu_seconds, resource_measurement
 from utils.modeling import (
@@ -1752,7 +1753,17 @@ def validate_locked_run(
         ):
             raise ValueError("locked linear completed-fold record does not validate")
         shards.append(pl.read_parquet(shard))
-    reconstructed = pl.concat(shards).sort("symbol", "timestamp", "fold")
+    # Publication stamps the label onto every prediction frame that arrives without one
+    # (`_with_prediction_label`, the single path all four families publish through), and the
+    # per-fold shards on disk are written before that. So the reconstruction has to be stamped
+    # the same way before the two frames can be compared. Without it this check compared a
+    # five-column frame against a six-column one and could never pass - unreachable until a
+    # linear configuration first carried a holdout, which is what fx_pairs did once its
+    # carrier selection was corrected. The stamp is added rather than the column dropped: the
+    # published label is part of what the reconstruction has to agree with.
+    reconstructed = _with_prediction_label(
+        pl.concat(shards).sort("symbol", "timestamp", "fold"), str(spec["label"])
+    )
     if not reconstructed.equals(published):
         raise ValueError("locked linear fitted state does not reproduce published predictions")
     return hashlib.sha256(canonical_json(manifest_record).encode()).hexdigest()

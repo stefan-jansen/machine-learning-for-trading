@@ -63,6 +63,11 @@ import polars as pl
 import yaml
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.feature_engineering import (
     assert_values_agree,
     families_from_config,
@@ -730,6 +735,54 @@ record = write_artifact(
 print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}")
 print(f"  rows {record['n_rows']:,}   digest {record['digest']}")
 
+# %% [markdown]
+# ## What the matrix holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# how much sits at exactly zero, how far the extreme values are from the body, whether anything is
+# constant. A threshold crossed there asks for a sentence of explanation and settles nothing on
+# its own: a characteristic reported by a fraction of firms is thin because the filing is optional,
+# and one reported by none would be a defect.
+#
+# The second is the question a null count cannot reach. **Coverage is measured against the keys
+# the labels declare, not against the rows this matrix happens to hold.** A `(symbol, timestamp)`
+# carrying a label and no feature row is one no model can be asked to score, and it is lost to
+# every family at once before any of them is fitted.
+#
+# The declaration here is as strict as stage 02's, and for the same reason. **This matrix is the
+# firm-month panel with released characteristics attached**, not a set of trailing windows over a
+# price series, so nothing warms up and nothing runs off the end: a firm-month either carries a
+# characteristic release or it does not, and the row exists either way. Every key the labels
+# declare is owed a row, and anything missing is something this stage did.
+
+# %%
+report = quality_report(
+    matrix,
+    name="financial features",
+    key_columns=PANEL_KEY,
+    expected=label_universe(CASE_DIR, keys=PANEL_KEY),
+    keys=PANEL_KEY,
+    entity="symbol",
+    session="timestamp",
+)
+render_quality_report(report)
+
+# %% [markdown]
+# ### Sign-off
+#
+# **The matrix covers the label universe exactly: 804,530 of 804,530 firm-months, nothing missing
+# and nothing unexpected.** That is the strictest of the three declarations this notebook could
+# have made and the only one it is entitled to, because nothing here warms up. The matrix is the
+# firm-month panel with released characteristics attached rather than a set of trailing windows
+# over a price series, so there is no window to fill and no forward return to run off the end of
+# the sample - a firm-month either carries a release or it does not, and the row exists either way.
+#
+# A single missing key here would be a row this stage dropped, and there are none. What varies
+# across this matrix is *within* the rows: a characteristic reported by a fraction of firms is
+# thin because the filing is optional, and the null shares in the profile below say which. Those
+# are the numbers a model stage has to reckon with, and they are a different question from whether
+# the panel is whole, which it is.
+#
 # %% [markdown]
 # ## Key takeaways
 #

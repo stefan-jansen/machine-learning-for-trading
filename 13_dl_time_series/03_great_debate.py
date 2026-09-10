@@ -14,31 +14,47 @@
 # ---
 
 # %% [markdown]
-# # The Great Debate: Are Transformers Effective for Time Series?
+# # Linear Baselines Against a Transformer
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook tests the core finding from Zeng et al. (2023) that simple
-# linear models can outperform Transformers on long-term time series forecasting.
-# We implement all three LTSF-Linear variants (Linear, D-Linear, N-Linear), a
-# vanilla Transformer, and two naive forecasts on daily SPY returns.
+# In 2022 Zeng and co-authors published a paper whose title was a question - *Are
+# Transformers Effective for Time Series Forecasting?* - and whose answer was
+# largely no. On nine standard forecasting benchmarks, models consisting of a single
+# matrix multiplication matched or bettered a series of Transformer architectures
+# that had been reported as the state of the art. The result did not show that
+# attention cannot work on sequences. It showed that the papers claiming it worked
+# had not been comparing against anything hard.
 #
-# **Learning Objectives**:
-# - Implement the Linear, D-Linear, and N-Linear baselines from the LTSF-Linear paper
-# - Build a simple Transformer encoder for time series
-# - Test whether linear models compete with a Transformer and naive forecasts
-# - Understand why this result sparked the "great debate" in the field
+# This notebook reproduces the shape of that comparison on daily SPY returns. It
+# builds the three linear models from the paper, a Transformer encoder, and two
+# forecasts with no parameters at all, and scores them together. It then runs the
+# diagnostic the paper used to argue that the Transformers were not using temporal
+# order in the first place: shuffle the days inside each input window and see whether
+# anything gets worse.
 #
-# **Book Reference**: Chapter 13, Section 13.4 (The Great Debate)
+# **Learning objectives**:
+# - Build the three LTSF-Linear models - a plain linear map from the window to the
+#   forecast, one that splits the window into a smooth part and a remainder first, and
+#   one that subtracts the last observation before mapping and adds it back after.
+# - Build a Transformer encoder over the same window and see what it costs in
+#   parameters relative to a single matrix.
+# - Put a forecast of zero and a forecast that repeats the last value into the same
+#   table, and read every trained model against them rather than against each other.
+# - Destroy the time ordering inside each input window and measure what each model
+#   loses, which is how you tell a model that uses sequence from one that does not.
 #
-# **Prerequisites**: ETF price data via the canonical `load_etfs()` loader
+# **Book Reference**: Chapter 13, Section 13.4 (Linear baselines versus transformers).
+# Zeng et al. (2022), *Are Transformers Effective for Time Series Forecasting?*
+#
+# **Prerequisites**: `01_core_architectures`; ETF price data via the canonical
+# `load_etfs()` loader.
 
 # %%
 """Test whether simple linear models can outperform Transformers on time series."""
 
 import os
 import time
-import warnings
 from datetime import datetime
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -48,12 +64,11 @@ import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
+from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -77,14 +92,23 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
 # %% [markdown]
-# ## Data Preparation
+# ## The data
 #
-# We align several ETF series to a common calendar but run the core
-# Linear-versus-Transformer comparison on SPY. This is a deliberate
-# simplification: the Zeng et al. critique is about a single-series LTSF
-# experiment, and a multi-symbol panel adds confounders (cross-sectional
-# variance, multi-asset attention) we do not want to entangle with the
-# main question.
+# The comparison runs on one series: SPY's daily returns. That is deliberate. The
+# claim under test is about single-series forecasting, and a panel of several funds
+# would add a second thing the models differ on - how they handle a cross-section -
+# which is not what is being measured here.
+#
+# Five funds are nonetheless loaded, and only to fix the calendar. Keeping the dates on
+# which all five traded gives a single trading calendar with no gaps to explain, and
+# the same one the other notebooks in this chapter use. SPY's column is then taken out
+# of it.
+#
+# Returns rather than prices, unlike `02_nbeats_interpretable`. A return series has no
+# trend to extrapolate past, so the problem that notebook measured - every test input
+# outside the training range - does not arise. What replaces it is a harder problem:
+# there is almost nothing to predict, which is exactly why the no-parameter forecasts
+# below are hard to beat.
 
 # %%
 etf_df = load_etfs()
@@ -104,16 +128,80 @@ returns = close_wide.with_columns(
     [pl.col(c).pct_change().alias(c) for c in feature_cols]
 ).drop_nulls()
 
-# SPY is the primary series for the LTSF-style univariate comparison
 series = returns["SPY"].to_numpy().astype(np.float32)
+dates = returns["timestamp"].to_numpy()
+
+print(f"{len(series)} trading days shared by all {len(SYMBOLS)} funds, {dates[0]} to {dates[-1]}")
+print(
+    f"SPY daily return: mean {series.mean():+.5f}, standard deviation "
+    f"{series.std():.5f}, so the mean is {abs(series.mean()) / series.std():.3f} "
+    f"standard deviations from zero"
+)
+
+# %% [markdown]
+# ### The series the models have to forecast
+#
+# Two panels. The left is the return series itself: no trend to speak of, a level that
+# stays near zero, and volatility that clusters into bursts. The right is the
+# autocorrelation - the correlation between each day's return and the return some
+# number of days earlier - with the band inside which a correlation is
+# indistinguishable from zero at a sample this size, namely $\pm 1.96/\sqrt{n}$.
+#
+# Read them together and the notebook's outcome stops being surprising. The printed
+# mean is a small fraction of a standard deviation from zero, so forecasting zero is
+# close to forecasting the mean. And if almost every autocorrelation sits inside the
+# band, then the ordered history of returns has little linear relationship to what
+# comes next, which is what every model in this notebook is being asked to find.
+
+# %%
+n_lags = 40
+centred = series - series.mean()
+denom = float((centred**2).sum())
+acf = [float((centred[k:] * centred[:-k]).sum()) / denom for k in range(1, n_lags + 1)]
+conf = 1.96 / np.sqrt(len(series))
+
+fig_data = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=["SPY daily returns", "Autocorrelation of those returns"],
+)
+fig_data.add_trace(
+    go.Scatter(x=dates, y=series, line=dict(color=COLORS["blue"], width=1), name="Return"),
+    row=1,
+    col=1,
+)
+fig_data.add_trace(
+    go.Bar(x=list(range(1, n_lags + 1)), y=acf, marker_color=COLORS["slate"], name="ACF"),
+    row=1,
+    col=2,
+)
+for sign in (1, -1):
+    fig_data.add_hline(y=sign * conf, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
+fig_data.update_xaxes(title_text="Date", row=1, col=1)
+fig_data.update_xaxes(title_text="Lag (trading days)", row=1, col=2)
+fig_data.update_yaxes(title_text="Daily return", row=1, col=1)
+fig_data.update_yaxes(title_text="Correlation with the return that many days earlier", row=1, col=2)
+fig_data.update_layout(
+    title="What there is to forecast, before any model is fitted", showlegend=False
+)
+show_plotly_with_alt(
+    fig_data,
+    "Two panels. The left plots SPY's daily return against date, centred on zero with "
+    "volatility arriving in bursts. The right is a bar chart of the correlation "
+    "between a day's return and the return a given number of days earlier, for lags "
+    "one to forty, with dotted lines marking the band inside which a correlation is "
+    "indistinguishable from zero at this sample size.",
+)
 
 
 # %% [markdown]
 # ### Sequence builder
 #
-# Standard sliding-window construction: each input is `lookback` daily returns
-# and each target is the next `horizon` returns. We assign complete forecast
-# horizons to one partition and purge the 23 overlapping targets at each boundary.
+# Each input is `LOOKBACK` consecutive daily returns and each target is the
+# `HORIZON` returns that follow it. Unlike `01_core_architectures`, where the target
+# was a single day, the whole path is predicted at once - which is what the linear
+# models below map to in one matrix multiplication, and what makes the parameter
+# comparison against a Transformer meaningful.
 
 
 # %%
@@ -147,9 +235,12 @@ print(f"Sequences: {X.shape}, Target: {y.shape}")
 print(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
 # %% [markdown]
-# **Note**: The 70/15/15 cutoffs refer to forecast target dates. No target date
-# appears in two partitions. Walk-forward validation (Section 13.7) remains
-# preferable when the goal is a production estimate rather than this comparison.
+# The cutoffs are positions in the return series, and an example belongs to the
+# partition its forecast target falls in. A target spans `HORIZON` days, so the
+# examples whose horizon would straddle a boundary are dropped rather than assigned to
+# one side: no target date appears in two partitions. Chapter 6 sets out the
+# walk-forward procedure that a production estimate needs; a single chronological cut
+# is enough for a comparison between models that all face the same cut.
 
 # %% [markdown]
 # ## Model Definitions
@@ -172,9 +263,19 @@ class Linear(nn.Module):
 
 
 # %% [markdown]
-# ### D-Linear
-# Decomposes input into trend (moving average) and remainder,
-# applies separate linear layers to each.
+# ### D-Linear: split the window before mapping it
+#
+# The window is first separated into a smooth part and what is left over. The smooth
+# part is a moving average - each day replaced by the average of the `kernel_size` days
+# around it - and the remainder is the window minus that average. Two independent
+# linear maps then run, one on each part, and their forecasts are added. The idea is
+# that a slow drift and the fluctuations around it are different things to extrapolate,
+# and giving each its own matrix lets the model treat them differently.
+#
+# The averaging needs the window extended at both ends to keep its length, and the
+# extension is a repeat of the edge values rather than zeros. Padding with zeros would
+# pull the average towards zero at exactly the two places the forecast depends on
+# most - the start of the window and, worse, its final day.
 
 
 # %%
@@ -186,10 +287,7 @@ class DLinear(nn.Module):
         self.lookback = lookback
         self.horizon = horizon
         self.kernel_size = kernel_size
-        # No internal padding - we explicitly edge-pad inputs in `forward`
-        # so the moving average mirrors the boundary values instead of
-        # injecting zeros, which would bias the trend toward zero near the
-        # window edges.
+        # Padding is applied in `forward` instead, in replicate mode.
         self.avg_pool = nn.AvgPool1d(kernel_size=kernel_size, stride=1, padding=0)
         self.linear_trend = nn.Linear(lookback, horizon)
         self.linear_remainder = nn.Linear(lookback, horizon)
@@ -228,8 +326,21 @@ class NLinear(nn.Module):
 
 
 # %% [markdown]
-# ### Vanilla Transformer
-# Standard Transformer encoder with positional encoding for time series.
+# ### The Transformer, as the critique found it
+#
+# Each day of the window is projected into a `D_MODEL`-dimensional vector - a token -
+# and a learned position vector is added so the encoder can tell day 3 from day 47,
+# which self-attention cannot otherwise do: attention compares every token to every
+# other with no notion of which came first. The encoder layers then run, and the head
+# flattens all `LOOKBACK` token vectors into one long vector and maps it to the
+# forecast.
+#
+# That head is worth noticing, because it is where most of the parameters go and it is
+# a large part of why the parameter counts below differ by the factor they do. It is
+# also the design the critique was aimed at: after paying for attention over positions,
+# the model concatenates every position anyway. `04_transformers` builds two
+# architectures that change what a token is - a patch of consecutive days in one, a
+# whole feature's history in the other - rather than keeping this shape.
 
 
 # %%
@@ -361,24 +472,42 @@ zero_mse = results["Zero"]["mse"]
 for result in results.values():
     result["mse_ratio"] = result["mse"] / zero_mse
 
-best_learned_name = min(model_factories, key=lambda name: results[name]["mse"])
-transformer_ratio = results["Transformer"]["mse"] / results[best_learned_name]["mse"]
-parameter_ratio = results["Transformer"]["params"] / results["Linear"]["params"]
-
-print(
-    f"Best learned model: {best_learned_name}; Transformer error is "
-    f"{transformer_ratio:.2f}x as large. Zero forecast remains best; "
-    f"the Transformer has {parameter_ratio:.1f}x as many parameters as Linear."
+summary_df = pl.DataFrame(
+    [
+        {
+            "Forecast": name,
+            "Parameters": results[name]["params"],
+            "Test MSE": results[name]["mse"],
+            "MSE / zero forecast": round(results[name]["mse_ratio"], 3),
+            "Train seconds": round(results[name]["time"], 1),
+        }
+        for name in ["Zero", "Closest Repeat", "Linear", "D-Linear", "N-Linear", "Transformer"]
+    ]
 )
+summary_df
 
 # %% [markdown]
-# **Interpretation**: The linear family beats the Transformer on this SPY task,
-# the narrow comparison at the center of Zeng et al. But every learned model
-# loses to a zero-return forecast. Daily returns offer little predictable signal,
-# so the stronger conclusion is not that a linear network forecasts well. It is
-# that additional capacity fails to earn its keep here. The Closest Repeat
-# baseline from the original paper is also weak because yesterday's return is a
-# poor forecast for every point in the next 24-day horizon.
+# ### How to read the table
+#
+# The column that decides everything is **MSE / zero forecast**. Predicting zero for
+# every day of every horizon is what a forecaster does when it has nothing to say, and
+# on a return series it is not a straw man: returns average close to zero, so the
+# squared error of that forecast is essentially the variance of the returns
+# themselves. A model scoring above one has spent its parameters getting further from
+# the target than saying nothing would have.
+#
+# **Closest Repeat** - carry the last observed return forward across the whole horizon
+# - is the second no-parameter entry, and it is the one the LTSF papers use. On a
+# return series it should do poorly, and for a reason worth stating: yesterday's return
+# is a draw from a nearly zero-mean distribution, so repeating it commits to a nonzero
+# path for the entire horizon on the strength of one noisy observation. That makes it a
+# worse baseline than zero here, which is itself informative - a benchmark's difficulty
+# depends on what is being forecast, and importing one from a paper on electricity
+# demand does not import its difficulty.
+#
+# The **Parameters** column is the other half of the argument. Whatever the errors turn
+# out to be, they were reached at very different cost, and the linear models have
+# nothing in them but one or two matrices from the window to the horizon.
 
 # %%
 ordered_models = ["Zero", "Closest Repeat", "Linear", "D-Linear", "N-Linear", "Transformer"]
@@ -402,22 +531,52 @@ fig = go.Figure(
 )
 
 fig.update_layout(
-    title="Linear models beat the Transformer, but not a zero-return forecast",
+    title="Every trained model, measured against saying nothing",
     xaxis_title="Forecast",
-    yaxis_title="Test MSE relative to zero forecast",
+    yaxis_title="Test MSE relative to the zero forecast",
     showlegend=False,
     yaxis_range=[0, max(results[name]["mse_ratio"] for name in ordered_models) * 1.15],
 )
-fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"])
-fig.show()
+fig.add_hline(
+    y=1,
+    line_dash="dot",
+    line_color=COLORS["neutral"],
+    annotation_text="zero forecast",
+    annotation_position="right",
+)
+show_plotly_with_alt(
+    fig,
+    "A bar chart of six forecasts, from the two no-parameter rules through the three "
+    "linear models to the Transformer, each bar giving its test mean squared error as "
+    "a multiple of the zero forecast's, with a dotted line at one.",
+)
 
 # %% [markdown]
-# ## Shuffle Experiment
+# ## Does any of them use the ordering?
 #
-# Zeng et al. shuffled each input sequence to destroy temporal order. On the
-# Exchange and ETTh1 benchmarks, this hurt the linear models much more than the
-# Transformers. We repeat the diagnostic on SPY returns without assuming that a
-# result from those multivariate benchmarks must transfer.
+# A model that reads a sequence should behave differently when the sequence stops
+# being one. The diagnostic is to take each test input window, shuffle its days into a
+# random order, and run the model again. The model's weights do not change; only the
+# arrangement of what it is shown does.
+#
+# Two things are measured, because the error alone cannot answer the question. The
+# error says whether the shuffle cost anything on average; the distance between the
+# two sets of predictions says whether the model's output moved at all. Predictions
+# can move a long way and leave the average squared error where it was, so a model
+# whose error barely changes has not thereby been shown to ignore order. Only a model
+# whose *predictions* barely move has been.
+#
+# This is the test that made the original critique sharp. Zeng and co-authors found
+# that shuffling cost the Transformers very little on their benchmarks, while the
+# linear models suffered - evidence against attention layers whose entire
+# justification is modelling relations between positions.
+#
+# The same diagnostic is run here, on a different kind of series, and its outcome has
+# to be read against that difference. Those benchmarks are electricity load and
+# exchange rates, with daily and weekly cycles to be found. Daily equity returns have
+# very little sequential structure for any model to use, so a small shuffle effect
+# here says something about the series and not only about the architecture. Both
+# readings are available and the section below separates them.
 
 # %%
 # Evaluate all models on original and shuffled test inputs
@@ -439,64 +598,148 @@ for name, model in models.items():
 
     mse_orig = float(np.mean((pred_orig - y_test) ** 2))
     mse_shuf = float(np.mean((pred_shuf - y_test) ** 2))
+    # RMS gap between the two prediction sets, over the RMS size of the originals.
+    pred_shift = float(
+        np.sqrt(np.mean((pred_shuf - pred_orig) ** 2)) / np.sqrt(np.mean(pred_orig**2))
+    )
     shuffle_results.append(
         {
             "Model": name,
             "MSE (original)": round(mse_orig, 6),
             "MSE (shuffled)": round(mse_shuf, 6),
             "Delta (%)": round(100 * (mse_shuf - mse_orig) / mse_orig, 1),
+            "Prediction shift": round(pred_shift, 3),
         }
     )
 
 shuffle_df = pl.DataFrame(shuffle_results)
 
-fig = go.Figure(
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=["Change in error", "How far the predictions moved"],
+)
+fig.add_trace(
     go.Bar(
         x=shuffle_df["Model"],
         y=shuffle_df["Delta (%)"],
-        marker_color=[COLORS["blue"], COLORS["slate"], COLORS["amber"], COLORS["copper"]],
+        marker_color=COLORS["blue"],
         text=[f"{value:+.1f}%" for value in shuffle_df["Delta (%)"]],
         textposition="outside",
-        hovertemplate="%{x}<br>MSE change: %{y:+.1f}%<extra></extra>",
-    )
+    ),
+    row=1,
+    col=1,
 )
-fig.add_hline(y=0, line_color=COLORS["neutral"])
-fig.update_layout(
-    title="Shuffling barely changes error on low-signal SPY returns",
-    xaxis_title="Model",
-    yaxis_title="Change in test MSE after shuffling (%)",
-    showlegend=False,
+fig.add_trace(
+    go.Bar(
+        x=shuffle_df["Model"],
+        y=shuffle_df["Prediction shift"],
+        marker_color=COLORS["amber"],
+        text=[f"{value:.3f}" for value in shuffle_df["Prediction shift"]],
+        textposition="outside",
+    ),
+    row=1,
+    col=2,
 )
-fig.show()
+fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
+fig.add_hline(
+    y=1.0,
+    line_dash="dot",
+    line_color=COLORS["neutral"],
+    annotation_text="disagreement as large as the forecast",
+    annotation_position="bottom right",
+    row=1,
+    col=2,
+)
+fig.update_yaxes(title_text="Change in test MSE (%)", row=1, col=1)
+fig.update_yaxes(title_text="Prediction shift (0 = unchanged)", row=1, col=2)
+fig.update_layout(title="Two different questions about the same shuffle", showlegend=False)
+show_plotly_with_alt(
+    fig,
+    "Two bar charts over the same four trained models. The left gives the percentage "
+    "change in test mean squared error when the days inside every input window are "
+    "randomly reordered. The right gives how far each model's predictions moved, as the "
+    "root-mean-square gap between its original and shuffled predictions divided by the "
+    "root-mean-square size of the originals, with zero meaning unchanged.",
+)
 
 # %% [markdown]
-# **Finding**: On this SPY split, shuffling has minimal impact on any model.
-# The Transformer's MSE is essentially unchanged and the linear models also
-# show negligible change. This is a diagnostic on one univariate financial
-# series - not a proof that daily equity returns are i.i.d., and not a claim
-# that self-attention generally ignores temporal order; the original Zeng et
-# al. shuffle gap was demonstrated on weather and electricity data with
-# strong periodic patterns, structure that our SPY return series mostly
-# lacks. Read the result as: when the input carries little sequential signal,
-# preserving sequential order does not help.
-
-# %% [markdown]
-# ## Validation-Only Lookback Sensitivity
+# The two panels answer different questions, and the difference between them is the
+# point of this section.
 #
-# Zeng et al. found that longer inputs often helped linear models while leaving
-# Transformers stable or worse. We test three lookbacks without consulting the
-# test set. Every candidate uses the same forecast-date cutoffs, so changing the
-# lookback changes available context rather than silently shifting the calendar.
+# **The left panel says only how much the average squared error moved.** Error is an
+# average over every test window, and an average hides what happened inside it: two
+# sets of predictions can both miss a near-zero target by a similar amount while
+# disagreeing completely with each other. A bar near zero here means shuffling cost the
+# model little accuracy. It does not mean the model produced the same forecast.
+#
+# **The right panel asks whether the forecast changed at all.** It measures the
+# root-mean-square gap between each model's original and shuffled predictions, divided
+# by the root-mean-square size of the original predictions. Zero means the model
+# emitted the same numbers from the reordered window and therefore did not read
+# position - within these test windows and this one shuffle. A value of one means the
+# two prediction sets differ, in root-mean-square, by as much as the original forecasts
+# are large; above one, by more than that. It is a size and nothing else: it does not
+# say which way either forecast pointed, and a shuffled prediction that is simply a
+# multiple of the original registers here too.
+#
+# It is a gap and not a correlation on purpose. A correlation of one would be satisfied
+# by predictions that are twice the originals plus a constant, which is a model whose
+# output very much depends on position; correlation measures linear association and not
+# agreement, and only a distance answers "did the numbers change".
+#
+# Read the two panels together and check them against what the critique predicts. Its
+# claim is that the linear models depend on position and the Transformer does not, so
+# it predicts a lopsided picture on the right - the linear bars high, the Transformer's
+# near zero - while the left panel may show very little for anybody. If that is what
+# the chart shows, then attention layers whose entire justification is modelling
+# relations between positions are producing an output that barely depends on position,
+# and no accuracy table would have revealed it.
+#
+# **What this does not settle.** No uncertainty has been estimated for the left panel,
+# so a small bar there is not established as a real effect and neither is a large one.
+# Estimating it would take more than counting windows, because these windows overlap:
+# consecutive examples share `HORIZON - 1` of their target days, so their errors are
+# heavily dependent and the effective number of independent observations is far below
+# the number of rows. A test that ignored that would report a confidence interval far
+# narrower than the evidence supports. And a model whose predictions move while its
+# error does not is reading position and getting nothing for it, which on daily equity
+# returns is the expected outcome and is a statement about the series rather than the
+# architecture.
+#
+# The general lesson holds whatever the dataset: a claim that an architecture exploits
+# some structure is testable by destroying that structure in the input and re-scoring.
+# It costs one forward pass and no accuracy table implies it.
+
+# %% [markdown]
+# ## Does a longer input window help?
+#
+# Zeng and co-authors reported that giving the linear models longer inputs kept
+# improving them while the Transformers stayed flat or got worse - a second sign that
+# the extra positions were not being used. Three window lengths are fitted here.
+#
+# Everything is scored on the **validation** windows. Comparing candidates is what
+# those are for, and reading the held-back stretch to pick a window length would spend
+# it: every number reported from it afterwards would be a report on a choice already
+# made using it.
+#
+# Two things are pinned so the sweep varies only the window. Every candidate faces the
+# same target dates, because the cutoffs are fixed in the return series rather than as
+# a fraction of each candidate's own sequence count. And every candidate starts its
+# training examples on the date the longest window can first reach, so all three are
+# fitted on the same days - otherwise the shorter windows would train on more examples
+# and a difference in error could be a difference in sample size.
 
 # %%
 lookback_values = [48, 96, 192]
+sweep_first_target = max(lookback_values)
 lookback_results = []
 
 for lb in lookback_values:
     X_lb, y_lb = create_sequences(series, lb, HORIZON)
     target_start_lb = np.arange(lb, len(series) - HORIZON + 1)
     target_end_lb = target_start_lb + HORIZON - 1
-    train_mask_lb = target_end_lb < train_target_cutoff
+    train_mask_lb = (target_start_lb >= sweep_first_target) & (target_end_lb < train_target_cutoff)
     val_mask_lb = (target_start_lb >= train_target_cutoff) & (target_end_lb < val_target_cutoff)
 
     X_train_lb, y_train_lb = X_lb[train_mask_lb], y_lb[train_mask_lb]
@@ -532,7 +775,7 @@ for lb in lookback_values:
                 "MSE ratio": mse_lb / zero_val_mse,
             }
         )
-    print(f"  Lookback={lb}: done")
+    print(f"  {lb}-day window, {int(train_mask_lb.sum())} training examples: done")
 
 lookback_df = pl.DataFrame(lookback_results)
 
@@ -556,42 +799,67 @@ for name, color, dash in [
             hovertemplate=f"{name}<br>Lookback: %{{x}}<br>Relative MSE: %{{y:.2f}}x<extra></extra>",
         )
     )
-fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"])
+fig.add_hline(
+    y=1,
+    line_dash="dot",
+    line_color=COLORS["neutral"],
+    annotation_text="zero forecast",
+    annotation_position="right",
+)
 fig.update_layout(
-    title="Longer context does not overcome the zero-return baseline",
-    xaxis_title="Lookback (trading days)",
-    yaxis_title="Validation MSE relative to zero forecast",
+    title="Validation error against the length of the input window",
+    xaxis_title="Input window (trading days)",
+    yaxis_title="Validation MSE relative to the zero forecast",
     xaxis=dict(tickmode="array", tickvals=lookback_values),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three lines, one each for the plain linear model, the decomposition linear "
+    "model and the Transformer, plotting validation mean squared error as a multiple "
+    "of the zero forecast's against input window length at three settings, with a "
+    "dotted line at one.",
+)
 
 # %% [markdown]
-# **Finding**: Use this chart as a model-selection diagnostic, not another test
-# result. It compares candidates only on validation targets. None beats the
-# horizontal zero-forecast reference, and the short three-point curves do not
-# support a general claim about how either architecture scales with context.
+# Three points per curve is enough to see whether a curve moves and not enough to
+# describe how an architecture scales - the original study swept far more settings on
+# data with far more signal. Read this as what it is: a check that the window length
+# was chosen by measurement rather than by habit, run on the partition reserved for
+# choosing things.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Linear baselines beat the Transformer on this univariate task**, the narrow
-#    comparison highlighted by Zeng et al. (2023), with about 44x fewer parameters
-# 2. **No learned model beats zero**: low MSE relative to a complex model is not
-#    evidence of useful return predictability; naive forecasts belong in every comparison
-# 3. **Three variants**: Linear (plain), D-Linear (trend/remainder decomposition),
-#    N-Linear (last-value normalization) - all with minimal parameters
-# 4. **Shuffle test does not transfer**: neither architecture reacts much to shuffled
-#    SPY returns, unlike the paper's Exchange and ETTh1 benchmark results
-# 5. **Lookback sensitivity is validation-only**: fixed target dates prevent leakage
-#    and make the comparison independent of the final test set
-# 6. The debate motivated better Transformer designs (PatchTST, iTransformer)
-#    that directly address these failure modes
+# 1. **A comparison between two architectures says nothing until something with no
+#    parameters is in the table.** Two models can be ranked against each other while
+#    both are worse than predicting zero, and the ranking looks like a finding right up
+#    until the third row is added. This is the whole content of the critique the
+#    notebook reproduces: the Transformer papers were compared against each other.
+# 2. **Import a baseline's identity, not its difficulty.** Repeating the last
+#    observation is a demanding benchmark on a price level and a weak one on a return
+#    series, because a return is a draw from a nearly zero-mean distribution and
+#    repeating it commits to a path on the strength of one noisy number. A benchmark
+#    taken from a paper on other data has to be re-argued for yours.
+# 3. **Test a structural claim by destroying the structure.** If an architecture is
+#    said to exploit temporal order, shuffle the order inside each input and run it
+#    again. It costs one forward pass, and no accuracy table implies it.
+# 4. **Score that test on the predictions, not only on the error.** An average squared
+#    error can sit still while the predictions underneath it change completely, so a
+#    flat error bar answers nothing on its own. Measuring the distance between the
+#    original and shuffled predictions asks the question directly, and a distance is
+#    what it has to be: a correlation of one is satisfied by any affine rescaling, so
+#    it cannot tell you the numbers did not change.
+# 5. **Choose settings on the validation partition and say that you did.** The window
+#    sweep here is model selection, and reporting it as a result would spend the
+#    held-back stretch on a choice already made.
 #
-# **Caveat**: These results are on univariate SPY data. Transformers may perform
-# better in multivariate settings with rich covariates where cross-series attention
-# extracts meaningful relationships (Section 13.5 explores TFT for this case).
-# PyTorch deterministic algorithms and a fixed cuBLAS workspace make repeated
-# executions reproducible on the same software and GPU stack; another environment
-# may still produce small floating-point differences.
+# **Known limitations.** One series, one chronological split, one seed, one horizon,
+# and no hyperparameter search beyond the window sweep - so nothing here ranks these
+# architectures in general, and the specific outcome on daily equity returns is
+# dominated by how little there is to forecast. The Transformer is the vanilla encoder
+# the critique targeted, with a head that flattens every position, rather than any of
+# the designs that answered it; `04_transformers` builds two of those. Training times
+# in the table are wall-clock on a shared machine and are indicative only.
 #
-# **Next**: See `04_transformers` for modern PatchTST and iTransformer architectures.
+# **Next**: `04_transformers` builds PatchTST and iTransformer, both of which change
+# what a token is in order to give attention something positional to work with.

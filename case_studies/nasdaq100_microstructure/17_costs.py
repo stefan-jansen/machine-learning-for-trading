@@ -71,6 +71,7 @@ import time
 
 import polars as pl
 
+from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -82,6 +83,7 @@ from case_studies.utils.backtest_presets import (
     ensure_backtest_spec,
     set_backtest_costs_bps,
     strategy_view,
+    traded_universe_declaration,
 )
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.notebook_contracts import excluded_families
@@ -101,8 +103,41 @@ CASE_STUDY_ID = "nasdaq100_microstructure"
 LABEL = ""
 MAX_SYMBOLS = 0
 TOP_N_COMBOS = None
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
+# looks for exactly this pair. Without them the canonical branch regenerates in place, which
+# needs generated-artifact symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %%
+# A reduced run is a preview run. Refused on the canonical tier so a narrowed result can
+# never land in the registry the book's numbers come from, and so the two can never sit in
+# one registry to be ranked against each other: `resolve_best_backtest_runs` takes the top
+# Sharpe over every backtest at a stage, and a Sharpe earned over a handful of names would
+# outrank one earned over the whole panel. `us_equities_panel` 16 through 19 already refuse
+# the parameter this way, and `canonically_refused_parameters` reads the refusal out of the
+# source, so the canonical fixture path drops the name rather than handing the notebook
+# something its first cell raises on (ml4t/agent-workspace#911).
+if EXECUTION_TIER == "canonical" and MAX_SYMBOLS:
+    raise ValueError(
+        "MAX_SYMBOLS narrows the universe this run trades, which makes it a different "
+        "portfolio from the declared one and gives it its own backtest identity "
+        "(ml4t/agent-workspace#911). A canonical run trades the declared universe: set "
+        "MAX_SYMBOLS=0, or run under EXECUTION_TIER='preview' with a WORKSPACE."
+    )
+
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Opening it
+# activates a root and rewrites `ML4T_OUTPUT_DIR` process-wide, and every later
+# `get_case_study_dir`, prediction read and registry write resolves against that variable. A
+# `CASE_DIR` bound before this line points at the released registry while this notebook writes
+# to the workspace, and the two never meet: the sweep finds nothing registered and every reader
+# scoped to hashes from the other root comes back empty.
+
+# %%
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 if TOP_N_COMBOS is None:
@@ -162,7 +197,7 @@ PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sens
 CANONICAL_UNIVERSE = get_universe_filters_for(CASE_STUDY_ID)[0]
 
 
-def _on_canonical_universe(frame: pl.DataFrame) -> pl.DataFrame:
+def _on_canonical_universe(frame: pl.DataFrame, stage: str = "upstream") -> pl.DataFrame:
     """Drop runs selected under a universe this case study does not treat as canonical.
 
     `None` means the case study pins no universe, and then every run qualifies - the filter
@@ -171,6 +206,17 @@ def _on_canonical_universe(frame: pl.DataFrame) -> pl.DataFrame:
     """
     if CANONICAL_UNIVERSE is None:
         return frame
+    # An empty resolver result carries no columns at all, so reading `spec_json` off it raised
+    # `ColumnNotFoundError: "spec_json" not found`, naming a column rather than the absence that
+    # produced it. Returning the empty frame is NOT the fix: it made this notebook exit 0 having
+    # registered nothing, which is the same absence wearing a success. Measured 2026-09-09 on the
+    # smoke chain - 202 signal backtests registered, none carrying `universe_filter`, and this
+    # notebook reported no error at all.
+    if frame.is_empty():
+        raise RuntimeError(
+            f"no {stage} backtests are registered for {CASE_STUDY_ID}, so there is nothing "
+            "to price. Run 14_backtest through 16_risk_management against this registry first."
+        )
     keep = [
         strategy_view(json.loads(spec)).get("signal", {}).get("universe_filter")
         == CANONICAL_UNIVERSE
@@ -195,7 +241,8 @@ def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
                 _on_canonical_universe(
                     resolve_best_backtest_runs(
                         CASE_STUDY_ID, LABEL, split="validation", stage=stage, top_n=1_000_000
-                    )
+                    ),
+                    stage,
                 ),
             )
             for stage in PRE_COST_STAGES
@@ -639,6 +686,12 @@ def run_cadence_cost_backtest(
         initial_cash=bt_config.initial_cash,
         chapter="ch18",
         label=LABEL,
+        # `MAX_SYMBOLS` reduced `cadence_prices` and, until the run said so in its own
+        # specification, that reduction did not reach `backtest_hash`: a reduced run and the
+        # full run over the same predictions hashed alike (ml4t/agent-workspace#911). Built
+        # from the panel this spec is being built against, which is the one `run_backtest`
+        # is handed below. A full run declares nothing and hashes as it did before.
+        traded_universe=(traded_universe_declaration(cadence_prices) if MAX_SYMBOLS else None),
         # The universe travels with the spec, not just with the query above. A row registered
         # without it reads as full-universe to every later reader - including section 4's
         # full-versus-screened query and `derived_tables_off_canonical_universe` - so the

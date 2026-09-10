@@ -85,7 +85,7 @@ from .selection_field import (
     upstream_plan_hashes,
 )
 from .strategy import Strategy, strategy_warmup_periods
-from .workspace import Study, open_study
+from .workspace import Study, open_study, read_only_study
 
 __all__ = [
     "causal_supersedes",
@@ -133,6 +133,7 @@ __all__ = [
     "narrows_declared_catalog",
     "model_requests",
     "open_study",
+    "read_only_study",
     "register_adapter",
     "registered_adapters",
     "plan_backtests",

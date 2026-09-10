@@ -1410,3 +1410,39 @@ def common_sample_daily_ic(
     }
     shared_rows = common.join(scored_dates, on=date_col)
     return ics, scored_dates.height, shared_rows.height
+
+
+def align_join_clock(
+    frame: pl.DataFrame, dtype: pl.Datetime, column: str = "timestamp"
+) -> pl.DataFrame:
+    """Put one timestamp column on `dtype`, so a join on it cannot silently match nothing.
+
+    Prediction artifacts and panel artifacts disagree on the time unit, and sometimes on the
+    zone. The sequence path round-trips the frame through pandas, whose ``datetime64[ns]`` comes
+    back as ``us`` rather than the unit the panel is written at, and the zone can be lost the
+    same way. The instants are identical.
+
+    **The divergence is deliberate and must not be unified at the source.**
+    ``artifact_digest.value_digest`` is sensitive to the time unit, and
+    ``computation.expected_prediction_keys.digest`` is taken over this column, so rewriting the
+    stored unit would move ``training_hash`` for every registered sequence run. Reconciling a
+    cosmetic difference by re-keying a registry is the most expensive mistake available here.
+
+    So the normalization belongs at each join site, which is what this is. A naive value is
+    stamped as the UTC it is rather than the zone being dropped from everything, and the replace
+    comes before the cast because casting a naive column to a zoned dtype converts it instead of
+    stamping it.
+
+    `crypto_perps_funding/13_backtest.py::on_clock_dtype` is the same function against that
+    notebook's own clock, written first and left in place because changing it is a code-cell edit
+    that costs an execution. Fold it into this one when that notebook next runs.
+    """
+    have = frame.schema[column]
+    if have == dtype:
+        return frame
+    stamp = pl.col(column)
+    if getattr(have, "time_zone", None) is None and dtype.time_zone is not None:
+        stamp = stamp.dt.replace_time_zone("UTC")
+    elif getattr(have, "time_zone", None) is not None and dtype.time_zone is None:
+        stamp = stamp.dt.convert_time_zone("UTC").dt.replace_time_zone(None)
+    return frame.with_columns(stamp.cast(dtype))

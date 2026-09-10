@@ -35,6 +35,47 @@ _EXECUTION_MODE_BY_DELAY = {
 }
 
 
+def traded_universe_declaration(prices: pl.DataFrame) -> dict[str, Any]:
+    """Describe the symbol set a run can hold, for the caller to put in its spec.
+
+    ``MAX_SYMBOLS`` reduces the price panel and nothing else. On the engine path that
+    bounds what the run can trade, because the engine cannot fill an unpriced name; on
+    the vectorized path it bounds nothing, because ``gross_ret = weight * y_true`` is
+    computed from the predictions and ``prices`` supplies only the rebalance calendar.
+    Either way the reduction never reached ``backtest_hash``, so a reduced run and a
+    full run over the same predictions hashed alike and the second was served the
+    first's result. Measured on us_firm_characteristics/11_backtest, 2026-08-24: 8
+    predictions x 4 schemes at 300 symbols and at 3,708 gave bit-identical Sharpe, CAGR
+    and drawdown across all 32 backtests (ml4t/agent-workspace#911).
+
+    The declaration carries a digest of the sorted symbol list rather than its length,
+    because ``{A, B}`` and ``{A, C}`` are two symbols each and two different portfolios.
+    It goes in ``strategy.signal``, which is hashed whole, so a caller that declares one
+    gets an identity of its own and can neither be served nor serve a full-universe row.
+    ``run_backtest`` reads it back through ``apply_traded_universe``: it checks the panel
+    it was handed against this digest and narrows the predictions to it, so the run
+    trades what its identity says on both paths.
+
+    Call it only when the panel was deliberately reduced. A caller that declares nothing
+    produces byte-identical specs to before this key existed, which is what leaves every
+    registered backtest at the identity it was written under.
+    """
+    from case_studies.utils.registry.specs import canonical_json, compute_hash
+
+    if "symbol" not in prices.columns:
+        raise ValueError(
+            "traded_universe_declaration needs a 'symbol' column on the price panel; "
+            f"got columns={list(prices.columns)}"
+        )
+    symbols = sorted(prices.get_column("symbol").drop_nulls().unique().to_list())
+    if not symbols:
+        raise ValueError("traded_universe_declaration was handed an empty price panel")
+    return {
+        "n_symbols": len(symbols),
+        "digest": compute_hash(canonical_json({"symbols": symbols})),
+    }
+
+
 def resolve_execution_mode(fill_timing: str):
     """Map fill_timing string to ExecutionMode enum.
 
@@ -446,6 +487,7 @@ def build_backtest_spec(
     min_weight_change: float | None = None,
     min_trade_value: float | None = None,
     label: str | None = None,
+    traded_universe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # A case study that declares per-label cadences must be told which label it is building for.
     # Defaulting to the case-study cadence here would put the spec on the wrong grid and register
@@ -475,6 +517,14 @@ def build_backtest_spec(
     resolved_signal = deepcopy(signal)
     if case_study == "sp500_options":
         resolved_signal.setdefault("schedule_contract", SP500_OPTIONS_SCHEDULE_CONTRACT)
+    # The universe a reduced run trades, from `traded_universe_declaration`. It sits in the
+    # signal block because that block is hashed whole, so the reduction reaches
+    # `backtest_hash` without a second place to keep in step with it. Emitted only when the
+    # caller declares one - the rule `cadence` and `step` already follow above - so a full
+    # run produces byte-identical specs to before this parameter existed and every
+    # registered backtest keeps the identity it was written under (ml4t/agent-workspace#911).
+    if traded_universe is not None:
+        resolved_signal["traded_universe"] = deepcopy(traded_universe)
 
     strategy_spec: dict[str, Any] = {
         "signal": resolved_signal,

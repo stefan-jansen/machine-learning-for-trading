@@ -1058,6 +1058,24 @@ def unwritten_run(nb: dict, py: Path) -> str | None:
     )
 
 
+def display_path(path: Path) -> Path:
+    """How to name a notebook in a message, when it may not be inside the repository.
+
+    ``relative_to`` raises for a path outside ``REPO_ROOT``, and every use of it here is
+    inside a message - three of them inside a *refusal*. So the caller who most needs to be
+    told what is wrong got a ``ValueError`` traceback out of the error path instead of the
+    error. ``clear`` already carried a local ``try``/``except`` for this, which is the
+    evidence it happens rather than an argument that it might.
+
+    It happens whenever a notebook is executed outside the worktree: a scratch copy, a
+    staging path under ``/tmp``, anything a future runner writes somewhere else.
+    """
+    try:
+        return path.relative_to(REPO_ROOT)
+    except ValueError:
+        return path
+
+
 def stamp_notebook(
     nb_path: Path,
     executor: str,
@@ -1076,11 +1094,11 @@ def stamp_notebook(
     """
     py = paired_py(nb_path)
     if py is None:
-        raise SystemExit(f"no paired .py for {nb_path.relative_to(REPO_ROOT)} — cannot stamp")
+        raise SystemExit(f"no paired .py for {display_path(nb_path)} — cannot stamp")
     nb = json.loads(nb_path.read_text(encoding="utf-8"))
     conflict = contradicts_injected_cell(nb, parameters)
     if conflict:
-        raise SystemExit(f"refusing to stamp {nb_path.relative_to(REPO_ROOT)}: {conflict}")
+        raise SystemExit(f"refusing to stamp {display_path(nb_path)}: {conflict}")
     if not was_executed(nb):
         # The gate catches this at commit time as HOLLOW; catching it here names the
         # step that went wrong while the run is still on screen. The way it happens is
@@ -1088,12 +1106,12 @@ def stamp_notebook(
         # and before the stamp, which discards the outputs; nb-run.sh orders the sync
         # after the stamp for exactly this reason.
         raise SystemExit(
-            f"refusing to stamp {nb_path.relative_to(REPO_ROOT)}: no code cell carries an "
+            f"refusing to stamp {display_path(nb_path)}: no code cell carries an "
             "output or an execution count, so nothing in it was executed. A stamp on this "
             "would claim a run that left no trace. Execute it, or leave it cleared."
         )
     if not allow_unchanged_outputs and (reason := unwritten_run(nb, py)):
-        raise SystemExit(f"refusing to stamp {nb_path.relative_to(REPO_ROOT)}: {reason}")
+        raise SystemExit(f"refusing to stamp {display_path(nb_path)}: {reason}")
     stamp = {
         "source_py_blob": git_blob(py),
         # What the run produced, and the repository code that produced it. Neither is
@@ -1823,11 +1841,7 @@ def _cmd_clear(args: argparse.Namespace) -> int:
             kept.append(cell)
         nb["cells"] = kept
         nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-        try:
-            shown = nb_path.relative_to(REPO_ROOT)
-        except ValueError:
-            shown = nb_path
-        print(f"cleared {shown}")
+        print(f"cleared {display_path(nb_path)}")
         cleared += 1
     if not cleared:
         print("nothing to clear")

@@ -74,6 +74,11 @@ from ml4t.engineer.features.ml import percentile_rank_features
 
 from case_studies.crypto_perps_funding.funding_data import load_funding_rates
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.feature_engineering import (
     EPS,
     assert_values_agree,
@@ -1141,6 +1146,133 @@ record = write_artifact(
 print(f"Wrote case_studies/crypto_perps_funding/features/financial.parquet, {record['digest']}")
 print(f"{len(set(clusters.values()))} redundancy clusters at the cut drawn in F5")
 
+# %% [markdown]
+# ## What the matrix holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# how much sits at exactly zero, how far the extreme values are from the body, whether anything is
+# constant. A threshold crossed there asks for a sentence of explanation and settles nothing on
+# its own: a funding rate that is exactly zero for a third of its periods is the instrument, and a
+# momentum feature that is would be a defect.
+#
+# The second is the question a null count cannot reach. **Coverage is measured against the keys
+# the labels declare, not against the rows this matrix happens to hold.** A `(symbol, timestamp)`
+# carrying a label and no feature row is one no model can be asked to score, and it is lost to
+# every family at once before any of them is fitted.
+#
+# A shortfall against that reference is not by itself a defect, so the matrix declares where it is
+# entitled to be short first, and here two mechanisms decide it rather than one. The null policy
+# keeps a row once every trailing symbol feature has filled, which costs the longest window in the
+# register - counted per perpetual, on its own periods. **The cross-section filter costs something
+# a per-symbol window cannot describe**: a period carrying fewer than `MIN_CROSS_SECTION` eligible
+# perpetuals is dropped whole, so every perpetual that *was* eligible on it loses that period too,
+# and the loss lands in the middle of their spans rather than at the front. Early in the sample,
+# when most perpetuals are still filling their windows, that is most periods. Declaring only the
+# window would report the filter as an unexplained hole in eighteen symbols at once.
+
+# %%
+LEADING_BUDGET = max(w for family in W.values() for w in family.values())
+print(
+    f"leading budget {LEADING_BUDGET} periods = the longest trailing window the null policy "
+    f"waits for; below that, fewer than {MIN_CROSS_SECTION} perpetuals are eligible and the "
+    "period is dropped for all of them"
+)
+
+report = quality_report(
+    features,
+    name="financial features",
+    key_columns=["symbol", "timestamp"],
+    expected=label_universe(CASE_DIR, keys=["symbol", "timestamp"]),
+    keys=["symbol", "timestamp"],
+    entity="symbol",
+    session="timestamp",
+    expected_missing={
+        "leading": (LEADING_BUDGET, "the longest trailing symbol feature filling"),
+        "interior": (None, f"a period with fewer than {MIN_CROSS_SECTION} eligible perpetuals"),
+        "trailing": (None, f"a period with fewer than {MIN_CROSS_SECTION} eligible perpetuals"),
+    },
+)
+render_quality_report(report)
+
+# %% [markdown]
+# Those declarations are claims, and this is the check on them. The cause is one thing with a
+# knock-on, not two independent ones. **A settlement with no premium index takes the premium
+# features down for as long as the longest window reads back through it** - one absent value
+# removes a stretch of ninety periods rather than a row - and when enough perpetuals are shadowed
+# at once, the period falls below `MIN_CROSS_SECTION` and is dropped for every perpetual on it,
+# including ones whose own premium was fine. That is why the loss appears as holes inside eighteen
+# spans while the price bars are complete: there is no gap in the panel behind any of these keys,
+# and the check below confirms it before attributing them.
+
+# %%
+sessions = panel.select("timestamp").unique().sort("timestamp").with_row_index("i")
+missing_at = (
+    report["missing_classified"].filter(pl.col("where") != "leading").join(sessions, on="timestamp")
+)
+bars = (
+    panel.filter(pl.col("close").is_not_null())
+    .select("symbol", "timestamp")
+    .join(sessions, on="timestamp")
+)
+behind = (
+    missing_at.join(bars, on="symbol", suffix="_b")
+    .filter(pl.col("i_b").is_between(pl.col("i") - LEADING_BUDGET, pl.col("i") - 1))
+    .group_by(["symbol", "i"])
+    .len()
+)
+short_history = behind.filter(pl.col("len") < LEADING_BUDGET).height
+print(f"price bars behind: {short_history} of {missing_at.height:,} keys have a gap in the panel")
+
+no_premium = (
+    panel.filter(pl.col("premium_index_close").is_null())
+    .select("symbol", "timestamp")
+    .join(sessions, on="timestamp")
+)
+shadow = (
+    no_premium.select(
+        "symbol", pl.int_ranges(pl.col("i"), pl.col("i") + LEADING_BUDGET + 1).alias("i")
+    )
+    .explode("i")
+    .unique()
+)
+dropped_period = missing_at.join(features.select("timestamp").unique(), on="timestamp", how="anti")
+attributed = pl.concat(
+    [
+        dropped_period.select("symbol", "timestamp"),
+        missing_at.join(shadow, on=["symbol", "i"], how="semi").select("symbol", "timestamp"),
+    ]
+).unique()
+print(
+    f"of {missing_at.height:,} missing keys outside the warmup, {attributed.height:,} "
+    f"({attributed.height / missing_at.height:.2%}) sit within {LEADING_BUDGET} periods of a "
+    f"settlement with no premium index, or on a period the cross-section filter dropped as a "
+    f"consequence; {missing_at.height - attributed.height:,} are accounted for by neither"
+)
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Coverage is 92.22% of the keys the labels declare, and the shortfall has one cause with a
+# knock-on rather than the two it looks like.** 1,710 keys are the warmup: all 19 perpetuals lose
+# exactly 90 periods, the longest trailing window the null policy waits for, and none loses more.
+# The other 6,710 sit inside or after a perpetual's span, which no window length explains, and
+# **the price panel has no gap behind a single one of them** - the check above establishes that
+# before attributing anything, because a missing bar would have been the obvious answer and is not
+# the answer here.
+#
+# What removes them is the premium index. A settlement with no premium value takes the premium
+# features down for the ninety periods that read back through it, so one absent value costs a
+# stretch rather than a row; and when enough perpetuals are shadowed at once the period falls below
+# `MIN_CROSS_SECTION` and is dropped for every perpetual on it, including ones whose own premium
+# was fine. **That accounts for 5,642 of the 6,710**, and the two effects overlap heavily because
+# the second is caused by the first rather than being independent of it.
+#
+# **1,068 keys - 1.0% of the label universe - are accounted for by neither**, and that is the
+# number this notebook carries forward rather than a number it explains away. Widening the window
+# to 132 or 180 periods moves it by less than half a percent, so they are not a longer shadow;
+# they are something else, small enough not to change a fold or a ranking and large enough to be
+# worth stating. A residual nobody prints is a residual nobody notices growing.
+#
 # %% [markdown]
 # ## Key takeaways
 #

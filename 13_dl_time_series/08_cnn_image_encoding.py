@@ -14,27 +14,40 @@
 # ---
 
 # %% [markdown]
-# # CNN with Time Series Image Encoding (GAF + MTF)
+# # Turning a window into a picture: GAF and MTF encodings
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook converts time series windows into 2D images using **Gramian Angular
-# Fields** (GAF) and **Markov Transition Fields** (MTF), then trains a standard CNN
-# to regress on forward returns. The approach reformulates forecasting as image
-# regression, allowing convolutional networks to detect visual patterns in the
-# encoded representations.
+# Every architecture in this section so far has kept the window as a sequence and
+# argued about how to relate its positions - attention, dilated convolution, mixing,
+# a recurrent state. This notebook takes a different route: it turns each window into
+# a two-channel image and hands it to an ordinary image CNN, so that the whole
+# apparatus built for pictures applies unchanged.
 #
-# **Learning Objectives**:
-# - Implement Gramian Angular Summation Fields (GASF) that encode pairwise
-#   angular sums
-# - Implement Markov Transition Fields (MTF) that encode transition probabilities
-#   between discretized states
-# - Stack GAF + MTF as multi-channel images and train a CNN regressor on
-#   forward returns
-# - Compare CNN-on-images against a Ridge+PCA baseline on the same flattened
-#   image pixels, evaluated by MSE and Spearman IC
+# The encodings are the point. A **Gramian angular field** rescales the window to
+# $[-1, 1]$, reads each value as an angle, and fills cell $(i, j)$ with a function of
+# the two angles - so the image is a table of every pair of positions, and a
+# convolution over it reads relations between pairs rather than between values. A
+# **Markov transition field** bins the window into quantiles and fills cell $(i, j)$
+# with how often the series moved between the bins those two positions fall in.
 #
-# **Book Reference**: Chapter 13, Section 13.6 (The Full Practitioner Toolkit)
+# What the transformation discards is as important as what it builds, and both
+# encodings below discard the same thing: they normalise inside each window, so the
+# level and the range of the returns are gone before the CNN sees anything. Two
+# windows of the same shape and different volatility become the same picture.
+#
+# **Learning objectives**:
+# - Build both encodings from the definition and say what each cell of the resulting
+#   matrix means.
+# - Say what the per-window normalisation throws away, and why that matters for a
+#   label whose scale is a return.
+# - Read the resampling step: a `LOOKBACK`-day window becomes an
+#   `IMAGE_SIZE`-by-`IMAGE_SIZE` image, so check whether that interpolates up or
+#   summarises down before treating pixels as data.
+# - Score the CNN against a penalised linear map on the same flattened pixels, so the
+#   comparison isolates the CNN and not the encoding.
+#
+# **Book Reference**: Chapter 13, Section 13.6 (Alternative architectures and foundation models)
 #
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
@@ -42,7 +55,6 @@
 """CNN with Time Series Image Encoding - convert time series to GAF/MTF images for forward-return regression."""
 
 import os
-import warnings
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -52,6 +64,7 @@ import plotly.graph_objects as go
 import polars as pl
 import torch
 import torch.nn as nn
+from dl_sequences import create_sequences_multi_asset, load_dl_dataset, train_model
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from plotly.subplots import make_subplots
 from sklearn.decomposition import PCA
@@ -59,11 +72,7 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, add_message_title
-
-warnings.filterwarnings("ignore")
-
-from dl_sequences import create_sequences_multi_asset, load_dl_dataset, train_model
+from utils.style import COLORS, add_message_title, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -114,6 +123,16 @@ print(f"Target: {TARGET_COL}")
 # %%
 df = mds.dataset.drop_nulls(subset=FEATURE_COLS + [TARGET_COL])
 print(f"Rows after dropping nulls: {len(df):,}")
+per_date = df.group_by(mds.date_col).len().sort(mds.date_col)
+print(
+    f"{df[mds.date_col].min()} to {df[mds.date_col].max()}, "
+    f"{df[mds.entity_cols[0]].n_unique()} funds; funds per date "
+    f"{per_date['len'].min()} to {per_date['len'].max()}, median {per_date['len'].median():.0f}"
+)
+print(
+    f"Label {TARGET_COL}: mean {df[TARGET_COL].mean():+.5f}, "
+    f"standard deviation {df[TARGET_COL].std():.5f}"
+)
 
 X, y, timestamps, symbols = create_sequences_multi_asset(
     df,
@@ -131,9 +150,17 @@ y = np.nan_to_num(y[sequence_order], nan=0.0).astype(np.float32)
 timestamps = timestamps[sequence_order]
 symbols = symbols[sequence_order]
 
+# %% [markdown]
+# ### Splitting by date, with a gap for the label horizon
+#
+# The split is by date, at fixed fractions of the trading days, and an example belongs
+# to the partition the date it carries falls in. The label is a `LABEL_HORIZON`-day
+# forward return, so an example dated within that many days of a boundary has an
+# outcome resolved by days on the far side; those examples are dropped. Input windows
+# may still reach back over a boundary, which is right - at decision time the model has
+# every past observation available.
+
 # %%
-# Date-based 60/20/20 temporal split. The target is a 21-day forward return,
-# so labels whose outcome windows cross the next boundary are purged.
 unique_dates = np.sort(np.unique(timestamps))
 train_boundary_idx = int(len(unique_dates) * 0.6)
 val_boundary_idx = int(len(unique_dates) * 0.8)
@@ -204,14 +231,25 @@ print(f"Capped split: Train={len(X_train):,}, Val={len(X_val):,}, Test={len(X_te
 # %% [markdown]
 # ### Cross-sectional IC helper
 #
-# Mean cross-sectional Spearman IC by date - same metric used in the rest of
-# Chapter 13 so the Image-CNN result is comparable with the other
-# architectures.
+# Mean cross-sectional Spearman IC by date - the same metric used across this section,
+# so the image CNN is scored the way the sequence models were.
+#
+# A date's IC is undefined when a model predicts the same value for every fund on it:
+# the predicted ranks are all tied and there is nothing to correlate. The library
+# returns `NaN` for such a date, and polars treats `NaN` and null as different values,
+# so `drop_nulls` alone leaves it in place and one of them makes the whole mean `NaN`.
+# Both are filtered here, and the count of dates the mean was taken over is printed
+# beside it - which matters here, because the subsampling above leaves far fewer dates
+# than the notebooks that score on the full panel.
 
 
 # %%
 def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
-    """Mean cross-sectional Spearman IC across dates."""
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    Returns the mean and the defined/total date counts. Filters both null and NaN,
+    since polars `drop_nulls` leaves NaN in place.
+    """
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "prediction": y_pred})
     ret_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "forward_return": y_true})
     ic_per_date = cross_sectional_ic_series(
@@ -222,8 +260,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
+    defined = ic_per_date.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+    mean_ic = float(defined["ic"].mean()) if defined.height else float("nan")
+    return {"ic": mean_ic, "n_defined": defined.height, "n_total": ic_per_date.height}
 
 
 # %% [markdown]
@@ -410,8 +449,15 @@ for row in range(3):
     axes[row, 2].set_title("MTF" if row == 0 else "")
     plt.colorbar(im2, ax=axes[row, 2], fraction=0.046)
 
-fig.suptitle("GASF encodes angular relationships; MTF encodes transitions from the same window")
-fig.show()
+fig.suptitle("Three training windows, each as a series, a GASF and an MTF")
+show_with_alt(
+    fig,
+    "A three-by-three grid, one row per training window. The left panel of each row "
+    "plots the window as a line against timestep; the middle shows its GASF matrix on "
+    "a blue-to-red diverging scale from minus one to one; the right shows its MTF "
+    "matrix on a yellow-to-red scale from zero. Both matrices are square with one row "
+    "and column per resampled position, and each carries its own colour bar.",
+)
 
 # %% [markdown]
 # ## CNN Architecture
@@ -493,17 +539,20 @@ model = ImageCNN(n_channels=2, dropout=DROPOUT).to(DEVICE)
 
 n_params = sum(p.numel() for p in model.parameters())
 print(f"ImageCNN parameters: {n_params:,}")
-print(f"Image size: {IMAGE_SIZE}x{IMAGE_SIZE}, channels: 2 (GASF + MTF)")
+print(
+    f"Image size: {IMAGE_SIZE}x{IMAGE_SIZE}, channels: 2 (GASF + MTF), "
+    f"from a {LOOKBACK}-day window: {'interpolated up' if IMAGE_SIZE > LOOKBACK else 'summarised down'}"
+)
 
 history = train_model(model, X_train_img, y_train, X_val_img, y_val, EPOCHS, LR, BATCH_SIZE, DEVICE)
 
 # %% [markdown]
 # ### Training convergence
 #
-# The loss curves show whether the CNN is learning from the encoded images over
-# the configured training budget. A validation curve that stays flat while the
-# training curve falls signals the model is fitting noise the images do not
-# generalize.
+# The two curves are what separates learning from memorising: a training curve alone
+# cannot tell them apart, because both look like progress. A validation curve that
+# stays flat or turns up while the training curve keeps falling says the CNN is fitting
+# something in these images that does not carry to the next stretch of dates.
 
 # %%
 fig, ax = plt.subplots(figsize=(7, 4), constrained_layout=True)
@@ -515,11 +564,14 @@ ax.set_ylabel("MSE loss")
 ax.legend()
 add_message_title(
     ax,
-    f"Image CNN reaches its validation minimum at epoch {np.argmin(history['val_loss']) + 1} "
-    f"of {len(history['val_loss'])}",
-    subtitle="GAF+MTF images, forward 21-day return target",
+    "Training and validation error per epoch",
+    subtitle="GASF and MTF channels, forward 21-day return target",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A line chart of mean squared error against epoch, with one line for the training "
+    "set and one for the validation set, marked at each epoch.",
+)
 
 # %% [markdown]
 # ## Evaluate on Test Set
@@ -534,11 +586,13 @@ with torch.no_grad():
     y_pred = np.concatenate(preds, axis=0)
 
 test_mse = np.mean((y_pred - y_test) ** 2)
-test_ic = cross_sectional_ic_mean(y_test, y_pred, test_dates, test_symbols)
+cnn_ic = cross_sectional_ic_mean(y_test, y_pred, test_dates, test_symbols)
+test_ic = cnn_ic["ic"]
 
 print("\nImage CNN Test Results:")
 print(f"  MSE: {test_mse:.6f}")
-print(f"  Spearman IC: {test_ic:.4f}")
+print(f"  Spearman IC: {test_ic:.4f}", end="")
+print(f"  (defined on {cnn_ic['n_defined']} of {cnn_ic['n_total']} test dates)")
 
 # %% [markdown]
 # ## Ridge + PCA Baseline
@@ -566,15 +620,34 @@ ridge.fit(X_train_pca, y_train)
 y_ridge_pred = ridge.predict(X_test_pca)
 
 ridge_mse = np.mean((y_ridge_pred - y_test) ** 2)
-ridge_ic = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+ridge_ic_result = cross_sectional_ic_mean(y_test, y_ridge_pred, test_dates, test_symbols)
+ridge_ic = ridge_ic_result["ic"]
 zero_mse = float(np.mean(y_test**2))
 
 print(f"\nRidge + PCA ({n_components} components) Baseline:")
 print(f"  MSE: {ridge_mse:.6f}")
-print(f"  Spearman IC: {ridge_ic:.4f}")
+print(f"  Spearman IC: {ridge_ic:.4f}", end="")
+print(f"  (defined on {ridge_ic_result['n_defined']} of {ridge_ic_result['n_total']} test dates)")
 
 # %% [markdown]
-# ## Summary
+# ## The image CNN against the linear baseline
+#
+# Two questions, two panels. The left asks whether the model ordered the funds usefully
+# on each date; the right asks whether its predicted return levels were closer than
+# predicting zero. A model can do better on one and worse on the other, and both are
+# reported because acting on a forecast uses the ordering while fitting one minimises
+# the squared error.
+#
+# The baseline starts from the *same pixels*, reduces them to `n_components` principal
+# components and maps those linearly to the label. Holding the encoding fixed on both
+# sides is what makes the two comparable at all, but it does not isolate convolution:
+# the two pipelines also differ in how many inputs they see, in whether the map is
+# linear, and in how each is fitted and penalised. Read the bars as two pipelines
+# built on one encoding, not as a measurement of what convolution contributed.
+#
+# Neither bar says anything about whether the encoding itself was worth doing. That
+# would need a model fitted on the raw window, which the earlier notebooks in this
+# section supply.
 
 # %%
 model_names = ["Image CNN", "Ridge + PCA"]
@@ -615,63 +688,73 @@ for model_name, ic_value, mse_ratio in zip(model_names, ic_values, mse_ratios, s
         col=2,
     )
 
-ic_leader = model_names[int(np.argmax(ic_values))]
-mse_winners = sum(ratio < 1 for ratio in mse_ratios)
 fig.add_hline(y=0, line_color=COLORS["neutral"], row=1, col=1)
 fig.add_hline(y=1, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
 fig.update_layout(
-    title=f"{ic_leader} leads on rank IC; {mse_winners} of 2 models beat zero-return MSE",
-    width=950,
+    title="The image CNN and ridge on the same pixels, ranked and levelled",
     height=480,
 )
 fig.update_yaxes(title_text="Spearman IC", row=1, col=1)
 fig.update_yaxes(title_text="MSE / zero-return MSE", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bar panels, one bar per model. The left panel gives each model's mean "
+    "cross-sectional Spearman IC against a line at zero; the right gives its test MSE "
+    "as a multiple of the zero forecast's, against a dotted line at one.",
+)
 
 # %% [markdown]
-# ## Interpretation
+# ## What this setup can and cannot be asked
 #
-# Treat this as a method illustration, not an architectural claim. On this
-# single-feature, single-split setup, the paired figure reports both
-# cross-sectional ranking and squared error relative to zero. Encoding a
-# single feature channel into a 2-channel GAF+MTF image does not by itself
-# establish a cross-sectional edge. The
-# representation is deliberately impoverished - one feature versus the
-# multi-feature sequence inputs the other architectures use - so the point here
-# is the encoding mechanics, visible in the GASF/MTF panels above, not a
-# performance verdict. Section 13.6 reviews published comparisons that encode
-# all features and benchmark against sequence-native models; those are the right
-# tests for the GAF/MTF representation as a class.
+# The input here is one feature - `FEATURE_COLS` holds a single column - where every
+# other architecture in this section reads eight. That is not an oversight to correct
+# later; it is what keeps the encoding legible, since a GASF of one series is a
+# picture you can look at and a GASF of eight is a stack you cannot. It also means the
+# bars above compare two models on a deliberately thin representation.
+#
+# The sample is capped the same way `07_mamba_ssm` caps it, so both scores are averaged
+# over the printed number of dates rather than the whole test stretch. Between the
+# single feature and the capped dates, this notebook is a demonstration of the
+# encoding, and the published comparisons that encode every feature and score against
+# sequence-native models are the tests that would say something about GAF and MTF as a
+# representation.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **GAF encodes angular relationships**: The Gramian Angular Field maps
-#    pairwise temporal relationships into a symmetric matrix, preserving the
-#    original time ordering along the diagonal
-# 2. **MTF captures transition dynamics**: The Markov Transition Field
-#    discretizes the series into quantile bins and encodes state-to-state
-#    transition probabilities, complementing the angular view
-# 3. **Multi-channel images provide richer signal**: Stacking GASF and MTF
-#    as separate channels gives the CNN two complementary views of the same
-#    window, similar to RGB channels in natural images
-# 4. **Encoding cost is non-trivial**: The per-sample image generation loop
-#    adds significant preprocessing overhead compared to feeding raw sequences
-#    directly to an LSTM or Transformer
-# 5. **Representation differs from sequence-native models**: this notebook
-#    does not evaluate the CNN against LSTM/Transformer baselines or test
-#    ensembling - Section 13.6 reviews the published comparisons
-# 6. **Single-feature encoding is a teaching simplification**: encoded
-#    representations come from one feature channel only, so single-split
-#    IC results are method illustrations rather than empirical claims
-#    about GAF/MTF + CNN versus Ridge as architectures in general
+# 1. **Both encodings normalise inside the window, so scale is gone.** The GASF
+#    min-max scales to $[-1, 1]$ before taking angles, and the MTF assigns quantile
+#    bins computed from that window alone. Two windows with the same shape and
+#    different volatility produce the same picture, and the label is a return, whose
+#    scale is exactly what was removed. Any cross-sectional ranking has to come from
+#    shape.
+# 2. **Every cell is a pair of positions, not a position.** A GASF cell holds a
+#    function of the angles at $i$ and $j$; an MTF cell holds how often the series
+#    moved between the bins those two positions occupy. A convolution over the image
+#    therefore reads neighbourhoods of *pairs*, which is a different object from the
+#    neighbourhoods of timesteps a 1D convolution reads.
+# 3. **The resampling can add pixels that are not data.** The window is interpolated
+#    onto an `IMAGE_SIZE` grid before encoding; when `IMAGE_SIZE` exceeds `LOOKBACK`,
+#    the extra rows and columns are interpolation, and the image is larger than the
+#    information in it. Check the two constants against each other before treating
+#    image size as a capacity knob.
+# 4. **Encoding is per-sample work done before training.** The images are built in a
+#    loop over windows and materialised in full, which is a preprocessing cost and a
+#    memory cost that feeding the raw sequence to a recurrent or attention model does
+#    not incur.
+# 5. **One encoding, two pipelines - and that is all the comparison is.** Both models
+#    start from the same images, which is what makes them comparable, but they differ
+#    in more than convolution: the ridge sees `n_components` principal components
+#    rather than every pixel, fits a linear map, and is penalised and solved
+#    differently. Attributing the gap to any single one of those differences would be
+#    reading past the experiment. Whether the encoding itself was worth doing is a
+#    further question again, and needs a model fitted on the raw window.
 #
-# Deterministic PyTorch algorithms, a fixed cuBLAS workspace, and an explicit
-# PCA random state make repeated executions reproducible on the same software
-# and GPU stack; another environment may still produce small floating-point
-# differences.
+# **Known limitations.** One feature, one chronological split, one label horizon, one
+# seed, and a sample capped by the encoding cost. Deterministic PyTorch algorithms, a
+# fixed cuBLAS workspace and an explicit PCA random state make repeated execution
+# reproduce on the same software and GPU; another environment will differ in the final
+# decimals.
 #
-# **Next**: See `09_foundation_models` for pre-trained time series foundation
-# models that skip manual feature engineering entirely.
-# **Book**: Section 13.6 discusses image encoding alongside other alternative
-# representations in the full practitioner toolkit.
+# **Next**: `09_foundation_models` stops training on this panel altogether and asks
+# what a model pretrained on other series brings to it.

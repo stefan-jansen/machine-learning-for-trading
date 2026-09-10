@@ -63,6 +63,11 @@ from ml4t.engineer.features.volatility import yang_zhang_volatility
 from plotly.subplots import make_subplots
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
 from case_studies.utils.feature_engineering import (
     EPS,
@@ -1027,6 +1032,59 @@ record = write_artifact(
 )
 print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record['digest']}")
 
+# %% [markdown]
+# ## What the matrix holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# how much sits at exactly zero, how far the extreme values are from the body, whether anything is
+# constant. A threshold crossed there asks for a sentence of explanation and settles nothing on
+# its own.
+#
+# The second is the question a null count cannot reach. **Coverage is measured against the keys
+# the labels declare, not against the rows this matrix happens to hold.** The labels describe the
+# front contract, so the comparison is against `front` rather than the whole matrix - the deferred
+# positions are inputs to the curve features and carry no label of their own, and including them
+# would report two thirds of a correct matrix as rows nobody asked for.
+#
+# A shortfall against that reference is not by itself a defect, so the matrix declares where it is
+# entitled to be short first. The null policy keeps a row once the 21-session return and its
+# volatility have both filled, counted per `(product, position)` on that contract's own
+# settlements. What the sign-off answers for is the residual: keys inside a contract's own span,
+# where no window explains them.
+
+# %%
+LEADING_BUDGET = WINDOWS["volatility"][0]
+print(f"leading budget {LEADING_BUDGET} settlements = the ret_21d and vol_21d null policy")
+
+report = quality_report(
+    front,
+    name="financial features (front contract)",
+    key_columns=PANEL_KEY,
+    expected=label_universe(CASE_DIR, keys=PANEL_KEY),
+    keys=PANEL_KEY,
+    entity=["product", "position"],
+    session="timestamp",
+    expected_missing={
+        "leading": (LEADING_BUDGET, "the 21-settlement return and volatility warming up")
+    },
+)
+render_quality_report(report)
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Coverage is 99.44% of the keys the labels declare, and the whole shortfall is the null policy
+# arriving on schedule.** All 630 missing keys sit before a contract's first feature row, all 30
+# products lose exactly 21 settlements, and none loses more. That is `ret_21d` and `vol_21d`
+# filling, which is what the null policy above says it keeps a row for. Nothing sits inside a
+# contract's span and nothing sits after it: **the residual is zero.**
+#
+# **165 keys carry a feature row and no label.** These are the mirror case - the last settlements
+# of each product's history, where the forward return has no future price and the trailing features
+# are perfectly well defined. A feature row with no label is never joined, so it is carried rather
+# than dropped, and its count matching the labels' own trailing loss is the cheapest check that the
+# two stages agree about where the sample ends.
+#
 # %% [markdown]
 # ## Key takeaways
 #
