@@ -72,7 +72,7 @@ The chapter's message is that reinforcement learning is most credible for sequen
 uv run python 21_rl_execution_hedging/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "21_rl_execution_hedging"
+uv run pytest tests/test_chapter_notebooks.py -v -k "21_rl_execution_hedging"
 ```
 
 ## References

@@ -72,7 +72,7 @@ This section positions RAG not as the endpoint, but as one tool inside broader m
 uv run python 22_rag_financial_research/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "22_rag_financial_research"
+uv run pytest tests/test_chapter_notebooks.py -v -k "22_rag_financial_research"
 ```
 
 ## References

@@ -30,7 +30,7 @@ This section closes the chapter by restating backtesting as a falsification disc
 # From the repository root
 uv run python 16_strategy_simulation/<notebook>.py
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "16_strategy_simulation"
+uv run pytest tests/test_chapter_notebooks.py -v -k "16_strategy_simulation"
 ```
 ## References
 - **Ashwin Alankar et al.** (2023). [Fairy Tails: Lessons from 150 Years of Drawdowns](https://doi.org/10.3905/jpm.2023.1.503). *The Journal of Portfolio Management*.

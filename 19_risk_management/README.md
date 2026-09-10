@@ -81,7 +81,7 @@ The cross-case-study risk-overlay comparison lives in Chapter 20: see [`20_strat
 uv run python 19_risk_management/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "19_risk_management"
+uv run pytest tests/test_chapter_notebooks.py -v -k "19_risk_management"
 ```
 
 ## References
