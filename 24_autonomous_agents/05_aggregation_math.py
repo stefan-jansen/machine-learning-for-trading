@@ -47,8 +47,6 @@
 # %%
 """From Opinions to Probabilities: aggregation math for multi-agent forecasting."""
 
-import math
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -147,11 +145,14 @@ pl.DataFrame(
 correlations = [0.0, 0.1, 0.3, 0.5, 0.7]
 n_range = list(range(2, 12))
 curve_colors = ml4t_palette(len(correlations), categorical=True)
-line_styles = ["-", "--", ":", "-.", "-"]
+line_styles = ["-", "--", ":", "-.", (0, (5, 1))]
 diversity_series = [
     (
         rho,
-        [min(3.0, math.sqrt(n / (1 + (n - 1) * rho))) for n in n_range],
+        [
+            neyman_extremize([0.65] * n, base=0.5, correlation=rho).extremization_factor
+            for n in n_range
+        ],
         color,
         line_style,
     )
@@ -173,12 +174,10 @@ for n, color, line_style in zip(
     line_styles[:4],
     strict=True,
 ):
-    agg_probs = []
-    for rho in rho_range:
-        d_raw = math.sqrt(n / (1 + (n - 1) * rho)) if (1 + (n - 1) * rho) > 0 else 1.0
-        d = max(1.0, min(3.0, d_raw))
-        p_extreme = base + d * (mean_p - base)
-        agg_probs.append(max(0.01, min(0.99, p_extreme)))
+    agg_probs = [
+        neyman_extremize([mean_p] * n, base=base, correlation=rho).extremized_probability
+        for rho in rho_range
+    ]
     aggregate_series.append((n, agg_probs, color, line_style))
 
 # %% [markdown]
@@ -198,7 +197,11 @@ for rho, values, color, line_style in diversity_series:
         label=f"ρ={rho}",
     )
 axes[0].set(xlabel="Number of forecasters", ylabel="Diversity factor d")
-add_message_title(axes[0], "Correlation, not panel size, sets the ceiling on d")
+add_message_title(
+    axes[0],
+    "Diversity factor d by panel size",
+    subtitle="Five assumed pairwise correlations; d is clamped at 3",
+)
 axes[0].legend()
 axes[0].axhline(1.0, color=COLORS["neutral"], linestyle="--", alpha=0.6)
 
@@ -207,8 +210,8 @@ for n, values, color, line_style in aggregate_series:
 axes[1].set(xlabel="Assumed forecaster correlation (ρ)", ylabel="Aggregate probability")
 add_message_title(
     axes[1],
-    "The correlation you assume moves the aggregate more than the panel size",
-    subtitle="Mean forecast held fixed; dashed line marks the unextremized mean",
+    "Aggregate by assumed correlation",
+    subtitle="Mean forecast held fixed at the dashed line; four panel sizes",
 )
 axes[1].legend()
 axes[1].axhline(mean_p, color=COLORS["neutral"], linestyle="--", alpha=0.6)
@@ -216,10 +219,11 @@ format_pct_axis(axes[1])
 show_with_alt(
     fig,
     "Two panels. On the left, the diversity factor against the number of forecasters for five "
-    "assumed correlations: the independent curve keeps rising while the correlated ones flatten "
-    "early. On the right, the aggregate probability against the assumed correlation for four "
-    "panel sizes, with the mean forecast held fixed: every curve falls toward the unextremized "
-    f"mean of {mean_p:.0%} as the assumed correlation rises.",
+    "assumed correlations: the independent curve keeps climbing until it flattens against its "
+    "clamp, while the correlated ones flatten early and far lower. On the right, the aggregate "
+    "probability against the assumed correlation for four panel sizes, with the mean forecast "
+    "held fixed: each curve starts higher the larger the panel, and each falls toward the "
+    "dashed line marking the unextremized mean.",
 )
 
 # %% [markdown]
@@ -286,45 +290,49 @@ pl.DataFrame(
 # $p' = \sigma(a \cdot \text{logit}(p) + \log d)$, which is the same map with $b = \log d$.
 
 # %%
-fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-
 p_range = np.linspace(0.01, 0.99, 100)
+exponents = [
+    (0.5, "a=0.5 (compress)"),
+    (1.5, "a=1.5 (extremize)"),
+    (2.0, "a=2.0 (strong extremize)"),
+]
 
-# Different a values
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 for (a, label), color, line_style in zip(
-    [
-        (0.5, "a=0.5 (compress)"),
-        (1.0, "a=1.0 (identity)"),
-        (1.5, "a=1.5 (extremize)"),
-        (2.0, "a=2.0 (strong extremize)"),
-    ],
-    ml4t_palette(4, categorical=True),
-    line_styles[:4],
+    exponents,
+    ml4t_palette(len(exponents), categorical=True),
+    line_styles[:3],
     strict=True,
 ):
     calibrated = [platt_scale(p, a=a, d=1.0) for p in p_range]
     ax.plot(p_range, calibrated, color=color, linestyle=line_style, label=label)
 
+# The diagonal is the a=1.0 member of the same family, so it is drawn once, as the
+# neutral reference the other curves are read against.
 ax.plot(
     [0, 1],
     [0, 1],
     color=COLORS["neutral"],
     linestyle="--",
     alpha=0.6,
-    label="Identity mapping",
+    label="a=1.0 (identity)",
 )
-ax.set_xlabel("Original Probability")
-ax.set_ylabel("Transformed Probability")
-add_message_title(ax, "Parameter a controls compression or extremization")
+ax.set_xlabel("Original probability")
+ax.set_ylabel("Transformed probability")
+add_message_title(
+    ax,
+    "Platt-scaled probability against the original",
+    subtitle="Three exponents at d=1, read against the identity diagonal",
+)
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
 format_pct_axis(ax, axis="both")
 show_with_alt(
     fig,
-    "Four Platt scaling curves plotted against the identity diagonal on a square axis. The "
+    "Three Platt scaling curves plotted against the identity diagonal on a square axis. The "
     "curve for an exponent below one bows toward the middle of the range, compressing "
     "probabilities toward even odds; the curves for exponents above one bow toward the corners, "
-    "pushing probabilities out to the ends.",
+    "pushing probabilities out to the ends. All of them cross the diagonal at even odds.",
 )
 
 # %% [markdown]
@@ -391,7 +399,9 @@ pl.DataFrame(
 # shifts toward the agent carrying the most weight, which raises the aggregate. The effective
 # panel size falls, because concentrating weight on one forecaster is closer to consulting one
 # forecaster, which lowers $d$ and pushes the aggregate back toward the base rate. The table
-# above shows both, and the correlation adjustment shrinks the effective size again on top of
+# above shows both. The correlation adjustment then shrinks the effective size a second time,
+# on top of the concentration, so the skewed row ends up smaller for two separate reasons.
+
 # %% [markdown]
 # ## Log-Odds Extremization
 #
@@ -405,49 +415,67 @@ pl.DataFrame(
 # Multiplying the log-odds by $a$ says the aggregate carries $a$ times the evidence the raw
 # probability did. Above one extremizes, below one compresses, and one leaves the probability
 # alone.
-# This has the same effect as Platt scaling but is parameterized more intuitively:
-# $a > 1$ extremizes, $a < 1$ compresses.
+#
+# With $d = 1$ this is the same function as Platt scaling, not merely a similar one, so
+# plotting it in probability space would redraw the figure above. Measuring the gap says it
+# once and for all.
+
+# %%
+agreement_gap = max(
+    abs(platt_scale(p, a=a, d=1.0) - logodds_extremize(p, a)) for a, _ in exponents for p in p_range
+)
+print(f"Largest gap between Platt at d=1 and the log-odds form, over the grid: {agreement_gap:.2e}")
+
+# %% [markdown]
+# What the log-odds form makes visible is why $a$ is the parameter worth having. Plot the same
+# three transformations with log-odds on both axes and each one is a straight line through the
+# origin whose slope is $a$: the exponent is the factor the evidence is multiplied by, and the
+# curvature in the probability-space figure is entirely the sigmoid changing units.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-
-p_range = np.linspace(0.01, 0.99, 100)
+logit_p = np.log(p_range / (1 - p_range))
 
 for (a, label), color, line_style in zip(
-    [
-        (0.5, "a=0.5 (compress)"),
-        (1.0, "a=1.0 (identity)"),
-        (1.5, "a=1.5 (moderate extremize)"),
-        (2.0, "a=2.0 (strong extremize)"),
-    ],
-    ml4t_palette(4, categorical=True),
-    line_styles[:4],
+    exponents,
+    ml4t_palette(len(exponents), categorical=True),
+    line_styles[:3],
     strict=True,
 ):
-    calibrated = [logodds_extremize(p, a) for p in p_range]
-    ax.plot(p_range, calibrated, color=color, linestyle=line_style, label=label)
+    transformed = np.array([logodds_extremize(p, a) for p in p_range])
+    ax.plot(
+        logit_p,
+        np.log(transformed / (1 - transformed)),
+        color=color,
+        linestyle=line_style,
+        label=label,
+    )
 
-ax.plot([0, 1], [0, 1], color=COLORS["neutral"], linestyle="--", alpha=0.6, label="Identity")
-ax.set_xlabel("Original Probability")
-ax.set_ylabel("Transformed Probability")
-add_message_title(ax, "Log-odds scaling preserves symmetry around 50%")
+ax.plot(
+    logit_p, logit_p, color=COLORS["neutral"], linestyle="--", alpha=0.6, label="a=1.0 (identity)"
+)
+ax.set_xlabel("Log-odds of the original probability")
+ax.set_ylabel("Log-odds after the transformation")
+add_message_title(
+    ax,
+    "The same three transformations, in log-odds space",
+    subtitle="Even odds sits at the origin on both axes",
+)
 ax.legend(loc="upper left")
 ax.set_aspect("equal")
-format_pct_axis(ax, axis="both")
 show_with_alt(
     fig,
-    "Four log-odds transformation curves plotted against the identity diagonal on a square "
-    "axis. Exponents above one bow away from the diagonal toward the corners, exponents below "
-    "one bow toward the middle, and every curve passes through even odds, so the family is "
-    "symmetric about that point.",
+    "Three straight lines through the origin on a square axis with log-odds on both axes, "
+    "plotted against the identity diagonal. The line for the exponent below one is shallower "
+    "than the diagonal and the two above it are steeper, so each transformation is a change of "
+    "slope rather than a change of shape.",
 )
 
 # %% [markdown]
-# The curves are the same family as Platt's, and the parameterisation is the one worth keeping:
-# $a$ multiplies the log-odds, so it says directly how much more evidence the aggregate is
-# being credited with than the raw probability carried. Whether $a$ should exceed one is not
-# something the shape of the curve can answer; it comes from resolved forecasts, which is the
-# subject of the next section.
+# The parameterisation is the one worth keeping: $a$ multiplies the log-odds, so it says
+# directly how much more evidence the aggregate is being credited with than the raw
+# probability carried. Whether $a$ should exceed one is not something the shape of the line
+# can answer; it comes from resolved forecasts, which is the subject of the next section.
 
 # %% [markdown]
 # ## Fitting the Exponent on Resolved Forecasts
@@ -505,44 +533,74 @@ print(f"Test Brier after:   {test_brier_after:.4f}")
 print(f"Test improvement:   {test_improvement:.1%}")
 
 # %% [markdown]
-# The comparison below is drawn from the held-out panel alone: the exponent was chosen on the
-# training observations and applied to these unchanged.
+# The two Brier scores say the correction helped and nothing about where. A **reliability
+# diagram** answers that: sort the held-out forecasts into equal-sized groups, and plot each
+# group's average forecast against the share of its questions that actually resolved yes. A
+# forecaster whose probabilities mean what they say lands on the diagonal; a point below it
+# promised more than the outcomes delivered, and a point above it promised less.
+#
+# Everything below is the held-out panel alone. The exponent was chosen on the training
+# observations and applied to these unchanged.
+
+# %%
+N_RELIABILITY_BINS = 4
+bin_edges = np.quantile(test_forecasts, np.linspace(0, 1, N_RELIABILITY_BINS + 1))
+bin_index = np.digitize(test_forecasts, bin_edges[1:-1])
+reliability = [
+    (
+        label,
+        [float(np.mean(np.array(series)[bin_index == b])) for b in range(N_RELIABILITY_BINS)],
+        [float(np.mean(test_outcomes[bin_index == b])) for b in range(N_RELIABILITY_BINS)],
+    )
+    for label, series in (("Raw", test_forecasts), ("Calibrated", test_calibrated))
+]
+bin_sizes = [int((bin_index == b).sum()) for b in range(N_RELIABILITY_BINS)]
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-test_briers = [test_brier_before, test_brier_after]
-bars = ax.bar(
-    ["Raw", "Calibrated"],
-    test_briers,
-    color=[COLORS["blue"], COLORS["copper"]],
-    width=0.58,
+for (label, mean_forecast, realized), color, marker in zip(
+    reliability, [COLORS["blue"], COLORS["copper"]], ["o", "s"], strict=True
+):
+    ax.plot(mean_forecast, realized, marker=marker, color=color, label=label)
+ax.plot(
+    [0, 1], [0, 1], color=COLORS["neutral"], linestyle="--", alpha=0.6, label="Perfect calibration"
 )
-ax.bar_label(bars, labels=[f"{value:.3f}" for value in test_briers], padding=3)
-ax.set_xlabel("Held-out forecasts")
-ax.set_ylabel("Brier score (lower is better)")
-ax.set_ylim(0, max(test_briers) * 1.2)
+ax.set_xlabel("Average forecast within the group")
+ax.set_ylabel("Share of the group that resolved yes")
+ax.set_xlim(0, 1)
+ax.set_ylim(0, 1)
+ax.set_aspect("equal")
+format_pct_axis(ax, axis="both")
 add_message_title(
     ax,
-    "A calibration fitted on one panel carries to another",
-    subtitle="Exponent fit on the training observations only, then frozen",
+    "Reliability of the held-out forecasts, before and after",
+    subtitle=f"{N_RELIABILITY_BINS} equal-sized groups of {bin_sizes[0]} held-out questions each",
 )
+ax.legend(loc="upper left")
 show_with_alt(
     fig,
-    f"Two bars of Brier score on the held-out panel: {test_brier_before:.3f} for the raw "
-    f"forecasts and {test_brier_after:.3f} after the fitted exponent is applied. Lower is "
-    "better.",
+    "Reliability diagram on a square axis with the perfect-calibration diagonal. The raw and "
+    "calibrated series each connect four points, one per group of held-out questions. Both "
+    "sit below the diagonal at the low end and above it at the high end, and calibration "
+    "pulls the outermost groups toward the diagonal while leaving the ordering unchanged.",
 )
 
 # %% [markdown]
-# The improvement is small, and on this data it should be. The forecasts were simulated by
-# shrinking each probability linearly toward even odds and adding noise. A log-odds exponent
-# does not invert a linear shrinkage: it can only be the single exponent that minimizes Brier
-# score across the range, closer at some probabilities than at others, and the added noise is
-# not correctable at all. So the fit is an approximate correction to an approximate
-# description of the miscalibration, which is the ordinary case.
+# The two outer groups sit on the far side of the diagonal from each other: the lowest group's
+# questions resolved yes less often than it forecast, and the highest group's resolved yes more
+# often. That is under-confidence, and it is what the generating process put there - each true
+# probability was shrunk toward even odds before the forecast was recorded. The fitted exponent
+# is above one, which spreads the forecasts back out, and the two outer points move toward the
+# diagonal.
+#
+# The improvement in Brier score is nonetheless small, and on this data it should be. A
+# log-odds exponent does not invert a linear shrinkage: it is a single exponent minimizing
+# Brier score across the whole range, closer at some probabilities than at others, and the
+# noise added on top is not correctable at all. The second group, which resolved yes far less
+# often than either version forecast, is where that shows.
 #
 # What the comparison establishes is the procedure: fit on one panel, freeze, score on another.
-# Read the same two numbers off a fit evaluated on its own training observations and they say
+# Read the same numbers off a fit evaluated on its own training observations and they say
 # nothing, because the exponent was chosen to make them look that way.
 
 # %% [markdown]
@@ -563,12 +621,9 @@ for rho, color, line_style in zip(
     line_styles[:3],
     strict=True,
 ):
-    effective_n = []
-    for n in agent_counts:
-        denom = 1 + (n - 1) * rho
-        d = math.sqrt(n / denom) if denom > 0 else 1.0
-        effective_n.append(d**2)
-
+    effective_n = [
+        neyman_extremize([0.65] * n, base=0.5, correlation=rho).effective_n for n in agent_counts
+    ]
     ax.plot(
         agent_counts,
         effective_n,
@@ -584,14 +639,14 @@ ax.plot(
     color=COLORS["neutral"],
     linestyle="--",
     alpha=0.6,
-    label="Independent agents",
+    label="Fully independent",
 )
 ax.set_xlabel("Agents run")
 ax.set_ylabel("Effective panel size")
 add_message_title(
     ax,
-    "Correlated agents stop adding information long before the budget runs out",
-    subtitle=r"Effective size is $d^2$; for fixed ρ > 0 it approaches 1/ρ",
+    "Effective panel size against agents run",
+    subtitle=r"Effective size is $d^2$, at three assumed pairwise correlations",
 )
 ax.legend()
 show_with_alt(

@@ -233,6 +233,7 @@ def extract_sentiment(p_yes: float) -> Sentiment:
 
 # %%
 INLINE_ENUMERATION = re.compile(r"\(\d+\)\s*")
+SENTENCE_END = re.compile(r"(?<![A-Z])(?<=[.!?])\s+(?=[A-Z])")
 
 
 def extract_key_findings(rationale: str) -> list[str]:
@@ -250,8 +251,11 @@ def extract_key_findings(rationale: str) -> list[str]:
     if len(items) < 2:
         return []
     # The text after the last marker runs on into whatever the model wrote next, so the last
-    # item ends at its own sentence boundary rather than at the end of the rationale.
-    items[-1] = re.split(r"(?<=[.!?])\s+", items[-1])[0]
+    # item ends at its own sentence boundary rather than at the end of the rationale. The
+    # boundary has to survive an abbreviation: "U.S. inflation remains elevated" is one
+    # sentence, so a full stop only ends the item when the letter before it is not a capital
+    # and the next word begins with one.
+    items[-1] = SENTENCE_END.split(items[-1])[0]
     return [item.rstrip(";.").strip() for item in items][:10]
 
 
