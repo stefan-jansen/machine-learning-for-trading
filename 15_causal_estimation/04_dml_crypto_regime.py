@@ -465,10 +465,17 @@ def regime_effect(mask, name):
     drop it, or the two regressions being compared are not the same regression: it is one on
     the rows the subgroup fit used, zero everywhere else, so the same rows estimate the same
     two coefficients. Rows in no test fold come back NaN and are left out by the same column.
+
+    Both guards below count bars, not rows. A regime of 150 rows is eight bars of this
+    panel, too few for five folds with an embargo and far too few for a kernel with a
+    42-bar bandwidth, and cross-fitting can still come back all-NaN from a regime that
+    clears the pre-fit guard. An unusable subgroup has to return NaN: a design of zeros
+    fits without complaint and reports an effect of exactly zero with a standard error of
+    exactly zero, which reads as a perfectly estimated null where there is no estimate.
     """
-    if mask.sum() <= 100:
-        print(f"\n  {name}:\n    Insufficient data")
-        return 0.0, 1.0, 0.0
+    if np.unique(decision_times[mask]).size <= HAC_LAGS:
+        print(f"\n  {name}:\n    Fewer bars than the {HAC_LAGS}-bar bandwidth")
+        return float("nan"), float("nan"), float("nan")
 
     fit = manual_dml_timeseries(
         Y[mask],
@@ -486,6 +493,14 @@ def regime_effect(mask, name):
     used[mask] = np.isfinite(fit["Y_res"]) & np.isfinite(fit["T_res"])
     y_full = np.zeros(len(decision_times))
     t_full = np.zeros(len(decision_times))
+    used_bars = np.unique(decision_times[used]).size
+    if used_bars <= HAC_LAGS:
+        print(
+            f"\n  {name}:\n    Cross-fitting left {used_bars} usable bars, fewer than the "
+            f"{HAC_LAGS}-bar bandwidth"
+        )
+        return float("nan"), float("nan"), float("nan")
+
     y_full[used] = fit["Y_res"][used[mask]]
     t_full[used] = fit["T_res"][used[mask]]
     design = np.column_stack([used.astype(float), t_full])
@@ -508,7 +523,11 @@ effect_high, se_high_hac, t_high = regime_effect(high_vol_mask, "High Volatility
 # Independence-of-subsets approximation; the interaction model below is the better answer.
 effect_diff = effect_high - effect_low
 se_diff_independent = np.sqrt(se_low_hac**2 + se_high_hac**2)
-t_diff_independent = effect_diff / se_diff_independent if se_diff_independent > 0 else 0
+t_diff_independent = (
+    effect_diff / se_diff_independent
+    if np.isfinite(effect_diff) and se_diff_independent > 0
+    else float("nan")
+)
 
 print(f"\n  Regime Difference (independence approximation): {effect_diff:.4f}")
 print(f"    SE: {se_diff_independent:.4f}, t={t_diff_independent:.2f}")
@@ -822,13 +841,27 @@ show_plotly_with_alt(
 
 # %%
 # Regime comparison
+# A subgroup with too few bars to estimate comes back NaN; drawing it would put a zero bar
+# with no error bar beside two real ones.
+regime_bars = [
+    (label, effect, se, colour)
+    for label, effect, se, colour in (
+        ("Low Vol", effect_low, se_low_hac, COLORS["blue"]),
+        ("High Vol", effect_high, se_high_hac, COLORS["amber"]),
+        ("Overall", dml_effect, dml_se_hac, COLORS["neutral"]),
+    )
+    if np.isfinite(effect) and np.isfinite(se)
+]
+
+bar_labels, bar_effects, bar_ses, bar_colours = (list(column) for column in zip(*regime_bars))
+
 fig2 = go.Figure()
 fig2.add_trace(
     go.Bar(
-        x=["Low Vol", "High Vol", "Overall"],
-        y=[effect_low, effect_high, dml_effect],
-        error_y=dict(type="data", array=[1.96 * se_low_hac, 1.96 * se_high_hac, 1.96 * dml_se_hac]),
-        marker_color=[COLORS["blue"], COLORS["amber"], COLORS["neutral"]],
+        x=bar_labels,
+        y=bar_effects,
+        error_y=dict(type="data", array=[1.96 * se for se in bar_ses]),
+        marker_color=bar_colours,
     )
 )
 fig2.update_layout(
@@ -840,9 +873,9 @@ fig2.update_layout(
 )
 show_plotly_with_alt(
     fig2,
-    "Bar chart of the adjusted premium effect in the low-volatility regime, the "
-    "high-volatility regime and the full sample, each with a 95 percent error bar. The bars "
-    "are small relative to their error bars, and every error bar spans zero.",
+    f"Bar chart of the adjusted premium effect for {', '.join(bar_labels)}, each with a "
+    "95 percent error bar. The bars are small relative to their error bars, and every "
+    "error bar spans zero.",
 )
 
 # %% [markdown]
