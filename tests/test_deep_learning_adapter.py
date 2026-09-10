@@ -749,10 +749,11 @@ def test_run_dl_cv_assembles_predictions_in_config_then_epoch_order(tmp_path) ->
 
     Post-processing used to hold the whole prediction set three times over: the frame read back
     from the incremental parquet files, a filtered copy per configuration, and every eligible
-    epoch slice appended to a list that was then concatenated. Cutting the slices lazily from
-    one frame removes two of those copies, and the thing that could go wrong is order: a single
-    filter over the whole frame returns file order, not configuration-then-epoch order, and the
-    registered prediction set is order-bearing.
+    epoch slice appended to a list that was then concatenated. Reading one slice back at a time
+    removes those copies, and the thing that could go wrong is order: a single pass over the
+    whole set returns file order, not configuration-then-epoch order. Registry identity does
+    not depend on the order - `published_prediction_digest` sorts its row hashes - but every
+    artifact the runner writes does.
     """
     import numpy as np
     import pandas as pd

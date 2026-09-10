@@ -2867,8 +2867,7 @@ def run_dl_cv(
     gc.collect()
 
     # Read in the order the loop recorded, which is the order a single frame cut by
-    # (config, checkpoint) produced: configuration, then checkpoint, then fold. A prediction
-    # set is registered content-addressed, so the row order is a result.
+    # (config, checkpoint) produced: configuration, then checkpoint, then fold.
     complete_predictions = _read_prediction_shards(
         [
             shard

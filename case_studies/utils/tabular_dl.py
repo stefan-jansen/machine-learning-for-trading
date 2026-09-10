@@ -2059,8 +2059,7 @@ def _load_incremental_preds_for_config(incr_dir: Path, config_name: str) -> pl.D
 
     The shards are read in the order :func:`incremental_prediction_files` defines - folds
     by the lexicographic order of ``<config>_fold<fold>``, checkpoints ascending inside a
-    fold - which is the order one file per fold produced. A registered prediction set is
-    content-addressed, so that order is a result and not a presentation detail.
+    fold - which is the order one file per fold produced.
     """
     parquet_files = incremental_prediction_files(incr_dir, config_name)
     if not parquet_files:

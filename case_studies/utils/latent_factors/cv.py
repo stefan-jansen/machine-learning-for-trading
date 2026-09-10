@@ -957,8 +957,7 @@ def run_latent_factor_cv(
     for model_name in active_models:
         fold_ics_df = pl.DataFrame(state[model_name]["fold_ics"])
         # Read back in the order the folds were fitted, which is the order the accumulating
-        # list produced. A registered prediction set is content-addressed, so that is a
-        # result and not a presentation detail.
+        # list produced.
         if state[model_name]["pred_files"]:
             preds_df = pl.read_parquet(state[model_name]["pred_files"])
         elif state[model_name]["pred_frames"]:

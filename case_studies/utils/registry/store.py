@@ -1289,8 +1289,10 @@ def incremental_prediction_shards(
 
     The order is the one a single file per fold produced: folds by the lexicographic
     order of ``<config>_fold<fold>``, and inside a fold the checkpoints ascending, which
-    is the order they were fitted in. Prediction sets are registered content-addressed,
-    so this is a result, not a presentation detail.
+    is the order they were fitted in. Registry identity does not depend on it -
+    ``published_prediction_digest`` sorts its row hashes - but every artifact these
+    runners write does, and holding the order is what let the change be compared against
+    the implementation it replaced.
     """
     pattern = "*.parquet" if config_name is None else f"{config_name}_fold*.parquet"
     shards: list[tuple[str, int, Path]] = []
