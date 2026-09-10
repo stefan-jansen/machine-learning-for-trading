@@ -774,20 +774,22 @@ fig.update_layout(
 fig.update_yaxes(range=[0, 1])
 show_plotly_with_alt(
     fig,
-    "Five bars on a retriever-score axis running from zero to one. All five stand in the "
-    "lower half of it, between roughly a third and a little over half the height of the "
-    "axis. The answerable query is the tallest and its label reports the most matched "
-    "terms; the three financial queries follow at similar heights with one or two matched "
-    "terms each; the out-of-domain query is the shortest and matched none. The gap between "
-    "the tallest and the shortest bar is smaller than the empty space above all of them.",
+    "Five bars on a retriever-score axis running from zero to one. All five fall between "
+    "roughly a third and a little over half the height of the axis, four of them below its "
+    "midpoint and the tallest just above it. The answerable query is the tallest and its "
+    "label reports the most matched terms; the three financial queries follow at similar "
+    "heights with one or two matched terms each; the out-of-domain query is the shortest "
+    "and matched none. The gap between the tallest and the shortest bar is smaller than "
+    "the empty space above all of them.",
 )
 
 # %% [markdown]
-# The bars occupy the lower half of the axis and differ from each other by less
-# than they differ from either end of it. That compression is the reason a raw
-# score cannot be a guardrail: the ordering is right, and the distance between
-# "this corpus answers your question" and "this corpus is about something else
-# entirely" is a fraction of the scale the number is reported on.
+# The bars sit between roughly a third and a little over half of the axis, and
+# differ from each other by less than they differ from either end of it. That
+# compression is the reason a raw score cannot be a guardrail: the ordering is
+# right, and the distance between "this corpus answers your question" and "this
+# corpus is about something else entirely" is a fraction of the scale the number
+# is reported on.
 
 # %% [markdown]
 # ## 7. Numeric Workflow: Retrieve → Extract → Compute → Narrate
