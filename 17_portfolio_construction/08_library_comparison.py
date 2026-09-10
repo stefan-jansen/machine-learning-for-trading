@@ -387,8 +387,9 @@ print(f"Covariance matrix shape: {S.shape}")
 # %% [markdown]
 # A long-only Max-Sharpe risky portfolio requires at least one positive expected excess return.
 # When that precondition fails, every library receives the same decision before its API boundary:
-# allocate 100% to cash at the declared hurdle and report `cash_precheck` instead of invoking a
-# ratio solver. This is an economic policy, not a fallback to a different risky objective.
+# allocate the whole portfolio to cash at the declared hurdle and report `cash_precheck` instead
+# of invoking a ratio solver. This is an economic policy, not a fallback to a different risky
+# objective.
 
 
 # %%
@@ -622,7 +623,7 @@ fig.add_scatter(
 )
 
 fig.update_layout(
-    title="Training frontiers depend on the chosen risk measure",
+    title="Mean-variance and CVaR efficient frontiers on the training window",
     xaxis_title="Annualized volatility",
     yaxis_title="Annualized expected return",
     xaxis_tickformat=".0%",
@@ -753,8 +754,9 @@ for library, weights in common_sharpe_weights.items():
     print(f"{library} Max-Sharpe vs independent oracle: {weight_difference:.2e}")
 
 # %% [markdown]
-# The matching CVaR task minimizes the historical loss tail at the same 95% confidence,
-# with long-only weights that sum to one and no return target or ratio objective.
+# The matching CVaR task minimizes the historical loss tail at the declared confidence level -
+# `CVAR_CONFIDENCE` in the settings cell - with long-only weights that sum to one and no return
+# target or ratio objective.
 
 # %%
 # Minimum empirical CVaR is a linear program over weights, the VaR threshold, and tail slacks.
@@ -1142,7 +1144,6 @@ growth_colors = {
     "Equal Weight": COLORS["neutral"],
 }
 cumulative_growth = {name: np.cumprod(1 + portfolio_returns[name]) for name in growth_methods}
-growth_leader = max(cumulative_growth, key=lambda name: cumulative_growth[name][-1])
 
 fig = go.Figure()
 for name in growth_methods:
@@ -1155,7 +1156,9 @@ for name in growth_methods:
         name=name,
         line=dict(
             color=growth_colors[name],
-            width=3 if name == growth_leader else 2,
+            # The benchmark is drawn as context, so it is the dashed neutral line and the
+            # three optimized paths are weighted alike - none of them is the subject.
+            width=2,
             dash="dash" if name == "Equal Weight" else "solid",
         ),
     )
@@ -1169,7 +1172,9 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Four growth-of-one-dollar paths over the test window for the three libraries' maximum-Sharpe allocations and for equal weight, the three optimized paths overlapping closely.",
+    "Four growth-of-one-dollar paths over the test window: the three libraries' "
+    "maximum-Sharpe allocations lie on top of one another so only the last drawn is "
+    "visible, and the dashed equal-weight benchmark runs above them for most of the window.",
 )
 
 # %% [markdown]
@@ -1205,7 +1210,7 @@ for library in library_order:
     )
 
 fig.update_layout(
-    title="Risk and return of fourteen frozen allocations, by library",
+    title="Risk and return by library, fourteen allocations and the benchmark",
     xaxis_title="Annualized volatility",
     yaxis_title="Annualized return",
     xaxis_tickformat=".0%",
@@ -1316,9 +1321,10 @@ least_concentrated = (
     conc_df.filter(pl.col("portfolio") != "Equal Weight").sort("hhi").row(0, named=True)
 )
 print(
-    f"Equal weight sets the HHI floor at {equal_weight_hhi:.3f} across {num_stocks} funds. "
-    f"The least concentrated optimized allocation is {least_concentrated['portfolio']} at "
-    f"{least_concentrated['hhi']:.3f}, holding {least_concentrated['positions']} positions."
+    f"Across {num_stocks} funds, no long-only fully-invested portfolio can have an HHI below "
+    f"equal weight's {equal_weight_hhi:.3f}. The least concentrated optimized allocation is "
+    f"{least_concentrated['portfolio']} at {least_concentrated['hhi']:.3f}, holding "
+    f"{least_concentrated['positions']} positions."
 )
 
 # %% [markdown]
@@ -1437,7 +1443,7 @@ fig.add_bar(
     col=2,
 )
 fig.update_layout(
-    title="A turnover penalty trades breadth for trading distance",
+    title="What the turnover penalty and the L2 penalty each change",
     height=430,
 )
 fig.update_yaxes(title_text="One-way turnover", tickformat=".0%", rangemode="tozero", row=1, col=1)

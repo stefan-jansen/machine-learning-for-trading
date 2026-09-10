@@ -61,6 +61,7 @@ import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 import sympy
+from IPython.display import Markdown, display
 
 # Portfolio analysis
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
@@ -177,11 +178,19 @@ examples = [
     (0.70, 0.5),  # Strong edge, unfavorable odds
 ]
 
-print("Kelly Fraction Examples:")
-for prob, odds in examples:
-    kelly = compute_kelly_fraction(prob, odds)
-    growth = compute_growth_rate(prob, kelly, odds)
-    print(f"P(win)={prob:.0%}, Odds={odds}:1 -> Kelly={kelly:.1%}, Growth={growth:.4f}")
+pl.DataFrame(
+    [
+        {
+            "win probability": prob,
+            "odds won per unit staked": odds,
+            "Kelly fraction": compute_kelly_fraction(prob, odds),
+            "growth rate per bet": compute_growth_rate(
+                prob, compute_kelly_fraction(prob, odds), odds
+            ),
+        }
+        for prob, odds in examples
+    ]
+)
 
 # %% [markdown]
 # ### Growth Rate as Function of Bet Size
@@ -220,7 +229,7 @@ for i, prob in enumerate(probabilities):
 
 # %%
 fig.update_layout(
-    title="Growth peaks at an interior stake and falls away faster above it",
+    title="Expected growth rate against bet fraction, by win probability",
     xaxis_title="Bet Fraction (f)",
     yaxis_title="Expected Growth Rate",
     xaxis_tickformat=".0%",
@@ -257,8 +266,10 @@ def simulate_wealth_paths(
 
 
 # %% [markdown]
-# Each simulation is a thousand independent wealth paths, so what is plotted is their spread:
-# the median path and the bands containing the middle half and the middle 90% of outcomes.
+# Every panel below is driven by one shared sequence of coin-toss outcomes, so the panels
+# differ only in the stake and the comparison between them is paired rather than a comparison
+# of two draws. What is plotted is the spread across the simulated paths: the median path, the
+# band containing the middle half of them and the band containing the middle nine tenths.
 
 
 # %%
@@ -298,13 +309,16 @@ def add_percentile_bands(
 
 # %%
 # Simulate paths for different Kelly multiples
-n_trials = 1000
-n_simulations = 500
+n_trials = 1000  # bets in one path
+n_simulations = 500  # independent paths, which is what the percentile bands are taken across
 win_prob = 0.55
 odds = 1.0
+INITIAL_WEALTH = 100.0
 kelly = compute_kelly_fraction(win_prob, odds)
 kelly_multiples = [0.25, 0.5, 1.0, 1.5, 2.0]
 common_outcomes = np.random.default_rng(SEED).random((n_trials, n_simulations)) < win_prob
+
+print(f"{n_simulations:,} independent paths of {n_trials:,} bets each, one shared outcome draw.")
 
 fig = make_subplots(
     rows=1,
@@ -315,7 +329,7 @@ fig = make_subplots(
 
 for i, mult in enumerate(kelly_multiples):
     fraction = kelly * mult
-    wealth = simulate_wealth_paths(common_outcomes, fraction, odds)
+    wealth = simulate_wealth_paths(common_outcomes, fraction, odds, INITIAL_WEALTH)
     wealth_pcts = np.percentile(wealth, [5, 25, 50, 75, 95], axis=1)
     add_percentile_bands(fig, np.arange(n_trials), wealth_pcts, col_idx=i + 1, showlegend=(i == 0))
 
@@ -323,7 +337,7 @@ for i, mult in enumerate(kelly_multiples):
 fig.update_xaxes(title_text="Trial")
 fig.update_yaxes(type="log", title_text="Wealth")
 fig.update_layout(
-    title="Growth peaks near full Kelly while overbetting widens downside dispersion",
+    title="Simulated wealth at five multiples of the Kelly fraction",
     height=400,
     showlegend=True,
 )
@@ -332,14 +346,22 @@ show_plotly_with_alt(
     "Five panels of simulated wealth on a logarithmic axis against trial number, at a quarter, a half, one, one and a half, and twice the Kelly fraction, the median path rising and the shaded percentile bands widening as the multiple grows.",
 )
 
-print(f"Optimal Kelly fraction: {kelly:.1%}")
-print(f"Terminal wealth after {n_trials:,} bets, from ${100:.0f}:")
+print(f"Kelly fraction at a win probability of {win_prob:.0%} and even odds: {kelly:.1%}")
+print(f"Terminal wealth after {n_trials:,} bets, from {INITIAL_WEALTH:,.0f} of capital:")
+
+terminal_rows = []
 for mult in kelly_multiples:
-    terminal = simulate_wealth_paths(common_outcomes, kelly * mult, odds)[-1]
+    terminal = simulate_wealth_paths(common_outcomes, kelly * mult, odds, INITIAL_WEALTH)[-1]
     p05, p50, p95 = np.percentile(terminal, [5, 50, 95])
-    print(
-        f"  {mult:>5.0%} Kelly   5th pct {p05:12,.2f}   median {p50:14,.2f}   95th pct {p95:16,.2f}"
+    terminal_rows.append(
+        {
+            "multiple of Kelly": f"{mult:.0%}",
+            "5th percentile": p05,
+            "median": p50,
+            "95th percentile": p95,
+        }
     )
+pl.DataFrame(terminal_rows)
 
 # %% [markdown]
 # ### Distribution of Terminal Wealth
@@ -400,7 +422,7 @@ for mult in [0.5, 1.0, 1.5, 2.0]:
     )
 
 fig.update_layout(
-    title="Full Kelly maximizes the centre and widens the spread",
+    title="Terminal log-wealth distribution, by multiple of the Kelly fraction",
     xaxis_title="Log(Wealth)",
     yaxis_title="Probability",
     height=450,
@@ -463,7 +485,7 @@ for i, n in enumerate([2, 3, 4, 5]):
     )
 
 fig.update_layout(
-    title="Higher-order terms matter as returns move away from zero",
+    title="log(1+x) and its Taylor polynomials of order two to five",
     xaxis_title="x",
     yaxis_title="y",
     yaxis_range=[-2, 1.5],
@@ -581,7 +603,6 @@ print(f"  Observed-return leverage boundary: {max_observed_safe:.1%}")
 
 # %%
 rolling_window = int(ROLLING_WINDOW_YEARS * 252)
-rolling_window_years = ROLLING_WINDOW_YEARS
 # A window of W over N returns yields N - W + 1 estimates. The chart below is about how much
 # the fraction moves, so it needs enough of them to move over: a year's worth is the floor.
 rolling_estimates = sp500_returns.height - rolling_window + 1
@@ -615,7 +636,10 @@ fig = make_subplots(
     cols=1,
     shared_xaxes=True,
     vertical_spacing=0.1,
-    subplot_titles=[f"Rolling Statistics ({rolling_window_years:.1f}Y Window)", "Kelly Fraction"],
+    subplot_titles=[
+        f"Annualized return and volatility over a {ROLLING_WINDOW_YEARS}-year window",
+        "Kelly fraction those two moments imply",
+    ],
 )
 
 # Rolling return and volatility
@@ -654,7 +678,7 @@ fig.update_yaxes(title_text="Annualized value", tickformat=".0%", row=1, col=1)
 fig.update_yaxes(title_text="Kelly fraction", tickformat=".0%", row=2, col=1)
 fig.update_layout(
     height=600,
-    title="The same formula on rolling windows gives wildly different answers",
+    title="Rolling annualized return and volatility, and the Kelly fraction they imply",
 )
 show_plotly_with_alt(
     fig,
@@ -781,7 +805,7 @@ fig.add_hline(
 )
 
 fig.update_layout(
-    title="Kelly sizes positions without any notion of a budget",
+    title="Raw Kelly allocation per ETF against the equal-weight reference",
     xaxis_title="Asset",
     yaxis_title="Allocation (Can Exceed 100%)",
     yaxis_tickformat=".0%",
@@ -828,20 +852,26 @@ portfolio_returns["Equal Weight"] = test_matrix @ equal_weights
 portfolio_gross["Equal Weight"] = float(np.abs(equal_weights).sum())
 
 # %% [markdown]
-# **Gross exposure** is the sum of the absolute position sizes: a book 300% long and 200% short
-# has five times the account at risk and is 100% net long - the same gross as a 250/250 book, which
-# is the one that is flat on net. Its reciprocal is the move that would end
+# **Gross exposure** is the sum of the absolute position sizes: a book three times the account
+# long and twice it short has five times the account at risk and is one account net long - the
+# same gross as a book two and a half times long against the same short, which is the one that
+# is flat on net. Its reciprocal is the move that would end
 # the account, and that is a worst case rather than a market move - it needs every long to fall
 # and every short to rise by that percentage on the same day. Net exposure is far smaller than
 # gross, so a uniform market decline of that size does not do it. What the number establishes is
 # that at high leverage the worst case sits inside a single ordinary session.
 
 # %%
-print("Gross exposure, and the simultaneous adverse move on every position that would")
-print("wipe the account out, with no cap applied:")
-for name, gross in portfolio_gross.items():
-    ruin_move = 1.0 / gross
-    print(f"  {name:<14} {gross:6.2f}x gross    wiped out by {ruin_move:.2%} against every leg")
+pl.DataFrame(
+    [
+        {
+            "allocation": name,
+            "gross exposure (x account)": gross,
+            "adverse move against every leg that empties the account": 1.0 / gross,
+        }
+        for name, gross in portfolio_gross.items()
+    ]
+)
 
 # %% [markdown]
 # ### What each Kelly multiple did on the test window
@@ -914,7 +944,7 @@ for name, pf_ret in portfolio_returns.items():
     )
 
 fig.update_layout(
-    title="Growth curves that assume free, unlimited, never-called borrowing",
+    title="Growth of one dollar on the test window, by allocation",
     xaxis_title="Date",
     yaxis_title="Growth of $1",
     height=500,
@@ -941,7 +971,7 @@ for row in metrics_df.iter_rows(named=True):
         ),
     )
 fig.update_layout(
-    title="Full Kelly turns negative as volatility overwhelms average return",
+    title="Annualized return against annualized volatility, by allocation",
     xaxis_title="Annualized volatility",
     yaxis_title="Annualized return",
     xaxis_tickformat=".0%",
@@ -1007,34 +1037,40 @@ comparison
 # %% [markdown]
 # ## What the test window actually says
 
-# %%
-full_kelly_row = metrics_df.filter(pl.col("strategy") == "100% Kelly").row(0, named=True)
-print(f"Gross exposure the training estimates ask for: {np.abs(kelly_allocation).sum():.1f}x")
-print(f"At a quarter of that:                          {portfolio_gross['25% Kelly']:.1f}x")
-print(
-    "Lowest point of the full-Kelly wealth path:    "
-    f"{full_kelly_row['min_wealth_multiple']:.3g}x the starting capital"
-)
+# %% [markdown]
+# Every number in the paragraph below is read from the table above it rather than typed, so it
+# moves with the run instead of describing an earlier one.
 
-# %% [markdown] tags=["results"]
-# The last line is the one that decides how to read the growth chart above it. At its worst point
-# the full-Kelly path is down to about one ten-millionth of the capital it started with, while
-# carrying more than forty times that capital in gross positions - which is the same thing the
-# `max_dd` column says when it reads exactly -1.0. The chart's vertical axis is logarithmic, so a
-# fall of that size still looks like a line on the page; the number is what says the account is
-# gone. No broker holds a position through it, and the arithmetic above says why: at that gross
-# exposure it takes only 2.15% against every leg at once - every long down that much and every
-# short up that much - to empty the account. That is a worst case rather than a market move, since
-# net exposure is a fraction of gross and a uniform decline does not do it; what matters is that
-# 46x leverage puts the worst case within a single ordinary session.
-#
-# Halving the fraction does not rescue it. Half-Kelly bottoms at 0.13x with a 99.2% drawdown, and
-# only at a quarter does the worst point stay above 0.76x. What separates them is not the sign of
-# the estimates but how much leverage is taken on the strength of them.
-#
-# So the curves are not a track record. They are what the formula's answer would have produced given
-# borrowing that is unlimited, free of interest, and never called, and the value of computing them
-# is precisely that the assumption is visible in the leverage number rather than hidden.
+# %%
+rows = {row["strategy"]: row for row in metrics_df.iter_rows(named=True)}
+full, half, quarter = rows["100% Kelly"], rows["50% Kelly"], rows["25% Kelly"]
+ruin_move_full = 1.0 / full["gross_exposure"]
+
+display(
+    Markdown(
+        "The lowest point of the full-Kelly wealth path is what decides how to read the growth "
+        f"chart above. At its worst the path is down to {full['min_wealth_multiple']:.1e} times "
+        f"the capital it started with, while carrying {full['gross_exposure']:.0f} times that "
+        "capital in gross positions - which is the same thing the `max_dd` column says when it "
+        f"reads {full['max_dd']:.3f}. The chart's vertical axis is logarithmic, so a fall of that "
+        "size still looks like a line on the page; the number is what says the account is gone. "
+        "No broker holds a position through it, and the arithmetic above says why: at that gross "
+        f"exposure it takes {ruin_move_full:.2%} against every leg at once - every long down that "
+        "much and every short up that much - to empty the account. That is a worst case rather "
+        "than a market move, since net exposure is a fraction of gross and a uniform decline does "
+        f"not do it; what matters is that {full['gross_exposure']:.0f} times leverage puts the "
+        "worst case inside a single ordinary session.\n\n"
+        f"Halving the fraction does not rescue it: half Kelly bottoms at "
+        f"{half['min_wealth_multiple']:.2f} times its starting capital, with a drawdown of "
+        f"{abs(half['max_dd']):.1%}, and only at a quarter does the worst point stay above "
+        f"{quarter['min_wealth_multiple']:.2f} times. What separates them is not the sign of the "
+        "estimates but how much leverage is taken on the strength of them.\n\n"
+        "So the curves are not a track record. They are what the formula's answer would have "
+        "produced given borrowing that is unlimited, free of interest and never called, and the "
+        "value of computing them is precisely that the assumption is visible in the leverage "
+        "number rather than hidden."
+    )
+)
 
 # %% [markdown]
 # ## Key takeaways
