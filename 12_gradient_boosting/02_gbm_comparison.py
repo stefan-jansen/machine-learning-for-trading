@@ -643,8 +643,8 @@ fig.suptitle("Accuracy, training time and memory by library and preset", fontsiz
 show_with_alt(
     fig,
     "Three panels of grouped bars sharing a preset axis, one bar per library. Left: "
-    "test rank IC against a line at zero. Middle: training time in seconds on a log "
-    "scale. Right: the resident memory each fit added, in megabytes.",
+    "test rank IC, with the bars measured from zero. Middle: training time in seconds "
+    "on a log scale. Right: the resident memory each fit added, in megabytes.",
 )
 
 # %%
