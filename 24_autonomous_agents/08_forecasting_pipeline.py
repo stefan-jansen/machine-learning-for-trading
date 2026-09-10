@@ -696,87 +696,118 @@ else:
 # %% [markdown]
 # ## Where the Probability Went
 #
-# One line per question, one point per stage, in the order the pipeline ran them. This is the
-# figure to read before the final number: it shows which stage moved the answer and by how
-# much, and a stage that never moves anything on any question is a stage that is being paid
-# for and not used.
+# Three of the numbers a run produces are the same quantity at different points in the
+# pipeline: the aggregate over the research agents, the post-debate blend, and the final
+# probability. Those are what the line below joins. Everything else a stage produced is an
+# input to one of them - the market price the agents were shown, the agents' own answers, the
+# debate midpoint that enters the post-debate blend at weight `DEBATE_WEIGHT`, and the
+# supervisor's own probability - and is drawn as an open marker at the stage that read it.
 #
-# The market price appears first, as a reference rather than a stage. It was shown to the
-# research agents, so it is where they started rather than something they were tested against.
+# The distinction decides what a gap on this chart means. Between two carried values it is
+# movement, and a stage that never moves anything on any question is being paid for and not
+# used. Between two research agents it is disagreement: they answer in parallel and neither
+# saw the other.
 
 # %%
-flow_rows = []
+STAGE_X = {
+    "Market": 0,
+    "Agents": 1,
+    "Aggregate": 2,
+    "Post-debate": 3,
+    "Supervisor": 4,
+    "Final": 5,
+}
+
+carried_rows, input_rows = [], []
 for r in results:
     q_short = textwrap.shorten(r.question.question, width=44, placeholder="...")
-    phases = []
+
+    aggregate_p = (
+        r.aggregation.extremized_probability
+        if r.aggregation.extremized_probability is not None
+        else r.aggregation.raw_probability
+    )
+    midpoint = (
+        (r.debate.bull_final_probability + r.debate.bear_final_probability) / 2
+        if r.debate and r.debate.bull_final_probability is not None
+        else aggregate_p
+    )
+    post_debate = (1 - DEBATE_WEIGHT) * aggregate_p + DEBATE_WEIGHT * midpoint
+
+    carried_rows += [
+        {"question": q_short, "stage": "Aggregate", "p_yes": aggregate_p},
+        {"question": q_short, "stage": "Post-debate", "p_yes": post_debate},
+        {"question": q_short, "stage": "Final", "p_yes": r.final_probability},
+    ]
 
     if r.question.current_market_price is not None:
-        phases.append(("Market", r.question.current_market_price))
-
-    for a in r.agents:
-        phases.append((a.agent_id, a.p_yes))
-
-    if r.aggregation:
-        aggregate_p = (
-            r.aggregation.extremized_probability
-            if r.aggregation.extremized_probability is not None
-            else r.aggregation.raw_probability
+        input_rows.append(
+            {"question": q_short, "stage": "Market", "p_yes": r.question.current_market_price}
         )
-        phases.append(("Aggregate", aggregate_p))
-
+    for a in r.agents:
+        if a.p_yes is not None:
+            input_rows.append({"question": q_short, "stage": "Agents", "p_yes": a.p_yes})
     if r.debate and r.debate.bull_final_probability is not None:
-        mid = (r.debate.bull_final_probability + r.debate.bear_final_probability) / 2
-        phases.append(("Debate", mid))
-
+        input_rows.append({"question": q_short, "stage": "Post-debate", "p_yes": midpoint})
     if r.supervisor and r.supervisor.p_yes is not None:
-        phases.append(("Supervisor", r.supervisor.p_yes))
+        input_rows.append({"question": q_short, "stage": "Supervisor", "p_yes": r.supervisor.p_yes})
 
-    phases.append(("Final", r.final_probability))
-
-    for name, p in phases:
-        flow_rows.append({"question": q_short, "phase": name, "p_yes": p})
-
-flow_df = pl.DataFrame(flow_rows)
+carried_df = pl.DataFrame(carried_rows)
+inputs_df = pl.DataFrame(input_rows)
 
 fig, ax = plt.subplots()
-phase_order = flow_df["phase"].unique(maintain_order=True).to_list()
-for i, (question_text, group) in enumerate(flow_df.group_by("question", maintain_order=True)):
-    group = group.with_columns(pl.col("phase").cast(pl.Enum(phase_order))).sort("phase")
+questions = carried_df["question"].unique(maintain_order=True).to_list()
+palette = dict(zip(questions, [COLORS["blue"], COLORS["amber"]]))
+for q in questions:
+    carried = carried_df.filter(pl.col("question") == q)
     ax.plot(
-        group["phase"].to_list(),
-        group["p_yes"].to_list(),
+        [STAGE_X[stage] for stage in carried["stage"]],
+        carried["p_yes"].to_list(),
         marker="o",
         linewidth=2,
-        color=[COLORS["blue"], COLORS["amber"]][i],
-        label=question_text[0],
+        color=palette[q],
+        label=q,
+        zorder=3,
     )
+    stage_inputs = inputs_df.filter(pl.col("question") == q)
+    ax.scatter(
+        [STAGE_X[stage] for stage in stage_inputs["stage"]],
+        stage_inputs["p_yes"].to_list(),
+        facecolors="none",
+        edgecolors=palette[q],
+        s=55,
+        zorder=2,
+    )
+ax.set_xticks(list(STAGE_X.values()), list(STAGE_X.keys()))
 ax.set_xlabel("Pipeline stage")
 ax.set_ylabel("Probability of yes")
 ax.set_ylim(0, 1)
 add_message_title(
     ax,
-    "Probability at each pipeline stage, for both questions",
-    subtitle="Market price shown first as the agents' starting context, not a stage",
+    "The probability the pipeline carries, and what each stage read",
+    subtitle="Filled markers joined by a line are the running answer; open markers are inputs",
 )
 ax.legend(loc="upper right")
 show_with_alt(
     fig,
-    "Line chart of probability against pipeline stage, one line per question, running from the "
-    "market price through the research agents to the aggregate, the debate midpoint, the "
-    "supervisor and the final blend. Neither line is flat, and neither moves in one direction: "
-    "both rise at some stages and fall at others, and the two do not move together.",
+    "Chart of probability against pipeline stage, one colour per question. A line joins three "
+    "filled markers on each - the aggregate, the post-debate blend and the final probability - "
+    "passing over the supervisor stage without a marker there. Open markers of the same colour "
+    "sit at the market price, at each research agent's answer, at the debate midpoint and at "
+    "the supervisor's own probability. On one question the three agent markers coincide; on "
+    "the other, two coincide and the third sits far above them. Both lines stay in the lower "
+    "half of the range, and one ends higher than it started while the other ends lower.",
 )
 
 # %% [markdown]
-# Which stage moved the answer is a question the chart poses and a reader should not have to
-# eyeball. The largest single step on each line is below, read off the same frame the chart was
-# drawn from.
+# The steps below are taken over the carried values alone, so each one is the same quantity
+# before and after a stage weighted something into it.
 
 # %%
 largest_move = (
-    flow_df.with_columns(
+    carried_df.with_columns(
         pl.col("p_yes").diff().over("question").alias("move"),
-        pl.col("phase").shift().over("question").alias("from_phase"),
+        pl.col("stage").shift().over("question").alias("from_stage"),
     )
     .drop_nulls("move")
     .with_columns(pl.col("move").abs().alias("size"))
@@ -785,16 +816,24 @@ largest_move = (
     .first()
     .select(
         "question",
-        pl.format("{} to {}", "from_phase", "phase").alias("largest step"),
+        pl.format("{} to {}", "from_stage", "stage").alias("largest step"),
         pl.col("move").round(3),
     )
 )
 largest_move
 
 # %% [markdown]
-# The two questions are moved most by different stages, which is the reading to take from the
-# chart: no stage in this pipeline is where the answer is decided, and none of them is idle
-# either. Whether any of that movement is an improvement is a scoring question, and neither of
+# The largest carried step falls at a different stage on each question: the post-debate blend
+# on one, the supervisor blend on the other. No stage in this pipeline decides the answer and
+# none of them is idle.
+#
+# The open markers carry a reading the line cannot. On the recession question all three
+# research agents returned the same probability and the aggregate came out below every one of
+# them, because extremizing away from a base of even odds treats agreement between agents as
+# evidence - which is the assumption
+# [`05_aggregation_math`](05_aggregation_math.ipynb) derives and
+# [`06_multi_agent_research`](06_multi_agent_research.ipynb) tests against agents that share a
+# prompt. Whether any of this movement is an improvement is a scoring question, and neither of
 # these questions had resolved.
 
 # %% [markdown]
