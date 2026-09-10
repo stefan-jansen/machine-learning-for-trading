@@ -712,8 +712,9 @@ show_with_alt(
     fig,
     "Two panels. Left: TabM's L1 loss against epoch, a grey line per fold for training and "
     "an amber line per fold for validation, with a faint vertical line at each fold's "
-    "selected epoch; the training lines fall throughout while most validation lines turn "
-    "upward. Right: the stopping point each model reached on each fold, against a dotted "
+    "selected epoch, all of them at low epoch; the training lines descend after an "
+    "unsettled first few epochs while most validation lines turn upward. Right: the "
+    "stopping point each model reached on each fold, against a dotted "
     "line at that model's cap.",
 )
 
