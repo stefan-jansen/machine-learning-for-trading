@@ -723,10 +723,20 @@ def simulate_heston(
 # ### Heston Simulation
 #
 # The variance starts at its long-run level, so the long-run volatility is the
-# square root of `HESTON_THETA`. The Feller condition is evaluated from the same
-# named parameters that drive the simulation, and asserted rather than printed as
-# advice: a violated Feller condition means the truncation is doing real work and
-# the path no longer represents the model the prose describes.
+# square root of `HESTON_THETA`.
+#
+# The Feller condition, $2\kappa\theta > \xi^2$, decides whether zero is attainable.
+# Below it the variance process reaches zero with positive probability, which is a
+# different regime of the same model and not an invalid one; plenty of fitted Heston
+# parameters violate it. The values here satisfy it, so the simulated variance stays
+# strictly positive and the section can talk about clustering without also talking
+# about absorption at zero. The assertion reads the same named parameters that drive
+# the simulation, so an edit that moves them into the other regime fails here rather
+# than quietly changing what the figure shows.
+#
+# Satisfying the condition is a statement about the continuous process, not about the
+# discretization. An Euler step can propose a negative variance under any parameters,
+# which is why `simulate_heston` truncates at zero either way.
 
 # %%
 HESTON_MU = 0.05

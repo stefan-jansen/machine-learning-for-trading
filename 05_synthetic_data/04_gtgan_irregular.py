@@ -133,6 +133,7 @@
 # %%
 """GT-GAN — Neural ODE-based generative model for irregular time series."""
 
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -466,6 +467,13 @@ print(f"Time shape: {seq_times.shape}")
 
 # Store normalization params
 norm_params = {"min": seq_min.squeeze(), "max": seq_max.squeeze()}
+
+# CONFIG names the features and the window, not the bars themselves, and the bars
+# come from Chapter 3 when it has been run and from a synthetic fallback when it
+# has not. A digest of them is what tells those two runs apart.
+_data_digest = hashlib.sha256(np.ascontiguousarray(sequences))
+_data_digest.update(np.ascontiguousarray(seq_times))
+CONFIG["data_digest"] = _data_digest.hexdigest()[:16]
 
 
 # %% [markdown]
@@ -843,6 +851,24 @@ class GTGAN(nn.Module):
         return mu + eps * std
 
 
+# %% [markdown]
+# ### Reusing a checkpoint, and when not to
+#
+# Training is the expensive step, so a saved checkpoint is loaded when one matches. What
+# counts as a match is the question. `CHECKPOINT_IDENTITY` below names every setting that
+# moves the weights, including `data_digest`, because `CONFIG` names the features and the
+# window and not the bars they are cut from.
+#
+# The digest matters most on the path a reader is most likely to take. This notebook falls
+# back to synthetic bars when the Chapter 3 outputs are absent, so a first run trains on
+# the fallback and a later run, after Chapter 3 has been executed, sees real bars. Without
+# the digest that second run loads the fallback-trained weights. It also takes the
+# checkpoint's scaler, while `sequences_norm` above was scaled from the new bars, which
+# would leave the holdout comparison and the training data on different scales. A digest
+# mismatch retrains instead, which is the only answer that keeps the two consistent.
+
+
+# %%
 # Initialize model
 model = GTGAN(
     input_dim=n_features,
@@ -883,6 +909,7 @@ CHECKPOINT_IDENTITY = (
     "ode_method",
     "holdout_fraction",
     "weights_version",
+    "data_digest",
 )
 if _saved is not None:
     saved_config = _saved.get("config", {})
