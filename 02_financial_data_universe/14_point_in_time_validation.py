@@ -201,9 +201,10 @@ show_plotly_with_alt(
 # its inputs are prices that had not printed yet. No live system can produce that line, so a
 # backtest that uses it reports skill the strategy could not have had.
 #
-# The share of a centered window that lies in the future is just under half and stays there as
-# the width grows, as the two measured windows above show. A longer centered average does not
-# leak proportionally less; it leaks further ahead.
+# What the two measured windows show is that the future share does not fall away as the window
+# widens: it approaches half, wobbling with the parity of the width rather than declining. The
+# distance leaked does grow, at roughly half the width. So a longer centered average is not a
+# smaller violation; it is a violation that reaches further ahead.
 #
 # There is a second tell, and it is the one that shows up first in practice. A centered
 # average has no value for the most recent rows, because they are still waiting for inputs,
@@ -651,11 +652,12 @@ revisions
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Just under half of a centered window lies in the future, at any width.** The window
-#    offsets are measured above rather than assumed, because the convention differs between
-#    libraries and between odd and even widths. Since the share does not shrink with width, a
-#    longer centered average leaks further ahead rather than less. The figure shows the
-#    consequence and the printed distances measure it.
+# 1. **Close to half of a centered window lies in the future, and widening it does not help.**
+#    The offsets are measured above rather than assumed, because the convention differs
+#    between libraries and with the parity of the width. The future share approaches half as
+#    the window grows, and the distance leaked grows with it at about half the width, so a
+#    longer centered average reaches further ahead rather than violating less. The figure
+#    shows the consequence and the printed distances measure it.
 #
 # 2. **Correlating a level against a return does not detect leakage.** Tomorrow's close, used
 #    directly as a feature, scores near zero on that test, alongside a clean trailing average.
