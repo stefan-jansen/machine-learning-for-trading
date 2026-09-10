@@ -435,10 +435,10 @@ ax2.legend(loc="upper right", frameon=False, fontsize=8)
 
 show_with_alt(
     fig,
-    "Two panels on a shared date axis. Top: cumulative growth of one dollar for the four "
-    "strategies, a solid line per strategy for gross returns and a dashed line for the same "
-    "strategy net of cost. Bottom: one-sided turnover as bars at each monthly rebalance, for "
-    "the three active strategies.",
+    "Two panels on a shared date axis. Top: cumulative growth of one dollar, one solid line "
+    "per strategy for gross returns, and for the three active strategies a dashed line of "
+    "the same colour for that strategy net of cost. Equal weight is drawn gross only. "
+    "Bottom: one-sided turnover as bars at each monthly rebalance, for those three.",
 )
 
 # %% [markdown] tags=[]
@@ -560,10 +560,11 @@ display(Markdown("\n".join(_lines)))
 # Equal weight is the useful contrast: it holds every asset and trades only the drift
 # back to $1/N$ each month, so its gross and net Sharpe are nearly the same number. The
 # active strategies re-pick a top-N list each month and pay for the whole difference
-# between consecutive lists. The Sharpe that costs is the cost rate times the fraction
-# traded, divided by that strategy's own volatility, so turnover sets the order and
-# volatility moves a strategy within it: two strategies that trade the same amount give
-# up different amounts of Sharpe when one of them is the steadier.
+# between consecutive lists. What that takes from the annualized return is the cost rate
+# times the fraction traded, so return drag is proportional to turnover. The Sharpe drag
+# is that return drag divided by the strategy's own volatility, which is a different
+# ordering: of two strategies that trade the same amount, the steadier one gives up the
+# larger ratio.
 #
 # A signal whose IC is near zero or negative can still post a respectable net Sharpe,
 # and the ranking is not the only thing that could produce it. A long-only top-N
@@ -581,10 +582,12 @@ display(Markdown("\n".join(_lines)))
 #    says how well a signal orders the cross-section; net Sharpe says what holding the
 #    implied portfolio returned after costs. The table above shows how far apart the
 #    two orderings can be on the same eight folds.
-# 2. **Turnover is what separates them.** Cost is charged on the difference between
-#    consecutive weight vectors, so at a fixed cost per side the Sharpe given up is
-#    proportional to how much a strategy trades. Equal weight trades only its monthly
-#    drift back to $1/N$; a monthly top-N re-pick trades most of the book.
+# 2. **Trading is what separates them.** Cost is charged on the difference between
+#    consecutive weight vectors, so at a fixed cost per side the *return* a strategy
+#    gives up is proportional to how much it trades. The *Sharpe* it gives up is that
+#    return divided by its own volatility, so the steadier of two strategies that trade
+#    equally loses the larger ratio. Equal weight trades only its monthly drift back to
+#    $1/N$; a monthly top-N re-pick trades most of the book.
 # 3. **Put transaction costs in the objective.** Regularization controls coefficient
 #    magnitude, not position change, so a penalized fit is not a low-turnover fit.
 #    Turnover-penalized objectives and trading constraints (*Chapters 17 and 18*) are
