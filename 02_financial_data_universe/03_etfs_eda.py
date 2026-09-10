@@ -241,8 +241,16 @@ print("=== Data quality ===")
 print(f"Total null values: {total_nulls}")
 print(f"Zero-volume rows:  {zero_volume.height} ({100 * zero_volume.height / etfs.height:.3f}%)")
 
+# %% [markdown]
+# Two checks of the same invariant follow, and they are meant to disagree.
+#
+# `check_ohlc_invariants` compares against a tolerance scaled to the price. The filter
+# below it compares strictly, the way the check itself used to. Run them side by side and
+# the third number, the size of the breach, says which of the two is describing the panel
+# and which is describing its own arithmetic.
+
 # %%
-# OHLC invariants: high should be the max and low the min of {open, high, low, close}
+# high should be the max and low the min of {open, high, low, close}
 invariants = check_ohlc_invariants(etfs)
 print("OHLC invariants:")
 for row in invariants.iter_rows(named=True):
@@ -280,24 +288,27 @@ if breach.len():
 
 # %% [markdown]
 # Three numbers, and they answer different questions. The per-invariant table says *which*
-# ordering fails. The union count says *how many* rows fail at least one. The breach size says
-# *by how much*, and it is the one that identifies the cause.
+# ordering fails, and reports every check clean. The strict union count says *how many* rows
+# fail at least one, and reports several hundred. The breach size says *by how much*, and it
+# is the one that settles which of the two to believe.
 #
 # The largest breach in the whole panel is about the size of float64 epsilon, printed beside
 # it: the smallest relative difference a double-precision number can represent. On those rows
 # the close and the high are the same price, and the adjustment arithmetic left them one bit
-# apart. Nothing is wrong with the data.
+# apart. An adjusted panel multiplies each of the four price fields by the same cumulative
+# ratio in four separate operations, and those four products do not round identically.
+# Nothing is wrong with the data, and the tolerant check is the one telling the truth.
 #
-# What is wrong is the comparison. `high >= close` is a strict test on floating-point values,
-# and a strict test on quantities that went through a multiplication will fail on ties. The
-# right form compares against a tolerance scaled to the price, and until it does, a check that
-# reports under a hundred percent here is reporting on arithmetic rather than on the panel.
+# The strict comparison is not wrong about what it measured; it is wrong about what that
+# means. `high >= close` on two independently rounded products fails on ties, so it counts
+# ties as violations. A check written that way reports on its own arithmetic, and it will do
+# so on any adjusted price panel, in every dataset in this chapter and yours.
 #
 # This is worth dwelling on because the plausible explanation is the wrong one. Per-field
 # vendor rounding would also produce failed ordering checks, and it would produce them at a
 # size a price could notice - a fraction of a cent, not a fraction of a trillionth. The count
 # alone cannot tell the two apart, and a reader who stops at the count will believe whichever
-# story they were told.
+# story they were told. Measuring the breach is what separates them, and it is three lines.
 
 # %% [markdown]
 # ## 5. Liquidity across the groups
@@ -402,9 +413,7 @@ print(f"  Configured symbols: {configured} across {len(etf_mgr.config.tickers)} 
 #   The groups here differ by more than an order of magnitude in daily volume, so a rotation
 #   that can trade one bucket at negligible cost cannot assume the same fills in another.
 #
-# **Known limitations.** `check_ohlc_invariants` compares strictly, so it reports these
-# tie-at-the-last-bit rows as violations on any adjusted panel; the rate it prints for this
-# dataset is a property of that comparison rather than of the data. The universe is fixed and
+# **Known limitations.** The universe is fixed and
 # every member is still quoted, so this panel says nothing about ETF closures - a real ETF universe does lose members, and a backtest that
 # selects from this pool inherits the survivorship its construction removed. Volume is in
 # shares rather than notional, so it is not comparable across price levels without converting.

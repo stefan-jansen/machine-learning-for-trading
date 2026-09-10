@@ -264,10 +264,17 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## 4. Data Quality
 #
-# These are raw exchange bars, not an adjusted panel, so the OHLC relations are exact rather
-# than approximate: the high is a maximum of prices that were printed and the low a minimum of
-# the same. Any breach at all is a defect in the capture, so the check reports a count rather
-# than a percentage against a tolerance.
+# These are raw exchange bars, not an adjusted panel, so the OHLC relations here are exact
+# rather than approximate: the high is a maximum of prices that were printed and the low a
+# minimum of the same. Nothing has been multiplied by an adjustment ratio, so there is no
+# arithmetic that could leave a high and a close a bit apart when they are the same price.
+#
+# `check_ohlc_invariants` compares against a relative tolerance, which is what an adjusted
+# panel needs and what `03_etfs_eda` shows the reason for. On this file that tolerance has
+# nothing to forgive, so the cell converts the percentage back into a count of bars: any
+# breach at all, of any size, would be a defect in the capture rather than a rounding
+# artifact, and a count of zero says that more plainly than a percentage that rounds to a
+# hundred.
 
 # %%
 # OHLC invariants
