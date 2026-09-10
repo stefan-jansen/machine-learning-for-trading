@@ -577,8 +577,22 @@ def generate_samples(generator: nn.Module, n_samples: int) -> np.ndarray:
     return synthetic
 
 
+# %% [markdown]
+# ### Choosing the rows to compare against
+#
+# `real_data` rows are consecutive trading days, so its first N rows are one stretch
+# of history rather than N draws from the period the generator was trained on. The
+# comparisons below read `real_eval` and the sweep reads `sweep_eval`, both drawn at
+# random from all of it.
+
 # %%
+eval_rng = np.random.default_rng(SEED)
 N_GENERATE = min(len(real_data), 5000)
+real_eval = real_data[eval_rng.choice(len(real_data), size=N_GENERATE, replace=False)]
+
+SWEEP_EVAL_ROWS = min(1000, len(real_data))
+sweep_eval = real_data[eval_rng.choice(len(real_data), size=SWEEP_EVAL_ROWS, replace=False)]
+
 synthetic_data = generate_samples(generator, N_GENERATE)
 print(f"Generated {len(synthetic_data)} synthetic samples with DP guarantees")
 
@@ -590,7 +604,7 @@ print(f"Generated {len(synthetic_data)} synthetic samples with DP guarantees")
 
 # %%
 fig = plot_fidelity_comparison(
-    real_data[:N_GENERATE],
+    real_eval,
     synthetic_data,
     title="DP-GAN: real against synthetic at the spent privacy budget",
     n_samples=min(1000, N_GENERATE),
@@ -671,7 +685,7 @@ def evaluate_quality(real: np.ndarray, synthetic: np.ndarray) -> dict:
 # ### Run Quality Evaluation
 
 # %%
-quality = evaluate_quality(real_data[:N_GENERATE], synthetic_data)
+quality = evaluate_quality(real_eval, synthetic_data)
 
 # %% [markdown]
 # ## 9. Visualize Training and Results
@@ -859,7 +873,7 @@ def collapse_diagnostics(sample: np.ndarray) -> dict:
 print("\n" + "=" * 60)
 print("PRIVACY-UTILITY TRADE-OFF ANALYSIS")
 print("=" * 60)
-_real_collapse = collapse_diagnostics(real_data[:1000])
+_real_collapse = collapse_diagnostics(sweep_eval)
 print(
     f"Real data, for reference: mean |off-diagonal corr| "
     f"{_real_collapse['mean_abs_offdiag_corr']:.3f}, "
@@ -886,8 +900,8 @@ for eps in epsilon_values:
     )
 
     # Evaluate
-    synth = generate_samples(gen, 1000)
-    q = evaluate_quality(real_data[:1000], synth)
+    synth = generate_samples(gen, SWEEP_EVAL_ROWS)
+    q = evaluate_quality(sweep_eval, synth)
     collapse = collapse_diagnostics(synth)
     tradeoff_results.append({"epsilon": eps, **q, **collapse})
     print(
