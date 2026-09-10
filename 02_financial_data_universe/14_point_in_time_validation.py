@@ -28,11 +28,12 @@
 # ## Learning Objectives
 # - Distinguish *event time* (when something happened) from *knowledge time*
 #   (when we learned about it), and the bitemporal axis for macro releases.
-# - Show why a centered moving average leaks future information visually,
-#   and why a level-vs-return correlation heuristic is a *weak* leakage
-#   detector that misses obvious cases.
-# - Build the corrected scale-invariant heuristic (feature-return ↔
+# - Show why a centered moving average leaks future information, and why a
+#   level-versus-return correlation heuristic misses it.
+# - Build the corrected scale-invariant heuristic (feature-return against
 #   future-return) that does fire for `close.pct_change(-1)` features.
+# - Determine, by measurement, what the macro panel's timestamps mean, and
+#   what a forward-fill over them costs when they are period stamps.
 # - Query FRED with `vintage_date` to see how the GDP advance estimate
 #   differs from the revised value.
 #
@@ -44,7 +45,8 @@
 # - ETF parquet files materialized under `ML4T_DATA_PATH`.
 # - Macro parquet (FRED snapshot) materialized under `ML4T_DATA_PATH` or
 #   loadable via `data.load_macro`.
-# - `FRED_API_KEY` environment variable for the live vintage query in §5
+# - `FRED_API_KEY` environment variable for the live vintage query, which is
+#   the last section so that everything before it runs without a key
 #   (free key at https://fred.stlouisfed.org/docs/api/api_key.html).
 
 # %%
@@ -58,37 +60,76 @@ import polars as pl
 from ml4t.data.providers import FREDProvider
 
 from data import load_etfs, load_macro
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# ### Declared parameters
+#
+# `LEAK_THRESHOLD` is the correlation above which the validator in the last-but-one section
+# calls a feature leaky. It is declared here rather than living on the class so the value the
+# reader sees and the value the check uses are the same one, and Section 4 prints the measured
+# correlations it has to separate.
+#
+# `MONTHLY_RELEASE_LAG_DAYS` and `QUARTERLY_RELEASE_LAG_DAYS` are how long after a period ends
+# its first estimate is published. They are round numbers standing in for a real release
+# calendar: US payrolls and unemployment land on the first Friday after the reference month,
+# CPI in the middle of the following month, and the GDP advance estimate about four weeks
+# after the quarter closes. A production system reads the actual calendar; these two make the
+# size of the correction visible.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+DEMO_SYMBOL = "SPY"
+MA_WINDOW = 5  # window for the leakage demonstrations
+MA_WINDOW_LONG = 20  # window for the figure
+PLOT_TAIL_DAYS = 120
+LEAK_THRESHOLD = 0.30  # |corr| above which the validator flags a feature
+MAX_GAP_DAYS = 5
+EXECUTION_LAG_ROWS = 1  # trading days between a close-of-day signal and its fill
+
+MONTHLY_RELEASE_LAG_DAYS = 7
+QUARTERLY_RELEASE_LAG_DAYS = 30
+MACRO_DEMO_SERIES = "unrate"
 
 # %% [markdown]
 # ## 1. Load Real Market Data
 #
-# SPY daily bars (2006-01-03 → 2025-12-31) anchor every example below.
+# Daily bars for one ETF anchor every example below.
 
 # %%
-spy = load_etfs().filter(pl.col("symbol") == "SPY").sort("timestamp")
-print(f"SPY data: {len(spy)} rows; {spy['timestamp'].min()} → {spy['timestamp'].max()}")
+spy = load_etfs().filter(pl.col("symbol") == DEMO_SYMBOL).sort("timestamp")
+print(f"{DEMO_SYMBOL}: {len(spy):,} rows; {spy['timestamp'].min()} to {spy['timestamp'].max()}")
 spy.head()
 
 # %% [markdown]
 # ## 2. Lookahead Bias: A Visual Demonstration
 #
-# A *centered* moving average computed at time $T$ averages prices in
-# $[T-2, T+2]$ — three of those five inputs are unavailable at $T$. The
-# trailing window only uses $[T-4, T]$, which is what a live system can
-# actually compute.
+# A *centered* moving average of width $w$ computed at time $T$ averages the window
+# $[T - \lfloor w/2 \rfloor,\ T + \lfloor w/2 \rfloor]$, so $\lfloor w/2 \rfloor$ of its
+# inputs have not happened yet: two of five for a five-day window, ten of twenty for a
+# twenty-day one. The trailing window of the same width uses $[T - w + 1,\ T]$, which is what
+# a live system can compute.
+#
+# The count matters more than it looks. Half a centered window is future, always, whatever
+# the width, so a longer centered average does not leak proportionally less - it leaks
+# further ahead.
 
 # %%
 spy_ma = (
     spy.with_columns(
-        pl.col("close").rolling_mean(window_size=20).alias("ma20_trailing"),
-        pl.col("close").rolling_mean(window_size=20, center=True).alias("ma20_centered"),
+        pl.col("close").rolling_mean(window_size=MA_WINDOW_LONG).alias("ma_trailing"),
+        pl.col("close").rolling_mean(window_size=MA_WINDOW_LONG, center=True).alias("ma_centered"),
     )
     .drop_nulls()
-    .tail(120)
+    .tail(PLOT_TAIL_DAYS)
+)
+
+_tracking = spy_ma.select(
+    (pl.col("close") - pl.col("ma_trailing")).abs().mean().alias("trailing"),
+    (pl.col("close") - pl.col("ma_centered")).abs().mean().alias("centered"),
+)
+print(
+    f"Mean absolute distance from the close over the plotted window: "
+    f"trailing {_tracking['trailing'][0]:.2f}, centered {_tracking['centered'][0]:.2f}"
 )
 
 # %%
@@ -104,40 +145,55 @@ fig.add_trace(
 fig.add_trace(
     go.Scatter(
         x=spy_ma["timestamp"].to_list(),
-        y=spy_ma["ma20_trailing"].to_list(),
-        name="20d trailing MA (PIT-correct)",
+        y=spy_ma["ma_trailing"].to_list(),
+        name=f"{MA_WINDOW_LONG}d trailing MA",
         line=dict(color=COLORS["slate"], width=2),
     )
 )
 fig.add_trace(
     go.Scatter(
         x=spy_ma["timestamp"].to_list(),
-        y=spy_ma["ma20_centered"].to_list(),
-        name="20d centered MA (uses future)",
+        y=spy_ma["ma_centered"].to_list(),
+        name=f"{MA_WINDOW_LONG}d centered MA",
         line=dict(color=COLORS["copper"], width=2, dash="dash"),
     )
 )
 fig.update_layout(
-    title="Trailing vs centered moving average — centered knows the future",
+    title=f"{DEMO_SYMBOL} close with trailing and centered moving averages",
     xaxis_title="Date",
-    yaxis_title="SPY price",
+    yaxis_title=f"{DEMO_SYMBOL} price",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A price line rising across about six months, with two moving averages drawn over it. "
+    "The solid trailing average runs below the price and turns after each move in it. The "
+    "dashed centered average runs above the trailing one for the whole window, shifted "
+    "left relative to it, and tracks the middle of the price's oscillation rather than "
+    "lagging behind it.",
+)
 
 # %% [markdown]
-# The dashed centered MA tracks SPY more tightly because it averages
-# tomorrow's price into today's smoother. A live trading system cannot
-# reproduce that line, so any backtest using it will overstate skill.
-
-# %% [markdown]
-# ## 3. Why the Naïve Correlation Heuristic Fails
+# The centered average sits closer to the close, by the measured distance printed above, and
+# it turns where the price turns rather than after it. Both follow from the same thing: half
+# its inputs are prices that had not printed yet. No live system can produce that line, so a
+# backtest that uses it reports skill the strategy could not have had.
 #
-# A natural-but-wrong leakage test correlates the *level* of a feature with
-# next-period *return*. The two live on different distributions: prices are
-# (close to) random walks while returns are mean-zero noise, so even a
-# feature constructed from tomorrow's close has a ~0 correlation with the
-# next-day return.
+# There is a second tell, and it is the one that shows up first in practice. A centered
+# average has no value for the most recent half-window, because those rows are still waiting
+# for inputs, so `drop_nulls` above silently ends the plotted series short of the data. A
+# feature that cannot be computed for today is a feature no live system can trade on, and
+# that missing tail is visible long before any correlation test is run.
+
+# %% [markdown]
+# ## 3. Why the Naive Correlation Heuristic Fails
+#
+# A leakage test that suggests itself is to correlate a feature's *level* with the next
+# period's *return*. It does not work, and the reason is not subtle once stated: a price
+# level is dominated by where the series has drifted to over years, and next-day returns are
+# close to mean-zero noise around that drift. The correlation is between a slow trend and a
+# fast wiggle, and it comes out near zero whether or not the feature contains tomorrow's
+# price. The next cell scores three features, one of which is tomorrow's close itself.
 
 
 # %%
@@ -155,32 +211,36 @@ def naive_leakage_corr(df: pl.DataFrame, feature: str, price: str = "close") -> 
 
 # %%
 naive_features = spy.with_columns(
-    pl.col("close").rolling_mean(window_size=5).alias("ma5_trailing"),
-    pl.col("close").rolling_mean(window_size=5, center=True).alias("ma5_centered"),
+    pl.col("close").rolling_mean(window_size=MA_WINDOW).alias("ma_trailing"),
+    pl.col("close").rolling_mean(window_size=MA_WINDOW, center=True).alias("ma_centered"),
     pl.col("close").shift(-1).alias("tomorrow_close"),
 ).drop_nulls()
+
+LEAKAGE_FEATURES = ["ma_trailing", "ma_centered", "tomorrow_close"]
 
 naive_results = pl.DataFrame(
     [
         {"feature": f, "naive_corr_with_next_return": naive_leakage_corr(naive_features, f)}
-        for f in ["ma5_trailing", "ma5_centered", "tomorrow_close"]
+        for f in LEAKAGE_FEATURES
     ]
 )
 naive_results
 
 # %% [markdown]
-# All three features score near zero — the heuristic flunks both the trailing
-# (clean) and the lookahead (centered, tomorrow's close) examples. The
-# problem is the units: a ~$500 price level has no scale relationship with a
-# ±1 % daily return. The fix is a **scale-invariant** test.
+# All three score near zero, including the one that *is* tomorrow's price. The test does not
+# separate a clean feature from a leaking one, so a feature matrix passing it has learned
+# nothing about itself.
+#
+# What the test needs is for both sides to be the same kind of quantity. Turning the feature
+# into its own period-over-period return does that, and it is what the next section builds.
 
 # %% [markdown]
 # ## 4. A Correct Scale-Invariant Leakage Test
 #
-# Convert any feature to its own period-over-period return, then correlate
-# with the next-period price return. A feature constructed from $\mathrm{close}_{T+k}$
-# now exposes itself: when $k \geq 1$ the feature-return at $T$ literally
-# *is* the price return some periods ahead, so the correlation jumps to ~1.
+# Convert any feature to its own period-over-period return, then correlate that with the next
+# period's price return. A feature built from $\mathrm{close}_{T+k}$ now exposes itself: for
+# $k \ge 1$ the feature's return at $T$ *is* the price return $k$ periods ahead, so the
+# correlation goes to one.
 
 
 # %%
@@ -211,23 +271,29 @@ fixed_results = pl.DataFrame(
             "feature": f,
             "scale_invariant_corr": leakage_corr_scale_invariant(naive_features, f),
         }
-        for f in ["ma5_trailing", "ma5_centered", "tomorrow_close"]
+        for f in LEAKAGE_FEATURES
     ]
 )
 fixed_results
 
 # %% [markdown]
-# The same three features now sort cleanly: the trailing MA stays low, the
-# centered MA's correlation jumps because three of its five inputs sit in
-# the future, and `tomorrow_close` (which is literally the next day's price)
-# saturates near 1. This is the leakage detector you actually want.
+# The same three features now sort: the trailing average stays low, the centered average
+# rises because two of its five inputs sit in the future, and `tomorrow_close` saturates near
+# one because it is the next day's price.
+#
+# What separates them is a gap in the middle of the scale, and the validator later in this
+# notebook puts its threshold there. The gap is what makes a threshold possible at all: a
+# detector whose clean and leaking cases sat close together would need a cutoff chosen to
+# produce the answer already known, which is not a detector.
 
 # %% [markdown]
-# ## 5. Signal–Trade Lag: Trading Days, Not Calendar Days
+# ## 5. Signal-to-Trade Lag: Trading Days, Not Calendar Days
 #
-# Daily strategies that close-of-day on $T$ must trade no earlier than the
-# open of $T+1$. The library helper `validate_signal_trade_lag` shifts by
-# *rows* (trading days) so weekends and holidays drop out automatically.
+# A signal computed from the close of $T$ can be acted on no earlier than the open of $T+1$.
+# The shift has to be by *rows* rather than by calendar days, because the next tradable
+# moment after a Friday close is a Monday open and no amount of date arithmetic knows which
+# Mondays are holidays. Shifting the timestamp column by rows inherits the trading calendar
+# from the data itself.
 
 
 # %%
@@ -241,51 +307,255 @@ def validate_signal_trade_lag(signals: pl.DataFrame, execution_lag: int = 1) -> 
 
 # %%
 spy_with_signal = spy.with_columns(
-    (pl.col("close") / pl.col("close").shift(5) - 1).alias("momentum_signal")
+    (pl.col("close") / pl.col("close").shift(MA_WINDOW) - 1).alias("momentum_signal")
 )
-validate_signal_trade_lag(spy_with_signal, execution_lag=1).select(
+_lagged = validate_signal_trade_lag(spy_with_signal, execution_lag=EXECUTION_LAG_ROWS)
+_calendar_gap = _lagged.select(
+    (pl.col("earliest_execution") - pl.col("signal_date")).dt.total_days().alias("days")
+).drop_nulls()
+print(
+    f"Calendar days between a signal and its earliest execution: "
+    f"{_calendar_gap['days'].min()} to {_calendar_gap['days'].max()}, "
+    f"for a lag of {EXECUTION_LAG_ROWS} trading day(s)"
+)
+print(_calendar_gap.group_by("days").len().sort("days"))
+_lagged.select(
     ["timestamp", "close", "momentum_signal", "signal_date", "earliest_execution"]
-).head(8)
+).drop_nulls().head(8)
 
 # %% [markdown]
-# ## 6. Macro Data Freshness and Forward-Fill
+# ## 6. What the Macro Panel's Timestamps Mean
 #
-# Macro series have very different cadences. Always forward-fill — never
-# back-fill — and remember that the timestamp must represent the *release*
-# date, not the period the data describes, for the fill to be PIT-safe.
+# Macro series arrive at different cadences and the panel stores them side by side on one daily
+# grid, so a column has to be carried forward between its own releases. The usual advice is to
+# forward-fill and never back-fill, and that advice is correct and not sufficient: it is safe
+# only if the timestamp is the date the number was *published*. If the timestamp is the period
+# the number *describes*, forward-filling from it hands a backtest a figure weeks before anyone
+# outside the statistical agency had it.
+#
+# Which convention this panel uses is a question about the file, so the next cells ask it.
 
 # %%
 macro = load_macro()
 macro = macro.rename({col: col.lower() for col in macro.columns})
 
 date_col = "timestamp" if "timestamp" in macro.columns else "date"
-macro_summary = pl.DataFrame(
-    [
-        {
-            "series": s,
-            "non_null": macro.filter(pl.col(s).is_not_null()).height,
-            "first": macro.filter(pl.col(s).is_not_null())[date_col].min(),
-            "last": macro.filter(pl.col(s).is_not_null())[date_col].max(),
-        }
-        for s in ["dgs10", "unrate", "vixcls"]
-        if s in macro.columns
-    ]
-)
-macro_summary
+_series_cols = [c for c in macro.columns if c != date_col]
 
-# %%
-unrate = (
-    macro.select([date_col, "unrate"])
-    .filter(pl.col(date_col).dt.year() >= 2023)
-    .with_columns(pl.col("unrate").forward_fill().alias("unrate_filled"))
-    .filter(
-        (pl.col(date_col) >= datetime(2023, 1, 1)) & (pl.col(date_col) <= datetime(2023, 3, 31))
+freshness = (
+    pl.DataFrame(
+        {
+            "series": _series_cols,
+            "nulls": [macro[c].null_count() for c in _series_cols],
+            "value_changes": [
+                macro.select((pl.col(c) != pl.col(c).shift(1)).sum()).item() for c in _series_cols
+            ],
+        }
     )
+    .with_columns(
+        (pl.col("value_changes") / (macro.height / 365.25)).round(1).alias("changes_per_year")
+    )
+    .sort("changes_per_year")
 )
-unrate.head(10)
+print(f"Macro panel: {macro.height:,} rows, {macro[date_col].min()} to {macro[date_col].max()}")
+print(f"Distinct dates: {macro[date_col].n_unique():,} (a row per calendar day, weekends included)")
+freshness
 
 # %% [markdown]
-# ## 7. Bitemporal GDP via FRED `vintage_date`
+# Two things are already visible. Every column is complete: there are no nulls to forward-fill,
+# because the panel arrives pre-filled. And the change counts sort the columns into cadences
+# without anyone declaring them, from a few changes a year up to one per business day.
+#
+# The convention question is answered by *when* the changes happen.
+
+# %%
+_change_day = (
+    pl.concat(
+        [
+            macro.select(
+                pl.lit(c).alias("series"),
+                pl.col(date_col).dt.day().alias("day_of_month"),
+            ).filter(
+                macro.select((pl.col(c) != pl.col(c).shift(1)).alias("x"))["x"]
+                & macro.select(pl.col(c).shift(1).is_not_null().alias("y"))["y"]
+            )
+            for c in _series_cols
+        ]
+    )
+    .group_by("series", "day_of_month")
+    .len()
+)
+_first_of_month = (
+    _change_day.group_by("series")
+    .agg(
+        pl.col("len").sum().alias("changes"),
+        pl.col("len").filter(pl.col("day_of_month") == 1).sum().alias("on_the_first"),
+    )
+    .with_columns((pl.col("on_the_first") / pl.col("changes")).alias("share_on_the_first"))
+    .sort("share_on_the_first", descending=True)
+)
+print("Share of each series' value changes that land on the first of a month:")
+_first_of_month
+
+# %% [markdown]
+# The low-cadence series change their value on the first of the month, every time. That is not
+# a release calendar: no statistical agency publishes on the first of every month, and none
+# publishes a quarter's output on the first day of that quarter. It is the period stamp. FRED
+# labels a monthly observation with the first day of the month it describes and a quarterly one
+# with the first day of the quarter, and the panel has carried each value forward from there.
+#
+# So the unemployment rate for a month is readable in this panel from that month's first day,
+# before the month it measures has finished, let alone been surveyed and published. The
+# forward-fill in this panel is not PIT-safe, and adding a forward-fill of its own would change
+# nothing, because there is nothing left to fill.
+
+# %%
+_period_days = {"monthly": 31, "quarterly": 92}
+
+
+def stamp_to_availability(frame: pl.DataFrame, column: str, cadence: str) -> pl.DataFrame:
+    """Move a period-stamped series to the date its first estimate could have been read.
+
+    The stamp is the first day of the period, so the period ends roughly a period length later
+    and the first estimate follows the declared release lag after that.
+    """
+    lag_days = _period_days[cadence] + (
+        MONTHLY_RELEASE_LAG_DAYS if cadence == "monthly" else QUARTERLY_RELEASE_LAG_DAYS
+    )
+    return frame.select(
+        (pl.col(date_col) + pl.duration(days=lag_days)).alias("available_from"),
+        pl.col(column).alias(f"{column}_pit"),
+    )
+
+
+_demo = macro.select(date_col, MACRO_DEMO_SERIES)
+_pit = stamp_to_availability(_demo, MACRO_DEMO_SERIES, "monthly")
+_joined = (
+    _demo.join(_pit, left_on=date_col, right_on="available_from", how="left")
+    .with_columns(pl.col(f"{MACRO_DEMO_SERIES}_pit").forward_fill())
+    .drop_nulls()
+)
+_differs = _joined.filter(pl.col(MACRO_DEMO_SERIES) != pl.col(f"{MACRO_DEMO_SERIES}_pit"))
+
+print(
+    f"Rows where the panel's {MACRO_DEMO_SERIES} and the release-lagged version disagree: "
+    f"{_differs.height:,} of {_joined.height:,} "
+    f"({100 * _differs.height / _joined.height:.0f}%)"
+)
+print(
+    "Largest disagreement: "
+    f"{(_differs[MACRO_DEMO_SERIES] - _differs[f'{MACRO_DEMO_SERIES}_pit']).abs().max():.1f} "
+    "percentage points"
+)
+_joined.filter(pl.col(date_col).dt.year() == 2020).head(12)
+
+# %% [markdown]
+# The two columns disagree on three days in four, and the widest disagreement is larger than
+# the whole range the series occupies in an ordinary decade: the unemployment rate moved by
+# more than ten points inside two months in 2020, and the panel's column carries the move
+# weeks before it was published.
+#
+# The lag applied here is a round number standing in for a release calendar, so the corrected
+# column is not itself production-grade. What it establishes is the direction and the magnitude:
+# the uncorrected column is early, on most days, by an amount that is large exactly when the
+# data is interesting. A macro feature built straight off this panel is a feature that knows the
+# recession before the recession was announced.
+#
+# The general rule, and the reason this notebook is here: **a timestamp is a claim about when
+# something was knowable, and the file rarely says which claim it is making.** Determine it by
+# measurement, once, and record the answer where the loader is.
+
+# ## 7. PIT Validator Walkthrough
+#
+# The scale-invariant leakage test, a date-monotonicity check and a gap audit, wrapped so a
+# whole feature matrix can be run through them in one call. The leakage threshold is the
+# declared `LEAK_THRESHOLD`, and Section 4's table is what justifies putting it where it is:
+# the clean features and the leaking ones are separated by most of the scale, so the cutoff
+# sits in empty space rather than between two adjacent measurements.
+
+
+# %%
+class PITValidator:
+    """Point-in-time validation for daily price-and-feature panels."""
+
+    def __init__(self, df: pl.DataFrame, date_col: str = "timestamp"):
+        self.df = df
+        self.date_col = date_col
+        self.violations: list[dict] = []
+
+    def check_future_leakage(self, feature_col: str, price_col: str = "close") -> dict:
+        corr = leakage_corr_scale_invariant(self.df, feature_col, price_col)
+        severity = "HIGH" if abs(corr) > LEAK_THRESHOLD else "LOW"
+        result = {
+            "feature": feature_col,
+            "scale_invariant_corr": round(corr, 4),
+            "severity": severity,
+            "violation": severity == "HIGH",
+        }
+        if result["violation"]:
+            self.violations.append(result)
+        return result
+
+    def check_date_gaps(self, max_gap_days: int = MAX_GAP_DAYS) -> dict:
+        gaps = (
+            self.df.sort(self.date_col)
+            .with_columns(pl.col(self.date_col).diff().dt.total_days().alias("gap_days"))
+            .filter(pl.col("gap_days") > max_gap_days)
+        )
+        return {
+            "rows": len(self.df),
+            "gaps_above_threshold": len(gaps),
+            "max_gap_days": int(gaps["gap_days"].max()) if len(gaps) > 0 else 0,
+        }
+
+    def check_monotonic_dates(self) -> dict:
+        diffs = self.df[self.date_col].diff().drop_nulls().dt.total_days()
+        is_sorted = bool((diffs >= 0).all())
+        return {"is_monotonic": is_sorted, "violation": not is_sorted}
+
+
+# %%
+spy_features = spy.with_columns(
+    pl.col("close").rolling_mean(window_size=MA_WINDOW).alias("ma_short_trailing"),
+    pl.col("close").rolling_mean(window_size=MA_WINDOW_LONG).alias("ma_long_trailing"),
+    pl.col("close").rolling_mean(window_size=MA_WINDOW, center=True).alias("ma_short_centered"),
+    pl.col("close").shift(-1).alias("tomorrow_close"),
+).drop_nulls()
+
+validator = PITValidator(spy_features)
+validation_table = pl.DataFrame(
+    [
+        validator.check_future_leakage(f)
+        for f in [
+            "ma_short_trailing",
+            "ma_long_trailing",
+            "ma_short_centered",
+            "tomorrow_close",
+        ]
+    ]
+)
+validation_table
+
+# %%
+gap_check = validator.check_date_gaps()
+mono_check = validator.check_monotonic_dates()
+print(
+    f"Date gaps over {MAX_GAP_DAYS} calendar days: "
+    f"{gap_check['gaps_above_threshold']} (max {gap_check['max_gap_days']} days); "
+    f"monotonic={mono_check['is_monotonic']}"
+)
+print(f"Features flagged as leaking: {len(validator.violations)} of {validation_table.height}")
+
+# %% [markdown]
+# The two constructed-from-the-future features are flagged and the two trailing averages are
+# not, which is the ordering the section set out to produce. It is worth being clear about
+# what that does and does not establish. The validator was run on features whose status was
+# known in advance, so this is a test of the validator, not of the features. Run against a
+# feature matrix nobody has audited, it will catch leakage that shows up as correlation with
+# the next return, and will not catch leakage that does not: a feature using a future value
+# of something *other* than the price it is scored against passes this check untouched.
+
+# ## 8. Bitemporal GDP via FRED `vintage_date`
 #
 # Macro data is revised. The FRED API's `realtime_start` / `realtime_end`
 # parameters return the values **as known at** a chosen historical date.
@@ -340,129 +610,56 @@ revisions = (
 revisions
 
 # %% [markdown]
-# Q1 2023 and Q2 2023 are unchanged between the two vintages, but the Q3
-# 2023 *advance* level (released 2023-10-26 and visible to a 2023-11-01
-# query) was revised down ~0.05 % by mid-2024. That is small for GDP but
-# would compound across many series in a macro-driven backtest.
+# The earlier quarters agree between the two vintages because they had already been revised
+# to their current values by the first vintage date. The most recent quarter does not: what a
+# query in late 2023 returned for it was the advance estimate, and by mid-2024 that number
+# had moved.
+#
+# The revision is small in percentage terms, which is the ordinary case and the reason this
+# is easy to skip. The problem is not the size of one revision. It is that a backtest reading
+# the current value is reading a number that did not exist at the decision date, for every
+# revised series it touches, and the direction of a revision is not noise: estimates are
+# revised toward what actually happened.
 
 # %% [markdown]
-# ## 8. PIT Validator Walkthrough
-#
-# Wrap the scale-invariant leakage test (above), a date-monotonicity check,
-# and a gap audit into a single class so it can be run over a feature
-# matrix in one call.
-
-
-# %%
-class PITValidator:
-    """Point-in-time validation for daily price-and-feature panels."""
-
-    LEAK_THRESHOLD = 0.30  # |corr| above which we flag
-
-    def __init__(self, df: pl.DataFrame, date_col: str = "timestamp"):
-        self.df = df
-        self.date_col = date_col
-        self.violations: list[dict] = []
-
-    def check_future_leakage(self, feature_col: str, price_col: str = "close") -> dict:
-        corr = leakage_corr_scale_invariant(self.df, feature_col, price_col)
-        severity = "HIGH" if abs(corr) > self.LEAK_THRESHOLD else "LOW"
-        result = {
-            "feature": feature_col,
-            "scale_invariant_corr": round(corr, 4),
-            "severity": severity,
-            "violation": severity == "HIGH",
-        }
-        if result["violation"]:
-            self.violations.append(result)
-        return result
-
-    def check_date_gaps(self, max_gap_days: int = 5) -> dict:
-        gaps = (
-            self.df.sort(self.date_col)
-            .with_columns(pl.col(self.date_col).diff().dt.total_days().alias("gap_days"))
-            .filter(pl.col("gap_days") > max_gap_days)
-        )
-        return {
-            "rows": len(self.df),
-            "gaps_above_threshold": len(gaps),
-            "max_gap_days": int(gaps["gap_days"].max()) if len(gaps) > 0 else 0,
-        }
-
-    def check_monotonic_dates(self) -> dict:
-        diffs = self.df[self.date_col].diff().drop_nulls().dt.total_days()
-        is_sorted = bool((diffs >= 0).all())
-        return {"is_monotonic": is_sorted, "violation": not is_sorted}
-
-
-# %%
-spy_features = spy.with_columns(
-    pl.col("close").rolling_mean(window_size=5).alias("ma5_trailing"),
-    pl.col("close").rolling_mean(window_size=20).alias("ma20_trailing"),
-    pl.col("close").rolling_mean(window_size=5, center=True).alias("ma5_centered_BAD"),
-    pl.col("close").shift(-1).alias("tomorrow_close_BAD"),
-).drop_nulls()
-
-validator = PITValidator(spy_features)
-validation_table = pl.DataFrame(
-    [
-        validator.check_future_leakage(f)
-        for f in [
-            "ma5_trailing",
-            "ma20_trailing",
-            "ma5_centered_BAD",
-            "tomorrow_close_BAD",
-        ]
-    ]
-)
-validation_table
-
-# %%
-gap_check = validator.check_date_gaps(max_gap_days=5)
-mono_check = validator.check_monotonic_dates()
-print(
-    f"Date gaps over 5 calendar days: {gap_check['gaps_above_threshold']} "
-    f"(max {gap_check['max_gap_days']} d); monotonic={mono_check['is_monotonic']}"
-)
-print(f"Violations flagged: {len(validator.violations)}")
-
 # %% [markdown]
 # ## Key Takeaways
 #
-# Operational PIT checks on SPY (2006-2025) and the FRED GDP series.
+# 1. **Half of a centered window is always in the future.** The share does not shrink as the
+#    window grows, so a longer centered average does not leak less; it leaks further ahead. The
+#    figure shows the consequence, and the printed distances measure it.
 #
-# ### Quantitative Findings
-# - **Naïve heuristic (level vs return correlation)** scores |0.0049|,
-#   |0.0100|, and |0.0189| for trailing-MA, centered-MA and `tomorrow_close`
-#   respectively — all near zero, so it cannot distinguish leakage from clean
-#   construction on this panel and is not a useful detector by itself.
-# - **Scale-invariant heuristic (feature-return vs next-return)** scores
-#   ~0 for the trailing MA-5 and momentum, jumps for the centered MA-5,
-#   and saturates near 1.0 for `tomorrow_close` — exactly the ordering one
-#   expects when leakage is real.
-# - **PIT validator** flags `ma5_centered_BAD` and `tomorrow_close_BAD` at
-#   the 0.30 threshold; trailing MA-5/20 pass. (Return-shaped features like
-#   5-day momentum should be checked by direct correlation rather than the
-#   pct_change-based helper, which destabilizes near zero.)
-# - **GDP vintage**: Q3 2023 GDP-level revision between vintages
-#   2023-11-01 and 2024-06-01 is −0.049 % ($27 623.5 → $27 610.1B). Q1/Q2
-#   are unchanged. Small in absolute terms, but every macro series in a
-#   backtest has its own revision profile.
-# - **Macro panel cadence**: `unrate` carries 9,497 daily forward-filled
-#   rows (2000-01-01 → 2025-12-31) but the underlying release is monthly —
-#   forward-fill across calendar days only is PIT-safe when the timestamp
-#   represents the release date, not the observation period.
+# 2. **Correlating a level against a return does not detect leakage.** Tomorrow's close, used
+#    directly as a feature, scores near zero on that test, alongside a clean trailing average.
+#    A feature matrix that passes it has learned nothing about itself.
 #
-# ### Implications for Practitioners
-# - **Construction matters more than detection**: the centered-MA leak is
-#   visible in the figure but invisible to the naïve correlation test.
-#   Detection is a backstop, not a substitute for code review.
-# - **Always express features in scale-invariant form** when running
-#   automated leakage scans.
-# - **Use vintage queries for any macro indicator that is revised** (GDP,
-#   payrolls, inflation). Revisions inflate apparent strategy quality if the
-#   final value is used for a trade decision the backtest maker only could
-#   have observed at the advance value.
+# 3. **Putting both sides in return space makes the same test work**, and the reason the
+#    threshold is placeable is that the clean and leaking cases end up separated by most of the
+#    scale. A cutoff between two adjacent measurements would be a cutoff chosen to produce the
+#    answer already known.
 #
-# **Next**: `15_survivorship_bias_detection` adds the
-# universe-membership dimension to the temporal correctness shown here.
+# 4. **A trading-day lag has to be applied by rows, not by dates.** One trading day is one to
+#    five calendar days depending on where in the week and the holiday calendar it falls, and
+#    the counts are printed above. Shifting the timestamp column by rows inherits the calendar
+#    from the data.
+#
+# 5. **The macro panel's timestamps are period stamps, not release dates, and this is
+#    measurable.** Every low-cadence series changes value on the first of a month, which no
+#    release calendar does. The panel arrives already carried forward from those stamps, so it
+#    is complete, a further forward-fill is a no-op, and reading a column gives a figure weeks
+#    before it was published. Compared against a release-lagged version, the panel's own
+#    column disagrees on three days in four, and at the widest by more than ten points of
+#    unemployment - the spring of 2020, when the difference between knowing and not knowing
+#    was the whole trade.
+#
+# 6. **Macro values are revised, so the current value is not the value that was available.**
+#    Vintage queries return what was knowable at a date. Revisions move estimates toward what
+#    actually happened, which is precisely the direction that flatters a backtest.
+#
+# 7. **Detection is a backstop, not a substitute for construction.** Every check here was run
+#    against features whose status was known in advance, which tests the check. On an unaudited
+#    matrix these checks catch the leakage that correlates with the scored return and miss the
+#    leakage that does not.
+#
+# **Next**: `15_survivorship_bias_detection` adds the universe-membership dimension to the
+# temporal correctness shown here.
