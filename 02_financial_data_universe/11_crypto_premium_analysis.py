@@ -36,8 +36,13 @@
 # case study built on this dataset lives in `case_studies/crypto_perps_funding/`.
 #
 # ## Prerequisites
-# - Crypto perpetual + premium parquet files materialized under `ML4T_DATA_PATH`.
-# - Loader `data.load_crypto_premium`.
+# - Crypto perpetual + premium parquet files materialized under `ML4T_DATA_PATH`
+#   (`data/crypto/market/download.py`).
+# - Binance's published funding settlements, which Section 5 scores the formula against.
+#   The perpetual downloader does not fetch them; `case_studies/crypto_perps_funding/
+#   funding_data.py` does.
+# - Loaders `data.load_crypto_premium` and
+#   `case_studies.crypto_perps_funding.funding_data.load_funding_rates`.
 #
 # ---
 
@@ -50,8 +55,8 @@ import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
+from case_studies.crypto_perps_funding.funding_data import load_funding_rates
 from data import load_crypto_premium
-from utils import ML4T_DATA_PATH
 from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% [markdown]
@@ -100,19 +105,26 @@ TAIL_CLIP_PCT = 0.5  # dropped from each end before binning the cross-asset hist
 #
 # ### Key properties
 #
-# 1. **Positive premium**: the perpetual is bid above the index, and longs pay shorts
-# 2. **Negative premium**: the perpetual is offered below it, and shorts pay longs
-# 3. **Exactly zero**: the index is inside the impact spread and no premium is owed
+# 1. **Positive premium**: the impact bid sits above the index - the perpetual's executable
+#    quote is rich
+# 2. **Negative premium**: the impact ask sits below the index - the executable quote is
+#    cheap
+# 3. **Exactly zero**: the index falls inside the impact spread
 # 4. **Funding rate**: derived from the premium index, settled every 8 hours on Binance
 #
-# ### Arbitrage Opportunity
+# ### Who pays whom
 #
-# When premium is significantly positive:
-# - **Long Spot** + **Short Perpetual** = Collect funding payments
-# - Market-neutral position captures the funding rate
+# The premium's sign does not answer this, and the difference is not a corner case. Funding
+# is $F = P + \operatorname{clamp}(I - P)$ with a positive interest rate $I$, so the premium
+# has to fall below $I - c$ before funding turns negative at all - a zero premium still
+# leaves longs paying shorts at exactly the interest rate. Section 5 derives this and
+# measures how often each case occurs.
 #
-# When premium is significantly negative:
-# - **Short Spot** + **Long Perpetual** = Collect funding payments
+# Payment direction follows the funding rate:
+#
+# - **Funding positive**: longs pay shorts. **Long Spot** + **Short Perpetual** collects it,
+#   market-neutral.
+# - **Funding negative**: shorts pay longs. **Short Spot** + **Long Perpetual** collects it.
 
 # %%
 premium_df = load_crypto_premium(frequency="8h")
@@ -582,10 +594,8 @@ print(
 # claim that can fail - and it is the check that separates the two readings of the clamp.
 
 # %%
-realized_funding = (
-    pl.read_parquet(ML4T_DATA_PATH / "crypto" / "market" / "funding_rate.parquet")
-    .select("timestamp", "symbol", pl.col("funding_rate").cast(pl.Float64).alias("realized"))
-    .filter(pl.col("symbol") == DEMO_SYMBOL)
+realized_funding = load_funding_rates(symbols=[DEMO_SYMBOL]).select(
+    "timestamp", "symbol", pl.col("funding_rate").cast(pl.Float64).alias("realized")
 )
 
 check = btc_funding.join(
@@ -679,27 +689,35 @@ print(f"  Annualized return (min): {ann_min:.1f}%")
 # %% [markdown]
 # ### The clamp does not bound the funding rate
 #
-# It is tempting to read the clamp as a cap: half a basis point per settlement, so an APY
-# ceiling somewhere near sixty percent. That is a misreading of the same formula, in the other
-# direction. Outside the dead zone the clamp saturates and the expression becomes
-# $F = P \mp c$ for the clamp half-width $c$, which tracks the premium wherever it goes. The
-# clamp bounds how far
-# funding can sit *from* the premium, not how large it can be.
+# It is tempting to read the clamp as a cap: five basis points per settlement either side of
+# the interest rate, so an APY ceiling somewhere in the tens of percent. That is a misreading
+# of the same formula, in the other direction. Outside the dead zone the clamp saturates and
+# the expression becomes $F = P \mp c$ for the clamp half-width $c$, which tracks the premium
+# wherever it goes. The clamp bounds how far funding can sit *from* the premium, not how
+# large it can be.
+#
+# The misreading's own bounds are worth writing down before testing them, because they are
+# not symmetric: $\operatorname{clamp}(P) + I$ runs from $I - c$ to $I + c$, which the
+# interest rate shifts off zero. Testing $|F|$ against the upper bound alone would miss every
+# violation below the lower one.
 #
 # The realized series settles it, and the answer is not marginal.
 
 # %%
-realized_all = pl.read_parquet(
-    ML4T_DATA_PATH / "crypto" / "market" / "funding_rate.parquet"
-).select("symbol", pl.col("funding_rate").cast(pl.Float64).alias("realized"))
+realized_all = load_funding_rates().select(
+    "symbol", pl.col("funding_rate").cast(pl.Float64).alias("realized")
+)
 
-_supposed_bound = FUNDING_CLAMP + INTEREST_RATE
+_supposed_floor = INTEREST_RATE - FUNDING_CLAMP
+_supposed_ceiling = INTEREST_RATE + FUNDING_CLAMP
+_beyond = (pl.col("realized") < _supposed_floor) | (pl.col("realized") > _supposed_ceiling)
 _btc_realized = realized_all.filter(pl.col("symbol") == DEMO_SYMBOL)["realized"]
 _annualize = PERIODS_PER_DAY * 365 * 100
 
 print(
-    f"If the clamp bounded funding, the ceiling would be {_supposed_bound:.4f} per settlement "
-    f"({_supposed_bound * _annualize:.1f}% APY)"
+    f"If the clamp bounded funding, it would run {_supposed_floor:.4f} to "
+    f"{_supposed_ceiling:.4f} per settlement "
+    f"({_supposed_floor * _annualize:.1f}% to {_supposed_ceiling * _annualize:.1f}% APY)"
 )
 print(
     f"Realized {DEMO_SYMBOL} funding actually ranges "
@@ -707,21 +725,26 @@ print(
     f"({_btc_realized.min() * _annualize:.0f}% to {_btc_realized.max() * _annualize:.0f}% APY)"
 )
 print(
-    f"  settlements beyond the supposed bound: {(_btc_realized.abs() > _supposed_bound).mean():.2%}"
+    f"  settlements outside those bounds: "
+    f"{realized_all.filter(pl.col('symbol') == DEMO_SYMBOL).select(_beyond.mean()).item():.2%}"
 )
 
 realized_all.group_by("symbol").agg(
-    pl.col("realized").min().alias("min_rate"),
-    pl.col("realized").max().alias("max_rate"),
-    (pl.col("realized").abs() > _supposed_bound).mean().alias("share_beyond_supposed_bound"),
-).sort("min_rate")
+    pl.col("realized").mean().alias("mean_rate"),
+    pl.col("realized").min().alias("min_observed"),
+    pl.col("realized").max().alias("max_observed"),
+    _beyond.mean().alias("share_outside_supposed_bounds"),
+).sort("min_observed")
 
 # %% [markdown]
 # Funding does have a hard cap, but it is a separate mechanism at a far wider level and it is
-# set per contract rather than universally - the table above shows the per-symbol floors and
-# ceilings the exchange enforced, and they differ by an order of magnitude across the universe.
-# The clamp is not that cap, and reading it as one understates the tail risk of a funding
-# strategy several times over on the most liquid contract and far more on the thin ones.
+# set per contract rather than universally. The table above does not show that cap: its
+# columns are the largest and smallest rates each contract actually settled at, which bound
+# the enforced limit from inside and say nothing about where it sits or whether it moved
+# during the sample. What they do establish is enough for the point at hand - the observed
+# extremes are already far outside the clamp, and they differ by an order of magnitude across
+# the universe. Reading the clamp as the cap understates the tail risk of a funding strategy
+# several times over on the most liquid contract and far more on the thin ones.
 
 # %%
 fig = go.Figure()
@@ -757,10 +780,13 @@ show_plotly_with_alt(
 print(f"Annualized funding return range: {ann_min:.1f}% to {ann_max:.1f}%")
 
 # %% [markdown]
-# One more count, and it is worth labelling carefully because the obvious label is wrong. The
-# share of settlements whose estimated APY exceeds a chosen level is not the share where the
-# clamp binds - the two were reported as the same number in an earlier version of this
-# notebook, and they differ by tens of percentage points.
+# One more count, and it needs labelling carefully. The share of settlements whose estimated
+# APY exceeds a chosen level and the share where the clamp binds are different quantities, and
+# the relation between them runs one way. Exceeding the threshold requires a binding clamp,
+# because funding without one is pinned at the interest rate and annualizes far below any
+# threshold worth setting. The clamp binding does not require exceeding the threshold: it binds
+# whenever the premium sits more than the clamp half-width from the interest rate, which is a
+# routine condition, and the resulting APY is usually nowhere near the threshold.
 
 # %%
 APY_THRESHOLD_PCT = 20
@@ -775,12 +801,16 @@ print(
     f"Settlements where the clamp binds:       {_clamp_binds:,} of {len(btc_funding):,} "
     f"({100 * _clamp_binds / len(btc_funding):.1f}%)"
 )
-print("These measure different things and neither implies the other.")
+print(
+    f"Without a binding clamp funding is exactly {INTEREST_RATE:.4f}, or "
+    f"{INTEREST_RATE * _annualize:.2f}% APY, so every settlement above the threshold is one "
+    f"where the clamp binds. The converse does not hold."
+)
 
 (
     high_conviction.sort("annualized_pct", descending=True)
     .head(10)
-    .select(["timestamp", "premium_index_close", "est_funding_rate", "annualized_pct"])
+    .select(["settles_at", "premium_index_close", "est_funding_rate", "annualized_pct"])
 )
 
 # %% [markdown]
@@ -824,9 +854,10 @@ print("These measure different things and neither implies the other.")
 #    badly, and most on the contracts where the tail is worst.
 #
 # 4. **Two different counts, one label.** The share of settlements whose APY exceeds a chosen
-#    threshold and the share where the clamp binds are different quantities; an earlier version
-#    of this notebook reported the first under the name of the second. Both are printed above,
-#    and they differ by tens of percentage points.
+#    threshold and the share where the clamp binds are different quantities, and the
+#    implication runs one way: exceeding the threshold requires a binding clamp, while the
+#    clamp binds routinely at premiums that move the APY hardly at all. Both are printed
+#    above, and they differ by tens of percentage points.
 #
 # 5. **The estimate is a proxy and says so.** Binance computes funding from a time-weighted
 #    average of the premium over the interval; this notebook has eight-hour bars and uses the
@@ -841,9 +872,13 @@ print("These measure different things and neither implies the other.")
 #
 # ### Implications for the funding-arbitrage case study
 #
-# - **Direction**: every contract in this panel has a negative mean premium over the sample, so
-#   the structural flow favours the side that is long the perpetual. That is a property of this
-#   window and not a law.
+# - **Direction**: the mean premium is negative for every contract in this panel, and the mean
+#   funding rate is *positive* for nearly all of them. The signs disagree because the
+#   transform is not monotone through zero: every premium within the clamp of the interest
+#   rate settles at the interest rate exactly, which is positive, so a premium distribution
+#   centred slightly below zero still pays longs-to-shorts on average. Read direction off the
+#   realized funding column in the per-symbol table above, never off the premium's sign. Both
+#   are properties of this window and not laws.
 # - **Regimes**: the rolling premium changes sign for long stretches, so a static threshold
 #   fires in one regime and never in the other. `case_studies/crypto_perps_funding/` carries
 #   the regime-aware version.
