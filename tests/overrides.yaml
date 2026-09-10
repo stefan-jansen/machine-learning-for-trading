@@ -1078,6 +1078,7 @@
   gpu: true
   timeout: 600
 23_knowledge_graphs/03_graph_rag_qa:
+  docker_env: ml4t+neo4j
   timeout: 300
 23_knowledge_graphs/05_institutional_holdings_kg:
   docker_env: ml4t+neo4j
@@ -1089,9 +1090,9 @@
   tier: on_demand
   timeout: 600
 23_knowledge_graphs/10_network_portfolio_construction:
-  docker_env: ml4t+neo4j
   timeout: 300
 23_knowledge_graphs/04_rag_comparison_benchmark:
+  gpu: true
   timeout: 300
 23_knowledge_graphs/01_sp100_sec_download:
   skip: true

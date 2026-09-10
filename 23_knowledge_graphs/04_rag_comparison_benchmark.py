@@ -61,7 +61,7 @@ import torch
 from sentence_transformers import SentenceTransformer
 
 from data import load_institutional_holdings_13f
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
@@ -328,8 +328,9 @@ def graph_retrieve(question: BenchmarkQuestion) -> list[str]:
 # ### Graph Token Budget
 #
 # Estimate the token cost of a structured-row response by concatenating the
-# selected fields with separators and applying the rough 1.3 words-per-token
-# multiplier the comparison-table uses for both retrievers.
+# selected fields with separators and applying the same rough words-per-token
+# multiplier the vector side uses, so the two budgets differ by representation
+# rather than by how they were counted. Neither is a tokenizer count.
 
 
 # %%
@@ -470,7 +471,18 @@ results.select(
 # not an estimated model advantage.
 
 # %% [markdown]
-# ## 6. Headline Metrics
+# ## 6. Headline metrics, and how to read them
+#
+# One of these two numbers is a measurement and the other is an assertion. The
+# oracle's recall is 1 because its predicates are the ones that built the gold
+# set, so the "delta" between the systems is just one minus the vector arm's
+# recall wearing a comparative label. The vector figure is the only estimated
+# quantity here.
+#
+# The token figures compare a structured row against the prose sentence built
+# from the same fields, so the difference is a property of the two
+# representations rather than of the retrievers. It is worth knowing - a
+# relational answer is compact - and it is not a model efficiency result.
 
 # %%
 graph_summary = summary.filter(pl.col("system") == "graph").row(0, named=True)
@@ -482,8 +494,16 @@ token_reduction = 1.0 - (
 )
 
 print("\nReal-data comparison")
-print(f"Support recall delta (graph - vector): {recall_delta:.2%}")
-print(f"Token reduction (graph vs vector): {token_reduction:.2%}")
+print(
+    f"Relational oracle support recall: {graph_summary['avg_support_recall']:.2%} (by construction)"
+)
+print(f"Vector support recall:            {vector_summary['avg_support_recall']:.2%}")
+print(f"  the difference, {recall_delta:.2%}, is one minus the vector figure and nothing more")
+print(
+    f"Retrieval tokens: {graph_summary['avg_retrieval_tokens']:.0f} for structured rows against "
+    f"{vector_summary['avg_retrieval_tokens']:.0f} for the prose form of the same rows "
+    f"({token_reduction:.0%} fewer)"
+)
 
 # %% [markdown]
 # ### Retrieval Comparison by Query Type
@@ -525,39 +545,47 @@ vector_tokens = [
 # %% [markdown]
 # #### Render Support and Context Panels
 
+# %% [markdown]
+# The oracle's recall is drawn as a reference line rather than as a series. It
+# is flat at 1 for every question kind and cannot be otherwise, so a bar for it
+# would put an assertion beside a measurement and invite the reader to compare
+# their heights.
+
 # %%
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], constrained_layout=True)
-axes[0].bar(
-    x - width / 2,
-    graph_recalls,
-    width,
-    label="Relational oracle",
+axes[0].bar(x, vector_recalls, width * 1.4, label="Vector retrieval", color=COLORS["amber"])
+axes[0].axhline(
+    graph_summary["avg_support_recall"],
     color=COLORS["blue"],
-)
-axes[0].bar(
-    x + width / 2,
-    vector_recalls,
-    width,
-    label="Vector retrieval",
-    color=COLORS["amber"],
+    linestyle="--",
+    linewidth=2,
+    label="Relational oracle (1 by construction)",
 )
 axes[0].set_xticks(x, kind_labels)
-axes[0].set_ylabel("Average Support Recall")
+axes[0].set_ylabel("Average support recall")
 axes[0].set_ylim(0, 1.15)
 axes[0].legend(frameon=False, ncol=2, loc="upper center")
 
-axes[1].bar(x - width / 2, graph_tokens, width, color=COLORS["blue"])
-axes[1].bar(x + width / 2, vector_tokens, width, color=COLORS["amber"])
+axes[1].bar(x - width / 2, graph_tokens, width, color=COLORS["blue"], label="Structured rows")
+axes[1].bar(x + width / 2, vector_tokens, width, color=COLORS["amber"], label="Prose rows")
 axes[1].set_xticks(x, kind_labels)
-axes[1].set_ylabel("Average Retrieval Tokens")
-axes[1].set_title("Estimated context includes each representation's formatting", loc="left")
+axes[1].set_ylabel("Average retrieval tokens")
+axes[1].set_title("Context size by representation, over the same retrieved rows", loc="left")
+axes[1].legend(frameon=False, ncol=2)
 
 add_message_title(
     axes[0],
-    "Explicit predicates trade semantic flexibility for exact support",
-    subtitle=f"{len(benchmark_questions)} questions over latest positions as of {BENCHMARK_CUTOFF}",
+    "Support recall by question kind, against the oracle ceiling",
+    subtitle="Benchmark questions over the latest disclosed positions at the cutoff",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels sharing three question-kind categories on the horizontal axis. Top: "
+    "bars for vector retrieval's average support recall, well below a dashed horizontal "
+    "reference line at one marking the relational oracle; the bars differ across the three "
+    "kinds and none reaches the line. Bottom: paired bars of average retrieval tokens, the "
+    "structured-row bar much shorter than the prose-row bar in every category.",
+)
 
 # %% [markdown]
 # ### Machine-Readable Completion Record
@@ -582,16 +610,41 @@ completion_record = {
 print("COMPLETION_RECORD=" + json.dumps(completion_record, sort_keys=True))
 
 # %% [markdown]
-# The structured lookup achieves perfect recall because the benchmark support
-# is defined by the same predicates. The embedding baseline is a useful contrast,
-# but seven generated questions do not establish production accuracy or cost.
+# The structured lookup reaches perfect recall because the benchmark support is
+# defined by its own predicates - the assertion above enforces it, so a change
+# that broke the identity would stop the notebook rather than quietly produce a
+# comparison. The embedding baseline is the contrast worth having, and seven
+# generated questions over ten institutions do not establish production
+# accuracy or cost.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **This benchmark uses real 13F holdings rows** rather than synthetic prompts or simulated outcomes.
-# 2. **Graph retrieval is evaluated on exact support recall**, which is the right failure mode for multi-entity financial questions.
-# 3. **Vector retrieval pays a larger context budget** because it must recover answer rows from free-text holdings statements.
-# 4. **Question mix matters**: direct holdings lookup is easier for both systems, while co-ownership questions create the clearest structural advantage for graph retrieval.
+# 1. **Only one arm of this benchmark is measured.** The relational side runs
+#    the predicates that defined the gold support set, so its recall is 1 for
+#    every question and would be whatever those predicates returned. What the
+#    run estimates is how much of that support an embedding retriever recovers
+#    from prose descriptions of the same rows. Read the vector column; the
+#    difference between the columns adds nothing to it.
 #
-# **Next**: See `03_graph_rag_qa.py` for the read-only text-to-Cypher layer that turns these graph lookups into a controlled QA workflow.
+# 2. **The oracle is still the right baseline to draw.** It is what an explicit
+#    relational representation gives you for free, and its value here is that it
+#    fixes the ceiling rather than that it ranks above anything. A benchmark with two
+#    estimated arms would be a different and more expensive notebook.
+#
+# 3. **The token difference is a representation difference.** Both budgets are
+#    the same rows: one as `institution | issuer | value | date`, the other as
+#    an English sentence saying the same thing. That a relational answer is
+#    compact is worth knowing and is not a measurement of retriever efficiency,
+#    and neither figure is a tokenizer count.
+#
+# 4. **Where the vector arm loses is worth reading per question kind**, and the
+#    per-question audit above is where to read it: one holder question is
+#    recovered completely and another is missed completely, which says more
+#    about how the issuer is named in the corpus than about question difficulty.
+#
+# 5. **Seven questions over ten institutions.** Enough to show the shape of the
+#    failure, not enough to size it.
+#
+# **Next**: [`03_graph_rag_qa`](03_graph_rag_qa.ipynb) puts a read-only
+# text-to-Cypher layer over these lookups.
