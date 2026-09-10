@@ -485,6 +485,12 @@ else:
 #
 # Passing `groups` and `units` makes it permute within each ETF, where `BLOCK_SIZE` counts
 # that ETF's own ordered trading days and a block is the three weeks the name promises.
+#
+# Each placebo also runs the estimator being tested, with the same fold count and embargo. A
+# placebo fitted on three folds against an estimate fitted on five is a different estimator
+# on a different number of cross-fitted rows, and the null would then be centred wherever
+# that difference puts it rather than where the absence of an effect does. The observed
+# statistic itself moves between the two settings.
 
 # %%
 # Test 2: Block Permutation Test (uses shared block_permute)
@@ -512,7 +518,8 @@ for i in range(N_PLACEBO_PERMUTATIONS):
             df_perm[outcome_col].values,
             df_perm[treatment_col].values,
             df_perm[confounder_cols].values,
-            n_folds=3,
+            n_folds=CV_FOLDS,  # the estimate's own setting; see the markdown above
+            embargo=LABEL_HORIZON,
             groups=decision_times,
             horizon=FORWARD_HORIZON,
         )
@@ -591,13 +598,16 @@ else:
 # and only the count is a statement about the null the test actually built. Read the count
 # printed above, and the mean and standard deviation beside it, before reading the z-score.
 #
-# **And this null is not centred at zero.** Permuting blocks within a symbol reorders when
-# that symbol's momentum was high; it leaves untouched *which* symbols had high momentum on
-# average and which had high average forward returns. The between-symbol part of the
-# association is therefore intact in every draw, and the null the test builds is the narrower
-# one of "no within-symbol timing relation", not "no relation". A placebo mean well away from
-# zero is that between-symbol component showing up, and it is the reason the count and the
-# z-score part company here.
+# **This null is not centred at zero, and that is worth looking at rather than reporting.**
+# A permutation that implemented "no association" would put the placebo statistics around
+# zero. Two obvious explanations do not survive a check: demeaning the fitted residuals by
+# symbol leaves the placebo estimates positive, and so does demeaning them by date, so
+# neither a preserved between-symbol nor a preserved between-date component accounts for it.
+# What does is not settled here. Until it is, the count is the statistic to read - it asks
+# how often a permuted treatment reaches the observed statistic, which stays a fair question
+# whatever the distribution's centre - and the z-score, which measures distance from that
+# centre in placebo standard deviations, is a statement about a distribution the test has not
+# explained.
 
 # %% [markdown]
 # The two halves are cut at a decision time rather than at a row, so neither holds a

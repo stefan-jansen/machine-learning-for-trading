@@ -610,6 +610,11 @@ print(f"  Difference: {abs(econml_effect - dml_effect):.6f}")
 # support. Each permutation's t-statistic divides by its own standard error, so the scale
 # cancels and what is left is the question the refutation is for: is the alignment between
 # treatment and outcome stronger than the alignment a shuffle produces?
+#
+# Each placebo also runs the estimator being tested, with the same fold count and embargo. A
+# placebo fitted on fewer folds is a different estimator on a different number of cross-fitted
+# rows, and the null would then be centred wherever that difference puts it rather than where
+# the absence of an effect does.
 
 # %%
 block_sweep_rows = []
@@ -636,7 +641,7 @@ for block_size in BLOCK_SIZES:
             Y,
             T_placebo,
             X,
-            n_folds=3,
+            n_folds=CV_FOLDS,  # the estimate's own setting; see the markdown above
             embargo=EMBARGO_PERIODS,
             groups=decision_times,
             hac_maxlags=HAC_LAGS,
