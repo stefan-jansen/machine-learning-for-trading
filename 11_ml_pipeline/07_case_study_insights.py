@@ -1551,16 +1551,24 @@ else:
 # %% [markdown] tags=[]
 # ### 6c. Top-N feature overlap across case studies
 #
-# Are the same features driving the linear signal across case studies,
-# or does each case study have its own world? For each case study's
-# highest-IC linear configuration on the primary label, we rank
-# features by mean absolute fold coefficient and take the top 10. The
-# pairwise Jaccard overlap of these sets shows how much feature
-# selection generalizes across panels.
+# Are the same features driving the linear signal across case studies, or does
+# each case study have its own world? For each case study's highest-IC linear
+# configuration on the primary label, we rank features by mean absolute fold
+# coefficient and take the leading `TOP_N`, then measure the pairwise Jaccard
+# overlap of those sets.
+#
+# A low overlap has two explanations and the matrix alone cannot separate them:
+# the panels select different features from a library they share, or their
+# libraries barely overlap to begin with. The summary under the heatmap reports
+# how many feature names the most similar pair of panels has in common, which is
+# what tells the two apart.
 
 # %% tags=[]
 TOP_N = 10
 top_features: dict[str, set[str]] = {}
+# The library each fit had to choose from, so the overlap below can be read against how
+# many names the two panels share at all.
+panel_features: dict[str, set[str]] = {}
 for row in rank1.iter_rows(named=True):
     cs = row["case_study"]
     cfg = row["config_name"]
@@ -1582,6 +1590,7 @@ for row in rank1.iter_rows(named=True):
     if feature_score.is_empty():
         continue
     top_features[row["short_name"]] = set(feature_score["feature"].to_list())
+    panel_features[row["short_name"]] = set(coefs["feature"].unique().to_list())
 
 print(f"Top-{TOP_N} feature sets collected for {len(top_features)} case studies.")
 
@@ -1639,8 +1648,9 @@ else:
     colorbar.set_label("Jaccard overlap")
     show_with_alt(
         fig,
-        f"Symmetric heatmap of the pairwise Jaccard overlap between each pair of case "
-        f"studies' top-{TOP_N} coefficient features, each cell labelled with its value.",
+        "Symmetric heatmap of the pairwise Jaccard overlap between each pair of case "
+        "studies' leading coefficient features, each cell labelled with its value. The "
+        "title names how many features each set holds.",
     )
 
 # %% tags=[]
@@ -1655,12 +1665,30 @@ overlap_phrase = (
     if has_overlap
     else "unavailable, because fewer than two panels contributed a feature set"
 )
+# How many feature names the most-overlapping pair of panels has in common. A zero top-N
+# overlap between panels with disjoint libraries says nothing about selection.
+shared_library = [
+    (len(panel_features[a] & panel_features[b]), a, b)
+    for index, a in enumerate(cs_names)
+    for b in cs_names[index + 1 :]
+]
+most_shared = max(shared_library) if shared_library else (0, "", "")
 if has_overlap:
+    if most_shared[0] > 0:
+        _library_note = (
+            f"The panels are not simply drawing on disjoint libraries: **{most_shared[1]}** "
+            f"and **{most_shared[2]}** have {most_shared[0]} feature names in common, and "
+            "their leading features are still selected from different parts of it."
+        )
+    else:
+        _library_note = (
+            "No two panels share a feature name here, so this overlap is a statement about "
+            "the libraries rather than about what each fit selected from them."
+        )
     display(
         Markdown(
             f"The largest off-diagonal top-{TOP_N} Jaccard overlap is **{max_overlap:.2f}**. "
-            "Each selected fit draws primarily on its panel-specific feature library; recurring "
-            "momentum or volatility primitives do not form a universal short list."
+            + _library_note
         )
     )
 else:
