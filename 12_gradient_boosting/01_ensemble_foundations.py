@@ -41,6 +41,8 @@
 # %%
 """Ensemble Foundations - benchmark bagging against boosting on financial return prediction."""
 
+import warnings
+
 import catboost as cb
 import lightgbm as lgb
 import matplotlib.pyplot as plt
@@ -56,6 +58,16 @@ from data import load_firm_characteristics
 from utils.paths import display_path, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLOR_CYCLER, COLORS, show_with_alt
+
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
 
 OUTPUT_DIR = get_output_dir(12, "us_firm_characteristics")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -347,13 +359,17 @@ display(
 # %% [markdown]
 # **What to read off it.** These bars are one split with no interval attached, so the
 # ordering is what this run produced rather than a measurement of which method is
-# better on data of this kind. Two things keep that in proportion. The drop from
-# validation to test inside any single model is far larger than the spread between
-# models on test, and that drop is the scale a between-model gap has to be read
-# against. And the two panels need not order the models the same way: rank IC scores
-# how well a model orders the cross-section, $R^2$ scores how close its predictions
-# are in level, and a model can do better on one and worse on the other. A conclusion
-# that holds in one panel and not the other is a conclusion about the panel.
+# better on data of this kind. The results cell prints two numbers to hold against
+# each other: how far apart the models are on test, and how far a single model moves
+# between validation and test. Where the second is the larger, a between-model
+# ordering is smaller than the movement one model shows across splits, and reading a
+# ranking off it is reading that movement.
+#
+# The two panels also need not order the models the same way. Rank IC scores how well
+# a model orders the cross-section, $R^2$ scores how close its predictions sit to the
+# realized return, and a model can do better on one and worse on the other. A
+# conclusion that holds in one panel and not the other is a conclusion about the
+# panel.
 
 # %% [markdown]
 # ## 5. Feature Importance
