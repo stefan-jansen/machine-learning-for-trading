@@ -828,10 +828,15 @@ show_with_alt(
     "Net, each with an error bar one standard deviation wide.",
 )
 # %% [markdown]
-# The error bars are the finding. Every method's spread across folds is wider than the gaps
-# between the methods, so ranking them on this evidence would be ranking noise. What the
-# chart supports is that all four land in the same place and that a single fold could put any
-# of them on top.
+# The error bars are wider than the gaps between the bars, which is worth seeing and is less
+# than it looks. Every method is scored on the same folds, so their scores rise and fall
+# together with whatever each fold happens to contain - and a method can be consistently
+# ahead of another while both have wide marginal spreads. Overlapping error bars across
+# methods do not settle whether one is ahead of another.
+#
+# What settles it is the paired difference: subtract the two methods' IC fold by fold and
+# look at the spread of that series, which cancels the fold effect these bars are dominated
+# by. This chart shows the spread; it does not compare the methods.
 # %% [markdown] tags=[]
 # ### Prediction Rank Stability
 #
@@ -913,9 +918,12 @@ show_with_alt(
 )
 # %% [markdown]
 # The two series come apart, and where they do is the point. The feature count falls away
-# long before the information coefficient responds, so over that range LASSO is removing
-# features the model was not using. Reading the count alone would suggest the model is being
-# damaged; reading both says it is being simplified.
+# over a range where mean validation IC does not, so across that range LASSO produces a
+# sparser model at no observed cost in ranking accuracy.
+#
+# That is not the same as saying the dropped features carried nothing. Their coefficients
+# were non-zero and did contribute; what happens on refitting is that correlated features
+# take up the contribution. The chart shows the trade is available, not that it is free.
 # %% [markdown] tags=[]
 # ### LASSO Coefficient Path (Top 10 Features)
 #
