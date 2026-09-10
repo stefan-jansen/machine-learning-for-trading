@@ -63,7 +63,6 @@
 08_financial_features/06_robustness_sensitivity.py
 08_financial_features/07_event_studies.py
 08_financial_features/case_study_feature_summary.py
-15_causal_estimation/09_adia_causal_benchmark.py
 15_causal_estimation/11_factor_zoo_validation.py
 16_strategy_simulation/01_backtest_first_principles.py
 16_strategy_simulation/02_futures_backtesting.py

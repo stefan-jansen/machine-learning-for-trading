@@ -30,7 +30,8 @@
 #
 # **What ADIA Shows**:
 # - If you have many labeled dataset–DAG pairs from the same data-generating process,
-#   supervised methods can outperform classical discovery on new samples from that family
+#   supervised methods can reach a higher accuracy than classical discovery on new samples
+#   from that family
 #
 # **What ADIA Does NOT Show**:
 # - That observational data alone is sufficient for reliable causal discovery
@@ -50,19 +51,19 @@
 # %% [markdown]
 # ## 1. Setup and Configuration
 
+# %% [markdown]
+# **`lightgbm` is imported before `scikit-learn`, and the order matters.** Both ship their own
+# OpenMP runtime and the first one loaded wins for the whole process. On macOS ARM64, getting
+# scikit-learn's `libomp` first makes LightGBM's next multithreaded fit segfault inside the
+# OpenMP thread-suspend path, killing the kernel with no traceback. The `import
+# lightgbm` beside the training cell further down cannot fix it - by then the module header
+# has already lost the race - so the binding is established here and re-stated there for the
+# reader. A pre-commit hook checks the order.
+
 # %%
 """Causal discovery under a simulator: lessons from the ADIA Lab Challenge."""
 
-import warnings
-
-# lightgbm must be imported before scikit-learn. Both ship their own OpenMP
-# runtime and the first one loaded wins for the whole process; on macOS ARM64,
-# getting scikit-learn's libomp first makes LightGBM's next multithreaded fit
-# segfault in __kmp_suspend_initialize_thread, killing the kernel with no
-# traceback. The `import lightgbm` further down, beside the training cell that
-# uses it, cannot fix this - by then the module header has already lost the
-# race - so the binding is established here and re-stated there for the reader.
-import lightgbm as lgb  # noqa: F401
+import lightgbm as lgb  # noqa: F401  # first, for OpenMP; see the markdown above
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
@@ -72,9 +73,7 @@ from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 from sklearn.model_selection import StratifiedGroupKFold
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 N_DATASETS = 2000
@@ -477,8 +476,8 @@ print(f"Number of features: {feature_df.shape[1]}")
 # %% [markdown]
 # ## 6. Baseline: Conditional-Independence Heuristic
 #
-# Traditional constraint-based baselines achieved approximately 40% balanced accuracy in the
-# official challenge. The compact rule below is not the PC algorithm: it maps marginal and
+# Traditional constraint-based baselines reached roughly two in five on balanced accuracy in
+# the official challenge. The compact rule below is not the PC algorithm: it maps marginal and
 # conditional-independence tests directly to the eight roles. It provides an in-notebook baseline
 # on exactly the same simulated datasets as the supervised model.
 
@@ -583,7 +582,7 @@ for fold, (train_idx, val_idx) in enumerate(cv.split(X_train, y_train, groups)):
 oof_accuracy = balanced_accuracy_score(y_train, all_oof_preds)
 print(f"\nOverall OOF Balanced Accuracy: {oof_accuracy:.1%}")
 print(f"Mean ± std across folds: {np.mean(fold_scores):.1%} ± {np.std(fold_scores):.1%}")
-print("ADIA winner (reported external benchmark): 76.70%")
+print("ADIA challenge, top reported score on the official data: 76.70%")
 
 # %% [markdown]
 # ## 8. Model Diagnostics
@@ -672,17 +671,19 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=(
-        f"{category_tick_labels[largest_category]} nodes make up "
-        f"{category_shares[largest_category]:.1%} of labeled roles"
-    ),
+    title="Share of labeled nodes in each causal role",
     xaxis_title="Causal role",
     yaxis_title="Share of labeled nodes",
     yaxis=dict(range=[0, max(category_shares) * 1.18], tickformat=".0%"),
     margin=dict(b=100),
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bar chart of the share of labeled nodes falling in each causal role, with the share "
+    "printed above every bar and the largest role drawn in amber against blue for the rest. "
+    "The roles are unevenly represented.",
+)
 
 # %% [markdown]
 # ### Supervision Helps Across Roles
@@ -703,7 +704,7 @@ for method, color in [("CI heuristic", COLORS["neutral"]), ("Supervised", COLORS
         )
     )
 fig.update_layout(
-    title=f"Group-isolated supervision improves {improved_count} of 8 causal roles",
+    title="Role accuracy of the CI heuristic and the supervised model",
     xaxis_title="Causal role",
     yaxis_title="Role accuracy",
     yaxis=dict(range=[0, 1], tickformat=".0%"),
@@ -711,7 +712,12 @@ fig.update_layout(
     margin=dict(b=100, t=90),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bar chart with one pair of bars per causal role, the conditional-independence "
+    "heuristic beside the supervised model, on a shared accuracy axis running from zero to "
+    "one. A legend above the plot names the two methods.",
+)
 
 # %% [markdown]
 # ### Confusion Matrix
@@ -743,13 +749,19 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=f"Grouped cross-validation reaches {oof_accuracy:.1%} balanced accuracy",
+    title="Row-normalized confusion matrix of the out-of-fold predictions",
     xaxis_title="Predicted category",
     yaxis_title="True category",
     height=560,
     margin=dict(l=115, b=100, t=90, r=60),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of the row-normalized confusion matrix over the causal roles, true category on "
+    "the vertical axis and predicted category on the horizontal one. Each cell prints its "
+    "rate as a percentage of that true category's nodes and carries the underlying count in "
+    "its hover label; darker cells are higher rates.",
+)
 
 # %% [markdown]
 # ### Feature Importance
@@ -772,20 +784,26 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=f"{top_feature_name.title()} carries the most simulator-specific predictive gain",
+    title="Share of LightGBM gain carried by each feature",
     xaxis_title="Share of LightGBM gain across folds",
     yaxis_title="Feature",
     height=500,
     xaxis=dict(tickformat=".0%"),
     margin=dict(l=165, t=90),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart of the twelve features carrying the largest share of LightGBM gain, "
+    "ordered by that share, each with a horizontal error bar giving its spread across the "
+    "cross-validation folds.",
+)
 
 # %% [markdown]
 # ### Method Comparison
 #
-# The first two bars share this notebook's simplified simulator. The final bar is the reported ADIA
-# winner and provides external context, not a like-for-like ranking.
+# The first two bars share this notebook's simplified simulator. The third is the score the
+# challenge's top entry reported on the official data, external context rather than a
+# like-for-like ranking.
 
 # %%
 method_names = [
@@ -807,15 +825,21 @@ fig = go.Figure(
 )
 fig.update_layout(
     title=(
-        f"Supervision gains {oof_accuracy - baseline_accuracy:.0%} within the local simulator"
-        "<br><sup>The ADIA winner is external context, not a like-for-like comparison</sup>"
+        "Balanced accuracy of the two local methods and the reported ADIA score"
+        "<br><sup>The ADIA score is external context, not a like-for-like comparison</sup>"
     ),
     xaxis_title="Method and benchmark",
     yaxis_title="Balanced accuracy",
     yaxis=dict(range=[0, 1], tickformat=".0%"),
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bar chart of three balanced-accuracy scores with the value printed above each bar: the "
+    "local conditional-independence heuristic, the local grouped-cross-validation LightGBM "
+    "model, and the score reported by the ADIA challenge entry. The third bar is drawn in "
+    "amber to mark that it comes from a different dataset.",
+)
 
 # %% [markdown]
 # ## 10. Results Reflection
@@ -846,7 +870,7 @@ that family. It is not an estimate of causal-discovery accuracy on financial tim
 #
 # ### Critical Reading: Benchmark Limitations
 # - **Reisach et al. (2021)**, "Beware of the Simulated DAG! Causal Discovery Benchmarks
-#   May Be Easy To Game." [arXiv:2102.13647](https://arxiv.org/abs/2102.13647)
+#   May Be Easy To Game." [Preprint](https://arxiv.org/abs/2102.13647)
 #
 # ### Classical Causal Discovery References
 # - Spirtes et al. (2000), *Causation, Prediction, and Search* (PC algorithm)
