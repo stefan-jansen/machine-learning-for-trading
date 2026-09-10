@@ -126,6 +126,10 @@ warnings.filterwarnings(
 # %% tags=["parameters"]
 SEED = 42
 MAX_TRAIN_STEPS = -1
+# How many sentences to score in the validation and test splits; 0 means all of them.
+# This is the knob that decides whether CI can run this notebook - see the comment above
+# the split below.
+MAX_EVAL_SAMPLES = 0
 
 # %% [markdown]
 # `set_global_seeds` covers Python, NumPy and Torch. The Trainer draws from its own generator
@@ -239,6 +243,33 @@ def create_dataset_dict(train_df: pl.DataFrame, val_df: pl.DataFrame, test_df: p
 
 
 dataset = create_dataset_dict(train_df, val_df, test_df)
+
+# Scoring, not training, is what this notebook spends its time on, and MAX_TRAIN_STEPS
+# does not touch it. Each model is scored on the validation split every `eval_steps`
+# during training and once on the test split at the end, and a full pass costs 183s on
+# one CPU thread against 727 sentences. Under `MAX_TRAIN_STEPS: 20` that is two
+# in-training evaluations plus two passes over the test split, so twenty training steps
+# sit behind about twelve minutes of inference per model. Bounding the scored splits is
+# the knob that reaches that; bounding the model count would leave a three-way
+# comparison with one entry.
+#
+# 0 means score everything, which is what a real run does. The splits are already
+# shuffled and stratified by `train_test_split`, so a prefix of each is class-balanced
+# in expectation.
+if MAX_EVAL_SAMPLES > 0:
+    dataset = DatasetDict(
+        {
+            "train": dataset["train"],
+            "validation": dataset["validation"].select(
+                range(min(MAX_EVAL_SAMPLES, len(dataset["validation"])))
+            ),
+            "test": dataset["test"].select(range(min(MAX_EVAL_SAMPLES, len(dataset["test"])))),
+        }
+    )
+    print(
+        f"Scored splits bounded to {MAX_EVAL_SAMPLES}: "
+        f"val {len(dataset['validation'])}, test {len(dataset['test'])}"
+    )
 
 # %% [markdown]
 # ## The three checkpoints, and which of them can be read as held out
@@ -406,7 +437,12 @@ def fine_tune_model(model_name: str, spec: dict, dataset: DatasetDict) -> dict:
     train_result = trainer.train()
     train_time = time.time() - start_time
 
-    # Evaluate on test set
+    # `evaluate` and `predict` both make a full forward pass over the test split and
+    # report the same accuracy and macro F1, so this scores it twice. Collapsing them
+    # into a single `predict(..., metric_key_prefix="eval")` is correct and saves a
+    # pass per model, but it moves the two models fine-tuned after it - DeBERTa-v3 to
+    # 96.8% and ModernBERT to 97.9%, which puts ModernBERT above FinBERT and makes the
+    # "scores highest" in takeaway 2 false. ml4t/agent-workspace#1121 carries it.
     test_results = trainer.evaluate(tokenized["test"])
 
     # Get predictions for confusion matrix
@@ -550,11 +586,14 @@ show_with_alt(
 
 # %%
 n_models = len(results)
-fig, axes = plt.subplots(1, n_models, figsize=FIGSIZE["triple_h_tall"])
+# `squeeze=False` so this cell does not depend on how many models ran. `n_models` is
+# read from `results`, and without it a one-model dict gets a bare Axes rather than an
+# array and the zip below raises `'Axes' object is not iterable`.
+fig, axes = plt.subplots(1, n_models, figsize=FIGSIZE["triple_h_tall"], squeeze=False)
 
 labels = ["negative", "neutral", "positive"]
 
-for ax, (name, r) in zip(axes, results.items(), strict=True):
+for ax, (name, r) in zip(axes[0], results.items(), strict=True):
     cm = confusion_matrix(r["y_true"], r["y_pred"])
     sns.heatmap(
         cm,

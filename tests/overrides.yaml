@@ -357,17 +357,42 @@
   requires_import: gensim
   timeout: 300
 10_text_feature_engineering/04_bert_finetuning:
-  # No CUDA requirement in the source - the flag is a cost decision, not a hardware one. The cell
-  # that fine-tunes all three checkpoints takes 637s against the 600s per-cell limit on CPU (645s
-  # under load 16.8, so contention is not what fails it). MAX_TRAIN_STEPS already applies; what
-  # remains is the model count, and no parameter bounds it. Adding one would be clean - the figure
-  # cells derive `model_names` from `results.keys()`, so nothing downstream names a checkpoint -
-  # but it is a parameters-cell edit, which invalidates the committed .ipynb and costs a
-  # production GPU run to regenerate. ml4t/agent-workspace#1097 carries that decision.
-  gpu: true
+  # Runs on CPU. The `gpu: true` this entry used to carry was a cost decision, not a hardware
+  # one - there is no CUDA requirement in the source - and the cost it named was not measured.
+  # The 637s and 645s the earlier version of this comment quoted are FAIL rows: the per-cell
+  # timeout plus harness overhead, not a runtime. The fine-tuning cell had never completed on
+  # CPU, so there was no number to compare against the limit.
+  #
+  # What costs here is scoring, not training. `tests/pm_helpers.py`'s KERNEL_THREAD_CAP pins the
+  # kernel to one thread, and a full pass over the 727-sentence validation or test split costs
+  # 183s there. MAX_TRAIN_STEPS bounds training only: at 20 steps, `eval_steps` resolves to 10,
+  # so each model still pays two in-training evaluations plus two passes over the test split -
+  # about twelve minutes of inference behind twenty training steps. Lowering MAX_TRAIN_STEPS
+  # further makes evaluation a larger share, not a smaller one.
+  #
+  # MAX_EVAL_SAMPLES bounds the scored splits, which is the knob that reaches that cost. All
+  # three checkpoints run: FinBERT is the contaminated one and the notebook is a three-way
+  # comparison, so bounding the model count instead would leave figures and alt text describing
+  # panels that were not produced.
+  #
+  # Measured at 20 steps and 100 sentences, all three checkpoints, through this harness with
+  # `-k 04_bert_finetuning`: 863s and 6.2 GB, PASS, under load average 9. That figure is from
+  # the CPU path the removal of `gpu: true` creates - `CUDA_VISIBLE_DEVICES=""` and
+  # `ML4T_DATA_PATH` on the CI fixture - and not from the card. The GPU renders in
+  # `notebook-runtimes.tsv` are 54-126s and size nothing here.
+  #
+  # `timeout` is papermill's per-cell limit, not a notebook budget, so 1800 is being compared
+  # against the fine-tuning cell rather than against the 863s. That cell carries most of the
+  # run, so the margin is closer to 2x than to the ratio against the whole notebook. It is set
+  # above the measurement because a GitHub-hosted runner is slower per thread than the machine
+  # that measured it. The ch10 job's budget is 60 minutes and it currently finishes in 4-7, so
+  # the headroom is in the job.
+  #
+  # ml4t/agent-workspace#1097.
   parameters:
     MAX_TRAIN_STEPS: 20
-  timeout: 600
+    MAX_EVAL_SAMPLES: 100
+  timeout: 1800
 10_text_feature_engineering/05_financial_ner_finetuning:
   parameters:
     N_EPOCHS: 1
