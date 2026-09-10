@@ -1204,6 +1204,29 @@ def _predict_reconstructed_sequence(
     return np.concatenate(parts)
 
 
+def _sorted_by_checkpoint(
+    frames: dict[int, list[pl.DataFrame]],
+    context: SequenceResearchContext,
+) -> pl.DataFrame:
+    """Concatenate reconstructed folds, each checkpoint sorted, one checkpoint at a time.
+
+    The whole frame used to be sorted at once by (entity, date, fold, checkpoint). Its only
+    reader is `_publish_sequence_predictions`, which cuts one checkpoint out of it, and
+    inside one checkpoint the fourth key is a constant - so sorting each checkpoint's rows
+    by the first three gives every published slice the same rows in the same order. What it
+    does not do is sort 160 million rows in one go: a sort costs about three times its input
+    (measured 0.69 GB in, 2.13 GB of growth, and the streaming engine is no cheaper), which
+    on a nasdaq reconstruction - twenty checkpoints over two folds of four million
+    validation rows - is around 21 GB to produce a 7 GB frame.
+    """
+    ordered: list[pl.DataFrame] = []
+    for checkpoint in sorted(frames):
+        parts = frames[checkpoint]
+        ordered.append(pl.concat(parts).sort(context.entity_col, context.date_col, "fold_id"))
+        parts.clear()
+    return pl.concat(ordered)
+
+
 def _reconstruct_pytorch_predictions(
     model_root: Path,
     context: SequenceResearchContext,
@@ -1212,7 +1235,7 @@ def _reconstruct_pytorch_predictions(
     from case_studies.utils.deep_model_state import deep_checkpoint_path, restore_deep_model
     from case_studies.utils.sequence_dataset import materialize_sequences
 
-    frames = []
+    frames: dict[int, list[pl.DataFrame]] = {}
     lookback = int(context.config["params"].get("lookback", 60))
     calendar_id = str(computation["preprocessing"]["calendar_id"])
     device = torch.device(str(computation["numerics"]["device"]))
@@ -1292,7 +1315,7 @@ def _reconstruct_pytorch_predictions(
                 device,
                 batch_size=int(context.config["batch_size"]),
             )
-            frames.append(
+            frames.setdefault(int(value), []).append(
                 pl.DataFrame(
                     {
                         context.date_col: timestamps,
@@ -1307,7 +1330,7 @@ def _reconstruct_pytorch_predictions(
             )
     if not frames:
         raise ValueError("locked sequence fitted state produced no predictions")
-    return pl.concat(frames).sort(context.entity_col, context.date_col, "fold_id", "epoch")
+    return _sorted_by_checkpoint(frames, context)
 
 
 def _reconstruct_darts_predictions(
@@ -1352,7 +1375,7 @@ def _reconstruct_darts_predictions(
         label_col=context.label_col,
         config=config,
     )
-    frames = []
+    frames: dict[int, list[pl.DataFrame]] = {}
     has_temporal = bool(
         context.temporal_by_fold is not None
         and context.temporal_keys
@@ -1412,10 +1435,10 @@ def _reconstruct_darts_predictions(
                 pl.lit(config["config_name"]).alias("config"),
                 pl.lit(value).alias("epoch"),
             )
-            frames.append(frame)
-    if not frames or any(frame.is_empty() for frame in frames):
+            frames.setdefault(int(value), []).append(frame)
+    if not frames or any(part.is_empty() for parts in frames.values() for part in parts):
         raise ValueError("locked Darts fitted state produced incomplete predictions")
-    return pl.concat(frames).sort(context.entity_col, context.date_col, "fold_id", "epoch")
+    return _sorted_by_checkpoint(frames, context)
 
 
 def _reconstruct_sequence_predictions(

@@ -988,3 +988,52 @@ def test_run_dl_cv_holds_one_checkpoint_slice_at_a_time(tmp_path, monkeypatch) -
         f"a scored checkpoint found {max(alive_at_each_scoring)} prediction frames alive; "
         f"post-processing is holding slices across checkpoints"
     )
+
+
+def test_checkpoint_sorted_reconstruction_matches_a_whole_frame_sort() -> None:
+    """Sorting each checkpoint gives every published slice the rows a whole-frame sort gave.
+
+    The reconstruction's only reader cuts one checkpoint out of the frame, and inside one
+    checkpoint the `epoch` key is a constant, so the two orders can only differ on rows the
+    published slice does not contain. Sorting the whole frame instead costs about three
+    times its input; on a nasdaq reconstruction that is roughly 21 GB to produce a 7 GB
+    frame.
+    """
+    import numpy as np
+
+    from case_studies.utils.deep_learning import _sorted_by_checkpoint
+
+    rng = np.random.default_rng(4)
+    entities = np.array(["C", "A", "B", "A", "C", "B"])
+    stamps = np.array(
+        ["2024-01-03", "2024-01-02", "2024-01-02", "2024-01-03", "2024-01-02", "2024-01-03"],
+        dtype="datetime64[us]",
+    )
+    frames: dict[int, list[pl.DataFrame]] = {}
+    for checkpoint in (10, 5):
+        for fold in (1, 0):
+            frames.setdefault(checkpoint, []).append(
+                pl.DataFrame(
+                    {
+                        "timestamp": stamps,
+                        "symbol": entities,
+                        "fold_id": fold,
+                        "y_score": rng.normal(size=len(entities)),
+                        "y_true": rng.normal(size=len(entities)),
+                        "config": "nlinear",
+                        "epoch": checkpoint,
+                    }
+                )
+            )
+    whole = pl.concat([part for parts in frames.values() for part in parts]).sort(
+        "symbol", "timestamp", "fold_id", "epoch"
+    )
+    context = SimpleNamespace(entity_col="symbol", date_col="timestamp")
+
+    by_checkpoint = _sorted_by_checkpoint(frames, context)
+
+    assert sorted(by_checkpoint["epoch"].unique().to_list()) == [5, 10]
+    for checkpoint in (5, 10):
+        assert whole.filter(pl.col("epoch") == checkpoint).equals(
+            by_checkpoint.filter(pl.col("epoch") == checkpoint)
+        ), f"checkpoint {checkpoint} publishes a different slice than a whole-frame sort"
