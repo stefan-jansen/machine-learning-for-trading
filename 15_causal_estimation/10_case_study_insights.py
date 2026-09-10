@@ -80,8 +80,11 @@ TREATMENT_LABELS = {
 CASE_ORDER = {case_study: rank for rank, case_study in enumerate(CASE_STUDY_IDS)}
 
 # %% [markdown]
-# The loader returns all causal rows from one registry. Missing registries, failed
-# integrity checks, empty tables, and duplicate labels all stop the notebook.
+# The loader returns all causal rows from one registry. A missing registry, a failed
+# integrity check and a duplicate label all stop the notebook, because each of those is a
+# broken registry. A registry that is intact and simply holds no causal row is a different
+# thing: that case study has not run its causal stage yet, and the loader returns an empty
+# frame so the section below can name it rather than the notebook failing on it.
 
 
 # %%
@@ -105,7 +108,7 @@ def _load_causal_runs(case_study: str) -> pl.DataFrame:
         ).fetchall()
 
     if not rows:
-        raise RuntimeError(f"No causal_runs rows for {case_study}")
+        return pl.DataFrame()
     frame = pl.DataFrame([dict(row) for row in rows], infer_schema_length=None)
     duplicates = frame.group_by("label").len().filter(pl.col("len") != 1)
     if not duplicates.is_empty():
@@ -144,13 +147,21 @@ def _enrich_causal(frame: pl.DataFrame, case_study: str) -> pl.DataFrame:
 
 
 # %% [markdown]
-# Loading all nine registries at once makes coverage explicit. The primary-label
-# assertion prevents a partial chart with a denominator that no longer matches its prose.
+# Loading every registry at once makes coverage explicit. A case study that has registered a
+# causal row must have exactly one row at its primary label, and the count every chart and
+# sentence below divides by is the number of case studies that loaded - never the number
+# that exist. The two are printed side by side so a partial chart cannot be read as a
+# complete one.
 
 # %%
 all_frames = []
+missing_causal = []
 for case_study in CASE_STUDY_IDS:
-    case_frame = _enrich_causal(_load_causal_runs(case_study), case_study)
+    raw_frame = _load_causal_runs(case_study)
+    if raw_frame.is_empty():
+        missing_causal.append(case_study)
+        continue
+    case_frame = _enrich_causal(raw_frame, case_study)
     primary_count = case_frame.filter(pl.col("label") == PRIMARY_LABELS[case_study]).height
     if primary_count != 1:
         raise RuntimeError(
@@ -159,11 +170,18 @@ for case_study in CASE_STUDY_IDS:
         )
     all_frames.append(case_frame)
 
+if not all_frames:
+    raise RuntimeError("No case study has registered a causal run; nothing to compare")
+
 all_causal = pl.concat(all_frames, how="diagonal_relaxed")
 primary_df = all_causal.filter(pl.col("label") == pl.col("primary_label")).sort("case_order")
-n_expected = len(CASE_STUDY_IDS)
-if primary_df.height != n_expected:
-    raise RuntimeError(f"Primary coverage is {primary_df.height}/{n_expected}")
+n_expected = primary_df.height
+print(f"Causal coverage: {n_expected} of {len(CASE_STUDY_IDS)} case studies")
+if missing_causal:
+    print(
+        "No causal row registered yet, so absent from every chart and count below: "
+        + ", ".join(SHORT_NAMES[case_study] for case_study in missing_causal)
+    )
 
 # %%
 coverage_df = primary_df.select(
@@ -550,8 +568,10 @@ display(
 
 # %%
 takeaway_text = f"""
-- **Coverage is complete and explicit.** The notebook loaded one primary row for all
-  **{n_expected}** case studies and rejected ambiguous labels.
+- **Coverage is explicit.** The notebook loaded one primary row for **{n_expected}** of the
+  **{len(CASE_STUDY_IDS)}** case studies and rejected ambiguous labels. Every count below
+  divides by the first number. Absent, because no causal row is registered for them yet:
+  **{", ".join(SHORT_NAMES[case_study] for case_study in missing_causal) or "none"}**.
 - **HAC evidence is selective.** **{n_sig} of {n_expected}** primary effects have
   Driscoll-Kraay intervals that exclude zero: **{", ".join(sig_names) or "none"}**.
 - **Orthogonalization is material.** Median absolute confounding bias is
