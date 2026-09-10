@@ -742,3 +742,101 @@ class TestDeclaredTrainSequenceStride:
         dl = setup["modeling"]["dl"]
         assert dl["train_sequence_stride_horizons"] == 1
         assert "max_train_sequences" not in dl
+
+
+def test_run_dl_cv_assembles_predictions_in_config_then_epoch_order(tmp_path) -> None:
+    """What the runner returns is what its own incremental files hold, in the same order.
+
+    Post-processing used to hold the whole prediction set three times over: the frame read back
+    from the incremental parquet files, a filtered copy per configuration, and every eligible
+    epoch slice appended to a list that was then concatenated. Cutting the slices lazily from
+    one frame removes two of those copies, and the thing that could go wrong is order: a single
+    filter over the whole frame returns file order, not configuration-then-epoch order, and the
+    registered prediction set is order-bearing.
+    """
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    symbols = ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
+    frames = []
+    for symbol in symbols:
+        first = rng.normal(size=len(dates))
+        second = rng.normal(size=len(dates))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "symbol": symbol,
+                    "timestamp": dates,
+                    "f1": first,
+                    "f2": second,
+                    "target": 0.1 * first + 0.05 * second + 0.01 * rng.normal(size=len(dates)),
+                }
+            )
+        )
+    dataset = pd.concat(frames, ignore_index=True)
+    splits = [
+        {
+            "fold": 0,
+            "train_start": dates[0],
+            "train_end": dates[59],
+            "val_start": dates[60],
+            "val_end": dates[79],
+        },
+        {
+            "fold": 1,
+            "train_start": dates[0],
+            "train_end": dates[79],
+            "val_start": dates[80],
+            "val_end": dates[119],
+        },
+    ]
+    config_names = ("nlinear", "lstm_h64")
+    configs = [
+        {
+            "family": "deep_learning",
+            "config_name": name,
+            "n_epochs": 4,
+            "checkpoint_interval": 1,
+            "batch_size": 16,
+            "params": {"architecture": architecture, "lookback": 5},
+        }
+        for name, architecture in zip(config_names, ("nlinear", "lstm"), strict=True)
+    ]
+
+    result = deep_learning.run_dl_cv(
+        dataset,
+        splits,
+        configs=configs,
+        n_features=2,
+        feature_names=["f1", "f2"],
+        label_col="target",
+        date_col="timestamp",
+        entity_col="symbol",
+        device="cpu",
+        register=False,
+        save_dir=tmp_path,
+        seed=0,
+    )
+
+    shards = sorted((tmp_path / "_incremental").glob("*.parquet"))
+    assert shards, "the runner wrote no incremental predictions to reassemble from"
+    persisted = pl.concat(
+        [
+            pl.read_parquet(path).cast({"timestamp": pl.Datetime("us")}, strict=False)
+            for path in shards
+        ],
+        how="diagonal_relaxed",
+    )
+    expected_folds = sorted(int(split["fold"]) for split in splits)
+    parts = []
+    for config_name in config_names:
+        for_config = persisted.filter(pl.col("config") == config_name)
+        for epoch in sorted(for_config["epoch"].unique().to_list()):
+            for_epoch = for_config.filter(pl.col("epoch") == epoch)
+            if sorted(for_epoch["fold_id"].unique().to_list()) == expected_folds:
+                parts.append(for_epoch)
+    assert len(parts) == len(config_names) * 4
+
+    assert result["all_predictions"].equals(pl.concat(parts, how="diagonal_relaxed"))
