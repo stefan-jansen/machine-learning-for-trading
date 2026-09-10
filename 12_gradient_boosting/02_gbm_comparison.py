@@ -18,7 +18,7 @@
 #
 # **Docker image**: `ml4t-gpu`
 #
-# **Chapter 12, Section 12.2**: The Workhorse — Gradient Boosting Machines
+# **Chapter 12, Section 12.2**: The Workhorse - Gradient Boosting Machines
 #
 # ## Purpose
 # This notebook benchmarks four gradient boosting implementations across CPU and
@@ -39,11 +39,10 @@
 # - **Related**: `08_shap_analysis` for SHAP fundamentals
 
 # %%
-"""GBM Library Benchmark — compare sklearn, XGBoost, LightGBM, and CatBoost on accuracy, speed, and memory."""
+"""GBM Library Benchmark - compare sklearn, XGBoost, LightGBM and CatBoost on accuracy, speed and memory."""
 
-# Import torch before ml4t.diagnostic. ml4t.diagnostic transitively loads the
-# `cuda` Python package, which dlopens the older system `libcudart.so.12` and
-# wins symbol resolution; subsequent torch imports then fail with
+# Import torch before ml4t.diagnostic, which transitively dlopens the older system
+# `libcudart.so.12` and wins symbol resolution; a torch import after that fails on
 # `undefined symbol: cudaGetDriverEntryPointByVersion`.
 import gc
 import os
@@ -57,11 +56,9 @@ import numpy as np
 import polars as pl
 import psutil
 import torch  # noqa: F401
-from sklearn.metrics import ndcg_score
-
-warnings.filterwarnings("ignore")
-
+from IPython.display import Markdown, display
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from sklearn.metrics import ndcg_score
 
 from case_studies.utils.gbm import (
     create_model,
@@ -87,18 +84,28 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLOR_CYCLER
+from utils.style import COLOR_CYCLER, show_with_alt
 
-# One color per library, shared across the CPU and GPU figures so a library
-# keeps its hue. COLOR_CYCLER's first four entries (navy, gold, copper, green)
-# are chosen for perceptual separation; the raw palette names blue/slate/neutral
-# all read as near-navy and are indistinguishable in a grouped bar chart.
+# One colour per library, shared across the CPU and GPU figures. COLOR_CYCLER's first
+# four entries separate perceptually; blue, slate and neutral all read as near-navy and
+# are indistinguishable in a grouped bar chart.
 LIB_COLORS = {
     "sklearn_hgb": COLOR_CYCLER[0],  # navy
     "xgboost": COLOR_CYCLER[1],  # gold
     "lightgbm": COLOR_CYCLER[2],  # copper
     "catboost": COLOR_CYCLER[3],  # green
 }
+
+
+def report_no_gpu(section: str) -> None:
+    """Say a GPU section produced nothing, so an empty section reads as an absence."""
+    display(
+        Markdown(
+            f"**{section}**: no GPU was detected in this run, so this "
+            "section is empty. The prose above describes what it measures."
+        )
+    )
+
 
 # %% [markdown]
 # ### GPU Detection
@@ -218,7 +225,7 @@ if HAS_GPU:
     print(f"GPU name: {gpu_caps.get('gpu_name', 'unknown')}")
     print(f"GPU-capable libraries (CUDA only): {GPU_LIBRARIES}")
 else:
-    print("No NVIDIA GPU detected — running CPU-only benchmark")
+    print("No NVIDIA GPU detected; running the CPU-only benchmark")
 
 # %% [markdown]
 # ## 2. Load Benchmark Data
@@ -392,8 +399,9 @@ print(f"Saved benchmark results to {benchmark_path.relative_to(CHAPTER_DIR.paren
 # %% [markdown]
 # ## 5. Accuracy Results (IC)
 #
-# Test-set IC by library, preset, and device. Higher is better. Differences
-# within 0.005 are within noise for a single fold.
+# Test-set IC by library, preset and device. On one fold, a difference of this size
+# is not a difference: nothing here carries an interval, so read the table for the
+# sign and the spread rather than for an ordering.
 
 # %%
 # IC pivot: library × preset, CPU only
@@ -417,16 +425,16 @@ if HAS_GPU:
     display(ic_device)
 
 # %% [markdown]
-# **Interpretation**: On a single 2023 walk-forward fold of the ETF universe,
-# every library × preset combination produces a negative IC, with the
-# CPU best (CatBoost/medium = −0.002) essentially at zero and the worst near −0.05.
-# This does *not* refute the GBM family — it refutes the assumption that an
-# untuned 21-day return regression on noisy ETF features will out-of-sample.
+# **Interpretation**: on a single walk-forward fold of the ETF universe, every
+# library and preset lands at a negative test IC; the table above gives the range.
+# That is not a judgement on the GBM family. It is what an untuned 21-day return
+# regression on noisy ETF features does out of sample, which is the assumption
+# under test here.
 # The benchmark is informative for *engineering* (timing, memory, GPU behavior
 # below); accuracy claims should be made on multi-fold CV with tuned hyper-
 # parameters (notebook `04_optuna_tuning`). CPU and GPU versions of the same
 # library can produce different predictions due to floating-point precision
-# (GPU histogram binning typically uses FP32) — the IC differences between
+# (GPU histogram binning typically uses FP32), so the IC differences between
 # CPU and CUDA columns above illustrate this and are not implementation bugs.
 
 # %% [markdown]
@@ -490,7 +498,7 @@ predict_cpu = (
 predict_cpu
 
 # %%
-# Prediction throughput (rows/sec) — easier to compare across presets
+# Prediction throughput in rows per second, which compares across presets.
 throughput_cpu = (
     results_df.filter(pl.col("device") == "cpu")
     .pivot(on="library", index="preset", values="predict_rows_per_s")
@@ -499,8 +507,10 @@ throughput_cpu = (
 throughput_cpu
 
 # %%
-if HAS_GPU:
-    # CPU vs GPU prediction speedup for the libraries that have a GPU build
+if not HAS_GPU:
+    report_no_gpu("CPU against GPU prediction speed")
+else:
+    # Prediction speedup for the libraries that ship a GPU build.
     cpu_pred = results_df.filter(
         (pl.col("device") == "cpu") & pl.col("library").is_in(GPU_LIBRARIES)
     ).select(["library", "preset", pl.col("predict_test_s").alias("cpu_predict_s")])
@@ -521,7 +531,7 @@ if HAS_GPU:
 # making inference deterministic and often the fastest at moderate tree counts.
 # XGBoost and LightGBM walk asymmetric trees and have similar CPU inference
 # costs. GPU `predict()` is rarely worth the launch overhead for batch
-# inference at the row counts of a typical case study — the speedups above
+# inference at the row counts of a typical case study, and the speedups above
 # are smaller than the training speedups in §6 and can be below 1× for small
 # batches.
 
@@ -532,7 +542,7 @@ if HAS_GPU:
 # training memory: native C/CUDA allocations and memory the allocator has already
 # reserved or that `gc` reclaims mid-measurement do not show up. At these dataset
 # sizes the delta is dominated by allocator/gc timing rather than steady-state
-# model size — most cells read ~0 and the few non-zero values do not rank presets
+# model size: most cells read zero and the few non-zero values do not rank presets
 # or libraries in any stable way. Read this panel as "training here fits
 # comfortably in a few hundred MB", not as a memory ranking; use a dedicated
 # profiler (or peak RSS) if you need to size hardware.
@@ -576,9 +586,9 @@ axes[0].set_xticks([i + 0.3 for i in range(len(preset_order))])
 axes[0].set_xticklabels(preset_order)
 axes[0].set_xlabel("Preset")
 axes[0].set_ylabel("Test IC (Spearman)")
-axes[0].set_title("(a) Accuracy")
+axes[0].set_title("Test IC by preset")
 
-# Panel (b): Training time (log scale)
+# Training time, log scale.
 for lib in lib_order:
     subset = cpu_df[cpu_df["library"] == lib]
     if subset.empty:
@@ -596,7 +606,7 @@ axes[1].set_xticklabels(preset_order)
 axes[1].set_xlabel("Preset")
 axes[1].set_ylabel("Training Time (s, log scale)")
 axes[1].set_yscale("log")
-axes[1].set_title("(b) Speed")
+axes[1].set_title("Training time by preset")
 
 # Panel (c): Memory
 for lib in lib_order:
@@ -615,27 +625,30 @@ axes[2].set_xticks([i + 0.3 for i in range(len(preset_order))])
 axes[2].set_xticklabels(preset_order)
 axes[2].set_xlabel("Preset")
 axes[2].set_ylabel("Memory Delta (MB, RSS)")
-axes[2].set_title("(c) Memory")
+axes[2].set_title("Resident memory added by preset")
 
 handles, labels = axes[0].get_legend_handles_labels()
 fig.legend(handles, labels, loc="lower center", ncol=4, fontsize=9, frameon=False)
-fig.suptitle(
-    "Single-fold test IC is negative for every library and preset; LightGBM is consistently among the fastest on CPU",
-    fontsize=12,
-    y=1.02,
+fig.suptitle("Accuracy, training time and memory by library and preset", fontsize=12, y=1.02)
+show_with_alt(
+    fig,
+    "Three panels of grouped bars sharing a preset axis, one bar per library. Left: "
+    "test rank IC, drawn downward because every bar is negative. Middle: training time "
+    "in seconds on a log scale, rising with preset weight. Right: the resident memory "
+    "each fit added, which is zero for most bars.",
 )
-fig.tight_layout(rect=(0, 0.04, 1, 1))
-plt.show()
 
 # %%
-if HAS_GPU:
+if not HAS_GPU:
+    report_no_gpu("CPU against GPU timing")
+else:
     gpu_df = results_df.filter(pl.col("device") == "cuda").to_pandas()
     cpu_gpu_libs = GPU_LIBRARIES
     gpu_colors = LIB_COLORS  # same hue per library as the CPU figure
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Panel (a): CPU vs GPU training time
+    # CPU against GPU training time.
     for lib in cpu_gpu_libs:
         cpu_sub = cpu_df[(cpu_df["library"] == lib)]
         gpu_sub = gpu_df[(gpu_df["library"] == lib)]
@@ -666,7 +679,7 @@ if HAS_GPU:
     axes[0].set_xlabel("Preset")
     axes[0].set_ylabel("Training Time (s, log scale)")
     axes[0].set_yscale("log")
-    axes[0].set_title("(a) CPU (faded) vs GPU (solid) Training Time")
+    axes[0].set_title("Training time, CPU faded against GPU solid")
     axes[0].legend(fontsize=7, ncol=2)
 
     # Panel (b): GPU speedup
@@ -688,17 +701,20 @@ if HAS_GPU:
     axes[1].set_xlabel("Preset")
     axes[1].set_ylabel("Speedup (CPU time / GPU time)")
     axes[1].axhline(y=1, color="gray", linestyle="--", linewidth=0.5)
-    axes[1].set_title("(b) GPU Speedup Factor (>1 = GPU faster)")
+    axes[1].set_title("GPU time divided by CPU time")
     axes[1].legend(fontsize=8)
 
     fig.suptitle(
-        f"On the 227K-row ETF panel, GPU speedups are modest and preset-dependent "
-        f"({gpu_caps.get('gpu_name', 'GPU')})",
+        f"Training time and GPU speedup by preset ({gpu_caps.get('gpu_name', 'GPU')})",
         fontsize=12,
         y=1.02,
     )
-    fig.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Two panels sharing a preset axis. Left: training time per library, the CPU bar "
+        "faded and the GPU bar solid beside it. Right: the ratio of the two, against a "
+        "dashed line at one where neither device is faster.",
+    )
 
 # %% [markdown]
 # ## 10. GPU Speedup at Scale
@@ -706,12 +722,12 @@ if HAS_GPU:
 # The ETF benchmark above is small enough (227K training rows) that GPU
 # launch overhead competes with kernel time. We re-run the medium preset
 # on the US Equities Panel (~5M training rows) to demonstrate how dataset
-# scale changes the picture. LightGBM's CUDA backend uses FP64 exclusively
-# — the `gpu_use_dp` toggle "can be used only in OpenCL implementation
-# (`device_type='gpu'`), in CUDA implementation only double precision is
-# currently supported" (LightGBM docs). Consumer GPUs like the RTX 3090
-# have ~1/32 FP64 vs FP32 throughput, so LightGBM's CUDA path runs but
-# delivers only a modest speedup — far less than XGBoost or CatBoost.
+# scale changes the picture. LightGBM's CUDA backend computes in double precision
+# only: its `gpu_use_dp` toggle "can be used only in OpenCL implementation
+# (`device_type='gpu'`), in CUDA implementation only double precision is currently
+# supported" (LightGBM docs). A consumer GPU runs FP64 at a small fraction of its
+# FP32 throughput, so LightGBM's CUDA path runs and gains far less from the device
+# than XGBoost or CatBoost.
 #
 # > **Run this notebook in the `ml4t-gpu` Docker image.** Only that image
 # > (and `rapids`) ships a LightGBM compiled from source with `-DUSE_CUDA=1`;
@@ -720,7 +736,7 @@ if HAS_GPU:
 # > `lightgbm_cuda=False`, the `device=='cuda'` loop skips LightGBM, and its
 # > GPU rows silently vanish. If the GPU detection panel above does not list
 # > all three of xgboost/lightgbm/catboost, you are NOT in the CUDA-LightGBM
-# > image and the GPU numbers are wrong — do not record them.
+# > image and the GPU numbers are wrong: do not record them.
 
 # %%
 if HAS_GPU:
@@ -742,7 +758,9 @@ if HAS_GPU:
     print(f"Scale benchmark: {X_scale.shape[0]:,} rows × {X_scale.shape[1]} features")
 
 # %%
-if HAS_GPU:
+if not HAS_GPU:
+    report_no_gpu("GPU speedup at scale")
+else:
     scale_results = []
     scale_config = load_gbm_config("medium")
     scale_libs = ["xgboost", "lightgbm", "catboost"]
@@ -778,30 +796,25 @@ if HAS_GPU:
     scale_speedup
 
 # %% [markdown]
-# **Interpretation**: At ~5M rows with `N_JOBS=8`, CatBoost shows the
-# largest GPU speedup (~14×, ~134s → ~10s) and XGBoost ~7× (~105s → ~14s).
-# LightGBM's CUDA path runs (~65s → ~15s) but its ~4.5× speedup is the most
-# modest of the three — its CUDA backend is FP64-only and consumer GPUs
-# throttle FP64 (see the note above) — while its ~65s CPU wall time is also
-# the lowest of the three libraries at this scale, roughly 1.6× faster than
-# XGBoost CPU. The take-away is that GPU acceleration is highly
-# library-specific: CatBoost gains the most on CUDA hardware, and LightGBM is
-# the fastest on CPU at this dataset size and thread count. On the smaller ETF
-# panel above (227K rows), GPU speedups are more variable and preset-dependent —
-# CatBoost reaches ~5× on the heavy preset and XGBoost runs ~2–3×, while
-# LightGBM's CUDA path is often slower than its CPU path at this size. Exact
-# wall-clock timings and speedup ratios are load- and hardware-dependent and
-# will shift run to run; the ordering (CatBoost gains most, LightGBM least) is
-# the stable message.
+# **Interpretation**: the speedup table above is this machine on this run. What
+# carries beyond it is the reason the three libraries differ, which is
+# architectural rather than incidental: LightGBM's CUDA backend computes in double
+# precision only, and a consumer GPU runs FP64 at a small fraction of its FP32
+# throughput, so LightGBM has the least to gain from the device while often being
+# the quickest of the three on CPU. Read the ratios as a demonstration of that
+# shape, not as numbers to quote: they move with load, thread count and hardware.
+# The smaller ETF panel earlier in the notebook makes the same point from the other
+# side, where launch overhead competes with kernel time and the ordering is less
+# stable.
 #
-# All four CPU scale-bench rows are run with `N_JOBS=8` (matching §6) so
-# the comparison reflects per-thread work at 4.9M rows rather than
-# thread-oversubscription thrash on a high-core-count workstation.
+# Every CPU row of the scale benchmark runs at `N_JOBS`, the same thread count as the
+# ETF benchmark above, so the comparison is per-thread work at the row count printed
+# with the dataset rather than thread oversubscription on a high-core-count machine.
 
 # %% [markdown]
 # ## 11. Monotonic Constraints and SHAP Dependence
 #
-# Monotonic constraints force the model to respect directional relationships —
+# Monotonic constraints force the model to respect a directional relationship:
 # a constrained feature cannot reverse direction. We compare SHAP dependence
 # plots for the same feature with and without a negative monotonic constraint,
 # demonstrating that constraints eliminate spurious local reversals while
@@ -867,7 +880,7 @@ axes[0].scatter(
 )
 axes[0].set_xlabel(constraint_feature)
 axes[0].set_ylabel("SHAP value (impact on prediction)")
-axes[0].set_title(f"Unconstrained: local reversals present (IC={ic_free:.4f})")
+axes[0].set_title("Unconstrained model")
 
 axes[1].scatter(
     X_sample[:, constraint_idx],
@@ -877,23 +890,40 @@ axes[1].scatter(
     color=COLOR_CYCLER[2],
 )
 axes[1].set_xlabel(constraint_feature)
-axes[1].set_title(f"Monotone -1: strictly non-increasing (IC={ic_con:.4f})")
+axes[1].set_title("Monotone -1 constraint")
 
-fig.suptitle(f"A negative monotone constraint removes local reversals: {constraint_feature}")
-fig.tight_layout()
-plt.show()
+fig.suptitle(f"SHAP value against {constraint_feature}, with and without the constraint")
+show_with_alt(
+    fig,
+    f"Two scatter panels on one vertical scale, SHAP value against {constraint_feature}. "
+    "Left, the unconstrained model: points spread over the full height of the axis. "
+    "Right, the model fitted with a negative monotone constraint on that feature: the "
+    "points sit in a narrow band near the top.",
+)
+
+# %% tags=["results"]
+_free_span = float(shap_free[:, constraint_idx].max() - shap_free[:, constraint_idx].min())
+_con_span = float(shap_con[:, constraint_idx].max() - shap_con[:, constraint_idx].min())
+display(
+    Markdown(
+        f"- Range of this feature's SHAP values: unconstrained {_free_span:.4f}, "
+        f"constrained {_con_span:.4f}.\n"
+        f"- Test IC: unconstrained {ic_free:.4f}, constrained {ic_con:.4f}."
+    )
+)
 
 # %% [markdown]
-# **Interpretation**: The unconstrained model shows local reversals — regions
-# where the feature's effect on prediction changes direction. The constrained
-# model enforces a strictly non-increasing relationship, producing a smooth
-# SHAP dependence curve. The IC change between constrained and unconstrained
-# is small here (≈0.011 in absolute IC, well inside single-fold noise) — the
-# imposed prior neither helps nor obviously hurts on this feature. Monotonic
-# constraints act as effective regularization only when the directional prior
-# is sharply right; on noisy financial features with weak signal, the
-# constraint's value is hard to detect from a single fold and should be
-# evaluated on multi-fold CV against an unconstrained baseline.
+# **What to read off it.** Both panels are on one vertical scale, and that is the
+# comparison. The constrained model has not bent this feature's contribution into a
+# downward curve; it has flattened it, which satisfies a non-increasing constraint the
+# cheap way. A monotone prior imposed on a feature whose empirical relationship is
+# noisy does not force the model to find a monotone signal - it lets the model stop
+# using the feature's variation, and the range printed above is how far that went.
+#
+# The two test ICs are close, and on one fold with no interval that is not evidence
+# either way about the constraint. A directional prior is worth imposing when it is
+# right, and this notebook cannot tell you whether it is; that needs the constrained
+# and unconstrained models scored across folds.
 
 # %% [markdown]
 # ## 12. Learning-to-Rank Worked Example (LambdaMART)
@@ -1028,67 +1058,57 @@ ltr_summary = pl.DataFrame(
 ltr_summary
 
 # %% [markdown]
-# **Interpretation**: LambdaMART achieves higher NDCG@10 than the regression
-# baseline (0.5311 vs 0.5046), confirming that the ranking objective directly
-# optimizes the metric it's evaluated on. The IC against raw returns also
-# tilts in LambdaMART's favor (+0.0176 vs −0.025): on this fold, optimizing
-# for within-date ordering happened to produce scores that correlated with
-# return magnitudes too. The general principle remains — ranking targets
-# need not preserve magnitude relationships — but on a single fold the two
-# can move together. Practitioners should choose between ranking (top-k
-# selection within each rebalance) and regression (signal strength for
-# position sizing) based on their strategy's needs and validate both on
-# multi-fold CV.
+# **Interpretation**: the table above scores each model on both metrics. Note what
+# the NDCG column can and cannot settle: LambdaMART is trained on a ranking
+# surrogate and scored with a ranking metric, so an advantage there is the setup
+# working as arranged rather than a finding. The IC column is the interesting one,
+# because nothing in the ranking objective asks for a correlation with return
+# magnitude, and on a single fold the two metrics can agree or disagree by chance.
+#
+# The choice between them is not decided by either number. Ranking suits top-k
+# selection within a rebalance, regression suits a signal whose magnitude sizes a
+# position, and either way the comparison needs multiple folds before it means
+# anything.
 
 # %% [markdown]
 # ## 13. Key Takeaways
 #
-# 1. **No library wins on accuracy in this single-fold benchmark.** Test ICs
-#    on the 2023 ETF fold are uniformly negative for every
-#    library × preset combination (range −0.049 to −0.002). The benchmark is
-#    informative for *engineering* (timing, memory, GPU); accuracy ranking
-#    requires multi-fold CV with tuned hyperparameters (notebook
-#    `04_optuna_tuning`). Treat the ETF IC table as a worked illustration of
-#    the single-fold variance, not a library ordering.
+# 1. **This single-fold benchmark does not rank the libraries on accuracy.** Every
+#    library and preset lands at a negative test IC on the ETF fold, and the table
+#    above gives the range. The benchmark is built for engineering questions - timing,
+#    memory, device behaviour - and an accuracy ordering needs multi-fold CV with tuned
+#    hyperparameters, which is `04_optuna_tuning`.
 #
-# 2. **GPU pays off on large data; less so on the ETF panel.** On the ~5M-row
-#    US Equities Panel scale benchmark (`N_JOBS=8`), CatBoost shows ~14×
-#    GPU speedup (~134s → ~10s) and XGBoost ~7× (~105s → ~14s). On the 227K-row
-#    ETF panel, GPU speedups are more variable and preset-dependent — CatBoost
-#    reaches ~5× on the heavy preset while LightGBM's CUDA path is
-#    often slower than CPU. LightGBM's CUDA path at scale runs
-#    (~65s → ~15s) but its ~4.5× speedup is the most modest of the three
-#    (FP64-only backend); on CPU it is the fastest of the three at the scale
-#    benchmark (~65s), roughly 1.6× faster than XGBoost. Exact timings are
-#    load- and hardware-dependent — the library ordering, not the ratios, is the
-#    durable result. (LightGBM CUDA requires the `ml4t-gpu` Docker image; the
-#    local `uv` venv's PyPI wheel is CPU-only.)
+# 2. **What a GPU buys depends on the library, and the reason is architectural.**
+#    LightGBM's CUDA backend is double-precision only and consumer GPUs run FP64 at a
+#    fraction of FP32 throughput, so it gains least from the device while often being
+#    quickest on CPU. The ratios in the tables are this machine on this run; the reason
+#    they differ is what carries. LightGBM's CUDA path needs the `ml4t-gpu` image at
+#    all: the PyPI wheel in the local venv has no CUDA build.
 #
-# 3. **CPU/GPU predictions differ** due to floating-point precision in
-#    histogram binning. These differences cascade through the ensemble,
-#    producing IC differences (visible in the CPU-vs-CUDA pivot above) that
-#    exceed pure rounding noise. Treat the CPU and GPU paths as related but
-#    distinct estimators.
+# 3. **CPU and GPU are related but distinct estimators.** Histogram binning at
+#    different precision changes split points, and those differences cascade through
+#    the ensemble into IC differences larger than rounding. Do not treat a GPU rerun as
+#    a reproduction of a CPU result.
 #
-# 4. **Training memory is small and hard to measure by RSS delta.** All CPU
-#    configs train within a few hundred MB, but the RSS-delta probe is a noisy
-#    lower bound dominated by allocator/gc timing — most cells read ~0 and the
-#    measurement does not cleanly rank presets or libraries (native C/CUDA
-#    allocations and GPU memory are invisible to process RSS). Use a dedicated
-#    profiler or peak RSS if you need to size hardware.
+# 4. **The memory panel is a lower bound, and mostly reads zero.** RSS delta is
+#    dominated by allocator and garbage-collection timing and cannot see native or
+#    device allocations, so it neither ranks the libraries nor sizes hardware. Use a
+#    profiler or peak RSS for that; the panel is here to show what the cheap probe does
+#    and does not capture.
 #
-# 5. **Monotonic constraints had a small effect on this feature.** Imposing a
-#    `monotone=-1` prior on the highest-importance feature changed test IC by
-#    ≈0.011 — well inside single-fold noise. The qualitative point survives:
-#    when an unconstrained model has captured local reversals that carry
-#    signal, a wrong-direction prior can destroy them; when the prior is right
-#    or the feature is weak, the regulariser is silent. Validate constraint
-#    choices on multi-fold CV.
+# 5. **A monotone constraint can be satisfied by flattening a feature.** On the
+#    highest-importance feature the constrained model's SHAP values collapse into a
+#    narrow band rather than bending into a downward curve, and the two test ICs are
+#    close. A directional prior is regularization when the direction is right and a
+#    silent way of dropping a feature when it is not; one fold cannot tell you which.
 #
-# 6. **LambdaMART vs regression**: on this fold LambdaMART achieves higher
-#    NDCG@10 (0.5311 vs 0.5046) and slightly positive IC against raw returns
-#    (+0.0176 vs −0.025). Choose ranking for cross-sectional selection,
-#    regression for signal magnitude estimation; they are not interchangeable.
+# 6. **A ranking objective and a regression objective answer different questions.**
+#    The scores are in the table above. LambdaMART's advantage on NDCG is arranged by
+#    the setup, since it trains on a ranking surrogate and is scored with a ranking
+#    metric; whether its scores also correlate with return magnitude is the part
+#    nothing in its objective asks for. Choose ranking for selection within a
+#    rebalance and regression for a magnitude that sizes a position.
 #
 # **Next**: See `04_optuna_tuning` for Bayesian hyperparameter optimization,
 # `08_shap_analysis` for SHAP fundamentals, and `11_conformal_gbm` for
