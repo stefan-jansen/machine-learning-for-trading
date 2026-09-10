@@ -243,12 +243,19 @@ pool_counts
 
 # %%
 esg_categories = ("Environmental", "Social", "Governance")
-per_category = max(1, MAX_HEADLINES // len(esg_categories)) if MAX_HEADLINES > 0 else PER_CATEGORY
+if MAX_HEADLINES > 0:
+    # Quotient and remainder, so a cap below the category count yields that many
+    # headlines rather than one per category.
+    quota, extra = divmod(MAX_HEADLINES, len(esg_categories))
+    quotas = [quota + (1 if index < extra else 0) for index in range(len(esg_categories))]
+else:
+    quotas = [PER_CATEGORY] * len(esg_categories)
+
 selected_headlines = pl.concat(
     [
-        group.sample(min(per_category, group.height), seed=SEED)
-        for category in esg_categories
-        if (group := esg_news.filter(pl.col("category") == category)).height
+        group.sample(min(quota, group.height), seed=SEED)
+        for category, quota in zip(esg_categories, quotas, strict=True)
+        if quota and (group := esg_news.filter(pl.col("category") == category)).height
     ]
 ).sort(["timestamp", "headline"], descending=[True, False])
 ESG_HEADLINES = selected_headlines["headline"].to_list()
