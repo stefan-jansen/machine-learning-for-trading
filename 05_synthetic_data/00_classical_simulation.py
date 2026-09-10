@@ -1276,7 +1276,7 @@ for idx, (name, prices) in enumerate(all_models.items()):
     )
 
 fig.update_layout(
-    title="Return distributions differ mainly in the tails",
+    title="Daily log-return densities from the five simulated paths",
     xaxis_title="Daily Log-Return",
     yaxis_title="Density",
     barmode="overlay",
@@ -1759,7 +1759,7 @@ for idx, (name, sample) in enumerate(bootstrap_samples.items()):
     )
 
 fig.update_layout(
-    title="IID resampling removes volatility clustering; block methods keep it",
+    title="Squared-return autocorrelation, SPY and three bootstrap resamples",
     xaxis_title="Lag (days)",
     yaxis_title="Autocorrelation",
 )
