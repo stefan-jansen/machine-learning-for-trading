@@ -286,7 +286,8 @@ jobs:
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch22 }}" == "true" ]]; then
             add_ch "ch22" "22_rag"
           fi
-          # Ch23 skipped — requires Neo4j service (tested in test-neo4j when ready)
+          # Ch23 has no entry here: six of its ten notebooks need the Neo4j service,
+          # which this job does not start. They run in test-neo4j instead.
           # if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch23 }}" == "true" ]]; then
           #   add_ch "ch23" "23_knowledge"
           # fi
@@ -314,8 +315,14 @@ jobs:
           fi
           echo "run_py312=$run_py312" >> "$GITHUB_OUTPUT"
 
-          # --- Neo4j flag (needs populated Neo4j — skip until infra is ready) ---
+          # --- Neo4j flag ---
+          # The service and the --network host wiring below are in place, and the
+          # notebooks that need Neo4j run against it in dependency order. This job is
+          # not one of the required contexts, so it reports rather than blocks.
           run_neo4j="false"
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch23 }}" == "true" ]]; then
+            run_neo4j="true"
+          fi
           echo "run_neo4j=$run_neo4j" >> "$GITHUB_OUTPUT"
 
           # --- Benchmark flag (disabled — QuestDB container fails health check in CI) ---
@@ -1726,14 +1733,26 @@ jobs:
             -e NEO4J_URI -e NEO4J_USER -e NEO4J_PASSWORD \
             "${{ steps.image.outputs.ref }}" \
             bash -c '
-              # Dependency order: upstream notebooks generate data for downstream ones.
+              # One invocation per dependency level, because a group runs in pytest
+              # collection order: "03 or 05" collects 03 first, and 03 reads the graph
+              # 05 writes. Each producer gets its own invocation ahead of its consumer.
+              #   05 writes Institution/Stock/HOLDS  -> 03 queries them
+              #   02 writes the supply graph          -> 09 reads it and its snapshot
+              #   08 writes the event graph           -> 07 reads it
+              # 08 needs a CUDA device and skips on a GPU-less runner, which is why 07
+              # carries a skip in tests/overrides.yaml rather than failing here.
               python -m pytest tests/test_docker_notebooks.py -v --tb=short \
-                -k "08_8k_event_extraction" && \
+                -k "05_institutional_holdings_kg" && \
+              python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+                -k "03_graph_rag_qa" && \
               python -m pytest tests/test_docker_notebooks.py -v --tb=short \
                 -k "02_supply_chain_kg_construction" && \
               python -m pytest tests/test_docker_notebooks.py -v --tb=short \
-                -k "07_dynamic_kg_temporal or 03_graph_rag_qa or 05_institutional_holdings_kg \
-                    or 09_knowledge_graph_features"
+                -k "09_knowledge_graph_features" && \
+              python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+                -k "08_8k_event_extraction" && \
+              python -m pytest tests/test_docker_notebooks.py -v --tb=short \
+                -k "07_dynamic_kg_temporal"
             '
 
   # ---------------------------------------------------------------------------

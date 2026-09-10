@@ -1084,14 +1084,19 @@
   docker_env: ml4t+neo4j
   timeout: 600
 23_knowledge_graphs/09_knowledge_graph_features:
+  # It reads the supply graph and the SupplyGraphSnapshot that 02 writes, and raises
+  # when either is absent, so 02 has to run against the same Neo4j first. The
+  # test-neo4j job gives 02 its own pytest invocation ahead of this one. 02 no longer
+  # needs a GPU either, which is what the previous skip here was waiting on.
   docker_env: ml4t+neo4j
-  skip: true
-  skip_reason: Requires 02_supply_chain_kg_construction with GPU to populate Neo4j
-  tier: on_demand
   timeout: 600
 23_knowledge_graphs/10_network_portfolio_construction:
   timeout: 300
 23_knowledge_graphs/04_rag_comparison_benchmark:
+  # Section 4 asserts `torch.cuda.is_available()`, then constructs the SentenceTransformer
+  # with `device="cuda"` and asserts the encoder landed there. There is no CPU path.
+  # Measured: with the card hidden, `torch.cuda.is_available()` is False, so the assert
+  # fires before any embedding is computed.
   gpu: true
   timeout: 300
 23_knowledge_graphs/01_sp100_sec_download:
