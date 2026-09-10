@@ -396,7 +396,7 @@ jd_returns = np.diff(np.log(jd_prices))
 
 k = np.exp(JD_MU_JUMP + 0.5 * JD_SIGMA_JUMP**2) - 1
 print(f"Jump-Diffusion simulation: {len(jd_prices)} prices")
-upward_jump_share = 1 - norm.cdf(0, loc=JD_MU_JUMP, scale=JD_SIGMA_JUMP)
+upward_jump_share = norm.sf(0, loc=JD_MU_JUMP, scale=JD_SIGMA_JUMP)
 print(f"Mean jump size: {k:.2%} (median {np.exp(JD_MU_JUMP) - 1:.2%})")
 print(f"Upward jumps: {upward_jump_share:.1%}; intensity {JD_LAMBDA:.0f} per year")
 print(f"Jump compensator k: {k:.4f} (subtracted from drift)")
