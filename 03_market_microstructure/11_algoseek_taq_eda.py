@@ -453,7 +453,7 @@ fig.update_layout(
 
 show_plotly_with_alt(
     fig,
-    "A horizontal bar chart of the ten venues with the largest share of executed volume, longest bar at the bottom, each labelled with its percentage. The horizontal axis is share of volume and the vertical axis names the venues.",
+    "A horizontal bar chart of the ten venues with the largest share of executed volume, longest bar at the top, each labelled with its percentage. The horizontal axis is share of volume and the vertical axis names the venues.",
 )
 
 # %% [markdown]

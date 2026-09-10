@@ -347,7 +347,7 @@ fig.update_layout(
 
 show_plotly_with_alt(
     fig,
-    "A bar chart of trades classified by the Lee-Ready rule into buyer-initiated, seller-initiated and unclassified, green for buys and red for sells, showing how the day's trades and volume divided between the sides.",
+    "Two doughnut charts side by side, both split into buyer-initiated in green, seller-initiated in red and unclassified. The first divides the day's trade count between the three and the second divides its volume.",
 )
 
 # %% [markdown]
@@ -399,10 +399,11 @@ print(f"\nImbalance ↔ Return correlation: {corr[0, 0]:.3f}")
 # together, which is close to a definition - the trades that pushed the price up are the
 # ones counted as buys.
 #
-# It is not a signal. Acting on it would require knowing the minute's imbalance before
-# the minute ends, which is knowing the answer. A tradeable version has to predict the
-# next minute's imbalance from information available now, and that is a different and
-# much harder measurement - `09_databento_mbo_analysis` makes it, with the lag in place.
+# It is not a signal, because acting on it would require knowing the minute's imbalance
+# before the minute ends. The tradeable question is whether an imbalance already
+# observed says anything about the *next* interval's return, which is a different
+# measurement on the same two series: lag the imbalance behind the return rather than
+# pairing them within a bar. `09_databento_mbo_analysis` makes that one.
 
 # %% [markdown]
 # The three series go on one figure with a shared time axis because the question is how
@@ -623,7 +624,8 @@ show_plotly_with_alt(
 #
 # **3. A contemporaneous correlation is not a signal.** Pairing a minute's imbalance with
 # that minute's return measures co-movement, and acting on it would require knowing the
-# minute before it ended. The lagged version is a different measurement.
+# minute before it ended. Lagging the imbalance behind the return asks the tradeable
+# question instead, and it is a different measurement with a different answer.
 #
 # **4. Plot stress measures together and check whether they peak together.** Spread and
 # imbalance are both read as stress; if their extremes fall in different hours, they are

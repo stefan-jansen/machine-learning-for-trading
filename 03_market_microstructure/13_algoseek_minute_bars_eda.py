@@ -662,9 +662,14 @@ if all(
 # ### Why This Matters
 #
 # Tick direction records where each trade printed relative to the one before it, so it
-# measures the sequence of price changes rather than which side crossed. An uptick ratio
-# above one half means more volume traded on rising prices than on falling ones over the
-# bar.
+# measures the sequence of price changes rather than which side crossed.
+#
+# The ratio computed below counts repeat ticks with their parent direction: volume that
+# traded at an unchanged price after an uptick is counted as an uptick. That is the
+# standard convention and it is worth knowing, because it means the ratio is not the
+# share of volume that traded on a rising price. A bar in which one share ticked up, a
+# hundred traded flat after it, and ten ticked down reads well above one half, even
+# though more volume changed hands on falling prices than rising ones.
 #
 # That is a different quantity from order-flow imbalance, which counts shares by
 # aggressor side. The two usually agree and need not: a large buy that walks up through
@@ -1068,9 +1073,10 @@ show_with_alt(
 # a large order is filled at one price rather than walking the book, which makes the
 # divergence more informative than either series alone.
 #
-# **Pressure** (`trade_to_mid_vol_weight`) says how far from the midpoint the average trade
-# printed, scaled by the spread. Direction and intensity are different questions, and this
-# is the intensity one.
+# **Pressure** says how far from the midpoint the average trade printed.
+# `trade_to_mid_vol_weight` is that distance in dollars; `trade_to_mid_vol_weight_rel`
+# divides it by the spread, and it is the second one that compares across stocks.
+# Direction and intensity are different questions, and this is the intensity one.
 #
 # **Spread and quote count** (`spread_bps`, `min_spread`, `nbbo_quote_count`) describe the
 # conditions rather than the flow. A widening spread with a falling quote count is market
