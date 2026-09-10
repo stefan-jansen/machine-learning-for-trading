@@ -1616,20 +1616,22 @@ print(f"  TSTR Ratio: {tstr_results['tstr_ratio']:.3f}")
 # %% [markdown]
 # **Interpretation**: the TSTR ratio is one accuracy divided by another, so it says
 # how the two models compare and nothing about whether either one works. Two models
-# that both fail put it at one just as readily as two that both succeed, and that is
-# the case here: read the printed accuracies against the naive baseline above them,
-# and read the real-trained recall on the extreme-move class. Precision and recall are
+# that both fall short put it at one just as readily as two that both succeed, and
+# neither of the accuracies printed above reaches the naive baseline printed beside
+# them. Precision and recall are
 # where a model that finds the rare large moves separates from one that predicts the
 # negative class throughout, and the accuracy column cannot make that distinction
 # because the positive class is a few percent of the test rows.
 #
 # **Trading context**: extreme-move prediction leans on volatility clustering, so this
 # section was meant to ask whether the synthetic paths carry it. A ratio near one
-# answers that only once both models clear the baseline. Where they do not, the
-# comparison is between two models that learned nothing from either source, and the
-# question of volatility clustering is still open - the lag-1 autocorrelation reported
-# earlier is computed on returns, not on squared returns, so it does not settle it
-# either.
+# answers that only once both models clear the naive baseline on the metric the ratio
+# is built from. Where neither does, the ratio establishes nothing either way about
+# volatility clustering, and the precision and recall columns are the ones to read
+# instead: they are computed on the positive class, so they separate a model that finds
+# some extreme moves from one that never predicts them, which accuracy at this
+# prevalence cannot. The lag-1 autocorrelation reported earlier does not settle the
+# question either, being computed on returns rather than on squared returns.
 
 # %% [markdown]
 # ### Sample Sequences and Decomposition
