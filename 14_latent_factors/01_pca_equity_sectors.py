@@ -536,10 +536,12 @@ print(
 # than of performance. That is not the same as the sectors moving the same way. A window
 # in which one group of sectors rises whenever another falls is still one direction, with
 # opposite-signed loadings, and the share stays high; what pulls the share down is
-# variance spreading across several independent directions. So read the line together
-# with the loadings of section 4 before calling a rise co-movement, and note that stress
-# has no one signature here: a synchronized sell-off and a rotation can produce the same
-# share.
+# variance spreading across several independent directions. Telling the two apart needs
+# the loadings of the window itself, and this loop keeps only the variance shares - the
+# loadings in section 4 are fitted on the whole sample and cannot settle what any one
+# window was doing. So read a rise as concentration, not as co-movement, and note that
+# stress has no one signature here: a synchronized sell-off and a rotation can produce
+# the same share.
 #
 # Every point is computed from the window ending at that date, so the line describes
 # what had already happened. Nothing here forecasts the next window's value.
@@ -696,8 +698,8 @@ print(
 #    moves.** A single full-sample number hides the movement, and the rolling window is
 #    what shows it. The share does not say which direction: a synchronized sell-off and a
 #    rotation that sets one group of sectors against another can both leave most of the
-#    variance in one component, and only the loadings separate them. Neither is "the
-#    stress signature".
+#    variance in one component, and separating them needs that window's own loadings,
+#    which this notebook does not keep. Neither is "the stress signature".
 # 4. **Orthogonality is a property of the fitting sample, not of every window in it.**
 #    The rolling correlation between the first two components shows how far a short
 #    window departs from zero, which is what anything built on their independence has to
