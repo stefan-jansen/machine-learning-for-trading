@@ -103,15 +103,37 @@ spy.head()
 # %% [markdown]
 # ## 2. Lookahead Bias: A Visual Demonstration
 #
-# A *centered* moving average of width $w$ computed at time $T$ averages the window
-# $[T - \lfloor w/2 \rfloor,\ T + \lfloor w/2 \rfloor]$, so $\lfloor w/2 \rfloor$ of its
-# inputs have not happened yet: two of five for a five-day window, ten of twenty for a
-# twenty-day one. The trailing window of the same width uses $[T - w + 1,\ T]$, which is what
-# a live system can compute.
+# A trailing moving average of width $w$ at time $T$ averages $[T - w + 1,\ T]$, which is what
+# a live system can compute. A *centered* one is the same window slid forward so that $T$ sits
+# near its middle, which puts some of its inputs after $T$.
 #
-# The count matters more than it looks. Half a centered window is future, always, whatever
-# the width, so a longer centered average does not leak proportionally less - it leaks
-# further ahead.
+# Exactly how many depends on the library's centering convention and on whether the width is
+# odd or even, so the next cell asks rather than assumes: running the centered average over a
+# ramp makes each output reveal the window that produced it.
+
+
+# %%
+def centered_window_offsets(width: int) -> tuple[int, int]:
+    """Return the first and last offsets, relative to T, of a centered window of `width`.
+
+    Averaging a ramp gives back the midpoint of whatever window was used, so one output value
+    identifies the window exactly.
+    """
+    ramp = pl.DataFrame({"x": [float(i) for i in range(4 * width)]}).with_columns(
+        pl.col("x").rolling_mean(window_size=width, center=True).alias("centered")
+    )
+    row = next(i for i, v in enumerate(ramp["centered"]) if v is not None)
+    # The mean of a ramp is its window's midpoint, so this recovers the window's first input.
+    first_input = ramp["centered"][row] - (width - 1) / 2
+    return int(first_input - row), int(first_input + width - 1 - row)
+
+
+for _w in (MA_WINDOW, MA_WINDOW_LONG):
+    _lo, _hi = centered_window_offsets(_w)
+    print(
+        f"Centered window of width {_w:>2}: [T{_lo:+d}, T{_hi:+d}], "
+        f"{_hi} of {_w} inputs are in the future"
+    )
 
 # %%
 spy_ma = (
@@ -179,11 +201,15 @@ show_plotly_with_alt(
 # its inputs are prices that had not printed yet. No live system can produce that line, so a
 # backtest that uses it reports skill the strategy could not have had.
 #
+# The share of a centered window that lies in the future is just under half and stays there as
+# the width grows, as the two measured windows above show. A longer centered average does not
+# leak proportionally less; it leaks further ahead.
+#
 # There is a second tell, and it is the one that shows up first in practice. A centered
-# average has no value for the most recent half-window, because those rows are still waiting
-# for inputs, so `drop_nulls` above silently ends the plotted series short of the data. A
-# feature that cannot be computed for today is a feature no live system can trade on, and
-# that missing tail is visible long before any correlation test is run.
+# average has no value for the most recent rows, because they are still waiting for inputs,
+# so `drop_nulls` above silently ends the plotted series short of the data. A feature that
+# cannot be computed for today is a feature no live system can trade on, and that missing
+# tail is visible long before any correlation test is run.
 
 # %% [markdown]
 # ## 3. Why the Naive Correlation Heuristic Fails
@@ -277,9 +303,9 @@ fixed_results = pl.DataFrame(
 fixed_results
 
 # %% [markdown]
-# The same three features now sort: the trailing average stays low, the centered average
-# rises because two of its five inputs sit in the future, and `tomorrow_close` saturates near
-# one because it is the next day's price.
+# The same three features now sort: the trailing average stays low, the centered average rises
+# because part of its window sits in the future, and `tomorrow_close` saturates near one
+# because it is the next day's price.
 #
 # What separates them is a gap in the middle of the scale, and the validator later in this
 # notebook puts its threshold there. The gap is what makes a threshold possible at all: a
@@ -625,9 +651,11 @@ revisions
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Half of a centered window is always in the future.** The share does not shrink as the
-#    window grows, so a longer centered average does not leak less; it leaks further ahead. The
-#    figure shows the consequence, and the printed distances measure it.
+# 1. **Just under half of a centered window lies in the future, at any width.** The window
+#    offsets are measured above rather than assumed, because the convention differs between
+#    libraries and between odd and even widths. Since the share does not shrink with width, a
+#    longer centered average leaks further ahead rather than less. The figure shows the
+#    consequence and the printed distances measure it.
 #
 # 2. **Correlating a level against a return does not detect leakage.** Tomorrow's close, used
 #    directly as a feature, scores near zero on that test, alongside a clean trailing average.
