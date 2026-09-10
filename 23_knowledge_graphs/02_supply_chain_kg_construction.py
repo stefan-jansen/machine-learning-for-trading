@@ -1031,10 +1031,45 @@ def _load_predicate(session, triples: list[Triple], predicate: str, batch_size: 
 
 
 # %% [markdown]
+# ### Clearing an Existing Graph
+#
+# This notebook shares a database with the rest of the chapter, and it is the
+# second writer to touch `:Company`: `08_8k_event_extraction` attaches its event
+# relationships to nodes with that label and declares `Company.name` unique. So the
+# reset cannot delete company nodes, and it cannot leave a second node behind for a
+# name that already exists.
+#
+# Adopting existing `:Company` nodes into `:Entity` is what prevents the duplicate.
+# Without it, a database where 08 ran first already holds `(:Company {name: "Apple
+# Inc."})`, `MERGE (:Entity {name: "Apple Inc."})` matches nothing, and the load
+# creates a second node that the uniqueness constraint then rejects.
+#
+# Deleting only entity nodes that have no relationships left is what protects 08:
+# a `DETACH DELETE` over `:Entity` would take its `APPOINTED` and `ACQUIRED` edges
+# with it, because after adoption those nodes carry the label too.
+
+
+# %%
+RESET_STATEMENTS = (
+    # This notebook's own edges, whichever revision wrote them.
+    "MATCH (:Company)-[r:HAS_SUPPLIER|COMPETES_WITH|HAS_CUSTOMER]->() DELETE r",
+    # One node per name across the chapter: adopt company nodes written by 08, or
+    # by an earlier revision of this notebook, before anything merges on :Entity.
+    "MATCH (n:Company) WHERE NOT n:Entity SET n:Entity",
+    # Role nodes from the revision that keyed on the role label are unreachable now.
+    "MATCH (n:Supplier) WHERE NOT n:Entity DETACH DELETE n",
+    "MATCH (n:Customer) WHERE NOT n:Entity DETACH DELETE n",
+    # Roles are re-applied by the load; a stale one would outlive its edges.
+    "MATCH (n:Entity) REMOVE n:Supplier, n:Customer",
+    # What is left with no edges at all belongs to no notebook.
+    "MATCH (n:Entity) WHERE NOT (n)--() DELETE n",
+)
+
+
+# %% [markdown]
 # ### Top-Level Batch Loader
 #
-# Clear the supply-chain subgraph (relationships plus Supplier/Customer nodes,
-# leaving Company nodes intact), then dispatch each predicate to `_load_predicate`.
+# Reset the supply-chain subgraph, then dispatch each predicate to `_load_predicate`.
 
 
 # %%
@@ -1052,13 +1087,8 @@ def load_to_neo4j_batch(triples: list[Triple], batch_size: int = 1000) -> int:
 
     loaded = 0
     with NEO4J_DRIVER.session() as session:
-        session.run("MATCH (n:Entity) DETACH DELETE n")
-        # Nodes written by an earlier revision of this notebook carry no :Entity
-        # label. Clear those too, but leave :Company alone: 08 writes that label
-        # for its own event graph and does not write supply-chain edges.
-        session.run("MATCH (:Company)-[r:HAS_SUPPLIER|COMPETES_WITH|HAS_CUSTOMER]->() DELETE r")
-        session.run("MATCH (n:Supplier) DETACH DELETE n")
-        session.run("MATCH (n:Customer) DETACH DELETE n")
+        for statement in RESET_STATEMENTS:
+            session.run(statement)
         for predicate in UNWIND_TEMPLATES:
             loaded += _load_predicate(session, triples, predicate, batch_size)
 
@@ -1076,17 +1106,21 @@ with NEO4J_DRIVER.session() as session:
     persisted_count = session.run(
         "MATCH (:Company)-[r:HAS_SUPPLIER|COMPETES_WITH|HAS_CUSTOMER]->() RETURN count(r) AS n"
     ).single()["n"]
-    persisted_entities = session.run("MATCH (n:Entity) RETURN count(n) AS n").single()["n"]
+    persisted_entities = session.run(
+        "MATCH (n:Entity) WHERE EXISTS { (n)-[:HAS_SUPPLIER|COMPETES_WITH|HAS_CUSTOMER]-() } "
+        "RETURN count(n) AS n"
+    ).single()["n"]
 assert persisted_count == len(unique_triples), (
     f"Neo4j contains {persisted_count} supply-chain edges; expected {len(unique_triples)}"
 )
 assert persisted_entities == len(all_entities), (
-    f"Neo4j contains {persisted_entities} entity nodes; expected {len(all_entities)}. "
-    "A name that reached the graph twice means resolution did not collapse it."
+    f"Neo4j holds {persisted_entities} entity nodes on the supply-chain edges; "
+    f"expected {len(all_entities)}. A name that reached the graph twice means "
+    "resolution did not collapse it."
 )
 load_elapsed = time.time() - load_start_time
 print(f"Loading completed in {load_elapsed:.2f}s")
-print(f"Entity nodes: {persisted_entities}, supply-chain edges: {persisted_count}")
+print(f"Entity nodes on supply-chain edges: {persisted_entities}, edges: {persisted_count}")
 
 # %% [markdown]
 # ### Graph Snapshot
