@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -117,6 +117,9 @@ from utils.paths import display_path
 
 # %% tags=["parameters"]
 SKIP_PARSING = False
+# Messages to read before stopping. None parses the whole session, which is what the
+# shipped output is built from; a small number is how you try the parser out first.
+MAX_MESSAGES = None
 
 # %% [markdown]
 # The parse reads one directory and writes another. `load_nasdaq_itch(get_base_path=True)`
@@ -203,10 +206,12 @@ print(f"Timestamp: {ts_ns:,} nanoseconds = {ts_ns / 1e9:.9f} seconds after midni
 print(f"Price: ${price:.4f}")
 
 # %% [markdown]
-# ## 3. Loading Pre-Parsed ITCH Data
+# ## 3. What the Pipeline Holds Right Now
 #
-# If you've already parsed ITCH data (using the Rust parser or Python parser), you can load
-# the pre-parsed messages directly. This is the recommended approach for analysis.
+# Before parsing anything, take stock: the raw binary is the input, the per-message-type
+# Parquet directories are the output, and either can be absent. On a first run the parsed
+# side is empty, and it stays empty until Section 4 writes it. The parsed messages are
+# loaded in Section 5, after there is something to load.
 
 # %%
 # Check what data is available locally
@@ -237,21 +242,6 @@ for msg_dir in parsed_with_data:
     name = MESSAGE_SPECS.get(msg_dir.name, {}).get("name", "Unknown")
     n_files = len(list(msg_dir.glob("*.parquet")))
     print(f"  {msg_dir.name} ({name}): {n_files} files")
-
-# %%
-# Validate: at minimum we need parsed data to continue
-trade_dir = MESSAGE_DIR / "P"
-assert trade_dir.exists() and list(trade_dir.glob("*.parquet")), (
-    f"No parsed ITCH data at {MESSAGE_DIR}.\n"
-    "To set up the data pipeline:\n"
-    "  1. Download raw data:  uv run python data/equities/market/microstructure/nasdaq_itch_download.py\n"
-    "  2. Parse (this notebook, Section 4) or use Rust parser (Section 6)\n"
-    "  3. Parsed messages go to: data/equities/market/microstructure/nasdaq_itch/messages/"
-)
-
-trades = pl.read_parquet(trade_dir / "*.parquet")
-print(f"\nLoaded {len(trades):,} trade messages")
-print(f"Columns: {trades.columns}")
 
 # %% [markdown]
 # ## 4. Full Parser Implementation
@@ -474,7 +464,7 @@ if not SKIP_PARSING and (gz_files or bin_files):
             itch_file=itch_file,
             trading_day=trading_day,
             output_dir=MESSAGE_DIR,
-            # max_messages=1_000_000,  # Remove this line for full parse
+            max_messages=MAX_MESSAGES,
         )
 
         print("\nMessage counts:")
@@ -485,7 +475,24 @@ if not SKIP_PARSING and (gz_files or bin_files):
 # %% [markdown]
 # ## 5. Message Type Analysis
 #
-# After parsing, we can analyze message distributions.
+# The parse has written one Parquet directory per message type, so the store can now be
+# read back. The cell below asserts on trade messages (`P`) because that is the type it
+# goes on to load. A full session always contains them, so an empty `P` directory means
+# the parse did not finish rather than that this day happened to have no trades.
+
+# %%
+trade_dir = MESSAGE_DIR / "P"
+assert trade_dir.exists() and list(trade_dir.glob("*.parquet")), (
+    f"No parsed trade messages at {trade_dir}.\n"
+    "Section 4 writes them from the raw binary. If SKIP_PARSING is True, it was skipped\n"
+    "and the store has to have been written by an earlier run or by the Rust parser of\n"
+    "Section 6. If the raw binary is missing, fetch it first:\n"
+    "  uv run python data/equities/market/microstructure/nasdaq_itch_download.py"
+)
+
+trades = pl.read_parquet(trade_dir / "*.parquet")
+print(f"Loaded {len(trades):,} trade messages")
+print(f"Columns: {trades.columns}")
 
 # %%
 # Message type distribution — use lazy scan to count without loading all data
