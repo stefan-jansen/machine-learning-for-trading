@@ -315,9 +315,10 @@ def block_bootstrap_blocks(values, block_size, rng, context=LAG_CONTEXT):
     two of them.
 
     Each dataset carries `context` rows of real history before its block. Without them
-    tigramite's `2 * tau_max` cut would take a fifth of every block, and the resample would
-    be running on half the observations of the fit whose stability it is measuring - which
-    also reads as instability on the chart.
+    tigramite's `2 * tau_max` cut takes the first ten rows of every twenty-row block at the
+    defaults here, half of it, and the resample runs on 250 usable observations against the
+    490 of the fit whose stability it is measuring - which also reads as instability on the
+    chart.
     """
     n = len(values)
     n_blocks = n // block_size
