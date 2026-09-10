@@ -391,11 +391,40 @@ print(f"Confounding bias (naive - DML): {bias:.4f} ({bias_pct:+.1f}%)")
 # repeat the estimand inside each regime rather than fitting a single
 # heterogeneity model.
 
+# %% [markdown]
+# ### What a Subgroup Standard Error Can and Cannot Say Here
+#
+# The two fits below re-fit everything inside a regime, nuisance models included, which is a
+# different estimator from the full-sample one rather than the same estimator on fewer rows.
+# That is what makes them worth having, and it also costs them a contiguous time grid.
+#
+# A regime is a set of **episodes**, not an interval: the market moves in and out of high
+# volatility repeatedly. Handed only its own timestamps, the covariance estimator numbers
+# them consecutively, so the last bar of one episode and the first bar of the next become
+# neighbours however much calendar time separates them. Inside an episode the bandwidth
+# counts real 8-hour bars; across an episode boundary it compresses the gap to nothing. The
+# cell prints the episode counts and lengths so the size of that compression is visible.
+#
+# The consequence is where to read the regime comparison from. The subgroup intervals below
+# are indicative. The regime **difference** comes from the interaction model further down,
+# which is fitted on the full sample and therefore on an unbroken grid.
+
 # %%
 print("\nRegime-Conditional Treatment Effects (Regime-Stratified ATE)...")
 
 low_vol_mask = regime == 0
 high_vol_mask = regime == 1
+
+# Episode structure: a regime run is a maximal stretch of consecutive timestamps in it.
+regime_by_time = pd.Series(regime, index=decision_times).groupby(level=0).first().sort_index()
+episode_id = (regime_by_time != regime_by_time.shift()).cumsum()
+episode_lengths = regime_by_time.groupby([regime_by_time, episode_id]).size()
+for label, name in ((0, "Low"), (1, "High")):
+    lengths = episode_lengths.loc[label]
+    print(
+        f"  {name}-vol regime: {len(lengths)} episodes, "
+        f"median {lengths.median():.0f} bars, longest {lengths.max()} bars"
+    )
 
 print("\n  Low Volatility Regime:")
 if low_vol_mask.sum() > 100:
@@ -748,8 +777,9 @@ print(f"Regime effect ratio (high/low vol): {regime_ratio:.2f}x")
 #
 # 3. **A regime difference needs one model, not two.** Adding the two subgroup variances
 #    assumes the estimates are independent draws, which disjoint subsets of one market are
-#    not. The interaction on the residualized full sample gives the difference and its
-#    standard error from a single fit.
+#    not; and a subgroup fitted on its own episodes has no unbroken time grid for its
+#    standard error to count on. The interaction on the residualized full sample avoids both
+#    problems, giving the difference and its standard error from a single fit on every bar.
 #
 # 4. **A block permutation is only a block permutation if the blocks run along time.** On
 #    this panel a bare `block_permute` would shuffle within a bar. The sweep over one, seven
