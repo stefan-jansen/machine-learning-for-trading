@@ -1318,7 +1318,8 @@ show_with_alt(
     fig,
     "Two panels. Left: the classification score's IC against the continuous return, one "
     "row per pair with its HAC interval, against a line at zero. Right: the regression "
-    "score's mean daily AUC against the binary direction, against a line at one half.",
+    "score's pooled out-of-fold AUC against the binary direction, against a line at one "
+    "half.",
 )
 
 # %%
