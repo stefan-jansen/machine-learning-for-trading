@@ -1499,8 +1499,8 @@ show_with_alt(
     fig,
     "Two scatter panels comparing real and synthetic paths. In the PCA projection "
     "both sets overlap in a dense cluster at the origin, but the real points also "
-    "scatter far out in every direction while the synthetic points stay in the "
-    "cluster. In the t-SNE projection the synthetic points spread over a wider area "
+    "scatter far out along both axes and into all four quadrants while the "
+    "synthetic points stay in the cluster. In the t-SNE projection the synthetic points spread over a wider area "
     "than the real ones, which concentrate toward the centre.",
 )
 
@@ -1736,9 +1736,13 @@ def plot_path_comparison_unconditional(
         yaxis=dict(range=shared_range),
         yaxis2=dict(range=shared_range),
     )
-    fig.update_xaxes(title_text="Day", row=1, col=1)
-    fig.update_xaxes(title_text="Day", row=1, col=2)
-    fig.update_yaxes(title_text="Cumulative Return", row=1, col=1)
+    # Zerolines off: the right panel hides its y axis, so both render inside the
+    # plotting area, and the y zeroline is the same navy as the real paths - a
+    # horizontal rule in the synthetic panel reads as a real path plotted into it.
+    fig.update_xaxes(title_text="Day", zeroline=False, row=1, col=1)
+    fig.update_xaxes(title_text="Day", zeroline=False, row=1, col=2)
+    fig.update_yaxes(title_text="Cumulative Return", zeroline=False, row=1, col=1)
+    fig.update_yaxes(zeroline=False, row=1, col=2)
 
     return fig
 
@@ -1757,8 +1761,10 @@ show_plotly_with_alt(
     "Two panels of thirty cumulative return paths each over fifteen days, real on "
     "the left and synthetic on the right, drawn on a shared vertical scale so the "
     "two spreads can be compared directly. Each path starts at its window's first "
-    "day's return, close enough to zero to be indistinguishable at this scale, and "
-    "the synthetic paths reach further from zero by the last day than the real ones.",
+    "day's return, close enough to zero to be indistinguishable at this scale. The "
+    "synthetic paths fan out more evenly and the highest path at day fifteen is a "
+    "synthetic one, while the lowest path in either panel is real and falls below "
+    "anything the synthetic panel reaches.",
 )
 
 # %% [markdown]
