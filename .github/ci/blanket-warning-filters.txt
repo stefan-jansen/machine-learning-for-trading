@@ -43,8 +43,6 @@
 03_market_microstructure/18_algoseek_jump_detection.py
 05_synthetic_data/02_tailgan_tail_risk.py
 05_synthetic_data/05_diffusion_ts.py
-06_strategy_definition/02_cv_foundations.py
-06_strategy_definition/03_case_study_overview.py
 07_defining_the_learning_task/01_data_quality_diagnostics.py
 07_defining_the_learning_task/02_preprocessing_pipeline.py
 07_defining_the_learning_task/03_label_methods.py
