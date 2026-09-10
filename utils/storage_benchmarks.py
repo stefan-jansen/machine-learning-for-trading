@@ -22,8 +22,6 @@ import plotly.graph_objects as go
 import polars as pl
 import yaml
 
-warnings.filterwarnings("ignore")
-
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -152,6 +150,11 @@ else:
     TIMING_RUNS = 3
 
 # Database connection configuration (environment variable overrides)
+# Defaults are the values `docker-compose.yml` gives the services it ships, and the
+# ports are the ones it publishes to the host. A default that disagrees with the only
+# server in the repository is a failure waiting for the first reader who follows the
+# quick start outside the container, and it surfaces as a missing org or an empty
+# database rather than as a configuration error.
 DB_CONFIG = {
     "clickhouse": {
         "host": os.environ.get("CLICKHOUSE_HOST", "localhost"),
@@ -168,14 +171,14 @@ DB_CONFIG = {
         "port": int(os.environ.get("TIMESCALE_PORT", "5437")),
         "user": os.environ.get("TIMESCALE_USER", "postgres"),
         "password": os.environ.get("TIMESCALE_PASSWORD", "benchmark"),
-        "database": os.environ.get("TIMESCALE_DB", "postgres"),
+        "database": os.environ.get("TIMESCALE_DB", "ml4t"),
     },
     "influxdb": {
         "host": os.environ.get("INFLUXDB_HOST", "localhost"),
         "port": int(os.environ.get("INFLUXDB_PORT", "8086")),
-        "org": os.environ.get("INFLUXDB_ORG", "benchmark"),
+        "org": os.environ.get("INFLUXDB_ORG", "ml4t"),
         "token": os.environ.get("INFLUXDB_TOKEN", "benchmark-token"),
-        "bucket": os.environ.get("INFLUXDB_BUCKET", "benchmark"),
+        "bucket": os.environ.get("INFLUXDB_BUCKET", "market_data"),
     },
     "postgres": {
         "host": os.environ.get("POSTGRES_HOST", "localhost"),
@@ -248,8 +251,7 @@ def time_operation(func, n_runs: int = TIMING_RUNS, warmup: bool = True) -> tupl
         warmup: Whether to run once before timing to warm up caches/JIT (default: True)
 
     Returns:
-        (mean_time, result): Mean execution time and last result
-            Note: Timing stats (percentiles) are stored in result.timing_stats if available
+        (mean_time, result): Mean execution time and the last run's result.
     """
     # Warm-up run (exclude from timing)
     if warmup:
@@ -267,26 +269,7 @@ def time_operation(func, n_runs: int = TIMING_RUNS, warmup: bool = True) -> tupl
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
-    # Calculate statistics
-    times_array = np.array(times)
-    mean_time = float(np.mean(times_array))
-
-    # Store timing stats as metadata (if result supports it)
-    try:
-        if hasattr(result, "__dict__"):
-            result.timing_stats = {
-                "mean": mean_time,
-                "std": float(np.std(times_array)),
-                "min": float(np.min(times_array)),
-                "max": float(np.max(times_array)),
-                "p50": float(np.percentile(times_array, 50)),
-                "p95": float(np.percentile(times_array, 95)),
-                "p99": float(np.percentile(times_array, 99)),
-            }
-    except Exception:
-        pass  # Not all result types support metadata
-
-    return mean_time, result
+    return float(np.mean(np.array(times))), result
 
 
 # -----------------------------------------------------------------------------
@@ -381,15 +364,20 @@ def wait_until_rows_visible(
 
 
 def validate_result(
-    result: Any, expected_rows: int, operation: str, tolerance: float = 0.1
+    result: Any, expected_rows: int, operation: str, tolerance: float = 0.0
 ) -> None:
-    """Validate benchmark result has reasonable row count.
+    """Check a benchmark result returned the row count the query was known to produce.
+
+    Every benchmarked query is deterministic and its answer is known before it runs,
+    so the default is exact. A near miss is a wrong answer, not a tolerable one, and
+    a truncated result would otherwise post the fastest time on the chart.
 
     Args:
         result: Result to validate (DataFrame, list, dict with 'dataset', or None)
         expected_rows: Expected number of rows
         operation: Operation name for error messages
-        tolerance: Fraction tolerance (0.1 = 10% deviation acceptable)
+        tolerance: Fractional slack. Zero, unless a caller can say why its query is
+            not exactly determined.
 
     Raises:
         AssertionError: If row count is unreasonable
@@ -839,13 +827,26 @@ def generate_tick_data(
         },
     )
 
-    # Use ASOF join to match each trade with most recent quote
-    trades_with_quotes = trades_prelim.join_asof(
-        quotes_df.sort(["symbol", "timestamp"]),
-        on="timestamp",
-        by="symbol",
-        strategy="backward",
-    )
+    # Use ASOF join to match each trade with the most recent quote.
+    #
+    # polars cannot verify sortedness once `by` groups are given, so it warns on every
+    # such join whether or not the frame is sorted. Here it is, by construction: the
+    # trade timestamps are a strictly increasing arithmetic sequence, so they are
+    # increasing within every symbol group as well. The suppression names that one
+    # message rather than silencing the category, so a genuine sortedness problem
+    # elsewhere still reaches the reader.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Sortedness of columns cannot be checked when 'by' groups provided",
+            category=UserWarning,
+        )
+        trades_with_quotes = trades_prelim.join_asof(
+            quotes_df.sort(["symbol", "timestamp"]),
+            on="timestamp",
+            by="symbol",
+            strategy="backward",
+        )
 
     # Calculate trade prices: 25% at ask, 25% at bid, 50% at mid
     trade_sides = np.random.rand(n_trades)

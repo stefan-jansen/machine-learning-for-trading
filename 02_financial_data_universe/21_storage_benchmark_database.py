@@ -55,6 +55,17 @@
 #   created fresh for the run. Bulk load happens once per dataset, so that is
 #   what we time. Repeating it would append duplicate rows on the append-only
 #   engines, or require a teardown that is not part of the write.
+# - **A write bar is what the client pays, and the clients differ.** SQLite,
+#   DuckDB, ClickHouse and kdb+ hand the panel over in one block (`to_sql`, a
+#   Parquet scan, `insert_df`, `set`), so almost all of their write time is the
+#   engine. PostgreSQL and TimescaleDB have to build one Python tuple per row
+#   for `execute_values`, and InfluxDB one `Point` per row for line protocol.
+#   That construction is what using those interfaces costs, so it stays inside
+#   the timed region - but it is not the engine, and a reader comparing bars
+#   should know which bars contain it. Each of the three measures its own row
+#   building separately and prints the share; the summary below collects them.
+#   Read a write bar as "what it costs to get this panel into this engine
+#   through its Python client", not as the engine's raw ingest rate.
 # - **Durability inside the timed region.** PostgreSQL and TimescaleDB commit
 #   synchronously, so their flush cost is inside the timed call. QuestDB (ILP
 #   + WAL) and InfluxDB acknowledge before the rows are queryable, so they
@@ -68,7 +79,9 @@
 #   would be cold for the embedded engines and warm for the servers - neither
 #   cold nor comparable. Warm and uniform is the measurable choice; §2.4 says
 #   so where it reports these figures.
-# - **Every read is validated** against the expected row count. A query that
+# - **Every read is validated** against the expected row count, exactly. Each
+#   query below is deterministic and its answer is known before it runs, so a
+#   near miss is a wrong answer rather than a tolerable one - and a query that
 #   silently returns a truncated result would otherwise post the fastest time
 #   on the chart.
 #
@@ -95,13 +108,22 @@
 # ## Quick Start
 #
 # ```bash
-# # Embedded only (no Docker needed)
-# BENCHMARK_SCALE=S uv run python storage_benchmark_databases.py
+# # Embedded engines only (no Docker needed)
+# uv run --extra db-benchmark python 02_financial_data_universe/21_storage_benchmark_database.py
 #
-# # With server databases (start Docker first)
-# docker compose --profile benchmark up -d timescaledb clickhouse questdb influxdb
-# BENCHMARK_SCALE=L uv run python storage_benchmark_databases.py
+# # With the server engines as well, from the host (compose publishes their ports)
+# docker compose --profile databases up -d timescaledb postgres clickhouse questdb influxdb
+# uv run --extra db-benchmark python 02_financial_data_universe/21_storage_benchmark_database.py
 # ```
+#
+# The scale is the `BENCHMARK_SCALE` parameter below, not an environment variable:
+# the cell after the parameters cell writes the parameter back into the environment
+# for `utils.storage_benchmarks` to read, so a `BENCHMARK_SCALE=...` prefix on the
+# command line is overwritten before anything reads it. Change the scale by editing
+# the parameter, or by injecting it with Papermill as CI does.
+#
+# Whichever engines answer, the coverage report near the bottom names the ones that
+# produced the numbers on this page, and the ones that did not.
 
 # %% [markdown]
 # ## Setup
@@ -119,18 +141,37 @@ import subprocess
 import time as time_module
 import urllib.parse
 import urllib.request
-import warnings
 from datetime import UTC, timedelta
 from pathlib import Path
 
+# %% [markdown]
+# ### Declared parameters
+#
+# `BENCHMARK_SCALE` selects the panel size; the production setting is the one §2.4
+# quotes, and CI overrides it to the small scale through Papermill. Every cell that
+# reports a number also reports the scale that produced it, so a figure lifted off
+# this page carries its own provenance.
+#
+# `RANGE_QUERY_SHARE` is the fraction of the panel the range query should select.
+# It is a share rather than a fixed number of days because the panel's calendar span
+# grows with the scale: a fixed seven-day window selects a fifth of the large panel
+# and *all* of the small one, which would silently turn the range-query panel of the
+# chart into a second copy of the full scan.
+#
+# `LOG_AXIS_RATIO` is the spread at which a chart panel switches to a logarithmic
+# x-axis, measured on the bars actually drawn rather than assumed from a past run.
+
 # %% tags=["parameters"]
-# Production scale follows chapter §2.4 prose ("L scale, ~1 M OHLCV rows").
-# Override via Papermill for CI: BENCHMARK_SCALE = "S".
 BENCHMARK_SCALE = "L"
+RANGE_QUERY_SHARE = 0.2
+LOG_AXIS_RATIO = 10.0
+
+# %% [markdown]
+# `utils.storage_benchmarks` reads the scale from the environment when it is imported,
+# so the variable has to be set before the import rather than passed to a function
+# afterwards.
 
 # %%
-# storage_benchmarks reads BENCHMARK_SCALE at import time, so the env var must
-# be set before the import below.
 os.environ["BENCHMARK_SCALE"] = BENCHMARK_SCALE
 
 import pandas as pd
@@ -138,7 +179,7 @@ import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
 from utils.storage_benchmarks import (
     ACTIVE_SCALE,
     BENCHMARK_DIR,
@@ -163,9 +204,7 @@ from utils.storage_benchmarks import (
     validate_result,
     wait_until_rows_visible,
 )
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, show_plotly_with_alt
 
 # %%
 OUTPUT_DIR = get_output_dir(2, "storage_benchmark")
@@ -175,11 +214,12 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # ## Check Available Databases
 
 # %%
-# Track benchmark status
 benchmark_status = {
     # Embedded (always available if package installed)
     "SQLite": {"expected": True, "tested": False, "category": "embedded"},
-    "DuckDB": {"expected": False, "tested": False, "category": "embedded"},
+    # DuckDB is imported unconditionally below, so its absence raises rather than
+    # lowering the bar this run is measured against.
+    "DuckDB": {"expected": True, "tested": False, "category": "embedded"},
     "ArcticDB": {"expected": False, "tested": False, "category": "embedded"},
     # Servers (need Docker)
     "ClickHouse": {"expected": True, "tested": False, "category": "server"},
@@ -194,10 +234,15 @@ print("=" * 70)
 print(f"DATABASE BENCHMARK - Scale: {ACTIVE_SCALE}")
 print("=" * 70)
 
-# === Check Embedded Databases ===
-# DuckDB ships in both the `benchmark` (ARM64) and `benchmark-full` (x86)
-# images. ArcticDB is x86-only — it lives in `benchmark-full`. SQLite is
-# always available via stdlib.
+# %% [markdown]
+# ### Which engines are present
+#
+# DuckDB ships in both the `benchmark` (ARM64) and `benchmark-full` (x86) images, and
+# SQLite comes with Python, so both are always available and the notebook refuses to
+# continue without DuckDB rather than quietly dropping it. ArcticDB is x86-only and
+# lives in `benchmark-full`; where it is absent it is reported as absent.
+
+# %%
 try:
     import duckdb  # noqa: F401
 except ImportError as exc:
@@ -209,19 +254,26 @@ except ImportError as exc:
     ) from exc
 
 print("\n### Embedded Databases")
-benchmark_status["DuckDB"]["expected"] = True
 print("[OK] DuckDB: Available")
 print("[OK] SQLite: Available (built-in)")
 
+# %% [markdown]
+# The ArcticDB guard below catches `Exception`, not `ImportError`. An ArcticDB that is
+# installed but cannot run raises something else entirely - `NotImplementedError`
+# against an unsupported protobuf, for one - and a guard that catches only
+# `ImportError` lets that end the notebook. An optional engine has to be optional in
+# every way it can fail to be usable, not only in the one way it can be absent.
+
+# %%
 try:
     import arcticdb as adb
 
     HAS_ARCTICDB = True
     benchmark_status["ArcticDB"]["expected"] = True
     print("[OK] ArcticDB: Available")
-except ImportError:
+except Exception as exc:
     HAS_ARCTICDB = False
-    print("○ ArcticDB: Not installed (x86-only — use the benchmark-full image)")
+    print(f"○ ArcticDB: unavailable, skipping ({type(exc).__name__}: {exc})")
 
 # %%
 # === Check Server Databases ===
@@ -285,6 +337,7 @@ try:
     )
     HAS_INFLUXDB = bool(influx_test.ready())
     influx_test.close()
+    del influx_test
     if HAS_INFLUXDB:
         print("[OK] InfluxDB: Available")
     else:
@@ -313,8 +366,17 @@ except Exception:
     HAS_POSTGRES = False
     print("[FAIL] PostgreSQL: Not available (start Docker)")
 
+# %% [markdown]
+# ### kdb+ via PyKX, in IPC mode
+#
+# The q binary and the licence are looked for *before* PyKX is imported, and the
+# order is load-bearing. PyKX must never be imported in unlicensed mode
+# (`PYKX_UNLICENSED=1`). An unlicensed import leaves the process in a state where
+# later numpy work segfaults, and the crash lands in `generate_ohlcv_data`, nowhere
+# near the import that caused it, so it reads as a data bug. Without a licence there
+# is nothing to benchmark, so PyKX is not imported at all and kdb+ is skipped.
+
 # %%
-# PyKX/kdb+ (IPC mode with external q process)
 HAS_PYKX = False
 Q_BINARY: Path | None = None
 
@@ -325,13 +387,6 @@ Q_BINARY_LOCATIONS = [
 ]
 KX_LICENSE_DIRS = [Path.home() / ".pykx", Path.home() / ".kx"]
 
-# Look for the q binary and a licence BEFORE importing PyKX. The order matters:
-# PyKX must never be imported in unlicensed mode (`PYKX_UNLICENSED=1`), which is
-# what this cell used to do. Unlicensed PyKX 4.0 leaves the process in a state
-# where later numpy work segfaults — the crash lands in `generate_ohlcv_data`,
-# nowhere near this cell, so it reads as a data bug rather than an import one.
-# Without a licence there is nothing to benchmark anyway, so we simply do not
-# import PyKX at all and skip kdb+.
 for q_path in Q_BINARY_LOCATIONS:
     if q_path.exists() and q_path.is_file():
         Q_BINARY = q_path
@@ -345,9 +400,9 @@ if Q_BINARY is None or KX_LICENSE_FILE is None:
     print("○ PyKX/kdb+: Optional (not configured) — skipping, no result will be claimed")
     if Q_BINARY is None:
         print("    → Get a free personal edition: https://kx.com/kdb-personal-edition-download/")
-        print(f"    → Install the q binary to: {Q_BINARY_LOCATIONS[0]}")
+        print(f"    → Install the q binary to: {display_path(Q_BINARY_LOCATIONS[0])}")
     if KX_LICENSE_FILE is None:
-        print(f"    → Place the licence file (kc.lic) in: {KX_LICENSE_DIRS[0]}")
+        print(f"    → Place the licence file (kc.lic) in: {display_path(KX_LICENSE_DIRS[0])}")
 else:
     try:
         # q resolves its licence from QLIC, not from the file merely existing on
@@ -357,13 +412,21 @@ else:
 
         HAS_PYKX = True
         benchmark_status["kdb+/PyKX"]["expected"] = True
-        print(f"[OK] PyKX/kdb+ {kx.__version__}: Available (IPC mode, licence {KX_LICENSE_FILE})")
-    except ImportError:
-        print("○ PyKX/kdb+: Not installed (optional — `uv pip install pykx`)")
+        print(
+            f"[OK] PyKX/kdb+ {kx.__version__}: Available "
+            f"(IPC mode, licence {display_path(KX_LICENSE_FILE)})"
+        )
+    except Exception as exc:
+        # As with ArcticDB: an optional engine that is present but unusable must not
+        # end the run, whatever it raises on the way out.
+        print(f"○ PyKX/kdb+: unavailable, skipping ({type(exc).__name__}: {exc})")
+
+# %% [markdown]
+# The embedded count is read off the status table rather than written as a literal,
+# so adding an engine to that table is the only edit adding an engine needs.
 
 # %%
-# Availability summary
-n_embedded = 2 + int(HAS_ARCTICDB)  # sqlite + duckdb (+ arcticdb if x86)
+n_embedded = sum(v["expected"] for v in benchmark_status.values() if v["category"] == "embedded")
 n_servers = sum([HAS_CLICKHOUSE, HAS_QUESTDB, HAS_TIMESCALEDB, HAS_INFLUXDB, HAS_POSTGRES])
 n_hft = int(HAS_PYKX)
 
@@ -407,39 +470,95 @@ quotes_pandas = quotes_df.to_pandas()
 results: list[BenchmarkResult] = []
 
 # %% [markdown]
-# ## Benchmark Windows
+# ### Measuring what the client pays
 #
-# Two derived quantities that every engine below reuses, so that all engines
-# answer the *same* question and can be validated against the same expected
-# row count:
-#
-# - **Range query**: the first 7 calendar days of the panel — the slice a
-#   backtest walks. Against session-aware minute bars this covers 5 trading
-#   sessions, a real fraction of the panel rather than a full scan.
-# - **Aggregation**: minute bars resampled to **daily** bars. Every engine
-#   buckets by day; bucketing minute data by minute would be a near-identity
-#   for the engines that did it and a real reduction for the ones that didn't,
-#   which is not a comparison.
+# PostgreSQL, TimescaleDB and InfluxDB reach their servers through interfaces that
+# take one Python object per row, so building those objects is part of what writing
+# through them costs and it stays inside the timed write. It is not, however, part of
+# the database, and the engines that accept the panel as a block pay none of it. The
+# helper below times the construction on its own so each of the three can report how
+# much of its write bar was Python, and the summary near the chart collects them.
 
 # %%
-RANGE_QUERY_DAYS = 7
+client_side_build: dict[str, float] = {}
+
+
+def measure_row_build(engine: str, build) -> float:
+    """Time an engine's client-side row construction in isolation."""
+    gc.collect()
+    started = time_module.perf_counter()
+    rows = build()
+    elapsed = time_module.perf_counter() - started
+    del rows
+    gc.collect()
+    client_side_build[engine] = elapsed
+    return elapsed
+
+
+def report_row_build(engine: str, write_seconds: float) -> None:
+    """Print an engine's client-side share of its own write time."""
+    build_seconds = client_side_build[engine]
+    print(
+        f"  Client-side row building: {build_seconds:.3f}s of the {write_seconds:.3f}s "
+        f"write ({build_seconds / write_seconds:.0%})"
+    )
+
+
+# %% [markdown]
+# ## Benchmark Windows
+#
+# Two derived quantities that every engine below reuses, so that all engines answer
+# the *same* question and can be validated against the same expected row count:
+#
+# - **Range query**: the leading sessions of the panel, the slice a backtest walks.
+#   The window is sized as a share of the panel rather than as a fixed number of
+#   calendar days, because the panel's span is a function of the scale. Seven
+#   calendar days is a fifth of the large panel but covers the small panel entirely,
+#   and a range query that selects every row is a full scan wearing a different
+#   name: the chart would show two panels measuring one query and the reader would
+#   have no way to tell. Sizing by share keeps the question the same at every scale,
+#   and the cell below prints the share it actually achieved.
+# - **Aggregation**: minute bars resampled to **daily** bars. Every engine buckets
+#   by day; bucketing minute data by minute would be a near-identity for the engines
+#   that did it and a real reduction for the ones that did not, which is not a
+#   comparison.
+
+# %%
+session_first_ts = (
+    ohlcv_df.group_by(pl.col("timestamp").dt.date().alias("session"))
+    .agg(pl.col("timestamp").min().alias("first_ts"))
+    .sort("session")["first_ts"]
+    .to_list()
+)
+n_sessions = len(session_first_ts)
+range_sessions = max(1, round(RANGE_QUERY_SHARE * n_sessions))
 
 range_start = ohlcv_df["timestamp"].min()
-range_end = range_start + timedelta(days=RANGE_QUERY_DAYS)
+if range_sessions < n_sessions:
+    range_end = session_first_ts[range_sessions]
+else:
+    range_end = ohlcv_df["timestamp"].max() + timedelta(minutes=1)
+
 range_expected_rows = ohlcv_df.filter(
     (pl.col("timestamp") >= range_start) & (pl.col("timestamp") < range_end)
 ).height
+range_share = range_expected_rows / total_rows
 agg_expected_rows = ohlcv_df.select(
     pl.struct("symbol", pl.col("timestamp").dt.truncate("1d")).n_unique()
 ).item()
 
-n_sessions = ohlcv_df.select(pl.col("timestamp").dt.date().n_unique()).item()
 print(f"Panel spans {n_sessions} trading sessions: {range_start} → {ohlcv_df['timestamp'].max()}")
 print(
-    f"Range query  : {range_start} ≤ timestamp < {range_end} "
-    f"→ {range_expected_rows:,} rows ({range_expected_rows / total_rows:.1%} of panel)"
+    f"Range query  : first {range_sessions} of {n_sessions} sessions, "
+    f"{range_start} ≤ timestamp < {range_end} "
+    f"→ {range_expected_rows:,} rows ({range_share:.1%} of panel)"
 )
 print(f"Aggregation  : minute bars → {agg_expected_rows:,} daily bars")
+if range_sessions >= n_sessions:
+    print(
+        "  [WARN] The panel is only one window wide at this scale, so the range query "
+        "reads every row and its chart panel repeats the full scan."
+    )
 
 # %% [markdown]
 # ---
@@ -679,6 +798,13 @@ print(f"  ASOF Join: {asof_time:.3f}s ({N_TICKS_TRADES / asof_time / 1e6:.2f}M t
 # - "Git for DataFrames" - version history, time travel
 # - Optimized for financial time-series
 # - LMDB backend (local), S3/Azure (cloud)
+#
+# ArcticDB answers the read and the aggregation but not the range query. Its
+# server-side `date_range` filter keys off a datetime *index*, and this panel carries
+# `timestamp` as a column, which is the canonical schema; pushing the filter down
+# would need a different write layout from the one timed above. So ArcticDB is absent
+# from the range-query panel rather than being timed on a client-side filter no other
+# engine pays.
 
 # %%
 if HAS_ARCTICDB:
@@ -710,13 +836,6 @@ if HAS_ARCTICDB:
     validate_result(arctic_result, total_rows, "ArcticDB read")
     results.append(BenchmarkResult("ArcticDB", "read", read_time, arctic_size, total_rows))
 
-    # No range_query for ArcticDB: its server-side `date_range` filter keys off a
-    # datetime *index*, and this panel carries `timestamp` as a column (the
-    # canonical schema). Pushing the filter down would need a different write
-    # layout than the one benchmarked above, so ArcticDB is absent from the
-    # range-query chart rather than being timed on a client-side filter that no
-    # other engine pays.
-
     def arctic_aggregation():
         df = lib.read("ohlcv").data
         return (
@@ -732,6 +851,7 @@ if HAS_ARCTICDB:
         )
 
     agg_time, agg_result = time_read(arctic_aggregation, n_runs=min(2, TIMING_RUNS))
+    validate_result(agg_result, agg_expected_rows, "ArcticDB aggregation")
     results.append(BenchmarkResult("ArcticDB", "aggregation", agg_time, 0, len(agg_result)))
 
     print(f"\nArcticDB: {arctic_size / 1e6:.1f} MB")
@@ -888,6 +1008,15 @@ else:
 # - Time-series specific SQL extensions (SAMPLE BY)
 # - Native ASOF JOIN
 
+# %% [markdown]
+# QuestDB ingests over ILP, which acknowledges before the rows are queryable. The WAL
+# commit is therefore polled *inside* the timed region, so QuestDB's write ends where
+# PostgreSQL's does: when the data can be read back. A fixed sleep outside the timed
+# call, which is what this used to do, charges QuestDB nothing for durability.
+#
+# The panel is handed to `Sender.dataframe` as a block, so QuestDB pays no per-row
+# Python cost and does not appear in the client-side table.
+
 # %%
 if HAS_QUESTDB:
     print("\n" + "=" * 70)
@@ -932,10 +1061,6 @@ if HAS_QUESTDB:
         ) timestamp(timestamp) PARTITION BY DAY WAL
     """)
 
-    # Write via ILP. The WAL commit is polled INSIDE the timed region so that
-    # QuestDB's write time ends where PostgreSQL's does: when the rows are
-    # queryable. The previous fixed sleep sat outside the timed call, which
-    # charged QuestDB nothing for durability.
     def write_questdb():
         with Sender.from_conf(
             f"http::addr={DB_CONFIG['questdb']['host']}:{DB_CONFIG['questdb']['http_port']};"
@@ -964,7 +1089,9 @@ if HAS_QUESTDB:
     # Read — explicit limit so the endpoint returns the whole table, then
     # validated like every other engine's read.
     def read_questdb():
-        return questdb_query("SELECT * FROM ohlcv_benchmark", limit=f"1,{total_rows}")
+        # One past the expected count: asking for exactly the expected number would
+        # truncate an over-large result to exactly right and validate it as correct.
+        return questdb_query("SELECT * FROM ohlcv_benchmark", limit=f"1,{total_rows + 1}")
 
     qdb_read_time, qdb_result = time_read(read_questdb, n_runs=min(3, TIMING_RUNS))
     validate_result(qdb_result, total_rows, "QuestDB read")
@@ -977,7 +1104,7 @@ if HAS_QUESTDB:
             f"WHERE timestamp >= '{range_start.isoformat()}' "
             f"AND timestamp < '{range_end.isoformat()}'"
         )
-        return questdb_query(sql, limit=f"1,{range_expected_rows}")
+        return questdb_query(sql, limit=f"1,{range_expected_rows + 1}")
 
     qdb_range_time, qdb_range_result = time_read(questdb_range_query, n_runs=min(3, TIMING_RUNS))
     validate_result(qdb_range_result, range_expected_rows, "QuestDB range query")
@@ -996,7 +1123,7 @@ if HAS_QUESTDB:
                    last(close) as close, sum(volume) as volume
             FROM ohlcv_benchmark SAMPLE BY 1d ALIGN TO CALENDAR
             """,
-            limit=f"1,{agg_expected_rows}",
+            limit=f"1,{agg_expected_rows + 1}",
         )
 
     qdb_agg_time, qdb_agg_result = time_read(questdb_ohlcv, n_runs=min(3, TIMING_RUNS))
@@ -1054,36 +1181,50 @@ if HAS_TIMESCALEDB:
         "SELECT create_hypertable('ohlcv_benchmark', 'timestamp', chunk_time_interval => INTERVAL '1 day');"
     )
 
+# %% [markdown]
+# ### TimescaleDB write
+#
+# `execute_values` takes a sequence of Python tuples, so the panel has to be turned
+# into one tuple per row before any of it reaches the server. That construction uses
+# `itertuples`, not `iterrows`: `iterrows` boxes each row as a Series first, which
+# costs an order of magnitude more to produce tuples that compare equal. The
+# difference is pandas rather than the database, and it was being charged to this
+# engine's write bar. The cell below prints what the construction cost on this run.
+#
+# On size, `hypertable_size()` rather than `pg_total_relation_size()`: a hypertable's
+# rows live in child chunks, so the parent relation is empty and
+# `pg_total_relation_size` reports about 16 kB of catalog overhead instead of data.
+
 # %%
 if HAS_TIMESCALEDB:
-    # Write
-    def write_timescaledb():
-        data = [
+
+    def build_timescaledb_rows():
+        return [
             (
-                row["timestamp"],
-                row["symbol"],
-                row["open"],
-                row["high"],
-                row["low"],
-                row["close"],
-                int(row["volume"]),
-                row["vwap"],
-                int(row["num_trades"]),
+                r.timestamp,
+                r.symbol,
+                r.open,
+                r.high,
+                r.low,
+                r.close,
+                int(r.volume),
+                r.vwap,
+                int(r.num_trades),
             )
-            for _, row in ohlcv_pandas.iterrows()
+            for r in ohlcv_pandas.itertuples(index=False)
         ]
+
+    def write_timescaledb():
         execute_values(
             cur,
             """
             INSERT INTO ohlcv_benchmark (timestamp, symbol, open, high, low, close, volume, vwap, num_trades) VALUES %s
         """,
-            data,
+            build_timescaledb_rows(),
         )
 
     ts_write_time, _ = time_write(write_timescaledb)
-    # hypertable_size(), not pg_total_relation_size(): a hypertable's rows live
-    # in child chunks, so the parent relation is empty and pg_total_relation_size
-    # reports ~16 kB of catalog overhead rather than the data.
+    measure_row_build("TimescaleDB", build_timescaledb_rows)
     cur.execute("SELECT hypertable_size('ohlcv_benchmark');")
     ts_size = cur.fetchone()[0]
     results.append(BenchmarkResult("TimescaleDB", "write", ts_write_time, ts_size, total_rows))
@@ -1133,6 +1274,7 @@ if HAS_TIMESCALEDB:
 
     print(f"\nTimescaleDB: {ts_size / 1e6:.1f} MB")
     print(f"  Write: {ts_write_time:.3f}s | Read: {ts_read_time:.3f}s")
+    report_row_build("TimescaleDB", ts_write_time)
     print(f"  Range query: {ts_range_time:.3f}s ({len(ts_range_result):,} rows)")
     print(f"  OHLCV aggregation: {ts_agg_time:.3f}s ({len(ts_agg_result):,} daily bars)")
 
@@ -1179,33 +1321,42 @@ if HAS_POSTGRES:
     """)
     pg_cur.execute("CREATE INDEX idx_pg_symbol_timestamp ON ohlcv_benchmark(symbol, timestamp);")
 
+# %% [markdown]
+# ### PostgreSQL write
+#
+# The same `execute_values` interface as TimescaleDB, so the same per-row Python
+# construction, built the same way and measured separately for the same reason.
+
 # %%
 if HAS_POSTGRES:
-    # Write
-    def write_postgres():
-        data = [
+
+    def build_postgres_rows():
+        return [
             (
-                row["timestamp"],
-                row["symbol"],
-                row["open"],
-                row["high"],
-                row["low"],
-                row["close"],
-                int(row["volume"]),
-                row["vwap"],
-                int(row["num_trades"]),
+                r.timestamp,
+                r.symbol,
+                r.open,
+                r.high,
+                r.low,
+                r.close,
+                int(r.volume),
+                r.vwap,
+                int(r.num_trades),
             )
-            for _, row in ohlcv_pandas.iterrows()
+            for r in ohlcv_pandas.itertuples(index=False)
         ]
+
+    def write_postgres():
         execute_values(
             pg_cur,
             """
             INSERT INTO ohlcv_benchmark (timestamp, symbol, open, high, low, close, volume, vwap, num_trades) VALUES %s
         """,
-            data,
+            build_postgres_rows(),
         )
 
     pg_write_time, _ = time_write(write_postgres)
+    measure_row_build("PostgreSQL", build_postgres_rows)
     pg_cur.execute("SELECT pg_total_relation_size('ohlcv_benchmark');")
     pg_size = pg_cur.fetchone()[0]
     results.append(BenchmarkResult("PostgreSQL", "write", pg_write_time, pg_size, total_rows))
@@ -1257,6 +1408,7 @@ if HAS_POSTGRES:
 
     print(f"\nPostgreSQL: {pg_size / 1e6:.1f} MB")
     print(f"  Write: {pg_write_time:.3f}s | Read: {pg_read_time:.3f}s")
+    report_row_build("PostgreSQL", pg_write_time)
     print(f"  Range query: {pg_range_time:.3f}s ({len(pg_range_result):,} rows)")
     print(f"  OHLCV aggregation: {pg_agg_time:.3f}s ({len(pg_agg_result):,} daily bars)")
 
@@ -1305,10 +1457,21 @@ if HAS_INFLUXDB:
     if org is None:
         raise RuntimeError(f"InfluxDB org {influx_org!r} not found on the server")
     buckets_api.create_bucket(bucket_name=influx_bucket, org_id=org.id)
+    del buckets_api, existing, orgs, org
+
+# %% [markdown]
+# ### InfluxDB write
+#
+# The line-protocol client takes one `Point` per row, so InfluxDB pays a per-row
+# Python cost like PostgreSQL and TimescaleDB, and like theirs it is inside the timed
+# write and measured separately. The poll to first-queryable is inside the timed
+# region too, so this write ends at the same event as every other one: the rows are
+# readable. A fixed sleep outside the timed call would charge InfluxDB nothing for
+# the acknowledge-early behaviour that makes it fast.
 
 # %%
 if HAS_INFLUXDB and benchmark_status["InfluxDB"]["tested"]:
-    # Write — build line-protocol Points, batch via the synchronous WriteApi
+    INFLUX_BATCH_ROWS = 10_000
     influx_write_api = influx_client.write_api(write_options=SYNCHRONOUS)
 
     _influx_ts = pd.to_datetime(ohlcv_pandas["timestamp"])
@@ -1318,12 +1481,8 @@ if HAS_INFLUXDB and benchmark_status["InfluxDB"]["tested"]:
         _influx_ts = _influx_ts.dt.tz_convert("UTC")
     influx_ts_pandas = _influx_ts
 
-    def write_influxdb():
-        # Per-row Point construction is timed alongside the write to stay
-        # apples-to-apples with TimescaleDB/PostgreSQL, which build their
-        # rows inside the timed function. Pulling the comprehension out would
-        # bias InfluxDB favorably by excluding serialization cost.
-        points = [
+    def build_influx_points():
+        return [
             Point("ohlcv")
             .tag("symbol", row.symbol)
             .field("open", float(row.open))
@@ -1334,13 +1493,15 @@ if HAS_INFLUXDB and benchmark_status["InfluxDB"]["tested"]:
             .field("vwap", float(row.vwap))
             .field("num_trades", int(row.num_trades))
             .time(ts, WritePrecision.NS)
-            for ts, row in zip(influx_ts_pandas, ohlcv_pandas.itertuples(index=False), strict=False)
+            for ts, row in zip(influx_ts_pandas, ohlcv_pandas.itertuples(index=False), strict=True)
         ]
-        # Batch writes to keep memory and request size bounded.
-        batch_size = 10_000
-        for i in range(0, len(points), batch_size):
+
+    def write_influxdb():
+        points = build_influx_points()
+        # Batched so memory and request size stay bounded.
+        for i in range(0, len(points), INFLUX_BATCH_ROWS):
             influx_write_api.write(
-                bucket=influx_bucket, org=influx_org, record=points[i : i + batch_size]
+                bucket=influx_bucket, org=influx_org, record=points[i : i + INFLUX_BATCH_ROWS]
             )
 
     def influx_row_count() -> int:
@@ -1362,15 +1523,13 @@ if HAS_INFLUXDB and benchmark_status["InfluxDB"]["tested"]:
 
     def write_influxdb_durable():
         write_influxdb()
-        # Poll to first-queryable INSIDE the timed region, so InfluxDB's write
-        # ends at the same event as PostgreSQL's: rows readable. The previous
-        # fixed sleep sat outside the timed call and charged InfluxDB nothing.
         return wait_until_rows_visible(
             influx_row_count, total_rows, timeout=max(120.0, WAL_FLUSH_TIMEOUT * 40)
         )
 
     influx_write_time, influx_visible = time_write(write_influxdb_durable)
     assert influx_visible == total_rows, f"InfluxDB ingested {influx_visible:,} of {total_rows:,}"
+    measure_row_build("InfluxDB", build_influx_points)
     # size_bytes=0 -> recorded as empty, not as zero: InfluxDB's client API
     # exposes no per-bucket on-disk size, so this engine is absent from the size
     # column rather than claiming it stores the panel for free.
@@ -1425,13 +1584,20 @@ if HAS_INFLUXDB and benchmark_status["InfluxDB"]["tested"]:
         BenchmarkResult("InfluxDB", "range_query", influx_range_time, 0, len(influx_range_result))
     )
 
+# %% [markdown]
+# Every InfluxDB handle is dropped as soon as it is done with, rather than left to the
+# interpreter. The client signs out from its destructor, and by the time the
+# interpreter tears down, the module globals that sign-out needs are already gone: any
+# surviving handle then becomes a traceback on stderr after the last cell has run.
+#
+# The aggregation buckets to daily bars with the OHLCV-correct reduction per field
+# (first, max, min, last, sum), which is what TimescaleDB, QuestDB and PostgreSQL
+# compute. A single-pass `last()` across all fields would be both semantically wrong
+# for open, high, low and volume, and artificially fast against the engines doing the
+# mixed aggregation.
+
 # %%
 if HAS_INFLUXDB and benchmark_status["InfluxDB"]["tested"]:
-    # OHLCV aggregation — bucket to daily bars with the OHLCV-correct
-    # reduction per field (first/max/min/last/sum), matching what TimescaleDB,
-    # QuestDB, and PostgreSQL compute. Single-pass last() across all fields
-    # would yield semantically wrong open/high/low/volume and would also be
-    # artificially fast vs. the mixed-aggregation engines.
     agg_flux = f"""
     src = from(bucket: "{influx_bucket}")
       |> range(start: 0)
@@ -1462,10 +1628,13 @@ if HAS_INFLUXDB and benchmark_status["InfluxDB"]["tested"]:
 
     print("\nInfluxDB:")
     print(f"  Write (to queryable): {influx_write_time:.3f}s | Read: {influx_read_time:.3f}s")
+    report_row_build("InfluxDB", influx_write_time)
     print(f"  Range query: {influx_range_time:.3f}s ({len(influx_range_result):,} rows)")
     print(f"  OHLCV aggregation: {influx_agg_time:.3f}s ({len(influx_agg_result):,} daily bars)")
 
     influx_client.close()
+    del influx_write_api, influx_query_api, influx_query_api_probe, influx_client
+    gc.collect()
 else:
     print("\n⊘ InfluxDB benchmark skipped")
 
@@ -1482,6 +1651,15 @@ else:
 #
 # We use IPC mode (connecting to external q process) rather than PyKX's embedded q
 # because it provides more reliable license handling and better reflects production usage.
+
+# %% [markdown]
+# The kdb+ write persists a splayed table to disk with `set`, which is what a kdb+
+# shop does to persist a table and ends with the data on disk. It used to time `-8!`,
+# in-memory IPC serialization, and call that a write while every other engine on the
+# same chart wrote to disk or to a server. That is a different operation, and it is
+# why kdb+ once looked about forty times faster than anything else: it was not doing
+# the work. `.Q.en` enumerates the symbol column against the sym file, which a
+# splayed table requires, and the whole persist is inside the timed region.
 
 # %%
 if HAS_PYKX:
@@ -1517,14 +1695,6 @@ if HAS_PYKX:
         kdb_ohlcv = kx.toq(ohlcv_pandas)
         q["ohlcv"] = kdb_ohlcv
 
-        # Write — persist a splayed table to disk.
-        #
-        # This used to time `-8!` (in-memory IPC serialization) and call it a
-        # write, while every other engine on the same chart wrote to disk or to a
-        # server. That is not the same operation, and it is why kdb+ looked
-        # ~40x faster than anything else: it was not doing the work. `set` on a
-        # splayed table is the comparable operation — it is what a kdb+ shop
-        # actually does to persist a table, and it ends with the data on disk.
         KDB_DIR = BENCHMARK_DIR / f"kdb_{ACTIVE_SCALE.lower()}"
         if KDB_DIR.exists():
             shutil.rmtree(KDB_DIR)
@@ -1535,8 +1705,6 @@ if HAS_PYKX:
         KDB_TBL_HANDLE = kx.SymbolAtom(f":{KDB_DIR}/ohlcv/")
 
         def write_pykx():
-            # `.Q.en` enumerates the symbol column against the sym file, which a
-            # splayed table requires; the whole persist is inside the timed region.
             return q("{[dir;tbl] tbl set .Q.en[dir; ohlcv]}", KDB_DB_HANDLE, KDB_TBL_HANDLE)
 
         pykx_write_time, _ = time_write(write_pykx)
@@ -1664,21 +1832,54 @@ if results:
             print(f"\n{op.upper().replace('_', ' ')}:")
             print(op_data.select(["database", "time_s"]))
 
+# %% [markdown]
+# ### How much of each write bar was the client
+#
+# Only the engines whose Python interface takes one object per row appear here. For
+# the rest the panel goes over in a block and the figure below is theirs entirely.
+
+# %%
+if client_side_build:
+    write_times = {r.name: r.time_seconds for r in results if r.operation == "write"}
+    print(
+        pl.DataFrame(
+            [
+                {
+                    "database": engine,
+                    "write_s": write_times[engine],
+                    "client_build_s": build_s,
+                    "client_share": build_s / write_times[engine],
+                }
+                for engine, build_s in client_side_build.items()
+                if engine in write_times
+            ]
+        ).sort("client_share", descending=True)
+    )
+else:
+    print(
+        "No engine on this run reached its server through a per-row Python interface, "
+        "so every write bar below is the engine."
+    )
+
+# %% [markdown]
+# ### The chart
+#
+# Every engine on a panel was timed under the one read policy stated at the top, so
+# the bars within a panel are comparable. Each panel picks its own x-axis scale from
+# the bars it actually has: a wide spread gets a logarithmic axis so the short bars
+# stay legible, and a narrow one stays linear so that bar length remains proportional
+# to time. On a logarithmic axis a bar starts at the axis floor rather than at zero,
+# so a two-fold difference reads as a much larger one; choosing the axis from the
+# measured spread rather than from a remembered one keeps that from happening when
+# a different set of engines answers.
+
 # %%
 if results:
-    # Visualization — every engine on a panel was timed under the one policy
-    # stated at the top, so the bars are comparable.
     _panels = [
         ("read", "Full scan", COLORS["blue"]),
-        ("range_query", f"Range query ({RANGE_QUERY_DAYS}-day window)", COLORS["slate"]),
+        ("range_query", "Range query", COLORS["slate"]),
         ("asof_join", "ASOF join", COLORS["amber"]),
     ]
-    # Full scan / range query span ~30-40x across engines, so a log x-axis keeps
-    # every bar legible. ASOF join runs on the three engines that support it, and
-    # they sit within ~2x of each other; on a log axis a bar starts at the axis
-    # floor, so a 2x spread would read as ~3x bar length. A linear axis makes bar
-    # length proportional to time (honest) and preserves kdb+'s ASOF showcase.
-    _LOG_OPS = {"read", "range_query"}
 
     fig = make_subplots(
         rows=1,
@@ -1707,7 +1908,9 @@ if results:
             row=1,
             col=col,
         )
-        if op in _LOG_OPS:
+        times = op_data["time_s"].to_list()
+        spread = max(times) / min(times) if min(times) > 0 else 1.0
+        if spread >= LOG_AXIS_RATIO:
             fig.update_xaxes(
                 title_text="Seconds (log, lower is better)", type="log", row=1, col=col
             )
@@ -1715,10 +1918,9 @@ if results:
             fig.update_xaxes(title_text="Seconds (lower is better)", type="linear", row=1, col=col)
 
     fig.update_layout(
-        title_text=f"Database Comparison ({ACTIVE_SCALE} scale, {total_rows:,} rows, warm reads)",
+        title_text="Read, range-query and ASOF-join time by engine",
         height=500,
-        # Fixed width so the three panels have room to breathe in the embedded
-        # PNG; the default ~700px crowds eight engines and their value labels.
+        # Fixed width: the default ~700px crowds eight engines and their value labels.
         width=1050,
         showlegend=False,
         paper_bgcolor=COLORS["bg_light"],
@@ -1726,7 +1928,23 @@ if results:
         # Wider right margin so the 'X.XXXs' value labels don't crop.
         margin=dict(l=90, r=90, t=80, b=50),
     )
-    fig.show()
+
+    _scale_word = {"S": "Small", "M": "Medium", "L": "Large"}.get(ACTIVE_SCALE, ACTIVE_SCALE)
+    print(
+        f"Warm reads on a {_scale_word}-scale panel: {total_rows:,} rows, "
+        f"{n_sessions} sessions, {len(results_df['database'].unique())} engines. "
+        f"Range query covers the first {range_sessions} of {n_sessions} sessions "
+        f"({range_share:.1%} of the panel)."
+    )
+    show_plotly_with_alt(
+        fig,
+        "Three horizontal-bar panels titled Full scan, Range query and ASOF join, each "
+        "with one bar per database engine, sorted fastest at the top and labelled with "
+        "its time in seconds. The full-scan and range-query panels carry many engines "
+        "and the ASOF-join panel only the few with a native ASOF join. Each panel's "
+        "x-axis is seconds, logarithmic where the engines span a wide range and linear "
+        "where they do not, with the axis label saying which.",
+    )
 
 # %%
 if results:
@@ -1734,29 +1952,38 @@ if results:
         fig.write_image(
             OUTPUT_DIR / "server_database_comparison.png", width=1200, height=600, scale=2
         )
-    except (RuntimeError, OSError):
-        pass  # Kaleido/Chrome not available in benchmark image
+    except (RuntimeError, OSError) as exc:
+        # Kaleido/Chrome is absent from some benchmark images. Say so rather than
+        # passing silently: the book figure is then missing, and a silent skip is
+        # indistinguishable from a file that was written.
+        print(f"PNG export skipped, the static figure was not written: {exc}")
     save_chart(fig, f"database_comparison_{ACTIVE_SCALE.lower()}")
     save_benchmark_results(results, "databases")
 
 # %%
-# Coverage report
 print("\n### BENCHMARK COVERAGE")
 tested = [k for k, v in benchmark_status.items() if v["tested"]]
 expected = [k for k, v in benchmark_status.items() if v["expected"]]
-print(f"Tested: {len(tested)}/{len(expected)} databases")
+print(f"Tested: {len(tested)}/{len(expected)} databases that were available")
 for db in sorted(benchmark_status.keys()):
-    status = "[OK]" if benchmark_status[db]["tested"] else "[FAIL]"
-    cat = benchmark_status[db]["category"]
-    print(f"  {status} {db} ({cat})")
+    entry = benchmark_status[db]
+    if entry["tested"]:
+        status = "[OK]   "
+    elif entry["expected"]:
+        status = "[FAIL] "  # present and expected to answer, but did not
+    else:
+        status = "○ skip "  # not available on this machine; nothing was claimed
+    print(f"  {status}{db} ({entry['category']})")
 
 print("\n" + "=" * 70)
 print("[OK] Database benchmark complete!")
 print("=" * 70)
 
+# %% [markdown]
+# The fastest engine per operation, read back off the results this run actually
+# collected. An engine that did not answer cannot appear.
+
 # %%
-# Fastest engine per operation, read back off the results actually collected
-# in THIS run. Anything not benchmarked here cannot appear.
 if results:
     fastest = (
         results_df.drop_nulls("time_s")
@@ -1772,27 +1999,35 @@ if results:
 # %% [markdown]
 # ## Key Takeaways
 #
-# The engine names below are deliberately absent: which engine wins each
-# operation is printed by the cell above, from this run's own results, on your
-# hardware. What generalizes is the shape of the answer, not the ordering:
+# No engine is named as fastest here. Which one answered each operation quickest is
+# printed above, from this run's own results on your hardware, and it can differ from
+# ours. What carries across runs is the shape of the answer:
 #
-# 1. **Storage layout sets the scan cost.** Engines that store columns
-#    together and execute vectorized (DuckDB, ClickHouse) scan and aggregate a
-#    minute panel far faster than row-oriented engines (SQLite, PostgreSQL),
-#    which must touch every column of every row to answer a query about two.
+# 1. **Storage layout sets the scan cost.** An engine that stores a column together
+#    and executes over it in batches reads a minute panel differently from one that
+#    stores a row together and must touch all nine fields to answer a question about
+#    two. That division - DuckDB and ClickHouse on one side, SQLite and PostgreSQL
+#    on the other - is a fact about how the engines are built, and it is the first
+#    thing to look at in the full-scan panel.
 # 2. **A range query is a different question from a scan**, and it is the one a
-#    backtest asks. The `RANGE_QUERY_DAYS`-day window above touches roughly a
-#    fifth of the panel, so engines that prune by time partition or use a
-#    time-ordered index separate from those that scan and filter. Ranking
-#    engines on full scans alone would hide that.
-# 3. **Ingest rate and durability are one number, not two.** The write times
-#    here all end when the data is queryable, which is why the engines that
-#    acknowledge early (QuestDB ILP, InfluxDB) do not look free.
-# 4. **The comparison is only as good as its policy.** Every number above is a
-#    single cold write and a warm mean read, for every engine. Warm reads
-#    flatter anything with a buffer pool; on a cold cache, or over a network,
-#    the compressed engines gain. Rerun on your own ingestion path before
-#    choosing.
+#    backtest asks. The window above covers the leading sessions of the panel; the
+#    cell that defines it prints what share of the rows that turned out to be. An
+#    engine that prunes by time partition or walks a time-ordered index answers it
+#    without reading the rest, and one that scans and filters does not. Ranking on
+#    full scans alone would hide the difference. Watch the share: if the window ever
+#    covers the whole panel, the two left-hand chart panels are measuring one query.
+# 3. **Ingest rate and durability are one number, not two.** Every write time here
+#    ends when the data is queryable, which is why the engines that acknowledge
+#    early - QuestDB over ILP, InfluxDB - do not look free.
+# 4. **Some write bars contain a client, and some do not.** PostgreSQL, TimescaleDB
+#    and InfluxDB are reached through interfaces that want one Python object per
+#    row; the others take the panel in a block. The table above the chart gives the
+#    Python share of each of those three write times. It is a real cost of using
+#    that interface from Python, and it is not a property of the database.
+# 5. **The comparison is only as good as its policy.** Every number above is one
+#    cold write and a warm mean read, for every engine. Warm reads flatter anything
+#    with a buffer pool; on a cold cache, or across a network, the compressed engines
+#    gain. Rerun on your own ingestion path before choosing.
 #
 # **kdb+/PyKX** is skipped unless you supply a q binary and a license, so it is
 # absent from the numbers above unless you configured it. The chapter discusses
