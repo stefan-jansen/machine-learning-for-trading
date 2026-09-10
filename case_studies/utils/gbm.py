@@ -2742,18 +2742,24 @@ def plan_model_requests(
 
     ordered: list[dict[str, Any] | None] = [None] * len(requests)
     planned_groups = []
-    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
+    # One entry, not a growing dict. The cache is here so two compatibility groups over the same
+    # inputs read the panel once; keeping every group's panel instead is what made a multi-label
+    # plan carry one modeling dataset per label to the end of the run. Measured 2026-09-10 on
+    # nasdaq100_microstructure, one `load_modeling_dataset` per label with nothing released:
+    # 6.71, 12.65, 18.41, 22.53 GiB resident and a 35.79 GiB peak, before a single fit.
+    cached_input_key: tuple[str, str, int] | None = None
+    cached_inputs: tuple[Any, Any] | None = None
     for key, indexed_requests in groups.items():
         input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
+        if cached_input_key != input_key:
+            # Released before the next panel is read, so the two are never alive together.
+            cached_input_key, cached_inputs = None, None
         base = _load_gbm_batch_base(
             study,
             indexed_requests[0][1],
-            inputs=input_cache.get(input_key),
+            inputs=cached_inputs,
         )
-        input_cache.setdefault(
-            input_key,
-            (base["label_ref"], base["mds"]),
-        )
+        cached_input_key, cached_inputs = input_key, (base["label_ref"], base["mds"])
         mds = base["mds"]
         placeholder_folds = tuple({"fold": int(split["fold"])} for split in base["splits"])
         planned_candidates = {}
@@ -2787,6 +2793,14 @@ def plan_model_requests(
             ordered[index] = spec
             planned_candidates[index] = (config, effective, device, max_bin, num_threads)
         planned_groups.append((key, indexed_requests, base, planned_candidates))
+        # The payload outlives planning by the whole length of the run, and `mds` is by far the
+        # largest thing in `base`. `run_model_plan` reloads this group's panel when it reaches
+        # the group and drops it again afterwards, so one is alive at a time instead of one per
+        # group. Nothing else planning derived is rebuilt - the splits, the expected keys and
+        # the provenance in `base` are the planned ones - so no identity can move.
+        mds = None
+        base["mds"] = None
+    cached_input_key, cached_inputs = None, None
     if any(spec is None for spec in ordered):
         raise RuntimeError("GBM batch planner did not resolve every request")
     return tuple(spec for spec in ordered if spec is not None), tuple(planned_groups)
@@ -2798,6 +2812,21 @@ def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ..
     ]
     failures = []
     for key, indexed_requests, base, planned_candidates in payload:
+        if base.get("mds") is None:
+            # Planning dropped it rather than carry every group's panel to the end of the run.
+            # One reload per group - a scan - against one modeling dataset per label held for
+            # the length of a multi-label call.
+            from utils.modeling import load_modeling_dataset
+
+            request = indexed_requests[0][1]
+            tier = ExecutionTier(request["execution_tier"])
+            study.require_writable()
+            study.activate(tier)
+            base["mds"] = load_modeling_dataset(
+                study.case_study,
+                base["label_ref"].name,
+                max_symbols=int(dict(request["preview_reductions"]).get("max_symbols", 0)),
+            )
         try:
             candidates = _run_gbm_batch_group(
                 study,
@@ -2810,6 +2839,9 @@ def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ..
         except Exception as error:
             failures.append(error)
             continue
+        finally:
+            # Whatever the group did, its panel goes now: the next group loads its own.
+            base["mds"] = None
         for candidate in candidates:
             if candidate.error is not None:
                 failures.append(candidate.error)
@@ -2831,18 +2863,21 @@ def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[Mo
 
     ordered: list[ModelRun | None] = [None] * len(requests)
     failures = []
-    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
+    # One entry, not a growing dict - see `plan_model_requests`. A dict keyed by input holds
+    # every label's panel to the end of the call; measured at 22.53 GiB over four labels on
+    # nasdaq100_microstructure, before a single fit.
+    cached_input_key: tuple[str, str, int] | None = None
+    cached_inputs: tuple[Any, Any] | None = None
     for key, indexed_requests in groups.items():
         input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
+        if cached_input_key != input_key:
+            cached_input_key, cached_inputs = None, None
         base = _load_gbm_batch_base(
             study,
             indexed_requests[0][1],
-            inputs=input_cache.get(input_key),
+            inputs=cached_inputs,
         )
-        input_cache.setdefault(
-            input_key,
-            (base["label_ref"], base["mds"]),
-        )
+        cached_input_key, cached_inputs = input_key, (base["label_ref"], base["mds"])
         candidates = _run_gbm_batch_group(
             study,
             indexed_requests,
