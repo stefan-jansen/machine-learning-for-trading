@@ -40,7 +40,6 @@
 """Ch20 Friction Survival — cross-case-study cost-sweep analysis from registry."""
 
 import json
-import warnings
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -55,7 +54,6 @@ from case_studies.utils.analytics import (
 from utils.paths import get_chapter_dir
 from utils.style import show_with_alt
 
-warnings.filterwarnings("ignore")
 pl.Config.set_tbl_rows(20)
 
 # %% tags=["parameters"]
@@ -475,15 +473,16 @@ display(
 # does not appear in any table above; the figures below are quoted from its own
 # evaluation and are not computed here.
 #
-# - **Median round-trip spread**: 1091 bps of premium (10.9%)
-# - **Best executable Sharpe**: −1.05 (across 5 predictions × 8 schemes)
-# - **Three-label decomposition** (best GBM, `leaves_15_mae`, `ew_top5`):
-#   mid-unhedged Sharpe = +2.70, mid-DH Sharpe = +0.43, executable Sharpe = −1.50
-# - **Spread-adjusted ranking** (optimizing signal + spread jointly) improves
-#   Sharpe from −1.50 to −0.30, but stays negative
+# Its own evaluation carries the numbers; the shape of them is what belongs here. The median
+# round-trip spread on those straddles is a large double-digit percentage of the premium, and
+# every executable Sharpe in the sweep is negative. Decomposing one prediction across three
+# labels separates where that goes: priced at the mid and unhedged the Sharpe is strongly
+# positive, delta-hedging at the mid takes most of it, and pricing the same trades at the quotes
+# a desk would actually get turns it negative. Ranking on signal and spread jointly recovers
+# part of the gap and does not close it.
 #
-# The ML signal is real (IC = 0.068), but the 15.4 pp average spread impact
-# per trade overwhelms the per-period signal. A generic bps cost sweep
+# The ML signal is real - the IC is positive - but the average spread impact per trade is many
+# times the per-period signal it has to pay for. A generic bps cost sweep
 # misrepresents this case study because the cost is predominantly the
 # bid-ask spread, not commission. The teaching point is that strategy
 # design must jointly optimize for signal quality and execution costs:

@@ -42,7 +42,6 @@
 """Ch20 Risk Overlays — cross-case-study comparison from registry."""
 
 import json
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -56,8 +55,6 @@ from case_studies.utils.analytics import (
     load_chapter_backtests,
 )
 from utils.style import show_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 # 0 = all
@@ -282,12 +279,12 @@ _helped = best_per_cs.filter(pl.col("sharpe_delta") > 0)
 display(
     Markdown(
         f"For {_helped.height} of {best_per_cs.height} case studies the "
-        "highest-Sharpe overlay configuration beats the baseline"
+        "highest-Sharpe overlay configuration clears the baseline"
         + (f" ({', '.join(_helped['display_name'].to_list())})" if _helped.height else "")
         + ". Deltas run from "
         f"{best_per_cs['sharpe_delta'].min():+.3f} to "
         f"{best_per_cs['sharpe_delta'].max():+.3f}.\n\n"
-        "Taking a maximum over a sweep and asking whether it beats the baseline "
+        "Taking a maximum over a sweep and asking whether it clears the baseline "
         "is close to asking whether the sweep was large enough. The population "
         "statistics in the next section are the ones that say whether applying "
         "an overlay is a good idea, because they include the configurations that "
@@ -630,6 +627,7 @@ else:
 # %% tags=["results"]
 _cat = category_stats.sort("median_sharpe_delta", descending=True)
 _neg_med = _cat.filter(pl.col("median_sharpe_delta") < 0)
+_total_configs = int(_cat["n_configs"].sum())
 _top_rate = _cat.sort("pct_positive", descending=True).row(0, named=True)
 _best = best_per_cs.sort("sharpe_delta", descending=True).row(0, named=True)
 _dd_change = (
@@ -637,7 +635,7 @@ _dd_change = (
 )
 display(
     Markdown(
-        f"**Across {int(_cat['n_configs'].sum())} overlay configurations in "
+        f"**Across {_total_configs} overlay configurations in "
         f"{_cat.height} categories**, the median Sharpe change is negative in "
         f"{_neg_med.height} of them"
         + (f" ({', '.join(_neg_med['category'].to_list())})" if _neg_med.height else "")
@@ -653,7 +651,7 @@ display(
         f"{_best['managed_sharpe']:.2f} ({_best['sharpe_delta']:+.2f}), maximum "
         f"drawdown {_best['baseline_max_dd']:.1%} to "
         f"{_best['managed_max_dd']:.1%}, a {abs(_dd_change):.0f} percent "
-        "reduction. That is one configuration selected as the best of a sweep on "
+        "reduction. That is one configuration selected as the top of a sweep on "
         "validation data, which is where a claim like it belongs on the evidence "
         "and not in a deployment decision."
     )
