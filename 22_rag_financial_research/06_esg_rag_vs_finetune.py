@@ -34,8 +34,9 @@
 # The screening path turns out to demonstrate its own principal limitation
 # without being asked to. Section 2 measures it: over the Bloomberg archive,
 # the keyword screen that selects "ESG-relevant" headlines selects almost
-# nothing but environmental ones, and the reason is a property of the language
-# rather than of the list.
+# nothing but environmental ones, and two properties of the screen itself
+# account for a good deal of that - its selection terms and the order its
+# categoriser tests them in.
 #
 # **Learning objectives**
 #
@@ -43,8 +44,8 @@
 #
 # - Say what a fixed taxonomy costs, from a measurement rather than an
 #   assertion.
-# - Recognise why a keyword screen finds environmental topics far more readily
-#   than social or governance ones.
+# - Measure what a keyword screen actually selected, and name the properties of
+#   the screen that account for the composition it returned.
 # - Separate a model's inference cost from the one-off cost of loading it.
 # - State the evidence contract a RAG producer has to meet before its output
 #   can be compared with a classifier's.
