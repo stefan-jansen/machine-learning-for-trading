@@ -859,6 +859,7 @@ def create_causal_graph_viz(
             textfont=dict(size=10, color=COLORS["silver"]),
             hoverinfo="text",
             hovertext=labels,
+            showlegend=False,
         )
     )
     # Edge colour is the only thing carrying stability, or sign, so it needs naming on the

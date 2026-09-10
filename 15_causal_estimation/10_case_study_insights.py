@@ -245,7 +245,7 @@ add_message_title(ax, "HAC t-statistic of each case study's primary effect")
 ax.legend(frameon=False, loc="best")
 show_with_alt(
     fig,
-    "Forest plot with one row per case study, ordered by case study, plotting the "
+    "Forest plot with one row per case study, ordered by the statistic itself, plotting the "
     "Driscoll-Kraay t-statistic of that panel's primary DML effect. A dashed vertical line "
     "marks zero and two dotted lines mark the plus and minus significance threshold; markers "
     "are filled or open according to whether the t-statistic clears it, and a legend says "
@@ -316,8 +316,9 @@ ax.legend(
 )
 show_with_alt(
     fig,
-    "Horizontal bar chart with one bar per case study giving the signed confounding bias of "
-    "the naive estimate as a percentage of the adjusted one. A solid line marks zero and "
+    "Horizontal bar chart with one bar per case study, ordered by absolute size, giving the "
+    "signed confounding bias of the naive estimate as a percentage of the adjusted one. A "
+    "solid line marks zero and "
     "dotted lines mark plus and minus fifty percent; bars are coloured by whether the naive "
     "estimate is the larger or the smaller of the two, and a legend says which.",
 )
