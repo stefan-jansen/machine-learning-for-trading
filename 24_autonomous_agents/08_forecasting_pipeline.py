@@ -51,8 +51,9 @@
 """Full Forecasting Pipeline: agent-debate-supervisor end-to-end."""
 
 import json
+import textwrap
 import time
-from datetime import date
+from datetime import date, datetime
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -441,7 +442,11 @@ def _forecast_one(forecaster, question: ForecastQuestion) -> ForecastResult:
     aggregation = neyman_extremize(
         [agent.p_yes for agent in answered], base=0.5, correlation=forecaster.correlation
     )
-    aggregate_p = aggregation.extremized_probability or aggregation.raw_probability
+    aggregate_p = (
+        aggregation.extremized_probability
+        if aggregation.extremized_probability is not None
+        else aggregation.raw_probability
+    )
     debate = DebateAgent(
         llm=forecaster.llm,
         max_rounds=forecaster.debate_rounds,
@@ -519,9 +524,10 @@ class AIAForecaster:
 # [`07_adversarial_debate`](07_adversarial_debate.ipynb). Running both shows what each stage
 # does when the panel already agrees and when it does not.
 #
-# Both were unresolved on the 2026-06-09 capture date, which is what makes them honest
-# forecasts and also what makes them unscoreable. Replayed by default; `RUN_LIVE = True` with
-# `ANTHROPIC_API_KEY` and `TAVILY_API_KEY` forecasts current questions instead.
+# Both were unresolved when the captures were taken, which is what makes them honest forecasts
+# and also what makes them unscoreable; the replay cell reports each capture's date from the
+# record. Replayed by default; `RUN_LIVE = True` with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY`
+# forecasts current questions instead.
 
 # %%
 questions = [get_chapter_clear_question(), get_chapter_contested_question()]
@@ -595,9 +601,10 @@ def _load_pinned_questions() -> tuple[list, list]:
     for pinned_name in PINNED_TRACES:
         run = RunTrace.load(TRACES_DIR / pinned_name)
         result = run.forecast_result()
+        recorded = datetime.fromisoformat(run.created_at).date().isoformat()
         print(
             f"  ✓ {result.question.question[:50]}... → {result.final_probability:.2f} "
-            f"(replay) | {len(run.llm_calls)} calls from {pinned_name}"
+            f"(replay of a capture recorded {recorded}) | {len(run.llm_calls)} calls"
         )
         replay_results.append(result)
         replay_traces.append(run)
@@ -654,8 +661,10 @@ r = results[0]
 print(f"Question: {r.question.question}\n")
 print(show_agents(r.agents))
 
+# %% [markdown]
+# ### Aggregation
+
 # %%
-print("── Aggregation ──")
 if r.aggregation:
     print(f"  method:     {r.aggregation.method}")
     print(f"  inputs:     {r.aggregation.input_probabilities}")
@@ -663,15 +672,20 @@ if r.aggregation:
     print(f"  extremized: {r.aggregation.extremized_probability:.2f}")
     print(f"  d={r.aggregation.extremization_factor:.2f}, n_eff={r.aggregation.effective_n:.1f}")
 
+# %% [markdown]
+# ### Debate
+
 # %%
 if r.debate:
     print(show_debate_transcript(r.debate))
+
+# %% [markdown]
+# ### Supervisor, and what the pipeline returned
 
 # %%
 if r.supervisor:
     print(show_supervisor(r.supervisor))
 
-print("\n── Final ──")
 print(f"  probability: {r.final_probability:.2f}")
 print(f"  confidence:  {r.final_confidence:.2f}")
 if r.duration_seconds is not None:
@@ -693,7 +707,7 @@ else:
 # %%
 flow_rows = []
 for r in results:
-    q_short = r.question.question.split("?")[0][:36]
+    q_short = textwrap.shorten(r.question.question, width=44, placeholder="...")
     phases = []
 
     if r.question.current_market_price is not None:
@@ -703,9 +717,12 @@ for r in results:
         phases.append((a.agent_id, a.p_yes))
 
     if r.aggregation:
-        phases.append(
-            ("Aggregate", r.aggregation.extremized_probability or r.aggregation.raw_probability)
+        aggregate_p = (
+            r.aggregation.extremized_probability
+            if r.aggregation.extremized_probability is not None
+            else r.aggregation.raw_probability
         )
+        phases.append(("Aggregate", aggregate_p))
 
     if r.debate and r.debate.bull_final_probability is not None:
         mid = (r.debate.bull_final_probability + r.debate.bear_final_probability) / 2
@@ -738,19 +755,47 @@ ax.set_ylabel("Probability of yes")
 ax.set_ylim(0, 1)
 add_message_title(
     ax,
-    "Most of the pipeline's movement happens before the debate",
+    "Probability at each pipeline stage, for both questions",
     subtitle="Market price shown first as the agents' starting context, not a stage",
 )
-ax.legend(loc="best")
+ax.legend(loc="upper right")
 show_with_alt(
     fig,
-    "Line chart of probability against pipeline stage, one line per question, running from "
-    f"the market price through the {N_AGENTS} research agents to the aggregate, the debate "
-    "midpoint, the supervisor and the final blend. The recession line runs from "
-    f"{results[0].question.current_market_price:.0%} to {results[0].final_probability:.0%} and "
-    f"the rate-hike line from {results[1].question.current_market_price:.0%} to "
-    f"{results[1].final_probability:.0%}.",
+    "Line chart of probability against pipeline stage, one line per question, running from the "
+    "market price through the research agents to the aggregate, the debate midpoint, the "
+    "supervisor and the final blend. Neither line is flat, and neither moves in one direction: "
+    "both rise at some stages and fall at others, and the two do not move together.",
 )
+
+# %% [markdown]
+# Which stage moved the answer is a question the chart poses and a reader should not have to
+# eyeball. The largest single step on each line is below, read off the same frame the chart was
+# drawn from.
+
+# %%
+largest_move = (
+    flow_df.with_columns(
+        pl.col("p_yes").diff().over("question").alias("move"),
+        pl.col("phase").shift().over("question").alias("from_phase"),
+    )
+    .drop_nulls("move")
+    .with_columns(pl.col("move").abs().alias("size"))
+    .sort("size", descending=True)
+    .group_by("question", maintain_order=True)
+    .first()
+    .select(
+        "question",
+        pl.format("{} to {}", "from_phase", "phase").alias("largest step"),
+        pl.col("move").round(3),
+    )
+)
+largest_move
+
+# %% [markdown]
+# The two questions are moved most by different stages, which is the reading to take from the
+# chart: no stage in this pipeline is where the answer is decided, and none of them is idle
+# either. Whether any of that movement is an improvement is a scoring question, and neither of
+# these questions had resolved.
 
 # %% [markdown]
 # ## Token use
