@@ -1470,17 +1470,29 @@ print(
     f"The upper-right panel shows the {min(TOP_OPERATIONS_CHARTED, results_df.height)} "
     f"operations with the widest gap."
 )
+# %% [markdown]
+# The alt text has to describe the image this run produced, so the parts of it that are
+# an outcome rather than a layout are counted off the results. Writing "the pandas bar is
+# taller in every pair" into the string would be a claim about someone else's hardware,
+# and the one reader who cannot check it against the picture is the reader the alt text
+# exists for.
+
+# %%
+_charted_pandas_slower = int((sorted_results["pandas_time"] > sorted_results["polars_time"]).sum())
+_charted = sorted_results.height
+_below_diagonal = operations_faster
 show_plotly_with_alt(
     fig,
     "Four panels. Top left, one bar per timed operation category giving the geometric "
     "mean speedup of Polars over pandas, tallest on the left, each labelled with its "
-    "multiple, above a dashed line at parity. Top right, paired bars of pandas time and "
-    "Polars time on a logarithmic seconds axis, for the operations with the widest gaps "
-    "rather than for all of them, the pandas bar taller in every pair. Bottom left, a "
-    "histogram of the speedups, massed at the low end with a thin tail to the right and "
-    "a dashed line at parity. Bottom right, a scatter of pandas time against Polars "
-    "time, one point per operation, with a dashed diagonal marking equal times: every "
-    "point sits below it, so Polars finished each operation sooner.",
+    "multiple, against a dashed line at parity. Top right, paired bars of pandas time "
+    "and Polars time on a logarithmic seconds axis, for the operations with the widest "
+    "gaps rather than for all of them; the pandas bar is the taller of the pair in "
+    f"{_charted_pandas_slower} of the {_charted} pairs shown. Bottom left, a histogram "
+    "of the speedups with a dashed line at parity. Bottom right, a scatter of pandas "
+    "time against Polars time, one point per operation, with a dashed diagonal marking "
+    f"equal times; {_below_diagonal} of the {results_df.height} points sit below the "
+    "diagonal, one for each operation Polars finished sooner.",
 )
 
 # %% [markdown]
