@@ -420,6 +420,11 @@ regime_by_time = pd.Series(regime, index=decision_times).groupby(level=0).first(
 episode_id = (regime_by_time != regime_by_time.shift()).cumsum()
 episode_lengths = regime_by_time.groupby([regime_by_time, episode_id]).size()
 for label, name in ((0, "Low"), (1, "High")):
+    # A reduced MAX_SAMPLES can leave one regime empty, because the volatility threshold
+    # needs 50 prior timestamps before it produces a label at all.
+    if label not in episode_lengths.index.get_level_values(0):
+        print(f"  {name}-vol regime: 0 episodes in this sample")
+        continue
     lengths = episode_lengths.loc[label]
     print(
         f"  {name}-vol regime: {len(lengths)} episodes, "
