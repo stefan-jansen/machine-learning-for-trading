@@ -59,7 +59,8 @@
 #
 # **Prerequisite**: [`06_conditional_autoencoder`](06_conditional_autoencoder.ipynb)
 #
-# **Book reference**: Section 14.7, stochastic discount factors and the beta network.
+# **Book reference**: Section 14.7 (The stochastic discount factor and the
+# supervised autoencoder models)
 
 # %% [markdown]
 # ## 1. Setup
@@ -82,7 +83,14 @@ from ml4t.diagnostic.metrics.uncertainty import compute_ic_uncertainty
 
 from data import load_macro, load_us_equities
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_palette, zero_line
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    ml4t_palette,
+    show_with_alt,
+    zero_line,
+)
 
 # %% tags=["parameters"]
 N_STOCKS = 200
@@ -607,7 +615,7 @@ print(
 
 # %%
 history_frame = pl.DataFrame(history).with_row_index("evaluation")
-fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True, constrained_layout=True)
 axes[0].plot(
     history_frame["evaluation"], history_frame["loss_train"], color=COLORS["blue"], label="Train"
 )
@@ -620,13 +628,23 @@ axes[0].plot(
 axes[0].set_yscale("log")
 axes[0].set_ylabel("Squared pricing-moment loss")
 axes[0].legend()
-add_message_title(axes[0], "Adversarial pricing losses remain numerically resolved")
+add_message_title(axes[0], "Train and validation squared pricing-moment loss")
 axes[1].plot(history_frame["evaluation"], history_frame["sharpe_valid"], color=COLORS["blue"])
 zero_line(axes[1])
 axes[1].set_xlabel("Validation evaluation")
 axes[1].set_ylabel("Validation factor Sharpe (daily)")
-add_message_title(axes[1], "Validation Sharpe selects the frozen SDF checkpoint")
-fig.show()
+add_message_title(axes[1], "Daily validation factor Sharpe by evaluation")
+show_with_alt(
+    fig,
+    "Two stacked panels sharing an x-axis of validation-evaluation index. The upper panel "
+    "plots the squared pricing-moment loss on a log axis for train (navy) and validation "
+    "(amber). Both curves shift level abruptly at the three points where a new adversarial "
+    "instrument round begins; train runs well below validation through the first two "
+    "rounds and the two converge in the last. The lower panel plots the daily validation "
+    "factor Sharpe against a dashed zero line: it starts near its highest value, dips and "
+    "recovers through the middle of training, and falls back towards zero by the right "
+    "edge.",
+)
 
 # %% [markdown]
 # ## 5. Frozen SDF evaluation
@@ -658,8 +676,11 @@ for name, values in factor_paths.items():
     print(f"{name}: daily Sharpe={daily_sharpe:.3f}, annualized={daily_sharpe * np.sqrt(252):.2f}")
 
 # %% [markdown]
-# Test pricing errors summarize $E[M R^e_i]$ for each asset. Deciles reveal
-# whether a small subset dominates the residual moment violations.
+# Test pricing errors summarize $E[M R^e_i]$ for each asset. The figure below
+# plots the mean signed error inside each decile of the per-asset distribution.
+# Whether a small subset carries the residual moment violations is a question
+# about magnitude, so it is answered by the printed concentration share rather
+# than by the signed deciles.
 
 # %%
 sdf_net.eval()
@@ -675,7 +696,16 @@ pricing_errors = (
     .numpy()
 )
 observed_errors = pricing_errors[data["test"].mask.any(dim=0).cpu().numpy()]
-error_deciles = np.quantile(observed_errors, np.linspace(0.1, 1.0, 10))
+error_groups = np.array_split(np.sort(observed_errors), 10)
+decile_means = np.array([group.mean() for group in error_groups])
+absolute_errors = np.abs(observed_errors)
+top_tenth = int(np.ceil(0.1 * len(absolute_errors)))
+concentration = float(np.sort(absolute_errors)[-top_tenth:].sum() / absolute_errors.sum())
+print(
+    f"Test pricing errors: {len(observed_errors)} assets, decile means "
+    f"{10_000 * decile_means[0]:.1f} to {10_000 * decile_means[-1]:.1f} bp; "
+    f"the largest tenth by absolute error carries {concentration:.1%} of the total"
+)
 
 # %% [markdown]
 # ## 6. Beta-network predictive head
@@ -709,7 +739,7 @@ class BetaNetwork(nn.Module):
 
 # %% [markdown]
 # Beta checkpoints minimize validation MSE with the LSTM state carried from the
-# training segment. Test remains sealed during this second selection step.
+# training segment. Test is not read during this second selection step.
 
 
 # %%
@@ -837,14 +867,24 @@ annual_sharpes = [factor_metrics[key]["annual"] for key in ("train", "valid", "t
 axes[0].bar(names, annual_sharpes, color=colors)
 zero_line(axes[0])
 axes[0].set_ylabel("Annualized factor Sharpe")
-add_message_title(axes[0], f"Test factor Sharpe is {annual_sharpes[-1]:.2f}")
-axes[1].plot(range(1, 11), 10_000 * error_deciles, color=COLORS["blue"], marker="o")
+add_message_title(axes[0], "Annualized factor Sharpe by split")
+axes[1].plot(range(1, 11), 10_000 * decile_means, color=COLORS["blue"], marker="o")
 zero_line(axes[1])
 axes[1].set_xlabel("Asset pricing-error decile")
 axes[1].set_ylabel("Mean pricing error (basis points)")
-add_message_title(axes[1], "Top-decile pricing errors are largest")
+add_message_title(axes[1], "Mean test pricing error by asset decile")
 fig.subplots_adjust(hspace=0.65)
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels. The upper panel is a bar chart of annualized factor Sharpe for "
+    "the train, validation and test splits against a dashed zero line; the train and "
+    "validation bars stand well above zero and the test bar is too close to zero to see. "
+    "The lower panel joins ten markers with a line, plotting the mean pricing error in "
+    "basis points inside each decile of the per-asset pricing-error distribution against "
+    "a dashed zero line. Because the deciles are ordered by that error, the series rises "
+    "from a negative value in the first decile, crosses zero in the low middle deciles, "
+    "and reaches its largest positive value in the tenth.",
+)
 
 # %%
 daily_ics = ic_series["ic"].to_numpy()
@@ -865,19 +905,32 @@ axes[0].set_yscale("log")
 axes[0].set_xlabel("Beta-network epoch")
 axes[0].set_ylabel("Beta-target MSE")
 axes[0].legend()
-add_message_title(axes[0], "Validation selects the beta checkpoint")
+add_message_title(axes[0], "Beta-target MSE by beta-network epoch")
 axes[1].hist(daily_ics[np.isfinite(daily_ics)], bins=24, color=COLORS["blue"], alpha=0.8)
 zero_line(axes[1])
 axes[1].axvline(ic_uncertainty["mean_ic"], color=COLORS["amber"], linewidth=2, label="Mean IC")
 axes[1].set_xlabel("Daily cross-sectional rank IC")
 axes[1].set_ylabel("Test dates")
 axes[1].legend()
-add_message_title(
-    axes[1],
-    f"Test mean IC is {ic_uncertainty['mean_ic']:.3f}",
-)
+add_message_title(axes[1], "Daily cross-sectional rank IC across test dates")
 fig.subplots_adjust(hspace=0.65)
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels. The upper panel plots beta-target MSE on a log axis against "
+    "beta-network epoch for train (navy) and validation (amber). Train declines smoothly "
+    "across the whole range. Validation starts below it, rises to a peak inside the first "
+    "hundred epochs, then falls back below train and flattens. The lower panel is a "
+    "histogram of the daily cross-sectional rank IC over the test dates: roughly "
+    "symmetric, centered near zero, spanning about -0.6 to 0.6, with a vertical amber "
+    "line marking the mean.",
+)
+
+# %% [markdown]
+# Validation MSE below train MSE in the upper panel does not mean the network
+# generalizes better than it fits. The two curves measure the same loss on
+# different samples of the beta target, the return-factor product, whose scale
+# is not constant across windows. Only movement along the validation curve
+# supports the checkpoint comparison.
 
 # %% [markdown]
 # ## 8. Takeaways
