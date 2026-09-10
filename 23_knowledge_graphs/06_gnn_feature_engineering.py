@@ -527,23 +527,24 @@ tabular_ic_mean = float(fold_results["tabular_ic"].mean())
 hybrid_ic_mean = float(fold_results["hybrid_ic"].mean())
 mean_ic_delta = float(fold_results["hybrid_minus_tabular"].mean())
 
+# Descriptive spread only: these folds share training stocks and score correlated
+# names inside one return window, so they are not independent replicates.
 fold_deltas = fold_results["hybrid_minus_tabular"].to_numpy()
 delta_sd = float(np.std(fold_deltas, ddof=1))
-delta_se = delta_sd / np.sqrt(len(fold_deltas))
 folds_favouring_hybrid = int((fold_deltas > 0).sum())
-standard_errors_from_zero = mean_ic_delta / delta_se if delta_se else float("nan")
 largest_adverse = float(fold_deltas.min())
+largest_favourable = float(fold_deltas.max())
 
 print(f"\nMean tabular IC: {tabular_ic_mean:+.3f}")
 print(f"Mean hybrid IC: {hybrid_ic_mean:+.3f}")
 print(f"Mean paired delta: {mean_ic_delta:+.3f}")
 print(
-    f"Per-fold delta spread: sd {delta_sd:.3f}, se {delta_se:.3f}, "
-    f"{standard_errors_from_zero:+.2f} standard errors from zero"
+    f"Per-fold delta spread: sd {delta_sd:.3f}, range {largest_adverse:+.3f} to "
+    f"{largest_favourable:+.3f}"
 )
 print(
     f"Folds favouring the hybrid: {folds_favouring_hybrid} of {len(fold_deltas)}; "
-    f"largest adverse fold {largest_adverse:+.3f}"
+    f"the mean is {abs(mean_ic_delta) / delta_sd:.2f} standard deviations from zero"
 )
 fold_results
 
@@ -554,12 +555,17 @@ fold_results
 # this sample. It does not establish that GNNs generally improve or degrade
 # equity forecasts.
 #
-# The mean is also not the result. Read the folds: most of them favour the hybrid,
-# one reverses it by more than the others combined, and the mean sits a fraction of
-# a standard error from zero. A reader shown only the mean takes a small negative
-# number for a small negative effect. What the experiment produced is a sign it
-# cannot resolve, which is why the spread is printed beside the mean and drawn as
-# five separate lines below rather than as one summary marker.
+# The mean is also not the result. The folds disagree in sign, the single most
+# adverse one moves further than the rest put together, and the mean is a small
+# fraction of the fold-to-fold spread. A reader shown only the mean takes a small
+# negative number for a small negative effect. What the experiment produced is a
+# sign it does not determine, which is why the spread prints beside the mean and
+# the figure draws five separate lines rather than one summary marker.
+#
+# The spread is descriptive and nothing here converts it into a confidence
+# statement. The folds share training stocks and score correlated names inside one
+# return window, so treating five paired deltas as independent replicates would
+# understate the uncertainty rather than quantify it.
 
 # %% [markdown]
 # Direct fold labels are spread by a minimum vertical gap. Leader lines preserve
@@ -641,7 +647,8 @@ ax.set_title("Held-out-stock IC, tabular against tabular plus graph")
 ax.text(
     0.02,
     0.02,
-    f"Mean paired delta {mean_ic_delta:+.3f}, sd {delta_sd:.3f} across {len(fold_deltas)} folds",
+    f"Mean paired delta {mean_ic_delta:+.3f}, fold spread {largest_adverse:+.3f} "
+    f"to {largest_favourable:+.3f}",
     transform=ax.transAxes,
     color=COLORS["neutral"],
 )
@@ -747,7 +754,8 @@ results
 # 2. **Fit preprocessing inside the fold**: Even cross-sectional scaling can leak held-out data.
 # 3. **Use a pre-target universe**: Future liquidity cannot decide today's investable set.
 # 4. **Report the spread, not the mean**: the folds disagree in sign here and the
-#    mean sits a fraction of a standard error from zero, so the experiment does not
-#    resolve which way the effect goes on its own sample.
+#    mean is a small fraction of their spread, so the experiment does not determine
+#    which way the effect goes even on its own sample. The spread is descriptive:
+#    folds that share training stocks are not independent replicates.
 # 5. **Interpret the ablation narrowly**: five stock folds from one target window
 #    do not settle whether GNNs help across markets or time.
