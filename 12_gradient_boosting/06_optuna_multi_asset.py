@@ -54,6 +54,7 @@ import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from IPython.display import Markdown, display
 
 # LightGBM records synthetic feature names when fitted on an array with an eval_set,
 # and sklearn then warns at every predict on an array that has none to compare. One
@@ -551,7 +552,15 @@ transfer_summary
 # ## 12. Transfer Visualization
 
 # %%
-if len(transfer_rows) >= 2:
+if len(transfer_rows) < 2:
+    display(
+        Markdown(
+            "**No transfer chart**: it compares the tuned asset class against at least one "
+            "other, and this run loaded fewer than two. The load table above says which "
+            "case studies were available."
+        )
+    )
+else:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     asset_names = [r["symbol"] for r in transfer_rows]
