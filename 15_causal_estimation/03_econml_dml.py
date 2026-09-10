@@ -557,6 +557,10 @@ if len(placebo_effects) > 10:
         f"   Placebo draws at least as extreme: "
         f"{int(round(permutation_p * (len(placebo_effects) + 1))) - 1} of {len(placebo_effects)}"
     )
+else:
+    print("   Insufficient successful permutations")
+    z_score = None
+    permutation_p = None
 
 # %% [markdown]
 # **The z-score and the p-value can disagree, and the count is the one that holds.** The
@@ -567,10 +571,6 @@ if len(placebo_effects) > 10:
 # entity has no reason to centre it there - the two answer different questions, and only the
 # count is a statement about the null the test actually built. Read the count printed above,
 # and the mean and standard deviation beside it, before reading the z-score.
-else:
-    print("   Insufficient successful permutations")
-    z_score = None
-    permutation_p = None
 
 # %% [markdown]
 # The two halves are cut at a decision time rather than at a row, so neither holds a
@@ -730,7 +730,7 @@ print("Quantitative Findings")
 print("-" * 40)
 print(f"SE inflation, Driscoll-Kraay over iid: {se_inflation:.2f}x")
 if dml_estimate is not None:
-    direction = "smaller" if abs(naive_estimate) > abs(dml_estimate) else "larger"
+    direction = "larger" if abs(naive_estimate) > abs(dml_estimate) else "smaller"
     print(
         f"Adjustment moves the slope by {abs(bias_pct):.1f}% - the unadjusted estimate is "
         f"{direction} in magnitude"
