@@ -431,7 +431,7 @@ if HAS_MESSAGE_DATA and len(limit_orders) > 0 and "shares" in limit_orders.colum
 
     fig, ax = plt.subplots(figsize=(10, 5))
     size_by_side.nlargest(15, "Buy").sort_values("Buy").plot.barh(
-        ax=ax, color={"Buy": COLORS["bid"], "Sell": COLORS["ask"]}
+        ax=ax, color={"Buy": COLORS["positive"], "Sell": COLORS["negative"]}
     )
     ax.set_title(f"{SYMBOL}: the fifteen most common order sizes, by side")
     ax.set_xlabel("Share of orders")
@@ -486,7 +486,7 @@ if (
 
     fig, ax = plt.subplots(figsize=(10, 5))
     value_pivot.nlargest(10, "Buy").sort_values("Buy").plot.barh(
-        ax=ax, color={"Buy": COLORS["bid"], "Sell": COLORS["ask"]}
+        ax=ax, color={"Buy": COLORS["positive"], "Sell": COLORS["negative"]}
     )
     ax.set_title(f"{SYMBOL}: share of submitted dollar value by order size")
     ax.set_xlabel("Share of total dollar value")
@@ -686,13 +686,13 @@ if HAS_MESSAGE_DATA and orders_with_cancel is not None:
 
 # %%
 if HAS_MESSAGE_DATA and cancelled_orders_df is not None and len(cancelled_orders_df) > 0:
-    positive = cancelled_orders_df.filter(pl.col("cancel_time") > 0)["cancel_time"].to_numpy()
+    lifetimes = cancelled_orders_df.filter(pl.col("cancel_time") > 0)["cancel_time"].to_numpy()
     fig, ax = plt.subplots(figsize=(10, 5))
-    if len(positive):
-        edges = np.logspace(np.log10(positive.min()), np.log10(positive.max()), 41)
-        ax.hist(positive, bins=edges, edgecolor="none", alpha=0.8, color=COLORS["slate"])
+    if len(lifetimes):
+        edges = np.logspace(np.log10(lifetimes.min()), np.log10(lifetimes.max()), 41)
+        ax.hist(lifetimes, bins=edges, edgecolor="none", alpha=0.8, color=COLORS["slate"])
         ax.set_xscale("log")
-        median_life = float(np.median(positive))
+        median_life = float(np.median(lifetimes))
         ax.axvline(
             median_life,
             color="red",
@@ -927,14 +927,14 @@ if (
             axes[0],
             cancelled_orders_df,
             "cancel_time",
-            COLORS["ask"],
+            COLORS["negative"],
             "termination",
         ),
         (
             axes[1],
             executed_orders_df,
             "exec_time",
-            COLORS["bid"],
+            COLORS["positive"],
             "execution",
         ),
     ):
@@ -1084,15 +1084,23 @@ if enriched_c is not None and "price_improvement_raw" in enriched_c.columns:
 # a uniform offset can be told apart, which a mean alone cannot do.
 
 # %% [markdown]
-# ## 8. The same timings across the whole venue
+# ## 8. Two narrower timings across the whole venue
 #
-# Everything so far followed one symbol. The same two durations can be computed for every
-# order the venue saw that day, because only three columns are needed - the order
-# reference and two timestamps - and a scan that reads nothing else fits in memory.
+# Everything so far followed one symbol. Two durations can be computed for every order the
+# venue saw that day, because only three columns are needed - the order reference and two
+# timestamps - and a scan that reads nothing else fits in memory.
 #
-# One symbol can be unrepresentative in either direction: a heavily quoted name is
-# re-priced more often than the average, a thin one hardly at all. The venue-wide figures
-# below are what the chapter quotes.
+# They are not the same two quantities as above, and the difference matters when reading
+# them side by side. This pass defines the end of an order's life as its first `D`
+# delete, where the per-symbol section counted the first `D`, `X` or `U`; and it defines
+# the first fill as the first `E`, where the per-symbol section also counted `C`. So an
+# order that was replaced rather than deleted, or filled first by a `C`, is either absent
+# here or timed from a later event. Read these as time to deletion and time to first `E`
+# fill, over every symbol; the per-symbol numbers cover more event types over one.
+#
+# The narrowing is deliberate: `D` and `E` are the two largest message types on the feed,
+# and restricting to them is what lets the pass read a few hundred million orders without
+# a symbol filter.
 
 # %%
 if HAS_MESSAGE_DATA:
@@ -1143,7 +1151,7 @@ if HAS_MESSAGE_DATA:
     cancel_within_10s = (cancel_seconds < 10.0).mean()
     cancel_median = cancel_seconds.median()
 
-    print(f"\nTime to termination, venue-wide ({venue_cancelled:,} orders):")
+    print(f"\nTime to deletion (D only), venue-wide ({venue_cancelled:,} orders):")
     print(f"  Within 500 ms:     {cancel_within_500ms:.1%}")
     print(f"  Within 1 second:   {cancel_within_1s:.1%}")
     print(f"  Within 10 seconds: {cancel_within_10s:.1%}")
@@ -1180,7 +1188,7 @@ if HAS_MESSAGE_DATA:
     exec_median = exec_seconds.median()
     exec_over_40min = (exec_seconds > 2400).mean()
 
-    print(f"\nTime to first execution, venue-wide ({venue_executed:,} orders):")
+    print(f"\nTime to first E fill, venue-wide ({venue_executed:,} orders):")
     print(f"  Within 1 millisecond: {exec_within_1ms:.1%}")
     print(f"  Median:               {exec_median:.3f} s")
     print(f"  Over 40 minutes:      {exec_over_40min:.1%}")
@@ -1190,13 +1198,15 @@ if HAS_MESSAGE_DATA:
 
 # %% [markdown]
 # Compare the two lists above against each other rather than reading either alone. Orders
-# that end without trading do so quickly; orders that trade take longer, and a tail of
-# them waits for most of the session. That ordering is the mechanism at work: an order
-# is withdrawn as soon as the price it was written against moves, and it fills only when
+# that are deleted are deleted quickly; orders that fill take longer, and a tail of them
+# waits for most of the session. That ordering is the mechanism at work: an order is
+# withdrawn as soon as the price it was written against moves, and it fills only when
 # someone chooses to cross to it, which is not something its sender controls.
 #
-# The two populations also overlap, because an order can fill part of its size and be
-# withdrawn afterwards, so these are two views of one day rather than two disjoint sets.
+# The two populations overlap, because an order can fill part of its size and be deleted
+# afterwards, so these are two views of one day rather than two disjoint sets. And both
+# are conditional on the event happening at all: an order still resting at the close
+# appears in neither.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1213,9 +1223,11 @@ if HAS_MESSAGE_DATA:
 #    of the distribution the analysis is about.
 # 4. **Plot lifetimes on a log axis.** They span microseconds to hours; on a linear axis
 #    the entire distribution lands in the first bin.
-# 5. **One symbol is not the venue.** The per-order work runs on one name because it has
-#    to; the venue-wide pass reads three columns and covers every order, and the two are
-#    reported separately rather than blended.
+# 5. **One symbol is not the venue, and the two passes measure different events.** The
+#    per-order work runs on one name because it has to, over `D`, `X`, `U`, `E` and `C`;
+#    the venue-wide pass reads three columns over every order but only `D` and `E`. They
+#    are reported separately, and a difference between them is partly population and
+#    partly definition.
 #
 # ### Known limitations
 #

@@ -108,13 +108,7 @@ TRADING_DATE = "2020-01-30"
 BUCKET_FREQ = "1m"
 MIN_BUCKETS = 50
 
-# %% [markdown]
-# Bids and asks get their own two colours on top of the repository palette, so that green
-# means bid and red means ask in every figure below.
-
 # %%
-COLORS = {**COLORS, "bid": "#2E7D32", "ask": "#C62828"}
-
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
 OUTPUT_DIR = get_output_dir(3, "lob_analysis")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
