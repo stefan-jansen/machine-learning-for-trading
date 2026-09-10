@@ -109,8 +109,6 @@ OUTPUT_DIR = get_output_dir(12, "shap_analysis")
 
 # %%
 set_global_seeds(SEED)
-# %%
-
 # %% [markdown]
 # ## 2. Load Data
 

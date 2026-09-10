@@ -93,7 +93,6 @@ from utils.style import COLORS, show_with_alt
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# %%
 # %% tags=["parameters"]
 N_TRIALS = 50
 # 0 = all folds for walk-forward HPO

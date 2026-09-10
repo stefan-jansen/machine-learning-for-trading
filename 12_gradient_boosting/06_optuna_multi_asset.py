@@ -99,7 +99,6 @@ def cross_sectional_ic_mean(
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# %%
 # %% tags=["parameters"]
 N_TRIALS = 50
 SEED = 42
