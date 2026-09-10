@@ -378,19 +378,21 @@ display(
 # A block permutation that compares raw effects is biased toward "passed" by arithmetic.
 # Permuting the treatment also frees it from the controls, so the placebo estimator divides
 # by a much larger residual variance and its effects come out smaller whether or not there
-# is anything to find. `04_dml_crypto_regime` leaves 9.3% of its treatment's variance after
-# its controls, and moving its own comparison to t-statistics took its permutation p from
-# the 1/101 floor to the middle of the null. ml4t/agent-workspace#1120 carries the same
-# correction into the shared implementation these registries are written by.
+# is anything to find. `04_dml_crypto_regime` prints how much of its treatment's variance
+# its controls leave - under a tenth - and moving its own comparison to
+# t-statistics took its permutation p from the floor to the middle of the null.
+# ml4t/agent-workspace#1120 carries the same correction into the shared implementation
+# these registries are written by.
 #
 # Comparing t-statistics cancels that one-directional bias and does not make the test
 # calibrated. Measured on twelve synthetic panels with the true effect fixed at exactly
-# zero, AR(1) confounders at rho 0.95 and 40 placebo draws each, the raw-effect comparison
-# rejects at the 5% level on 11 panels and the t-statistic comparison on 5, and eleven of
-# the twelve observed t-statistics are negative against a true effect of zero (the
-# measurement is on ml4t/agent-workspace#1120). An estimate that is itself biased sits far
-# from its own permutation null and the permutation reports that distance correctly, so a
-# "Fails" below is a verdict on the distance and not on the estimate.
+# zero, highly persistent AR(1) confounders that strongly predict the treatment, and forty
+# placebo draws each: at the conventional five percent level the raw-effect comparison
+# rejects on eleven of the twelve and the t-statistic comparison on five, and eleven of the
+# twelve observed t-statistics are negative against a true effect of zero. The measurement
+# is on ml4t/agent-workspace#1120. An estimate that is itself biased sits far from its own
+# permutation null and the permutation reports that distance correctly, so what the column
+# below reports is that distance rather than whether the estimate is sound.
 
 # %%
 HAC_SIG = "HAC clears"

@@ -840,9 +840,7 @@ show_plotly_with_alt(
 )
 
 # %%
-# Regime comparison
-# A subgroup with too few bars to estimate comes back NaN; drawing it would put a zero bar
-# with no error bar beside two real ones.
+# Regime comparison; a NaN subgroup is left out rather than drawn as a bar of zero.
 regime_bars = [
     (label, effect, se, colour)
     for label, effect, se, colour in (
