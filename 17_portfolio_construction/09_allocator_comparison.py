@@ -45,7 +45,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-from IPython.display import Markdown, display
+from IPython.display import HTML, Markdown, display
 from ml4t.backtest import (
     BacktestConfig,
     CommissionType,
@@ -885,7 +885,7 @@ comparison_df
 # %% [markdown]
 # **Reading the table**: The marker identifies the allocator chosen on pre-2022 data. The holdout
 # ordering is shown to diagnose generalization, not to select a replacement. Avg Turnover is the
-# mean per-rebalance half-turnover, $0.5\sum_i|w_{i,t}-w_{i,t-1}|$, over the union of current and
+# mean per-rebalance half-turnover, $\tfrac{1}{2}\sum_i|w_{i,t}-w_{i,t-1}|$, over the union of current and
 # prior ETFs. It includes the initial allocation from cash; a switches-only convention would omit
 # the first observation. These four rows remain gross of explicit commission and slippage.
 #
@@ -926,14 +926,17 @@ comparison_df.style.format(
 # ### Practitioner Interpretation
 
 # %%
+CI_STANDARD_ERRORS = 1.96  # the two-sided normal multiplier at the conventional confidence level
+
 selected_holdout_row = comparison_df.loc[comparison_df["Method"] == selected_method].iloc[0]
-selected_ci_half_width = 1.96 * float(selected_holdout_row["Sharpe SE (IID)"])
+selected_ci_half_width = CI_STANDARD_ERRORS * float(selected_holdout_row["Sharpe SE (IID)"])
 display(
     Markdown(
         f"The pre-holdout choice is **{selected_method}**. Its holdout Sharpe is "
-        f"**{selected_holdout_row['Sharpe Ratio']:.3f}**, with an approximate IID 95% "
-        f"half-width of **{selected_ci_half_width:.3f}**. The interval is a scale check, not a "
-        "multiple-comparison adjustment, so drawdown and turnover remain essential diagnostics."
+        f"**{selected_holdout_row['Sharpe Ratio']:.3f}**, and at "
+        f"{CI_STANDARD_ERRORS:.2f} standard errors the approximate IID interval reaches "
+        f"**{selected_ci_half_width:.3f}** either side of it. The interval is a scale check, not "
+        "a multiple-comparison adjustment, so drawdown and turnover remain essential diagnostics."
     )
 )
 
@@ -945,8 +948,6 @@ fig = go.Figure()
 
 palette = ml4t_palette(4, categorical=True)
 colors = dict(zip(allocation_methods, palette, strict=True))
-holdout_leader = str(comparison_df.iloc[0]["Method"])
-
 for name, result in results.items():
     fig.add_trace(
         go.Scatter(
@@ -996,7 +997,7 @@ for name, result in results.items():
     )
 
 fig.update_layout(
-    title="Allocator choice changes the depth and timing of holdout losses",
+    title="Underwater curves of the four allocators over the holdout",
     xaxis_title="Date",
     yaxis_title="Drawdown",
     height=400,
@@ -1004,7 +1005,8 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Four underwater curves over the holdout, one per allocation method, all at or below zero.",
+    "Four underwater curves over the holdout, one per allocation method, each at or below zero "
+    "and each with its deepest trough in the first half of the window.",
 )
 
 # %% [markdown]
@@ -1045,7 +1047,7 @@ fig.add_hline(
 )
 
 fig.update_layout(
-    title="Rolling Sharpe reveals unstable allocator rankings",
+    title="Rolling one-year Sharpe ratio of the four allocators",
     xaxis_title="Date",
     yaxis_title="Sharpe Ratio",
     height=400,
@@ -1146,19 +1148,24 @@ fig.add_hline(
 )
 
 fig.update_layout(
-    title="Optimized holdout paths drift against equal weight",
+    title="Each optimized allocator's cumulative return divided by equal weight's",
     xaxis_title="Date",
     yaxis_title="Relative Return",
     height=400,
 )
 show_plotly_with_alt(
     fig,
-    "Three ratio curves against date, each optimized allocation's cumulative return divided by equal weight's, with a dashed line at parity.",
+    "Three ratio curves against date, each optimized allocation's cumulative return divided by "
+    "equal weight's, with a dashed line at parity. Each of the three runs above parity for most "
+    "of the holdout, the minimum-variance ratio highest.",
 )
 
 # %% [markdown]
-# **Trading implication**: Relative-performance drift below parity suggests keeping equal-weight
-# as the default fallback when optimization confidence degrades.
+# **Reading this chart**: a curve above the parity line means that allocation compounded ahead
+# of equal weight up to that date, and a curve below it means equal weight was ahead. The level
+# at the right edge is only half of it: a ratio that crosses parity repeatedly says something
+# different from one that stays on a single side, because the first is a lead that the sample
+# could easily have reversed and the second is one that held across every stretch of it.
 
 # %% [markdown]
 # ## 12. Reading the Comparison Table
@@ -1220,8 +1227,10 @@ final_summary.style.format(
 #
 # The same `PortfolioTearSheet` object supports two delivery modes:
 #
-# - **Inline** - `tear_sheet.show()` renders the metrics block plus each Plotly
-#   figure as standard cell outputs, useful for interactive analysis.
+# - **Inline** - the metrics block, then each Plotly figure as a cell output. `tear_sheet.show()`
+#   does this in one call, and it loops `fig.show()`, which publishes every PNG with no alt text
+#   and leaves a screen reader with nothing; displaying the figures one at a time is what lets
+#   each carry a description of what it plots.
 # - **HTML** - `tear_sheet.save_html(path)` writes a self-contained file for
 #   sharing or archival; the same content, packaged for distribution.
 
@@ -1291,8 +1300,50 @@ style_diagnostic_figures(selected_tear_sheet.figures)
 
 print(f"Holdout tear sheet generated for preselected allocator: {selected_method}")
 
-# Inline display: metrics summary + each constituent figure as a separate cell.
-selected_tear_sheet.show()
+# %%
+DASHBOARD_ALT = {
+    "Cumulative Returns": (
+        "Cumulative return of the preselected allocator and of the SPY benchmark against date "
+        "over the holdout."
+    ),
+    "Drawdown": (
+        "The preselected allocator's underwater curve against date, filled to zero, showing the "
+        "percentage below its own running peak, with the deepest point marked."
+    ),
+    "Rolling Sharpe Ratio": (
+        "Two lines of rolling Sharpe ratio against date, over sixty-three and two hundred and "
+        "fifty-two sessions, the shorter window swinging more widely than the longer one."
+    ),
+    "Rolling Volatility": (
+        "Three lines of annualized rolling volatility against date, over twenty-one, "
+        "sixty-three and two hundred and fifty-two sessions."
+    ),
+    "Rolling Beta": (
+        "Rolling beta of the preselected allocator against SPY, plotted against date and shaded "
+        "down to zero, with a dashed reference line at the market's own beta."
+    ),
+    "Annual Returns": (
+        "Bars of the allocator's annual return by calendar year, with the benchmark's annual "
+        "return marked as points and a line at zero."
+    ),
+    "Monthly Returns Heatmap": (
+        "Heatmap of monthly return, years down the vertical axis and calendar months across "
+        "with a compounded annual column at the right, each cell labelled with its return and "
+        "coloured from red for losses to green for gains."
+    ),
+    "Returns Distribution": (
+        "Histogram of the allocator's daily returns with a fitted normal density drawn over it "
+        "and vertical reference lines in the left tail."
+    ),
+    "Top Drawdowns": (
+        "Horizontal bars of drawdown depth for the five deepest episodes, one bar per episode, "
+        "ordered deepest at the top and annotated with the depth reached."
+    ),
+}
+
+display(HTML(f"<pre>{selected_tear_sheet.metrics.summary()}</pre>"))
+for figure_name, diagnostic_figure in selected_tear_sheet.figures.items():
+    show_plotly_with_alt(diagnostic_figure, DASHBOARD_ALT[figure_name])
 
 # %%
 # HTML delivery: same content packaged as a self-contained file.
