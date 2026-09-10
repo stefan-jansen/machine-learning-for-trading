@@ -39,11 +39,13 @@ x-common: &common
     - ${ML4T_DATA_PATH:-./data}:/data:rw
     # Every notebook that pins a HuggingFace checkpoint loads it with
     # local_files_only=True, so a container run has to see the host's cache or the
-    # load raises LocalEntryNotFoundError. Read-only: a notebook run must not
-    # populate the cache, which is what the pin exists to prevent. An absent cache
-    # resolves to an empty directory and the pinned load fails saying so, the same
-    # shape as the kdb+ licence mount below.
-    - ${HF_HOME:-${HOME}/.cache/huggingface}:/home/ml4t/.cache/huggingface:ro
+    # load raises LocalEntryNotFoundError. Read-write, because the notebooks that do
+    # not pin a checkpoint fetch it on first use (10_text_feature_engineering/09
+    # loads FinBERT through a bare from_pretrained), and a read-only mount turns
+    # that download into a failure. What a pinned load must not do is silently
+    # substitute a different checkpoint, and `revision=` with local_files_only is
+    # what prevents that, not the mount mode.
+    - ${HF_HOME:-${HOME}/.cache/huggingface}:/home/ml4t/.cache/huggingface:rw
   environment:
     - ML4T_DATA_PATH=/data
     - ML4T_PATH=/app

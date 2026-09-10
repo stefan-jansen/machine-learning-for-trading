@@ -228,21 +228,23 @@ def describe_items(items: list[str]) -> str:
 # happened to open. `load_sec_filings` owns where the staged 8-K parquet lives,
 # so re-deriving that path here would pin this notebook to a storage layout it
 # does not control; hashing the returned frame pins it to the content instead.
+#
+# Every field the extraction prompt reads has to be in the hash. `company_name` and
+# `symbol` are handed to the model alongside the text, so a corpus that renamed a
+# filer produces different extractions under an unchanged run identity unless they
+# are covered.
 
 
 # %%
+HASHED_FILING_FIELDS = ("accession_no", "cik", "company_name", "filing_date", "symbol", "text")
+
+
 def frame_sha256(frame: pl.DataFrame) -> str:
     """Content hash over the fields that identify a filing, independent of row order."""
     digest = hashlib.sha256()
-    for row in (
-        frame.select("accession_no", "cik", "filing_date", "symbol", "text")
-        .sort("accession_no")
-        .iter_rows(named=True)
-    ):
-        digest.update(
-            f"{row['accession_no']}\t{row['cik']}\t{row['filing_date']}\t{row['symbol']}\t".encode()
-        )
-        digest.update(hashlib.sha256(row["text"].encode()).digest())
+    for row in frame.select(HASHED_FILING_FIELDS).sort("accession_no").iter_rows(named=True):
+        for field_name in HASHED_FILING_FIELDS:
+            digest.update(hashlib.sha256(str(row[field_name]).encode()).digest())
     return digest.hexdigest()
 
 
@@ -252,6 +254,20 @@ filings_df = load_sec_filings("8-K", universe="sp100").sort(
 )
 SOURCE_SHA256 = frame_sha256(filings_df)
 SOURCE_ROWS = filings_df.height
+
+# %% [markdown]
+# A hash that misses a field the prompt reads is worse than no hash: it asserts an
+# identity the extraction does not have. Changing each hashed field in turn on one
+# row, and requiring the digest to move, is what makes the claim checkable.
+
+# %%
+_probe = filings_df.head(1)
+_probe_digest = frame_sha256(_probe)
+for _field in HASHED_FILING_FIELDS:
+    _mutated = _probe.with_columns((pl.col(_field).cast(pl.Utf8) + pl.lit("x")).alias(_field))
+    if frame_sha256(_mutated) == _probe_digest:
+        raise RuntimeError(f"frame_sha256 does not depend on {_field}")
+print(f"Content hash depends on all {len(HASHED_FILING_FIELDS)} hashed filing fields")
 required_columns = {"accession_no", "cik", "filing_date", "symbol", "text"}
 missing_columns = required_columns - set(filings_df.columns)
 if missing_columns:
