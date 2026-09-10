@@ -115,6 +115,9 @@ FORWARD_DAYS = 21  # Forward return horizon (matches label)
 
 # Strategy parameters
 N_QUANTILES = 5  # Quintile portfolios
+# A date needs at least this many complete pairs before its cross-sectional rank
+# correlation is worth averaging into the IC; a five-name cross-section is noise.
+MIN_IC_NAMES = 20
 
 # Transaction Costs: 10 bps round-trip for liquid ETFs
 TRANSACTION_COST_BPS = 10
@@ -313,16 +316,36 @@ print("=" * 60)
 
 train_pd = train_df.to_pandas()
 
-# Overall IC (Information Coefficient) - training period
-train_ic = stats.spearmanr(train_pd[treatment_col], train_pd[outcome_col])[0]
+
+def cross_sectional_ic(frame: pd.DataFrame) -> float:
+    """Mean over dates of the cross-sectional Spearman correlation.
+
+    The strategy sorts each date's cross-section into quintiles, so the association it
+    trades is a within-date one. Pooling every symbol-date row into a single Spearman
+    mixes that with the market's own time series, and the two need not even share a sign.
+    Ranks are taken within a date, and dates with fewer than `MIN_IC_NAMES` complete pairs
+    contribute nothing.
+    """
+    pairs = frame[[date_col, treatment_col, outcome_col]].dropna()
+    per_date = pairs.groupby(date_col).apply(
+        lambda g: (
+            stats.spearmanr(g[treatment_col], g[outcome_col])[0]
+            if len(g) >= MIN_IC_NAMES
+            else np.nan
+        ),
+        include_groups=False,
+    )
+    return float(per_date.mean())
+
+
+train_ic = cross_sectional_ic(train_pd)
 print(f"\nMomentum IC (train): {train_ic:.4f}")
 
-# IC by regime - training period
 print("\nIC by Regime (train):")
 for regime_label in ["low_vol", "mid_vol", "high_vol"]:
     regime_data = train_pd[train_pd["regime_label"] == regime_label]
     if len(regime_data) > 50:
-        ic = stats.spearmanr(regime_data[treatment_col], regime_data[outcome_col])[0]
+        ic = cross_sectional_ic(regime_data)
         print(f"  {regime_label}: IC = {ic:.4f} (n={len(regime_data):,})")
 
 # %% [markdown] tags=[]
@@ -750,8 +773,8 @@ print("=" * 60)
 
 test_pd = test_df.to_pandas()
 
-# Test period IC
-test_ic = stats.spearmanr(test_pd[treatment_col].dropna(), test_pd[outcome_col].dropna())[0]
+# Test period IC, on the same within-date definition as the training one
+test_ic = cross_sectional_ic(test_pd)
 print(f"\nMomentum IC (test): {test_ic:.4f}")
 print(f"IC change from train: {test_ic - train_ic:+.4f}")
 
@@ -1033,12 +1056,15 @@ for name, sharpe in test_sharpes.items():
 # %% [markdown] tags=[]
 # ### Reading the comparison
 #
-# The information coefficient printed above is the first thing to read, because it is a
-# property of the signal rather than of any strategy built on it. If it changes sign between
-# the training period and the holdout, the treatment's relationship to forward returns has
-# inverted and no sizing rule recovers from that: scaling a signal that points the wrong way
-# scales the loss. The three Sharpe ratios then say how each rule behaved given whatever the
-# signal did, and they are not evidence about the causal estimate that produced the scaling.
+# The information coefficient printed above is a property of the signal rather than of any
+# strategy built on it: the average, over dates, of the rank correlation between momentum
+# and the forward return within that date's cross-section. A sign change between the
+# training period and the holdout says the association the three rules all lean on was not
+# stable, which is the first thing to know about any of them. It does not by itself settle
+# what a strategy earned - the rules trade quintile spreads with regime-dependent exposure,
+# and an average that flips sign is consistent with several quintile patterns. The three
+# Sharpe ratios below say what each rule actually did, and neither they nor the IC are
+# evidence about the causal estimate that produced the scaling.
 #
 # What the causal analysis establishes is a statement about confounding in the training
 # period, conditional on the controls being adequate. It is not a forecast, and the holdout
