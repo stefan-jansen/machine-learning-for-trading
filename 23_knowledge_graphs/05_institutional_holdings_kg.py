@@ -989,12 +989,13 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    f"Two stacked panels. Top: horizontal bars for the {len(names)} most widely held "
+    f"Two stacked panels. The upper one has horizontal bars for the {len(names)} most "
+    "widely held "
     "stocks, labelled by shortened issuer name, on an axis running from zero to "
     f"{len(data_institutions)} possible holders. The bars run from {panel_span[0]} to "
     f"{panel_span[1]} holders, so they all end in a narrow band near the right edge and "
-    "the ordering between them is a difference of one or two holders. Bottom: horizontal "
-    "bars counting cohort stocks per screened sector, longest first, led by "
+    "the ordering between them is a difference of one or two holders. The lower one has "
+    "horizontal bars counting cohort stocks per screened sector, longest first, led by "
     f"{sector_names[0]} at {scounts[0]} of {len(data_stocks)}.",
 )
 
