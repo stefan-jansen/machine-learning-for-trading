@@ -665,18 +665,23 @@ print(f"  Heuristic: {SIMPLE_HEURISTIC}")
 
 
 # %% tags=[]
-def _assign_quintiles(group, treatment_col, n_quantiles):
-    """Assign quintile ranks within a cross-section."""
-    try:
-        group["quantile"] = pd.qcut(
-            group[treatment_col],
-            q=n_quantiles,
-            labels=range(1, n_quantiles + 1),
-            duplicates="drop",
-        )
-    except ValueError:
-        group["quantile"] = n_quantiles // 2 + 1
-    return group
+def _assign_quintiles(frame, treatment_col, n_quantiles):
+    """Quintile rank of each row within its own date's cross-section."""
+
+    def bucket(values):
+        try:
+            return pd.qcut(
+                values,
+                q=n_quantiles,
+                labels=range(1, n_quantiles + 1),
+                duplicates="drop",
+            ).astype(float)
+        except ValueError:
+            # Fewer distinct values than quantiles on this date; everything goes to the
+            # middle bucket, which carries no position either way.
+            return pd.Series(float(n_quantiles // 2 + 1), index=values.index)
+
+    return frame.groupby(date_col)[treatment_col].transform(bucket)
 
 
 # %% [markdown] tags=[]
@@ -687,17 +692,14 @@ def _assign_quintiles(group, treatment_col, n_quantiles):
 
 
 # %% tags=[]
-def _assign_base_weights(group, n_quantiles):
-    """Convert quintile assignments into gross-normalized long-short weights."""
-    raw_signal = np.zeros(len(group), dtype=float)
-    quantile_values = group["quantile"].to_numpy()
-    raw_signal[quantile_values == n_quantiles] = 1.0
-    raw_signal[quantile_values == 1] = -1.0
-
-    gross = float(np.abs(raw_signal).sum())
-    group = group.copy()
-    group["base_weight"] = raw_signal / gross if gross > 0 else 0.0
-    return group
+def _assign_base_weights(frame, n_quantiles):
+    """Gross-normalized long-short weight for each row, normalized within its date."""
+    raw_signal = np.select(
+        [frame["quantile"] == n_quantiles, frame["quantile"] == 1], [1.0, -1.0], default=0.0
+    )
+    raw = pd.Series(raw_signal, index=frame.index)
+    gross = raw.abs().groupby(frame[date_col]).transform("sum")
+    return (raw / gross).where(gross > 0, 0.0)
 
 
 # %% [markdown] tags=[]
@@ -708,11 +710,8 @@ def _assign_base_weights(group, n_quantiles):
 # %% tags=[]
 def _compute_portfolio_returns(df, outcome_col, cost_bps):
     """Compute gross return, turnover, cost, and net return from weights."""
-    portfolio_returns = (
-        df.groupby(date_col)
-        .apply(lambda x: float((x["weight"] * x[outcome_col]).sum()))
-        .reset_index(name="strategy_return")
-    )
+    contribution = df["weight"] * df[outcome_col]
+    portfolio_returns = contribution.groupby(df[date_col]).sum().reset_index(name="strategy_return")
 
     df_sorted = df.sort_values(["symbol", date_col]).copy()
     df_sorted["weight_change"] = (
@@ -746,10 +745,8 @@ def backtest_momentum_strategy(
     """Backtest a regime-scaled long-short momentum strategy on portfolio weights."""
     df = df.copy()
 
-    df = df.groupby(date_col, group_keys=False).apply(
-        _assign_quintiles, treatment_col=treatment_col, n_quantiles=n_quantiles
-    )
-    df = df.groupby(date_col, group_keys=False).apply(_assign_base_weights, n_quantiles=n_quantiles)
+    df["quantile"] = _assign_quintiles(df, treatment_col, n_quantiles)
+    df["base_weight"] = _assign_base_weights(df, n_quantiles)
 
     df["weight"] = df["base_weight"]
     for regime, scale in regime_scaling.items():
