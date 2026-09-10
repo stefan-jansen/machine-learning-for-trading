@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -23,7 +23,7 @@
 # ## Purpose
 # This notebook compares grid search against Optuna's Bayesian optimization on
 # the same parameter budget, first on a space grid can enumerate and then on a
-# continuous one it cannot. It also investigates validation overfitting — how
+# continuous one it cannot. It also measures validation overfitting: how
 # test IC diverges from validation IC as trial count increases.
 #
 # ## Key Insight
@@ -34,7 +34,7 @@
 # are single uncontrolled runs, not a cost comparison.
 #
 # ## Cross-References
-# - **Section 12.4**: TPE, pruning, validation overfitting (Box 12.3)
+# - **Section 12.4**: TPE, pruning, and its box on validation overfitting
 # - **Related**: `04_optuna_tuning` (full workflow), `06_optuna_multi_asset` (multi-objective)
 #
 # ## References
@@ -45,19 +45,14 @@
 # ## 1. Setup
 
 # %%
-"""Grid Search vs Optuna — compare HPO methods on convergence speed and final performance."""
+"""Grid Search against Optuna - compare HPO methods on convergence and final score."""
 
 import time
 import warnings
 
-# lightgbm must be imported before anything that loads scikit-learn, which
-# includes ml4t.diagnostic transitively. Both ship their own OpenMP runtime and
-# the first one loaded wins for the whole process; on macOS ARM64, getting
-# scikit-learn's libomp first makes LightGBM's next multithreaded fit segfault
-# in __kmp_suspend_initialize_thread, killing the kernel with no traceback.
-# This notebook fits with n_jobs=-1, so it is squarely exposed. Plain `import`
-# statements sort ahead of `from ... import` ones, so one canonical block keeps
-# this order and isort will not undo it.
+# lightgbm loads before anything that pulls in scikit-learn, ml4t.diagnostic included:
+# the first OpenMP runtime loaded wins the process, and sklearn's first segfaults
+# LightGBM's next threaded fit on macOS ARM64. This notebook fits with n_jobs=-1.
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
@@ -68,7 +63,15 @@ from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from optuna.samplers import TPESampler
 from sklearn.model_selection import ParameterGrid
 
-warnings.filterwarnings("ignore")
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
 
 
 def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
@@ -89,7 +92,7 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
 from utils.cv_splits import load_evaluation_config
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -111,30 +114,20 @@ df = mds.dataset.to_pandas()
 date_col = mds.date_col
 FEATURE_COLS = mds.feature_names
 
-# The TEST set is the case study's sealed holdout (setup.yaml `holdout_start` /
-# `holdout_end`). All eight walk-forward folds live strictly BEFORE holdout_start,
-# so the entire HPO search — grid, Optuna-on-grid, and Optuna-continuous — is
-# confined to fold 0's validation window and never touches the holdout. Reporting
-# "test IC" on a fold's own validation window (the earlier design here) leaked: the
-# fold-1 val window sat ~92% inside fold 0's training window, so the "test" was
-# mostly in-sample.
+# The test set is the case study's holdout, declared in `setup.yaml`. Every
+# walk-forward fold ends before it starts, so no search here can reach it.
 eval_cfg = load_evaluation_config("etfs")
 holdout_start = pd.Timestamp(eval_cfg["holdout_start"])
 holdout_end = pd.Timestamp(eval_cfg["holdout_end"])
-LABEL_HORIZON = 21  # trading days — fwd_ret_21d
+LABEL_HORIZON = 21  # trading days, matching fwd_ret_21d
 
-# Embargo: trim any validation date whose 21-trading-day label horizon would reach
-# into the holdout, so selection never scores on a return realized on or after the
-# first holdout day. A fwd_ret_21d label at date d is realized 21 trading days
-# later, so the last admissible val date must have at least 21 trading days BEFORE
-# holdout_start — index -(LABEL_HORIZON + 1) into the pre-holdout calendar (the
-# -LABEL_HORIZON date lands on the first holdout day). Only fold 0, adjacent to
-# holdout_start, is affected; earlier folds end well before the cutoff.
+# Embargo: a label at date d resolves LABEL_HORIZON trading days later, so the last
+# admissible validation date is that many days before the holdout starts. Index
+# -(LABEL_HORIZON + 1) is it; -LABEL_HORIZON would land on the holdout's first day.
 pre_holdout_dates = np.sort(df.loc[df[date_col] < holdout_start, date_col].unique())
 val_embargo_cutoff = pd.Timestamp(pre_holdout_dates[-(LABEL_HORIZON + 1)])
 
-# Fold 0 (most recent walk-forward fold) supplies train + validation; validation is
-# fold 0's val window trimmed by the embargo cutoff above. Test is the sealed holdout.
+# Fold 0 supplies train and validation, the latter trimmed by the embargo cutoff.
 split0 = mds.splits[0]
 
 train_mask = (df[date_col] >= split0["train_start"]) & (df[date_col] <= split0["train_end"])
@@ -166,7 +159,7 @@ X_test, y_test = X_test[valid], y_test[valid]
 dates_test, symbols_test = dates_test[valid], symbols_test[valid]
 
 print(f"ETFs: {len(FEATURE_COLS)} features")
-print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test (sealed holdout): {len(X_test):,}")
+print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test (holdout): {len(X_test):,}")
 print(f"Holdout window: {holdout_start.date()} → {holdout_end.date()}")
 
 
@@ -216,7 +209,7 @@ scored = [r for r in grid_results if np.isfinite(r["ic"])]
 if not scored:
     raise RuntimeError("No grid configuration produced a finite IC.")
 best_grid = max(scored, key=lambda x: x["ic"])
-print(f"Done in {grid_time:.1f}s — Best IC: {best_grid['ic']:.4f}")
+print(f"Done in {grid_time:.1f}s, best IC {best_grid['ic']:.4f}")
 
 # %% [markdown]
 # ## 5. Optuna (Same Budget, Same Space)
@@ -241,7 +234,7 @@ study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=SEED))
 study.optimize(optuna_objective, n_trials=N_GRID, show_progress_bar=True)
 optuna_time = time.time() - optuna_start
 
-print(f"Done in {optuna_time:.1f}s — Best IC: {study.best_value:.4f}")
+print(f"Done in {optuna_time:.1f}s, best IC {study.best_value:.4f}")
 
 # %% [markdown]
 # ### Same-Budget Comparison
@@ -265,9 +258,9 @@ comparison_df
 # in exchange. Search only pays where the space is too big to enumerate. The
 # wall-time column is one uncontrolled measurement on a shared machine, and the
 # two searches fit different sets of configurations, which cost different amounts
-# to train — so it is neither a benchmark nor evidence that either method is
+# to train, so it is neither a benchmark nor evidence that either method is
 # cheaper. The lesson is not that one method wins but that on a space this small
-# there is nothing to optimize: the chapter's recommendation stands — grid is
+# there is nothing to optimize; the chapter's recommendation stands. Grid is
 # fine for ≤4 parameters × ≤3 values each. What the continuous space tested next
 # adds is reach, to configurations a discrete grid cannot represent at all; that
 # is a property of the space, and it is not a measurement of the sampler.
@@ -298,10 +291,10 @@ study_cont = optuna.create_study(direction="maximize", sampler=TPESampler(seed=S
 study_cont.optimize(optuna_continuous_objective, n_trials=N_GRID, show_progress_bar=True)
 cont_time = time.time() - cont_start
 
-print(f"Done in {cont_time:.1f}s — Best IC: {study_cont.best_value:.4f}")
+print(f"Done in {cont_time:.1f}s, best IC {study_cont.best_value:.4f}")
 
 # %% [markdown]
-# ## 7. Efficiency Analysis: Trials to 95% of Best
+# ## 7. Efficiency: how many trials reach most of the search's final value
 
 # %%
 trials_df = study_cont.trials_dataframe()
@@ -318,9 +311,10 @@ print(f"Trials to reach 95% of best: {trials_to_95}")
 # %% [markdown]
 # ## 8. Validation Overfitting: IC Divergence
 #
-# Box 12.3 warns that excessive tuning overfits validation noise. We test
-# this empirically: for increasing trial budgets, compare the best validation
-# IC against the test IC of the corresponding model.
+# Section 12.4's box on validation overfitting warns that a long search fits the
+# validation window's noise. This section measures it: for increasing trial budgets,
+# the highest validation IC the search reached, against the holdout IC of the
+# configuration it selected at that budget.
 
 # %%
 trial_budgets = [10, 25, 50, 75, N_GRID]
@@ -367,30 +361,33 @@ ax.plot(
 )
 ax.set_xlabel("Number of Optuna Trials")
 ax.set_ylabel("Cross-sectional IC")
-ax.set_title("Extra trials inflate validation IC far more than held-out test IC")
+ax.set_title("Validation and holdout IC against the trial budget")
 ax.legend()
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two lines against the number of trials in the search: the best validation IC the "
+    "search reached at that budget, and the holdout IC of the configuration it selected "
+    "there.",
+)
 
 # %% [markdown]
 # **Interpretation**: The gap between the two curves is the point. Read the table
-# above by column: best *validation* IC rises with every increase in budget and
-# then plateaus, while *test* IC on the sealed 2024–2025 holdout peaks partway
-# through and then falls. Past that peak the extra trials are buying fit to the
-# validation window's noise and paying for it out of sample — the signature Box
-# 12.3 warns about, and the reason a budget is a parameter to choose rather than
-# maximize. (The test IC sits *above* the val IC in
-# absolute terms only because the 2024–2025 holdout was an unusually strong,
-# trending regime for this ETF universe — a level artifact of that window, not
-# evidence that tuning helped.) This single-fold, fixed-seed setup shows the
-# *direction* of overfitting but is a blunt instrument for quantifying it, because
-# it lacks trial-level variance. Section 10 asks a different question — how the two
-# selected configurations compare after refitting on `train + val` — and does not
-# reproduce this curve's shape, which is the honest state of the evidence rather
-# than a contradiction: a budget sweep within one space and a comparison of two
-# picks from different spaces are not the same experiment. For a higher-resolution
-# view of the effect this section does show, `04_optuna_tuning` shows how
-# single-fold HPO collapses to a one-tree model on a different fold.
+# above by column: the highest *validation* IC rises with the budget and then
+# plateaus,
+# while the *holdout* IC of the configuration selected at that budget peaks partway
+# through and then falls. Past that peak the extra trials buy fit to the validation
+# window's noise and pay for it out of sample, which is the effect Section 12.4's box
+# on validation overfitting describes and the reason a trial budget is a parameter to
+# choose rather than to maximize.
+#
+# Two things this figure does not say. The holdout IC sitting above the validation IC
+# in level is a property of that window, not evidence that tuning helped. And a
+# single fold at a fixed seed shows the direction of the effect without pricing it,
+# because nothing here varies the seed or the fold to give the curve a width. Section
+# 10 asks a different question - how the two selected configurations compare after
+# refitting on train plus validation - and does not reproduce this shape, which is two
+# experiments disagreeing about nothing: a budget sweep inside one space and a
+# comparison of two picks from different spaces are not the same measurement.
 
 # %% [markdown]
 # ## 9. Visualization
@@ -414,7 +411,7 @@ for bar, ic in zip(bars, ics, strict=False):
         fontsize=10,
     )
 ax1.set_ylabel("Validation IC")
-ax1.set_title("The continuous space reaches a higher validation IC than either discrete search")
+ax1.set_title("Validation IC of each search's selected configuration")
 
 # Right: convergence
 ax2 = axes[1]
@@ -423,11 +420,16 @@ ax2.plot(trials_df["number"], cummax, color=COLORS["amber"], linewidth=2, label=
 ax2.axhline(threshold, linestyle="--", color="gray", linewidth=0.8, label="95% threshold")
 ax2.set_xlabel("Trial Number")
 ax2.set_ylabel("Validation IC")
-ax2.set_title(f"TPE reaches 95% of its best validation IC by trial {trials_to_95}")
+ax2.set_title("Validation IC by trial, against the threshold")
 ax2.legend(fontsize=9)
 
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels. Left: one bar per search method, the validation IC of the "
+    "configuration it selected, each labelled with its value. Right: every trial's "
+    "validation IC against its trial number, with a line tracing the best so far and a "
+    "dashed line at the threshold used to count trials.",
+)
 
 # %% [markdown]
 # ## 10. Final Test Set Evaluation
@@ -458,23 +460,22 @@ final_df
 
 # %% [markdown]
 # **Interpretation**: This is the load-bearing comparison of the notebook, and it
-# is measured on the case study's **sealed 2024–2025 holdout** — never seen during
-# any search. Two configurations are compared, and two only: the one each search
-# selected on validation. The continuous selection beats the discrete one out of
-# sample here. That says the configuration Optuna picked was better, not that the
-# continuous space is better than the grid — the rest of the grid was never scored
-# on the holdout, so this measures the picks, not the spaces.
+# is measured on the case study's holdout, which no search here could see. Two
+# configurations are compared and two only: the one each search selected on
+# validation. Whichever scores higher out of sample, that is a statement about those
+# two configurations and not about the spaces they came from, because the rest of the
+# grid was never scored on the holdout.
 #
 # Read it against the budget sweep above rather than on its own. *How long* you
 # search within a space stops helping and starts hurting, which is what the test
 # curve turning down shows. Neither result licenses trusting the validation number
-# itself — on this ETF target every IC here is thin.
+# itself: on this ETF target every IC here is thin.
 #
-# **Do not read a single run of this notebook as a verdict on grid versus Optuna.**
-# An earlier execution of this same code, on an earlier vintage of the ETF
-# artifacts, ranked them the other way round. That instability is the finding: when
+# **One run of this notebook does not decide grid against Optuna.** An earlier
+# execution of this same code, on an earlier vintage of the ETF artifacts, ranked the
+# two in the opposite order. That instability is the finding: when
 # validation IC is low and noisy, the search method is not what decides the outcome,
-# and the only reliable defence is a holdout the search cannot touch — plus
+# and the only reliable defence is a holdout the search cannot touch, plus
 # walk-forward HPO, demonstrated in `04_optuna_tuning`.
 
 # %% [markdown]
@@ -502,7 +503,7 @@ final_df
 # 2. **Optuna**: Preferred for >4 parameters or continuous ranges
 # 3. **Budget**: 50–100 trials is the common convention for GBM tuning, but it is
 #    a parameter, not a default. Choose it with nested or walk-forward
-#    validation, then score the holdout once. Section 8 reads the sealed holdout
+#    validation, then score the holdout once. Section 8 reads the holdout
 #    across budgets to *show* that the turn exists; that is a diagnostic run
 #    after the fact, not a way to select the budget
 # 4. **Always**: Hold out a test set untouched during optimization

@@ -66,15 +66,6 @@
 08_financial_features/06_robustness_sensitivity.py
 08_financial_features/07_event_studies.py
 08_financial_features/case_study_feature_summary.py
-12_gradient_boosting/02_gbm_comparison.py
-12_gradient_boosting/03_dl_vs_gbm.py
-12_gradient_boosting/04_optuna_tuning.py
-12_gradient_boosting/06_optuna_multi_asset.py
-12_gradient_boosting/07_hpo_comparison.py
-12_gradient_boosting/08_shap_analysis.py
-12_gradient_boosting/09_xai_limitations.py
-12_gradient_boosting/11_conformal_gbm.py
-12_gradient_boosting/12_case_study_insights.py
 14_latent_factors/01_pca_equity_sectors.py
 14_latent_factors/02_eigenportfolios.py
 14_latent_factors/03_yield_curve_decomposition.py

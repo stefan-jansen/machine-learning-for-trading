@@ -82,8 +82,15 @@ from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
 
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # %% tags=["parameters"]
@@ -99,6 +106,8 @@ SEED = 42
 set_global_seeds(SEED)
 # %%
 OUTPUT_DIR = get_output_dir(12, "us_firm_characteristics")
+CATBOOST_LOG_DIR = OUTPUT_DIR / "catboost_info"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
 # ### Device Detection
@@ -111,13 +120,17 @@ GPU_AVAILABLE = torch.cuda.is_available()
 
 XGB_DEVICE = "cuda" if GPU_AVAILABLE else "cpu"
 CB_TASK_TYPE = "GPU" if GPU_AVAILABLE else "CPU"
+# CatBoost scores an MAE eval metric every fifth iteration on GPU, which it cannot
+# compute on the device; declaring that period keeps the behaviour without the
+# per-fit announcement on stderr.
+CB_METRIC_PERIOD = 5 if GPU_AVAILABLE else 1
 print(f"GPU available: {GPU_AVAILABLE} (XGB: {XGB_DEVICE}, CatBoost: {CB_TASK_TYPE})")
 
 # %% [markdown]
 # > **Reproducibility.** This search runs on a GPU for speed. GPU training is not
 # > bitwise reproducible: fixed seeds pin each model's random choices but not the
-# > order in which parallel hardware sums floating-point values, so the best
-# > configurations and IC values here are empirically stable across reruns rather
+# > order in which parallel hardware sums floating-point values, so the selected
+# > configurations and IC values here are stable across reruns rather
 # > than identical to the last decimal. For runs that must reproduce exactly, train
 # > on CPU with deterministic settings; `02_gbm_comparison` measures the
 # > GPU-versus-CPU prediction gap and gives the deterministic CPU recipe in full.
@@ -289,10 +302,11 @@ def make_catboost_objective():
             "random_strength": trial.suggest_float("random_strength", 0.0, 10.0),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
             "task_type": CB_TASK_TYPE,
+            "metric_period": CB_METRIC_PERIOD,
             "random_seed": SEED,
             "verbose": False,
             "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
-            "train_dir": "/tmp/catboost_info",
+            "train_dir": str(CATBOOST_LOG_DIR),
         }
         model = cb.CatBoostRegressor(**params)
         model.fit(X_train, y_train, eval_set=(X_valid, y_valid), verbose=False)
@@ -341,10 +355,11 @@ def build_model(lib_code, params):
         **eval_params,
         loss_function=cb_loss,
         task_type=CB_TASK_TYPE,
+        metric_period=CB_METRIC_PERIOD,
         early_stopping_rounds=EARLY_STOPPING_ROUNDS,
         random_seed=SEED,
         verbose=False,
-        train_dir="/tmp/catboost_info",
+        train_dir=str(CATBOOST_LOG_DIR),
     )
 
 
@@ -436,7 +451,7 @@ for lib_name, study_name, objective, lib_code in LIBRARY_CONFIGS:
 # %% [markdown]
 # ## 7. Per-Loss Analysis
 #
-# Extract the best MSE and best MAE configuration for each library to
+# Extract each library's highest-scoring MSE and MAE configuration to
 # assess whether loss function choice matters.
 
 # %%
@@ -533,13 +548,14 @@ loss_comparison_df
 # %% [markdown]
 # A library appears below only when its study completed a trial under each loss,
 # which a short search need not do: the sampler can spend every trial on one of the
-# two. Each bar is the best configuration the search found *conditional on* that
+# two. Each bar is the highest-scoring configuration the search found *conditional on*
+# that
 # loss, scored on the held-out 2000-2016 window. The two therefore differ in depth,
 # learning rate and regularization as well as in the loss, and the sampler did not
 # spend equal effort on each - the loss distribution printed further down says how
-# unequal. So the gap is the difference between the best the search reached under
-# each loss, which is the practical question, and not the isolated effect of the
-# loss function on an otherwise matched model.
+# unequal. So the gap is the difference between how far the search got under each
+# loss, which is the practical question, and not the isolated effect of the loss
+# function on an otherwise matched model.
 
 # %%
 if loss_comparison_df.is_empty():
@@ -572,8 +588,7 @@ else:
     ax.set_xlabel("Library")
     ax.set_ylabel("Held-out test IC (2000-2016)")
     ax.legend()
-    ax.set_title("Which loss wins is a per-library search result, not a prior")
-    plt.tight_layout()
+    ax.set_title("Held-out IC of each library's best MSE and MAE configuration")
     show_with_alt(
         fig,
         "Grouped bars of held-out test information coefficient, one pair per library, "
@@ -641,11 +656,7 @@ for ax, lib_name in zip(axes, lib_order, strict=False):
     ax.set_xlabel("fANOVA importance")
     ax.set_title(lib_name)
 
-fig.suptitle(
-    "Loss type (gold) dominates hyperparameter importance in every library",
-    fontsize=13,
-)
-plt.tight_layout()
+fig.suptitle("fANOVA importance by hyperparameter, one panel per library", fontsize=13)
 show_with_alt(
     fig,
     "One horizontal bar panel per library, ranking its hyperparameters by fANOVA "
@@ -682,8 +693,8 @@ for lib_name, study_name, _, _ in LIBRARY_CONFIGS:
     )
 
 # %% [markdown]
-# Tracking the best validation IC found so far against the trial index shows how
-# TPE keeps improving in discrete steps rather than settling on an early plateau.
+# Tracking the highest validation IC found so far against the trial index shows where
+# TPE improved and where it sat still.
 
 # %%
 palette = [COLORS["slate"], COLORS["amber"], COLORS["copper"]]
@@ -700,7 +711,6 @@ ax.set_xlabel("Trial number")
 ax.set_ylabel("Best validation IC so far")
 ax.legend()
 ax.set_title("Best validation IC so far, by trial, against the TPE warm-up")
-plt.tight_layout()
 show_with_alt(
     fig,
     "Best validation information coefficient found so far against trial number, one "
