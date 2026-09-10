@@ -861,12 +861,30 @@ def create_causal_graph_viz(
             hovertext=labels,
         )
     )
+    # Edge colour is the only thing carrying stability, or sign, so it needs naming on the
+    # chart: an arrow drawn in one of two colours says nothing to a reader without a key.
+    key = (
+        [("Recovered in most resamples", "positive"), ("Recovered in few", "amber")]
+        if stability
+        else [("Positive weight", "positive"), ("Negative weight", "negative")]
+    )
+    for name, color in key:
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                line=dict(color=COLORS[color], width=3),
+                name=name,
+            )
+        )
     fig.update_layout(
         title=dict(text=title, x=0.02, xanchor="left"),
-        showlegend=False,
-        height=500,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.08, xanchor="left", x=0),
+        height=520,
         width=720,
-        margin=dict(l=40, r=40, t=80, b=40),
+        margin=dict(l=40, r=40, t=80, b=60),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
     )
@@ -888,10 +906,11 @@ fig1 = create_causal_graph_viz(
 )
 show_plotly_with_alt(
     fig1,
-    "Network diagram of the assets arranged on a circle, with an arrow for each "
-    "contemporaneous edge the NOTEARS fit retains on the full sample. Arrow colour marks "
-    "whether the edge was recovered in at least half the block-bootstrap resamples, and the "
-    "hover label on each arrow carries its weight and that frequency.",
+    "Network diagram with the assets placed around an ellipse, one labelled disc each, and "
+    "an arrow for every contemporaneous edge the NOTEARS fit retains on the full sample. "
+    "Arrow thickness follows the edge weight and arrow colour separates edges recovered in "
+    "most block-bootstrap resamples from the rest, as the legend below the plot states. Each "
+    "arrow's hover label carries its weight and its bootstrap frequency.",
 )
 
 # Lagged effects from the causal-learn VAR-LiNGAM fit
@@ -903,9 +922,10 @@ fig2 = create_causal_graph_viz(
 )
 show_plotly_with_alt(
     fig2,
-    "Network diagram of the same assets on the same circle, with an arrow for each lagged "
-    "edge the pruned VAR-LiNGAM fit retains. Arrow colour marks the sign of the coefficient "
-    "and the hover label carries its size.",
+    "Network diagram with the same assets in the same positions, and an arrow for every "
+    "lagged edge the pruned VAR-LiNGAM fit retains. Arrow colour separates positive from "
+    "negative coefficients, as the legend below the plot states, thickness follows the "
+    "coefficient's size, and the hover label carries its value.",
 )
 
 # %% [markdown]
