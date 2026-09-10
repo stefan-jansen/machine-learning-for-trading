@@ -1121,12 +1121,17 @@ show_with_alt(
 # %% [markdown]
 # These are five single realizations, one per model, and a picture of five
 # paths cannot separate a model's properties from the draw that produced them.
-# Two things it does show are structural rather than incidental: the
-# jump-diffusion panel contains discontinuities that no diffusion path can
-# produce, and the mean-reversion panel stays inside a band around its
-# equilibrium while the others wander. Everything else — which path looks
-# calmest, which drew the deepest drawdown — is a property of the draw. The
-# next section measures the model properties across many draws instead.
+# That includes the two features most tempting to read as structural. The
+# jump-diffusion panel does not show discontinuities: the series is sampled
+# daily, so every step is already a gap on the page, and GBM's Gaussian log
+# increments produce occasional large days of their own. The mean-reversion
+# panel does not show a band either, because the log-OU process here has
+# unbounded Gaussian innovations and only drifts back toward equilibrium.
+# What actually separates these models is that jump-diffusion is discontinuous
+# in continuous time and mean reversion carries a restoring drift, and this
+# figure can show neither. Which path looks calmest and which drew the deepest
+# drawdown are properties of the draw. The next section measures the model
+# properties across many draws instead.
 
 # %% [markdown]
 # ## Model Statistics Comparison
