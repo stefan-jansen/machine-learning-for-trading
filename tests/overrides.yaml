@@ -1051,8 +1051,13 @@
     NUM_QUARTERS: 2
   timeout: 300
 22_rag_financial_research/08_rag_security:
+  # MAX_ATTACK_CASES is a cap that must not bind: the notebook raises on any
+  # value between one and the fixture count, because dropping a fixture drops
+  # an attack class and the two policies would then be compared on different
+  # threat sets. It was pinned at 5, which stopped binding the moment act_01
+  # made six. 0 means all of them and cannot go stale as fixtures are added.
   parameters:
-    MAX_ATTACK_CASES: 5
+    MAX_ATTACK_CASES: 0
   skip: true
   skip_reason: Requires RAG infrastructure (chromadb + embedding models) not provisioned in CI
   tier: weekly

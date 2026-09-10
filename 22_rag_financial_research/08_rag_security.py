@@ -530,13 +530,28 @@ fig.update_layout(
     margin=dict(t=100),
 )
 fig.update_yaxes(range=[0, 1.08])
+# The alt text is built from `summary` rather than written against one run, so a
+# different SUPPORT_THRESHOLD or fixture count cannot leave the description
+# saying what the chart no longer shows.
+_ALT_METRICS = [
+    ("unsupported_claim_rate", "unsupported claims"),
+    ("unsafe_action_rate", "unsafe actions"),
+    ("citation_failure_rate", "invalid citations"),
+]
+
+
+def describe_bars(policy: str) -> str:
+    """The three bar heights for one policy, as a screen reader would read them."""
+    row = summary.filter(pl.col("policy") == policy)
+    return ", ".join(f"{label} {row[metric][0]:.2f}" for metric, label in _ALT_METRICS)
+
+
 show_plotly_with_alt(
     fig,
     "A grouped bar chart with two answering policies on the horizontal axis and a "
-    "failure-rate axis from zero to one. Under the baseline, three bars: unsupported "
-    "claims is the tallest at about two thirds of the fixtures, unsafe actions next at "
-    "half, invalid citations shortest at a sixth. Under the defended policy all three "
-    "read zero and no bar is drawn.",
+    "failure-rate axis from zero to one, three bars per policy. Baseline: "
+    f"{describe_bars('baseline')}. Defended: {describe_bars('defended')}. A rate of "
+    "zero draws no bar, only its printed label.",
 )
 
 # %% [markdown]
