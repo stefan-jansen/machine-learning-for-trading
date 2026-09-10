@@ -36,8 +36,13 @@
 # case study built on this dataset lives in `case_studies/crypto_perps_funding/`.
 #
 # ## Prerequisites
-# - Crypto perpetual + premium parquet files materialized under `ML4T_DATA_PATH`.
-# - Loader `data.load_crypto_premium`.
+# - Crypto perpetual + premium parquet files materialized under `ML4T_DATA_PATH`
+#   (`data/crypto/market/download.py`).
+# - Binance's published funding settlements, which Section 5 scores the formula against.
+#   The perpetual downloader does not fetch them; `case_studies/crypto_perps_funding/
+#   funding_data.py` does.
+# - Loaders `data.load_crypto_premium` and
+#   `case_studies.crypto_perps_funding.funding_data.load_funding_rates`.
 #
 # ---
 
@@ -50,11 +55,31 @@ import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
+from case_studies.crypto_perps_funding.funding_data import load_funding_rates
 from data import load_crypto_premium
-from utils.style import COLORS, ml4t_palette
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
+
+# %% [markdown]
+# ### Declared parameters
+#
+# The funding constants are Binance's, not ours: the interest rate and the clamp half-width are
+# published contract terms, and the settlement cadence follows from them. They are declared
+# rather than written into the arithmetic so a reader can see the whole contract in one place
+# and CI can override any of it.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+# Binance's published funding terms, USDT-margined perpetuals.
+INTEREST_RATE = 0.0001  # per settlement
+FUNDING_CLAMP = 0.0005  # half-width of the clamp on (interest - premium)
+FUNDING_INTERVAL_HOURS = 8
+PERIODS_PER_DAY = 24 // FUNDING_INTERVAL_HOURS
+
+# Analysis choices.
+DEMO_SYMBOL = "BTCUSDT"
+ROLLING_WINDOW_DAYS = 30
+NOTABLE_PREMIUM = 0.001  # 10 bps: the level the regime split and the frequency stat both use
+COLOR_CLIP_BPS = 20
+TAIL_CLIP_PCT = 0.5  # dropped from each end before binning the cross-asset histograms
 
 # %% [markdown]
 # ---
@@ -63,27 +88,45 @@ from utils.style import COLORS, ml4t_palette
 #
 # ### What is the Premium Index?
 #
-# The **Premium Index** measures the deviation between perpetual futures prices and spot prices:
+# The **premium index** measures how far the perpetual trades from the underlying index. The
+# one-line version is the relative difference between perpetual and spot, and it is worth
+# starting there, but the exchange's definition is not that:
 #
-# $$\text{Premium Index} = \frac{\text{Perpetual Price} - \text{Spot Price}}{\text{Spot Price}}$$
+# $$\text{Premium Index} = \frac{\max(0,\ \text{Impact Bid} - \text{Price Index}) - \max(0,\ \text{Price Index} - \text{Impact Ask})}{\text{Price Index}}$$
 #
-# ### Key Properties:
+# The impact bid and ask are the prices at which a fixed notional would fill on each side, so
+# the numerator asks how far the perpetual's *executable* quote sits outside the index. Both
+# terms are zero whenever the index falls between them, which means the index has a **dead
+# zone** the width of the impact spread and returns exactly zero inside it.
 #
-# 1. **Positive Premium**: Perpetual > Spot → Longs pay Shorts (bullish sentiment)
-# 2. **Negative Premium**: Perpetual < Spot → Shorts pay Longs (bearish sentiment)
-# 3. **Funding Rate**: Derived from premium index, paid every 8 hours on Binance
+# That is not a technicality. It is why a large share of this column is exactly zero, why the
+# share is far larger for illiquid contracts than for BTC, and why treating those zeros as
+# missing data would be a mistake - `10_crypto_perps_eda` measures all three.
 #
-# ### Arbitrage Opportunity
+# ### Key properties
 #
-# When premium is significantly positive:
-# - **Long Spot** + **Short Perpetual** = Collect funding payments
-# - Market-neutral position captures the funding rate
+# 1. **Positive premium**: the impact bid sits above the index - the perpetual's executable
+#    quote is rich
+# 2. **Negative premium**: the impact ask sits below the index - the executable quote is
+#    cheap
+# 3. **Exactly zero**: the index falls inside the impact spread
+# 4. **Funding rate**: derived from the premium index, settled every 8 hours on Binance
 #
-# When premium is significantly negative:
-# - **Short Spot** + **Long Perpetual** = Collect funding payments
+# ### Who pays whom
+#
+# The premium's sign does not answer this, and the difference is not a corner case. Funding
+# is $F = P + \operatorname{clamp}(I - P)$ with a positive interest rate $I$, so the premium
+# has to fall below $I - c$ before funding turns negative at all - a zero premium still
+# leaves longs paying shorts at exactly the interest rate. Section 5 derives this and
+# measures how often each case occurs.
+#
+# Payment direction follows the funding rate:
+#
+# - **Funding positive**: longs pay shorts. **Long Spot** + **Short Perpetual** collects it,
+#   market-neutral.
+# - **Funding negative**: shorts pay longs. **Short Spot** + **Long Perpetual** collects it.
 
 # %%
-# Load the combined premium index data
 premium_df = load_crypto_premium(frequency="8h")
 
 print(f"Total rows: {len(premium_df):,}")
@@ -112,7 +155,7 @@ symbol_stats
 
 # %%
 # Sample data - BTC premium index
-btc_premium = premium_df.filter(pl.col("symbol") == "BTCUSDT").sort("timestamp")
+btc_premium = premium_df.filter(pl.col("symbol") == DEMO_SYMBOL).sort("timestamp")
 
 print(f"BTC Premium Index: {len(btc_premium):,} 8h observations")
 print(f"Date range: {btc_premium['timestamp'].min()} to {btc_premium['timestamp'].max()}")
@@ -170,12 +213,15 @@ fig.add_vline(
 )
 
 fig.update_layout(
-    title="BTC Premium Index Distribution (Basis Points)",
+    title=f"{DEMO_SYMBOL} premium index distribution, basis points",
     xaxis_title="Premium Index (bps)",
     yaxis_title="Frequency",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A histogram of the eight-hourly premium index in basis points, with dashed vertical lines marking the mean and two standard deviations either side. The mass is a tall narrow peak close to zero with long thin tails reaching much further left than right.",
+)
 
 # %%
 print("BTC Premium Statistics:")
@@ -185,8 +231,14 @@ print(f"  Min:  {np.min(btc_close_bps):.2f} bps")
 print(f"  Max:  {np.max(btc_close_bps):.2f} bps")
 print(f"  Skew: {((btc_close_bps - mean_val) ** 3).mean() / std_val**3:.2f}")
 
+# %% [markdown]
+# The four panels below drop the outermost half percent from each tail before binning. Limiting
+# the axis alone is not enough: bin width is set by the full range, so a contract carrying
+# thousand-basis-point dislocations would resolve its whole body into two bins. The guard on an
+# empty array is for reduced CI panels, where a symbol may be absent and a percentile of
+# nothing raises.
+
 # %%
-# Compare premium distributions across major assets
 major_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
 
 fig = make_subplots(rows=2, cols=2, subplot_titles=major_symbols)
@@ -199,12 +251,8 @@ for idx, (symbol, color) in enumerate(zip(major_symbols, colors, strict=False)):
 
     data = premium_df.filter(pl.col("symbol") == symbol)["premium_index_close"].to_numpy() * 10000
 
-    # SOL carries a handful of thousand-bps dislocations. Restricting the axis is not
-    # enough — the bin width is set by the full range, so the visible window would hold
-    # two bins. Drop the outer 1% before binning so all four panels resolve their body.
-    # A reduced test panel may not carry every symbol, and a percentile of nothing raises.
     if data.size:
-        lo, hi = np.percentile(data, [0.5, 99.5])
+        lo, hi = np.percentile(data, [TAIL_CLIP_PCT, 100 - TAIL_CLIP_PCT])
         data = data[(data >= lo) & (data <= hi)]
 
     fig.add_trace(
@@ -212,11 +260,14 @@ for idx, (symbol, color) in enumerate(zip(major_symbols, colors, strict=False)):
     )
 
 fig.update_layout(
-    title="Premium-index distributions, axes clipped to each central 99%",
+    title="Premium index distribution, four major contracts",
     height=500,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four histogram panels, one per contract, each showing the premium index in basis points with its outermost half percent of observations removed before binning. All four are centred near zero; the panels widen from the most liquid contract to the least.",
+)
 
 # %% [markdown]
 # ---
@@ -228,18 +279,20 @@ fig.show()
 # 2. Regime changes (bull vs bear markets)
 # 3. Correlation with price movements
 
+# %% [markdown]
+# The rolling window is expressed in days and converted to observations here, because the
+# series is on an eight-hour cadence and a window given in rows would mean a different span if
+# the cadence ever changed.
+
 # %%
-# BTC premium time series.
-# Data is on an 8h cadence (3 obs per day), so 30 days = 90 windows.
-PERIODS_PER_DAY = 3  # Binance funding interval is 8h
-ROLLING_WINDOW_DAYS = 30
+ROLLING_WINDOW_OBS = ROLLING_WINDOW_DAYS * PERIODS_PER_DAY
 
 btc_bps = btc_premium.with_columns(
     (pl.col("premium_index_close") * 10000).alias("premium_bps"),
 ).with_columns(
     pl.col("premium_index_close")
-    .rolling_mean(window_size=ROLLING_WINDOW_DAYS * PERIODS_PER_DAY)
-    .alias("rolling_30d"),
+    .rolling_mean(window_size=ROLLING_WINDOW_OBS)
+    .alias("rolling_premium"),
 )
 
 # %%
@@ -250,8 +303,8 @@ fig = make_subplots(
     shared_xaxes=True,
     vertical_spacing=0.1,
     subplot_titles=[
-        "BTC Premium Index (bps, 8h observations)",
-        f"{ROLLING_WINDOW_DAYS}-Day Rolling Average",
+        "Premium index, 8h observations (bps)",
+        f"{ROLLING_WINDOW_DAYS}-day rolling average (bps)",
     ],
 )
 
@@ -270,7 +323,7 @@ fig.add_trace(
 fig.add_trace(
     go.Scatter(
         x=btc_bps["timestamp"].to_list(),
-        y=(btc_bps["rolling_30d"] * 10000).to_list(),
+        y=(btc_bps["rolling_premium"] * 10000).to_list(),
         mode="lines",
         name="30-Day Rolling Avg",
         line=dict(color=COLORS["negative"], width=2),
@@ -280,10 +333,21 @@ fig.add_trace(
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=1, col=1)
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
-fig.update_layout(height=600, showlegend=False)
+fig.update_layout(
+    height=600,
+    showlegend=False,
+    title=f"{DEMO_SYMBOL} premium index, raw and rolling average",
+)
 fig.update_yaxes(title_text="Premium (bps)", row=1, col=1)
 fig.update_yaxes(title_text="Premium (bps)", row=2, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis across six years, each with a dashed line at zero. "
+    "The upper panel plots the raw eight-hourly premium in basis points, a dense band around "
+    "zero with occasional large excursions. The lower panel plots its rolling average, a much "
+    "smoother line that sits above zero for a long stretch early in the sample and below it "
+    "for a long stretch afterwards.",
+)
 
 # %%
 # Report the observed BTC range so the reader can size the y-axis.
@@ -295,9 +359,9 @@ print(f"BTC premium range: {btc_bps_series.min():.1f} to {btc_bps_series.max():.
 btc_regimes = btc_premium.with_columns(
     [
         # Define regimes based on premium level
-        pl.when(pl.col("premium_index_close") > 0.001)
+        pl.when(pl.col("premium_index_close") > NOTABLE_PREMIUM)
         .then(pl.lit("High Premium (Bullish)"))
-        .when(pl.col("premium_index_close") < -0.001)
+        .when(pl.col("premium_index_close") < -NOTABLE_PREMIUM)
         .then(pl.lit("Low Premium (Bearish)"))
         .otherwise(pl.lit("Neutral"))
         .alias("regime"),
@@ -337,7 +401,9 @@ premium_stats = (
             pl.col("premium_index_close").min().alias("min_premium"),
             pl.col("premium_index_close").max().alias("max_premium"),
             # Percentage of time premium > 10 bps (profitable arbitrage threshold)
-            (pl.col("premium_index_close").abs() > 0.001).mean().alias("pct_above_10bps"),
+            (pl.col("premium_index_close").abs() > NOTABLE_PREMIUM)
+            .mean()
+            .alias("pct_above_notable"),
         ]
     )
     .sort("std_premium", descending=True)
@@ -350,9 +416,9 @@ premium_stats_bps = premium_stats.with_columns(
         (pl.col("std_premium") * 10000).round(2).alias("std_bps"),
         (pl.col("min_premium") * 10000).round(2).alias("min_bps"),
         (pl.col("max_premium") * 10000).round(2).alias("max_bps"),
-        (pl.col("pct_above_10bps") * 100).round(1).alias("pct_above_10bps"),
+        (pl.col("pct_above_notable") * 100).round(1).alias("pct_above_notable"),
     ]
-).select(["symbol", "mean_bps", "std_bps", "min_bps", "max_bps", "pct_above_10bps"])
+).select(["symbol", "mean_bps", "std_bps", "min_bps", "max_bps", "pct_above_notable"])
 
 premium_stats_bps
 
@@ -362,14 +428,14 @@ fig = px.scatter(
     premium_stats_bps.to_pandas(),
     x="std_bps",
     y="mean_bps",
-    size="pct_above_10bps",
+    size="pct_above_notable",
     color="symbol",
     hover_name="symbol",
-    title="Premium Volatility vs Mean Premium",
+    title="Mean premium against premium volatility, by contract",
     labels={
         "std_bps": "Premium Volatility (bps)",
         "mean_bps": "Mean Premium (bps)",
-        "pct_above_10bps": "% Time > 10bps",
+        "pct_above_notable": "% of periods beyond the notable level",
     },
 )
 
@@ -384,17 +450,21 @@ fig.update_layout(
     ),
     margin=dict(b=120),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A scatter of mean premium against premium volatility, both in basis points, one marked point per contract, sized by how often the premium exceeds the notable level. Every point sits at or below zero on the vertical axis, and they spread rightwards along the volatility axis with the least liquid contracts furthest out.",
+)
 
 print("\nInterpretation:")
 print("- Top-right quadrant: High volatility, positive bias (bullish altcoins)")
 print("- Larger bubbles: More arbitrage opportunities (premium often > 10bps)")
 
-# %%
-# Monthly premium heatmap
-# Note: Some months have extreme values (e.g., SOL during FTX collapse at -72 bps)
-# We clip the color scale at ±20 bps for better visualization of typical patterns
+# %% [markdown]
+# The colour scale on the heatmap below is clipped. A handful of contract-months reach far
+# enough that, unclipped, they set the range and flatten every other cell to the same shade.
+# The clipped extremes are listed after the figure rather than hidden by it.
 
+# %%
 monthly_premium = (
     premium_df.with_columns([pl.col("timestamp").dt.strftime("%Y-%m").alias("month")])
     .group_by(["symbol", "month"])
@@ -413,9 +483,6 @@ assets = heatmap_data["symbol"].to_list()
 # Extract values for heatmap
 z_values = heatmap_data.select(month_cols).to_numpy() * 10000  # Convert to bps
 
-# Clip color scale at ±20 bps for better visualization
-COLOR_CLIP_BPS = 20
-
 # %%
 fig = go.Figure(
     data=go.Heatmap(
@@ -431,12 +498,15 @@ fig = go.Figure(
 )
 
 fig.update_layout(
-    title=f"Monthly Average Premium by Asset (bps, color clipped at ±{COLOR_CLIP_BPS})",
+    title="Monthly average premium by contract, colour clipped",
     xaxis_title="Month",
     yaxis_title="Symbol",
     height=600,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap with months across the horizontal axis and contracts up the vertical, shaded from one colour for negative average premium through neutral at zero to another for positive, with the scale clipped. Most cells sit close to neutral; isolated rows and columns saturate at the negative end, and the top rows are blank where a contract had not listed yet.",
+)
 
 # Report extremes that exceed color scale (shown as saturated colors)
 extremes = (
@@ -452,30 +522,160 @@ extremes
 #
 # ## Section 5: Funding Rate Estimation
 #
-# Binance calculates funding rates from premium index every 8 hours:
+# The funding rate is what the premium index is *for*: every eight hours one side of the market
+# pays the other, and the rate is computed from the index. Binance's formula is
 #
-# $$\text{Funding Rate} = \text{clamp}(\text{Premium Index}, -0.05\%, 0.05\%) + \text{Interest Rate}$$
+# $$F = P + \operatorname{clamp}\!\left(I - P,\ -c,\ +c\right)$$
 #
-# Where Interest Rate ≈ 0.01% (0.03%/day).
+# where $P$ is the premium index, $I$ the interest rate and $c$ the clamp half-width. Both
+# constants are Binance's published contract terms and are declared as `INTEREST_RATE` and
+# `FUNDING_CLAMP` in the parameters cell, so the arithmetic below and the reader read the same
+# values.
 #
-# **Annualized Return** from funding collection:
-# $$\text{APY} = \text{Funding Rate} \times 3 \times 365$$
-
+# **The clamp is on the difference, not on the premium**, and that changes the result
+# qualitatively rather than by a little. Whenever $|I - P|$ is inside the clamp the clamp does
+# nothing, the expression reduces to $F = P + (I - P) = I$, and the funding rate is *exactly*
+# the interest rate regardless of where the premium sat. Only outside that band does the
+# premium reach the funding rate at all.
+#
+# So the funding rate has a dead zone of its own, on the same pattern as the premium index in
+# Section 1: a formula whose output is pinned to a constant over a range of its input. Writing
+# the clamp on $P$ instead - $\operatorname{clamp}(P) + I$ - is a natural misreading and it
+# removes the dead zone entirely, producing a funding series that varies where the real one is
+# flat.
+#
+# **Annualized:** $\text{APY} = F \times 3 \times 365$, three settlements a day.
+#
+# ### Pairing an estimate with its settlement
+#
+# One thing has to be settled before the formula can be checked against anything: what the
+# timestamp on a premium bar means. Binance stamps a kline with the time the bar *opens*
+# (`open_time` in the archive; `data/crypto/market/download.py` carries it straight through to
+# the `timestamp` column). An 8-hour bar stamped 00:00 therefore spans 00:00 to 08:00, and its
+# close is the premium as the interval ends - the interval the exchange averages to settle
+# funding **at 08:00**.
+#
+# So a row stamped `t` estimates the settlement at `t + 8h`, not the one at `t`. The bars and
+# the settlements both sit on the same 00:00 / 08:00 / 16:00 grid, so joining them on the raw
+# timestamp produces a full set of rows and no error at all - it just compares each estimate
+# with the settlement one interval too early. The settlement time is computed as a column
+# below so the join has to name it.
 
 # %%
-# Calculate estimated funding rates using native Polars expressions
-# Formula: funding_rate = clamp(premium, -0.05%, 0.05%) + interest_rate
-# Interest rate ≈ 0.01% per 8h (0.0001)
-INTEREST_RATE = 0.0001
-
+premium_col = pl.col("premium_index_close")
 btc_funding = btc_premium.with_columns(
-    # Clamp premium to [-0.05%, 0.05%] and add interest rate
-    (pl.col("premium_index_close").clip(-0.0005, 0.0005) + INTEREST_RATE).alias("est_funding_rate"),
+    (premium_col + (INTEREST_RATE - premium_col).clip(-FUNDING_CLAMP, FUNDING_CLAMP)).alias(
+        "est_funding_rate"
+    ),
+    (premium_col.clip(-FUNDING_CLAMP, FUNDING_CLAMP) + INTEREST_RATE).alias("clamp_on_premium"),
+    (pl.col("timestamp") + pl.duration(hours=FUNDING_INTERVAL_HOURS)).alias("settles_at"),
 ).with_columns(
-    # Annualized return: 3 funding periods/day * 365 days * 100 for percentage
-    (pl.col("est_funding_rate") * 3 * 365 * 100).alias("annualized_pct"),
+    (pl.col("est_funding_rate") * PERIODS_PER_DAY * 365 * 100).alias("annualized_pct"),
 )
 
+_pinned = btc_funding.filter((pl.col("est_funding_rate") - INTEREST_RATE).abs() < 1e-12).height
+print(
+    f"Periods where the clamp binds: "
+    f"{btc_funding.filter((INTEREST_RATE - premium_col).abs() > FUNDING_CLAMP).height:,} of "
+    f"{len(btc_funding):,} "
+    f"({100 * btc_funding.filter((INTEREST_RATE - premium_col).abs() > FUNDING_CLAMP).height / len(btc_funding):.1f}%)"
+)
+print(
+    f"Periods where funding is pinned at exactly the interest rate: {_pinned:,} "
+    f"({100 * _pinned / len(btc_funding):.1f}%)"
+)
+
+# %% [markdown]
+# ### Checking the formula against what was actually charged
+#
+# The estimate does not have to be taken on trust. Binance publishes the funding rate it
+# settled at each interval, and the case study's download keeps it, so the formula can be held
+# against six years of the exchange's own numbers. That turns "here is the formula" into a
+# claim that can fail - and it is the check that separates the two readings of the clamp.
+
+# %%
+realized_funding = load_funding_rates(symbols=[DEMO_SYMBOL]).select(
+    "timestamp", "symbol", pl.col("funding_rate").cast(pl.Float64).alias("realized")
+)
+
+check = btc_funding.join(
+    realized_funding,
+    left_on=["settles_at", "symbol"],
+    right_on=["timestamp", "symbol"],
+    how="inner",
+)
+print(f"Settlements with both an estimate and a realized rate: {len(check):,}")
+for label, col in [
+    ("clamp on (interest - premium)", "est_funding_rate"),
+    ("clamp on the premium", "clamp_on_premium"),
+]:
+    err = (pl.col(col) - pl.col("realized")).abs()
+    stats = check.select(err.mean().alias("mae"), (err < 1e-9).mean().alias("exact"))
+    print(f"  {label:32s} mean abs error {stats['mae'][0]:.6f}   exact {stats['exact'][0]:.1%}")
+
+_realized_pinned = check.filter((pl.col("realized") - INTEREST_RATE).abs() < 1e-12).height
+print(
+    f"Realized funding exactly at the interest rate: {_realized_pinned:,} of {len(check):,} "
+    f"({100 * _realized_pinned / len(check):.1f}%)"
+)
+
+# %% [markdown]
+# ### The alignment is a claim too, and the same data tests it
+#
+# The eight-hour shift above was read off the download path rather than measured, and a wrong
+# shift would fail silently here for the same reason the raw join does: every offset that is a
+# multiple of the settlement interval lands on the grid and returns a nearly full set of rows.
+# What separates them is how well the estimate tracks the rate it is paired with. Sweeping the
+# offset makes the right one visible instead of assumed.
+
+# %%
+for offset in (-FUNDING_INTERVAL_HOURS, 0, FUNDING_INTERVAL_HOURS, 2 * FUNDING_INTERVAL_HOURS):
+    paired = btc_funding.with_columns(
+        (pl.col("timestamp") + pl.duration(hours=offset)).alias("paired_at")
+    ).join(
+        realized_funding,
+        left_on=["paired_at", "symbol"],
+        right_on=["timestamp", "symbol"],
+        how="inner",
+    )
+    err = (pl.col("est_funding_rate") - pl.col("realized")).abs()
+    stats = paired.select(
+        err.mean().alias("mae"),
+        (err < 1e-9).mean().alias("exact"),
+        pl.corr("est_funding_rate", "realized").alias("corr"),
+    )
+    print(
+        f"  bar stamped t paired with settlement t{offset:+3d}h:  rows {len(paired):,}   "
+        f"mean abs error {stats['mae'][0]:.6f}   exact {stats['exact'][0]:.1%}   "
+        f"correlation {stats['corr'][0]:.3f}"
+    )
+
+# %% [markdown]
+# Every offset joins, and the mean absolute errors are close enough that on their own they
+# would not decide anything. The correlation does: it peaks at the one-interval-forward
+# pairing and falls away on both sides, which is the pairing where the estimate and the
+# realized rate are computed from the same eight hours of premium. The wrong pairings still
+# correlate, because funding is persistent from one settlement to the next, so a misalignment
+# of this kind looks entirely reasonable in isolation and only the sweep locates it.
+#
+# With the pairing settled, the formula comparison stands: the published formula reproduces the
+# exchange's rate several times more closely than the misreading does, and only it produces the
+# point mass that is actually there - better than a third of realized BTC settlements are
+# exactly the interest rate, to the last decimal place. A funding series built by clamping the
+# premium would show that value almost never.
+#
+# The agreement is close but not exact, and the reason is worth stating rather than leaving as
+# noise. Binance computes the funding rate from a time-weighted average of the premium index
+# over the interval, sampled far more finely than the eight-hour bars this notebook has. Using
+# the bar's close is a proxy for that average. Of the proxies this file supports it reproduces
+# the exchange most closely - the bar's mean and its high-low midpoint both do worse - but it
+# remains a proxy, and the residual is what it costs.
+#
+# The estimate is therefore good enough to reason about the shape of funding and not a
+# substitute for the realized series where the realized series exists. The case study uses the
+# realized rates.
+
+# %%
 avg_funding_rate = float(btc_funding["est_funding_rate"].mean())
 ann_min = float(btc_funding["annualized_pct"].min())
 ann_max = float(btc_funding["annualized_pct"].max())
@@ -486,16 +686,72 @@ print(f"  Annualized return (avg): {ann_mean:.1f}%")
 print(f"  Annualized return (max): {ann_max:.1f}%")
 print(f"  Annualized return (min): {ann_min:.1f}%")
 
-# %%
-# Visualize annualized funding returns over time
-# Note: Funding rate is clamped to ±0.05% per period, so annualized range is bounded
-# to approximately ±55% (3 periods/day × 365 days × 0.05%)
+# %% [markdown]
+# ### The clamp does not bound the funding rate
+#
+# It is tempting to read the clamp as a cap: five basis points per settlement either side of
+# the interest rate, so an APY ceiling somewhere in the tens of percent. That is a misreading
+# of the same formula, in the other direction. Outside the dead zone the clamp saturates and
+# the expression becomes $F = P \mp c$ for the clamp half-width $c$, which tracks the premium
+# wherever it goes. The clamp bounds how far funding can sit *from* the premium, not how
+# large it can be.
+#
+# The misreading's own bounds are worth writing down before testing them, because they are
+# not symmetric: $\operatorname{clamp}(P) + I$ runs from $I - c$ to $I + c$, which the
+# interest rate shifts off zero. Testing $|F|$ against the upper bound alone would miss every
+# violation below the lower one.
+#
+# The realized series settles it, and the answer is not marginal.
 
+# %%
+realized_all = load_funding_rates().select(
+    "symbol", pl.col("funding_rate").cast(pl.Float64).alias("realized")
+)
+
+_supposed_floor = INTEREST_RATE - FUNDING_CLAMP
+_supposed_ceiling = INTEREST_RATE + FUNDING_CLAMP
+_beyond = (pl.col("realized") < _supposed_floor) | (pl.col("realized") > _supposed_ceiling)
+_btc_realized = realized_all.filter(pl.col("symbol") == DEMO_SYMBOL)["realized"]
+_annualize = PERIODS_PER_DAY * 365 * 100
+
+print(
+    f"If the clamp bounded funding, it would run {_supposed_floor:.4f} to "
+    f"{_supposed_ceiling:.4f} per settlement "
+    f"({_supposed_floor * _annualize:.1f}% to {_supposed_ceiling * _annualize:.1f}% APY)"
+)
+print(
+    f"Realized {DEMO_SYMBOL} funding actually ranges "
+    f"{_btc_realized.min():.4f} to {_btc_realized.max():.4f} "
+    f"({_btc_realized.min() * _annualize:.0f}% to {_btc_realized.max() * _annualize:.0f}% APY)"
+)
+print(
+    f"  settlements outside those bounds: "
+    f"{realized_all.filter(pl.col('symbol') == DEMO_SYMBOL).select(_beyond.mean()).item():.2%}"
+)
+
+realized_all.group_by("symbol").agg(
+    pl.col("realized").mean().alias("mean_rate"),
+    pl.col("realized").min().alias("min_observed"),
+    pl.col("realized").max().alias("max_observed"),
+    _beyond.mean().alias("share_outside_supposed_bounds"),
+).sort("min_observed")
+
+# %% [markdown]
+# Funding does have a hard cap, but it is a separate mechanism at a far wider level and it is
+# set per contract rather than universally. The table above does not show that cap: its
+# columns are the largest and smallest rates each contract actually settled at, which bound
+# the enforced limit from inside and say nothing about where it sits or whether it moved
+# during the sample. What they do establish is enough for the point at hand - the observed
+# extremes are already far outside the clamp, and they differ by an order of magnitude across
+# the universe. Reading the clamp as the cap understates the tail risk of a funding strategy
+# several times over on the most liquid contract and far more on the thin ones.
+
+# %%
 fig = go.Figure()
 
 fig.add_trace(
     go.Scatter(
-        x=btc_funding["timestamp"].to_list(),
+        x=btc_funding["settles_at"].to_list(),
         y=btc_funding["annualized_pct"].to_list(),
         mode="lines",
         name="Annualized Funding Return",
@@ -510,92 +766,127 @@ fig.add_hline(y=-20, line_dash="dot", line_color=COLORS["negative"], annotation_
 
 y_padding = 10
 fig.update_layout(
-    title="BTC Estimated Annualized Funding Return (%)",
+    title=f"{DEMO_SYMBOL} estimated annualized funding return",
     xaxis_title="Date",
     yaxis_title="Annualized Return (%)",
     yaxis=dict(range=[ann_min - y_padding, ann_max + y_padding]),
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A time series of the estimated annualized funding return in percent across six years, with a dashed line at zero and dotted reference lines at plus and minus twenty percent. The line oscillates around zero, spending long stretches within the reference lines and spiking well beyond them in both directions.",
+)
 
 print(f"Annualized funding return range: {ann_min:.1f}% to {ann_max:.1f}%")
 
+# %% [markdown]
+# One more count, and it needs labelling carefully. The share of settlements whose estimated
+# APY exceeds a chosen level and the share where the clamp binds are different quantities, and
+# the relation between them runs one way. Exceeding the threshold requires a binding clamp,
+# because funding without one is pinned at the interest rate and annualizes far below any
+# threshold worth setting. The clamp binding does not require exceeding the threshold: it binds
+# whenever the premium sits more than the clamp half-width from the interest rate, which is a
+# routine condition, and the resulting APY is usually nowhere near the threshold.
+
 # %%
-# 8h periods where the estimated funding APY exceeds ±20%.
-# Note: the funding-rate clamp pins per-period funding at ±0.0005 + 0.0001 interest,
-# so the APY ceiling is 3 × 365 × 0.0006 × 100 ≈ 65.7% (and floor ≈ −43.8%);
-# the top rows therefore all sit at the clamp.
-high_conviction = btc_funding.filter(pl.col("annualized_pct").abs() > 20)
+APY_THRESHOLD_PCT = 20
+high_conviction = btc_funding.filter(pl.col("annualized_pct").abs() > APY_THRESHOLD_PCT)
+_clamp_binds = btc_funding.filter((INTEREST_RATE - premium_col).abs() > FUNDING_CLAMP).height
 
 print(
-    f"High-conviction periods (|APY| > 20%): {len(high_conviction):,} of {len(btc_funding):,} 8h periods"
+    f"Settlements with |APY| above {APY_THRESHOLD_PCT}%: {len(high_conviction):,} of "
+    f"{len(btc_funding):,} ({100 * len(high_conviction) / len(btc_funding):.1f}%)"
 )
-print(f"Share of total: {len(high_conviction) / len(btc_funding) * 100:.1f}%")
+print(
+    f"Settlements where the clamp binds:       {_clamp_binds:,} of {len(btc_funding):,} "
+    f"({100 * _clamp_binds / len(btc_funding):.1f}%)"
+)
+print(
+    f"Without a binding clamp funding is exactly {INTEREST_RATE:.4f}, or "
+    f"{INTEREST_RATE * _annualize:.2f}% APY, so every settlement above the threshold is one "
+    f"where the clamp binds. The converse does not hold."
+)
 
 (
     high_conviction.sort("annualized_pct", descending=True)
     .head(10)
-    .select(["timestamp", "premium_index_close", "est_funding_rate", "annualized_pct"])
+    .select(["settles_at", "premium_index_close", "est_funding_rate", "annualized_pct"])
 )
 
 # %% [markdown]
 # ---
 #
-# ## Section 6: Using the CryptoDataManager
+# ## Section 6: Loading this data elsewhere
 #
-# The ml4t-data library provides a `CryptoDataManager` for convenient access to the premium index data.
-
-# %%
-# Using the CryptoDataManager (requires ml4t-data library)
-# This demonstrates the programmatic API for loading crypto data
-from ml4t.data.crypto import CryptoDataManager  # noqa: F401
-
-# CryptoDataManager provides a clean API for loading crypto data
-# For this notebook, we use direct parquet loading as shown above
-print("CryptoDataManager API available from ml4t-data library.")
-print("For this analysis, we use direct parquet loading for simplicity.")
+# Everything above went through `load_crypto_premium`, which is the loader the rest of the book
+# uses. The `ml4t-data` package also exposes `CryptoDataManager`, a class-based API over the
+# same files, and the case study reaches for it where it needs the download path as well as the
+# read path.
+#
+# There is nothing to demonstrate here that the sections above have not already shown, so this
+# section states which entry point to use rather than importing one to print that it exists.
+# `load_crypto_premium` for reading a panel, `CryptoDataManager` when you also need to fetch.
 
 # %% [markdown]
 # ---
 #
 # ## Key Takeaways
 #
-# Profile of the Binance premium-index panel underpinning the funding-arbitrage
-# case study.
+# 1. **The premium index is not the perpetual-spot difference, and the gap matters.** Binance
+#    computes it from the impact bid and ask against the price index, with a numerator that is
+#    zero whenever the index sits between them. That dead zone is why a large share of the
+#    column is exactly zero, why the share rises as liquidity falls, and why those zeros are
+#    measurements rather than gaps. `10_crypto_perps_eda` measures all three.
 #
-# ### Quantitative Findings
-# - **Panel scale**: 107,839 8h observations across 19 USDT-margined perpetuals,
-#   2020-01-01 → 2025-12-31. Coverage ranges from BTC/ETH (6,555 obs) down to
-#   SUIUSDT (2,920 obs from May 2023).
-# - **Slight short bias**: All 19 symbols have a *negative* mean premium
-#   (between −0.03 and −2.6 bps; MKR is essentially flat), so on average
-#   perpetuals trade *below* spot — the raw funding flow is from shorts to
-#   longs before adding the interest-rate baseline.
-# - **Volatility spectrum**: BTC has the tightest premium (std 5.6 bps).
-#   ETH/ADA/DOT cluster at 6–7 bps (~1.2× BTC). The wide-tail altcoins are
-#   SOL (std 36.7 bps, min −1,915 bps during the FTX collapse), XRP/UNI/COMP
-#   (10–11 bps), reflecting episodic dislocation rather than steady-state
-#   volatility.
-# - **Arbitrage frequency**: |premium| > 10 bps in 5–14 % of 8h periods
-#   depending on the symbol (BTC 5.0 %, COMP/ATOM 13–14 %).
-# - **Funding APY**: Binance's clamped funding rate (±0.05 % + 0.01 % interest)
-#   bounds the BTC annualized return at +65.7 % / −43.8 %. Realised mean is
-#   −5.7 % over 2020-25; the clamp is hit in 82.9 % of 8h periods (driven by
-#   the interest-rate baseline pushing |APY| above 20 % whenever premium is
-#   small).
+# 2. **The funding clamp is on the difference, not on the premium.** Binance settles
+#    $F = P + \operatorname{clamp}(I - P)$, so whenever the premium sits within the clamp of
+#    the interest rate the whole expression reduces to the interest rate exactly.
+#    Funding then has a dead zone of its own, and better than a third of realized settlements
+#    on the most liquid contract sit precisely on it. Clamping the premium instead removes that
+#    point mass and reproduces the exchange's own rate several times less accurately - both
+#    versions are computed above and scored against six years of published rates.
 #
-# ### Implications for the Funding-Arbitrage Case Study
-# - **Direction matters**: The negative mean premium means a *delta-neutral
-#   short-spot / long-perpetual* leg captures the structural funding flow on
-#   average for these symbols; the mirror trade only profits during transient
-#   bullish dislocations.
-# - **Asset selection**: Wide-tail altcoins (SOL, XRP, COMP) offer the largest
-#   per-event funding but expose the strategy to extreme premium tails.
-#   BTC/ETH provide a tighter, more reliable funding stream.
-# - **Regime awareness**: The 30-day rolling premium swings between bull (2021)
-#   and bear (2022) regimes; static thresholds will mis-fire — see the
-#   `case_studies/crypto_perps_funding/` pipeline for the regime-aware signal
-#   used downstream.
+# 3. **The clamp does not cap the funding rate.** Outside the dead zone it saturates and
+#    funding tracks the premium with a fixed offset, so the rate is unbounded by that
+#    mechanism. Realized settlements run to many times the ceiling the clamp appears to imply,
+#    and the real cap is a separate per-contract limit that differs by an order of magnitude
+#    across this universe. Reading the clamp as a cap understates a funding strategy's tail
+#    badly, and most on the contracts where the tail is worst.
+#
+# 4. **Two different counts, one label.** The share of settlements whose APY exceeds a chosen
+#    threshold and the share where the clamp binds are different quantities, and the
+#    implication runs one way: exceeding the threshold requires a binding clamp, while the
+#    clamp binds routinely at premiums that move the APY hardly at all. Both are printed
+#    above, and they differ by tens of percentage points.
+#
+# 5. **The estimate is a proxy and says so.** Binance computes funding from a time-weighted
+#    average of the premium over the interval; this notebook has eight-hour bars and uses the
+#    close, which is the most accurate of the proxies available here and still not exact. Where
+#    the realized series exists, use it - the case study does.
+#
+# 6. **Premium volatility spans the universe by more than an order of magnitude**, and the
+#    dispersion is episodic rather than steady: the widest contracts earn their standard
+#    deviations in a handful of dislocations. Contract selection for a funding strategy is a
+#    choice about which tail to hold, and the per-symbol table above is where that choice is
+#    made.
+#
+# ### Implications for the funding-arbitrage case study
+#
+# - **Direction**: the mean premium is negative for every contract in this panel, and the mean
+#   realized funding rate is *positive* for nearly all of them. The transform is monotone - a
+#   larger premium never produces a smaller funding rate - but it does not preserve sign: it
+#   has a plateau at the interest rate covering every premium within the clamp of it, and the
+#   interest rate is positive. Whether that plateau is enough to carry the mean across zero
+#   depends on how much of the distribution sits below the plateau and how far, which is a
+#   question about this sample and not an implication. In this sample it does. Read direction
+#   off the realized funding column in the per-symbol table above, never off the premium's
+#   sign, and treat both as properties of this window rather than laws.
+# - **Regimes**: the rolling premium changes sign for long stretches, so a static threshold
+#   fires in one regime and never in the other. `case_studies/crypto_perps_funding/` carries
+#   the regime-aware version.
+# - **Ties**: the premium's point mass at zero reaches a third of observations on the thinnest
+#   contracts, so any percentile or z-score feature built on this column is standardising a
+#   distribution with a large tie group.
 #
 # **Next**: `12_fx_pairs_eda` profiles the third 24/7-adjacent dataset —
 # G10 FX pairs at 4h cadence — completing the global market-data tour.

@@ -33,7 +33,7 @@
 #
 # ## Book Reference
 #
-# Chapter 2 §2.2 (asset-class market data landscape — derivatives).
+# §2.2, "The asset-class market data landscape" - the derivatives part of it.
 #
 # ## Prerequisites
 #
@@ -52,16 +52,60 @@
 # %%
 """S&P 500 Options Analytics — options chain structure, volatility surfaces, and data quality."""
 
+from datetime import date
+
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_sp500_daily_bars, load_sp500_options_eda
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# ### Declared parameters
+#
+# Everything the analysis is bounded by is declared here rather than repeated as a literal
+# further down, so a reader can see the whole scope of the notebook in one cell and Papermill
+# can override any of it for CI.
+#
+# The two moneyness bands are the ones that carry an argument. `ATM_BAND` is deliberately
+# narrow: an at-the-money implied volatility is meant to be read at a single strike, and
+# widening the band mixes in the smile. `CHAIN_BAND` is wide enough to show the smile's shape
+# without letting the far wings, where quotes are stale and spreads are enormous, set the
+# colour scale.
 
 # %% tags=["parameters"]
+START_DATE = "2020-01-01"
+END_DATE = "2020-12-31"
 DAILY_START_DATE = "2020-01-01"
+
+# Moneyness (strike / spot) bands.
+ATM_BAND = (0.98, 1.02)
+CHAIN_BAND = (0.7, 1.3)
+
+# Forward-return horizon, in trading days, for the information-content section.
+FORWARD_DAYS = 5
+
+# Expirations beyond this are drawn as their own section rather than shown alongside the
+# near-dated chain, which carries many more strikes.
+SURFACE_MAX_DAYS = 180
+
+# The spread section deliberately reaches further out than CHAIN_BAND, because what happens in
+# the wings is its subject.
+SPREAD_BAND = (0.5, 1.5)
+
+# "Near the money" for the spread summary; outside it either way is "away from the money".
+WING_BAND = (0.9, 1.1)
+
+# Options priced below this are quoted in ticks rather than in a spread, so a percentage
+# spread computed from them says more about the tick size than about liquidity.
+MIN_MID_PRICE = 0.10
+
+# The S&P 500's closing low of the 2020 drawdown. A dated external fact, not a result of this
+# notebook, so it is declared rather than computed - the IV peak beside it on the same chart
+# *is* computed, and the point of drawing both is that they are not the same day.
+SPX_TROUGH_DATE = "2020-03-23"
 
 # %% [markdown]
 # ## 1. Options Primer for ML Practitioners
@@ -69,7 +113,7 @@ DAILY_START_DATE = "2020-01-01"
 # Before diving into the data, let's establish the key concepts that make options
 # data different from—and complementary to—spot market data.
 #
-# ### 1.1 What is an Option?
+# ### What is an option?
 #
 # An option is a **derivative contract** that gives the holder the right (but not
 # obligation) to buy or sell an underlying asset at a specified price (strike)
@@ -80,7 +124,7 @@ DAILY_START_DATE = "2020-01-01"
 # | **Call** | Buy at strike | Underlying rises above strike |
 # | **Put** | Sell at strike | Underlying falls below strike |
 #
-# ### 1.2 Why Options Data Matters for ML
+# ### Why options data matters for ML
 #
 # Options prices embed **forward-looking information** that spot prices don't:
 #
@@ -94,7 +138,7 @@ DAILY_START_DATE = "2020-01-01"
 # - Underlying price movements (via order flow/positioning)
 # - Tail risk events (via skew)
 #
-# ### 1.3 Moneyness: ITM, ATM, OTM
+# ### Moneyness: in, at and out of the money
 #
 # Moneyness describes how an option's strike relates to the current spot price:
 #
@@ -104,12 +148,10 @@ DAILY_START_DATE = "2020-01-01"
 # | **ATM** (At-the-money) | Strike ≈ Spot | Strike ≈ Spot | Highest time value |
 # | **OTM** (Out-of-the-money) | Strike > Spot | Strike < Spot | Pure time value |
 #
-# We typically express moneyness as: **Strike / Spot** (or its log)
-# - Moneyness = 1.0 → ATM
-# - Moneyness < 1.0 → ITM call / OTM put
-# - Moneyness > 1.0 → OTM call / ITM put
+# Moneyness in this notebook is **strike divided by spot**. A ratio of one is at the money,
+# below one is an in-the-money call and an out-of-the-money put, and above one is the reverse.
 #
-# ### 1.4 Option Value Components
+# ### Option value components
 #
 # An option's price decomposes into intrinsic value (immediate exercise payoff) and
 # time value (the remainder, reflecting optionality):
@@ -128,7 +170,7 @@ DAILY_START_DATE = "2020-01-01"
 # %% [markdown]
 # ## 2. Dataset Overview
 #
-# ### 2.1 Data Schema
+# ### Data schema
 #
 # | Field | Type | Description |
 # |-------|------|-------------|
@@ -155,24 +197,27 @@ DAILY_START_DATE = "2020-01-01"
 # | `implied_vol` | Float64 | Black-Scholes implied volatility |
 # | `iv_convergence` | String | IV solver status (quality indicator) |
 #
-# ### 2.2 IV Convergence Codes
+# ### IV convergence codes
 #
-# The `iv_convergence` field indicates IV computation quality:
+# `iv_convergence` records how the vendor's solver arrived at each implied volatility, and it
+# is the field that decides which rows are usable. The code is a compound of two parts: what
+# the solver was given (`Converged` from a normal quote, `SmallBid` from a bid near zero,
+# `IntrVal` from a price at intrinsic value, `Failed` when it could not solve at all) and, where
+# the direct solve failed, how the number was produced instead (`FlatExtrapol`, `LinInterp`, or
+# `PutCallPair` from put-call parity).
 #
-# | Code | Meaning | Use in Analysis |
-# |------|---------|-----------------|
-# | `Converged` | IV solver converged normally | [OK] Highest quality |
-# | `SmallBid_FlatExtrapol` | Small bid, IV extrapolated | WARNING: Use with caution |
-# | `IntrVal_FlatExtrapol` | Deep ITM, IV extrapolated | WARNING: Use with caution |
-# | `IntrVal_PutCallPair` | IV from put-call parity | [OK] Usually reliable |
-# | `Failed` | IV solver did not converge | [FAIL] Exclude from analysis |
+# The full set present in the data is read from the data below rather than listed here. A
+# hand-written table of solver codes goes stale the first time the vendor adds one, and a
+# reader who trusts it will filter against a set that no longer matches the file.
 #
-# **Best practice**: Filter for `iv_convergence == "Converged"` for clean analysis.
+# Only `Converged` is used for analysis in this notebook. Everything else is either
+# extrapolated, interpolated, or derived from the other side of the pair, and none of those is
+# an implied volatility solved from the quote in front of it.
 
 # %%
 options = load_sp500_options_eda(
-    start_date="2020-01-01",
-    end_date="2020-12-31",
+    start_date=START_DATE,
+    end_date=END_DATE,
     include_greeks=True,
 )
 
@@ -186,7 +231,7 @@ print(f"Underlyings: {sorted(options['symbol'].unique().to_list())}")
 daily = load_sp500_daily_bars(
     symbols=sorted(options["symbol"].unique().to_list()),
     start_date=DAILY_START_DATE,
-    end_date="2020-12-31",
+    end_date=END_DATE,
 )
 
 print("\n=== S&P 500 Daily Prices ===")
@@ -194,9 +239,27 @@ print(f"Total rows: {len(daily):,}")
 print(f"Symbols: {daily['symbol'].n_unique()}")
 print(f"Date range: {daily['timestamp'].min()} to {daily['timestamp'].max()}")
 
+# %% [markdown]
+# ### What the solver actually returned
+
 # %%
-# Quick schema preview
-print("\n=== Options Schema ===")
+convergence_inventory = (
+    options.group_by("iv_convergence")
+    .len()
+    .with_columns((100 * pl.col("len") / pl.sum("len")).alias("pct"))
+    .sort("len", descending=True)
+)
+print(f"Distinct iv_convergence codes in this file: {convergence_inventory.height}")
+print(
+    f"Rows solved directly from the quote: "
+    f"{convergence_inventory.filter(pl.col('iv_convergence') == 'Converged')['pct'][0]:.2f}%"
+)
+convergence_inventory
+
+# %% [markdown]
+# ### Schema preview
+
+# %%
 options.head(3)
 
 # %% [markdown]
@@ -231,17 +294,20 @@ fig = px.histogram(
     options_per_symbol.to_pandas(),
     x="n_options",
     nbins=50,
-    title="Option Chain Size Distribution",
+    title="Options per symbol per day",
     labels={"n_options": "Number of Options per Symbol/Day", "count": "Frequency"},
 )
 median_options = float(options_per_symbol["n_options"].median())
 fig.add_vline(x=median_options, line_dash="dash", line_color=COLORS["negative"])
 fig.add_annotation(x=median_options, y=0.95, yref="paper", text="Median", showarrow=False)
 fig.update_layout(showlegend=False)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A histogram of how many option contracts each underlying carries on each trading day, with a dashed vertical line marking the median. The bulk of the mass sits in a broad hump with a long tail to the right.",
+)
 
 # %% [markdown]
-# ### 3.1 Single Symbol Deep Dive: AAPL
+# ### One chain in full: AAPL
 #
 # Let's examine one complete option chain to understand the structure.
 
@@ -272,10 +338,16 @@ print("\n=== AAPL Expirations ===")
 exp_breakdown.head(10)
 
 # %% [markdown]
-# ### 3.2 Option Chain Heatmap
+# ### The chain as a heatmap
 #
-# Visualize the entire chain as a heatmap: strikes on y-axis, expirations on x-axis,
-# colored by implied volatility. This reveals the **volatility surface** structure.
+# Strikes up the vertical axis, expirations across the horizontal, shaded by implied
+# volatility: the whole surface in one picture.
+#
+# It is drawn on the near-dated part of the chain only. The full chain runs out past two years,
+# and those far expirations carry a handful of strikes each. Plotted on a categorical axis they
+# take most of the width while the near-dated expirations, which carry almost every strike, are
+# crushed into a sliver at the left - so the chart would be mostly empty in the region where
+# there is least to see.
 
 # %%
 # Prepare data for heatmap - calls only, converged IV, reasonable moneyness
@@ -287,15 +359,19 @@ aapl_calls = (
         & (pl.col("implied_vol") < 2.0)  # Filter outliers
     )
     .with_columns((pl.col("strike") / pl.col("underlying_price")).alias("moneyness"))
-    .filter(pl.col("moneyness").is_between(0.7, 1.3))  # Focus on tradeable range
+    .filter(pl.col("moneyness").is_between(*CHAIN_BAND))
 )
 
-# Create pivot for heatmap
+heatmap_source = aapl_calls.filter(pl.col("days_to_maturity") <= SURFACE_MAX_DAYS)
 heatmap_data = (
-    aapl_calls.select(["strike", "expiration", "implied_vol"])
+    heatmap_source.select(["strike", "expiration", "implied_vol"])
     .sort(["expiration", "strike"])
     .to_pandas()
     .pivot(index="strike", columns="expiration", values="implied_vol")
+)
+print(
+    f"Heatmap covers {heatmap_data.shape[1]} expirations within {SURFACE_MAX_DAYS} days and "
+    f"{heatmap_data.shape[0]} strikes"
 )
 
 # %%
@@ -304,30 +380,55 @@ fig = go.Figure(
         z=heatmap_data.values,
         x=[str(c) for c in heatmap_data.columns],
         y=heatmap_data.index,
-        colorscale="Viridis",
+        colorscale=[[0, COLORS["silver"]], [1, COLORS["blue"]]],
         colorbar=dict(title="IV"),
     )
 )
 
 spot_float = float(spot)
-fig.add_hline(y=spot_float, line_dash="dash", line_color="white")
+fig.add_hline(y=spot_float, line_dash="dash", line_color=COLORS["negative"])
 fig.add_annotation(
-    y=spot_float, x=0.95, xref="paper", text=f"Spot: ${spot_float:.0f}", showarrow=False
+    y=spot_float,
+    x=0.02,
+    xref="paper",
+    yshift=12,
+    text="Spot",
+    showarrow=False,
+    font=dict(color=COLORS["negative"]),
 )
 
 fig.update_layout(
-    title=f"AAPL Option Chain - Implied Volatility Surface ({sample_date})",
+    title="AAPL option chain: implied volatility by strike and expiration",
     xaxis_title="Expiration",
     yaxis_title="Strike ($)",
     height=600,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap with expiration dates along the horizontal axis and strike prices up the vertical axis, shaded from pale for low implied volatility to dark for high, with a dashed horizontal line marking the spot price. The darkest cells sit in the bottom-left corner, at the lowest strikes and nearest expirations. Moving up the strike axis the shading fades to almost nothing in a band around the spot line, then darkens again to a uniform mid grey across the highest strikes. Moving right along the expiration axis the shading flattens out. Many cells are blank, because a strike is listed for some expirations and not others.",
+)
 
 # %% [markdown]
-# **Reading the heatmap:**
-# - Horizontal slice at one strike → Term structure (how IV varies with expiration)
-# - Vertical slice at one expiration → IV smile/skew (how IV varies with strike)
-# - Darker colors (lower IV) typically at ATM; lighter (higher IV) at wings
+# **Reading the heatmap.** A horizontal slice at one strike is a term structure: how the price
+# of volatility for that strike changes as the expiration moves out. A vertical slice at one
+# expiration is a smile: how it changes as the strike moves away from spot. Darker is higher
+# implied volatility.
+#
+# The darkest cells sit at the bottom left, at the lowest strikes and the nearest expirations.
+# That is the crash-protection corner of the chain, and it is the most expensive volatility on
+# the board.
+#
+# Read a column from bottom to top and the smile is there as shading rather than as a curve:
+# dark at the low strikes, almost white in a band around the spot line, and darkening again
+# across the high strikes. The two ends are not equally dark, which is the skew - with the
+# caveat developed in the smile section below that these are calls, so the low-strike end is
+# in-the-money calls rather than the out-of-the-money puts the usual explanation names.
+# Read a row from left to right and the variation flattens as the expiration moves out, which
+# is the term structure converging on a long-run level.
+#
+# The blank cells are not missing data in the sense of a defect. A strike is listed for some
+# expirations and not others, so the grid is genuinely sparse, and any surface model fitted to
+# it has to interpolate across those gaps rather than assume them filled.
 
 # %% [markdown]
 # ## 4. Volatility Surface Analysis
@@ -337,7 +438,7 @@ fig.show()
 # 1. **Moneyness** (strike relative to spot) → IV smile/skew
 # 2. **Time to expiration** → IV term structure
 #
-# ### 4.1 IV Smile and Skew
+# ### The smile and the skew
 
 # %%
 # IV smile for nearest expiration
@@ -348,19 +449,52 @@ fig = px.scatter(
     aapl_smile.to_pandas(),
     x="moneyness",
     y="implied_vol",
-    title=f"AAPL IV Smile - Nearest Expiration ({nearest_exp})",
+    title="AAPL implied volatility by moneyness, nearest expiration",
     labels={"moneyness": "Moneyness (Strike/Spot)", "implied_vol": "Implied Volatility"},
     trendline="lowess",
 )
 fig.add_vline(x=1.0, line_dash="dash", line_color=COLORS["neutral"])
 fig.add_annotation(x=1.0, y=0.95, yref="paper", text="ATM", showarrow=False)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A scatter of implied volatility against moneyness for the nearest expiration, with a smoothed trend line through it and a dashed vertical line at moneyness one. The points trace a clear U: falling from the left edge to a flat minimum just above moneyness one, then rising steadily across the whole right half to finish well above where they started.",
+)
 
 # %% [markdown]
-# **IV Smile/Skew interpretation:**
-# - **Smile**: IV higher for both OTM puts (left) and OTM calls (right) vs ATM
-# - **Skew**: Asymmetric - OTM puts typically have higher IV than OTM calls
-# - **Why?** Demand for downside protection (crash insurance) exceeds upside speculation
+# The curve is a smile: implied volatility is lowest close to the money and rises on both
+# sides. Strikes far from spot cost more volatility than strikes near it, in either direction.
+#
+# It is also not symmetric, and that asymmetry is the skew. What needs care is the reading
+# usually attached to it. Skew is normally explained as the market paying more for downside
+# protection than for upside, and that explanation compares out-of-the-money **puts** with
+# out-of-the-money calls. Every point on this curve is a call, so its left half is in-the-money
+# calls rather than out-of-the-money puts.
+#
+# Those are different contracts, and reading one as the other is a step that needs justifying
+# rather than assuming. Put-call parity is the justification: it ties a call and a put at the
+# same strike and expiration together tightly enough that they should imply nearly the same
+# volatility. Whether they do in this file is a question the file can answer, so the next cell
+# asks it.
+
+# %%
+_exp = nearest_exp
+_pair = (
+    aapl_day.filter(
+        (pl.col("expiration") == _exp)
+        & (pl.col("iv_convergence") == "Converged")
+        & (pl.col("implied_vol") > 0)
+    )
+    .select("strike", "call_put", "implied_vol")
+    .pivot(on="call_put", index="strike", values="implied_vol")
+    .drop_nulls()
+    .with_columns((pl.col("C") - pl.col("P")).abs().alias("iv_gap"))
+    .sort("strike")
+)
+print(f"Strikes with a converged IV on both sides at the nearest expiration: {_pair.height}")
+if _pair.height:
+    print(f"  median absolute call-put IV difference: {_pair['iv_gap'].median():.4f}")
+    print(f"  90th percentile: {_pair['iv_gap'].quantile(0.9):.4f}")
+    print(f"  largest: {_pair['iv_gap'].max():.4f}")
 
 # %%
 # Compare smile across multiple expirations
@@ -373,21 +507,24 @@ fig = px.scatter(
     x="moneyness",
     y="implied_vol",
     color="expiration",
-    title="AAPL IV Smile Across Expirations",
+    title="AAPL implied volatility by moneyness, four expirations",
     labels={"moneyness": "Moneyness", "implied_vol": "Implied Volatility"},
 )
 fig.add_vline(x=1.0, line_dash="dash", line_color=COLORS["neutral"])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A scatter of implied volatility against moneyness, coloured by expiration date, with a dashed vertical line at moneyness one. Each expiration forms its own curve; the curves are stacked rather than overlapping.",
+)
 
 # %% [markdown]
-# ### 4.2 IV Term Structure
+# ### The term structure
 #
 # How does ATM IV vary across expirations?
 
 # %%
 # ATM IV term structure (moneyness 0.98-1.02)
 atm_term = (
-    aapl_calls.filter(pl.col("moneyness").is_between(0.98, 1.02))
+    aapl_calls.filter(pl.col("moneyness").is_between(*ATM_BAND))
     .group_by("expiration")
     .agg(
         [
@@ -403,10 +540,13 @@ fig = px.line(
     x="days",
     y="iv_atm",
     markers=True,
-    title=f"AAPL ATM IV Term Structure ({sample_date})",
+    title="AAPL at-the-money implied volatility by days to expiration",
     labels={"days": "Days to Expiration", "iv_atm": "ATM Implied Volatility"},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A line with markers showing at-the-money implied volatility against days to expiration, running out beyond two years. The line begins low at the shortest expiry, jumps sharply to its highest point within the first month or so, falls back over the next hundred days, and then runs almost flat and slightly below that peak across the entire remaining range.",
+)
 
 # %% [markdown]
 # **Term structure shapes:**
@@ -415,14 +555,14 @@ fig.show()
 # - **Flat**: Consistent expectations across horizons
 
 # %% [markdown]
-# ### 4.3 3D Volatility Surface
+# ### Both dimensions at once
 #
 # Combine moneyness and time dimensions into a single surface visualization.
 
 # %%
 # Prepare surface data
 surface_data = (
-    aapl_calls.filter(pl.col("days_to_maturity") <= 180)  # Focus on <6 months
+    aapl_calls.filter(pl.col("days_to_maturity") <= SURFACE_MAX_DAYS)
     .select(["moneyness", "days_to_maturity", "implied_vol"])
     .to_pandas()
 )
@@ -435,14 +575,14 @@ fig = go.Figure(
             y=surface_data["days_to_maturity"],
             z=surface_data["implied_vol"],
             intensity=surface_data["implied_vol"],
-            colorscale="Viridis",
+            colorscale=[[0, COLORS["silver"]], [1, COLORS["blue"]]],
             opacity=0.7,
         )
     ]
 )
 
 fig.update_layout(
-    title=f"AAPL 3D Volatility Surface ({sample_date})",
+    title="AAPL implied volatility by moneyness and days to expiration",
     scene=dict(
         xaxis_title="Moneyness",
         yaxis_title="Days to Expiration",
@@ -450,7 +590,10 @@ fig.update_layout(
     ),
     height=600,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A three-dimensional mesh surface with moneyness on one horizontal axis, days to expiration on the other, and implied volatility as height, shaded by the same height. The surface slopes across both axes rather than being flat.",
+)
 
 # %% [markdown]
 # ## 5. Cross-Sectional Analysis
@@ -466,7 +609,7 @@ converged = options.filter(pl.col("iv_convergence") == "Converged")
 cross_section = (
     converged.filter(pl.col("timestamp") == sample_date)
     .with_columns((pl.col("strike") / pl.col("underlying_price")).alias("moneyness"))
-    .filter(pl.col("moneyness").is_between(0.98, 1.02))
+    .filter(pl.col("moneyness").is_between(*ATM_BAND))
     .filter(pl.col("call_put") == "C")
     .group_by("symbol")
     .agg(
@@ -499,13 +642,16 @@ fig = px.histogram(
     cross_section.to_pandas(),
     x="iv_atm",
     nbins=40,
-    title=f"Cross-Sectional ATM IV Distribution ({sample_date})",
+    title="At-the-money implied volatility across the eight underlyings",
     labels={"iv_atm": "ATM Implied Volatility", "count": "Number of Symbols"},
 )
 median_iv = float(cross_section["iv_atm"].median())
 fig.add_vline(x=median_iv, line_dash="dash", line_color=COLORS["negative"])
 fig.add_annotation(x=median_iv, y=0.95, yref="paper", text="Median", showarrow=False)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A histogram of at-the-money implied volatility across the eight underlyings on a single day, with a dashed vertical line at the median. With only eight values the bars are sparse.",
+)
 
 # %% [markdown]
 # ## 6. Time Series Analysis
@@ -517,7 +663,7 @@ fig.show()
 # Daily aggregate IV statistics
 daily_iv = (
     converged.with_columns((pl.col("strike") / pl.col("underlying_price")).alias("moneyness"))
-    .filter(pl.col("moneyness").is_between(0.98, 1.02))
+    .filter(pl.col("moneyness").is_between(*ATM_BAND))
     .filter(pl.col("call_put") == "C")
     .group_by("timestamp")
     .agg(
@@ -532,9 +678,12 @@ daily_iv = (
     .sort("timestamp")
 )
 
+# %% [markdown]
+# The band and the line are built in a single cell. Splitting a plotly figure across two cells
+# renders the half-built version as well, and a chart with no title or axis labels ships into
+# the notebook above the finished one.
+
 # %%
-# Build the full IV-evolution figure in one cell — splitting the figure across
-# two cells produced an intermediate render with no title or axis labels.
 fig = go.Figure()
 
 fig.add_trace(
@@ -568,27 +717,47 @@ fig.add_trace(
     )
 )
 
-fig.add_vline(x="2020-03-16", line_dash="dash", line_color=COLORS["negative"])
-fig.add_vline(x="2020-03-23", line_dash="dash", line_color=COLORS["positive"])
-fig.add_annotation(x="2020-03-16", y=0.95, yref="paper", text="COVID Low", showarrow=False)
-fig.add_annotation(x="2020-03-23", y=0.90, yref="paper", text="Market Bottom", showarrow=False)
+_iv_peak_date = daily_iv.sort("iv_p90", descending=True)[0, "timestamp"]
+fig.add_vline(x=_iv_peak_date, line_dash="dash", line_color=COLORS["negative"])
+fig.add_vline(x=SPX_TROUGH_DATE, line_dash="dash", line_color=COLORS["positive"])
+fig.add_annotation(x=_iv_peak_date, y=0.95, yref="paper", text="IV peak", showarrow=False)
+fig.add_annotation(x=SPX_TROUGH_DATE, y=0.90, yref="paper", text="S&P 500 trough", showarrow=False)
 
 fig.update_layout(
-    title="S&P 500 Universe ATM IV Evolution (2020)",
+    title="At-the-money implied volatility over 2020",
     xaxis_title="Date",
     yaxis_title="Implied Volatility",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A time series across 2020 of the median at-the-money implied volatility across the eight underlyings, drawn as a line inside a shaded band running from the tenth to the ninetieth percentile. The band is narrow and low through January and February, jumps to several times its previous width and height in March, and narrows and falls gradually through the rest of the year without returning to where it started. Two dashed vertical lines mark dates in March.",
+)
 
 # %% [markdown]
-# **Key observations:**
-# - The 90th-percentile ATM IV crossed 100% in mid-March 2020 (peak P90 ≈ 115% on
-#   2020-03-16); cross-sectional median ATM IV peaked near 70%.
-# - IV stayed materially above pre-crash levels well past Q1 — slow mean reversion
-#   even as spot recovered.
-# - The "fear gauge" aspect of IV — sharp spike, slow decay — is visible even on
-#   this eight-symbol slice.
+# %%
+_peak = daily_iv.sort("iv_p90", descending=True)[0]
+_jan = daily_iv.filter(pl.col("timestamp").dt.month() == 1)
+_dec = daily_iv.filter(pl.col("timestamp").dt.month() == 12)
+print(f"Highest 90th-percentile ATM IV: {_peak['iv_p90'][0]:.1%} on {_peak['timestamp'][0]}")
+print(f"  cross-sectional median that day: {_peak['iv_median'][0]:.1%}")
+print(
+    f"  days on which the 90th percentile exceeded 100%: {daily_iv.filter(pl.col('iv_p90') > 1.0).height}"
+)
+print(f"January median ATM IV: {_jan['iv_median'].mean():.1%}")
+print(f"December median ATM IV: {_dec['iv_median'].mean():.1%}")
+
+# %% [markdown]
+# The spike is sharp and the decay is not. Implied volatility multiplies within weeks in March
+# and is still above where it started when the year ends, months after the index itself had
+# recovered. That asymmetry is the property that makes implied volatility worth carrying as a
+# feature: it is not a restatement of the price move, because it does not come back on the same
+# schedule.
+#
+# The dashed lines make the same point in a second way. The day the market put the highest
+# price on future volatility is not the day the market bottomed - the peak in expected
+# volatility leads the trough in price. Naming both lines something like "the COVID low" would
+# have obscured exactly the gap the chart exists to show.
 
 # %% [markdown]
 # ## 7. Execution Cost Proxy: Bid-Ask Spreads
@@ -598,53 +767,115 @@ fig.show()
 
 # %%
 # Compute spread metrics
-spread_analysis = (
-    converged.with_columns(
-        [
-            (pl.col("ask") - pl.col("bid")).alias("spread_abs"),
-            ((pl.col("ask") - pl.col("bid")) / pl.col("mid_price")).alias("spread_pct"),
-            (pl.col("strike") / pl.col("underlying_price")).alias("moneyness"),
-        ]
-    )
-    .filter(pl.col("mid_price") > 0.10)  # Filter penny options
-    .filter(pl.col("spread_pct") < 2.0)  # Filter outliers
-)
+spread_analysis = converged.with_columns(
+    [
+        (pl.col("ask") - pl.col("bid")).alias("spread_abs"),
+        ((pl.col("ask") - pl.col("bid")) / pl.col("mid_price")).alias("spread_pct"),
+        (pl.col("strike") / pl.col("underlying_price")).alias("moneyness"),
+    ]
+).filter(pl.col("mid_price") > MIN_MID_PRICE)
 
 print("=== Bid-Ask Spread Statistics ===")
 spread_analysis.select(["spread_abs", "spread_pct"]).describe()
 
+# %% [markdown]
+# Spread is bucketed by moneyness in five-percent steps, and both the median and the ninetieth
+# percentile are reported for each bucket. The median alone would understate the problem: what
+# makes a strike untradeable is not its typical spread but how often it is quoted far wider
+# than typical, and those two diverge sharply as you move away from the money.
+
 # %%
-# Spread by moneyness
 spread_by_moneyness = (
-    spread_analysis.filter(pl.col("moneyness").is_between(0.8, 1.2))
-    .with_columns((pl.col("moneyness") * 20).round() / 20)  # Bucket to 5% increments
+    spread_analysis.filter(pl.col("moneyness").is_between(*SPREAD_BAND))
+    .with_columns((pl.col("moneyness") * 20).round() / 20)
     .group_by("moneyness")
-    .agg([pl.col("spread_pct").median().alias("median_spread")])
+    .agg(
+        pl.col("spread_pct").median().alias("median_spread"),
+        pl.col("spread_pct").quantile(0.9).alias("p90_spread"),
+        (pl.col("spread_pct") > 0.5).mean().alias("share_over_50pct"),
+        pl.len().alias("n"),
+    )
     .sort("moneyness")
 )
 
-fig = px.bar(
-    spread_by_moneyness.to_pandas(),
-    x="moneyness",
-    y="median_spread",
-    title="Median Bid-Ask Spread by Moneyness",
-    labels={"moneyness": "Moneyness", "median_spread": "Median Spread (%)"},
+_spread_pd = spread_by_moneyness.to_pandas()
+fig = go.Figure()
+fig.add_trace(
+    go.Bar(
+        x=_spread_pd["moneyness"],
+        y=_spread_pd["median_spread"],
+        name="Median",
+        marker_color=COLORS["blue"],
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=_spread_pd["moneyness"],
+        y=_spread_pd["p90_spread"],
+        name="90th percentile",
+        mode="lines+markers",
+        line=dict(color=COLORS["amber"], width=2),
+    )
+)
+fig.update_layout(
+    title="Bid-ask spread by moneyness",
+    xaxis_title="Moneyness (strike / spot)",
+    yaxis_title="Spread as a share of mid price",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
 )
 fig.add_vline(x=1.0, line_dash="dash", line_color=COLORS["neutral"])
 fig.add_annotation(x=1.0, y=0.95, yref="paper", text="ATM", showarrow=False)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of the median bid-ask spread as a percentage of the mid price, against moneyness buckets, with a dashed vertical line at moneyness one.",
+)
 
 # %% [markdown]
-# **Spread observations:**
-# - ATM options have tightest spreads (most liquid)
-# - Spreads widen for OTM options (less liquid)
-# - Deep OTM options can have very wide spreads (>50%)
-# - **Implication**: Focus on near-ATM for tradeable strategies
+# The two summaries below are computed over the quotes themselves rather than over the chart's
+# buckets. The buckets hold very unequal numbers of quotes, so a median of per-bucket ninetieth
+# percentiles is not the ninetieth percentile of anything, and averaging per-bucket breach
+# shares would weight a thin far-wing bucket the same as a crowded one beside the money.
+#
+# Either band can come back empty, and which one does depends on how wide the chain is: a
+# chain with strikes on one side of the wing boundary and none on the other empties that
+# side. A quantile of an empty frame is null, and formatting a null against a percentage
+# spec raises, so the cell says the band is empty rather than printing a number for a set
+# with nothing in it.
+
+# %%
+_in_band = spread_analysis.filter(pl.col("moneyness").is_between(*SPREAD_BAND))
+_near = _in_band.filter(pl.col("moneyness").is_between(*WING_BAND))
+_wings = _in_band.filter(~pl.col("moneyness").is_between(*WING_BAND))
+
+for label, frame in [("Near the money", _near), ("Away from it", _wings)]:
+    if not frame.height:
+        print(f"{label:16s} n={0:9,}  no contracts in this band, nothing to summarise")
+        continue
+    print(
+        f"{label:16s} n={frame.height:9,}  median {frame['spread_pct'].median():6.1%}  "
+        f"90th pct {frame['spread_pct'].quantile(0.9):6.1%}  "
+        f"wider than half the mid {(frame['spread_pct'] > 0.5).mean():5.1%}"
+    )
+
+# %% [markdown]
+# The median spread barely moves between the two groups, and reading only the medians would
+# suggest that moneyness costs a strategy almost nothing. The ninetieth percentile tells a
+# different story and it is the one that binds: away from the money it is well over twice what
+# it is near the money, and quotes wider than half the mid price are several times as common.
+#
+# The practical consequence is about which statistic to trade on. A cost model calibrated to
+# the median spread of this universe would be roughly right at the money and badly optimistic
+# in the wings, and the wings are exactly where a strategy buying convexity wants to operate.
+#
+# This is also as far as the data can take the question. There is no volume and no open
+# interest in this file, so spread is standing in for liquidity rather than measuring it, and a
+# wide spread on a contract nobody trades means something different from a wide spread on one
+# that trades all day.
 
 # %% [markdown]
 # ## 8. Data Quality Assessment
 #
-# ### 8.1 IV Convergence Rates
+# ### IV convergence rates
 
 # %%
 # Convergence statistics
@@ -659,10 +890,13 @@ print("=== IV Convergence Status ===")
 for row in convergence_stats.iter_rows(named=True):
     print(f"  {row['iv_convergence']}: {row['len']:,} ({row['pct']:.2f}%)")
 
+# %% [markdown]
+# A horizontal bar chart rather than a pie. The codes are numerous and their shares are wildly
+# uneven, so as a pie the small categories become slivers whose labels overlap each other and
+# cannot be read at all - and the small categories are the interesting ones here, because they
+# are the rows a reader has to decide whether to keep.
+
 # %%
-# Horizontal bar chart instead of a pie: 10 convergence categories make a pie
-# unreadable (tiny slices overlap their labels). The bar chart sorts by share
-# and keeps every label legible.
 convergence_pd = convergence_stats.to_pandas().sort_values("pct", ascending=True)
 fig = go.Figure(
     data=go.Bar(
@@ -675,17 +909,20 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="IV Convergence Status Distribution",
+    title="Share of rows by IV convergence code",
     xaxis_title="Share of rows (%)",
     yaxis_title="Convergence status",
     height=460,
     margin=dict(l=170, r=100),
     xaxis=dict(range=[0, max(convergence_pd["pct"]) * 1.15]),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A horizontal bar chart of what share of rows each IV convergence code accounts for, sorted with the largest at the top and the percentage written at the end of each bar. One bar is far longer than the rest.",
+)
 
 # %% [markdown]
-# ### 8.2 Coverage Analysis
+# ### Coverage over time
 
 # %%
 # Daily symbol coverage
@@ -726,41 +963,53 @@ fig.add_trace(
     col=1,
 )
 
-fig.update_layout(height=500, title="Options Universe Coverage Over Time")
-fig.show()
+fig.update_layout(height=500, title="Converged options available per day")
+show_plotly_with_alt(
+    fig,
+    "Two stacked time-series panels sharing a date axis across 2020. The upper panel counts the underlyings with converged options each day and the lower counts the converged contracts.",
+)
 
 # %% [markdown]
-# ### 8.3 Greeks Validation
+# ### Greeks validation
+#
+# Four of these five bounds are arithmetic facts about the Black-Scholes formula rather than
+# properties a dataset may or may not have: delta lies in [-1, 1], gamma and vega are
+# non-negative for a long option, and an implied volatility is positive. A breach of any of
+# them is a defect in the vendor's numbers.
+#
+# The fifth is not. Theta is non-positive for almost every option but not for all of them: a
+# deep in-the-money European put earns interest on the strike it will receive, and that can
+# outweigh time decay. So the theta line is expected to fall short of a hundred percent, and
+# what matters is whether the shortfall is the size that explanation predicts.
+#
+# Each line therefore reports its exact share and the number of rows outside the bound, rather
+# than a pass or fail against a threshold. A threshold here would be a number chosen to make
+# theta pass, and it would hide the one result worth looking at.
 
 # %%
-print("=== Greeks Validity Checks ===")
-
 checks = converged.select(
     [
-        # Delta should be [-1, 1]
-        ((pl.col("delta") >= -1.0) & (pl.col("delta") <= 1.0)).mean().alias("delta_in_bounds"),
-        # Gamma should be non-negative
+        ((pl.col("delta") >= -1.0) & (pl.col("delta") <= 1.0)).mean().alias("delta_within_pm1"),
         (pl.col("gamma") >= 0).mean().alias("gamma_non_negative"),
-        # Vega should be non-negative
         (pl.col("vega") >= 0).mean().alias("vega_non_negative"),
-        # Theta typically negative
-        (pl.col("theta") <= 0.01).mean().alias("theta_typical"),
-        # IV should be positive
+        (pl.col("theta") <= 0).mean().alias("theta_non_positive"),
         (pl.col("implied_vol") > 0).mean().alias("iv_positive"),
     ]
 )
 
+print(f"Greeks bounds over {len(converged):,} converged rows:")
 for col in checks.columns:
-    pct = checks[col][0] * 100
-    status = "PASS" if pct > 99.9 else ("WARN" if pct > 95 else "FAIL")
-    print(f"  [{status}] {col}: {pct:.2f}%")
+    share = checks[col][0]
+    breaches = round((1 - share) * len(converged))
+    verdict = "holds" if breaches == 0 else f"{breaches:,} rows outside"
+    print(f"  {col:22s} {100 * share:8.4f}%   {verdict}")
 
 # %%
 print("\n=== Greeks Summary Statistics ===")
 converged.select(["delta", "gamma", "theta", "vega", "implied_vol"]).describe()
 
 # %% [markdown]
-# ### 8.4 Point-in-Time Validation
+# ### Point-in-time validation
 
 # %%
 print("=== Point-in-Time Checks ===")
@@ -788,7 +1037,7 @@ else:
 # Compute ATM IV per symbol/date
 atm_iv = (
     converged.with_columns((pl.col("strike") / pl.col("underlying_price")).alias("moneyness"))
-    .filter(pl.col("moneyness").is_between(0.98, 1.02))
+    .filter(pl.col("moneyness").is_between(*ATM_BAND))
     .filter(pl.col("call_put") == "C")
     .with_columns((pl.col("moneyness") - 1.0).abs().alias("atm_distance"))
     .sort(["timestamp", "symbol", "atm_distance"])
@@ -806,8 +1055,8 @@ panel = (
     .sort(["symbol", "timestamp"])
     .with_columns(
         [
-            pl.col("iv_atm").shift(5).over("symbol").alias("iv_atm_lag5"),
-            pl.col("close").shift(-5).over("symbol").alias("close_fwd5"),
+            pl.col("iv_atm").shift(FORWARD_DAYS).over("symbol").alias("iv_atm_lag5"),
+            pl.col("close").shift(-FORWARD_DAYS).over("symbol").alias("close_fwd5"),
         ]
     )
     .with_columns(
@@ -819,11 +1068,86 @@ panel = (
     .drop_nulls(subset=["iv_change_5d", "ret_fwd5"])
 )
 
-# Correlation
 correlation = panel.select(pl.corr("iv_change_5d", "ret_fwd5").alias("corr"))[0, 0]
-print("=== IV Change vs Forward Return ===")
-print(f"Correlation: {correlation:.4f}")
-print("Interpretation: Falling IV tends to precede positive returns")
+print(f"Rows: {len(panel):,} over {panel['symbol'].n_unique()} symbols")
+print(
+    f"Correlation of {FORWARD_DAYS}-day IV change with {FORWARD_DAYS}-day forward return: "
+    f"{correlation:+.3f}"
+)
+
+# %% [markdown]
+# ### What that correlation is, and what it is not
+#
+# The number is small and negative, and before it is interpreted it is worth being explicit
+# about what would make it unreliable.
+#
+# **The observations are not independent.** Both sides of the correlation are computed over
+# rolling windows on daily data, so consecutive rows share four of their five days. The
+# effective sample is roughly a fifth of the row count, and any significance test that treated
+# these rows as independent would overstate its confidence by more than a factor of two.
+#
+# **There are eight underlyings, not a cross section.** Everything below aggregates across a
+# handful of large-cap names in a single year, so a result that holds for the aggregate can
+# rest on one or two of them.
+#
+# **The year is 2020.** A single episode moved implied volatility and price together and
+# violently, and a full-sample correlation could be that episode and nothing else.
+#
+# The first is a caveat that has to be stated and cannot be removed here. The second and third
+# can be checked, so they are.
+
+# %%
+_by_symbol = (
+    panel.group_by("symbol")
+    .agg(pl.corr("iv_change_5d", "ret_fwd5").alias("corr"), pl.len().alias("n"))
+    .sort("corr")
+)
+
+_crash = panel.filter(
+    pl.col("timestamp").dt.date().is_between(date(2020, 2, 15), date(2020, 4, 30))
+)
+_calm = panel.filter(
+    ~pl.col("timestamp").dt.date().is_between(date(2020, 2, 15), date(2020, 4, 30))
+)
+_spaced = (
+    panel.sort(["symbol", "timestamp"])
+    .with_columns(pl.int_range(pl.len()).over("symbol").alias("_i"))
+    .filter(pl.col("_i") % FORWARD_DAYS == 0)
+)
+
+print(f"Whole sample:                     n={len(panel):5,}  corr {correlation:+.3f}")
+print(
+    f"Excluding 15 Feb to 30 Apr 2020:  n={len(_calm):5,}  corr "
+    f"{_calm.select(pl.corr('iv_change_5d', 'ret_fwd5'))[0, 0]:+.3f}"
+)
+print(
+    f"Inside that window only:          n={len(_crash):5,}  corr "
+    f"{_crash.select(pl.corr('iv_change_5d', 'ret_fwd5'))[0, 0]:+.3f}"
+)
+print(
+    f"Non-overlapping windows only:     n={len(_spaced):5,}  corr "
+    f"{_spaced.select(pl.corr('iv_change_5d', 'ret_fwd5'))[0, 0]:+.3f}"
+)
+print(
+    f"\nPer symbol ({_by_symbol.filter(pl.col('corr') < 0).height} of "
+    f"{_by_symbol.height} negative):"
+)
+_by_symbol
+
+# %% [markdown]
+# The relationship is not the crash. Removing the ten weeks around it leaves the correlation
+# where it was rather than collapsing it, which is the outcome that would have discredited the
+# result and did not happen. Dropping to non-overlapping windows does not weaken it either.
+#
+# The per-symbol table is the weaker part. The sign is shared by most of the eight names but
+# not all of them, and the spread across names is wider than the aggregate figure. With eight
+# underlyings that is neither surprising nor reassuring: it is simply too few series to tell a
+# common effect from a coincidence among a handful of large-cap technology and financial names
+# in one year.
+#
+# So the honest reading is a hypothesis worth carrying forward, not a finding. Chapter 9
+# evaluates it as an information coefficient over a real cross section and a longer history,
+# which is where it can be confirmed or discarded.
 
 # %%
 # Quintile analysis
@@ -860,8 +1184,11 @@ quintile_returns = (
     .sort("iv_quintile")
 )
 
-print("\n=== Forward Returns by IV Change Quintile ===")
-print("(Q1 = largest IV decrease, Q5 = largest IV increase)")
+print("Forward returns by IV-change quintile (Q1 = largest decrease, Q5 = largest increase)")
+print(
+    f"Each quintile is formed within a day across {panel['symbol'].n_unique()} symbols, so a "
+    f"'quintile' here holds one or two names"
+)
 quintile_returns
 
 # %%
@@ -869,22 +1196,34 @@ fig = px.bar(
     quintile_returns.to_pandas(),
     x="iv_quintile",
     y="mean_ret",
-    title="5-Day Forward Returns by IV Change Quintile",
+    title="Mean forward return by IV-change quintile",
     labels={
         "iv_quintile": "IV Change Quintile (1=falling, 5=rising)",
         "mean_ret": "Mean 5-Day Return",
     },
 )
 fig.update_layout(xaxis=dict(tickmode="array", tickvals=[1, 2, 3, 4, 5]))
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of the mean forward return for each of five quintiles of five-day implied-volatility change, ordered from the largest decreases on the left to the largest increases on the right. The first bar is much the tallest, the second is about a third of it, the third is near zero, the fourth dips slightly below zero and the fifth returns to just above it.",
+)
 
 # %% [markdown]
-# The sign of the −0.08 IV-change vs forward-return correlation is negative: on
-# this 8-symbol 2020 slice, larger IV declines line up with higher 5-day forward
-# returns and larger IV increases with lower forward returns. The quintile means
-# above show how monotonic the relationship is. This notebook does not test
-# statistical significance or out-of-sample stability; the IV-based feature is
-# evaluated rigorously via IC analysis in Chapter 9.
+# The bars are not monotonic. The two quintiles with the largest implied-volatility declines
+# carry clearly positive mean returns and the rest are close to zero, with the last bucket
+# turning back up rather than continuing down. So what the picture supports is that large IV
+# declines precede positive returns, not that the effect is graded across the range - and a
+# correlation, which assumes a straight line, is the wrong summary of a shape like this one.
+#
+# The quintile bars restate the correlation and inherit every one of its limits, plus one of
+# their own: dividing eight names into five buckets leaves one or two names per bucket per day,
+# so each bar is an average over a handful of observations rather than over a portfolio. The
+# shape is worth looking at and the bar heights are not worth quoting.
+#
+# What the section establishes is a direction and a reason to look further. Falling implied
+# volatility lining up with positive forward returns is consistent with volatility risk premium
+# being harvested as fear subsides, and it is also consistent with several other stories this
+# data cannot separate. Chapter 9 is where the feature is tested properly.
 
 # %% [markdown]
 # ## 10. Data Quality Summary
@@ -931,23 +1270,44 @@ print("=" * 70)
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Scale (EDA slice)**: ~5.2M option records across 8 representative S&P 500
-#    underlyings in 2020. The full AlgoSeek panel covers the broader index — this
-#    notebook intentionally subsamples for fast exploration.
-# 2. **Structure**: Each underlying carries dozens of expirations and 100+
-#    strikes per day; chains are 3-D grids (strike × expiration × call/put).
-# 3. **Quality**: 69.6% of rows carry `iv_convergence == "Converged"`. The other
-#    convergence codes flag extrapolated or solver-failed IVs and should be
-#    excluded from analysis.
-# 4. **Greeks**: Pre-computed Black-Scholes sensitivities are well-bounded — Δ in
-#    [-1, 1], Γ ≥ 0, ν ≥ 0, θ ≤ 0 — at >99.9% of converged rows.
-# 5. **Volatility Surface**: Smile, skew, and term structure are all visible on
-#    this slice; the 3-D surface compresses both axes into one plot.
-# 6. **Information**: 5-day IV changes correlate with 5-day forward equity
-#    returns at -0.08 on this sample (falling IV → positive returns), motivating
-#    the IV-based features in Chapter 8.
-# 7. **Execution**: Median ATM bid-ask spread is ~6%; deep-OTM spreads widen
-#    sharply, which constrains tradeable strategies to near-the-money strikes.
+# 1. **The convergence code decides which rows exist.** Roughly a third of this file carries an
+#    implied volatility that was extrapolated, interpolated, or inferred from the other side of
+#    the put-call pair rather than solved from the quote. The exact share and the full set of
+#    codes are printed above rather than written here, because a hand-kept list of solver codes
+#    is wrong the first time the vendor adds one - this file carries twice as many codes as the
+#    five a reader would think to look for.
+#
+# 2. **Structure.** Each underlying carries dozens of expirations and many strikes on each day,
+#    so a chain is a three-dimensional grid of strike, expiration and side, and every section
+#    here is a slice through it.
+#
+# 3. **Four of the five Greeks bounds are arithmetic, and one is not.** Delta within plus or
+#    minus one, non-negative gamma and vega, and positive implied volatility hold on every
+#    converged row. Theta does not, and it should not: a deep in-the-money European put earns
+#    interest on the strike it will receive, which can outweigh time decay. The shortfall is
+#    small and it is the size that explanation predicts. A threshold that made theta "pass"
+#    would have hidden the only line worth reading.
+#
+# 4. **The volatility surface is visible on this slice.** Smile, skew and term structure all
+#    show up on eight names in one year, which is what makes the slice usable for teaching the
+#    shape even though it is far too small to support a claim about the shape.
+#
+# 5. **Implied volatility spikes fast and decays slowly.** The 2020 path multiplies within
+#    weeks in March and has still not returned to its January level by December, long after the
+#    index recovered. The day expected volatility peaked is not the day the index bottomed, and
+#    the chart marks both so the gap between them is visible.
+#
+# 6. **Spread punishes the wings through its tail, not its median.** The median spread is
+#    almost the same near the money and away from it; the ninetieth percentile is not, and
+#    quotes wider than half the mid price are several times as common in the wings. A cost
+#    model fitted to the median would be roughly right at the money and badly optimistic
+#    exactly where a strategy buying convexity wants to trade.
+#
+# 7. **The IV-return relationship is a hypothesis, not a finding.** The correlation is small
+#    and negative, and it is much the same figure with the crash window removed and with the
+#    sample thinned to non-overlapping windows - but the rows overlap by construction, there are eight
+#    underlyings rather than a cross section, and the sign is not shared by all of them.
+#    Chapter 9 tests it where it can be tested.
 #
 # ## Data Limitations
 #

@@ -25,9 +25,6 @@
 # fx_pairs are stamped and wait for a re-execution, and theirs must not regenerate
 # features/model_based.parquet, whose sha256 keys every model fitted against it.
 
-02_financial_data_universe/13_data_quality_framework.py
-02_financial_data_universe/21_storage_benchmark_database.py
-02_financial_data_universe/22_pandas_polars_benchmark.py
 03_market_microstructure/01_itch_parser.py
 03_market_microstructure/02_itch_lob_reconstruction.py
 03_market_microstructure/03_itch_lob_analysis.py
@@ -149,4 +146,3 @@ case_studies/us_firm_characteristics/14_costs.py
 case_studies/us_firm_characteristics/15_holdout_predictions.py
 case_studies/us_firm_characteristics/16_holdout_backtest.py
 case_studies/us_firm_characteristics/17_strategy_analysis.py
-utils/storage_benchmarks.py
