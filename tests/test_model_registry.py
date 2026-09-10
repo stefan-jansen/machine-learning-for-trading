@@ -197,8 +197,37 @@ def _quick_parameters(
         parameters.update(_LATENT_FACTOR_OVERRIDES)
     if case_study in _SPARSE_DATA_CASE_STUDIES:
         parameters.update(_SPARSE_DATA_OVERRIDES)
+    # FORCE_RETRAIN is a training-family lever and there is no causal equivalent. A causal run is
+    # addressed by its request, so `fx_pairs/11_causal_dml` and
+    # `sp500_equity_option_analytics/12_causal_dml` raise "an identical complete causal request is
+    # reused; change the request to refit" the moment it arrives as True - the two of the nine
+    # causal notebooks that declare the parameter at all. Injecting it failed both whenever the
+    # case study's stage 01-05 artifacts were reachable, which is any maintainer worktree built
+    # with --case-study; a fresh worktree skips the test earlier and never saw it. Dropped before
+    # override_params so a notebook that wants it back can still say so in overrides.yaml.
+    if suffix == "causal_dml":
+        parameters.pop("FORCE_RETRAIN", None)
     parameters.update(override_params)
     return parameters, suffix
+
+
+def test_a_causal_notebook_is_not_asked_to_force_a_retrain() -> None:
+    """The lever exists for training families and has no causal counterpart.
+
+    Both causal notebooks that bind FORCE_RETRAIN raise on it rather than honouring it, so
+    injecting the default aborted them in cell 6 before any fit. A notebook may still ask for
+    it back through its own overrides, which is why this checks the default rather than the
+    parameter's absence.
+    """
+    causal, suffix = _quick_parameters("fx_pairs", "11_causal_dml", {})
+    assert suffix == "causal_dml"
+    assert "FORCE_RETRAIN" not in causal
+
+    training, _ = _quick_parameters("fx_pairs", "06_linear", {})
+    assert training["FORCE_RETRAIN"] is True
+
+    reinstated, _ = _quick_parameters("fx_pairs", "11_causal_dml", {"FORCE_RETRAIN": True})
+    assert reinstated["FORCE_RETRAIN"] is True
 
 
 def test_notebook_override_parameters_have_final_precedence() -> None:

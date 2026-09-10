@@ -317,31 +317,40 @@ print(
 # %% [markdown]
 # ### Permutation Distribution
 #
-# The adjusted estimate against the distribution of placebo effects from
-# within-entity block permutations of the treatment.
+# The adjusted estimate against the distribution of placebo draws from within-entity block
+# permutations of the treatment, read on the t-statistic rather than on the effect. The
+# permutation frees the treatment from the confounders, so the residual it leaves the
+# second stage keeps its variance and every placebo effect divides by a larger number than
+# the observed one does. On the effect scale that shrinks the placebo distribution toward
+# zero whether or not there is anything to find; dividing each draw by its own standard
+# error removes it.
 
 # %%
-placebo_arr = np.asarray(metrics["placebo_effects"], dtype=float)
-if placebo_arr.size == 0:
+placebo_t_arr = np.asarray(metrics.get("placebo_t_stats") or [], dtype=float)
+if placebo_t_arr.size == 0:
     # The registry stores the draws beside the p-value, so an empty array here is a row written
     # before that column existed rather than a refutation that did not run. Say which, instead
     # of showing an empty axis.
-    print("This causal row predates the stored placebo draws; the p-value above is the test.")
+    print(
+        "This causal row predates the stored placebo t-statistics, which are the scale the "
+        "p-value is computed on; the p-value above is the test."
+    )
 else:
+    observed_t = dml_effect / se_hac
     fig, ax = plt.subplots(figsize=FIGSIZE["single"])
     ax.hist(
-        placebo_arr,
+        placebo_t_arr,
         bins=30,
         color=COLORS["silver_muted"],
         edgecolor=COLORS["neutral"],
         linewidth=0.5,
-        label="Placebo effects",
+        label="Placebo t-statistics",
     )
     ax.axvline(
-        dml_effect,
-        color=COLORS["negative"] if dml_effect < 0 else COLORS["positive"],
+        observed_t,
+        color=COLORS["negative"] if observed_t < 0 else COLORS["positive"],
         linewidth=2,
-        label=f"Adjusted estimate ({dml_effect:.6f})",
+        label=f"Adjusted estimate ({observed_t:+.2f})",
     )
     relation = "outside" if refutation_p < 0.05 else "inside"
     add_message_title(
@@ -352,7 +361,7 @@ else:
             f"{computation['refutation']['block_size']} sessions"
         ),
     )
-    ax.set_xlabel("5-day forward return per 1.0 annualized IV-RV spread")
+    ax.set_xlabel("Driscoll-Kraay t-statistic")
     ax.set_ylabel("Count")
     ax.legend()
     plt.show()

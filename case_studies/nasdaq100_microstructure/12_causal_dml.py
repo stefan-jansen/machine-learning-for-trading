@@ -357,28 +357,46 @@ summary
 # not need.
 
 # %%
-placebo = np.asarray(metrics.get("placebo_effects") or [], dtype=float)
-if placebo.size:
+# The distribution is drawn on the t-statistic, which is also the scale the p-value above
+# is computed on. Plotting the raw effects would put a narrower distribution beside a
+# p-value that did not come from it: a permuted treatment is no longer predictable from
+# the controls, so its residual keeps its variance, the second stage divides by a larger
+# number, and every placebo effect is pulled toward zero whether or not there is anything
+# to find. Dividing each draw by its own standard error is what removes that.
+placebo_t = np.asarray(metrics.get("placebo_t_stats") or [], dtype=float)
+if placebo_t.size:
+    observed_t = float(metrics["dml_effect"]) / float(metrics["dml_se_hac"])
     fig = go.Figure()
-    fig.add_histogram(x=placebo, nbinsx=30, name="Placebo effects", marker_color=COLORS["blue"])
+    fig.add_histogram(
+        x=placebo_t, nbinsx=30, name="Placebo t-statistics", marker_color=COLORS["blue"]
+    )
     fig.add_vline(
-        x=float(metrics["dml_effect"]),
+        x=observed_t,
         line_color=COLORS["amber"],
         line_width=2,
         annotation_text="observed",
     )
     fig.update_layout(
-        title="Observed effect against its block-permutation placebos",
-        xaxis_title="Treatment effect",
+        title="Observed t-statistic against its block-permutation placebos",
+        xaxis_title="HAC t-statistic",
         yaxis_title="Placebo replications",
     )
     show_plotly_with_alt(
         fig,
-        "Histogram of block-permutation placebo treatment effects with the observed DML "
-        "effect marked, showing where the estimate falls in the null distribution.",
+        "Histogram of block-permutation placebo HAC t-statistics with the observed DML "
+        "t-statistic marked, showing where the estimate falls in the null distribution.",
+    )
+    print(
+        f"Placebo t-statistics: {placebo_t.size} draws, "
+        f"mean {placebo_t.mean():+.3f}, sd {placebo_t.std():.3f}. "
+        f"Observed {observed_t:+.3f}."
     )
 else:
-    print("No placebo draws are stored on this row, so there is no null distribution to show.")
+    print(
+        "No placebo t-statistics are stored on this row, so there is no null distribution "
+        "to show. A row registered before the refutation moved onto the t scale carries "
+        "placebo effects only, and its stored p-value is not comparable with this figure."
+    )
 
 # %% [markdown]
 # ## Key takeaways

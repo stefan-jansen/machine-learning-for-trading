@@ -47,7 +47,12 @@ VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
 # through no change of its own. Nothing else is filled on NULL: see the comment at the
 # backfill itself for why a nullable column is not the same as a migrated one.
 MIGRATION_BACKFILLED_COLUMNS = frozenset(
-    {"refutation_n_successful", "refutation_placebo_json", "refutation_frozen_fraction"}
+    {
+        "refutation_n_successful",
+        "refutation_placebo_json",
+        "refutation_placebo_t_json",
+        "refutation_frozen_fraction",
+    }
 )
 MAX_PREDICTION_STD_RATIO = 100.0
 
@@ -2365,6 +2370,7 @@ def register_causal_run(
     refutation_p: float | None,
     refutation_n_successful: int | None = None,
     refutation_placebo_json: str | None = None,
+    refutation_placebo_t_json: str | None = None,
     refutation_frozen_fraction: float | None = None,
     spec_json: str,
     notebook: str | None,
@@ -2515,10 +2521,11 @@ def register_causal_run(
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
                 refutation_n_successful, refutation_placebo_json,
+                refutation_placebo_t_json,
                 refutation_frozen_fraction,
                 spec_json, notebook, started_at, elapsed_s, git_commit,
                 supersedes_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -2538,6 +2545,13 @@ def register_causal_run(
                 -- should fill it; one that does not must not erase them.
                 refutation_placebo_json=COALESCE(
                     excluded.refutation_placebo_json, causal_runs.refutation_placebo_json
+                ),
+                -- Fill-once for the same reason, and separately: a row whose p-value was
+                -- computed on raw thetas (before ml4t/agent-workspace#1120) has no t-scale
+                -- draws to recover, so NULL here is what distinguishes it from a corrected
+                -- one. Erasing a filled value would lose that distinction.
+                refutation_placebo_t_json=COALESCE(
+                    excluded.refutation_placebo_t_json, causal_runs.refutation_placebo_t_json
                 ),
                 -- Plain, not COALESCE: this column is in `comparable_columns`, so by the
                 -- time the UPDATE runs the value either matched the stored one or was
@@ -2592,6 +2606,7 @@ def register_causal_run(
                 refutation_p,
                 refutation_n_successful,
                 refutation_placebo_json,
+                refutation_placebo_t_json,
                 refutation_frozen_fraction,
                 spec_json,
                 notebook,
