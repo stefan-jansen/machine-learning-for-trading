@@ -80,7 +80,6 @@
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
 from datetime import date
 
 import matplotlib.pyplot as plt
@@ -101,9 +100,12 @@ from case_studies.utils.artifact_digest import read_digest, value_digest
 from case_studies.utils.coverage import assert_sessions_complete
 from case_studies.utils.cv_window import modeling_fold_boundaries
 from case_studies.utils.temporal import (
+    fit_wasserstein_kmeans,
     garch11_conditional_volatility,
+    lift_stream,
     refit_boundaries,
     walk_forward_feature,
+    wasserstein_distance_1d,
     write_model_based,
 )
 from data import load_us_equities
@@ -132,7 +134,6 @@ FFD_THRESHOLD = 1e-5
 FDR_ALPHA = 0.05
 
 FloatArray = NDArray[np.float64]
-IntArray = NDArray[np.int64]
 
 # %% [markdown]
 # ### The values a run can be given
@@ -609,112 +610,14 @@ show_with_alt(
 # boundary, held fixed while the next quarter of windows is scored against them, then fitted
 # again on everything up to the following boundary. Every stock carries the same value on a
 # date, because the series being clustered is market-wide.
-
-
-# %%
-@dataclass(frozen=True)
-class LiftedStream:
-    """Overlapping windows of cross-sectional return distributions."""
-
-    segments: FloatArray  # (n_segments, window_len)
-    sorted_segments: FloatArray  # Sorted per window
-    starts: IntArray  # Start indices
-    window_len: int
-    step: int
-
-
-def lift_stream(
-    returns: FloatArray,
-    window_len: int,
-    overlap: int,
-) -> LiftedStream:
-    """Lift a 1D return stream into overlapping windows."""
-    step = window_len - overlap
-    windows_view = np.lib.stride_tricks.sliding_window_view(returns, window_shape=window_len)
-    windows_view = windows_view[::step]
-    segments = np.ascontiguousarray(windows_view, dtype=np.float64)
-    sorted_segments = np.sort(segments, axis=1)
-    starts = np.arange(0, segments.shape[0] * step, step, dtype=np.int64)
-
-    return LiftedStream(
-        segments=segments,
-        sorted_segments=sorted_segments,
-        starts=starts,
-        window_len=window_len,
-        step=step,
-    )
-
-
-# %%
-def wasserstein_distance_1d(
-    sorted_a: FloatArray, sorted_b: FloatArray, p: float = 1.0
-) -> FloatArray:
-    """1D p-Wasserstein distance between equal-weight empirical measures.
-
-    Reduces over the last axis and broadcasts over the rest, so a stack of sorted windows
-    against one sorted centroid returns one distance per window.
-    """
-    return (np.abs(sorted_a - sorted_b) ** p).mean(axis=-1) ** (1.0 / p)
-
-
-def wasserstein_barycenter_1d(sorted_members: FloatArray, p: float = 1.0) -> FloatArray:
-    """Wasserstein barycenter: median (p=1) or mean (p=2) of sorted atoms."""
-    if p == 1.0:
-        return np.median(sorted_members, axis=0).astype(np.float64)
-    return sorted_members.mean(axis=0).astype(np.float64)
-
-
-# %%
-def fit_wasserstein_kmeans(
-    sorted_segments: FloatArray,
-    n_clusters: int = 2,
-    max_iter: int = 50,
-    n_init: int = 5,
-    random_state: int = 42,
-) -> tuple[IntArray, FloatArray]:
-    """Fit Wasserstein k-means on sorted 1D segments.
-
-    Returns (labels, centroids).
-    """
-    rng = np.random.default_rng(random_state)
-    n_samples = sorted_segments.shape[0]
-    best_labels = None
-    best_centroids = None
-    best_inertia = float("inf")
-
-    for _ in range(n_init):
-        # Random initialization
-        idx = rng.choice(n_samples, size=n_clusters, replace=False)
-        centroids = sorted_segments[idx].copy()
-
-        for _ in range(max_iter):
-            # Assignment: compute distance to each centroid
-            dists = np.zeros((n_samples, n_clusters))
-            for k in range(n_clusters):
-                dists[:, k] = wasserstein_distance_1d(sorted_segments, centroids[k][None, :])
-
-            labels = dists.argmin(axis=1)
-
-            # Update centroids
-            new_centroids = np.zeros_like(centroids)
-            for k in range(n_clusters):
-                members = sorted_segments[labels == k]
-                if len(members) > 0:
-                    new_centroids[k] = wasserstein_barycenter_1d(members, p=1.0)
-                else:
-                    new_centroids[k] = centroids[k]
-
-            if np.allclose(centroids, new_centroids, atol=1e-6):
-                break
-            centroids = new_centroids
-
-        inertia = sum(dists[i, labels[i]] for i in range(n_samples))
-        if inertia < best_inertia:
-            best_inertia = inertia
-            best_labels = labels
-            best_centroids = centroids
-
-    return best_labels, best_centroids
+#
+# The estimator itself - the lifting, the distance, the barycenter and the k-means around them -
+# is `lift_stream`, `wasserstein_distance_1d`, `wasserstein_barycenter_1d` and
+# `fit_wasserstein_kmeans` in `case_studies/utils/temporal.py`, beside the HMM helpers the other
+# case studies fit their regimes with. This notebook composes them on the schedule below.
+# [`09_model_based_features/12_wasserstein_regimes`](../../09_model_based_features/12_wasserstein_regimes.ipynb)
+# builds the same four objects from nothing, for a reader who wants to see the algorithm rather
+# than use it.
 
 
 # %% [markdown]
