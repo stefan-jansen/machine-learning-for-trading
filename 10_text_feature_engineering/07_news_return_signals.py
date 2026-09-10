@@ -1441,7 +1441,7 @@ print(high_coverage.head(10))
 # Save features + labels dataset
 from utils.paths import get_output_dir
 
-OUTPUT_DIR = get_output_dir(8, "fnspid")
+OUTPUT_DIR = get_output_dir(10, "fnspid")
 output_path = OUTPUT_DIR / "news_features.parquet"
 
 # Create output directory if it doesn't exist

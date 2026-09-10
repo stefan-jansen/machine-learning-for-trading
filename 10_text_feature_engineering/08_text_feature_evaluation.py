@@ -38,7 +38,8 @@
 #
 # ## What it reads and writes
 #
-# Reads `output/fnspid/news_features.parquet` from notebook 07, which already carries forward
+# Reads `10_text_feature_engineering/output/fnspid/news_features.parquet` from notebook 07,
+# which already carries forward
 # returns aligned to tradable dates with the lag applied - so no label is recomputed here and
 # nothing in this notebook can introduce a look-ahead that the feature notebook did not have.
 # Writes a signal summary, the daily IC series and the daily long-short series.
@@ -114,8 +115,8 @@ class EvalConfig:
 
 
 # Paths using standard utilities
-TEXT_INPUT_DIR = get_output_dir(8, "fnspid")
-OUTPUT_DIR = get_output_dir(8, "text_evaluation")
+TEXT_INPUT_DIR = get_output_dir(10, "fnspid")
+OUTPUT_DIR = get_output_dir(10, "text_evaluation")
 CONFIG = EvalConfig(min_assets_per_day=MIN_ASSETS_PER_DAY)
 
 # %% [markdown] tags=[]
