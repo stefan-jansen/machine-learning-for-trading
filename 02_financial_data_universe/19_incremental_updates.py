@@ -34,9 +34,10 @@
 #
 # **Prerequisites**: ml4t-data installed; live network access for Yahoo Finance.
 #
-# **Why incremental updates**: a full refresh of 500 symbols × 10 years pulls
-# ~1.26M rows; an incremental run pulls roughly the trading days since the
-# last fetch. The gap is two orders of magnitude in network and disk I/O.
+# **Why incremental updates**: a full refresh re-fetches every row a symbol has ever had,
+# and an incremental run fetches the sessions since the last one. On a universe of a few
+# hundred symbols with a decade of history, the first is millions of rows and the second is
+# hundreds, every day. Section 1 measures the ratio on the demo universe.
 
 # %% [markdown]
 # ## Setup
@@ -64,8 +65,8 @@ from ml4t.data.update_manager import GapDetector
 from ml4t.data.validation import OHLCVValidator
 
 from utils.downloading import update_through_last_complete_bar
-from utils.paths import get_output_dir
-from utils.style import COLORS
+from utils.paths import display_path, get_output_dir
+from utils.style import COLORS, show_with_alt
 
 # Storage for this notebook's demos. Wipe any prior-run artifacts so the
 # initial-load + update sequence is reproducible.
@@ -74,11 +75,27 @@ if DEMO_DIR.exists():
     shutil.rmtree(DEMO_DIR)
 DEMO_DIR.mkdir(parents=True, exist_ok=True)
 
-print(f"Demo storage: {DEMO_DIR}")
+print(f"Demo storage: {display_path(DEMO_DIR)}")
 
+
+# %% [markdown]
+# ### Declared parameters
+#
+# The freshness thresholds are the two that carry a judgment. A daily equity feed that has
+# not moved in more than a weekend is behind, and one that has not moved in more than a week
+# is broken; those are the two lines the dashboard draws and colours against.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+DEMO_SYMBOLS = ["AAPL", "MSFT", "GOOGL"]
+FULL_HISTORY_START = "2023-01-01"
+FULL_HISTORY_END = "2024-12-31"
+DEMO_PROVIDER = "yahoo"
+UPDATE_LOOKBACK_DAYS = 7
+
+FRESH_DAYS = 3  # up to this many days behind is fresh
+STALE_DAYS = 7  # beyond this the feed is not merely behind
+MAX_RETURN_THRESHOLD = 0.5  # the validator's extreme-return cutoff
+STORAGE_COMPRESSION = "zstd"
 
 # %% [markdown]
 # ---
@@ -91,16 +108,15 @@ print(f"Demo storage: {DEMO_DIR}")
 # ### Step 1: Initial Load (Full History)
 
 # %%
-# Initialize storage and DataManager
-config = StorageConfig(base_path=DEMO_DIR / "updates_demo", compression="zstd")
+config = StorageConfig(base_path=DEMO_DIR / "updates_demo", compression=STORAGE_COMPRESSION)
 storage = HiveStorage(config=config)
 dm = DataManager(storage=storage)
 
-symbols = ["AAPL", "MSFT", "GOOGL"]
+symbols = DEMO_SYMBOLS
 
 print("=== Initial Load (Full History) ===")
 for symbol in symbols:
-    dm.load(symbol, "2023-01-01", "2024-12-31", provider="yahoo")
+    dm.load(symbol, FULL_HISTORY_START, FULL_HISTORY_END, provider=DEMO_PROVIDER)
     meta = dm.get_metadata(symbol)
     print(f"  {symbol}: stored ({meta['row_count']} rows)")
 
@@ -108,7 +124,7 @@ for symbol in symbols:
 # ### Step 2: Incremental Update (Only New Data)
 #
 # An update reads the last timestamp in storage, refetches a small overlap
-# (`lookback_days=7`) so a bar the vendor revised replaces the stored one, and
+# (`UPDATE_LOOKBACK_DAYS`) so a bar the vendor revised replaces the stored one, and
 # merges everything since.
 #
 # **Where it stops matters more than where it starts.** Yahoo returns the
@@ -148,7 +164,9 @@ for symbol in symbols:
 # %%
 print("=== Incremental Update ===")
 for symbol in symbols:
-    rows = update_through_last_complete_bar(dm, storage, symbol, provider="yahoo", lookback_days=7)
+    rows = update_through_last_complete_bar(
+        dm, storage, symbol, provider=DEMO_PROVIDER, lookback_days=UPDATE_LOOKBACK_DAYS
+    )
     print(f"  {symbol}: updated ({rows} rows)")
 
 # %% [markdown]
@@ -231,7 +249,7 @@ for symbol in symbols:
 # %%
 def data_health_report(storage: HiveStorage, symbols: list[str]) -> pl.DataFrame:
     """Per-symbol freshness, gap count, and validation issue count."""
-    validator = OHLCVValidator(max_return_threshold=0.5)
+    validator = OHLCVValidator(max_return_threshold=MAX_RETURN_THRESHOLD)
     detector = GapDetector(exclude_weekends=True)
     now = datetime.now()
     rows = []
@@ -244,7 +262,7 @@ def data_health_report(storage: HiveStorage, symbols: list[str]) -> pl.DataFrame
         rows.append(
             {
                 "symbol": symbol,
-                "status": "stale" if days_stale > 5 else "fresh",
+                "status": "stale" if days_stale > STALE_DAYS else "fresh",
                 "rows": len(df),
                 "last_date": last_date.date(),
                 "days_stale": days_stale,
@@ -264,15 +282,19 @@ fig, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
 
 axes[0].barh(report["symbol"].to_list(), report["rows"].to_list(), color=COLORS["blue"])
 axes[0].set_xlabel("Rows")
-axes[0].set_title("Data Volume")
+axes[0].set_title("Rows stored")
 
 stale_days = report["days_stale"].to_list()
 freshness_color = [
-    COLORS["positive"] if d <= 3 else COLORS["amber"] if d <= 7 else COLORS["negative"]
+    COLORS["positive"]
+    if d <= FRESH_DAYS
+    else COLORS["amber"]
+    if d <= STALE_DAYS
+    else COLORS["negative"]
     for d in stale_days
 ]
-# Plot bars; zero-width bars (days_stale == 0) get a small marker so the
-# panel is not blank when every symbol is fresh.
+# A bar of zero width draws nothing, so a fully fresh universe would render a blank panel.
+# The markers below are what a reader sees instead of nothing.
 axes[1].barh(report["symbol"].to_list(), stale_days, color=freshness_color)
 zero_mask = [i for i, d in enumerate(stale_days) if d == 0]
 if zero_mask:
@@ -285,11 +307,15 @@ if zero_mask:
         zorder=3,
         label="Fresh (0 days)",
     )
-axes[1].axvline(3, color=COLORS["positive"], linestyle="--", alpha=0.6, label="3-day threshold")
-axes[1].axvline(7, color=COLORS["amber"], linestyle="--", alpha=0.6, label="7-day threshold")
+axes[1].axvline(
+    FRESH_DAYS, color=COLORS["positive"], linestyle="--", alpha=0.6, label=f"{FRESH_DAYS} days"
+)
+axes[1].axvline(
+    STALE_DAYS, color=COLORS["amber"], linestyle="--", alpha=0.6, label=f"{STALE_DAYS} days"
+)
 axes[1].set_xlim(left=-0.5)
 axes[1].set_xlabel("Days Since Update")
-axes[1].set_title("Data Freshness")
+axes[1].set_title("Days since last update")
 axes[1].legend(fontsize=8, loc="lower right")
 
 gaps = report["gaps"].to_list()
@@ -299,11 +325,18 @@ axes[2].barh(
     report["symbol"].to_list(), issues, left=gaps, color=COLORS["amber"], label="Validation"
 )
 axes[2].set_xlabel("Count")
-axes[2].set_title("Data Issues")
+axes[2].set_title("Gaps and validation flags")
 axes[2].legend(fontsize=8, loc="lower right")
 
-fig.suptitle("Data Health Dashboard")
-plt.show()
+fig.suptitle("Per-symbol storage health")
+show_with_alt(
+    fig,
+    "Three horizontal-bar panels sharing a symbol axis. The left shows rows stored per "
+    "symbol, with bars of near-equal length. The middle shows days since the last update "
+    "against two dashed threshold lines, with a coloured marker at zero for each symbol "
+    "that is fully up to date. The right stacks gap counts and validation flags per "
+    "symbol.",
+)
 
 # %% [markdown]
 # ---
