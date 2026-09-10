@@ -50,7 +50,7 @@ import shap
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 MAX_SENTENCES = 0  # 0 uses the full teaching sample
@@ -193,13 +193,19 @@ for ax, (_, predicted, strongest) in zip(axes, panel_rows, strict=True):
 
 axes[1].set_ylabel("Token")
 axes[-1].set_xlabel("SHAP contribution to predicted-class probability")
-fig.suptitle("Different phrases drive each FinBERT sentiment decision", x=0.06, ha="left")
-plt.show()
+fig.suptitle("Token contributions behind each FinBERT decision", x=0.06, ha="left")
+show_with_alt(
+    fig,
+    "One horizontal bar chart per sentence, each showing the tokens with the largest "
+    "SHAP contributions to that sentence's predicted class, coloured by sign against a "
+    "line at zero.",
+)
 
 # %% [markdown]
 # ## Controlled context test: narrowed versus widened
 #
-# A token's SHAP value belongs to a complete input, not to the token in isolation. To test that
+# A token's SHAP value is a property of the complete input rather than of the token alone. To
+# test that
 # distinction, hold the sentence template fixed and replace only *narrowed* with *widened*. The
 # resulting predictions and Positive-class attributions provide an adversarial check on the
 # contextual interpretation. A sensible-looking local explanation does not guarantee that the model
@@ -253,8 +259,12 @@ for ax, (wording, strongest) in zip(axes, context_panels, strict=True):
 
 fig.supylabel("Token")
 fig.supxlabel("SHAP contribution to Positive probability")
-fig.suptitle("A one-word perturbation exposes a counterintuitive response", x=0.06, ha="left")
-plt.show()
+fig.suptitle("Token contributions with one word changed", x=0.06, ha="left")
+show_with_alt(
+    fig,
+    "Two horizontal bar charts of token SHAP contributions to the Positive class, one "
+    "per wording of the same sentence template, coloured by sign against a line at zero.",
+)
 
 # %% [markdown]
 # ## Aggregate a small teaching sample
@@ -319,10 +329,14 @@ ax.set_xlabel("Summed SHAP contribution to Positive probability")
 ax.set_ylabel("Token")
 add_message_title(
     ax,
-    "A few tokens dominate Positive-class attribution in this sample",
-    subtitle=f"Top signed token totals across {len(teaching_sentences)} constructed sentences",
+    "Summed token contribution to the Positive class",
+    subtitle="Signed totals across the constructed teaching sentences",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of each token's summed SHAP contribution to the Positive class "
+    "across the sample, coloured by sign against a line at zero.",
+)
 
 # %% [markdown]
 # ## What attribution can support
