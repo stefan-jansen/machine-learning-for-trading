@@ -53,8 +53,6 @@
 # %%
 """OLS and the Inferential Toolkit - classical inference diagnostics before the prediction pivot."""
 
-import warnings
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -70,8 +68,6 @@ from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import show_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -214,6 +210,14 @@ family_counts
 # The history each symbol brings. One row per ETF, drawn only over the sessions
 # it actually appears on, so a break in a row is a stretch of sessions the panel
 # has for other symbols and not for this one.
+#
+# **What to read off it.** The rows form a staircase: symbols enter the panel over
+# the whole sample rather than all at the start, and a few rows break mid-series.
+# The panel is therefore unbalanced, and two things follow for what comes next. A
+# pooled fit weights the later years more heavily, because that is where most of
+# the rows are. And the cross-section a date-clustered standard error averages over
+# is much narrower early in the sample than late, so an estimator that assumes a
+# fixed panel width is assuming something this picture rules out.
 
 # %%
 sessions_per_symbol = (
@@ -236,9 +240,8 @@ ax.set_ylim(-1, sessions_per_symbol.height)
 ax.set_yticks([])
 ax.set_ylabel(f"{sessions_per_symbol.height} ETFs, ordered by first session")
 ax.set_xlabel("Session")
-ax.set_title("Symbols enter over time and some stop quoting for years")
+ax.set_title("Sessions each symbol quotes, across the sample")
 ax.grid(axis="x", alpha=0.3)
-plt.tight_layout()
 show_with_alt(
     fig,
     "One horizontal line per ETF over the sessions it appears on, ordered by first "
@@ -644,14 +647,26 @@ fig, ax = plt.subplots(figsize=(9, 4))
 ax.boxplot(ratios, vert=False, tick_labels=labels, widths=0.6)
 ax.axvline(1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.8)
 ax.set_xlabel("Standard error relative to the OLS standard error")
-ax.set_title("Each dependence the estimator admits widens the standard errors")
+ax.set_title("Standard errors by estimator, relative to OLS")
 ax.grid(axis="x", alpha=0.3)
-plt.tight_layout()
 show_with_alt(
     fig,
-    "Box plots of each estimator's standard error divided by the OLS standard error, "
-    "one box per estimator, against a dashed reference line at one.",
+    "Box plots of each estimator's standard error divided by the OLS standard error, one box "
+    "per estimator, against a dashed reference line at one. The HC3 box straddles that line; "
+    "the other three sit clear of it, shifting further right and growing wider as the "
+    "estimator admits more dependence, from the narrowest at the bottom to the widest at "
+    "the top.",
 )
+
+# %% [markdown]
+# Every estimator that admits more dependence produces wider standard errors, and the order
+# is the order of what each one allows for. HC3 admits only that the variance differs across
+# observations. Clustering by date admits that observations sharing a date move together,
+# which on a panel of this shape is most of the dependence there is. Clustering on both
+# dimensions and then Driscoll-Kraay add correlation within a symbol over time.
+#
+# None of this changes a coefficient. What changes is how much of it you are entitled to
+# believe.
 
 # %%
 # Count how many features change significance at 5% level
@@ -704,15 +719,25 @@ ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.8)
 ax.set_yticks(y_pos)
 ax.set_yticklabels(coef_plot["feature"].to_list())
 ax.set_xlabel("Coefficient estimate (standardized feature, 21-day forward return)")
-ax.set_title("Most large coefficients cannot be signed once dependence is admitted")
+ax.set_title("Coefficient estimates with Driscoll-Kraay confidence intervals")
 ax.grid(axis="x", alpha=0.3)
-plt.tight_layout()
 show_with_alt(
     fig,
-    "The largest coefficient estimates with Driscoll-Kraay confidence intervals, "
-    "sorted by value, against a dashed vertical line at zero.",
+    "The largest coefficient estimates with Driscoll-Kraay confidence intervals, sorted by "
+    "value, against a dashed vertical line at zero. Most of the intervals reach across the "
+    "line. Those that do not are mostly at the two ends of the sort, with one or two in "
+    "between.",
 )
 
+# %% [markdown]
+# Sorting by size and drawing the interval is what makes the point legible: the estimates
+# with the largest magnitudes are mostly not distinguishable from zero once the estimator
+# admits both that observations sharing a date move together and that a symbol's errors
+# persist over time. A ranking of coefficients by size is a ranking of point estimates, and
+# the interval is what says whether the ordering means anything.
+
+
+# %%
 n_crosses_zero = int((np.abs(coef_values) <= CONF_Z * cluster_se).sum())
 print(
     f"Of the {TOP_COEFS} largest coefficients, {n_crosses_zero} have a "
@@ -829,17 +854,16 @@ diag_max = max(y_pred_plot.max(), y_val_plot.max())
 axes[0].plot([diag_min, diag_max], [diag_min, diag_max], linestyle="--", linewidth=1.2)
 axes[0].set_xlabel("Predicted Return")
 axes[0].set_ylabel("Realized Return")
-axes[0].set_title("Predictions span a fraction of the realized return range")
+axes[0].set_title("Realized against predicted return")
 axes[0].grid(alpha=0.3)
 
 axes[1].scatter(y_pred_plot, residuals_plot, s=8, alpha=0.25, edgecolor="none")
 axes[1].axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.8)
 axes[1].set_xlabel("Predicted Return")
 axes[1].set_ylabel("Residual (Realized - Predicted)")
-axes[1].set_title("The largest predictions carry the largest negative residuals")
+axes[1].set_title("Residual against predicted return")
 axes[1].grid(alpha=0.3)
 
-plt.tight_layout()
 show_with_alt(
     fig,
     "Two scatter plots over the validation set: realized against predicted return "

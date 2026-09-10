@@ -50,7 +50,6 @@
 
 import hashlib
 import inspect
-import warnings
 from importlib.metadata import version
 
 import joblib
@@ -82,8 +81,6 @@ from utils.modeling import array_sha256, canonical_sha256, file_sha256
 from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -765,8 +762,7 @@ for ax, metric, title in zip(
     ax.set_xlim(0, max(max(vals), baseline_value) * 1.18)
     ax.legend(loc="lower right", fontsize=8)
 
-fig.suptitle("Both penalties land on the same operating point")
-fig.tight_layout()
+fig.suptitle("Validation metrics by penalty, against the majority-class baseline")
 show_with_alt(
     fig,
     "Three horizontal bar panels - accuracy, AUC-ROC and F1 - each showing the L2 "
@@ -832,7 +828,7 @@ ax.set_xticklabels(["Down", "Up"])
 ax.set_yticklabels(["Down", "Up"])
 ax.set_xlabel("Predicted")
 ax.set_ylabel("Actual")
-ax.set_title("The 0.5 threshold favors up predictions")
+ax.set_title("Validation confusion matrix at the default threshold")
 
 for i in range(2):
     for j in range(2):
@@ -844,14 +840,16 @@ for i in range(2):
             va="center",
             color="white" if cm[i, j] > cm.max() / 2 else "black",
         )
-
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two-by-two confusion matrix of actual against predicted direction, each cell "
     "labelled with its count and shaded by size.",
 )
-
+# %% [markdown] tags=[]
+# The default threshold of one half is a convention, not a decision. Applied to a model whose
+# probabilities cluster near the base rate, it sends almost everything to the majority class,
+# which is why the matrix is lopsided. A threshold is a choice about the cost of each kind of
+# error, and leaving it at the default is making that choice by not making it.
 # %% [markdown] tags=[]
 # The confusion matrix counts one particular decision rule: predict Up whenever
 # the estimated probability clears one half. That threshold is a choice, and it
@@ -887,15 +885,18 @@ ax.plot(fpr, tpr, linewidth=2, label=f"Logistic L2 (AUC = {auc_val:.3f})")
 ax.plot([0, 1], [0, 1], ls="--", color=COLORS["neutral"], label="Random")
 ax.set_xlabel("False Positive Rate")
 ax.set_ylabel("True Positive Rate")
-ax.set_title("Validation discrimination remains close to chance")
+ax.set_title("ROC curve on the validation folds")
 ax.legend(loc="lower right")
-fig.tight_layout()
 show_with_alt(
     fig,
     "ROC curve of true positive rate against false positive rate, drawn against "
     "the diagonal that a random ranking would trace.",
 )
-
+# %% [markdown] tags=[]
+# The curve sits just above the diagonal along its whole length, and the area under it is
+# barely above a half. On a two-class problem that is a model which orders the validation
+# cases hardly better than a coin, and every metric downstream of it has to be read in that
+# light.
 # %% [markdown] tags=[]
 # ### Precision-Recall Curve
 #
@@ -911,9 +912,8 @@ ax.plot(rec, prec, linewidth=2, label="Logistic L2")
 ax.axhline(baseline, ls="--", color=COLORS["neutral"], label=f"Baseline ({baseline:.2f})")
 ax.set_xlabel("Recall")
 ax.set_ylabel("Precision")
-ax.set_title("Precision converges to the positive-class base rate")
+ax.set_title("Precision against recall on the validation folds")
 ax.legend()
-fig.tight_layout()
 show_with_alt(
     fig,
     "Precision against recall, with a dashed horizontal line at the share of "
@@ -956,7 +956,7 @@ ax.set_yticks(range(len(top15)))
 ax.set_yticklabels(top15["feature"].to_list())
 ax.invert_yaxis()
 ax.set_xlabel("Mean |Coefficient|")
-ax.set_title("L1 spreads weight across several correlated features")
+ax.set_title("Mean absolute L1 coefficient by feature, colored by sign")
 ax.legend(
     handles=[
         Patch(color=COLORS["blue"], label="Positive mean coefficient"),
@@ -964,7 +964,6 @@ ax.legend(
     ],
     loc="lower right",
 )
-fig.tight_layout()
 show_with_alt(
     fig,
     "Horizontal bars of mean absolute coefficient for the leading features, "
@@ -990,15 +989,22 @@ ax.plot([0, 1], [0, 1], ls="--", color=COLORS["neutral"], label="Perfect calibra
 ax.plot(cal_means, cal_fracs, "o-", linewidth=2, markersize=6, label="Model")
 ax.set_xlabel("Mean Predicted Probability")
 ax.set_ylabel("Observed Fraction Positive")
-ax.set_title("Observed frequencies reveal probability calibration gaps")
+ax.set_title("Observed frequency against predicted probability")
 ax.legend()
-fig.tight_layout()
 show_with_alt(
     fig,
     "Reliability diagram: observed fraction of up outcomes against mean predicted "
     "probability, in ten bins, against the diagonal of perfect calibration.",
 )
-
+# %% [markdown] tags=[]
+# A calibrated model would track the diagonal. This one is close to flat: across the whole
+# range of predicted probabilities the observed frequency stays in a narrow band, so moving
+# the prediction from low to high barely moves what actually happens.
+#
+# That is the same finding the ROC curve gave, read a different way. A flat calibration curve
+# and an area near a half are two views of a model whose probabilities do not separate the
+# classes - and it is worth seeing both, because a model can be well calibrated and
+# uninformative, or sharp and badly calibrated, and the two plots catch different failures.
 # %% [markdown] tags=[]
 # **Interpretation**: A curve above the diagonal means the model is
 # under-confident (actual positive rate exceeds predicted probability),
@@ -1102,9 +1108,8 @@ ax.plot(mean_orig, frac_orig, "o-", label="Original", markersize=5)
 ax.plot(mean_platt, frac_platt, "s-", label="Platt-scaled", markersize=5)
 ax.set_xlabel("Mean Predicted Probability")
 ax.set_ylabel("Observed Fraction Positive")
-ax.set_title("Chronological Platt scaling reshapes latest-fold calibration")
+ax.set_title("Observed frequency against predicted probability, after Platt scaling")
 ax.legend()
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two reliability curves on the same fold, one from the raw model and one after "
