@@ -660,14 +660,17 @@ print(f"Robustness value: {rv_ret:.4f}")
 # crypto markets: an omitted confounder explaining that share of the residual variance of
 # both the treatment and the outcome would move the estimate to zero.
 #
-# It inherits one assumption from the estimator underneath it. DoWhy derives it from the
-# t-statistic of the linear backdoor fit, which uses iid standard errors, and the OLS+HAC
-# regression above reports a smaller t-statistic for the same estimate because consecutive
-# 24-hour outcomes overlap. A smaller t-statistic means a smaller robustness value, so the
-# number printed here is the optimistic end of the range. DoWhy also reports a robustness
-# value at a chosen significance level; it is omitted because it depends on the iid standard
-# error far more heavily than the point-estimate version does, and this notebook has already
-# established that the iid standard error is the wrong one.
+# It is a statement about the fit's algebra rather than about its sampling uncertainty. The
+# robustness value is a function of the partial $R^2$ of the treatment with the outcome,
+# which the OLS fit fixes through the identity $t^2 / \mathit{df} = R^2 / (1 - R^2)$.
+# Replacing the iid standard error with a HAC one changes what the estimate claims about its
+# own precision; it changes neither the fitted coefficient nor the residual variances the
+# omitted-variable bias formula operates on, so it leaves the robustness value where it is.
+#
+# That split is why DoWhy's robustness value *at a significance level* is omitted here.
+# That one asks how much confounding would make the estimate statistically indistinguishable
+# from zero, which is a question about standard errors, and the OLS+HAC regression above
+# shows the iid standard error is not the right one for overlapping 24-hour outcomes.
 
 # %% [markdown]
 # ## 7. Analysis B: Premium Reversion as Outcome
@@ -733,7 +736,7 @@ comparison = pd.DataFrame(
             "ATE (train)",
             "ATE (test)",
             "OOS drift",
-            "Robustness value (iid)",
+            "Robustness value",
         ],
         "Returns": [
             f"{est_ret_train.value:.6f}",
@@ -1028,8 +1031,7 @@ display(
 #    extreme reading explains part of it, which is the cost of the tighter mechanism.
 # 3. **Report which checks an estimate passes and which it fails**, along with the strength
 #    of omitted confounding that would overturn it. A robustness value near zero says the
-#    estimate is not separable from confounding the data cannot see - and it is an upper
-#    bound, because it is computed from iid standard errors.
+#    estimate is not separable from confounding the data cannot see.
 # 4. **Adjust the standard errors to the dependence in the data.** Overlapping forward
 #    outcomes at an 8-hour cadence make the iid standard error too small, which is why every
 #    estimate here is repeated with Newey-West lags at the outcome horizon.
