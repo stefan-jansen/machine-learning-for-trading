@@ -810,11 +810,16 @@ print("Per-day construction error, raw series minus the contract actually held:"
 print(_error_by_kind)
 
 # %% [markdown]
-# Strike-only days are not clean. Their mean error is several percentage points and it does not
-# average away - it is one-sided, in the opposite direction from the expiration days, so the
-# raw series understates what the held straddle earned on every kind of roll day but not by
-# the same amount or with the same sign of correction. The mean absolute error is larger still
-# and the worst single day is tens of percentage points.
+# Strike-only days are not clean. Their mean error is several percentage points, and the error
+# is defined as the raw series minus the held contract, so the sign says which way each group
+# is wrong on average: expiration days come out positive, meaning the raw series records more
+# than the position earned, and strike-only days come out negative, meaning it records less.
+# The two biases point in opposite directions and neither is small.
+#
+# The mean absolute error exceeds the absolute mean in both groups, which says the individual
+# days are not all wrong in their group's direction - the average is a net of errors both
+# ways, and the worst single day in each group is tens of percentage points. A bias that
+# happens to be modest in the average can still be large on the day a label is taken.
 #
 # So the two group means in Section 2 agreed for a reason that has nothing to do with the
 # series being right on those days. A day on which the strike moved records a return that
@@ -1007,8 +1012,9 @@ three_way
 #    series contributes most of them, which turns a correction into the bulk of the signal.
 #    Splitting the roll days by what changed is worth doing, and it is worth not over-reading:
 #    the strike-only group's mean sits beside the do-nothing group's, yet its per-day
-#    construction error against the held contract is several percentage points and one-sided.
-#    Agreement between two averages says nothing about whether the individual values are right.
+#    construction error against the held contract averages several percentage points, in the
+#    opposite direction from the error on expiration days. Agreement between two averages says
+#    nothing about whether the individual values are right.
 #
 # 3. **A short position's cumulative return is not the long's negation.** Per period and for a
 #    fixed quantity it is, which is why the notebook prints one convention and states the other.
