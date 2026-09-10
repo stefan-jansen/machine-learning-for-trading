@@ -81,7 +81,7 @@ from ml4t.data.universe import Universe
 
 from utils.downloading import update_through_last_complete_bar
 from utils.paths import REPO_ROOT, get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 
 def _rel(path):
@@ -102,16 +102,30 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 print(f"Storage directory: {_rel(STORAGE_DIR)}")
 
 
+# %% [markdown]
+# ### Declared parameters
+#
+# The demo universe, its window and the batch worker count are the three things a CI run
+# would want to narrow, so they are declared rather than written into the call that uses
+# them. `REBASE_LEVEL` is the value each series is rebased to in the figure below, and it
+# appears in the axis label as well as the arithmetic.
+
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+ETF_SYMBOLS = ["SPY", "QQQ", "IWM", "TLT", "GLD"]
+DEMO_START = "2024-01-01"
+DEMO_END = "2024-12-31"
+DEMO_PROVIDER = "yahoo"
+MAX_WORKERS = 4
+DEMO_SYMBOL = "AAPL"
+PIPELINE_UNIVERSE = "etf_momentum"
+REBASE_LEVEL = 100.0
 
 # %% [markdown]
 # ---
 #
 # ## 1. DataManager: The Unified Entry Point
 #
-# `DataManager` abstracts away provider selection, storage, and updates
-# behind a single interface. Compare:
+# `DataManager` puts provider selection, storage and updates behind one interface. Compare:
 #
 # ```python
 # # Without DataManager (manual)
@@ -133,7 +147,7 @@ print(f"Storage directory: {_rel(STORAGE_DIR)}")
 dm = DataManager()
 
 # Fetch a single symbol (defaults to Yahoo Finance for equities)
-aapl = dm.fetch("AAPL", "2024-01-01", "2024-12-31", provider="yahoo")
+aapl = dm.fetch(DEMO_SYMBOL, DEMO_START, DEMO_END, provider=DEMO_PROVIDER)
 
 print(f"AAPL: {aapl.shape[0]} rows, {aapl.shape[1]} columns")
 print(f"Date range: {aapl['timestamp'].min().date()} to {aapl['timestamp'].max().date()}")
@@ -148,25 +162,27 @@ aapl.head(3)
 
 # %%
 # Fetch 5 ETFs in parallel
-etf_symbols = ["SPY", "QQQ", "IWM", "TLT", "GLD"]
+etf_symbols = ETF_SYMBOLS
 etf_data = dm.batch_load(
     symbols=etf_symbols,
-    start="2024-01-01",
-    end="2024-12-31",
-    provider="yahoo",
-    max_workers=4,
+    start=DEMO_START,
+    end=DEMO_END,
+    provider=DEMO_PROVIDER,
+    max_workers=MAX_WORKERS,
 )
 
 print(f"Combined: {etf_data.shape[0]:,} rows across {etf_data['symbol'].n_unique()} symbols")
 
-# The stacked frame is easier to read as a picture than as a row count. Rebase
-# each ETF's close to 100 at the first 2024 session and color by asset class:
-# the batch is one call, but the panel spans equities (SPY/QQQ/IWM), long bonds
-# (TLT), and gold (GLD). Color carries the asset class, not the ticker — the
-# three equity lines move as a bundle while bonds and gold pull away, which is
-# exactly the cross-asset dispersion a multi-asset loader exists to capture.
+# %% [markdown]
+# A row count says the call returned something; it does not say what. Rebasing each series to
+# a common level at the first session makes the frame legible, and colouring by asset class
+# rather than by ticker makes the point of a multi-asset loader visible: the three equity
+# lines travel together and the bond and gold lines do not, which is the dispersion a batch
+# spanning three asset classes exists to capture and a single-asset loader cannot show.
+
+# %%
 etf_rebased = etf_data.sort("timestamp").with_columns(
-    (pl.col("close") / pl.col("close").first().over("symbol") * 100).alias("rebased")
+    (pl.col("close") / pl.col("close").first().over("symbol") * REBASE_LEVEL).alias("rebased")
 )
 
 etf_class = {
@@ -197,15 +213,24 @@ for sym in etf_symbols:
         )
     )
     seen.add(cls)
-fig.add_hline(y=100, line=dict(color=COLORS["neutral"], width=1, dash="dot"))
+fig.add_hline(y=REBASE_LEVEL, line=dict(color=COLORS["neutral"], width=1, dash="dot"))
 fig.update_layout(
-    title="One batch_load call returns three asset classes on one axis",
+    title="Batch-loaded ETFs, rebased and coloured by asset class",
     xaxis_title="Date",
-    yaxis_title="Rebased close (Jan 2 2024 = 100)",
+    yaxis_title=f"Rebased close (first session = {REBASE_LEVEL:.0f})",
     height=420,
     legend_title="Asset class",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Five lines over one year, rebased to a common level at the first session and coloured "
+    "in three groups for equities, long bonds and gold, with a dotted reference line at "
+    "the rebase level. The three equity lines rise together into the autumn and then "
+    "separate, two finishing well above the reference line and one falling back toward "
+    "it. The gold line runs highest through the autumn and eases back to join the "
+    "equity leaders. The bond line spends almost the whole year below the reference "
+    "line and ends furthest below it.",
+)
 
 # %% [markdown]
 # ---
@@ -216,7 +241,6 @@ fig.show()
 # ships curated universes that stay current with index rebalances.
 
 # %%
-# List available universes
 print("Available universes:")
 for name in Universe.list_universes():
     symbols = Universe.get(name)
@@ -229,9 +253,11 @@ print(f"\nS&P 500: {len(sp500)} symbols")
 print(f"First 10: {sp500[:10]}")
 print(f"Last 10:  {sp500[-10:]}")
 
+# %% [markdown]
+# A universe feeds straight into `batch_load`. The full list is the whole index, which is
+# more fetching than a demonstration needs, so this takes a slice of it.
+
 # %%
-# Use with DataManager.batch_load_universe for one-line loading
-# (fetches all 503 S&P 500 symbols — use a smaller slice for demo)
 sp500_sample = dm.batch_load(
     symbols=sp500[:5],
     start="2024-06-01",
@@ -257,9 +283,9 @@ for name in ["etf_momentum", "crypto_arb"]:
 # ## 3. HiveStorage: Partitioned Parquet
 #
 # For data you'll query repeatedly, Hive-partitioned Parquet is the storage
-# layer used throughout ml4t-data. The HiveStorage backend collapses the
-# logical key `equities/daily/AAPL` to a filesystem-safe directory name and
-# nests Hive-style year/month partitions underneath:
+# layer used throughout ml4t-data. The HiveStorage backend encodes a logical key such as
+# `equities/daily/AAPL` as a filesystem-safe directory name and nests Hive-style year and
+# month partitions underneath:
 #
 # ```
 # hive_demo/
@@ -288,7 +314,7 @@ storage_config = StorageConfig(
 )
 storage = HiveStorage(config=storage_config)
 
-# DataManager with storage — enables load/update/metadata operations
+# Given a storage backend, the same manager gains load, update and metadata operations.
 dm_stored = DataManager(storage=storage)
 
 # %% [markdown]
@@ -309,27 +335,28 @@ for symbol in symbols:
 # %% [markdown]
 # ### Query Stored Data
 
+# %% [markdown]
+# `storage.list_keys()` walks the on-disk layout rather than reading a manifest, so it
+# reports what is actually there even if a metadata file is missing or stale.
+#
+# The read below carries a date range, and only the partitions overlapping that range are
+# opened. Reading one year out of a two-year archive touches about half the files.
+
 # %%
-# List what's in storage. `storage.list_keys()` walks the on-disk layout, so it
-# reports every symbol regardless of metadata-file contents.
 stored_symbols = sorted(storage.list_keys())
 print(f"Symbols in storage: {stored_symbols}")
-
-# Read back with a date-range filter — only the matching month=k partitions
-# touch disk, so reading 2024 from a 2-year archive halves the I/O.
 aapl_2024 = storage.read(
-    stored_keys["AAPL"],
-    start_date=datetime(2024, 1, 1),
-    end_date=datetime(2024, 12, 31),
+    stored_keys[DEMO_SYMBOL],
+    start_date=datetime.strptime(DEMO_START, "%Y-%m-%d"),
+    end_date=datetime.strptime(DEMO_END, "%Y-%m-%d"),
 ).collect()
-print(f"\nAAPL 2024 only: {len(aapl_2024)} rows (partition-pruned)")
+print(f"\n{DEMO_SYMBOL} {DEMO_START} to {DEMO_END}: {len(aapl_2024)} rows (partition-pruned)")
 print(f"Date range: {aapl_2024['timestamp'].min().date()} to {aapl_2024['timestamp'].max().date()}")
 
 # %% [markdown]
 # ### Metadata
 
 # %%
-# Check metadata for stored symbols
 for symbol in symbols:
     meta = dm_stored.get_metadata(symbol)
     if meta:
@@ -340,31 +367,37 @@ for symbol in symbols:
 # %% [markdown]
 # ### Inspect Partition Structure
 
+# %% [markdown]
+# The directory names are not addressable from outside: the key is encoded for filesystem
+# safety, and each write commits into a new generation directory so a failed write cannot
+# leave a half-written partition visible. `partitions()` is therefore how a caller asks what
+# the store wrote, rather than listing a path it guessed.
+
 # %%
-# Ask the store what it wrote. The directory names are not addressable from outside -
-# the key is encoded for filesystem safety, and each write commits into a new generation
-# directory so a failed write cannot leave a half-written partition visible - so
-# `partitions()` is how a caller reports the layout.
 for symbol in symbols:
     parts = storage.partitions(stored_keys[symbol])
     print(f"{symbol}: {len(parts)} partitions, {sum(p.size_bytes for p in parts) / 1024:.1f} KB")
 
 print("\nAAPL partitions (first 8):")
-for part in storage.partitions(stored_keys["AAPL"])[:8]:
+for part in storage.partitions(stored_keys[DEMO_SYMBOL])[:8]:
     print(f"  {part.label}  ({part.size_bytes / 1024:.1f} KB)")
 
 # %% [markdown]
-# The two-year `AAPL` load lands as one Parquet file per calendar month — the
-# `partition_granularity="month"` setting above. A date-range query reads only
-# the months it needs (partition pruning); an incremental update writes only the
-# newest month. Each monthly file below holds ~21 trading days, so the sizes are
-# near-uniform, and every new month is a new partition, never a rewrite.
+# The two-year load lands as one Parquet file per calendar month, which is the
+# `partition_granularity="month"` setting above. Two things follow from that and the
+# chart below shows both. A date-range query reads only the months it overlaps, so the
+# partition-pruned read printed earlier touched a fraction of the files. And an
+# incremental update writes one new file rather than rewriting anything, because a month
+# that has closed never changes.
+#
+# The near-uniform file sizes are the visible consequence: every month holds about the
+# same number of trading days, so no partition is large enough to dominate a read.
 
 # %%
 aapl_sizes = pl.DataFrame(
     [
         {"period": part.label, "size_kb": part.size_bytes / 1024}
-        for part in storage.partitions(stored_keys["AAPL"])
+        for part in storage.partitions(stored_keys[DEMO_SYMBOL])
     ]
 )
 
@@ -376,13 +409,18 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="AAPL Hive storage: one Parquet partition per month",
+    title=f"{DEMO_SYMBOL} Hive partitions, one per month",
     xaxis_title="Partition (year-month)",
     yaxis_title="Partition size (KB)",
     height=420,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A bar per calendar month showing the size in kilobytes of that month's Parquet "
+    "partition. The bars are of similar height across the whole span, with small "
+    "variation and no month standing out.",
+)
 
 # %% [markdown]
 # ---
@@ -438,18 +476,22 @@ for symbol in symbols:
 # %% [markdown]
 # ### Gap Detection
 #
+# `exclude_weekends=True` stops Saturdays and Sundays counting as gaps, which is the only
+# part of the trading calendar a detector can infer without being handed one.
+#
+# What it reports therefore depends on the shape of the series it is given, and the two
+# shapes give opposite answers. The cached series here is calendar-dense: every non-trading
+# day carries the prior close forward, so there is nothing missing to find and the detector
+# reports none. A sparse feed carrying only trading days would have the detector flag every
+# holiday, because a holiday and an outage are the same absence to anything without an
+# exchange calendar. Neither answer is wrong and neither is a coverage check on its own.
+#
 # Before backtesting, verify data completeness. The IncrementalUpdater
 # can detect missing trading days.
 
 # %%
 from ml4t.data.update_manager import GapDetector
 
-# Pass `exclude_weekends=True` so Saturdays and Sundays don't count as gaps.
-# The cached series here is calendar-dense (each non-trading day carries the
-# prior close forward), so the detector reports no gaps. For a sparse,
-# trading-days-only feed it would instead flag every missing session, including
-# holidays — without an exchange calendar it cannot tell a holiday from a true
-# gap, so pair it with a calendar-aware check for end-of-day pipelines.
 gap_detector = GapDetector(exclude_weekends=True)
 
 for symbol, key in stored_keys.items():
@@ -564,22 +606,25 @@ def production_pipeline(
 
 
 # %%
-# Run pipeline on a small universe
 pipeline_output = production_pipeline(
-    universe_name="etf_momentum",
-    start="2024-01-01",
-    end="2024-12-31",
+    universe_name=PIPELINE_UNIVERSE,
+    start=DEMO_START,
+    end=DEMO_END,
     storage_path=STORAGE_DIR / "pipeline_demo",
 )
 
 pipeline_output.head()
 
 # %% [markdown]
-# A single validation issue per symbol on this 2024 ETF panel comes from the
-# `OHLCVValidator(max_return_threshold=0.5)` flagging the largest 1-day move
-# in each series — a sanity check, not a data error. The validator surfaces
-# candidates; downstream code decides whether to drop, winsorize, or pass
-# through. Section 2.6 (data quality) covers the trade-offs.
+# The issue count printed above is the extreme-return check firing, not corrupt data. The
+# validator is configured with a maximum daily move, and on a one-year ETF panel the largest
+# move in each series is the one it flags. That is the check working: it surfaces candidates
+# and says nothing about which of them are defects.
+#
+# Deciding what to do with a candidate is a separate step, and it belongs downstream where
+# the context is. `13_data_quality_framework` scores exactly this kind of flag against the
+# corporate-action columns of the same file, which is the difference between a candidate
+# list and a defect list.
 
 # %% [markdown]
 # ---
