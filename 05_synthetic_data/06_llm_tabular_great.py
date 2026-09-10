@@ -86,6 +86,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
+import transformers
 from be_great import GReaT
 from plotly.subplots import make_subplots
 from scipy import stats
@@ -100,6 +101,11 @@ from utils.style import COLORS, plot_fidelity_comparison, show_plotly_with_alt, 
 # Suppress transformers warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+# be_great overwrites its own checkpoint directory on every re-run, which is what we want.
+warnings.filterwarnings("ignore", category=UserWarning, module="be_great")
+# transformers routes its notices through logging rather than warnings: the pad-token
+# alignment below is expected, since GPT-2 ships without a pad token and GReaT adds one.
+transformers.logging.set_verbosity_error()
 
 # %% tags=["parameters"]
 # GReaT framework parameters (Borisov et al. 2023)

@@ -75,12 +75,20 @@
 # %%
 """Differential Privacy for Generative Models — DP-GAN with Opacus privacy guarantees."""
 
+import logging
 import warnings
 from datetime import date
 
 # Scoped by category and module, so a warning from this notebook's own code still shows.
 warnings.filterwarnings("ignore", category=UserWarning, module="opacus")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+# The hook warning is raised from C, so it is attributed to `sys` rather than to torch and
+# the module filter above never sees it. It fires because opacus registers backward hooks on
+# the discriminator's first layer, whose input is data and requires no gradient.
+warnings.filterwarnings("ignore", message="Full backward hook is firing")
+# Opacus reports the drop_last it ignores through its own logger, not through warnings.
+# DPDataLoader samples with Poisson sampling, so batch size varies and drop_last has no meaning.
+logging.getLogger("opacus").setLevel(logging.ERROR)
 
 import matplotlib.pyplot as plt
 import numpy as np
