@@ -49,6 +49,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import HTML, display
 from ml4t.backtest import (
     BacktestConfig,
     CommissionType,
@@ -332,8 +333,8 @@ ax.set_ylabel("Distance (based on correlation)")
 ax.set_xlabel("ETF")
 add_message_title(
     ax,
-    "ETF correlations separate defensive assets from the equity cluster",
-    subtitle="Ward linkage on correlation distance, fixed 15-ETF teaching universe",
+    "Hierarchical clustering of fifteen ETFs on correlation distance",
+    subtitle="Ward linkage, fixed teaching universe",
 )
 show_with_alt(
     fig,
@@ -402,7 +403,7 @@ fig.add_trace(
     col=2,
 )
 fig.update_layout(
-    title="Quasi-diagonal ordering exposes clustered covariance blocks",
+    title="Covariance matrix in the original and the quasi-diagonal ordering",
     height=560,
     width=1100,
     margin=dict(l=90, r=90, b=110, t=100),
@@ -440,7 +441,7 @@ fig = px.bar(
     weights_df,
     x="Name",
     y="HRP Weight",
-    title="HRP puts most of the portfolio in the lowest-variance holding",
+    title="HRP weight per ETF, largest first",
     color="HRP Weight",
     color_continuous_scale=[COLORS["silver_muted"], COLORS["blue"]],
 )
@@ -611,10 +612,13 @@ all_weights = pd.DataFrame(
 # Visualization: Weight comparison
 fig = go.Figure()
 
+# One colour per allocator, in the order the four are always listed. Equal weight is the
+# benchmark, so it takes the neutral grey; HRP is the subject of the notebook and takes the
+# primary colour. The same four are reused for the equity curves in section 9.
 methods = ["Equal", "Inv Vol", "Min Var (LW)", "HRP"]
-colors = [COLORS["silver_muted"], COLORS["blue"], COLORS["copper"], COLORS["positive"]]
+ALLOCATOR_COLORS = [COLORS["neutral"], COLORS["amber"], COLORS["copper"], COLORS["blue"]]
 
-for method, color in zip(methods, colors, strict=False):
+for method, color in zip(methods, ALLOCATOR_COLORS, strict=True):
     fig.add_trace(
         go.Bar(
             name=method,
@@ -625,7 +629,7 @@ for method, color in zip(methods, colors, strict=False):
     )
 
 fig.update_layout(
-    title="Risk-based methods diverge most in their largest allocations",
+    title="Portfolio weight per ETF under four allocators",
     barmode="group",
     xaxis_tickangle=45,
     xaxis_title="ETF",
@@ -636,7 +640,10 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Grouped bars of portfolio weight per ETF for equal weight, inverse volatility, shrinkage minimum variance and HRP, with a dashed line at the equal-weight level.",
+    "Grouped bars of portfolio weight per ETF for equal weight, inverse volatility, shrinkage "
+    "minimum variance and HRP. The two variance-based allocators put the bulk of the "
+    "portfolio in the aggregate bond fund, while the equal-weight bars sit at the same "
+    "height across the universe.",
 )
 
 # %% [markdown]
@@ -813,11 +820,12 @@ def rebalance_target(
     top_n: int,
     lookback: int,
     method: str,
+    min_history: int,
 ) -> pd.Series | None:
     """Return the target decided at `date`, or None when history/signal is unavailable."""
     loc = returns.index.get_loc(date)
     hist_returns = returns.iloc[max(0, loc - lookback) : loc]
-    if len(hist_returns) < 60:
+    if len(hist_returns) < min_history:
         return None
     top_assets = select_top_assets(date, returns, predictions, top_n)
     if len(top_assets) < 2:
@@ -841,9 +849,10 @@ def walk_forward_backtest(
     returns: pd.DataFrame,
     allocation_fn,
     predictions: pl.DataFrame,
-    lookback: int = 252,
-    rebalance_freq: str = "M",
-    top_n: int = 5,
+    lookback: int,
+    rebalance_freq: str,
+    top_n: int,
+    min_history: int,
     method: str = "allocator",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Hold positions between month-end decisions and let weights drift with returns."""
@@ -863,7 +872,7 @@ def walk_forward_backtest(
             current_weights = end_values / end_values.sum()
         if date in rebalance_dates:
             target = rebalance_target(
-                returns, predictions, date, allocation_fn, top_n, lookback, method
+                returns, predictions, date, allocation_fn, top_n, lookback, method, min_history
             )
             if target is not None:
                 pending_target = target
@@ -877,8 +886,23 @@ def walk_forward_backtest(
     )
 
 
+# %% [markdown]
+# Four settings decide what the backtest does, and every allocator gets the same four.
+# `LOOKBACK` is how much trailing history each covariance is estimated on - one year of
+# sessions, which with five selected names leaves the sample covariance comfortably
+# over-determined. `TOP_N` is how many of the fifteen the prediction picks each month, and it is
+# the number that decides whether the ratio of assets to observations is anywhere near the
+# regime HRP is designed for. `REBALANCE_FREQ` is month-end, so the targets are decided twelve
+# times a year and held in between. `MIN_HISTORY` is the shortest trailing window an allocator
+# is allowed to size from at all; below it the rebalance is skipped rather than estimated on too
+# few rows.
+
 # %%
-# Run walk-forward backtests for all allocation methods
+LOOKBACK = 252
+TOP_N = 5
+REBALANCE_FREQ = "M"
+MIN_HISTORY = 60
+
 allocation_methods = {
     "Equal Weight": lambda r: equal_weights(len(r.columns)),
     "Inverse Volatility": inverse_volatility_weights,
@@ -896,10 +920,11 @@ for name, alloc_fn in allocation_methods.items():
         returns=returns,
         allocation_fn=alloc_fn,
         predictions=upstream_preds,
-        lookback=252,
-        rebalance_freq="M",
-        top_n=5,
+        lookback=LOOKBACK,
+        rebalance_freq=REBALANCE_FREQ,
+        top_n=TOP_N,
         method=name,
+        min_history=MIN_HISTORY,
     )
     results[name] = ret_df["return"]
     weights_all[name] = w_df
@@ -1109,11 +1134,7 @@ cumulative = (1 + portfolio_returns).cumprod()
 
 fig = go.Figure()
 
-for col, color in zip(
-    cumulative.columns,
-    [COLORS["silver_muted"], COLORS["blue"], COLORS["copper"], COLORS["positive"]],
-    strict=False,
-):
+for col, color in zip(cumulative.columns, ALLOCATOR_COLORS, strict=True):
     fig.add_trace(
         go.Scatter(
             x=cumulative.index,
@@ -1134,7 +1155,10 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Four growth-of-one-dollar paths from the walk-forward backtest, one per allocation method, staying close together throughout.",
+    "Four growth-of-one-dollar paths from the walk-forward backtest, one per allocation "
+    "method. They track each other until about 2018 and then separate into two pairs, equal "
+    "weight and inverse volatility above, shrinkage minimum variance and HRP below, with all "
+    "four falling sharply in early 2020.",
 )
 
 # %% [markdown]
@@ -1171,8 +1195,55 @@ rolling_beta_figure = hrp_tear_sheet.figures["Rolling Beta"]
 rolling_beta_figure.update_layout(margin=dict(l=60, r=90, t=40, b=40))
 rolling_beta_figure.update_annotations(x=0.995, xanchor="right")
 
-# Inline display: metrics summary + each constituent figure as a separate cell.
-hrp_tear_sheet.show()
+# %% [markdown]
+# `hrp_tear_sheet.show()` would render the metrics block and then loop `fig.show()` over the
+# nine figures, which publishes each PNG with no alt text and leaves a screen reader with
+# nothing. Displaying the same content a figure at a time is what lets each one carry a
+# description of what it plots.
+
+# %%
+DASHBOARD_ALT = {
+    "Cumulative Returns": (
+        "Cumulative return of the HRP portfolio and of the SPY benchmark against date, both "
+        "compounding from the start of the invested window."
+    ),
+    "Drawdown": (
+        "The HRP portfolio's underwater curve against date, filled to zero, showing the "
+        "percentage below its own running peak."
+    ),
+    "Rolling Sharpe Ratio": (
+        "Two lines of rolling Sharpe ratio against date, over sixty-three and two hundred and "
+        "fifty-two sessions, the shorter window swinging more widely than the longer one."
+    ),
+    "Rolling Volatility": (
+        "Three lines of annualized rolling volatility against date, over twenty-one, "
+        "sixty-three and two hundred and fifty-two sessions."
+    ),
+    "Rolling Beta": (
+        "Rolling beta of the HRP portfolio against SPY, plotted against date and filled to "
+        "zero, with horizontal reference lines at zero and at one."
+    ),
+    "Annual Returns": (
+        "Bars of the HRP portfolio's annual return by calendar year, with the benchmark's "
+        "annual return marked as points and a line at zero."
+    ),
+    "Monthly Returns Heatmap": (
+        "Heatmap of monthly return, years down the vertical axis and calendar months across, "
+        "coloured from losses to gains."
+    ),
+    "Returns Distribution": (
+        "Histogram of the HRP portfolio's daily returns with a fitted normal density drawn "
+        "over it and vertical reference lines in the left tail."
+    ),
+    "Top Drawdowns": (
+        "Horizontal bars of the depth of the five deepest drawdown episodes, one bar per "
+        "episode, labelled by the dates the episode spans."
+    ),
+}
+
+display(HTML(f"<pre>{hrp_tear_sheet.metrics.summary()}</pre>"))
+for figure_name, dashboard_figure in hrp_tear_sheet.figures.items():
+    show_plotly_with_alt(dashboard_figure, DASHBOARD_ALT[figure_name])
 
 # %%
 # HTML delivery: the same content as a single self-contained file.
@@ -1216,7 +1287,7 @@ if not hrp_weights_hist.empty:
         )
 
     fig.update_layout(
-        title="Monthly HRP targets change as the selected ETF set changes",
+        title="Monthly HRP target weight for the six largest average holdings",
         xaxis_title="Date",
         yaxis_title="Weight",
         height=450,
@@ -1242,14 +1313,12 @@ else:
 
 # %%
 ranked = metrics_df.sort_values("Sharpe Ratio", ascending=False).reset_index(drop=True)
-for rank, row in ranked.iterrows():
-    print(
-        f"  {rank + 1}. {row['Method']:<19} Sharpe {row['Sharpe Ratio']:>6.3f}   "
-        f"vol {row['Annual Vol']:>6.1%}   turnover {row['Avg Turnover']:>7.1%}"
-    )
-print()
-print(f"HRP rank by Sharpe: {int(ranked.index[ranked['Method'] == 'HRP'][0]) + 1} of {len(ranked)}")
-print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each month: 5")
+ranked.index = pd.RangeIndex(1, len(ranked) + 1, name="Rank by Sharpe")
+
+print(f"Assets in the teaching universe: {n_assets}")
+print(f"Estimation window each allocator sizes from: {LOOKBACK} sessions")
+print(f"Assets selected each month: {TOP_N}")
+ranked[["Method", "Sharpe Ratio", "Annual Vol", "Avg Turnover"]].round(4)
 
 # %% [markdown] tags=["results"]
 # Read the ranking against what each allocator had to estimate, because that is the axis the four
@@ -1277,10 +1346,10 @@ print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each 
 # where that claim would be tested - but it measures two things at once. Every row pays for the
 # monthly re-selection of five names out of fifteen, and every row then pays for whatever its
 # own sizing rule does with the names it keeps. The equal-weight row shows what the schedule
-# costs an allocator that makes no sizing decision at all, which is a useful benchmark and not a
-# floor the others sit on top of: what a replacement costs depends on the weights being
-# replaced, so a concentrated allocator's selection cost is a different number rather than the
-# same one plus a margin.
+# costs an allocator that makes no sizing decision at all, which is a reference point and not a
+# quantity the other three sit above: what a replacement costs depends on the weights being
+# replaced, so a concentrated allocator's re-selection cost is a different number rather than
+# the equal-weight one plus a margin.
 #
 # ### What is true regardless of the ranking
 #
@@ -1333,10 +1402,13 @@ else:
 # 3. **HRP concentrates too, on the low-variance assets.** Section 7 traces a majority weight in a
 #    single bond fund to two successive inverse-variance splits. Risk-based is not the same thing
 #    as diversified.
-# 4. **Turnover is measured against the floor, not in absolute terms.** Every allocator inherits
-#    the churn of the monthly re-selection, and equal weight measures that floor exactly. What
-#    tests the claim that clustering stabilizes an allocation is the gap between HRP's turnover
-#    and equal weight's, not HRP's own number.
+# 4. **Turnover measures re-selection and sizing together, and no column separates them.** Every
+#    allocator pays for replacing names the monthly signal drops, and then pays again for
+#    whatever its own sizing rule does with the names it keeps. Equal weight shows what the
+#    schedule costs an allocator that makes no sizing decision, which is a reference point and
+#    not a quantity the others sit above: what a replacement costs depends on the weights being
+#    replaced. So HRP's turnover against equal weight's is suggestive about stability and is not
+#    a measurement of it.
 # 5. **The comparison is conditional in three ways.** A fixed 15-ETF ex-post universe, gross of
 #    costs in the vectorized path, and a selection signal ranked on validation data. It shows
 #    allocation behavior, not an out-of-sample estimate.
