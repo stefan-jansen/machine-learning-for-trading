@@ -53,57 +53,57 @@
 #   bipartite graph usable for similarity and clustering analysis
 
 # %% [markdown]
-# ## 1. Setup and Imports
+# ## Setup
 #
-# These parameters control the institution universe and filing horizon the
-# downstream analysis uses. The raw data is already on disk - this notebook
-# loads it via the canonical loader and filters it for the graph experiments.
+# These parameters set the institution universe and the filing horizon. The raw
+# data is already on disk; this notebook loads it through the canonical loader
+# and narrows it.
 
 # %%
 """Institutional Holdings Graph - point-in-time 13F ownership descriptors."""
 
-import warnings
-
-from IPython.display import display
-
-warnings.filterwarnings("ignore")
-
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import display
 from polars.testing import assert_frame_equal
 
 from data import load_13f_edges, load_13f_stock_features, load_institutional_holdings_13f
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# The institution universe is a list of CIKs and the display name comes from
+# the filing, not from this file. The CIK is the identity, and a hand-written
+# label that disagrees with the filer renames a manager in every table
+# downstream. This notebook carried one: 0001450144 was written as "Two Sigma
+# Investments", and that CIK files as TWO SIGMA SECURITIES, LLC - the
+# market-making entity, a different book from Two Sigma Investments LP.
+#
+# Extend the list to widen the analysis; rows for any other CIK in the artifact
+# are dropped.
 
 # %% tags=["parameters"]
 NUM_QUARTERS = 4
 MAX_INSTITUTIONS = 0
 
-# Institution universe (name, CIK with leading-zero padding). Rows for any
-# other CIKs present in the artifact are filtered out. Extend this list to
-# widen the analysis.
-ALL_INSTITUTIONS = [
-    ("Berkshire Hathaway", "0001067983"),
-    ("Bridgewater Associates", "0001350694"),
-    ("Renaissance Technologies", "0001037389"),
-    ("Two Sigma Investments", "0001450144"),
-    ("DE Shaw", "0001009207"),
-    ("AQR Capital", "0001167557"),
-    ("Citadel Advisors", "0001423053"),
-    ("Millennium Management", "0001273087"),
-    ("Point72 Asset Management", "0001603466"),
-    ("Tiger Global", "0001167483"),
+SELECTED_CIKS = [
+    "0001067983",
+    "0001350694",
+    "0001037389",
+    "0001450144",
+    "0001009207",
+    "0001167557",
+    "0001423053",
+    "0001273087",
+    "0001603466",
+    "0001167483",
 ]
 
 # %%
-INSTITUTIONS = (
-    ALL_INSTITUTIONS[:MAX_INSTITUTIONS] if MAX_INSTITUTIONS > 0 else ALL_INSTITUTIONS.copy()
-)
-SELECTED_CIKS = [cik for _, cik in INSTITUTIONS]
-INSTITUTION_NAMES = {cik: name for name, cik in INSTITUTIONS}
+if MAX_INSTITUTIONS > 0:
+    SELECTED_CIKS = SELECTED_CIKS[:MAX_INSTITUTIONS]
 
-print(f"Institution filter: {len(INSTITUTIONS)}")
+print(f"Institution filter: {len(SELECTED_CIKS)}")
 print(f"Quarters to retain: {NUM_QUARTERS}")
 
 # %% [markdown]
@@ -118,9 +118,9 @@ print(f"Quarters to retain: {NUM_QUARTERS}")
 # If the file is missing, the loader raises `DataNotFoundError` with a pointer
 # to the downloader and its README.
 #
-# **Interpretation**: The institution count and quarter window determine the
-# graph density. That result directly affects the crowding, similarity, and
-# ownership-change descriptors later in the notebook.
+# The institution count and the quarter window set the graph's density, and
+# every descriptor below inherits them. Ten managers is a small universe, and
+# Part 3 shows what that does to a similarity computed over it.
 
 # %%
 holdings_df = load_institutional_holdings_13f()
@@ -134,16 +134,18 @@ if missing_provenance:
 if holdings_df.schema["report_date"] != pl.Date:
     raise TypeError("Canonical 13F report_date must use the Polars Date type.")
 
-# Filter to the CIKs listed in ALL_INSTITUTIONS. The artifact may contain a
-# wider or narrower set; rows outside this universe are dropped.
+
+# %% [markdown]
+# Whether a manager filed for a quarter, and when that quarter became public,
+# are questions about what was *disclosed* rather than about what enters the
+# graph. The producer counts any disclosed row as evidence a manager filed, so
+# both are answered from the selected holdings before the option filter below:
+# a manager disclosing options only has still filed. Reading coverage off the
+# filtered frame would make this notebook reject a quarter the producer used,
+# and the parity assertion at the end would compare two different quarters.
+
+# %%
 holdings_df = holdings_df.filter(pl.col("cik").is_in(SELECTED_CIKS))
-# Whether a manager filed for a quarter, and when that quarter became public, are
-# questions about what was *disclosed* - not about what enters the graph. The producer
-# counts any disclosed row as evidence a manager filed, so both are answered from the
-# selected holdings before the option filter below. A manager that discloses options only
-# has filed; reading coverage off the filtered frame would make this notebook step back
-# from, or reject, a quarter the producer used, and the parity assertion at the end would
-# then compare two different quarters.
 disclosed_df = holdings_df
 option_rows = holdings_df.filter(
     pl.col("put_call").fill_null("").cast(pl.Utf8).str.strip_chars() != ""
@@ -164,10 +166,12 @@ holdings_df = holdings_df.with_columns(
     pl.col("report_date").alias("report_period"),
 )
 
+# %% [markdown]
+# A reporting quarter becomes available only once the last included manager has
+# filed for it. Duplicate CIK/CUSIP rows inside one information table are
+# summed rather than picked from positionally.
+
 # %%
-# A reporting quarter becomes available only after the last included manager
-# files. Duplicate CIK/CUSIP rows in an information table are summed rather than
-# selected positionally.
 quarter_availability = (
     disclosed_df.with_columns(pl.col("report_date").alias("report_period"))
     .group_by("report_period")
@@ -176,7 +180,15 @@ quarter_availability = (
 
 # %% [markdown]
 # Canonicalize each CUSIP's issuer label by the largest disclosed value in that
-# reporting period, with a lexical tie-break. This keeps graph labels stable.
+# reporting period, with a lexical tie-break, so a manager's spacing or
+# abbreviation does not decide how a company is named below.
+#
+# A quarter then enters the graph only once every covered manager has filed for
+# it. Filings are due 45 days after quarter end, so inside that window the
+# newest quarter holds the early filers only, and their peers' absence would
+# read as a mass exit rather than as missing coverage. The downloader applies
+# the same rule, which is what keeps the reconstruction at the end of this
+# notebook equal to its artifacts.
 
 # %%
 issuer_names = (
@@ -201,11 +213,6 @@ positions_df = (
     .join(quarter_availability, on="report_period", how="left")
 )
 
-# A quarter enters the graph only once every covered manager has filed for it.
-# 13F filings are due 45 days after quarter end, so inside that window the newest
-# quarter holds the early filers only, and their peers' absence would read as a
-# mass exit rather than as missing coverage. The downloader applies the same rule,
-# so this is also what keeps the reconstruction below equal to its artifacts.
 covered_ciks = disclosed_df["cik"].n_unique()
 complete_periods = (
     disclosed_df.with_columns(pl.col("report_date").alias("report_period"))
@@ -228,13 +235,8 @@ if partial_periods:
         f"{', '.join(str(p) for p in partial_periods)}"
     )
 positions_df = positions_df.filter(pl.col("report_period").is_in(complete_periods))
-# Every complete quarter, before NUM_QUARTERS narrows what this notebook displays. The
-# ownership-change table is part of the canonical feature set and the producer computes it
-# over the artifact's own last two complete quarters, so it has to be built from this frame
-# rather than from the displayed one: with NUM_QUARTERS=1 over a multi-quarter artifact the
-# truncated frame has nothing to compare, and emitting zero change there would contradict a
-# producer that compared two quarters. A one-quarter *artifact* is the different case the
-# no-comparison branch below handles.
+# Held before NUM_QUARTERS narrows the display: the change table is computed
+# over the artifact's last two complete quarters, as the producer does.
 complete_positions_df = positions_df
 
 if NUM_QUARTERS > 0:
@@ -255,10 +257,9 @@ print(
 )
 
 # %% [markdown]
-# **Interpretation**: The filtered panel exposes the core constraints of 13F
-# data: sparse quarterly snapshots, filing lags, and heterogeneous institution
-# coverage. The notebook therefore treats each row as a disclosed quarter-end
-# position, not as evidence about holdings between reports.
+# Each row is a position disclosed as of a quarter end, not evidence about
+# what was held between quarter ends. A manager can open and close a position
+# inside a quarter and disclose neither.
 
 # %% [markdown]
 # ## Part 2: Bipartite Graph Construction
@@ -294,9 +295,9 @@ else:
 # - Factor construction (co-ownership as a factor)
 # - Risk management (crowding detection)
 #
-# **Interpretation**: The bipartite summary print translates raw filings into a
-# network object. That result is the bridge from disclosure data to tradable
-# signals such as overlap, concentration, and shared ownership pressure.
+# Read the density above before the similarities below. It is the share of
+# possible institution-stock edges that exist, and at ten managers each holding
+# thousands of names it is not small.
 
 
 # %%
@@ -338,42 +339,131 @@ def compute_coownership_matrix(holdings: pl.DataFrame) -> tuple[np.ndarray, list
 # %%
 if len(latest_holdings) > 0:
     coown_matrix, stock_list = compute_coownership_matrix(latest_holdings)
-
-    print("=== Co-Ownership Matrix ===")
-    print(f"Shape: {coown_matrix.shape}")
-    print(f"Sparsity: {(coown_matrix < 0.01).mean():.1%} of pairs have <1% similarity")
-
-    # Find stocks with highest co-ownership
-    np.fill_diagonal(coown_matrix, 0)  # Ignore self-similarity
+    np.fill_diagonal(coown_matrix, 0)
     row_idx, col_idx = np.triu_indices_from(coown_matrix, k=1)
     pair_values = coown_matrix[row_idx, col_idx]
-    max_similarity = float(pair_values.max()) if len(pair_values) else 0.0
 
-    if max_similarity > 0:
-        tied = np.flatnonzero(np.isclose(pair_values, max_similarity, rtol=1e-7, atol=1e-8))
-        selected = min(
-            tied,
-            key=lambda index: (
-                stock_list[row_idx[index]],
-                stock_list[col_idx[index]],
-            ),
-        )
-        stock_a = stock_list[row_idx[selected]]
-        stock_b = stock_list[col_idx[selected]]
-        similarity = pair_values[selected]
+    ownership_norm, _ = build_ownership_matrix(latest_holdings)
+    holder_counts = (ownership_norm > 0).sum(axis=0)
 
-        # Get issuer names
-        name_a = latest_holdings.filter(pl.col("cusip") == stock_a)["issuer"].first()
-        name_b = latest_holdings.filter(pl.col("cusip") == stock_b)["issuer"].first()
-
-        print("\nHighest co-ownership pair:")
-        print(f"  {name_a} ({stock_a})")
-        print(f"  {name_b} ({stock_b})")
-        print(f"  Similarity: {similarity:.3f}")
+    print("=== Co-Ownership Matrix ===")
+    print(f"Shape: {coown_matrix.shape} over {len(pair_values):,} distinct stock pairs")
+    print(f"Pairs sharing no holder at all: {(pair_values == 0).mean():.1%}")
+    print(f"Pairs below 1% similarity:      {(pair_values < 0.01).mean():.1%}")
+    print(f"Pairs at or above 0.999:        {(pair_values >= 0.999).mean():.1%}")
 
 # %% [markdown]
-# **Interpretation**: The highest-similarity pair identifies securities with the
-# most similar disclosed owner weights. It does not measure return comovement.
+# ### Why so many pairs sit at the maximum
+#
+# The similarity is a cosine between two columns of a matrix with one row per
+# institution, and there are ten institutions. A stock held by exactly one of
+# them is a vector pointing along one axis, so any two stocks held by the same
+# single institution have a cosine of exactly 1 - not because they are alike in
+# any way an investor would recognise, but because there is one dimension of
+# evidence about each of them and it happens to be the same one.
+#
+# The count below is what that does to the top of the ranking.
+
+# %%
+if len(latest_holdings) > 0:
+    saturated = pair_values >= 0.999
+    single_holder_share = float((holder_counts == 1).mean())
+    if saturated.any():
+        endpoints = np.concatenate(
+            [holder_counts[row_idx[saturated]], holder_counts[col_idx[saturated]]]
+        )
+        one_holder_endpoints = float((endpoints == 1).mean())
+        print(
+            f"Stocks held by exactly one institution: {(holder_counts == 1).sum():,} of "
+            f"{len(holder_counts):,} ({single_holder_share:.0%})"
+        )
+        print(f"Pairs at similarity >= 0.999: {int(saturated.sum()):,}")
+        print(f"  of their endpoints, {one_holder_endpoints:.0%} are single-holder stocks")
+        print(f"  median holders per endpoint: {int(np.median(endpoints))}")
+
+# %% [markdown]
+# So "the highest co-ownership pair" is not a fact about two securities. It is
+# one arbitrary member of a very large tie, and the notebook used to print it
+# to three decimal places as though it had found something.
+#
+# The obvious repair is to require a minimum number of holders. The sweep below
+# measures how much that buys, and it also shows what it does not fix.
+
+# %%
+if len(latest_holdings) > 0:
+    floor_rows = []
+    for floor in (1, 2, 3, 5, 8):
+        eligible = np.flatnonzero(holder_counts >= floor)
+        if len(eligible) < 2:
+            continue
+        block = coown_matrix[np.ix_(eligible, eligible)]
+        upper = block[np.triu_indices_from(block, k=1)]
+        columns = ownership_norm[:, eligible]
+        top_share = columns.max(axis=0) / columns.sum(axis=0)
+        floor_rows.append(
+            {
+                "min_holders": floor,
+                "stocks": len(eligible),
+                "pairs_at_or_above_0999_pct": round(100 * float((upper >= 0.999).mean()), 4),
+                "max_similarity": round(float(upper.max()), 4),
+                "median_top_holder_share": round(float(np.median(top_share)), 2),
+            }
+        )
+    floor_table = pl.DataFrame(floor_rows)
+    floor_table
+
+# %% [markdown]
+# Requiring more holders thins the saturation sharply - the share of pairs at
+# the top of the scale falls by orders of magnitude across those rows - and it
+# does not reach zero until the floor is high enough to leave very few stocks.
+# The last column says why.
+#
+# A cosine is dominated by the largest component, not by the count of non-zero
+# ones. A stock held by five managers where one of them holds most of the
+# position is, for this purpose, almost a one-dimensional vector, and two such
+# stocks sharing that dominant manager score close to 1 whatever the other four
+# do. The median top-holder share falls as the floor rises, which is the real
+# mechanism behind the sweep: raising the holder floor works because it
+# incidentally selects less concentrated names.
+#
+# The pair below is the highest-scoring one at a floor of half the managers,
+# printed with each stock's largest single weight so the reader can see this
+# happening rather than take it on trust.
+
+# %%
+if len(latest_holdings) > 0:
+    min_holders = max(2, latest_holdings["cik"].n_unique() // 2)
+    eligible = holder_counts >= min_holders
+    pair_ok = eligible[row_idx] & eligible[col_idx]
+    if pair_ok.any():
+        candidates = np.flatnonzero(pair_ok)
+        best = candidates[np.argmax(pair_values[candidates])]
+        stock_a, stock_b = stock_list[row_idx[best]], stock_list[col_idx[best]]
+        name_a = latest_holdings.filter(pl.col("cusip") == stock_a)["issuer"].first()
+        name_b = latest_holdings.filter(pl.col("cusip") == stock_b)["issuer"].first()
+        column_a = ownership_norm[:, row_idx[best]]
+        column_b = ownership_norm[:, col_idx[best]]
+        print(f"Highest co-ownership among stocks held by at least {min_holders} managers:")
+        print(
+            f"  {name_a} ({stock_a}), {holder_counts[row_idx[best]]} holders, "
+            f"largest weight {column_a.max() / column_a.sum():.0%}"
+        )
+        print(
+            f"  {name_b} ({stock_b}), {holder_counts[col_idx[best]]} holders, "
+            f"largest weight {column_b.max() / column_b.sum():.0%}"
+        )
+        print(f"  Similarity: {pair_values[best]:.5f}")
+    else:
+        print(f"No pair of stocks is held by {min_holders} or more managers.")
+
+# %% [markdown]
+# The similarity still measures agreement in disclosed portfolio weights and
+# still says nothing about return comovement.
+#
+# The check worth carrying out of this section is not the holder floor. It is
+# to report a concentration alongside any similarity computed over a short
+# vector, because the two together say whether the number rests on one
+# observation or on several, and the similarity alone cannot.
 
 # %% [markdown]
 # ## Part 4: Institutional Ownership Change
@@ -443,9 +533,9 @@ else:
 # Use the quarter-over-quarter change table to identify broad institutional
 # buying, selling, new entries, and full exits.
 #
-# **Interpretation**: The table describes how reported ownership changed between
-# the latest two common reporting quarters. Predictive persistence is not tested.
-#
+# The comparison runs between the two most recent quarters that every included
+# manager filed for, so a manager missing from the newest quarter cannot read
+# as a mass exit.
 
 # %%
 if qoq is not None:
@@ -461,6 +551,7 @@ if qoq is not None:
         top_buys.select(
             [
                 "issuer_name",
+                pl.col("cusip").str.slice(-4).alias("cusip_tail"),
                 "n_institutions",
                 "value_q1_usd",
                 "value_q2_usd",
@@ -475,6 +566,7 @@ if qoq is not None:
         top_sells.select(
             [
                 "issuer_name",
+                pl.col("cusip").str.slice(-4).alias("cusip_tail"),
                 "n_institutions",
                 "value_q1_usd",
                 "value_q2_usd",
@@ -489,15 +581,25 @@ if qoq is not None:
     print(f"Complete exits: {len(exits)}")
 
 # %% [markdown]
-# **Interpretation**: The table measures disclosed quarter-over-quarter changes
-# across managers. Persistence and predictive value require a separate
-# point-in-time return study.
+# A new position and a full exit are both defined against zero disclosed
+# value, so a manager crossing the disclosure threshold in either direction
+# appears as one.
 
 # %% [markdown]
-# ## Part 5: Crowding Descriptors
+# ## Part 5: Crowding descriptors
 #
-# Breadth and ownership concentration form a descriptive crowding proxy.
-# This notebook does not observe trades, liquidation, or price impact.
+# Two quantities per stock. **Breadth** is the number of included managers
+# holding it. **Ownership HHI** is the Herfindahl index of those managers'
+# shares of the disclosed value, so it falls towards one over the holder count
+# when they hold similar amounts and rises towards one when a single manager
+# dominates.
+#
+# The crowding score below divides the first by the second. That makes its
+# scale a function of breadth twice over - a name held by `n` managers in equal
+# size scores about `n` squared - so the ranking is breadth first and weight
+# dispersion as a tie-break. It is a descriptive ordering within this manager
+# universe and its magnitude carries no units and no meaning outside it. This
+# notebook observes no trades, no liquidation and no price impact.
 
 # %%
 if len(latest_holdings) > 0:
@@ -541,6 +643,9 @@ if len(latest_holdings) > 0:
         crowding.select(
             [
                 "issuer_name",
+                # Two share classes of one company are two CUSIPs and two rows.
+                # Without the identifier they read as a duplicated row.
+                pl.col("cusip").str.slice(-4).alias("cusip_tail"),
                 "n_institutions",
                 "total_inst_value_usd",
                 "ownership_hhi",
@@ -555,12 +660,18 @@ if len(latest_holdings) > 0:
     )
     print(f"\nConcentrated bets (single-fund positions): {len(concentrated)}")
     if len(concentrated) > 0:
-        display(concentrated.select(["issuer_name", "total_inst_value_usd"]).head(10))
+        display(
+            concentrated.select(
+                "issuer_name",
+                pl.col("cusip").str.slice(-4).alias("cusip_tail"),
+                "total_inst_value_usd",
+            ).head(10)
+        )
 
 # %% [markdown]
-# **Interpretation**: High values identify names disclosed by many included
-# managers with dispersed ownership weights. Whether that structure predicts
-# liquidation pressure is a separate empirical question.
+# The high scores are the names most of these managers hold in comparable
+# size. Whether that structure predicts liquidation pressure is an empirical
+# question about prices, and nothing here touches prices.
 
 # %% [markdown]
 # ## Part 6: Institution Similarity Network
@@ -651,9 +762,10 @@ if len(latest_holdings) > 0 and latest_holdings["cik"].n_unique() > 1:
     display(inst_similarity.tail(5))
 
 # %% [markdown]
-# **Interpretation**: Institution-level similarity turns the 13F panel into a
-# map of strategy overlap. Highly similar managers share more portfolio weight,
-# while low-similarity pairs disclose distinct ownership sets.
+# This similarity is over portfolio weight vectors of several thousand
+# dimensions each, so it does not saturate the way the stock-level one does.
+# The quantity it measures is agreement in disclosed long equity weights, which
+# is a fraction of what most of these managers run.
 
 # %% [markdown]
 # ## Part 7: Visualization
@@ -672,7 +784,7 @@ if len(latest_holdings) > 0:
                 (pl.col("reported_value_usd").sum() / 1e9).alias("total_value_usd_bn"),
             ]
         )
-        .with_columns(pl.col("cik").replace(INSTITUTION_NAMES).alias("institution_name"))
+        .with_columns(pl.col("company_name").alias("institution_name"))
         .sort("total_value_usd_bn")
     )
 
@@ -687,20 +799,26 @@ if len(latest_holdings) > 0:
         )
     )
     fig1.update_layout(
-        title=f"{latest_holdings['cik'].n_unique()} managers disclose positions for {latest_period}",
+        title="Disclosed position value by manager, latest complete quarter",
         xaxis_title="Reported position value (USD billions)",
         yaxis_title=None,
         height=500,
-        width=900,
         showlegend=False,
-        margin=dict(l=180),
+        margin=dict(l=200),
     )
-    fig1.show()
+    show_plotly_with_alt(
+        fig1,
+        "A horizontal bar chart of ten managers' disclosed long-equity value in billions of "
+        "dollars, longest at the top. Berkshire Hathaway leads by a wide margin, AQR Capital "
+        "follows, then Citadel, Millennium and D. E. Shaw close together at about half "
+        "Berkshire's length. Renaissance, Point72, Tiger Global and Bridgewater are shorter "
+        "again, and Two Sigma Securities is last with a bar barely distinguishable from zero.",
+    )
 
 # %% [markdown]
-# **Interpretation**: The bar chart separates breadth from scale. Institutions
-# with fewer holdings but similar total value are expressing higher conviction
-# than diversified peers with comparable assets under management.
+# Length is disclosed dollars; the position count is on hover. A manager short
+# and wide holds many small positions, one long and narrow holds few large
+# ones, and neither is visible from the bar alone.
 
 # %%
 if len(latest_holdings) > 0:
@@ -744,28 +862,41 @@ if len(latest_holdings) > 0:
         )
     )
     fig2.update_layout(
-        title="Most broadly held disclosed positions in the common ownership graph",
+        title="The twenty most broadly held disclosed positions",
         xaxis_title="Reported position value (USD billions)",
         yaxis_title=None,
         height=600,
-        width=1000,
-        margin=dict(l=320),
+        margin=dict(l=330),
     )
-    fig2.show()
+    show_plotly_with_alt(
+        fig2,
+        "A horizontal bar chart of twenty holdings, each labelled with the issuer name and the "
+        "last four characters of its CUSIP, longest at the top. Apple is roughly twice the "
+        "length of the second bar and the lengths fall away steeply after the first five, with "
+        "the last several close to zero. Two rows carry the same issuer name with different "
+        "CUSIP suffixes, which are its two share classes.",
+    )
 
 # %% [markdown]
-# **Interpretation**: Widely held stocks are not automatically attractive
-# signals. Ownership breadth is a graph descriptor, not evidence of future returns.
+# Selection here is by breadth first and value second, so the ordering by bar
+# length is not the ordering that chose the twenty. Breadth is a description of
+# who discloses a name, not evidence about what it will do.
+
+# %% [markdown]
+# Selection is by the SIZE of the move rather than by its sign. Sorting on the
+# signed change and taking the head puts only increases on a chart whose zero
+# lines invite reading four quadrants.
 
 # %%
 if qoq is not None and len(qoq) > 0:
-    # Plot 3: Institutional ownership-change scatter
-    momentum_plot = qoq.filter(pl.col("n_institutions") >= 2).sort(
-        "value_change_usd", descending=True
+    momentum_plot = (
+        qoq.filter(pl.col("n_institutions") >= 2)
+        .filter(pl.col("pct_change").is_not_null())
+        .sort(pl.col("value_change_usd").abs(), descending=True)
     )
 
     if len(momentum_plot) > 0:
-        mom_pd = momentum_plot.filter(pl.col("pct_change").is_not_null()).head(50).to_pandas()
+        mom_pd = momentum_plot.head(50).to_pandas()
         mom_pd["pct_change_pct"] = (100 * mom_pd["pct_change"]).clip(lower=-100, upper=500)
         mom_pd["value_change_usd_bn"] = mom_pd["value_change_usd"] / 1e9
         fig3 = go.Figure(
@@ -781,20 +912,32 @@ if qoq is not None and len(qoq) > 0:
             )
         )
         fig3.update_layout(
-            title=f"Ownership changes compare {prior_period} with {current_period}",
+            title="Quarter-over-quarter ownership change, percentage against dollars",
             xaxis_title="Change in reported value (%, clipped to [-100, 500])",
             yaxis_title="Change in reported value (USD billions)",
             height=520,
             showlegend=False,
         )
-        fig3.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig3.add_vline(x=0, line_dash="dash", line_color="gray")
-        fig3.show()
+        fig3.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
+        fig3.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
+        show_plotly_with_alt(
+            fig3,
+            "A scatter of fifty holdings, percentage change in reported value on the horizontal "
+            "axis against dollar change in billions on the vertical, with dashed reference lines at "
+            "zero on both. The points form a low band close to the horizontal zero line and spread "
+            "the full width of the percentage axis; two sit far above the band at a modest "
+            "percentage change, and two sit at the far right of the percentage axis with a small "
+            "dollar change. The two axes rank the same holdings differently.",
+        )
 
 # %% [markdown]
-# **Interpretation**: The upper-right quadrant highlights names where both the
-# dollar value and percentage ownership are rising. Those are the strongest
-# candidates for a delayed ownership-change feature.
+# The fifty largest moves by absolute dollar change, in both directions. The
+# horizontal axis is clipped at the bounds its own label names, so a point on
+# either edge is at or beyond the cap rather than exactly at it.
+#
+# Both axes are here because they disagree. A large percentage change on a
+# small base is a small dollar change, and the points furthest to the right are
+# not the ones furthest up.
 
 # %% [markdown]
 # ## Part 8: Feature Engineering for ML Models
@@ -825,11 +968,7 @@ if len(latest_holdings) > 0:
         )
         .with_columns(
             [
-                # Derived features
-                # Breadth is a share of the managers actually in the graph, which is
-                # the denominator the canonical producer uses. Dividing by the
-                # configured list instead would diverge from the artifact whenever
-                # the two cover different manager sets.
+                # Breadth over the managers in the graph, the producer's denominator.
                 (pl.col("n_inst_holders") / latest_holdings["cik"].n_unique()).alias(
                     "inst_coverage_pct"
                 ),
@@ -848,9 +987,9 @@ if len(latest_holdings) > 0:
     print(stock_features.describe())
 
 # %% [markdown]
-# **Interpretation**: The feature summary describes quarter-end ownership
-# snapshots. It does not establish how long any feature remains informative.
-#
+# Every feature is as of a quarter end and becomes usable at the availability
+# timestamp, not at the quarter end. How long any of them stays informative is
+# not established here.
 # %%
 if len(latest_holdings) > 0:
     # Add momentum features if available
@@ -869,10 +1008,7 @@ if len(latest_holdings) > 0:
         )
         print("Added momentum features")
     else:
-        # With one complete quarter there is nothing to compare against, and the producer
-        # emits both columns anyway - 0.0 and null - so an artifact built with
-        # `--num-filings 1` has the same schema as any other. Skipping them here left the
-        # parity assertion below comparing a frame two columns short.
+        # One complete quarter: the producer still emits both columns, so match it.
         stock_features = stock_features.with_columns(
             pl.lit(0.0, dtype=pl.Float64).alias("inst_value_change_usd"),
             pl.lit(None, dtype=pl.Float64).alias("inst_pct_change"),
@@ -915,12 +1051,11 @@ if len(latest_holdings) > 0:
     print("Canonical edge and stock-feature artifact parity: PASS")
 
 # %% [markdown]
-# **Interpretation**: The feature table is the real bridge to modeling.
-# Breadth, concentration, and ownership-change variables can be merged with
-# price data as point-in-time cross-sectional features in Chapter 23 pipelines.
-# The canonical producer (`data/equities/positioning/13f_download.py`) writes
-# the same features to `$ML4T_DATA_PATH/equities/positioning/13f/`, and
-# downstream notebooks consume them via `load_13f_stock_features()`.
+# The assertion above is the point of the section: this notebook reconstructs
+# what the downloader wrote and checks the two frames are equal, so a reader
+# can see how the shipped artifact was built rather than taking it on trust. A
+# drift between them fails here instead of surfacing as a puzzling number in
+# Chapter 23.
 
 # %% [markdown]
 # ## Part 9: Artifacts on Disk
@@ -945,20 +1080,29 @@ print("Loaders:   load_institutional_holdings_13f(), load_13f_edges(),")
 print("           load_13f_stock_features()")
 
 # %% [markdown]
-# ## Results Interpretation
+# ## Results interpretation
 #
-# **Co-ownership structure**: The bipartite institution-stock graph is highly
-# sparse - most stock pairs share zero institutional holders. High-similarity
-# pairs identify common disclosed owners; return comovement is not tested here.
+# **Co-ownership structure.** This graph is not sparse, and the numbers to read
+# it by are printed in Part 2 and Part 3 rather than asserted here: the
+# bipartite density, the share of stock pairs sharing no holder, and the share
+# sitting at the top of the similarity scale. Ten large managers holding a few
+# thousand names each produce a densely connected graph, and the similarity
+# saturates because each stock is described by ten numbers. Both facts are
+# properties of the manager universe rather than of institutional ownership,
+# and widening the universe changes them.
 #
-# **Institutional ownership change**: Quarter-over-quarter changes describe how
-# aggregate reported holdings moved. The filing-date availability timestamp
-# records when each complete included-manager snapshot became observable. This
-# notebook does not estimate persistence or forward-return predictiveness.
+# **Institutional ownership change.** Quarter-over-quarter changes describe how
+# aggregate reported holdings moved between the two most recent quarters every
+# included manager filed for. The availability timestamp records when that
+# snapshot became observable. No persistence or forward-return claim is made or
+# tested.
 #
-# **Crowding risk**: Stocks held by many funds with similar portfolio weights
-# receive a high descriptive crowding score (breadth / HHI). The notebook does
-# not observe liquidation or price impact.
+# **Crowding.** The score is breadth divided by ownership concentration, and
+# Part 5 says what that makes it: a quantity dominated by the number of
+# managers holding the name, with the dispersion of their weights as a
+# tie-break. It describes disclosed structure. It does not observe liquidation
+# or price impact, and it is not on a scale that means anything outside this
+# manager universe.
 
 # %% [markdown]
 # ## Summary: What We Can Do With 13F Data
@@ -986,22 +1130,33 @@ if len(positions_df) > 0:
         print("Stock features (derived): 0")
 
 # %% [markdown]
-# ## Key Takeaways
-#
-# **Interpretation**: The closing pipeline summary shows why 13F data remains
-# useful despite reporting lag. The result is a quarter-end ownership lens that
-# complements returns, risk, and graph modeling workflows.
+# ## Key takeaways
 #
 # 1. SEC 13F filings provide a structured, machine-readable view of institutional
 #    equity ownership. The canonical downloader at
 #    `data/equities/positioning/13f_download.py` walks EDGAR and writes a
 #    normalized holdings artifact consumed here via `load_institutional_holdings_13f()`.
-# 2. Co-ownership cosine similarity creates a stock-stock graph where edges
-#    represent shared institutional holders - useful for clustering, GNN message
-#    passing, and diversification analysis.
-# 3. Quarter-over-quarter ownership change and concentration are descriptive
-#    candidates whose predictive value requires a point-in-time return study.
-# 4. The 45-day filing deadline limits real-time use; `timestamp` records when
+# 2. **A cosine's effective dimension is set by its weights, not by its
+#    non-zeros.** Each stock here is described by ten numbers, one per manager,
+#    and over a third are held by exactly one - two such stocks score exactly 1
+#    whenever that manager is the same, which is why millions of pairs sit at
+#    the top of the scale and "the highest-similarity pair" is an arbitrary pick
+#    from a tie. Requiring more holders thins that out, but the top pair is
+#    still at 1 with five holders each, because one manager carries the great
+#    majority of both positions. Part 3 measures both, and the check to carry
+#    away is to report a concentration next to any similarity computed over a
+#    short vector.
+# 3. **The crowding score is breadth twice over.** Dividing holder count by
+#    ownership HHI produces something close to the square of the holder count,
+#    so its ranking is breadth with a dispersion tie-break and its magnitude
+#    means nothing outside this manager universe. Quarter-over-quarter change
+#    and concentration are descriptive candidates whose predictive value
+#    requires a point-in-time return study.
+# 4. **The identity is the CIK and the name comes from the filing.** A
+#    hand-written display name that disagrees with the filer renames a manager
+#    in every table downstream, and this notebook carried one: the CIK labelled
+#    "Two Sigma Investments" files as Two Sigma Securities, a different book.
+# 5. The 45-day filing deadline limits real-time use; `timestamp` records when
 #    the complete included-manager snapshot becomes available.
 #
 # **Chapter Connections**:
