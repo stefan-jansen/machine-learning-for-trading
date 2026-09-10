@@ -50,9 +50,9 @@ from case_studies.utils.analytics import (
     DATASET_META,
     PRIMARY_LABELS,
     SHORT_NAMES,
-    _registry_path,
+    registry_path,
 )
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 SIG_T = 1.96
@@ -87,7 +87,7 @@ CASE_ORDER = {case_study: rank for rank, case_study in enumerate(CASE_STUDY_IDS)
 # %%
 def _load_causal_runs(case_study: str) -> pl.DataFrame:
     """Load one immutable causal row per label from a case-study registry."""
-    db_path = _registry_path(case_study).resolve()
+    db_path = registry_path(case_study).resolve()
     if not db_path.is_file():
         raise FileNotFoundError(f"Missing registry for {case_study}: {db_path}")
 
@@ -186,7 +186,7 @@ coverage_df
 #
 # Effect units differ by panel, so the table reports effects and confidence intervals in
 # native units while the chart compares their dimensionless HAC statistics. Filled
-# markers identify intervals that exclude zero at the 95% threshold.
+# markers identify intervals that exclude zero at the conventional two-sided threshold.
 
 # %%
 forest_df = primary_df.sort("t_hac")
@@ -241,10 +241,16 @@ ax.axvline(SIG_T, color=COLORS["amber"], linewidth=0.8, linestyle=":")
 ax.axvline(-SIG_T, color=COLORS["amber"], linewidth=0.8, linestyle=":")
 ax.set_yticks(forest_y, forest_df["short_name"].to_list())
 ax.set_xlabel("HAC t-statistic (dimensionless)")
-add_message_title(ax, f"{n_sig} of {n_expected} primary effects clear the HAC threshold")
+add_message_title(ax, "HAC t-statistic of each case study's primary effect")
 ax.legend(frameon=False, loc="best")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Forest plot with one row per case study, ordered by case study, plotting the "
+    "Driscoll-Kraay t-statistic of that panel's primary DML effect. A dashed vertical line "
+    "marks zero and two dotted lines mark the plus and minus significance threshold; markers "
+    "are filled or open according to whether the t-statistic clears it, and a legend says "
+    "which is which.",
+)
 
 # %%
 sig_names = forest_df.filter(pl.col("t_hac").abs() > SIG_T)["short_name"].to_list()
@@ -297,8 +303,8 @@ ax.set_yticks(bias_y, bias_df["short_name"].to_list())
 ax.set_xlabel("Signed confounding bias (%)")
 add_message_title(
     ax,
-    f"Naive OLS exceeds 50% absolute bias on {n_large_bias} primary-label panels",
-    subtitle=f"Median absolute bias {median_abs_bias:.1f}%; {reversal_df.height} panels reverse sign",
+    "Signed confounding bias of the naive estimate on each primary-label panel",
+    subtitle="Positive means the naive estimate is the larger one",
 )
 ax.legend(
     handles=[
@@ -308,8 +314,13 @@ ax.legend(
     frameon=False,
     loc="best",
 )
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bar chart with one bar per case study giving the signed confounding bias of "
+    "the naive estimate as a percentage of the adjusted one. A solid line marks zero and "
+    "dotted lines mark plus and minus fifty percent; bars are coloured by whether the naive "
+    "estimate is the larger or the smaller of the two, and a legend says which.",
+)
 
 # %%
 reversal_df.select(
@@ -325,8 +336,8 @@ reversal_df.select(
 reversal_names = reversal_df["short_name"].to_list()
 display(
     Markdown(
-        f"The median absolute bias is **{median_abs_bias:.1f}%** and "
-        f"**{n_large_bias} of {n_expected}** panels exceed 50%. The largest absolute bias "
+        f"The median absolute bias is **{median_abs_bias:.1f} percent** and "
+        f"**{n_large_bias} of {n_expected}** panels exceed half. The largest absolute bias "
         f"is **{abs(max_bias_row['confounding_bias_pct']):.1f}%** on "
         f"**{max_bias_row['short_name']}**. Naive and DML signs disagree on "
         f"**{reversal_df.height}** panels: **{', '.join(reversal_names) or 'none'}**."
@@ -336,9 +347,20 @@ display(
 # %% [markdown]
 # ## 4. Parametric and permutation evidence
 #
-# The HAC interval and block-permutation refutation ask different questions. The
-# cross-tabulation keeps their 5% decisions separate rather than treating either as a
-# universal pass/fail verdict.
+# The HAC interval and the block-permutation refutation ask different questions. The
+# cross-tabulation keeps their two decisions separate rather than collapsing them into one
+# pass or fail.
+#
+# **What the refutation column inherits.** `refutation_p` is read from each registry, and the
+# shared implementation that wrote it compares raw placebo effects against the observed
+# effect. Permuting the treatment also frees it from the controls, so the placebo estimator
+# divides by a larger residual variance and its effects are smaller for reasons that have
+# nothing to do with alignment - `04_dml_crypto_regime` measures a factor of eleven between
+# the two residual variances on its own panel, which moved its permutation p from the floor
+# to the middle of the null once the comparison was made on t-statistics. The registered
+# values here have not been recomputed that way, so read this column as what the registry
+# recorded rather than as a reading this notebook stands behind. Filed as
+# ml4t/agent-workspace#1120.
 
 # %%
 HAC_SIG = "HAC clears"
@@ -392,10 +414,14 @@ for row_index, hac in enumerate(sig_order):
         ax.text(column_index, row_index, label, ha="center", va="center", color=color)
 ax.set_xticks(range(len(TIER_ORDER)), [f"Refutation {value.lower()}" for value in TIER_ORDER])
 ax.set_yticks(range(len(sig_order)), sig_order)
-add_message_title(ax, "HAC and block-permutation evidence do not always agree")
+add_message_title(ax, "Panels by HAC significance against refutation outcome")
 fig.colorbar(image, ax=ax, label="Panels")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Heatmap crossing HAC significance on the vertical axis with the refutation outcome on "
+    "the horizontal one. Each cell is shaded by how many panels fall in it and prints that "
+    "count above the names of the panels themselves, so a cell holding none reads zero.",
+)
 
 # %%
 both_clear = panels[(HAC_SIG, "Passes")]
@@ -404,7 +430,7 @@ refutation_only = panels[(HAC_NOT, "Passes")]
 neither = panels[(HAC_NOT, "Fails")]
 display(
     Markdown(
-        f"Both tracks clear 5% for **{len(both_clear)}** panels "
+        f"Both tracks clear their threshold for **{len(both_clear)}** panels "
         f"(**{', '.join(both_clear) or 'none'}**). HAC alone clears for "
         f"**{', '.join(hac_only) or 'none'}**; refutation alone clears for "
         f"**{', '.join(refutation_only) or 'none'}**; neither clears for "
@@ -485,9 +511,14 @@ for index, short_name in enumerate(multi_horizon_names):
     ax.set_ylabel("DML effect (panel units)")
 for index in range(n_panels, n_rows * n_columns):
     axes.flat[index].set_visible(False)
-fig.suptitle(f"{n_panels} panels contain more than one distinct horizon", y=1.01)
-fig.tight_layout()
-fig.show()
+fig.suptitle("DML effect against label horizon, for panels with more than one", y=1.01)
+show_with_alt(
+    fig,
+    "A grid of small panels, one per case study that registers more than one label horizon. "
+    "Each plots the DML effect against the horizon in trading days on a logarithmic axis, as "
+    "a line with a marker at every horizon, inside a shaded band for the confidence interval, "
+    "with a dashed horizontal line at zero.",
+)
 
 # %%
 horizon_df.sort(["case_order", "horizon_days", "label"]).select(
@@ -520,12 +551,12 @@ display(
 takeaway_text = f"""
 - **Coverage is complete and explicit.** The notebook loaded one primary row for all
   **{n_expected}** case studies and rejected ambiguous labels.
-- **HAC evidence is selective.** **{n_sig} of {n_expected}** primary effects have 95%
-  intervals that exclude zero: **{", ".join(sig_names) or "none"}**.
+- **HAC evidence is selective.** **{n_sig} of {n_expected}** primary effects have
+  Driscoll-Kraay intervals that exclude zero: **{", ".join(sig_names) or "none"}**.
 - **Orthogonalization is material.** Median absolute confounding bias is
   **{median_abs_bias:.1f}%**; naive and DML signs differ on **{reversal_df.height}** panels.
-- **The two uncertainty tracks are complementary.** HAC and refutation both clear 5% on
-  **{len(both_clear)}** panels: **{", ".join(both_clear) or "none"}**.
+- **The two uncertainty tracks are complementary.** HAC and refutation both clear their
+  threshold on **{len(both_clear)}** panels: **{", ".join(both_clear) or "none"}**.
 - **Labels are not horizons.** **{n_panels}** panels have multiple distinct horizons,
   while **{len(same_horizon_multi)}** have multiple labels at one horizon.
 
