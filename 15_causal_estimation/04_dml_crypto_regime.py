@@ -350,7 +350,7 @@ T_res = dml_result.get("T_res", np.zeros_like(T))
 
 # What is left of the treatment once the controls have had it. The second stage regresses
 # the residualized outcome on this, so its variance is the estimator's whole denominator.
-cross_fitted = np.isfinite(T_res) & (T_res != 0)
+cross_fitted = np.isfinite(Y_res) & np.isfinite(T_res)
 treatment_residual_share = float(T_res[cross_fitted].var() / T[cross_fitted].var())
 
 print(f"\nDML Results (walk-forward CV with {EMBARGO_PERIODS}-bar embargo):")
@@ -458,6 +458,13 @@ def regime_effect(mask, name):
     aggregate, which is what an inactive bar contributes, and the kernel counts bars again.
     The slope is unchanged by the padding - a zero row moves neither X'X nor X'y - so only
     the standard error moves, which is the point.
+
+    The second stage `manual_dml_timeseries` runs is `Y_res = alpha + theta * T_res`, with
+    the intercept there because cross-fitting residuals need not be mean zero under an
+    expanding window. The padded design has to carry that intercept as a column rather than
+    drop it, or the two regressions being compared are not the same regression: it is one on
+    the rows the subgroup fit used, zero everywhere else, so the same rows estimate the same
+    two coefficients. Rows in no test fold come back NaN and are left out by the same column.
     """
     if mask.sum() <= 100:
         print(f"\n  {name}:\n    Insufficient data")
@@ -473,12 +480,17 @@ def regime_effect(mask, name):
         hac_maxlags=HAC_LAGS,
         return_residuals=True,
     )
+    # The intercept column is one on the rows the subgroup fit used and zero elsewhere; see
+    # the docstring above.
+    used = np.zeros(len(decision_times), dtype=bool)
+    used[mask] = np.isfinite(fit["Y_res"]) & np.isfinite(fit["T_res"])
     y_full = np.zeros(len(decision_times))
     t_full = np.zeros(len(decision_times))
-    y_full[mask] = np.nan_to_num(fit["Y_res"])
-    t_full[mask] = np.nan_to_num(fit["T_res"])
-    model = driscoll_kraay(y_full, t_full.reshape(-1, 1), decision_times)
-    effect, se, t_stat = float(model.params[0]), float(model.bse[0]), float(model.tvalues[0])
+    y_full[used] = fit["Y_res"][used[mask]]
+    t_full[used] = fit["T_res"][used[mask]]
+    design = np.column_stack([used.astype(float), t_full])
+    model = driscoll_kraay(y_full, design, decision_times)
+    effect, se, t_stat = float(model.params[1]), float(model.bse[1]), float(model.tvalues[1])
 
     print(f"\n  {name}:")
     print(f"    Effect: {effect:.4f} (t={t_stat:.2f}, SE={se:.4f})")
