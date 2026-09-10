@@ -23,19 +23,21 @@
 #
 # Reconstruct the **limit order book (LOB)** for a single symbol-day from NASDAQ
 # ITCH message-by-order (MBO) data, producing a one-second-resolution top-of-book
-# snapshot series (best bid/ask price and size) with per-second order-flow
-# imbalance (OFI). The reconstruction tracks full per-order book state internally;
-# the emitted snapshots record the best bid and ask.
+# snapshot series with per-second order-flow imbalance (OFI). The reconstruction tracks
+# every resting order internally; each snapshot records the highest bid and the lowest
+# ask, with the shares resting at each.
 #
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Process ITCH `A`/`F`/`D`/`X`/`E`/`C`/`U` messages into book state with correct
-#   handling of Replace (`U`) chains and order-pool tracking.
-# - Validate reconstruction quality via spread positivity (>99% non-crossed).
-# - Generate per-second OFI as the building block for short-horizon flow signals.
-# - Choose between order-by-order tracking and price-level aggregation, and
-#   understand the trade-offs.
+# - Turn a day of `A`/`F`/`D`/`X`/`E`/`C`/`U` messages into a book that knows, at every
+#   moment, how many shares rest at each price on each side.
+# - Follow a Replace (`U`) message, which retires one order reference and issues a new
+#   one, and say why a chain of them defeats a reconstruction that only reads adds.
+# - Check a reconstruction by counting crossed quotes, where the bid sits above the ask,
+#   which cannot happen in a real book and so counts reconstruction errors.
+# - Compute order-flow imbalance per second: shares added to the bid minus shares taken
+#   off it, less the same for the ask.
 #
 # ## Book reference
 #
@@ -58,10 +60,7 @@
 """Order Book Reconstruction from NASDAQ ITCH Messages — build limit order book from MBO data."""
 
 import os
-import warnings
 from datetime import datetime
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -73,34 +72,50 @@ from limit_orderbook import (
 )
 
 from data.equities.loader import load_nasdaq_itch
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
+from utils.style import show_with_alt
 
-# %%
-# Input: Pre-parsed ITCH messages from canonical data location
-ITCH_DIR = load_nasdaq_itch(get_base_path=True)
-
-# Output: LOB snapshots organized by symbol
-OUTPUT_DIR = get_output_dir(3, "nasdaq_itch") / "order_book"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-print(f"Input messages: {ITCH_DIR}")
-print(f"Output directory: {OUTPUT_DIR}")
+# %% [markdown]
+# ### Declared parameters
+#
+# `SYMBOL` and `TRADING_DATE` choose the one symbol-day to reconstruct; ITCH is a
+# venue-wide feed, and one book describes one symbol on one day.
+#
+# `START_TIME` and `END_TIME` bound the snapshots that are *kept*, not the messages that
+# are read. Regular trading hours on a US equity venue run 09:30 to 16:00 Eastern, and
+# those are the hours a reader wants a book for. Messages before `START_TIME` still have
+# to be processed, because an order added at 04:00 in the pre-market can be deleted at
+# 09:31, and the book cannot subtract shares it never added.
+#
+# `MESSAGE_LIMIT` caps how many messages of each type are read. A whole symbol-day of
+# AAPL is a few million messages, which is a minute of work; CI overrides this to a small
+# number so the notebook exercises the same code path in seconds. `None` reads them all.
+#
+# `SNAPSHOT_FREQ` sets how often the book is written down. One second is fine enough to
+# see liquidity move and coarse enough that a trading day fits in a frame of a few tens of
+# thousands of rows.
 
 # %% tags=["parameters"]
-# Configuration — Papermill injects overrides for CI
 SYMBOL = "AAPL"
 TRADING_DATE = "2020-01-30"
 START_TIME = "09:30:00"
 END_TIME = "16:00:00"
-MAX_MESSAGES = 0  # 0 = all messages
+MESSAGE_LIMIT = None
+SNAPSHOT_FREQ = "1s"
+
+# %% [markdown]
+# Batch runs over many symbols set `ITCH_SYMBOL` in the environment rather than editing
+# the cell above; the parameter is the default when the variable is unset.
 
 # %%
-# Symbol can be overridden via environment variable for batch processing
-SYMBOL = os.environ.get("ITCH_SYMBOL", SYMBOL)
+symbol = os.environ.get("ITCH_SYMBOL", SYMBOL)
 
-# Normalize MAX_MESSAGES: 0 means no limit
-if MAX_MESSAGES == 0:
-    MAX_MESSAGES = None
+ITCH_DIR = load_nasdaq_itch(get_base_path=True)
+OUTPUT_DIR = get_output_dir(3, "nasdaq_itch") / "order_book"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+print(f"Input messages:   {display_path(ITCH_DIR)}")
+print(f"Output directory: {display_path(OUTPUT_DIR)}")
 
 # %%
 # Validate parsed ITCH data — produced by 01_itch_parser or Rust parser
@@ -117,7 +132,7 @@ print(f"Available message types: {msg_types}")
 # %% [markdown]
 # ## 1. Understanding ITCH Message Types
 #
-# NASDAQ ITCH 5.0 provides message-by-order (MBO) data with these key types:
+# NASDAQ ITCH v5.0 provides message-by-order (MBO) data with these key types:
 #
 # | Type | Name | Description |
 # |------|------|-------------|
@@ -130,7 +145,8 @@ print(f"Available message types: {msg_types}")
 # | **U** | Order Replace | Modify price/size (cancel + add) |
 # | **P** | Trade | Non-displayed execution |
 #
-# **Price format**: Integer with 4 implied decimal places (e.g., 3212000 = $321.20)
+# **Price format**: an integer with four implied decimal places, so the field 3212000 is a
+# price of three hundred twenty-one dollars and twenty cents.
 #
 # **Timezone note**: ITCH timestamps are nanoseconds since midnight in US/Eastern (exchange local time).
 # The data is timezone-naive; convert to America/New_York before cross-source joins.
@@ -145,14 +161,14 @@ print(f"Available message types: {msg_types}")
 # %%
 # Get the stock_locate ID for our symbol from R messages
 stock_map = get_stock_locate_mapping(ITCH_DIR)
-assert SYMBOL in stock_map, f"Symbol {SYMBOL} not found in stock directory"
-symbol_locate = stock_map[SYMBOL]
-print(f"Symbol {SYMBOL} has stock_locate = {symbol_locate}")
+assert symbol in stock_map, f"Symbol {symbol} not found in stock directory"
+symbol_locate = stock_map[symbol]
+print(f"Symbol {symbol} has stock_locate = {symbol_locate}")
 
 # %%
 # Add orders (A and F types) - have 'stock' column
-add_a = load_itch_messages(ITCH_DIR, "A", symbol=SYMBOL, max_messages=MAX_MESSAGES)
-add_f = load_itch_messages(ITCH_DIR, "F", symbol=SYMBOL, max_messages=MAX_MESSAGES)
+add_a = load_itch_messages(ITCH_DIR, "A", symbol=symbol, max_messages=MESSAGE_LIMIT)
+add_f = load_itch_messages(ITCH_DIR, "F", symbol=symbol, max_messages=MESSAGE_LIMIT)
 
 # Combine A and F (select common columns)
 common_cols = [
@@ -168,105 +184,71 @@ common_cols = [
 add_orders = pl.concat([add_a.select(common_cols), add_f.select(common_cols)])
 
 # D, X, E, C, U messages don't have 'stock' column - use stock_locate filtering
-deletes = load_itch_messages(ITCH_DIR, "D", stock_locate=symbol_locate, max_messages=MAX_MESSAGES)
-cancels = load_itch_messages(ITCH_DIR, "X", stock_locate=symbol_locate, max_messages=MAX_MESSAGES)
+deletes = load_itch_messages(ITCH_DIR, "D", stock_locate=symbol_locate, max_messages=MESSAGE_LIMIT)
+cancels = load_itch_messages(ITCH_DIR, "X", stock_locate=symbol_locate, max_messages=MESSAGE_LIMIT)
 executions = load_itch_messages(
-    ITCH_DIR, "E", stock_locate=symbol_locate, max_messages=MAX_MESSAGES
+    ITCH_DIR, "E", stock_locate=symbol_locate, max_messages=MESSAGE_LIMIT
 )
 executions_c = load_itch_messages(
-    ITCH_DIR, "C", stock_locate=symbol_locate, max_messages=MAX_MESSAGES
+    ITCH_DIR, "C", stock_locate=symbol_locate, max_messages=MESSAGE_LIMIT
 )
-replaces = load_itch_messages(ITCH_DIR, "U", stock_locate=symbol_locate, max_messages=MAX_MESSAGES)
+replaces = load_itch_messages(ITCH_DIR, "U", stock_locate=symbol_locate, max_messages=MESSAGE_LIMIT)
 
 # P messages (trades) have 'stock' column
-trades = load_itch_messages(ITCH_DIR, "P", symbol=SYMBOL, max_messages=MAX_MESSAGES)
+trades = load_itch_messages(ITCH_DIR, "P", symbol=symbol, max_messages=MESSAGE_LIMIT)
 
-# %%
-# =========================================================================
-# CRITICAL: Pre-join D/X/E messages with Add orders to get price and side
-# =========================================================================
-# This is essential for correct LOB reconstruction. D/X/E messages only have
-# order_reference_number - they need to be joined with Add orders to get
-# the price and side for each order.
-
-order_cols = ["order_reference_number", "buy_sell_indicator", "price", "shares"]
-orders_lookup = add_orders.select(order_cols).rename({"shares": "original_shares"})
-
-# =========================================================================
-# IMPORTANT: Do NOT filter D/X/E/C messages based on order lookup!
-# =========================================================================
-# Orders can be created by U (Replace) messages, not just A/F. The chain:
-#   A → U → U → E → D
-# means E and D reference an order created by U, which isn't in orders_lookup.
-# We look up order info from submitted_orders during reconstruction anyway.
-# The join here is ONLY for backward compatibility with code that expects
-# these columns - but we DON'T filter based on join results.
+# %% [markdown]
+# ### Why the add messages are not enough on their own
 #
-# Note: The original pre-join approach assumed all orders start with A/F,
-# which is wrong for ~95% of replace chains.
+# A `D`, `X` or `E` message names only an order reference number. To know which price
+# level it acts on, you need the order that reference belongs to. The obvious move is to
+# look every reference up in the `A`/`F` adds - and it loses a large part of the day,
+# because a Replace (`U`) message retires one reference and issues a *new* one. After
+# `A → U`, the live order is the one `U` created, and a later `D` names that reference,
+# which never appeared in an add.
+#
+# So the reconstruction keeps its own pool of live orders and adds `U` results to it as
+# it goes, rather than resolving references against the adds up front. The cell below
+# measures what the up-front approach would have missed on this symbol-day.
+
 
 # %%
-# Join D messages (but DON'T filter - order may be from U chain)
-if len(deletes) > 0:
-    deletes = deletes.join(
-        orders_lookup,
-        on="order_reference_number",
-        how="left",
+def share_not_in_adds(frame: pl.DataFrame, ref_col: str) -> tuple[int, int]:
+    """Count references in `ref_col` that no A/F add message ever created."""
+    if frame is None or frame.height == 0:
+        return 0, 0
+    missing = (
+        frame.select(ref_col)
+        .join(add_refs, left_on=ref_col, right_on="order_reference_number", how="anti")
+        .height
     )
-    # NOT filtered - order info looked up from pool during reconstruction
+    return missing, frame.height
 
-# Join X messages (but DON'T filter)
-if len(cancels) > 0:
-    cancels = cancels.join(
-        orders_lookup,
-        on="order_reference_number",
-        how="left",
-    )
-    # NOT filtered
 
-# Join E messages (but DON'T filter)
-if len(executions) > 0:
-    executions = executions.join(
-        orders_lookup,
-        on="order_reference_number",
-        how="left",
-    )
-    # NOT filtered
+add_refs = add_orders.select("order_reference_number").unique()
 
-# %%
-# Join C messages (but DON'T filter)
-if executions_c is not None and len(executions_c) > 0:
-    executions_c = executions_c.join(
-        orders_lookup,
-        on="order_reference_number",
-        how="left",
+missing_u, total_u = share_not_in_adds(replaces, "original_order_reference_number")
+if total_u:
+    print(f"Replace (U) messages: {total_u:,}")
+    print(
+        f"  ...replacing an order that came from another U rather than an add: "
+        f"{missing_u:,} ({missing_u / total_u * 100:.1f}%)"
     )
-    # NOT filtered
 
-# U (Replace) messages: DON'T filter on join!
-# Replace chains can be: A → U → U → U (order created by U, then replaced again)
-# The original_order_reference_number may reference an order created by a previous U,
-# not an A/F add. We look up the original order from the pool during reconstruction.
-if replaces is not None and len(replaces) > 0:
-    # Join to get original_side for orders that started with A/F
-    replaces = replaces.join(
-        orders_lookup.rename(
-            {
-                "order_reference_number": "original_order_reference_number",
-                "price": "original_price",
-                "buy_sell_indicator": "original_side",
-                "original_shares": "replaced_shares",
-            }
-        ),
-        on="original_order_reference_number",
-        how="left",
+missing_dxe, total_dxe = 0, 0
+for frame in (deletes, cancels, executions):
+    missing, total = share_not_in_adds(frame, "order_reference_number")
+    missing_dxe += missing
+    total_dxe += total
+if total_dxe:
+    print(f"\nD/X/E messages: {total_dxe:,}")
+    print(
+        f"  ...naming an order no add ever created: "
+        f"{missing_dxe:,} ({missing_dxe / total_dxe * 100:.1f}%)"
     )
-    # Note: Do NOT filter on original_price.is_not_null() - many U messages
-    # reference orders created by other U messages, not A/F. The side is
-    # looked up from the order pool during reconstruction.
 
 # %%
-print(f"\nSymbol: {SYMBOL}")
+print(f"\nSymbol: {symbol}")
 print(f"Trading Date: {TRADING_DATE}")
 print("\nMessage counts:")
 print(f"  Add orders (A+F): {len(add_orders):,}")
@@ -277,68 +259,79 @@ print(f"  Replaces (U): {len(replaces) if replaces is not None else 0:,}")
 print(f"  Trades (P): {len(trades):,}")
 
 # %% [markdown]
-# Inspect the structure of `Add` messages — `order_reference_number` is the join
-# key that lets later `D`/`X`/`E` messages locate the price level and side they
-# affect.
+# The first rows of the add messages show the fields the reconstruction reads:
+# `order_reference_number` is the identity a later `D`, `X` or `E` will name,
+# `buy_sell_indicator` puts the order on a side, and `price` and `shares` say where it
+# rests and how much of it.
 
 # %%
 add_orders.head(5)
 
+# %% [markdown]
+# Not every add is an attempt to trade. Market-peg orders and orders parked far from the
+# touch sit at sentinel prices near zero or in the hundreds of thousands, so the outright
+# minimum and maximum say nothing about where the symbol traded. The first and
+# ninety-ninth percentiles bound where displayed liquidity actually rests.
+
 # %%
-# A handful of far-from-market and market-peg orders sit at sentinel prices
-# (near $0 or ~$200k), so the raw min-max spans an implausibly wide range. The
-# 1st-99th percentile shows where displayed liquidity actually rests.
-_p = add_orders["price"]
-print(f"Price range (min-max):    ${_p.min():,.2f} - ${_p.max():,.2f}")
-print(f"Central range (1st-99th): ${_p.quantile(0.01):,.2f} - ${_p.quantile(0.99):,.2f}")
+add_prices = add_orders["price"]
+print(f"Price range (min to max):        ${add_prices.min():,.2f} - ${add_prices.max():,.2f}")
+print(
+    f"Central range (1st to 99th pct): "
+    f"${add_prices.quantile(0.01):,.2f} - ${add_prices.quantile(0.99):,.2f}"
+)
 
 # %% [markdown]
 # ## 3. Order Book Reconstruction Algorithm
 #
-# ### Why Price-Level Aggregation?
+# ### Two structures, and why both are needed
 #
-# We use **price-level aggregation** rather than order-by-order tracking:
+# The reconstruction carries an **order pool** and a **book**. The pool maps each live
+# order reference to its side, price and *remaining* shares. The book maps each price to
+# the total shares resting there on each side:
 #
 # ```
+# pool = {order_ref: (side, price, shares_remaining), ...}
 # book = {
-#     "B": {price1: total_shares, price2: total_shares, ...},  # Bids
-#     "S": {price1: total_shares, price2: total_shares, ...},  # Asks
+#     "B": {price: total_shares, ...},  # bids
+#     "S": {price: total_shares, ...},  # asks
 # }
 # ```
 #
-# **Processing rules for each message type**:
-# - **A/F (Add)**: Add shares to book at price level
-# - **D (Delete)**: Subtract original order's shares from price level
-# - **X (Cancel)**: Subtract cancelled shares from price level
-# - **E (Execute)**: Subtract executed shares from price level
-# - **U (Replace)**: Subtract original shares at old price, add new shares at new price
+# The book alone cannot process a message, because `D` and `E` name an order and not a
+# price. The pool alone cannot answer what the top of the book is without a scan. So each
+# message reads the pool to find the level it acts on and then moves shares on the book:
 #
-# This approach is more robust than order-by-order tracking because it doesn't
-# require tracking individual order IDs through their lifecycle.
+# | Message | Pool | Book |
+# |---|---|---|
+# | `A`/`F` add | record the new order | add its shares at its price |
+# | `D` delete | drop the order | subtract whatever remained of it |
+# | `X` cancel | reduce remaining shares | subtract the cancelled shares |
+# | `E`/`C` execute | reduce remaining shares | subtract the executed shares |
+# | `U` replace | retire the old reference, record the new one | subtract at the old price, add at the new |
 #
-# **Note**: The `reconstruct_lob_with_ofi` function is imported from `limit_orderbook` to enable
-# code reuse with `14_itch_bar_sampling` (Lee-Ready trade classification).
+# The remaining-shares bookkeeping is what makes `D` correct. An order added for 500
+# shares that has already executed 300 leaves 200 on the book, and the delete must remove
+# 200. A reconstruction that subtracts the original 500 drives the level negative.
+#
+# `reconstruct_lob_with_ofi` in `limit_orderbook` does this in a compiled loop, and
+# `14_itch_bar_sampling` calls the same module.
 
 # %% [markdown]
 # ## 4. Run Reconstruction
 
+# %% [markdown]
+# Every message from the start of the day up to `END_TIME` is processed, and only the
+# snapshots from `START_TIME` onwards are kept. The two boundaries differ because the
+# pool has to be warm before the first snapshot is meaningful: an order added at 04:00
+# in the pre-market, partly executed at 05:00 and deleted at 09:31 leaves the book
+# correctly only if all three messages were seen. Start reading at 09:30 and the delete
+# arrives for an order the pool has never heard of.
+
 # %%
-# Use configured time window (defaults to full RTH: 09:30-16:00)
-# Note: We load ALL messages from start of day up to end_time because
-# delete/execute messages reference orders placed hours earlier in pre-market.
 start_time = datetime.strptime(f"{TRADING_DATE} {START_TIME}", "%Y-%m-%d %H:%M:%S")
 end_time = datetime.strptime(f"{TRADING_DATE} {END_TIME}", "%Y-%m-%d %H:%M:%S")
 
-# CRITICAL: Include ALL messages from start of day up to end_time
-# Delete/Execute messages at 9:31 reference Add orders from 4:00 AM pre-market.
-# Without the full message history, we can't track remaining shares correctly.
-#
-# The order pool is built incrementally:
-# - 4:00 AM: Add order 12345, 500 shares
-# - 5:00 AM: Execute 200 shares (remaining = 300)
-# - 9:31 AM: Delete order 12345 (remove 300 shares, not 500!)
-#
-# Snapshots are only generated after start_time.
 add_all = add_orders.filter(pl.col("timestamp") <= end_time)
 del_all = deletes.filter(pl.col("timestamp") <= end_time)
 can_all = cancels.filter(pl.col("timestamp") <= end_time)
@@ -356,10 +349,12 @@ print(f"  Executions (E): {len(exec_all):,}")
 print(f"  Executions (C): {len(exec_c_all) if exec_c_all is not None else 0:,}")
 print(f"  Replaces: {len(rep_all) if rep_all is not None else 0:,}")
 
+# %% [markdown]
+# The reconstruction runs the message loop in a compiled kernel and accumulates
+# order-flow imbalance as it goes, so the pass that builds the book is also the pass that
+# measures the flow into it.
+
 # %%
-# Reconstruct LOB with OFI using Numba-accelerated function
-# This computes Order Flow Imbalance during the reconstruction pass:
-# OFI = (Bid Adds - Bid Removes) - (Ask Adds - Ask Removes)
 lob = reconstruct_lob_with_ofi(
     add_all,
     del_all,
@@ -367,8 +362,7 @@ lob = reconstruct_lob_with_ofi(
     exec_all,
     executions_c=exec_c_all,
     replaces=rep_all,
-    n_levels=5,
-    snapshot_freq="1s",
+    snapshot_freq=SNAPSHOT_FREQ,
 )
 
 # Filter to RTH snapshots only (reconstruction processes all messages from start of day)
@@ -376,7 +370,7 @@ if len(lob) > 0:
     lob = lob.filter(pl.col("timestamp") >= start_time)
 
 assert len(lob) > 0, (
-    f"LOB reconstruction returned 0 snapshots for {SYMBOL} on {TRADING_DATE}. "
+    f"LOB reconstruction returned 0 snapshots for {symbol} on {TRADING_DATE}. "
     "Check that the trading date has parsed ITCH messages on disk."
 )
 
@@ -389,8 +383,10 @@ lob.head()
 # %% [markdown]
 # ### Spread validity
 #
-# A correctly reconstructed book has positive spreads almost everywhere — crossed
-# quotes (`bid > ask`) signal lost messages or order-pool errors.
+# A crossed quote is a snapshot whose highest bid sits above its lowest ask. A real book
+# cannot be in that state - the two orders would have traded - so every crossed snapshot
+# is a reconstruction error: a message dropped, or shares subtracted from the wrong level.
+# The count below is the reconstruction's own error rate.
 
 # %%
 valid_count = (lob["spread"] > 0).sum()
@@ -422,11 +418,18 @@ lob.select(
 
 # %%
 # Create output directory for symbol
-symbol_dir = OUTPUT_DIR / SYMBOL
+symbol_dir = OUTPUT_DIR / symbol
 symbol_dir.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
-# ### 5.1 Market Depth
+# ### Market depth through the session
+#
+# Two stacked panels share a time axis over the trading day. The top panel is the signed
+# order-flow imbalance summed within each minute; the bottom is the shares resting at the
+# highest bid and the lowest ask, averaged within each minute.
+
+# %%
+ALT_LOB_DYNAMICS = "Two stacked line charts sharing a time axis across one trading session. The upper panel plots order-flow imbalance per minute as a single dark line oscillating about a dashed zero line, with the vertical range clipped to the first and ninety-ninth percentiles. The lower panel plots two lines, bid depth in green and ask depth in red, showing the shares resting at the top of the book in each minute."
 
 # %%
 lob_pd = lob.to_pandas().set_index("timestamp")
@@ -439,36 +442,31 @@ ofi_1m = (
 fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
 
 ax1 = axes[0]
-# Per-minute OFI (signed). Positive values indicate net buying pressure
-# within the minute, negative net selling. Per-minute is more readable
-# than the cumulative trace because the opening cross dominates the
-# cumulant's scale.
 ofi_series = ofi_1m["ofi"].fillna(0)
 ofi_series.plot(ax=ax1, color="#1E3A5F", linewidth=1.0, label="1-min OFI")
 ax1.axhline(0, color="gray", linestyle="--", linewidth=0.5)
-# Y-range from the 1st/99th percentiles to keep extreme minutes from
-# squashing the rest of the session.
-_vals = ofi_series.to_numpy()
-if len(_vals):
-    _lo, _hi = np.nanpercentile(_vals, [1, 99])
-    _pad = max(abs(_lo), abs(_hi)) * 0.15
-    ax1.set_ylim(_lo - _pad, _hi + _pad)
-ax1.set_title(f"{SYMBOL} per-minute order-flow imbalance (signed)")
+ofi_values = ofi_series.to_numpy()
+if len(ofi_values):
+    low, high = np.nanpercentile(ofi_values, [1, 99])
+    pad = max(abs(low), abs(high)) * 0.15
+    ax1.set_ylim(low - pad, high + pad)
+ax1.set_title(f"{symbol} order-flow imbalance per minute")
 ax1.set_ylabel("OFI (shares per minute)")
 ax1.legend(loc="upper right")
 
 ax2 = axes[1]
-ofi_1m["bid_size_0"].plot(ax=ax2, label="Bid Depth (L0)", color="green", alpha=0.7)
-ofi_1m["ask_size_0"].plot(ax=ax2, label="Ask Depth (L0)", color="red", alpha=0.7)
-ax2.set_title(f"{SYMBOL} top-of-book depth — bid and ask sizes evolve through the session")
+ofi_1m["bid_size_0"].plot(ax=ax2, label="Bid depth (top of book)", color="green", alpha=0.7)
+ofi_1m["ask_size_0"].plot(ax=ax2, label="Ask depth (top of book)", color="red", alpha=0.7)
+ax2.set_title(f"{symbol} shares resting at the best bid and the best ask, per minute")
 ax2.set_ylabel("Shares")
+ax2.set_xlabel("Time (US/Eastern)")
 ax2.legend()
 
-plt.tight_layout()
-plt.show()
+show_with_alt(fig, ALT_LOB_DYNAMICS)
 
 # %% [markdown]
-# For depth imbalance analysis and return predictability, see **`03_itch_lob_analysis`** Section 7.
+# `03_itch_lob_analysis` takes these snapshots further, into depth imbalance and whether
+# order flow anticipates the next price move.
 
 # %% [markdown]
 # ## 6. Save Results
@@ -476,41 +474,35 @@ plt.show()
 # %%
 output_file = symbol_dir / "lob_snapshots.parquet"
 lob.write_parquet(output_file)
-print(f"Saved LOB snapshots to: {output_file}")
-print(f"Shape: {lob.shape}")
+print(f"Saved LOB snapshots to: {display_path(output_file)}")
+print(f"Rows: {lob.height:,}  Columns: {lob.width}")
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# ### Order Pool Tracking is Essential
+# 1. **Track what remains of an order, not what it started as.** An add of 500 shares
+#    followed by executions of 100 and 200 leaves 200 on the book, and the delete that
+#    ends it removes 200. Subtracting the original size drives the price level negative
+#    and the error stays there for the rest of the session.
+# 2. **A replace is a new order.** `U` retires one reference and issues another, so a
+#    reconstruction that resolves references only against the adds loses every order that
+#    has been replaced. The counts printed earlier in this notebook say how much of the
+#    day that is for this symbol.
+# 3. **Read from the start of the day, snapshot from the open.** The two windows are
+#    different: the pool has to see the pre-market adds that later messages will name.
+# 4. **`C` executes at the order's own price**, and `P` trades are non-displayed, so they
+#    never touched the visible book and do not change it.
+# 5. **Crossed quotes are the reconstruction's error rate.** They cannot occur in a real
+#    book, so their share is a direct check rather than a market observation.
 #
-# **Critical insight**: Proper order book reconstruction requires tracking the
-# *remaining* shares per order, not just the original order data.
+# ### Known limitations
 #
-# The key challenge is handling message chains correctly:
-#
-# ```
-# A (Add 500 shares) → E (Execute 100) → E (Execute 200) → D (Delete remaining)
-# ```
-#
-# After two executions, 200 shares remain. The Delete message must remove 200
-# shares, not the original 500. This requires maintaining an order pool that
-# tracks remaining shares after each execution.
-#
-# ### Replace (U) Message Chains
-#
-# Replace messages create new order references: `A → U → U → U`
-#
-# When an order is replaced, the *new* order_reference_number becomes canonical.
-# Subsequent D/E/X messages reference orders created by U, not just A/F adds.
-# This means ~95% of Replace messages would be lost if we only tracked A/F orders.
-#
-# ### Technical Summary
-#
-# 1. **Order pool tracking**: Track remaining shares per order_reference_number
-# 2. **U creates new orders**: Replace messages spawn new order references
-# 3. **C messages use original price**: Execute-with-price updates book at order's price
-# 4. **P messages don't affect book**: Non-displayable/hidden order executions
+# - One venue. ITCH carries NASDAQ-routed activity, so this book is NASDAQ's, not the
+#   consolidated quote across all US venues.
+# - The snapshots record the top of the book. The pool holds every price level, but what
+#   is written out is the highest bid, the lowest ask, and the shares resting at each.
+# - Hidden liquidity is invisible by construction: an order that was never displayed
+#   never entered the book, and only its execution (`P`) is observable.
 #
 # ### Next Steps
 #

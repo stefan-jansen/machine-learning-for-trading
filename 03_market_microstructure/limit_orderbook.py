@@ -491,7 +491,6 @@ def _numba_reconstruct_lob(
     prices: np.ndarray,
     shares: np.ndarray,
     snapshot_interval_ns: int,
-    n_levels: int,
 ) -> tuple:
     """
     Core Numba kernel for LOB reconstruction with OFI.
@@ -747,14 +746,14 @@ def reconstruct_lob_with_ofi(
     executions: pl.DataFrame,
     executions_c: pl.DataFrame | None = None,
     replaces: pl.DataFrame | None = None,
-    n_levels: int = 10,
     snapshot_freq: str = "1s",
     show_progress: bool = True,
 ) -> pl.DataFrame:
     """
-    Numba-accelerated LOB reconstruction with OFI computation.
+    LOB reconstruction with OFI computation, in a compiled loop.
 
-    ~10-50x faster than Python version for large message sets.
+    Emits top-of-book snapshots: the best bid and ask and the shares resting at
+    each. The internal book holds every price level; only the touch is written out.
     Computes Order Flow Imbalance (OFI) during the reconstruction pass.
 
     OFI = (Bid Adds - Bid Removes) - (Ask Adds - Ask Removes)
@@ -777,8 +776,6 @@ def reconstruct_lob_with_ofi(
         C messages (order executed with price)
     replaces : pl.DataFrame, optional
         U messages (order replacements)
-    n_levels : int
-        Number of price levels to track (currently returns top-of-book)
     snapshot_freq : str
         Frequency for LOB snapshots (e.g., '1s', '100ms', '1min')
     show_progress : bool
@@ -946,7 +943,6 @@ def reconstruct_lob_with_ofi(
         prices,
         shares_arr,
         snapshot_interval_ns,
-        n_levels,
     )
 
     (

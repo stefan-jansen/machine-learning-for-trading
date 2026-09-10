@@ -578,11 +578,13 @@ for msg_dir in sorted(MESSAGE_DIR.iterdir()):
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The protocol is message-by-order.** Every event names the individual order it acts
-#    on, stamped to the nanosecond, which is what makes book reconstruction possible at all.
-# 2. **Six message types carry the book.** `A` and `F` add an order, `E` and `C` execute
-#    against one, `X` cancels part of one, `D` deletes one, `U` replaces one. The rest
-#    describe the session around them.
+# 1. **The protocol is message-by-order.** Every message that changes the book names the
+#    individual order it acts on, stamped to the nanosecond, which is what makes book
+#    reconstruction possible at all. Session-level messages - `S` for market events, `R`
+#    for the stock directory, `Q` for the auction crosses - carry no order reference and
+#    describe the venue rather than a single order.
+# 2. **Seven message types carry the book.** `A` and `F` add an order, `E` and `C` execute
+#    against one, `X` cancels part of one, `D` deletes one, `U` replaces one.
 # 3. **Numbers arrive encoded.** Prices are integers with four implied decimal places, and
 #    timestamps are nanoseconds since midnight, so both need converting before use.
 # 4. **Parse in batches, not in one pass.** Buffering by message type and flushing to
