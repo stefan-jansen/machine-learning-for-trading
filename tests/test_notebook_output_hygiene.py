@@ -426,7 +426,6 @@ KNOWN_HOUSE_FIGURE_WARNINGS = frozenset(
         "23_knowledge_graphs/02_supply_chain_kg_construction_qwen25_rerun.ipynb",
         "23_knowledge_graphs/02_supply_chain_kg_construction_qwen3.ipynb",
         "23_knowledge_graphs/08_8k_event_extraction_qwen3.ipynb",
-        "26_mlops_governance/03_safe_model_rollout.ipynb",
         "case_studies/fx_pairs/19_strategy_analysis.ipynb",
         "case_studies/us_firm_characteristics/09_causal_dml.ipynb",
     }
