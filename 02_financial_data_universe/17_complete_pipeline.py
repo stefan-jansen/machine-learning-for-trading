@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -23,7 +24,7 @@
 # end-to-end pipelines: an equity pipeline that stitches WikiPrices
 # (1990-2018) with Yahoo (2018-now), and a crypto pipeline that consumes
 # the local Binance hourly perpetuals panel. The notebook then shows how
-# `ml4t.data.DataManager` collapses the same logic into a few lines.
+# `ml4t.data.DataManager` does the same job in a fraction of the code.
 #
 # ## Learning Objectives
 # - Build a multi-source equity pipeline and validate at every boundary.
@@ -64,15 +65,38 @@ from ml4t.data.providers import WikiPricesProvider, YahooFinanceProvider
 from data import load_crypto_perps
 from utils import DATA_DIR
 from utils.paths import display_path, get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
-# Reproducibility: a fixed AS_OF_DATE keeps outputs stable between book editions.
-AS_OF_DATE = "2025-01-15"
-print(f"Data path: {display_path(DATA_DIR)}")
-
+# %% [markdown]
+# ### Declared parameters
+#
+# `AS_OF_DATE` fixes the right-hand end of every window so the outputs are stable between
+# book editions rather than moving with the wall clock.
+#
+# `WIKI_END_DATE` is the seam. The WikiPrices feed stopped on that date, so it is the
+# boundary the stitch filters on and the line the figure draws. It appears once here rather
+# than in each of the three places that need it.
+#
+# The two gap thresholds encode a difference in kind rather than degree: an equity calendar
+# closes for weekends and holidays, and a perpetual futures market does not close at all, so
+# the same gap means an ordinary weekend on one panel and an outage on the other.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+AS_OF_DATE = "2025-01-15"
+WIKI_END_DATE = "2018-03-27"  # the last day the WikiPrices feed published
+
+EQUITY_SYMBOLS = ["AAPL", "MSFT", "JPM"]
+EQUITY_START = "1990-01-01"
+EQUITY_MAX_GAP_DAYS = 5  # a longer gap than any holiday weekend produces
+
+CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+CRYPTO_START = "2024-01-01"
+CRYPTO_MAX_GAP_HOURS = 1.5  # a 24/7 hourly panel should never exceed one bar
+FUNDING_HOURS_UTC = [0, 8, 16]
+RECENT_DAYS = 30  # window for the first crypto panel
+
+# %%
+print(f"Data path: {display_path(DATA_DIR)}")
 
 # %% [markdown]
 # ---
@@ -101,7 +125,22 @@ print(f"Data path: {display_path(DATA_DIR)}")
 # %% [markdown]
 # ---
 #
-# ## 2. Equity Pipeline (Stocks: AAPL / MSFT / JPM)
+# ## 2. Equity Pipeline
+#
+# ### The seam needs a rescale, not just a filter
+#
+# Both feeds publish adjusted prices, and they are adjusted for different sets of events.
+# WikiPrices back-adjusts only the splits that happened inside its own coverage window,
+# which ends in 2018. Yahoo back-adjusts every split up to today, including ones after that
+# date - Apple's four-for-one in 2020 among them. Filtering the two legs at the seam and
+# concatenating them therefore produces a series with a step in it, and the step is a
+# corporate action rather than a price move.
+#
+# The fix is one number. Both legs are already dividend-adjusted, so the only thing left
+# between them is the post-seam split factor, and the ratio of the recent leg's first close
+# to the historical leg's last close is exactly that factor. Volume scales the other way - a
+# four-for-one split quarters the price and quadruples the share count - so the historical
+# volume is divided by the same number.
 #
 # ### Requirements
 #
@@ -121,21 +160,39 @@ print(f"Data path: {display_path(DATA_DIR)}")
 
 
 # %%
+def _naive_utc(df: pl.DataFrame, column: str = "timestamp") -> pl.DataFrame:
+    """Put `column` on a single clock: UTC, with the zone dropped.
+
+    A provider that stamps naive is read as already UTC; one that stamps UTC-aware is
+    converted and then stripped. Nothing moves in either case, and the two become concatenable.
+    """
+    if df[column].dtype.time_zone is None:
+        return df
+    return df.with_columns(pl.col(column).dt.convert_time_zone("UTC").dt.replace_time_zone(None))
+
+
 def _combine_pipeline_sources(
     historical: pl.DataFrame | None,
     recent: pl.DataFrame | None,
     symbol: str,
-    wiki_end: str = "2018-03-27",
+    wiki_end: str = WIKI_END_DATE,
 ) -> pl.DataFrame:
     """Combine Wiki Prices and Yahoo Finance data at the provider boundary."""
     if historical is None and recent is None:
         raise ValueError(f"No data available for {symbol}")
 
     if historical is None:
-        return recent.with_columns(pl.lit("yahoo").alias("source"))
+        return _naive_utc(recent).with_columns(pl.lit("yahoo").alias("source"))
 
     if recent is None:
-        return historical.with_columns(pl.lit("wiki").alias("source"))
+        return _naive_utc(historical).with_columns(pl.lit("wiki").alias("source"))
+
+    # The two providers disagree about time zones: one stamps naive, the other UTC-aware.
+    # Concatenating them raises rather than silently mixing, which is the right behaviour and
+    # still has to be resolved here. Both are daily bars in UTC, so dropping the zone after
+    # converting to it puts them on one clock without moving any observation.
+    historical = _naive_utc(historical)
+    recent = _naive_utc(recent)
 
     # Both sources - combine with proper boundary
     wiki_end_dt = datetime.strptime(wiki_end, "%Y-%m-%d").date()
@@ -143,17 +200,8 @@ def _combine_pipeline_sources(
     historical = historical.filter(pl.col("timestamp").dt.date() <= wiki_end_dt)
     recent = recent.filter(pl.col("timestamp").dt.date() > wiki_end_dt)
 
-    # Back-adjust the historical Wiki series for any splits that occurred AFTER
-    # the Wiki cutoff (e.g., AAPL 4-for-1 on 2020-08-31). Wiki's adjusted prices
-    # only back-adjust splits available within its own coverage window; Yahoo's
-    # adjusted prices retroactively account for every later split. Without this
-    # rescale, the stitch produces a visible step at the source boundary. We
-    # rescale historical OHLC by the ratio of (Yahoo first close) / (Wiki last
-    # close); both series are already dividend-adjusted, so this isolates the
-    # post-boundary split factor. Volume scales inversely to price (a 4-for-1
-    # split divides price by 4 and multiplies volume by 4), so the historical
-    # volume column is divided by the same factor to stay consistent with
-    # Yahoo's retroactively-split-adjusted volume on the recent side.
+    # Rescale the historical leg onto the recent leg's adjustment basis. See the markdown
+    # above this cell for why the ratio of the two closes at the seam is the right factor.
     if len(historical) > 0 and len(recent) > 0:
         wiki_last_close = historical.sort("timestamp")["close"][-1]
         yahoo_first_close = recent.sort("timestamp")["close"][0]
@@ -213,7 +261,7 @@ def _validate_pipeline_data(df: pl.DataFrame, symbol: str) -> dict[str, Any]:
         (dates[i] - dates[i - 1]).days for i in range(1, len(dates)) if len(dates) > 1
     )
 
-    if max_gap_days > 5:
+    if max_gap_days > EQUITY_MAX_GAP_DAYS:
         issues.append(f"Date gap of {max_gap_days} days")
 
     # Duplicate dates
@@ -286,7 +334,7 @@ def _fetch_wiki_historical(
 
 # %%
 def _process_etf_symbol(
-    pipeline: "ETFMomentumPipeline", symbol: str, start_date: str = "1990-01-01"
+    pipeline: "ETFMomentumPipeline", symbol: str, start_date: str = EQUITY_START
 ) -> dict[str, Any]:
     """Process a single symbol through the complete pipeline."""
     print(f"\n{symbol}:")
@@ -372,8 +420,8 @@ class ETFMomentumPipeline:
     2008 onwards (see `case_studies/etfs/`).
     """
 
-    UNIVERSE = ["AAPL", "MSFT", "JPM"]
-    WIKI_END_DATE = "2018-03-27"
+    UNIVERSE = EQUITY_SYMBOLS
+    SEAM = WIKI_END_DATE  # the class keeps its own reference to the declared seam
     END_DATE = AS_OF_DATE
 
     def __init__(self, wiki_path: Path | None = None, storage_path: Path | None = None):
@@ -392,7 +440,7 @@ class ETFMomentumPipeline:
         """Fetch data from Wiki Prices (pre-2018)."""
         if not self.wiki_path.exists():
             raise FileNotFoundError(f"Wiki Prices parquet not found at {self.wiki_path}")
-        return _fetch_wiki_historical(self.wiki_path, symbol, start_date, self.WIKI_END_DATE)
+        return _fetch_wiki_historical(self.wiki_path, symbol, start_date, self.SEAM)
 
     def fetch_recent(self, symbol: str, start_date: str) -> pl.DataFrame | None:
         """Fetch data from Yahoo Finance (2018-present)."""
@@ -405,9 +453,9 @@ class ETFMomentumPipeline:
         self, historical: pl.DataFrame | None, recent: pl.DataFrame | None, symbol: str
     ) -> pl.DataFrame:
         """Combine Wiki Prices and Yahoo Finance data."""
-        return _combine_pipeline_sources(historical, recent, symbol, self.WIKI_END_DATE)
+        return _combine_pipeline_sources(historical, recent, symbol, self.SEAM)
 
-    def process_symbol(self, symbol: str, start_date: str = "1990-01-01") -> dict[str, Any]:
+    def process_symbol(self, symbol: str, start_date: str = EQUITY_START) -> dict[str, Any]:
         """Process a single symbol through the complete pipeline."""
         return _process_etf_symbol(self, symbol, start_date)
 
@@ -423,7 +471,7 @@ etf_results = etf_pipeline.run()
 
 # %%
 # Visualize the stitched data — one panel per symbol
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+fig, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
 for ax, (symbol, result) in zip(axes, etf_results.items(), strict=True):
     df = result["data"]
     for source, color in [("wiki", COLORS["blue"]), ("yahoo", COLORS["amber"])]:
@@ -439,15 +487,24 @@ for ax, (symbol, result) in zip(axes, etf_results.items(), strict=True):
                 color=color,
             )
     ax.axvline(
-        datetime(2018, 3, 27), color="red", linestyle="--", alpha=0.5, label="Source transition"
+        datetime.strptime(WIKI_END_DATE, "%Y-%m-%d"),
+        color=COLORS["copper"],
+        linestyle="--",
+        alpha=0.7,
+        label="Source transition",
     )
-    ax.set_title(f"{symbol}: stitched WikiPrices + Yahoo")
+    ax.set_title(f"{symbol}: close, coloured by source")
     ax.set_xlabel("Date")
     ax.set_ylabel("Close ($)")
     ax.legend(loc="upper left")
     ax.set_yscale("log")
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Three panels side by side, one per symbol, each showing a daily close on a logarithmic "
+    "axis over three decades in two colours for the two sources, with a dashed vertical line "
+    "at the source transition. In every panel the two coloured segments meet at that line "
+    "with no visible step, and each series rises across the window.",
+)
 
 # %% [markdown]
 # ---
@@ -481,7 +538,7 @@ def _validate_crypto_coverage(df: pl.DataFrame, symbol: str) -> dict[str, Any]:
 
     for i in range(1, len(timestamps)):
         gap_hours = (timestamps[i] - timestamps[i - 1]).total_seconds() / 3600
-        if gap_hours > 1.5:
+        if gap_hours > CRYPTO_MAX_GAP_HOURS:
             missing_hours += int(gap_hours) - 1
 
     coverage_pct = (
@@ -650,15 +707,15 @@ class CryptoFundingRatePipeline:
 # %%
 # Run the crypto pipeline
 crypto_pipeline = CryptoFundingRatePipeline()
-crypto_results = crypto_pipeline.run(symbols=["BTCUSDT", "ETHUSDT"], start_date="2024-01-01")
+crypto_results = crypto_pipeline.run(symbols=CRYPTO_SYMBOLS, start_date=CRYPTO_START)
 
 # %%
 # Visualize crypto data patterns: price series + hourly/daily volume profile
 btc_data = crypto_results["BTCUSDT"]["data"]
-fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+fig, axes = plt.subplots(1, 3, figsize=(16, 5), constrained_layout=True)
 
 # Panel 1: last 30 days of close
-recent_data = btc_data.tail(24 * 30)
+recent_data = btc_data.tail(24 * RECENT_DAYS)
 axes[0].plot(
     recent_data["timestamp"].to_list(),
     recent_data["close"].to_list(),
@@ -667,7 +724,7 @@ axes[0].plot(
     color=COLORS["blue"],
 )
 axes[0].set_ylabel("Close ($)")
-axes[0].set_title("BTCUSDT: last 30 days")
+axes[0].set_title(f"{CRYPTO_SYMBOLS[0]}: last {RECENT_DAYS} days")
 axes[0].tick_params(axis="x", rotation=45)
 
 # Panel 2: average volume by hour, with funding windows highlighted
@@ -680,11 +737,11 @@ axes[1].bar(
     color=COLORS["blue"],
     alpha=0.7,
 )
-for funding_hour in [0, 8, 16]:
-    axes[1].axvline(funding_hour, color="red", linestyle="--", alpha=0.5)
+for funding_hour in FUNDING_HOURS_UTC:
+    axes[1].axvline(funding_hour, color=COLORS["copper"], linestyle="--", alpha=0.7)
 axes[1].set_ylabel("Average volume")
 axes[1].set_xlabel("Hour (UTC)")
-axes[1].set_title("Volume by hour (funding windows in red)")
+axes[1].set_title("Average volume by hour, funding hours marked")
 
 # Panel 3: average volume by weekday (weekend in red)
 daily_volume = (
@@ -698,10 +755,16 @@ axes[2].bar(range(7), daily_volume["avg_volume"].to_list(), color=colors, alpha=
 axes[2].set_xticks(range(7))
 axes[2].set_xticklabels(days)
 axes[2].set_ylabel("Average volume")
-axes[2].set_title("Volume by day (weekend in red)")
+axes[2].set_title("Average volume by weekday")
 
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Three panels. The left is an hourly price line over the most recent month. The middle "
+    "is a bar per hour of the day showing average volume, with dashed vertical lines at the "
+    "three funding hours; the bars vary across the day without an obvious peak at those "
+    "lines. The right is a bar per weekday in two colours for weekdays and weekend, with "
+    "the two weekend bars shorter than the five weekday bars.",
+)
 
 # %% [markdown]
 # ---
@@ -793,40 +856,29 @@ for symbol in Universe.get("etf_momentum"):
 # %% [markdown]
 # ## Key Takeaways
 #
-# Two end-to-end pipelines wired through the validation/storage stack
-# from chapter §2.3.
+# 1. **A stitch is two adjustment bases, not two date ranges.** Filtering each feed at the seam
+#    and concatenating leaves a step wherever a corporate action fell after the older feed
+#    stopped, because the older feed could not back-adjust for something it never saw. Both legs
+#    are dividend-adjusted, so one ratio at the seam removes the difference, and volume takes the
+#    reciprocal of the same factor.
 #
-# ### Quantitative Findings
-# - **Equity stitch (AAPL/MSFT/JPM, 1990-now)**: each symbol's stitched
-#   panel is ~8,800 daily rows — 7,113-7,114 from WikiPrices
-#   (1990 → 2018-03-27) + 1,711 from Yahoo (2018-03-28 → 2025-01-15),
-#   for 26,474 total rows across the three symbols. The validator
-#   flags 3 issues — one >5-day gap per symbol corresponding to the
-#   2001-09-10 → 09-17 NYSE closure following 9/11 — which is the
-#   expected behaviour for the calendar-day gap heuristic on
-#   pre-2018 data.
-# - **Equity-pipeline ETF caveat**: the *case study* universe
-#   (SPY/QQQ/IWM/TLT/GLD) is index ETFs, which are **not** in WikiPrices.
-#   Running the same pipeline on those tickers produces 0 WikiPrices
-#   rows + Yahoo-only data starting 2018-03-28 — the multi-source
-#   stitch is real for stocks, vacuous for ETFs.
-# - **Crypto pipeline (BTCUSDT, ETHUSDT from 2024-01-01)**: 17,544 hours
-#   per symbol, 100 % coverage of the expected 24/7 window, zero
-#   duplicate timestamps.
-# - **DataManager equivalent** (§5): the 5-symbol Yahoo-only fetch +
-#   HiveStorage write + OHLCVValidator + GapDetector loop reproduces
-#   the manual pipeline above in ~20 lines instead of ~150.
+# 2. **Tag every row with its source.** A `source` column is what makes the seam visible in the
+#    figure above, makes a provider mismatch debuggable, and makes a migration reversible. It
+#    costs one column.
 #
-# ### Implications for Practitioners
-# - **Tag the source**: a `source` column makes provider mismatches
-#   debuggable and migrations safe.
-# - **Match validators to cadence**: equity validators reject >5-day
-#   gaps as anomalies; crypto validators expect every hour and reject
-#   any >1.5 h gap.
-# - **Promote to DataManager once the pipeline stabilises**: explicit
-#   class-based pipelines are great for teaching, but the production
-#   path is the higher-level API (storage + validation + universe
-#   built in).
+# 3. **A validator has to match the cadence it is validating.** The equity pipeline treats a
+#    multi-day gap as an anomaly and the crypto pipeline treats a gap of more than one bar as
+#    one, because an equity calendar closes and a perpetual futures market does not. Running
+#    either threshold on the other panel reports the calendar as a fault or misses every outage.
+#
+# 4. **The gaps the equity validator finds are the calendar, and it cannot tell you that.** Each
+#    symbol's flagged gap is the same market closure, which is a fact about September 2001 rather
+#    than about the feed. A gap detector locates a discontinuity; deciding what it was takes a
+#    calendar.
+#
+# 5. **Promote to `DataManager` once the pipeline stops changing.** The explicit classes above
+#    exist to show what the higher-level API is doing. Section 5 reproduces the same work through
+#    it, and the production path is the shorter one.
 #
 # **Next**: `18_data_management` walks the `DataManager`, `Universe`,
 # and `HiveStorage` API in depth; `19_incremental_updates` shows the
