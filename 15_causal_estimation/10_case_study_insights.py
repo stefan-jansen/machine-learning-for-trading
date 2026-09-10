@@ -371,16 +371,18 @@ display(
 # cross-tabulation keeps their two decisions separate rather than collapsing them into one
 # pass or fail.
 #
-# **What the refutation column inherits.** `refutation_p` is read from each registry, and the
-# shared implementation that wrote it compares raw placebo effects against the observed
+# **What the refutation column inherits.** `refutation_p` is read from each registry rather
+# than computed here, so it is only as good as the run that wrote it. One thing to check
+# before quoting it: whether that run compared raw placebo effects against the observed
 # effect. Permuting the treatment also frees it from the controls, so the placebo estimator
 # divides by a larger residual variance and its effects are smaller for reasons that have
 # nothing to do with alignment - `04_dml_crypto_regime` measures a factor of eleven between
-# the two residual variances on its own panel, which moved its permutation p from the floor
-# to the middle of the null once the comparison was made on t-statistics. The registered
-# values here have not been recomputed that way, so read this column as what the registry
-# recorded rather than as a reading this notebook stands behind. Filed as
-# ml4t/agent-workspace#1120.
+# the two residual variances on its own panel, and moving its own comparison to t-statistics
+# took its permutation p from the floor to the middle of the null. ml4t/agent-workspace#1120
+# tracks that in the shared implementation and the direction of the error is always the same,
+# toward "passed", so a large p is not evidence of a careful run either. The values in this
+# render are whatever each registry held when it was executed; the provenance stamp says
+# when that was.
 
 # %%
 HAC_SIG = "HAC clears"
