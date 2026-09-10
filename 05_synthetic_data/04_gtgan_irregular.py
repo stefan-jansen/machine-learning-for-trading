@@ -1325,10 +1325,12 @@ def plot_irregular_sequences(
     return fig
 
 
+# `synthetic_sequences[i]` was generated on the time grid of `eval_idx[i]`, so the
+# real window and the timestamps have to be taken through the same index.
 sample_idx = 0
 fig = plot_irregular_sequences(
-    sequences_norm[sample_idx],
-    seq_times[sample_idx],
+    real_eval[sample_idx],
+    seq_times[eval_idx[sample_idx]],
     synthetic_sequences[sample_idx],
 )
 show_plotly_with_alt(
