@@ -34,9 +34,11 @@
 # - State the tick-imbalance threshold formula
 #   $\theta = \sum b_t$, $E[\theta_T] = E[T] \cdot |2P[b=1] - 1|$
 #   and the volume-imbalance variant.
-# - Compare alpha-based, fixed-threshold, and rolling-window imbalance bars,
-#   and recognize when the alpha-based scheme drifts (e.g., $\alpha=0.1$
-#   produces ~17x E[T] inflation on liquid equities).
+# - Compare an adaptive threshold, a fixed one and a rolling-window one on the same
+#   trade stream, and recognise the two ways the adaptive scheme fails: a threshold
+#   that runs away upward, and one that falls until every trade cuts a bar.
+# - Diagnose which of those is happening from the bar count and the average bar size,
+#   before looking at any downstream statistic.
 # - Choose imbalance-bar parameters that yield well-behaved
 #   Jarque-Bera / variance-ratio diagnostics.
 #
@@ -53,10 +55,7 @@
 """Information-Driven Bars: Formulas and Parameter Study — verifying AFML imbalance bar formulas and exploring parameter sensitivity."""
 
 import re
-import warnings
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import numpy as np
 import plotly.graph_objects as go
@@ -66,6 +65,7 @@ from scipy import stats
 
 # Import loader for MBO data
 from data import load_mbo_data
+from utils.style import show_plotly_with_alt
 
 # Polars display configuration
 
@@ -229,9 +229,12 @@ def calculate_tick_imbalance_bars_manual(
     return bar_indices, bar_info
 
 
+# %% [markdown]
+# The verification below runs the sampler by hand on the trade signs, with a slow decay
+# and a long warm-up, so that the threshold sequence can be inspected step by step
+# rather than only through the bars it produced.
+
 # %%
-# Run manual calculation
-# Use slow adaptation to prevent threshold spiral
 sides_arr = trades["side"].to_numpy()
 VERIFY_ET = 1000
 VERIFY_ALPHA = 0.001
@@ -321,13 +324,20 @@ def compute_stats(bars: pl.DataFrame) -> dict:
     return {"n_bars": len(bars), "jarque_bera": jb, "autocorr_1": ac, "variance_ratio_5": vr}
 
 
+# %% [markdown]
+# The sweep below runs each sampler over a grid of target bar sizes. The tick and volume
+# grids differ because their thresholds are in different units - trades against shares -
+# and both bracket a bar size producing a few hundred to a few thousand bars from this
+# session, which is the range where the downstream diagnostics have enough bars to be
+# meaningful and few enough that each holds real information.
+#
+# The decay rate is fixed at the slow end across the whole sweep, so what varies is the
+# target and not the sampler's stability.
+
 # %%
-# Parameter grids
-# Key insight: with persistent order flow imbalance, need SLOW adaptation (α=0.001)
-# to prevent threshold spiral. Also use longer warmup.
 TIB_ET = [500, 700, 1000, 1500, 2000, 3000]
 VIB_ET = [2000, 5000, 10000, 20000, 50000]
-ALPHA = 0.001  # Very slow adaptation - critical for stability
+ALPHA = 0.001  # slow decay; the feedback loop above is what this damps
 WARMUP = 100  # Longer warmup
 
 print("=" * 70)
@@ -370,8 +380,6 @@ tib_df = pl.DataFrame(tib_results)
 vib_df = pl.DataFrame(vib_results)
 
 # %%
-# Construct all four panels and show the figure exactly once to avoid
-# matplotlib/plotly intermediate-cell renders of an incomplete figure.
 fig = make_subplots(
     rows=2,
     cols=2,
@@ -454,34 +462,46 @@ fig.update_xaxes(type="log", title_text="Number of Bars", row=2, col=2)
 fig.update_yaxes(title_text="Variance Ratio(5)", row=2, col=2)
 
 fig.update_layout(
-    title="TIB vs VIB Statistical Properties",
+    title="Bar-count and return diagnostics for tick and volume imbalance bars",
     height=650,
     legend=dict(x=0.5, y=1.02, xanchor="center", orientation="h"),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four panels in a two-by-two grid comparing tick imbalance bars against volume imbalance bars across a grid of target bar sizes. Each panel plots one diagnostic against the number of bars produced, on a logarithmic horizontal axis, with one series per bar type.",
+)
 
 # %% [markdown]
 # ## 5. Key Takeaways
 #
-# | Property | TIBs | VIBs |
-# |----------|------|------|
-# | Accumulates | Trade signs (+1/-1) | Signed volume |
-# | Threshold scale | ~0.2 × E[T] | ~800 × E[T] |
-# | Bars for same E[T] | Many more | Far fewer |
+# | Property | Tick imbalance bars | Volume imbalance bars |
+# |----------|---------------------|-----------------------|
+# | Accumulates | Trade signs, plus or minus one | Signed volume |
+# | Threshold units | Trades | Shares |
+# | Bars at the same target size | Many more | Far fewer |
 #
-# ### Critical Calibration Insight
+# The threshold scales differ by orders of magnitude because they are in different
+# units, so a value calibrated for one is meaningless for the other.
 #
-# With persistent order flow imbalance (common in real data), the adaptive EWMA
-# can cause **threshold spiral** - bars get progressively larger as the algorithm
-# adapts E[T] and P[b=1] upward.
+# ### Why the adaptive threshold can run away
 #
-# **Solution**: Use very slow adaptation:
-# - α = 0.001 (not 0.1)
-# - warmup = 100+ bars (not 10)
+# The threshold is set from a running estimate of two things: the expected bar size and
+# the expected imbalance. Both are estimated from the bars the sampler has already cut,
+# which is what makes the scheme self-referential.
 #
-# ### AFML Insight
+# When order flow is persistently one-sided - which real data usually is - the estimated
+# imbalance rises, the threshold rises with it, the next bar takes longer to fill, and
+# the estimate rises again. The same loop runs in the other direction: an estimate that
+# falls produces shorter bars, which lower the estimate further, until every trade cuts
+# a bar. Both are the same feedback and the decay rate is what governs it.
 #
-# There's no "optimal" E[T]. Choose based on:
+# A slower decay and a longer warm-up damp the loop, at the cost of a sampler that is
+# less adaptive. The comparison below runs three decay rates so the two failure
+# directions and the working case can be seen against each other.
+#
+# ### Choosing a target bar size
+#
+# There is no optimal target. Choose it against:
 # - Desired bar frequency (more bars = better normality, but more noise)
 # - Trading horizon (intraday needs more bars than swing)
 # - Signal strength vs statistical properties tradeoff
@@ -614,19 +634,20 @@ print(compare_df)
 # %% [markdown]
 # ## 7. Recommendations
 #
-# | Use Case | Recommended Method | Why |
-# |----------|-------------------|-----|
-# | Production | `FixedTickImbalanceBarSampler` | Simplest, no drift, predictable |
-# | Research | `TickImbalanceBarSampler(α=0.001)` | Closest to textbook, slow adaptation |
+# | Use case | Sampler | Why |
+# |----------|---------|-----|
+# | Production | `FixedTickImbalanceBarSampler` | The threshold cannot drift, so bar size is predictable |
+# | Research | `TickImbalanceBarSampler` with a slow decay | Follows the textbook scheme while damping the feedback loop |
 #
-# **Key Findings**:
-# - The adaptive α-scheme fails in two opposite ways here: α=0.01 collapses the
-#   threshold (399,507 bars, avg 1 tick/bar), while α=0.1 inflates it (169 bars,
-#   avg 3,401 ticks/bar, ~17.5x E[T] drift). Only α=0.001 stays near target
-#   (594 bars, avg 968 ticks/bar, ~1x drift).
-# - The window-based sampler also produces degenerate bars in this test — likely a
-#   parameterization or implementation issue to investigate further
-# - α=0.001 with warmup=100 and fixed thresholds are the only reliable approaches here
+# The table above is how to read that recommendation. Two columns settle it before any
+# downstream statistic is looked at: how many bars a sampler cut, and how many trades
+# went into the average one. A sampler cutting hundreds of thousands of bars at one
+# trade each has a threshold that fell to nothing; one cutting a few hundred bars of
+# thousands of trades each has a threshold that ran away. Both are the feedback loop
+# described above, and neither shows up as an error.
+#
+# Compare each sampler's average bar against the target it was given. A ratio near one
+# is the scheme working; a ratio in the tens is drift, whichever direction it ran.
 
 # %%
 print("\n" + "=" * 70)
