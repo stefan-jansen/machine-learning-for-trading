@@ -366,11 +366,23 @@ print(f"13F holdings rows: {len(holdings_raw_df)} raw, {len(holdings_df)} long-e
 # which chains: a run of dates fourteen days apart merges without limit, and the
 # label it produces is a filing date standing in for a quarter end the artifact
 # already records.
+#
+# A period being present is not the same as a period being complete. 13Fs arrive
+# over a filing window, and the downloader keeps a partially filed quarter rather
+# than dropping it, so an artifact built during filing season holds a newest
+# period with some of the panel in it. Admitted as it stands, the institutions
+# that have not filed yet read as ownership exits: holder counts fall, values fall,
+# and churn rises, all from an artifact boundary. A period is only admitted here
+# when every institution in the panel has filed for it.
+#
+# Coverage is counted on every filing, options included, because an institution
+# that reported only puts and calls for a quarter did file. Features are still
+# computed from long-equity rows alone.
 
 
 # %%
 def report_period_calendar(holdings: pl.DataFrame) -> pl.DataFrame:
-    """One row per SEC report period, with the date its last filing became public."""
+    """One row per SEC report period: when its last filing arrived, and who filed."""
     return (
         holdings.group_by("report_date")
         .agg(
@@ -382,8 +394,13 @@ def report_period_calendar(holdings: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def complete_report_periods(periods: pl.DataFrame, panel_size: int) -> pl.DataFrame:
+    """Periods the whole institution panel has filed for."""
+    return periods.filter(pl.col("institutions") == panel_size)
+
+
 def public_report_periods(periods: pl.DataFrame, cutoff_date: str) -> list[date]:
-    """The report periods whose filings had all arrived by the cutoff."""
+    """Of those periods, the ones whose filings had all arrived by the cutoff."""
     cutoff = date.fromisoformat(cutoff_date)
     return [
         row["report_date"]
@@ -393,33 +410,72 @@ def public_report_periods(periods: pl.DataFrame, cutoff_date: str) -> list[date]
 
 
 # %%
-REPORT_PERIODS = report_period_calendar(holdings_df)
-LATEST_AVAILABLE = REPORT_PERIODS.get_column("available_from").max().isoformat()
+PANEL_SIZE = holdings_raw_df.get_column("cik").n_unique()
+REPORT_PERIODS = report_period_calendar(holdings_raw_df)
+COMPLETE_PERIODS = complete_report_periods(REPORT_PERIODS, PANEL_SIZE)
+_partial = REPORT_PERIODS.filter(pl.col("institutions") < PANEL_SIZE)
+assert not COMPLETE_PERIODS.is_empty(), (
+    f"no report period carries all {PANEL_SIZE} institutions in the panel"
+)
+LATEST_AVAILABLE = COMPLETE_PERIODS.get_column("available_from").max().isoformat()
 if not CUTOFF_DATE:
     CUTOFF_DATE = LATEST_AVAILABLE
     print(f"CUTOFF_DATE resolved from the artifact: {CUTOFF_DATE}")
 else:
     assert CUTOFF_DATE <= LATEST_AVAILABLE, (
-        f"CUTOFF_DATE {CUTOFF_DATE} is after {LATEST_AVAILABLE}, the last date any "
-        "filing in this artifact became public. Nothing exists to answer as of then."
+        f"CUTOFF_DATE {CUTOFF_DATE} is after {LATEST_AVAILABLE}, the date the newest "
+        "complete report period became public. Nothing exists to answer as of then."
     )
     print(f"CUTOFF_DATE overridden to {CUTOFF_DATE} (artifact reaches {LATEST_AVAILABLE})")
 
-PUBLIC_PERIODS = public_report_periods(REPORT_PERIODS, CUTOFF_DATE)
+PUBLIC_PERIODS = public_report_periods(COMPLETE_PERIODS, CUTOFF_DATE)
 assert len(PUBLIC_PERIODS) >= 2, (
-    f"only {len(PUBLIC_PERIODS)} report period(s) are public at {CUTOFF_DATE}; the "
-    "change and churn features need a prior period to compare against"
+    f"only {len(PUBLIC_PERIODS)} complete report period(s) are public at {CUTOFF_DATE}; "
+    "the change and churn features need a prior period to compare against"
 )
 # One filing per institution per period is what makes a period a snapshot rather
 # than a sum; an amendment against its original would break every count below.
-_per_period = holdings_df.group_by(["cik", "report_date"]).agg(
+_per_period = holdings_raw_df.group_by(["cik", "report_date"]).agg(
     pl.col("filing_date").n_unique().alias("filing_dates")
 )
 assert _per_period.filter(pl.col("filing_dates") > 1).is_empty(), (
     "an institution filed more than once for the same report period"
 )
+print(f"Institution panel: {PANEL_SIZE}")
 print(REPORT_PERIODS)
+print(f"Periods dropped for incomplete coverage: {_partial.height}")
 print(f"Report periods public at {CUTOFF_DATE}: {[p.isoformat() for p in PUBLIC_PERIODS]}")
+
+
+# %% [markdown]
+# ### The Coverage Gate, Exercised
+#
+# The artifact on disk is complete in every period, so the rule above is inert on
+# this data and would stay inert if it were wrong. Withholding one institution's
+# newest filing reproduces what a download during filing season looks like, and
+# the calendar has to drop that period.
+
+# %%
+_held_back = holdings_raw_df.get_column("cik").unique().sort().first()
+_newest = REPORT_PERIODS.get_column("report_date").max()
+_mid_season = holdings_raw_df.filter(
+    ~((pl.col("cik") == _held_back) & (pl.col("report_date") == _newest))
+)
+_mid_season_periods = (
+    complete_report_periods(report_period_calendar(_mid_season), PANEL_SIZE)
+    .get_column("report_date")
+    .to_list()
+)
+assert _newest not in _mid_season_periods, (
+    f"a period missing {_held_back} was still admitted as complete"
+)
+assert len(_mid_season_periods) == len(COMPLETE_PERIODS) - 1, (
+    "withholding one filing changed more than the period it was withheld from"
+)
+print(
+    f"With institution {_held_back} withheld from {_newest.isoformat()}, that period "
+    f"is excluded and {len(_mid_season_periods)} complete periods remain"
+)
 
 
 # %% [markdown]
@@ -1244,7 +1300,8 @@ feature_std = heatmap_data.std(axis=0)
 feature_std[feature_std == 0] = 1.0
 heatmap_z = (heatmap_data - heatmap_data.mean(axis=0)) / feature_std
 row_score = np.abs(heatmap_z).max(axis=1)
-row_order = np.argsort(row_score, kind="stable")[-20:][::-1]
+HEATMAP_ROWS = 20
+row_order = np.argsort(row_score, kind="stable")[-HEATMAP_ROWS:][::-1]
 plot_data = heatmap_z[row_order]
 plot_entities = np.asarray(heatmap_frame.get_column("entity"))[row_order]
 extreme_row, extreme_col = np.unravel_index(np.abs(plot_data).argmax(), plot_data.shape)
@@ -1269,14 +1326,11 @@ ax.set_yticklabels(plot_entities, fontsize=8)
 ax.set_xticks(range(len(diagnostic_cols)))
 ax.set_xticklabels(diagnostic_cols, fontsize=8, rotation=45, ha="right")
 ax.set_xlabel("Graph and ownership feature")
-ax.set_ylabel("Company")
+ax.set_ylabel(f"Company ({len(plot_entities)} of {heatmap_frame.height} complete profiles)")
 add_message_title(
     ax,
     "Standardized graph and ownership features, most deviant profiles",
-    subtitle=(
-        f"the {len(plot_entities)} of {heatmap_frame.height} complete profiles with "
-        "the largest deviation on any one column, which is what ranked them"
-    ),
+    subtitle="rows ranked by their largest deviation on any one column",
 )
 fig.colorbar(image, ax=ax, shrink=0.8, label="Standardized value (z-score)")
 show_with_alt(
