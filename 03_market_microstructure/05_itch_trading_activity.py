@@ -163,7 +163,7 @@ if HAS_MESSAGE_DATA:
     ax.set_ylabel("")
     show_with_alt(
         fig,
-        "A horizontal bar chart with one bar per ITCH message type, labelled with its letter code and name and sorted from fewest messages at the top to most at the bottom. The horizontal axis counts messages on a logarithmic scale, so single-digit counts and counts in the hundreds of millions are both readable on the same chart.",
+        "A horizontal bar chart with one bar per ITCH message type, labelled with its letter code and name and sorted with the most numerous type at the top and the rarest at the bottom. The horizontal axis counts messages on a logarithmic scale, so single-digit counts and counts in the hundreds of millions are both readable on the same chart.",
     )
 
     print("Message counts:")

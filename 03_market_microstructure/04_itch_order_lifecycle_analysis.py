@@ -320,7 +320,7 @@ if HAS_MESSAGE_DATA:
     ax.set_ylabel("")
     show_with_alt(
         fig,
-        "A horizontal bar chart with one bar per ITCH message type, each labelled with its letter code and name, sorted from fewest messages at the top to most at the bottom. The horizontal axis counts messages on a logarithmic scale spanning roughly one to several hundred million, so the shortest bars are single-digit counts and the longest run the full width.",
+        "A horizontal bar chart with one bar per ITCH message type, each labelled with its letter code and name, sorted with the most numerous type at the top and the rarest at the bottom. The horizontal axis counts messages on a logarithmic scale spanning roughly one to several hundred million, so the shortest bars are single-digit counts and the longest run the full width.",
     )
 
     print("Message counts:")
@@ -1204,9 +1204,11 @@ if HAS_MESSAGE_DATA:
 # someone chooses to cross to it, which is not something its sender controls.
 #
 # The two populations overlap, because an order can fill part of its size and be deleted
-# afterwards, so these are two views of one day rather than two disjoint sets. And both
-# are conditional on the event happening at all: an order still resting at the close
-# appears in neither.
+# afterwards, so these are two views of one day rather than two disjoint sets. Both are
+# also conditional on their event having happened: an order that was never deleted is
+# absent from the first list, and an order that never filled from the second. An order
+# that took a partial fill and was still resting at the close is in the second and not
+# the first.
 
 # %% [markdown]
 # ## Key Takeaways
