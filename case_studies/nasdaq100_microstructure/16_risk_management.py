@@ -166,6 +166,26 @@ prices = load_backtest_prices_for(
     max_symbols=MAX_SYMBOLS,
 )
 
+# `MAX_SYMBOLS` reduces the price panel and reaches `backtest_hash` through nothing, so a
+# reduced run and a full run over the same predictions hash alike and the second is served the
+# first's result (ml4t/agent-workspace#911). `14_backtest` and `15_portfolio_management` give a
+# reduced run an identity of its own by declaring the traded universe into the spec they BUILD;
+# this notebook carries each surviving configuration's spec forward through
+# `ensure_backtest_spec`, which has no such parameter, so there is no identity to give one
+# here. Refusal on the canonical tier is what keeps a narrowed sweep out of the registry the
+# book's numbers come from: this notebook registers with `register=True`, and
+# `resolve_best_backtest_runs` takes the top Sharpe over every backtest at a stage, so a Sharpe
+# earned over twelve names would outrank one earned over the whole panel. CI reaches this
+# notebook on the preview tier with a workspace, which the parameters cell above is what
+# arranges, so the reduced job is unaffected.
+if EXECUTION_TIER == "canonical" and MAX_SYMBOLS:
+    raise ValueError(
+        "MAX_SYMBOLS narrows the universe this run trades, which makes it a different "
+        "portfolio from the declared one and gives it its own backtest identity "
+        "(ml4t/agent-workspace#911). A canonical run trades the declared universe: set "
+        "MAX_SYMBOLS=0, or run under EXECUTION_TIER='preview' with a WORKSPACE."
+    )
+
 # %% [markdown]
 # ### MAE-Calibrated Trailing Stops
 #

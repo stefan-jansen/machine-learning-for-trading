@@ -76,6 +76,24 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 
+# `MAX_SYMBOLS` reduces the price panel this run trades and reaches `backtest_hash` through
+# nothing, so a reduced run and a full run over the same holdout predictions hash alike and
+# the second is served the first's result (ml4t/agent-workspace#911). `14_backtest` and
+# `15_portfolio_management` give a reduced run an identity of its own by declaring the traded
+# universe into the spec they BUILD; this notebook carries the selected configuration's spec
+# forward through `ensure_backtest_spec`, which has no such parameter, so there is no identity
+# to give one here. That leaves refusal as the only correct answer on the canonical tier, and
+# it matters more here than anywhere else in the case study: this is the one window the study
+# reports as unseen, it carries one backtest, and a narrowed result registered against it
+# could not be distinguished afterwards from the declared portfolio's.
+if EXECUTION_TIER == "canonical" and MAX_SYMBOLS:
+    raise ValueError(
+        "MAX_SYMBOLS narrows the universe this run trades, which makes it a different "
+        "portfolio from the declared one and gives it its own backtest identity "
+        "(ml4t/agent-workspace#911). A canonical run trades the declared universe: set "
+        "MAX_SYMBOLS=0, or run under EXECUTION_TIER='preview' with a WORKSPACE."
+    )
+
 
 def _registered_holdout_backtests(case_dir, prediction_hash):
     """The backtest hashes already registered against one holdout prediction set."""
