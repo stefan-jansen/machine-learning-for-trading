@@ -45,7 +45,7 @@
 """The Research Agent: ReAct loop with structured output extraction."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 
 import matplotlib.pyplot as plt
@@ -187,9 +187,11 @@ def build_step_prompt(
 # even odds and one at either certainty.
 #
 # That is a statement about the probability's position, not about the evidence behind it. An
-# agent that read forty documents and concluded the question is genuinely balanced scores zero;
-# is uniform and cheap. What would answer the question instead is calibration: whether
-# probabilities stated at seventy percent come true about seventy percent of the time.
+# agent that read forty documents and concluded the question is genuinely balanced scores zero,
+# and so does an agent that read nothing and guessed at even odds. The number is cheap and it
+# means the same thing for every agent, which is what it is for. What would answer the question
+# instead is calibration: whether probabilities stated at seventy percent come true about
+# seventy percent of the time.
 # [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) builds that arithmetic
 # and runs it on synthetic inputs, because measuring it for real needs forecasts recorded
 # before their questions resolved, which no capture in this chapter has.
@@ -216,15 +218,25 @@ def extract_sentiment(p_yes: float) -> Sentiment:
 
 
 # %% [markdown]
-# ### Key findings and uncertainties
+# ### Key findings
 #
-# Parses bullet points and numbered items from the rationale text, and identifies
-# sentences containing uncertainty language.
+# A model asked for a short rationale usually enumerates its reasons, and it picks the format
+# on its own: sometimes one item per line behind a dash or a number, sometimes run together
+# inside a sentence as `(1) ... (2) ...`. The function takes both, preferring line-leading
+# items where they exist and falling back to the inline markers, and it requires at least two
+# markers so that a lone parenthesised digit in ordinary prose is not read as a list.
+#
+# A rationale that enumerates nothing yields nothing, and that is the honest outcome rather
+# than a failure: the field records how the model chose to present its reasons, not how many
+# reasons it had.
 
 
 # %%
+INLINE_ENUMERATION = re.compile(r"\(\d+\)\s*")
+
+
 def extract_key_findings(rationale: str) -> list[str]:
-    """Extract bullet points and numbered items from rationale."""
+    """Extract the items a rationale enumerates, on their own lines or inline."""
     findings = []
     for line in rationale.split("\n"):
         line = line.strip()
@@ -232,7 +244,15 @@ def extract_key_findings(rationale: str) -> list[str]:
             findings.append(re.sub(r"^[-•*]\s+", "", line).strip())
         elif re.match(r"^\d+[.)]\s+", line):
             findings.append(re.sub(r"^\d+[.)]\s+", "", line).strip())
-    return findings[:10]
+    if findings:
+        return findings[:10]
+    items = [part.strip() for part in INLINE_ENUMERATION.split(rationale)[1:]]
+    if len(items) < 2:
+        return []
+    # The text after the last marker runs on into whatever the model wrote next, so the last
+    # item ends at its own sentence boundary rather than at the end of the rationale.
+    items[-1] = re.split(r"(?<=[.!?])\s+", items[-1])[0]
+    return [item.rstrip(";.").strip() for item in items][:10]
 
 
 # %% [markdown]
@@ -275,6 +295,28 @@ def assess_evidence_quality(sources_consulted: int, queries_made: int) -> Eviden
     if sources_consulted >= 5 or queries_made >= 2:
         return EvidenceQuality.MEDIUM
     return EvidenceQuality.LOW
+
+
+# %% [markdown]
+# ### Recomputing the derived fields on a replayed run
+#
+# A saved run holds both halves: what the model returned, and what was derived from it at the
+# time. Only the first half is a recording. The second is a function of it, so the replay
+# recomputes it with the functions above rather than reading it back, and the reader sees the
+# derivation run on a real rationale instead of a value from a file.
+
+
+# %%
+def rederive_fields(a: AgentForecastArtifact) -> AgentForecastArtifact:
+    """Recompute every derived field from the probability and rationale the model returned."""
+    return replace(
+        a,
+        confidence=extract_confidence({"p_yes": a.p_yes}),
+        sentiment=extract_sentiment(a.p_yes),
+        key_findings=extract_key_findings(a.rationale),
+        uncertainties=extract_uncertainties(a.rationale),
+        evidence_quality=assess_evidence_quality(a.sources_consulted, a.search_queries_made),
+    )
 
 
 # %% [markdown]
@@ -502,10 +544,11 @@ class ResearchAgent:
 # [`06_multi_agent_research`](06_multi_agent_research.ipynb) uses the companion
 # `CHAPTER_CLEAR_QUESTION` instead, where the agents agree, so the two can be compared.
 #
-# On the default path the notebook replays the pinned capture rather than calling anything:
-# provider `claude-sonnet-4`, Tavily search, recorded 2026-06-09. Setting `RUN_LIVE = True`
-# with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY` forecasts a current question instead, and will
-# not reproduce the values below.
+# On the default path the notebook replays the pinned capture rather than calling anything;
+# the cell below reports the provider, the search tool and the date of the capture it read,
+# each taken from the saved record. Setting `RUN_LIVE = True` with `ANTHROPIC_API_KEY` and
+# `TAVILY_API_KEY` forecasts a current question instead, and will not reproduce the values
+# below.
 
 # %%
 if RUN_LIVE:
@@ -535,12 +578,14 @@ else:
     question = pinned_run.question_obj()
     provider_name = pinned_run.provider
     search_name = "replay (pinned trace)"
-    replayed_artifacts = pinned_run.agent_artifacts()
+    replayed_artifacts = [rederive_fields(a) for a in pinned_run.agent_artifacts()]
     artifact = replayed_artifacts[0]
+    captured_on = datetime.fromisoformat(pinned_run.created_at).date().isoformat()
 
-print(f"Mode: {'LIVE' if RUN_LIVE else 'REPLAY (pinned 2026-06-09 trace)'}")
+mode = "live" if RUN_LIVE else f"replay of a capture recorded {captured_on}"
+print(f"Mode:     {mode}")
 print(f"Provider: {provider_name}")
-print(f"Search: {search_name}")
+print(f"Search:   {search_name}")
 print(f"Question: {question.question}\n")
 
 # %% [markdown]
@@ -796,15 +841,15 @@ ax.set_ylim(0, max(a.p_yes for a in pair) + 0.10)
 format_pct_axis(ax)
 add_message_title(
     ax,
-    "Two runs of one agent land on opposite sides of even odds",
+    "Two runs of one research agent on the same question",
     subtitle="Same question, prompts and tools; 2026-06-09 capture, "
     "search results carry no publication dates",
 )
 show_with_alt(
     fig,
-    f"Bar chart of two agent forecasts for the same question: {pair[0].agent_id} at "
-    f"{pair[0].p_yes:.0%} and {pair[1].agent_id} at {pair[1].p_yes:.0%}, "
-    f"{abs(pair[0].p_yes - pair[1].p_yes):.0%} apart.",
+    "Bar chart of the probability each of two research agents gave for the same question, one "
+    "bar per agent. The first bar stands well above even odds and the second well below it, "
+    "and each carries its own value as a label.",
 )
 
 # %% [markdown]
