@@ -286,11 +286,11 @@ jobs:
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch22 }}" == "true" ]]; then
             add_ch "ch22" "22_rag"
           fi
-          # Ch23 has no entry here: six of its ten notebooks need the Neo4j service,
-          # which this job does not start. They run in test-neo4j instead.
-          # if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch23 }}" == "true" ]]; then
-          #   add_ch "ch23" "23_knowledge"
-          # fi
+          if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch23 }}" == "true" ]]; then
+            # Named rather than "23_knowledge": six of the ten need the Neo4j service,
+            # which this job does not start, and they run in test-neo4j instead.
+            add_ch "ch23" "01_sp100 or 04_rag_comparison or 06_gnn or 10_network"
+          fi
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.ch24 }}" == "true" ]]; then
             add_ch "ch24" "24_autonomous"
           fi

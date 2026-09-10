@@ -457,24 +457,27 @@ print(f"Report periods public at {CUTOFF_DATE}: {[p.isoformat() for p in PUBLIC_
 
 # %%
 _held_back = holdings_raw_df.get_column("cik").unique().sort().first()
-_newest = REPORT_PERIODS.get_column("report_date").max()
+# Withhold from the newest period the gate currently admits, not the newest period
+# in the artifact. On an artifact that is already mid-season those differ, and
+# withholding from a period the gate has already excluded would demonstrate nothing.
+_target_period = COMPLETE_PERIODS.get_column("report_date").max()
 _mid_season = holdings_raw_df.filter(
-    ~((pl.col("cik") == _held_back) & (pl.col("report_date") == _newest))
+    ~((pl.col("cik") == _held_back) & (pl.col("report_date") == _target_period))
 )
 _mid_season_periods = (
     complete_report_periods(report_period_calendar(_mid_season), PANEL_SIZE)
     .get_column("report_date")
     .to_list()
 )
-assert _newest not in _mid_season_periods, (
+assert _target_period not in _mid_season_periods, (
     f"a period missing {_held_back} was still admitted as complete"
 )
 assert len(_mid_season_periods) == len(COMPLETE_PERIODS) - 1, (
     "withholding one filing changed more than the period it was withheld from"
 )
 print(
-    f"With institution {_held_back} withheld from {_newest.isoformat()}, that period "
-    f"is excluded and {len(_mid_season_periods)} complete periods remain"
+    f"With institution {_held_back} withheld from {_target_period.isoformat()}, that "
+    f"period is excluded and {len(_mid_season_periods)} complete periods remain"
 )
 
 

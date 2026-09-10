@@ -1100,8 +1100,11 @@
   gpu: true
   timeout: 300
 23_knowledge_graphs/01_sp100_sec_download:
-  skip: true
-  skip_reason: Writes to data volume (read-only in Docker)
+  # It was skipped as "Writes to data volume (read-only in Docker)". It writes
+  # nothing: it loads the staged filings through load_sec_filings and profiles them.
+  # Measured: runs clean in the ml4t image in 25s. The download it documents is a
+  # separate script, which is what the stale reason described.
+  timeout: 300
 23_knowledge_graphs/02_supply_chain_kg_construction:
   # The default path loads the committed extraction cache and touches no GPU:
   # RERUN_EXTRACTION is False, so Qwen is never loaded. Only cache regeneration
