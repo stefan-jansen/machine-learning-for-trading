@@ -59,9 +59,12 @@ from deepm.model import DeepmPolicy
 from deepm.train import train_model
 from matplotlib.colors import ListedColormap
 from matplotlib.ticker import PercentFormatter
+from ml4t.diagnostic.evaluation.portfolio_analysis import annual_volatility, max_drawdown
+from ml4t.diagnostic.metrics import sharpe_ratio
 from torch.utils.data import DataLoader
 
 from data import load_etfs
+from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
 
@@ -73,6 +76,7 @@ SEQ_LEN = 84
 D_MODEL = 64
 SEED = 42
 DEVICE = "auto"
+TRADING_DAYS = 252  # sessions a year, the grid every annualized figure below is scaled on
 
 # %% [markdown]
 # ### Determinism
@@ -212,7 +216,7 @@ ax.set_xticklabels(panel.assets, rotation=90, fontsize=7)
 ax.set_yticks(range(N_ASSETS))
 ax.set_yticklabels(panel.assets, fontsize=7)
 print(f"The macro prior keeps {graph_density:.0%} of the possible attention links.")
-ax.set_title("The macro prior blocks attention between unrelated asset classes")
+ax.set_title("Attention links the macro prior permits, asset by asset")
 show_with_alt(
     fig,
     "Binary matrix of the macro attention prior, assets on both axes, filled where an attention link is permitted and blank where the prior blocks it, with filled blocks along the asset-class groupings.",
@@ -359,7 +363,18 @@ train_cfg = TrainingConfig(
 )
 
 print(f"Training for up to {MAX_ITERS} iterations...")
-print(f"SoftMin: tau={train_cfg.softmin_tau}, lambda={train_cfg.softmin_lambda}")
+print(
+    f"SoftMin temperature tau={train_cfg.softmin_tau} sets how sharply the penalty focuses on "
+    "the weakest rolling window; a smaller value concentrates it on fewer windows."
+)
+print(
+    f"SoftMin weight lambda={train_cfg.softmin_lambda} sets how much that penalty counts "
+    "against the pooled Sharpe ratio the loss also maximizes."
+)
+print(
+    f"Turnover weight gamma_cost={train_cfg.gamma_cost} scales the per-asset cost schedule "
+    "the loss charges for changing weights."
+)
 
 # %%
 best_state, history = train_model(
@@ -398,7 +413,7 @@ ax.plot(
 )
 ax.set_xlabel("Iteration")
 ax.set_ylabel("Objective (higher = better)")
-ax.set_title("The training objective, which the loss negates and so maximizes")
+ax.set_title("Training objective by iteration")
 ax.legend()
 
 ax = axes[1]
@@ -419,7 +434,7 @@ ax.plot(
 ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Iteration")
 ax.set_ylabel("Pooled Sharpe")
-ax.set_title("Validation Sharpe is what the kept checkpoint is chosen on")
+ax.set_title("Training and validation pooled Sharpe by iteration")
 ax.legend()
 
 show_with_alt(
@@ -599,21 +614,20 @@ iv_returns.name = "InvVol"
 
 # %%
 def compute_perf_metrics(r, name):
-    """Performance metrics from a return series."""
+    """Performance metrics from a return series.
+
+    The return column is the arithmetic daily mean annualized, not a compounded growth
+    rate: it is the numerator of the Sharpe ratio beside it, so the two are read together.
+    """
     r = r.dropna()
     if len(r) < 10:
-        return {"Method": name, "Ann. Return": "N/A", "Sharpe": "N/A", "Max DD": "N/A"}
-    mu = r.mean() * 252
-    vol = r.std() * np.sqrt(252)
-    sr = mu / (vol + 1e-8)
-    cum = (1 + r).cumprod()
-    dd = float((cum / cum.cummax() - 1).min())
+        return {"Method": name, "Ann. Mean Return": "N/A", "Sharpe": "N/A", "Max DD": "N/A"}
     return {
         "Method": name,
-        "Ann. Return": f"{mu:.1%}",
-        "Ann. Vol": f"{vol:.1%}",
-        "Sharpe": f"{sr:.2f}",
-        "Max DD": f"{dd:.1%}",
+        "Ann. Mean Return": f"{r.mean() * TRADING_DAYS:.1%}",
+        "Ann. Vol": f"{annual_volatility(r.to_numpy(), TRADING_DAYS):.1%}",
+        "Sharpe": f"{sharpe_ratio(r.to_numpy(), periods_per_year=TRADING_DAYS):.2f}",
+        "Max DD": f"{max_drawdown(r.to_numpy()):.1%}",
     }
 
 
@@ -648,17 +662,9 @@ method_colors = {
     "Equal Weight": COLORS["amber"],
     "Inverse Volatility": COLORS["positive"],
 }
-sharpe_by_method = {
-    name: float(series.mean() / (series.std() + 1e-8) * np.sqrt(252))
-    for name, series in method_returns.items()
-}
 for label, r in method_returns.items():
     cum = (1 + r.dropna()).cumprod()
     ax.plot(cum.index, cum.values, label=label, color=method_colors[label])
-
-print("Held-out annualized Sharpe, net of the cost schedule:")
-for name, value in sharpe_by_method.items():
-    print(f"  {name:<20} {value:+.2f}")
 
 ax.set_xlabel("Date")
 ax.set_ylabel("Cumulative Return")
@@ -682,7 +688,7 @@ show_with_alt(
 
 # %%
 # Use rolling 21d realized volatility of SPY as regime indicator
-spy_vol = prices["SPY"].pct_change().rolling(21).std() * np.sqrt(252)
+spy_vol = prices["SPY"].pct_change().rolling(21).std() * np.sqrt(TRADING_DAYS)
 spy_vol_test = spy_vol.loc[test_mask].dropna()
 vol_median = spy_vol_test.median()
 
@@ -698,7 +704,7 @@ def regime_sharpe(r, mask):
     rm = r.reindex(mask.index)[mask]
     if len(rm) < 10:
         return float("nan")
-    return float(rm.mean() / (rm.std() + 1e-8) * np.sqrt(252))
+    return sharpe_ratio(rm.to_numpy(), periods_per_year=TRADING_DAYS)
 
 
 regime_results = pd.DataFrame(
@@ -764,6 +770,12 @@ drawdowns_panel.index.name = "timestamp"
 drawdowns_panel = drawdowns_panel.reset_index()
 drawdowns_panel["vol_median"] = float(vol_median)
 
+drawdowns_path = get_output_dir(17, "deepm_regime_robust") / "drawdowns.parquet"
+pl.from_pandas(drawdowns_panel).write_parquet(drawdowns_path)
+print(
+    f"Wrote {drawdowns_panel.shape[0]:,} rows to {drawdowns_path.parent.name}/{drawdowns_path.name}"
+)
+
 # %% [markdown]
 # ### Drawdown and Volatility Plot
 
@@ -814,7 +826,7 @@ ax.axhline(
 ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
 ax.set_ylabel("Volatility")
 ax.set_xlabel("Date")
-ax.set_title("The regime split is the median of SPY's own trailing volatility")
+ax.set_title("SPY trailing annualized volatility, with its holdout median")
 ax.legend()
 
 # The figure was closed on creation so the inline backend would not render it between the
@@ -863,9 +875,10 @@ show_with_alt(
 #    model rather than asking it to recover groupings from data; whether that prior
 #    is binding versus a fully learnable attention matrix is not tested here.
 # 3. **Cost awareness enters training as a differentiable turnover penalty**
-#    ($\gamma_{\text{cost}}=0.5$ over the asset-specific cost schedule). Held-out
-#    evaluation then applies the full one-way basis-point schedule to normalized
-#    target-weight changes, including the initial entry trade.
+#    ($\gamma_{\text{cost}}$, printed with the other training settings, weighting the
+#    asset-specific cost schedule). Held-out evaluation then applies the full one-way
+#    basis-point schedule to normalized target-weight changes, including the initial entry
+#    trade.
 # 4. **One ablation isolates one mechanism.** Turning the SoftMin penalty off while holding
 #    the architecture, the data and the seed fixed is what makes the difference between the two
 #    rows attributable to the penalty. The same argument applied to FiLM, the variable-selection

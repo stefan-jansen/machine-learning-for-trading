@@ -63,7 +63,7 @@ This section introduces causal thinking as a falsification layer for features th
 uv run python 07_defining_the_learning_task/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "07_defining_the_learning_task"
+uv run pytest tests/test_chapter_notebooks.py -v -k "07_defining_the_learning_task"
 ```
 
 ### Memory and runtime callouts

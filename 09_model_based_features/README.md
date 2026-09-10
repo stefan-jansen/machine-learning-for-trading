@@ -78,7 +78,7 @@ A conditional volatility of a quarter means one thing for a utility and another 
 uv run python 09_model_based_features/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "09_model_based_features"
+uv run pytest tests/test_chapter_notebooks.py -v -k "09_model_based_features"
 ```
 
 > Runtime, measured on a workstation: `10_uncertainty_features` about three minutes, which is the sampler; every other notebook in the chapter finishes in under 40 seconds.

@@ -112,7 +112,7 @@ Add keys to `.env` (see `.env.example`). Without API keys, notebooks auto-detect
 uv run python 24_autonomous_agents/<notebook>.py
 
 # Test mode (mock providers via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "24_autonomous_agents"
+uv run pytest tests/test_chapter_notebooks.py -v -k "24_autonomous_agents"
 ```
 
 ## References

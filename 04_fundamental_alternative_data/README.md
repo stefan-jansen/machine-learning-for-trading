@@ -60,7 +60,7 @@ This section provides a concrete pipeline for turning SEC filing text into a mod
 uv run python 04_fundamental_alternative_data/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "04_fundamental_alternative_data"
+uv run pytest tests/test_chapter_notebooks.py -v -k "04_fundamental_alternative_data"
 ```
 
 ### Required environment variables

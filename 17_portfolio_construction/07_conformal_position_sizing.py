@@ -47,6 +47,8 @@ import sqlite3
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from ml4t.diagnostic.evaluation.portfolio_analysis import annual_return, max_drawdown
+from ml4t.diagnostic.metrics import sharpe_ratio, sortino_ratio
 from ml4t.diagnostic.metrics.ic_inference import compute_ic_hac_stats
 from ml4t.diagnostic.signal.signal_ic import extract_signal_ic_series
 
@@ -360,7 +362,7 @@ ax.set_ylabel("Cumulative share of entity-fold widths")
 ax.legend(title="Validation panel")
 add_message_title(
     ax,
-    "CME residual widths vary more around their median",
+    "Conformal widths relative to each panel's own median",
     subtitle="Finite-sample Mondrian widths; strictly prior, horizon-embargoed calibration",
 )
 show_with_alt(
@@ -471,9 +473,12 @@ def compute_turnover(weights_long: pl.DataFrame, id_col: str, weight_col: str) -
 
 
 # %% [markdown]
-# Sharpe and Sortino scale by the number of non-overlapping horizon periods per
-# year. Annual return comes from the realized compounded path, not by compounding
-# the arithmetic mean return.
+# The four statistics come from `ml4t.diagnostic` rather than being written out here, and each
+# is passed the number of non-overlapping horizon periods in a year instead of the daily 252:
+# the return series has one observation per rebalance, not one per session, so annualizing it as
+# if it were daily would inflate every ratio. `annual_return` compounds the realized path rather
+# than the arithmetic mean return, which is what makes it consistent with the drawdown computed
+# from the same path.
 
 
 # %%
@@ -482,7 +487,6 @@ def metric_block(
 ) -> dict[str, dict[str, float]]:
     """Compute path-consistent validation metrics for the three allocators."""
     periods_per_year = TRADING_DAYS_PER_YEAR / horizon
-    ann_sqrt = np.sqrt(periods_per_year)
 
     out: dict[str, dict[str, float]] = {}
     for name, ret_col, w_col in [
@@ -491,28 +495,14 @@ def metric_block(
         ("score_weighted", "ret_score", "w_score"),
     ]:
         r = rets[ret_col].to_numpy()
-        mu = r.mean()
-        sd = r.std(ddof=1)
-        _downside_raw = float(np.sqrt(np.mean(np.minimum(r, 0.0) ** 2)))
-        downside = _downside_raw if _downside_raw > 0 else np.nan
-        cum = np.cumprod(1.0 + r)
-        peak = np.maximum.accumulate(cum)
-        max_dd = float((cum / peak - 1.0).min())
-        annual_return = (
-            float(cum[-1] ** (periods_per_year / r.size) - 1.0)
-            if r.size > 0 and np.all(1.0 + r > 0)
-            else float("nan")
-        )
         out[name] = {
-            "sharpe": float(mu / sd * ann_sqrt) if sd > 0 else float("nan"),
-            "sortino": float(mu / downside * ann_sqrt)
-            if downside == downside and downside > 0
-            else float("nan"),
-            "max_drawdown": max_dd,
+            "sharpe": sharpe_ratio(r, periods_per_year=periods_per_year),
+            "sortino": sortino_ratio(r, periods_per_year=periods_per_year),
+            "max_drawdown": float(max_drawdown(r)),
             "win_rate": float((r > 0).mean()),
             "avg_turnover": compute_turnover(weights, id_col, w_col),
             "n_obs": int(r.shape[0]),
-            "ann_return": annual_return,
+            "ann_return": annual_return(r, periods_per_year=periods_per_year),
         }
     return out
 
@@ -523,10 +513,36 @@ def metric_block(
 # would inflate Sharpe and break drawdown accounting, one global schedule keeps
 # every `HORIZON`th trading date without restarting at fold boundaries. The
 # Sharpe is annualized by $\sqrt{252/h}$ - for ETFs with $h=21$ this is
-# $\sqrt{12}$; for CME with $h=5$ this is $\sqrt{50.4}$. The realized portfolio
+# $\sqrt{252/21}$; for CME with $h=5$ it is $\sqrt{252/5}$. The realized portfolio
 # return at each rebalance date $t$ is $\sum_i w_{i,t}\,y_{i,t}$, where $y_{i,t}$
 # is the $h$-day forward return and the cohort is held to maturity (no
 # intra-period rebalancing).
+
+# %% [markdown]
+# One table shape for both case studies, so the two sections are read the same way.
+
+
+# %%
+def allocator_table(metrics: dict[str, dict[str, float]]) -> pl.DataFrame:
+    """One row per sizing rule, carrying the four measures section 8 draws."""
+    labels = {
+        "baseline_equal_weight": "Equal weight",
+        "conformal_weighted": "Conformal weighted",
+        "score_weighted": "Score weighted",
+    }
+    return pl.DataFrame(
+        [
+            {
+                "sizing rule": label,
+                "annualized Sharpe": metrics[key]["sharpe"],
+                "annualized return": metrics[key]["ann_return"],
+                "maximum drawdown": metrics[key]["max_drawdown"],
+                "mean one-way turnover": metrics[key]["avg_turnover"],
+            }
+            for key, label in labels.items()
+        ]
+    )
+
 
 # %% [markdown]
 # ## 6. ETFs (`fwd_ret_21d`)
@@ -544,16 +560,7 @@ etf_metrics = metric_block(etf_rets, etf_weights, "symbol", HORIZON_ETF)
 print(f"ETFs: {etf_rets.height} non-overlapping validation rebalances")
 
 # %%
-for label, key in [
-    ("Equal Weight", "baseline_equal_weight"),
-    ("Conformal Weighted", "conformal_weighted"),
-    ("Score Weighted", "score_weighted"),
-]:
-    m = etf_metrics[key]
-    print(
-        f"{label}: Sharpe {m['sharpe']:.3f}, annual return {m['ann_return']:.1%}, "
-        f"max drawdown {m['max_drawdown']:.1%}, one-way turnover {m['avg_turnover']:.3f}"
-    )
+allocator_table(etf_metrics)
 
 # %% [markdown]
 # ## 7. CME Futures (`fwd_ret_5d`)
@@ -571,16 +578,7 @@ cme_metrics = metric_block(cme_rets, cme_weights, "symbol", HORIZON_CME)
 print(f"CME futures: {cme_rets.height} non-overlapping validation rebalances")
 
 # %%
-for label, key in [
-    ("Equal Weight", "baseline_equal_weight"),
-    ("Conformal Weighted", "conformal_weighted"),
-    ("Score Weighted", "score_weighted"),
-]:
-    m = cme_metrics[key]
-    print(
-        f"{label}: Sharpe {m['sharpe']:.3f}, annual return {m['ann_return']:.1%}, "
-        f"max drawdown {m['max_drawdown']:.1%}, one-way turnover {m['avg_turnover']:.3f}"
-    )
+allocator_table(cme_metrics)
 
 # %% [markdown]
 # ## 8. Allocation Trade-offs on Validation
@@ -631,7 +629,7 @@ show_with_alt(
 # %% [markdown] tags=["results"]
 # ### What this run produced
 #
-# Two panels, three sizing rules, four measures each - all printed in sections 6 and 7 and drawn
+# Two panels, three sizing rules, four measures each - tabulated in sections 6 and 7 and drawn
 # together in the four-panel figure. The three rules share one selection at every rebalance, so
 # any difference between them comes from the weights alone.
 #

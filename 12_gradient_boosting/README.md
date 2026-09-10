@@ -67,7 +67,7 @@ This section provides the empirical payoff for the chapter. Instead of treating 
 uv run python 12_gradient_boosting/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "12_gradient_boosting"
+uv run pytest tests/test_chapter_notebooks.py -v -k "12_gradient_boosting"
 ```
 
 ## References

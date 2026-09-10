@@ -189,3 +189,38 @@ def test_the_recorded_block_survives_json_round_tripping(tmp_path):
     sidecar = json.loads((tmp_path / "new.parquet.digest.json").read_text())
     assert sidecar["fold_digests"] == fold_digests(pl.read_parquet(new))
     assert set(sidecar["supersedes"]["fold_digests"]) == {"0", "1"}
+
+
+def test_a_replacement_with_no_fold_column_is_refused_and_says_what_to_do(tmp_path):
+    """The maximal replacement, and the one an author actually hits.
+
+    `us_equities_panel`'s stage 04 was regenerated on 2026-09-10 from per-fold rows to one row
+    per (symbol, timestamp), so the new artifact has no `fold` column at all. That is every old
+    fold missing at once, and it belongs on the refusal path this script already has. It reached
+    `fold_digests` instead, whose KeyError is right for a library function and useless as the
+    answer to an author following the documented command.
+    """
+    old = _write(_frame(range(3)), tmp_path / "old.parquet")
+    new_frame = _frame(range(3)).drop("fold")
+    write_artifact(new_frame, tmp_path / "new.parquet", keys=["symbol"], written_by="test")
+    new = tmp_path / "new.parquet"
+
+    result = _record(old, new)
+    assert result.returncode == 1
+    assert "has no 'fold' column" in result.stdout
+    assert "replaces the pinned artifact rather than extending it" in result.stderr
+    assert "declare_artifact_supersession" in result.stderr
+    assert "supersedes" not in read_digest(new)
+
+
+def test_a_superseded_file_with_no_fold_column_has_nothing_to_record(tmp_path):
+    """The other side of the same check: no per-fold values existed to be carried across."""
+    old_frame = _frame(range(3)).drop("fold")
+    write_artifact(old_frame, tmp_path / "old.parquet", keys=["symbol"], written_by="test")
+    old = tmp_path / "old.parquet"
+    new = _write(_frame(range(3)), tmp_path / "new.parquet")
+
+    result = _record(old, new)
+    assert result.returncode == 1
+    assert "holds no per-fold values" in result.stderr
+    assert "supersedes" not in read_digest(new)

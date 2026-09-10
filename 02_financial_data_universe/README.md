@@ -60,7 +60,7 @@ This section translates data discipline into infrastructure decisions. Rather th
 uv run python 02_financial_data_universe/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "02_financial_data_universe"
+uv run pytest tests/test_chapter_notebooks.py -v -k "02_financial_data_universe"
 ```
 
 ### NB21 storage_benchmark_database prerequisites

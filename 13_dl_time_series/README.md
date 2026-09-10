@@ -86,7 +86,7 @@ The aggregate picture from [`12_case_study_insights`](12_case_study_insights.ipy
 uv run python 13_dl_time_series/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "13_dl_time_series"
+uv run pytest tests/test_chapter_notebooks.py -v -k "13_dl_time_series"
 ```
 
 > Every chapter-13 notebook except `12_case_study_insights` trains PyTorch on the GPU

@@ -57,7 +57,7 @@ This is the chapter's second major contribution after the feature-design grammar
 uv run python 08_financial_features/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "08_financial_features"
+uv run pytest tests/test_chapter_notebooks.py -v -k "08_financial_features"
 ```
 
 > Memory: `03_structural_cross_instrument_features` peaks at ~7.4 GB RSS scanning the AlgoSeek S&P-500 options surface — recommend ≥8 GB system RAM for §8.3.

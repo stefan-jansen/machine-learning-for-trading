@@ -29,7 +29,7 @@
 # - Evaluate interpolation quality at unobserved timestamps (GT-GAN's unique capability)
 # - Compare GT-GAN's irregular-data approach with fixed-grid generators (TimeGAN, Sig-CWGAN)
 #
-# **Book Reference**: Chapter 5, Section 5.4 (GANs for Financial Time Series) — GT-GAN
+# **Book Reference**: Chapter 5, Section 5.5 (GANs for financial time series) - GT-GAN
 # is treated here as a hybrid GAN + continuous-time generator for irregular observations.
 #
 # **Prerequisites**: Familiarity with GANs (`01_timegan_pytorch.py`) and Chapter 3 bar data.
@@ -98,32 +98,34 @@
 # **For production use**: Ensure Chapter 3's microstructure bar data is available.
 # Run Chapter 3 notebooks first to generate tick/volume/dollar bars.
 #
-# ### Results Context
+# ### What this run reports
 #
-# - **Reconstruction MSE**: ~0.026 — above the ~0.01 bar this notebook uses for a
-#   "good" autoencoder, so the encoder only roughly captures the bars (see the
-#   per-cell interpretation; this is a simplified, short-training demo)
-# - **KS statistic**: ~0.68 (high — small synthetic-data regime)
-# - **Smoothness ratio**: ~0.02 — the Neural-ODE interpolation is far smoother
-#   than the real bars (ratio ≪ 1), not matching their roughness
+# Three numbers say how the run went, all printed in the evaluation cells below:
+# reconstruction MSE for the autoencoder round-trip, the KS statistic against the
+# real marginal, and the smoothness ratio of the ODE interpolation against the real
+# bars. This is a short training pass over a small sample, so read them as a
+# demonstration of the architecture rather than as achievable quality.
 #
 # ---
 #
 # ## Per-Sample Time Integration
 #
-# Two ODE-stepping strategies are available:
+# `ode_method` selects one of two fixed-step solvers, and both advance each row of a
+# batch by that row's own interval:
 #
-# - **Euler method**: Direct vectorized computation `h_new = h + dt * f(h)` where dt
-#   varies per sample. Fast and exact for the Euler case.
-# - **Adaptive methods (Dopri5)**: Uses `torchdiffeq.odeint` with a batch-averaged
-#   time span. The original GT-GAN paper relied on `torchode` (Lienen & Günnemann,
-#   2022) for per-sample integration in a single solver call, but its
-#   `torchtyping` dependency is incompatible with current PyTorch, so we use
-#   `torchdiffeq` here.
+# - **Euler**: one evaluation per step, `h_new = h + dt * f(h)`.
+# - **RK4**: four evaluations per step, combined as `h + (dt / 6)(k1 + 2 k2 + 2 k3 + k4)`.
 #
-# For genuinely irregular time series (e.g., information-theoretic bars), the
-# Euler path is preferred since it preserves per-sample dt; the adaptive path is
-# kept for completeness and matches what `torchdiffeq` provides.
+# Neither drift network takes the time as an input, so a step depends only on the width
+# of the interval and a column of `dt` values is enough to give every row its own step.
+# That is what `ode_evolve` below does. `torchdiffeq.odeint` is still used for the
+# generator, whose whole batch genuinely shares one time span; it takes a single grid
+# for a batched initial state, so it cannot be used where the rows differ.
+#
+# An adaptive solver would need per-sample step control. The GT-GAN paper used
+# `torchode` (Lienen & Günnemann, 2022) for that, but its `torchtyping` dependency is
+# incompatible with current PyTorch, so the config cell rejects any method other than
+# the two above.
 #
 # **Reference**: Lienen, M. & Günnemann, S. (2022). "torchode: A Parallel ODE
 # Solver for PyTorch." https://arxiv.org/abs/2210.12375
@@ -131,6 +133,7 @@
 # %%
 """GT-GAN — Neural ODE-based generative model for irregular time series."""
 
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -146,7 +149,6 @@ import torch.optim as optim
 from IPython.display import Image, display
 from plotly.subplots import make_subplots
 from scipy import stats
-from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import accuracy_score, roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
@@ -155,7 +157,7 @@ from tqdm import tqdm
 
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, plot_fidelity_comparison
+from utils.style import COLORS, plot_fidelity_comparison, show_plotly_with_alt, show_with_alt
 
 # %% [markdown]
 # ## GT-GAN Architecture
@@ -168,7 +170,6 @@ ASSETS_DIR = get_chapter_dir(5) / "assets"
 if (ASSETS_DIR / "gtgan_architecture.jpeg").exists():
     display(Image(ASSETS_DIR / "gtgan_architecture.jpeg", width=800))
 
-HEADLESS = os.environ.get("HEADLESS", "0") == "1"
 
 # Checkpoint path for model persistence
 CHECKPOINT_PATH = get_output_dir(5, "gtgan") / "checkpoints" / "gtgan_model.pt"
@@ -181,10 +182,19 @@ HIDDEN_DIM = 24
 ODE_HIDDEN = 24
 MAX_STEPS = 2000
 BATCH_SIZE = 128
-ODE_METHOD = "rk4"
+ODE_METHOD = "rk4"  # "euler" or "rk4"; both step each sample by its own dt
 N_BARS = 2000  # Fallback synthetic bar count (when Ch3 data unavailable)
 RETRAIN = False  # Set True to retrain even if checkpoint exists
 SEED = 42
+
+# The reconstruction MSE this notebook treats as a well-behaved autoencoder. It is a
+# reading aid for the printed number, not a value the paper reports.
+GOOD_RECONSTRUCTION_MSE = 0.01
+
+# Progress bars write to stderr and papermill records every repaint, so they are off by
+# default and the training loop prints the same numbers to stdout instead. Set True to
+# watch a long run interactively.
+PROGRESS_BARS = False
 
 # %%
 set_global_seeds(SEED)
@@ -193,6 +203,7 @@ set_global_seeds(SEED)
 # Configuration for naturally irregular Chapter 3 bar data
 CONFIG = {
     "bar_type": "dollar",
+    "seed": SEED,
     "seq_length": SEQ_LENGTH,
     "features": ["close", "volume"],
     "latent_dim": LATENT_DIM,
@@ -203,7 +214,18 @@ CONFIG = {
     "learning_rate": 1e-3,
     "ode_method": ODE_METHOD,
     "holdout_fraction": 0.2,
+    # Bump when the architecture changes: nothing else in a checkpoint says what the
+    # weights were fitted into, so older ones load whenever the shapes line up.
+    # 2.1.0: the decoder integrates each sequence along its own timestamps.
+    "weights_version": "2.2.0",
 }
+
+if CONFIG["ode_method"] not in {"euler", "rk4"}:
+    raise ValueError(
+        f"ode_method must be 'euler' or 'rk4', got {CONFIG['ode_method']!r}. An "
+        "adaptive solver would pick its step sizes from one grid for the whole "
+        "batch, which is what the irregular timestamps here are meant to avoid."
+    )
 
 print(f"GT-GAN: Steps={CONFIG['max_steps']}, ODE={CONFIG['ode_method']}")
 
@@ -447,6 +469,13 @@ print(f"Time shape: {seq_times.shape}")
 # Store normalization params
 norm_params = {"min": seq_min.squeeze(), "max": seq_max.squeeze()}
 
+# CONFIG names the features and the window, not the bars themselves, and the bars
+# come from Chapter 3 when it has been run and from a synthetic fallback when it
+# has not. A digest of them is what tells those two runs apart.
+_data_digest = hashlib.sha256(np.ascontiguousarray(sequences))
+_data_digest.update(np.ascontiguousarray(seq_times))
+CONFIG["data_digest"] = _data_digest.hexdigest()[:16]
+
 
 # %% [markdown]
 # ## Neural ODE Components
@@ -493,30 +522,41 @@ class ODEFunc(nn.Module):
 
 
 # %% [markdown]
-# ### TorchODEFunc: Adaptive Solver Drift Network
+# ### Advancing a batch by its own inter-arrival times
 #
-# `torchdiffeq.odeint` calls the drift network as `f(t, y)`, so the same module
-# can serve as the Euler function (state-only `f(y)` via the wrapper above) or
-# as the adaptive Dopri5 drift via this `(t, y)` signature.
+# `torchdiffeq.odeint` integrates one time grid for the whole batch, so a batch of
+# sequences observed at different times has to be reduced to a single grid before it
+# can be passed. That reduction is what the irregular timestamps are supposed to
+# carry, so the step below takes a `dt` per row instead. Both drift networks ignore
+# $t$, which is what makes a per-row step size well defined: over an interval the
+# state change depends on the width of the interval and not on where it sits.
 
 
 # %%
-class TorchODEFunc(nn.Module):
-    """Drift network with the (t, y) signature expected by ``torchdiffeq.odeint``."""
+def ode_evolve(func: nn.Module, h: torch.Tensor, dt: torch.Tensor, method: str) -> torch.Tensor:
+    """
+    Advance each row of ``h`` by its own ``dt``.
 
-    def __init__(self, hidden_dim: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.Tanh(),
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
-            nn.Tanh(),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-        )
+    Args:
+        func: Drift network with the ``(t, y)`` signature; must ignore ``t``
+        h: State, shape (batch, hidden_dim)
+        dt: Step width per row, shape (batch,)
+        method: "euler" (one derivative evaluation) or "rk4" (four)
 
-    def forward(self, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute derivative dy/dt for the adaptive ODE solver."""
-        return self.net(y)
+    Returns:
+        State after the step, same shape as ``h``
+    """
+    dt = dt.unsqueeze(-1)
+    zero = torch.zeros((), device=h.device)
+
+    if method == "euler":
+        return h + dt * func(zero, h)
+
+    k1 = func(zero, h)
+    k2 = func(zero, h + 0.5 * dt * k1)
+    k3 = func(zero, h + 0.5 * dt * k2)
+    k4 = func(zero, h + dt * k3)
+    return h + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
 # %% [markdown]
@@ -533,11 +573,8 @@ class GRUODECell(nn.Module):
     GRU-ODE: A continuous-time version of GRU with per-sample dt handling.
 
     When an observation arrives, update the hidden state using GRU gates.
-    Between observations, evolve the state using the ODE.
-
-    For efficiency:
-    - Euler method: Direct vectorized computation (no solver overhead)
-    - Dopri5: Uses torchode for adaptive stepping with per-sample times
+    Between observations, evolve the state using ``ode_evolve``, so each sample
+    steps by its own inter-arrival time.
 
     Reference: De Brouwer et al. (2019) "GRU-ODE-Bayes"
     """
@@ -553,7 +590,7 @@ class GRUODECell(nn.Module):
         self.W_h = nn.Linear(input_dim + hidden_dim, hidden_dim)
 
         # ODE function for continuous evolution
-        self.ode_func = TorchODEFunc(hidden_dim)
+        self.ode_func = ODEFunc(hidden_dim)
 
     def forward(
         self,
@@ -572,21 +609,9 @@ class GRUODECell(nn.Module):
         Returns:
             Updated hidden state
         """
-        device = h.device
-
-        # Evolve hidden state via ODE with per-sample dt
-        dt_mask = dt_per_sample > 1e-6
-        if dt_mask.any():
-            if self.ode_method == "euler":
-                # Fast vectorized Euler: h_new = h + dt * f(t, h)
-                dt_expanded = dt_per_sample.unsqueeze(-1)  # (batch, 1)
-                dh_dt = self.ode_func(torch.tensor(0.0, device=device), h)
-                h = h + dt_expanded * dh_dt
-            else:
-                # Adaptive Dopri5 via torchdiffeq with batch-averaged time span.
-                dt_mean = dt_per_sample.mean().item()
-                t_span = torch.tensor([0.0, max(dt_mean, 1e-5)], device=device)
-                h = odeint(self.ode_func, h, t_span, method="dopri5")[-1]
+        # A row whose dt is zero is left where it is: every term of the step
+        # carries a dt factor.
+        h = ode_evolve(self.ode_func, h, dt_per_sample, self.ode_method)
 
         # GRU update at observation time
         combined = torch.cat([x, h], dim=1)
@@ -687,21 +712,21 @@ class ODEDecoder(nn.Module):
         Returns:
             Observations, shape (batch, n_times, output_dim)
         """
-        device = z.device
+        h = torch.tanh(self.fc_init(z))
 
-        h0 = torch.tanh(self.fc_init(z))
-        t_unique = times[0]
+        # Each row is integrated along its own query times from a fixed origin at zero,
+        # where create_irregular_sequences puts the start of every window; anchoring at
+        # the first query leaves a midpoint decode incomparable with an observation one.
+        prev = torch.zeros_like(times[:, 0])
 
-        eps = 1e-5
-        t_start = torch.tensor([t_unique[0].item() - eps], device=device)
-        t_span = torch.cat([t_start, t_unique])
+        states = []
+        for k in range(times.shape[1]):
+            dt = torch.clamp(times[:, k] - prev, min=0.0)
+            h = ode_evolve(self.ode_func, h, dt, self.ode_method)
+            states.append(h)
+            prev = times[:, k]
 
-        h_trajectory = odeint(self.ode_func, h0, t_span, method=self.ode_method)
-        h_at_times = h_trajectory[1:].permute(1, 0, 2)
-
-        output = self.fc_out(h_at_times)
-
-        return output
+        return self.fc_out(torch.stack(states, dim=1))
 
 
 # %% [markdown]
@@ -827,6 +852,24 @@ class GTGAN(nn.Module):
         return mu + eps * std
 
 
+# %% [markdown]
+# ### Reusing a checkpoint, and when not to
+#
+# Training is the expensive step, so a saved checkpoint is loaded when one matches. What
+# counts as a match is the question. `CHECKPOINT_IDENTITY` below names every setting that
+# moves the weights, including `data_digest`, because `CONFIG` names the features and the
+# window and not the bars they are cut from.
+#
+# The digest matters most on the path a reader is most likely to take. This notebook falls
+# back to synthetic bars when the Chapter 3 outputs are absent, so a first run trains on
+# the fallback and a later run, after Chapter 3 has been executed, sees real bars. Without
+# the digest that second run loads the fallback-trained weights. It also takes the
+# checkpoint's scaler, while `sequences_norm` above was scaled from the new bars, which
+# would leave the holdout comparison and the training data on different scales. A digest
+# mismatch retrains instead, which is the only answer that keeps the two consistent.
+
+
+# %%
 # Initialize model
 model = GTGAN(
     input_dim=n_features,
@@ -840,9 +883,52 @@ print(f"GT-GAN parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # Check for existing checkpoint
 SKIP_TRAINING = False
-if CHECKPOINT_PATH.exists() and not RETRAIN:
+_saved = (
+    torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+    if CHECKPOINT_PATH.exists() and not RETRAIN
+    else None
+)
+if _saved is not None and "history" not in _saved:
+    print(
+        f"\nCheckpoint at {CHECKPOINT_PATH} predates loss-history saving; retraining so "
+        "the training-progress section has its figure."
+    )
+    _saved = None
+
+# Every entry here changes the weights, so a checkpoint fitted under a different value
+# is not this run's model. Several are papermill parameters, so without this check a
+# second setting would load the first one's weights whenever the shapes still matched.
+CHECKPOINT_IDENTITY = (
+    "seq_length",
+    "features",
+    "latent_dim",
+    "hidden_dim",
+    "ode_hidden",
+    "max_steps",
+    "batch_size",
+    "learning_rate",
+    "ode_method",
+    "holdout_fraction",
+    "weights_version",
+    "data_digest",
+    "seed",
+)
+if _saved is not None:
+    saved_config = _saved.get("config", {})
+    mismatched = {
+        key: (saved_config.get(key), CONFIG[key])
+        for key in CHECKPOINT_IDENTITY
+        if saved_config.get(key) != CONFIG[key]
+    }
+    if mismatched:
+        print(f"\nCheckpoint at {CHECKPOINT_PATH} was fitted under different settings:")
+        for key, (was, now) in mismatched.items():
+            print(f"  {key}: checkpoint {was!r}, this run {now!r}")
+        print("Retraining.")
+        _saved = None
+if _saved is not None:
     print(f"\nLoading checkpoint from: {CHECKPOINT_PATH}")
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+    checkpoint = _saved
     model.encoder.load_state_dict(checkpoint["encoder"])
     model.decoder.load_state_dict(checkpoint["decoder"])
     model.generator.load_state_dict(checkpoint["generator"])
@@ -851,6 +937,7 @@ if CHECKPOINT_PATH.exists() and not RETRAIN:
         "min": np.array(checkpoint["scaler"]["min"]),
         "max": np.array(checkpoint["scaler"]["max"]),
     }
+    training_losses = checkpoint["history"]
     print("Checkpoint loaded successfully - skipping training")
     SKIP_TRAINING = True
 else:
@@ -906,7 +993,9 @@ def train_gtgan(
             yield from dataloader
 
     data_iter = infinite_dataloader()
-    pbar = tqdm(range(total_steps), desc=f"Training ({total_steps} steps)")
+    pbar = tqdm(
+        range(total_steps), desc=f"Training ({total_steps} steps)", disable=not PROGRESS_BARS
+    )
 
     for step in pbar:
         batch_seq, batch_time = next(data_iter)
@@ -956,13 +1045,17 @@ def train_gtgan(
         losses["g"].append(loss_g.item())
 
         if step % max(1, total_steps // 10) == 0:
-            pbar.set_postfix(
-                {
-                    "Recon": f"{recon_loss.item():.4f}",
-                    "D_real": f"{loss_d_real.item():.3f}",
-                    "G": f"{loss_g.item():.3f}",
-                }
-            )
+            report = {
+                "Recon": f"{recon_loss.item():.4f}",
+                "D_real": f"{loss_d_real.item():.3f}",
+                "G": f"{loss_g.item():.3f}",
+            }
+            pbar.set_postfix(report)
+            # The progress bar is the only place set_postfix shows up, so with bars off
+            # the same numbers go to stdout and reach the render.
+            if not PROGRESS_BARS:
+                fields = "  ".join(f"{k}: {v}" for k, v in report.items())
+                print(f"  Step {step}/{total_steps}  {fields}", flush=True)
 
     print("Training complete!")
     return losses
@@ -971,7 +1064,7 @@ def train_gtgan(
 # %% [markdown]
 # ### Run Training
 #
-# Execute step-based training. Progress is logged every 10% of total steps.
+# Execute step-based training. Progress is logged at regular intervals.
 
 # %%
 if not SKIP_TRAINING:
@@ -989,12 +1082,12 @@ if not SKIP_TRAINING:
             "max": norm_params["max"].tolist(),
         },
         "config": CONFIG,
+        # The training-progress figure plots these. Without them a checkpoint-loading
+        # run renders that section with no figure at all.
+        "history": training_losses,
     }
     torch.save(checkpoint_data, CHECKPOINT_PATH)
     print(f"\nCheckpoint saved to: {CHECKPOINT_PATH}")
-else:
-    # Create dummy losses for visualization when loading from checkpoint
-    training_losses = {"recon": [], "d_real": [], "d_fake": [], "g": []}
 
 
 # %% [markdown]
@@ -1025,21 +1118,38 @@ if training_losses["recon"]:  # Only plot if we have training losses
         template="ml4t",
         height=400,
     )
-    if not HEADLESS:
-        fig.show()
-else:
-    print("Training skipped (loaded from checkpoint) - no training losses to plot")
+    show_plotly_with_alt(
+        fig,
+        "Two panels of GT-GAN training curves against step. The left panel shows the "
+        "reconstruction loss dropping steeply over the first few hundred steps and "
+        "then running flat near zero. The right panel shows the discriminator's losses "
+        "on real and on fake sequences together with the generator loss; all three "
+        "spike against one another in bursts through roughly the first half of training "
+        "and then settle onto a common flat level that holds to the end.",
+    )
 
 # %% [markdown]
 # **Interpretation**: The reconstruction loss should decrease steadily, indicating the
 # autoencoder learns to compress and reconstruct irregular sequences through the ODE
 # bottleneck. The adversarial losses (D real, D fake, Generator) should oscillate and
 # roughly balance -- if the discriminator dominates (D losses near 0), the generator
-# receives no useful gradient. A reconstruction MSE below ~0.01 indicates good
-# autoencoder performance; the GAN component then refines the latent distribution.
+# receives no useful gradient. The notebook prints the reconstruction MSE against
+# `GOOD_RECONSTRUCTION_MSE` below; when it clears that bar, the GAN component is
+# refining a latent space the autoencoder has already learned to invert.
 
 # %% [markdown]
 # ## Generate Synthetic Irregular Sequences
+#
+# Training draws random numbers and loading a checkpoint draws none, so the two paths
+# reach this point with different torch RNG states. The latent noise the generator is
+# fed, and the initializations inside the evaluation protocol, would then differ between
+# the run that fitted the weights and a later run that loaded the same weights back:
+# same model, same data, same seed, different reported scores. That was measured, not
+# assumed: before this reseed the training path and the loading path returned different
+# TSTR ratios from one set of weights. Reseeding here is what makes them agree.
+
+# %%
+set_global_seeds(SEED)
 
 
 # %%
@@ -1054,8 +1164,21 @@ def generate_synthetic(
     return synthetic.cpu().numpy()
 
 
+# %% [markdown]
+# ### Choosing the sequences to evaluate against
+#
+# The sequences are rolling windows at stride one, so the first N of them start on N
+# consecutive bars: one stretch of the tape repeated, not N samples of it, and a quiet
+# or a violent week would stand in for the whole period. Everything below compares
+# against `real_eval`, drawn at random, and the synthetic sequences are generated on
+# that same draw's time grids so the two stay paired.
+
+# %%
 N_SYNTHETIC = min(200, len(sequences_norm))
-sample_times = torch.FloatTensor(seq_times[:N_SYNTHETIC]).to(device)
+eval_rng = np.random.default_rng(SEED)
+eval_idx = eval_rng.choice(len(sequences_norm), size=N_SYNTHETIC, replace=False)
+real_eval = sequences_norm[eval_idx]
+sample_times = torch.FloatTensor(seq_times[eval_idx]).to(device)
 synthetic_sequences = generate_synthetic(model, N_SYNTHETIC, sample_times, device)
 
 print(f"\nGenerated {len(synthetic_sequences)} synthetic sequences")
@@ -1072,18 +1195,33 @@ print(f"Shape: {synthetic_sequences.shape}")
 
 # %%
 fig = plot_fidelity_comparison(
-    sequences_norm[:N_SYNTHETIC],
+    real_eval,
     synthetic_sequences,
     title="GT-GAN: Real vs Synthetic Distribution",
     n_samples=min(200, N_SYNTHETIC),
     flatten_method="flatten",  # Flatten for irregular sequence comparison
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two scatter panels of the same flattened sequences, PCA on the left and t-SNE on "
+    "the right, each overlaying real points and synthetic ones. In both panels the "
+    "synthetic points lie along a narrow band while the real points fall away from it. "
+    "In the PCA panel the band is horizontal, at one height and covering part of the "
+    "first component's range, with the real points scattered across the whole panel. In "
+    "the t-SNE panel it is a diagonal band falling from left to right, and the real "
+    "points form separate clusters above and to the left of it and one cluster above "
+    "its right end; almost none sit below it.",
+)
 
 # %% [markdown]
-# **Interpretation**: Overlapping point clouds confirm that synthetic sequences occupy
-# similar regions of feature space as real data. GT-GAN's key strength is handling
-# irregular time sampling -- the interpolation metrics below test this capability.
+# **Interpretation**: the two point clouds do not cover the same region. The synthetic
+# sequences project onto a narrow band in both panels while the real ones fall elsewhere,
+# which is what a generator producing a family of similar sequences looks like under a
+# projection. Neither panel is a measurement: a projection into two dimensions can
+# separate sets a model cannot, and can hide a difference a model finds easily. The
+# discriminative score reported later in the notebook is the measured version of the
+# same question, and the interpolation section immediately below asks a different one -
+# whether the decoder returns sensible values at times it was not given.
 
 # %% [markdown]
 # ### Interpolation at Arbitrary Timestamps
@@ -1097,6 +1235,7 @@ def evaluate_interpolation(
     sequences: np.ndarray,
     times: np.ndarray,
     device: torch.device,
+    rng: np.random.Generator,
 ) -> dict:
     """
     Evaluate model's ability to interpolate at arbitrary timestamps.
@@ -1108,8 +1247,9 @@ def evaluate_interpolation(
     model.eval()
 
     n_test = min(50, len(sequences))
-    test_seq = torch.FloatTensor(sequences[:n_test]).to(device)
-    test_time = torch.FloatTensor(times[:n_test]).to(device)
+    test_idx = rng.choice(len(sequences), size=n_test, replace=False)
+    test_seq = torch.FloatTensor(sequences[test_idx]).to(device)
+    test_time = torch.FloatTensor(times[test_idx]).to(device)
 
     with torch.no_grad():
         mu, logvar = model.encode(test_seq, test_time)
@@ -1141,21 +1281,26 @@ def evaluate_interpolation(
     }
 
 
-interp_results = evaluate_interpolation(model, sequences_norm, seq_times, device)
+interp_results = evaluate_interpolation(model, sequences_norm, seq_times, device, eval_rng)
 
 print("\n=== Interpolation Evaluation ===")
-print(f"Reconstruction MSE: {interp_results['reconstruction_mse']:.6f}")
+recon = interp_results["reconstruction_mse"]
+print(f"Reconstruction MSE: {recon:.6f}")
+print(
+    f"  {'clears' if recon < GOOD_RECONSTRUCTION_MSE else 'above'} the "
+    f"GOOD_RECONSTRUCTION_MSE bar of {GOOD_RECONSTRUCTION_MSE}"
+)
 print(f"Interpolation smoothness: {interp_results['interpolation_smoothness']:.6f}")
 print(f"Real data smoothness: {interp_results['real_smoothness']:.6f}")
 print(f"Smoothness ratio (interp/real): {interp_results['smoothness_ratio']:.2f}")
 
 # %% [markdown]
-# **Interpretation**: A smoothness ratio near 1.0 means the ODE-based interpolation
-# produces trajectories with similar step-to-step variation as the real data -- the model
-# has learned realistic continuous dynamics rather than simply averaging adjacent points.
-# A ratio well below 1.0 indicates over-smoothing (the ODE is too rigid), while a ratio
-# above 1.0 suggests noisy interpolation. The reconstruction MSE measures how faithfully
-# the encode-decode round-trip recovers the input; values below ~0.01 are acceptable.
+# **Interpretation**: a smoothness ratio near one means the ODE-based interpolation
+# varies from step to step about as much as the real data does, so the model has learned
+# continuous dynamics rather than averaging adjacent points. A ratio well below one is
+# over-smoothing, the ODE being too rigid to follow the data; a ratio above one is noisy
+# interpolation. The reconstruction MSE measures how faithfully the encode-decode
+# round-trip recovers the input, and is printed above beside the bar it is judged against.
 
 # %% [markdown]
 # ## Statistical Comparison
@@ -1188,7 +1333,7 @@ def evaluate_statistics(real: np.ndarray, synthetic: np.ndarray) -> dict:
     }
 
 
-stats_results = evaluate_statistics(sequences_norm[:N_SYNTHETIC], synthetic_sequences)
+stats_results = evaluate_statistics(real_eval, synthetic_sequences)
 
 print("\n=== Statistical Evaluation ===")
 print(f"Mean KS statistic: {stats_results['mean_ks']:.4f}")
@@ -1196,12 +1341,12 @@ print(f"Max KS statistic: {stats_results['max_ks']:.4f}")
 print(f"Correlation error: {stats_results['correlation_error']:.4f}")
 
 # %% [markdown]
-# **Interpretation**: The KS statistic measures distributional divergence (0 = identical,
-# 1 = completely different). Values around 0.3-0.5 are typical for small-sample generative
-# models and indicate partial distributional match. High KS values (~0.7+) are expected
-# when training on limited data (a few hundred bars) and do not necessarily indicate
-# model failure -- they reflect the difficulty of capturing full distributional structure
-# from short irregular series. The correlation error measures how well the cross-feature
+# **Interpretation**: the KS statistic measures distributional divergence, from zero for
+# identical distributions to one for completely separated ones. A middling value is
+# typical of small-sample generative models and indicates a partial distributional match.
+# A high value is expected when training on a few hundred bars and does not on its own
+# mean the model has failed - it reflects how little distributional structure a short
+# irregular series carries. The correlation error measures how well the cross-feature
 # covariance is preserved.
 
 # %% [markdown]
@@ -1267,70 +1412,48 @@ def plot_irregular_sequences(
         yaxis=dict(range=shared_range),
         yaxis2=dict(range=shared_range),
     )
+    # The x zeroline is the template's navy, the same color as the real series, and it
+    # renders inside the plotting area as a vertical rule that reads as data.
+    fig.update_xaxes(zeroline=False)
 
     return fig
 
 
+# `synthetic_sequences[i]` was generated on the time grid of `eval_idx[i]`, so the
+# real window and the timestamps have to be taken through the same index.
 sample_idx = 0
 fig = plot_irregular_sequences(
-    sequences_norm[sample_idx],
-    seq_times[sample_idx],
+    real_eval[sample_idx],
+    seq_times[eval_idx[sample_idx]],
     synthetic_sequences[sample_idx],
 )
-if not HEADLESS:
-    fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels sharing a time axis and a vertical scale, both plotted at the "
+    "same irregular observation times so their markers line up column for column. The "
+    "upper panel is one real window of the close feature, a walk that reverses "
+    "direction repeatedly within a narrow band. The lower panel is the synthetic "
+    "sequence decoded on that same grid, a smooth curve rising from the first "
+    "observation to the last, steeply at first and then flattening, with none of the "
+    "reversals above it and covering far more of the shared vertical scale.",
+)
 
 # %% [markdown]
-# **Interpretation**: The overlay of real vs synthetic irregular sequences reveals
-# whether GT-GAN preserves both the **values** (return magnitudes) and the
-# **timing** (inter-observation gaps) of information-driven bars. Matching the
-# irregular spacing is critical — unlike fixed-frequency generators, GT-GAN must
-# learn that volatile periods produce more bars and quiet periods fewer. Paths
-# that track closely in both dimensions confirm the Neural ODE dynamics
-# capture the continuous-time evolution between observations.
-
-# %% [markdown]
-# ## PCA Visualization
-
-
-# %%
-real_flat = sequences_norm[:N_SYNTHETIC].reshape(N_SYNTHETIC, -1)
-syn_flat = synthetic_sequences.reshape(len(synthetic_sequences), -1)
-
-pca = PCA(n_components=2)
-combined = pca.fit_transform(np.vstack([real_flat, syn_flat]))
-pca_real = combined[: len(real_flat)]
-pca_syn = combined[len(real_flat) :]
-
-fig = go.Figure()
-fig.add_trace(
-    go.Scatter(
-        x=pca_real[:, 0],
-        y=pca_real[:, 1],
-        mode="markers",
-        name="Real",
-        marker=dict(color=COLORS["blue"], opacity=0.5),
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=pca_syn[:, 0],
-        y=pca_syn[:, 1],
-        mode="markers",
-        name="Synthetic",
-        marker=dict(color=COLORS["copper"], opacity=0.5),
-    )
-)
-
-fig.update_layout(
-    title=f"GT-GAN: PCA Distribution ({CONFIG['bar_type']} bars)",
-    xaxis_title="PC1",
-    yaxis_title="PC2",
-    template="ml4t",
-)
-if not HEADLESS:
-    fig.show()
-
+# **Interpretation**: both panels carry the same observation times, because the time
+# grid is an argument to `generate_synthetic` rather than something the model produces.
+# So nothing in this figure can say whether GT-GAN reproduces the arrival process of
+# information-driven bars: it is handed that process, not asked for it. What the two
+# panels compare is the values the decoder returns when it is given a real window's
+# timestamps, against the values that window actually took, on a shared vertical scale.
+#
+# On this window the two differ in both. The real series stays inside a narrow band and
+# reverses direction repeatedly between observations; the synthetic one rises across most
+# of the shared vertical scale without a single reversal. A decoder
+# whose output is the state of an ODE evolving between query points is smooth wherever
+# the fitted dynamics are smooth, so one window raises that question rather than
+# settling it. The interpolation section earlier in the notebook is the measured
+# version: it decodes at the observed times and again at the midpoints between them,
+# and reports the smoothness of each beside the real series.
 
 # %% [markdown]
 # ## Evaluation: GT-GAN Protocol
@@ -1356,6 +1479,7 @@ def gtgan_paper_evaluation(
     norm_params: dict,
     config: dict,
     device: torch.device,
+    rng: np.random.Generator,
 ) -> dict:
     """
     Evaluation for GT-GAN following Jeon et al. (2022).
@@ -1383,16 +1507,20 @@ def gtgan_paper_evaluation(
     )
 
     # Generate synthetic sequences
+    # Drawn at random for the same reason as above: consecutive rolling windows are
+    # one stretch of the tape, and both arms of every score below read these slices.
     n_eval = min(len(holdout_seq_norm), len(train_sequences), 100)
-    sample_times_tensor = torch.FloatTensor(train_times[:n_eval]).to(device)
+    train_idx = rng.choice(len(train_sequences), size=n_eval, replace=False)
+    holdout_idx = rng.choice(len(holdout_seq_norm), size=n_eval, replace=False)
+    sample_times_tensor = torch.FloatTensor(train_times[train_idx]).to(device)
 
     with torch.no_grad():
         synthetic_eval = model.generate(n_eval, sample_times_tensor, device).cpu().numpy()
 
     # Flatten for sklearn
-    real_flat = train_sequences[:n_eval].reshape(n_eval, -1)
+    real_flat = train_sequences[train_idx].reshape(n_eval, -1)
     syn_flat = synthetic_eval.reshape(n_eval, -1)
-    holdout_flat = holdout_seq_norm[:n_eval].reshape(min(n_eval, len(holdout_seq_norm)), -1)
+    holdout_flat = holdout_seq_norm[holdout_idx].reshape(n_eval, -1)
 
     # --- 1. Discriminative Score ---
     # Train classifier to distinguish real vs synthetic
@@ -1427,11 +1555,9 @@ def gtgan_paper_evaluation(
         y = sequences[:, -1, 0]  # Predict first feature at last timestep
         return X, y
 
-    X_real_train, y_real_train = create_prediction_data(train_sequences[:n_eval])
+    X_real_train, y_real_train = create_prediction_data(train_sequences[train_idx])
     X_syn, y_syn = create_prediction_data(synthetic_eval)
-    X_holdout, y_holdout = create_prediction_data(
-        holdout_seq_norm[: min(n_eval, len(holdout_seq_norm))]
-    )
+    X_holdout, y_holdout = create_prediction_data(holdout_seq_norm[holdout_idx])
 
     # TRTR: Train Real, Test Real (baseline)
     reg_trtr = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
@@ -1461,8 +1587,8 @@ def gtgan_paper_evaluation(
 
     # --- 3. Interpolation Quality (GT-GAN specific) ---
     # Encode real, decode at same times - measure reconstruction
-    test_seq = torch.FloatTensor(train_sequences[:n_eval]).to(device)
-    test_times = torch.FloatTensor(train_times[:n_eval]).to(device)
+    test_seq = torch.FloatTensor(train_sequences[train_idx]).to(device)
+    test_times = torch.FloatTensor(train_times[train_idx]).to(device)
 
     with torch.no_grad():
         mu, logvar = model.encode(test_seq, test_times)
@@ -1522,6 +1648,7 @@ paper_results = gtgan_paper_evaluation(
     norm_params=norm_params,
     config=CONFIG,
     device=device,
+    rng=eval_rng,
 )
 
 # Summary
@@ -1535,21 +1662,33 @@ print(f"""
 | Discriminative AUC    | {paper_results["discriminative"]["auc"]:.3f}    | ~0.50    | {"[OK]" if abs(paper_results["discriminative"]["auc"] - 0.5) < 0.15 else "WARNING"} |
 | TSTR MAE Ratio        | {paper_results["predictive"]["mae_ratio"]:.2f}x    | ~1.0x    | {"[OK]" if 0.7 < paper_results["predictive"]["mae_ratio"] < 1.5 else "WARNING"} |
 | Interpolation Bounded | {paper_results["interpolation"]["bounded_fraction"]:.1%}   | >70%     | {"[OK]" if paper_results["interpolation"]["bounded_fraction"] > 0.7 else "WARNING"} |
-
-GT-GAN's key advantage: handling naturally irregular timestamps from information bars.
 """)
 
 # %% [markdown]
-# **Interpretation**: GT-GAN's value proposition is not raw distributional fidelity (where
-# Diffusion-TS or Sig-CWGAN excel on regular grids) but its ability to operate on
-# **naturally irregular** data — the interpolation bounded-fraction metric measures this
-# directly. On this run, the discriminator is degenerate (Discriminative Accuracy = 1.000,
-# AUC = 1.000): the discriminator perfectly separates synthetic from real, which under
-# the GT-GAN evaluation protocol indicates that this short training pass has not yet
-# produced sequences the discriminator finds confusable with real ones. The TSTR MAE
-# ratio and bounded-fraction printed above are the readable signals on this run; the
-# discriminator metric should not be cited until a longer-running retrain is performed
-# (tracked as a deferred retrain follow-up).
+# **Interpretation**: read the four rows together rather than choosing among them. The
+# discriminative accuracy and AUC sit at their maximum, so the classifier separates
+# synthetic from real without error: whatever the sequences preserve is not enough to
+# fool a model that is looking for the difference. The TSTR ratio misses the band the
+# protocol allows, so a predictor fitted on the synthetic sequences carries more error on
+# real ones than a predictor fitted on real data does, by the margin the ratio above
+# gives. Those two rows are not the same finding: a classifier separating two sets
+# perfectly says nothing about how much of the predictive structure the second set
+# carries. The
+# bounded fraction clears its threshold, but it checks something narrower than its name
+# suggests. It encodes a real window, decodes at the midpoint between each pair of
+# observation times, and asks whether that value lands between the two neighbouring real
+# values with a fixed tolerance added on either side. That tolerance is wider than the
+# mean gap between adjacent observations printed in the interpolation section above, so
+# most of the band being cleared is tolerance rather than data. And the latent it decodes
+# comes from encoding a real window, which makes it the one row here that never runs the
+# generator. The passing row and the failing rows are therefore not in tension: they ask
+# different questions, and discarding the failing ones to keep the passing one would be
+# choosing a metric by its answer.
+#
+# `MAX_STEPS` is set to two thousand, which is a short adversarial run, and the
+# training-progress figure shows the three adversarial losses settling onto a common
+# flat level well before the end. Lengthening that run is the change to make before any
+# of these numbers is quoted as a property of GT-GAN rather than of this pass.
 
 # %% [markdown]
 # ## Save Outputs
@@ -1574,7 +1713,7 @@ metadata = {
     "version": "2.0",
     "generator": {
         "name": "gtgan",
-        "version": "2.0.0",
+        "version": CONFIG["weights_version"],
         "paper": "Jeon et al., GT-GAN: General Purpose Time Series Synthesis, NeurIPS 2022",
         "data_type": "naturally_irregular",
     },
@@ -1628,7 +1767,7 @@ samples_denorm = (
     synthetic_sequences * (norm_params["max"] - norm_params["min"]) + norm_params["min"]
 )
 np.save(checkpoint_dir / "samples.npy", samples_denorm.astype(np.float32))
-np.save(checkpoint_dir / "sample_times.npy", seq_times[:N_SYNTHETIC].astype(np.float32))
+np.save(checkpoint_dir / "sample_times.npy", seq_times[eval_idx].astype(np.float32))
 
 print(f"\nSaved outputs to: {checkpoint_dir}/")
 print("  - checkpoint.pt (model weights)")

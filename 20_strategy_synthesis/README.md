@@ -52,7 +52,7 @@ uv run python 20_strategy_synthesis/02_feature_evaluation.py
 MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python 20_strategy_synthesis/03_signal_quality.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "20_strategy_synthesis"
+uv run pytest tests/test_chapter_notebooks.py -v -k "20_strategy_synthesis"
 ```
 
 ## Dependencies
