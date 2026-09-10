@@ -670,12 +670,23 @@ def write_figure_12_7_artifact() -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     panels = {}
     panel_ids = []
+    skipped = []
     for cs_id in BEESWARM_CASE_STUDIES:
         label = PRIMARY_LABELS.get(cs_id)
         if label is None:
             continue
-        panels[cs_id] = _build_beeswarm_panel(cs_id, label)
+        try:
+            panels[cs_id] = _build_beeswarm_panel(cs_id, label)
+        except FileNotFoundError as exc:
+            # The book figure wants every panel, but a reader with one case study's
+            # artifacts should still get this notebook's own analysis. Record which
+            # panel is absent rather than ending the run on it.
+            skipped.append(f"{cs_id} ({exc})")
+            continue
         panel_ids.append(cs_id)
+
+    if skipped:
+        print("Beeswarm panels skipped for want of artifacts: " + "; ".join(skipped))
 
     artifact = OUTPUT_DIR / "figure_12_7_shap_beeswarm.npz"
     payload: dict[str, np.ndarray | str | int] = {"panel_ids": np.array(panel_ids)}
