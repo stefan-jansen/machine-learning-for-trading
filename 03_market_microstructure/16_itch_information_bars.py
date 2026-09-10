@@ -325,9 +325,13 @@ def compute_stats(bars: pl.DataFrame) -> dict:
 
 
 # %% [markdown]
-# The sweep below runs each sampler over a grid of target bar sizes. The tick and volume
-# grids differ because their thresholds are in different units - trades against shares -
-# and both bracket a bar size producing a few hundred to a few thousand bars from this
+# The sweep below runs each sampler over a grid of target bar sizes. Both grids are
+# passed as an expected number of trades per bar, so they are in the same units; they
+# differ in range because the two samplers accumulate different quantities to reach
+# their stopping threshold - trade signs in one case and signed volume in the other -
+# and so need different targets to produce a comparable number of bars.
+#
+# Both brackets are chosen to produce a few hundred to a few thousand bars from this
 # session, which is the range where the downstream diagnostics have enough bars to be
 # meaningful and few enough that each holds real information.
 #
@@ -468,7 +472,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Four panels in a two-by-two grid comparing tick imbalance bars against volume imbalance bars across a grid of target bar sizes. Each panel plots one diagnostic against the number of bars produced, on a logarithmic horizontal axis, with one series per bar type.",
+    "Four panels in a two-by-two grid comparing tick imbalance bars against volume imbalance bars, with one series per bar type in each. The top-left panel plots the number of bars produced against the target bar size, both on logarithmic axes. The other three plot a diagnostic against the number of bars produced on a logarithmic horizontal axis: the Jarque-Bera statistic, the lag-one autocorrelation, and the five-period variance ratio.",
 )
 
 # %% [markdown]
@@ -639,15 +643,17 @@ print(compare_df)
 # | Production | `FixedTickImbalanceBarSampler` | The threshold cannot drift, so bar size is predictable |
 # | Research | `TickImbalanceBarSampler` with a slow decay | Follows the textbook scheme while damping the feedback loop |
 #
-# The table above is how to read that recommendation. Two columns settle it before any
-# downstream statistic is looked at: how many bars a sampler cut, and how many trades
-# went into the average one. A sampler cutting hundreds of thousands of bars at one
-# trade each has a threshold that fell to nothing; one cutting a few hundred bars of
-# thousands of trades each has a threshold that ran away. Both are the feedback loop
-# described above, and neither shows up as an error.
+# The table above is how to read that recommendation, and the diagnosis is available
+# before any downstream statistic: compare the average number of trades an adaptive
+# sampler put into a bar against the target it was given. A ratio near one is the scheme
+# working. A ratio far below one means the threshold fell away, and in the limit every
+# trade cuts its own bar; a ratio far above one means it ran up, and the sampler cuts
+# few very long bars. Both are the same feedback loop and neither raises an error.
 #
-# Compare each sampler's average bar against the target it was given. A ratio near one
-# is the scheme working; a ratio in the tens is drift, whichever direction it ran.
+# That comparison applies to the adaptive samplers only. A fixed sampler is given an
+# imbalance threshold rather than a target trade count, so its bars have no target to be
+# measured against; what to check there is whether the bar count it produces is the one
+# the threshold was calibrated for.
 
 # %%
 print("\n" + "=" * 70)

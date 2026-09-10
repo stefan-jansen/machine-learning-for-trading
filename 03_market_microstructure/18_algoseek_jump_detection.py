@@ -463,11 +463,11 @@ ax.fill_between(
 )
 ax.set_xlabel("Date (2020)")
 ax.set_ylabel("Daily realized variance (sum of squared log returns)")
-ax.set_title(f"{SYMBOLS[0]}: annualized jump and diffusive variance over time")
+ax.set_title(f"{SYMBOLS[0]}: daily jump and diffusive variance over time")
 ax.legend()
 show_with_alt(
     fig,
-    "Two series over time for one symbol: the annualized variance attributed to jumps and the annualized variance attributed to continuous diffusion, on the same axis.",
+    "Two series over time for one symbol: the daily variance attributed to jumps and the daily variance attributed to continuous diffusion, on the same axis.",
 )
 
 # %% [markdown]

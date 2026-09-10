@@ -1575,11 +1575,12 @@ if "bar_data" in dir() and bar_data:
 #
 # ### Recommended Thresholds for NVDA (~500 bars/day)
 #
-# The comparison table above gives each sampler's threshold, the bars a day it produced,
-# and how much that count varied across days. Read the last two columns together: a
-# sampler whose day-to-day standard deviation approaches its mean is not delivering a
-# predictable number of bars, and any downstream code that assumes one will break on the
-# quiet days.
+# The calibration tables above give each sampler's mean daily bar count and the standard
+# deviation of that count across days. Read those two against each other: a sampler
+# whose day-to-day standard deviation approaches its mean is not delivering a
+# predictable number of bars, and downstream code that assumes one will break on the
+# quiet days. The comparison table that follows reports distributional diagnostics
+# instead, which is a separate question from stability.
 #
 # ### How to calibrate a threshold
 #

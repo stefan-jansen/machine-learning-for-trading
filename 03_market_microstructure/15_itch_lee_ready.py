@@ -707,7 +707,7 @@ if "multi_day_tick_summary" in globals():
     ax.spines[["top", "right"]].set_visible(False)
     show_with_alt(
         fig,
-        "A horizontal bar chart with one bar per classification method, sorted shortest at the top. Each bar's length is its accuracy against the venue's aggressor labels as a percentage, labelled inside the bar, with the share of trades that method classified printed as a separate label to the right of it.",
+        "A horizontal bar chart with one bar per classification method, sorted with the shortest at the bottom. Each bar's length is its accuracy against the venue's aggressor labels as a percentage, labelled inside the bar, with the share of trades that method classified printed as a separate label to the right of it.",
     )
 
 # %% [markdown]
