@@ -448,6 +448,13 @@ def extract_features(data: np.ndarray, x_idx: int, y_idx: int, z_idx: int) -> di
     return features
 
 
+# %% [markdown]
+# The feature matrix goes to LightGBM as a pandas frame rather than a bare array, so the
+# model is fitted and predicted with the same feature names. LightGBM's sklearn wrapper sets
+# `feature_names_in_` either way, inventing `Column_0` through `Column_n` for an array, and
+# scikit-learn then warns on every predict that the array it was handed carries no names.
+# Real names also mean the gain importances come back labelled.
+
 # %%
 all_features = []
 all_targets = []
@@ -466,7 +473,7 @@ for dataset_id, (data, label_list, (W, x_idx, y_idx)) in enumerate(
         print(f"  Processed {dataset_id + 1}/{len(datasets)} datasets")
 
 feature_df = pl.DataFrame(all_features)
-X_train = feature_df.to_numpy()
+X_train = feature_df.to_pandas()  # named columns; see the markdown above
 y_train = np.array(all_targets)
 groups = np.array(all_dataset_ids)
 
@@ -540,7 +547,7 @@ fold_scores = []
 fold_importances = []
 
 for fold, (train_idx, val_idx) in enumerate(cv.split(X_train, y_train, groups)):
-    X_tr, X_val = X_train[train_idx], X_train[val_idx]
+    X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
     y_tr, y_val = y_train[train_idx], y_train[val_idx]
     assert not set(groups[train_idx]).intersection(groups[val_idx])
 
