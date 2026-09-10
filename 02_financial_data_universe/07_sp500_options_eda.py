@@ -835,6 +835,12 @@ show_plotly_with_alt(
 # buckets. The buckets hold very unequal numbers of quotes, so a median of per-bucket ninetieth
 # percentiles is not the ninetieth percentile of anything, and averaging per-bucket breach
 # shares would weight a thin far-wing bucket the same as a crowded one beside the money.
+#
+# Either band can come back empty, and which one does depends on how wide the chain is: a
+# chain with strikes on one side of the wing boundary and none on the other empties that
+# side. A quantile of an empty frame is null, and formatting a null against a percentage
+# spec raises, so the cell says the band is empty rather than printing a number for a set
+# with nothing in it.
 
 # %%
 _in_band = spread_analysis.filter(pl.col("moneyness").is_between(*SPREAD_BAND))
@@ -842,8 +848,11 @@ _near = _in_band.filter(pl.col("moneyness").is_between(*WING_BAND))
 _wings = _in_band.filter(~pl.col("moneyness").is_between(*WING_BAND))
 
 for label, frame in [("Near the money", _near), ("Away from it", _wings)]:
+    if not frame.height:
+        print(f"{label:16s} n={0:9,}  no contracts in this band, nothing to summarise")
+        continue
     print(
-        f"{label:16s} n={len(frame):9,}  median {frame['spread_pct'].median():6.1%}  "
+        f"{label:16s} n={frame.height:9,}  median {frame['spread_pct'].median():6.1%}  "
         f"90th pct {frame['spread_pct'].quantile(0.9):6.1%}  "
         f"wider than half the mid {(frame['spread_pct'] > 0.5).mean():5.1%}"
     )
