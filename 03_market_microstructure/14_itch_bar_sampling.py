@@ -473,7 +473,7 @@ if time_1m is not None:
     plt.xticks(rotation=20, ha="right")
     show_with_alt(
         fig,
-        "A bar chart of intraday return excess kurtosis, one bar per bar type, with a reference at zero marking the normal distribution.",
+        "A vertical bar chart of intraday return excess kurtosis with one bar per bar type, sorted from lowest at the left to highest at the right, and a dashed reference line at zero marking the normal distribution. The rightmost bar, for time bars, is highlighted in a contrasting colour.",
     )
 
 # %% [markdown]
@@ -525,7 +525,7 @@ if time_1m is not None:
     )
     show_with_alt(
         fig,
-        "Overlaid return distributions, one series per bar type, with the tails clipped so the centre of each distribution is comparable.",
+        "A grid of panels, one per bar type, each a histogram of that sampler's bar returns as a density with a fitted normal curve drawn over it. The horizontal axis is the bar return as a percentage, clipped at the tails so the centre of each distribution is comparable across panels.",
     )
 
 # %% [markdown]
@@ -578,7 +578,7 @@ if tick_bars is not None:
     )
     show_with_alt(
         fig,
-        "One panel per bar type, each a distribution of how long that sampler's bars took to fill, in seconds.",
+        "A grid of panels, one per bar type, each plotting how long a bar took to fill in seconds against the bar's position in the session, so the series runs chronologically rather than as a distribution. A dashed horizontal line in each panel marks that sampler's mean duration and is labelled with it.",
     )
 
 # %% [markdown]
@@ -635,7 +635,7 @@ if volume_bars is not None and "buy_volume" in volume_bars.columns:
             width=1.0,
         )
         ax.axhline(0, color=COLORS["neutral"], linewidth=0.6)
-        ax.set_title("Order-flow imbalance flips bar to bar")
+        ax.set_title("Order-flow imbalance per bar, in sequence")
         ax.set_xlabel("Bar index (chronological)")
         ax.set_ylabel("(Buy - Sell) / total volume")
 
@@ -661,7 +661,7 @@ if volume_bars is not None and "buy_volume" in volume_bars.columns:
         )
         show_with_alt(
             fig,
-            "A scatter of each bar's order imbalance against the return over the following bar, one point per bar, with reference lines at zero.",
+            "Two panels. The left is a bar chart of each bar's order-flow imbalance in sequence, green above the zero line and red below, against bar index. The right scatters that same imbalance against the return over the following bar, one point per bar, with reference lines at zero on both axes.",
         )
 
 # %% [markdown]
@@ -783,7 +783,7 @@ if tick_bars is not None and len(tick_bars) > 0:
     # Bars per hour
     ax = axes[0]
     bars_per_hour.plot(kind="bar", ax=ax, color=COLORS["blue"], alpha=0.9)
-    ax.set_title("Tick-bar count peaks at the open and close")
+    ax.set_title("Tick bars formed per hour")
     ax.set_xlabel("Hour (ET)")
     ax.set_ylabel("Number of tick bars")
     ax.set_xticklabels([f"{h}:00" for h in bars_per_hour.index], rotation=45)
@@ -803,7 +803,7 @@ if tick_bars is not None and len(tick_bars) > 0:
     )
     show_with_alt(
         fig,
-        "Two panels against time of day: the number of bars each sampler cut in each part of the session, and the volume traded over the same hours.",
+        "Two bar charts side by side against hour of the trading session. The left counts the tick bars formed in each hour; the right sums the shares traded in the same hours.",
     )
 
     print(
@@ -855,8 +855,12 @@ if time_1m is not None:
 # The ordering matters more than any accuracy figure. A venue label is a record and the
 # other two are estimates, so where a label exists there is nothing to infer. Between
 # the two estimates, the quote test answers from the quote prevailing at the trade while
-# the tick test answers from what happened before it, and the difference shows up on
-# exactly the trades where the two disagree: those that printed at an unchanged price.
+# the tick test answers from what happened before it. They disagree whenever the
+# direction of the last price change points the other way from the trade's position
+# relative to the midpoint - an uptick that still prints below the midpoint reads as a
+# buy to one and a sell to the other. Trades at an unchanged price are one case of this
+# and the most common, because the tick test has nothing to read on them at all and
+# carries its last answer forward instead.
 #
 # `15_itch_lee_ready` measures all three on the same trades and reports the gap.
 #
