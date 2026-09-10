@@ -360,10 +360,10 @@
   # No CUDA requirement in the source - the flag is a cost decision, not a hardware one. The cell
   # that fine-tunes all three checkpoints takes 637s against the 600s per-cell limit on CPU (645s
   # under load 16.8, so contention is not what fails it). MAX_TRAIN_STEPS already applies; what
-  # remains is the model count, and no parameter bounds it. Adding one would be clean - line 495
-  # derives `model_names` from the results dict, so nothing downstream names a checkpoint - but it
-  # is a parameters-cell edit, which invalidates the committed .ipynb and costs a production GPU
-  # run to regenerate. ml4t/agent-workspace#1097 carries that decision.
+  # remains is the model count, and no parameter bounds it. Adding one would be clean - the figure
+  # cells derive `model_names` from `results.keys()`, so nothing downstream names a checkpoint -
+  # but it is a parameters-cell edit, which invalidates the committed .ipynb and costs a
+  # production GPU run to regenerate. ml4t/agent-workspace#1097 carries that decision.
   gpu: true
   parameters:
     MAX_TRAIN_STEPS: 20
@@ -376,17 +376,18 @@
 10_text_feature_engineering/06_finbert_cross_dataset:
   # FinBERT inference over the whole split - the SAMPLE_SIZE default of 10,000 exceeds its 8,142
   # rows, so it never binds - overruns the 300s per-cell limit on CPU: measured 334s idle, 353s
-  # under load 9.5. The notebook picks its device with a CPU fallback at line 102 and has no CUDA
-  # guard, so what it needed was a reduction, not a card. At 1,500 it passes in 160s and the
-  # majority-class rate it benchmarks against moves 43.1% -> 42.9%. ml4t/agent-workspace#1097.
+  # under load 9.5. The notebook picks its device with a plain `0 if torch.cuda.is_available()
+  # else -1` fallback and has no CUDA guard, so what it needed was a reduction, not a card. At
+  # 1,500 it passes in 160s and the majority-class rate it benchmarks against moves
+  # 43.1% -> 42.9%. ml4t/agent-workspace#1097.
   parameters:
     SAMPLE_SIZE: 1500
   timeout: 300
 10_text_feature_engineering/07_news_return_signals:
   # Not a GPU notebook - it ran to completion on CPU in 28s with the card hidden. What it cannot
   # do is produce a row against this fixture: the news sample spans 2020-01-02..2023-12-28 and
-  # `load_us_equities` ends 2018-03-27, so the join at line 981 drops all 109 feature rows and
-  # the notebook writes an empty news_features.parquet. It reports that ("Overlapping dates: 0",
+  # `load_us_equities` ends 2018-03-27, so the price join drops all 109 feature rows and the
+  # notebook writes an empty news_features.parquet. It reports that ("Overlapping dates: 0",
   # "Observations: 0") and still exits 0, so with the GPU flag off it silently replaced the panel
   # `tests/fixtures/seed_results.py::_seed_news_features` puts there for 08, which then failed on
   # the empty file. Production overlaps for nine years (news 2009-02..2020-06, prices to
@@ -406,12 +407,12 @@
   timeout: 300
 10_text_feature_engineering/09_filing_text_signals:
   # No CUDA requirement in the source - the flag is a cost decision. FinBERT chunks each ~6,500
-  # word MD&A section into ~16 windows of 512 tokens and costs over 15s per filing on CPU, so the
-  # scoring cell at line 317 overran the 600s per-cell limit at both sizes measured: 639s idle
-  # with MAX_SYMBOLS 5 (75 filings), and again with MAX_FILINGS 40. Reducing further is blocked,
-  # not merely slow: the IC loop needs 20 surviving observations per signal-horizon pair
-  # (line 654) and at 12 filings it gets none, at which point line 721 raises NameError because
-  # the else branch at 707 never binds `ic_summary`. That is ml4t/agent-workspace#1115; a usable
+  # word MD&A section into ~16 windows of 512 tokens and costs over 15s per filing on CPU, so its
+  # FinBERT scoring cell overran the 600s per-cell limit at both sizes measured: 639s idle with
+  # MAX_SYMBOLS 5 (75 filings), and again with MAX_FILINGS 40. Reducing further is blocked,
+  # not merely slow: the IC loop skips any signal-horizon pair with `valid.height < 20`, at 12
+  # filings that is every pair, and the figure cell's `len(ic_summary)` then raises NameError
+  # because the `if ic_results:` else branch never binds it. ml4t/agent-workspace#1115; a usable
   # reduction here needs it fixed first. ml4t/agent-workspace#1097.
   gpu: true
   parameters:
@@ -1052,10 +1053,10 @@
   tier: weekly
   timeout: 300
 22_rag_financial_research/06_esg_rag_vs_finetune:
-  # `REQUIRE_GPU = True` at line 77 is a module constant, not a papermill parameter, and line 83
-  # raises unless `torch.cuda.is_available()`. Line 230 raises again if the loaded FinBERT
-  # parameters are not on cuda. There is no CPU path. Measured: fails in 28s with the card
-  # hidden. ml4t/agent-workspace#1097.
+  # `REQUIRE_GPU = True` is a module constant, not a papermill parameter, and the guard on
+  # `torch.cuda.is_available()` raises. The later `parameter_device.type != "cuda"` check raises
+  # again if the loaded FinBERT weights are not on the card. There is no CPU path. Measured: fails
+  # in 28s with the card hidden. ml4t/agent-workspace#1097.
   gpu: true
   parameters:
     MAX_HEADLINES: 50
@@ -1086,9 +1087,9 @@
   tier: on_demand
   timeout: 600
 23_knowledge_graphs/06_gnn_feature_engineering:
-  # Line 73 raises unless `torch.cuda.is_available()`, and line 75 pins `DEVICE = "cuda"` for
-  # every tensor the fold loop builds (402-404). There is no CPU path. Measured: fails in 28s
-  # with the card hidden. ml4t/agent-workspace#1097.
+  # It raises unless `torch.cuda.is_available()`, then pins `DEVICE = torch.device("cuda")` for
+  # every tensor the fold loop builds. There is no CPU path. Measured: fails in 28s with the card
+  # hidden. ml4t/agent-workspace#1097.
   gpu: true
   timeout: 600
 23_knowledge_graphs/03_graph_rag_qa:
