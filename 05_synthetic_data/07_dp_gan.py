@@ -851,18 +851,28 @@ epsilon_values = [1.0, 5.0, 10.0, 50.0]
 tradeoff_results = []
 
 
-def collapse_diagnostics(sample: np.ndarray) -> dict:
+def collapse_diagnostics(sample: np.ndarray, scale: np.ndarray) -> dict:
     """Two numbers that separate a spread-out sample from a collapsed one.
 
     A generator that has collapsed onto a low-dimensional set makes each feature close
     to a deterministic function of the others, which shows up as off-diagonal
     correlations near one and as a handful of singular values carrying all the variance.
     Neither is visible in a distance between two correlation matrices.
+
+    Args:
+        sample: Rows in feature units, shape (n_rows, n_features)
+        scale: Per-feature standard deviation of the real data, shape (n_features,)
+
+    The variance spectrum is not scale free, and these features are not on one scale:
+    an annualized volatility, a daily return and a dimensionless ratio differ by orders
+    of magnitude. On raw units the widest feature would carry almost all the variance
+    in any sample, collapsed or not, so both samples are divided by the same real
+    standard deviations first. The correlations need no such treatment.
     """
     corr = np.corrcoef(sample, rowvar=False)
     off_diagonal = ~np.eye(corr.shape[0], dtype=bool)
-    centered = sample - sample.mean(axis=0)
-    variance = np.linalg.svd(centered, compute_uv=False) ** 2
+    standardized = (sample - sample.mean(axis=0)) / scale
+    variance = np.linalg.svd(standardized, compute_uv=False) ** 2
     share = np.cumsum(variance) / variance.sum()
     return {
         "mean_abs_offdiag_corr": float(np.abs(corr[off_diagonal]).mean()),
@@ -870,10 +880,15 @@ def collapse_diagnostics(sample: np.ndarray) -> dict:
     }
 
 
+# A feature the real data holds constant carries no variance to apportion, so it is
+# given unit scale rather than dividing by zero.
+real_feature_scale = np.where(sweep_eval.std(axis=0) > 0, sweep_eval.std(axis=0), 1.0)
+
+
 print("\n" + "=" * 60)
 print("PRIVACY-UTILITY TRADE-OFF ANALYSIS")
 print("=" * 60)
-_real_collapse = collapse_diagnostics(sweep_eval)
+_real_collapse = collapse_diagnostics(sweep_eval, real_feature_scale)
 print(
     f"Real data, for reference: mean |off-diagonal corr| "
     f"{_real_collapse['mean_abs_offdiag_corr']:.3f}, "
@@ -902,7 +917,7 @@ for eps in epsilon_values:
     # Evaluate
     synth = generate_samples(gen, SWEEP_EVAL_ROWS)
     q = evaluate_quality(sweep_eval, synth)
-    collapse = collapse_diagnostics(synth)
+    collapse = collapse_diagnostics(synth, real_feature_scale)
     tradeoff_results.append({"epsilon": eps, **q, **collapse})
     print(
         f"  mean |off-diagonal corr|: {collapse['mean_abs_offdiag_corr']:.3f}"
@@ -996,9 +1011,12 @@ show_plotly_with_alt(
 # summaries of a difference, and a difference between two correlation matrices cannot
 # say whether either of them describes a real spread. That is why the sweep also prints
 # `mean_abs_offdiag_corr` and `dims_for_99pct_variance` per budget, with the real data's
-# values above them for reference. Compare each budget's pair against the real one: an
-# off-diagonal correlation near one, or almost all the variance in a couple of
-# directions, is a generator that has collapsed rather than one that is merely noisy.
+# values above them for reference. Both samples are put on the real data's feature
+# scales first, so the dimension count is a statement about the shape of the sample and
+# not about which feature happens to be measured in the largest units. Compare each
+# budget's pair against the real one: an off-diagonal correlation near one, or a
+# variance the real data spreads over many directions concentrated into a couple, is a
+# generator that has collapsed rather than one that is merely noisy.
 # Where that is what the numbers show, a flat correlation-distance curve says the metric
 # does not separate these settings, not that the settings are equally good.
 #
