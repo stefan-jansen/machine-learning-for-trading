@@ -1675,10 +1675,14 @@ shared_library = [
 most_shared = max(shared_library) if shared_library else (0, "", "")
 if has_overlap:
     if most_shared[0] > 0:
+        _shared_pair_overlap = jaccard(top_features[most_shared[1]], top_features[most_shared[2]])
         _library_note = (
-            f"The panels are not simply drawing on disjoint libraries: **{most_shared[1]}** "
-            f"and **{most_shared[2]}** have {most_shared[0]} feature names in common, and "
-            "their leading features are still selected from different parts of it."
+            f"The two panels with the most library in common are **{most_shared[1]}** and "
+            f"**{most_shared[2]}**, sharing {most_shared[0]} feature names; their leading "
+            f"sets overlap at {_shared_pair_overlap:.2f}. Read that number rather than the "
+            "maximum above when asking whether the panels select differently: two panels "
+            "with no shared library cannot agree on a leading feature whatever their fits "
+            "do."
         )
     else:
         _library_note = (
