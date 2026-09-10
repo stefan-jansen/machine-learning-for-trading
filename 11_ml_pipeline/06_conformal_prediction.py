@@ -894,9 +894,12 @@ if conformal_results["aci"]["alpha_histories"]:
 # %% [markdown] tags=[]
 # **What to read off it.** The path only rises while the dates whose labels have
 # resolved over-covered, and only falls while they missed too often, so it is a
-# running record of that fold's realized coverage, lagged by the label horizon. A
-# path that leaves the target line and stays away says the delayed feedback kept
-# pointing the same way for longer than the step size could correct.
+# running record of that fold's realized coverage, lagged by the label horizon.
+# Its level is a different thing from its direction. Alpha settles wherever the
+# calibration quantile it selects delivers the target miss rate, and that place
+# need not be the nominal alpha: a path that leaves the target line and stays away
+# says the pooled calibration scores needed that much adjustment to cover at the
+# requested rate, not that the intervals are still missing.
 
 # %% [markdown] tags=[]
 # ## Interval Width Comparison
