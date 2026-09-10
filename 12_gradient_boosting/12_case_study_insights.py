@@ -703,7 +703,14 @@ def plot_holdout_decay(decay_df: pl.DataFrame) -> plt.Figure:
 # The completed chart is rendered only when an exact selected holdout row exists.
 
 # %%
-if not holdout_df.is_empty():
+if holdout_df.is_empty():
+    display(
+        Markdown(
+            "**No holdout chart**: no case study in this run has a holdout result for its "
+            "selected GBM configuration, so there is nothing to join a validation IC to."
+        )
+    )
+else:
     fig = plot_holdout_decay(decay_df)
     show_with_alt(
         fig,
@@ -1468,7 +1475,14 @@ shift_summary_df = (
 shift_summary_df
 
 # %%
-if rank_shift_summary:
+if not rank_shift_summary:
+    display(
+        Markdown(
+            "**No promotion chart**: no case study has both a GBM importance artifact and "
+            "Ridge coefficients, so there is no pair of rankings to difference."
+        )
+    )
+else:
     fig, axes = plt.subplots(
         1,
         len(rank_shift_summary),

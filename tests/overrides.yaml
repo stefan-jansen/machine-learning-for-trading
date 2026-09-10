@@ -509,7 +509,8 @@
   timeout: 300
 12_gradient_boosting/10_shap_nlp_sentiment:
   docker_env: py312
-  gpu: true
+  # No GPU required: line 65 reads torch.cuda.is_available() and falls back to CPU.
+  # Measured in the py312 CPU image: 73s wall clock, 1.9 GB peak (2026-09-10).
   timeout: 300
 12_gradient_boosting/11_conformal_gbm:
   # No `gpu:`. This one is stronger than stale: line 229 passes `"device_type": "cpu"`, and

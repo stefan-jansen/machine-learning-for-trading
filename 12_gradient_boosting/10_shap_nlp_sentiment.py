@@ -139,6 +139,7 @@ prediction_summary
 # negative value pushes away from it.
 
 # %%
+# Each call passes silent=True: the partition explainer's tqdm bar writes to stderr.
 explainer = shap.Explainer(
     predict_proba,
     tokenizer,
@@ -154,7 +155,7 @@ explain_sentences = [
 
 explain_probabilities = predict_proba(explain_sentences)
 explain_winners = explain_probabilities.argmax(axis=1)
-shap_values = explainer(explain_sentences)
+shap_values = explainer(explain_sentences, silent=True)
 
 # %% [markdown]
 # Each panel ranks tokens by absolute contribution to that sentence's predicted class. Direction is
@@ -217,7 +218,7 @@ context_sentences = [
     "Net loss widened significantly from the prior year.",
 ]
 context_probabilities = predict_proba(context_sentences)
-context_shap = explainer(context_sentences)
+context_shap = explainer(context_sentences, silent=True)
 positive_index = LABEL_ORDER.index("Positive")
 
 context_summary = pl.DataFrame(
@@ -290,7 +291,7 @@ teaching_sentences = [
 if MAX_SENTENCES > 0:
     teaching_sentences = teaching_sentences[:MAX_SENTENCES]
 
-teaching_shap = explainer(teaching_sentences)
+teaching_shap = explainer(teaching_sentences, silent=True)
 
 token_totals: dict[str, float] = {}
 for sentence_index in range(len(teaching_sentences)):
