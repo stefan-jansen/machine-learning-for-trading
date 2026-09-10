@@ -122,7 +122,7 @@ class _GBMBatchCandidate:
     training: TrainingResult | None = None
     ledger: ExecutionLedger | None = None
     attempt: ExecutionAttempt | None = None
-    frames: list[pl.DataFrame] = field(default_factory=list)
+    shards: list[Path] = field(default_factory=list)
     reused_folds: list[int] = field(default_factory=list)
     fitted_folds: list[int] = field(default_factory=list)
     fit_elapsed_s: float = 0.0
@@ -2315,7 +2315,16 @@ def _gbm_fold_prediction_shard(entries: list[dict[str, Any]], context: GBMContex
 def _fit_or_reuse_gbm_fold(
     candidate: _GBMBatchCandidate,
     fold: dict[str, Any],
-) -> tuple[pl.DataFrame, bool, float]:
+) -> tuple[Path, bool, float]:
+    """Fit one fold of one configuration, and return the shard it is persisted in.
+
+    Returning the path rather than the frame is what bounds the group. Fold-major execution
+    holds one prepared fold and fits every configuration in the compatibility group against it,
+    so a returned frame is retained until that configuration finishes - which is after the last
+    fold, for every configuration at once. A nasdaq fold shard is 1.75 GB in memory, and a
+    fifteen-configuration group over two folds accumulated 52 GB of frames that were already
+    on disk.
+    """
     assert candidate.spec is not None
     assert candidate.context is not None
     assert candidate.training is not None
@@ -2333,7 +2342,7 @@ def _fit_or_reuse_gbm_fold(
         prediction_shard=shard,
         resolved_settings=settings,
     ):
-        return pl.read_parquet(shard), True, 0.0
+        return shard, True, 0.0
 
     started = time.perf_counter()
     staging = training_dir / f".fold_{fold_id}.{uuid.uuid4().hex}.tmp"
@@ -2383,7 +2392,7 @@ def _fit_or_reuse_gbm_fold(
         )
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    return frame, False, time.perf_counter() - started
+    return shard, False, time.perf_counter() - started
 
 
 def _write_gbm_training_manifest(training: TrainingResult, fold_ids: tuple[int, ...]) -> None:
@@ -2404,33 +2413,32 @@ def _write_gbm_training_manifest(training: TrainingResult, fold_ids: tuple[int, 
         temporary.unlink(missing_ok=True)
 
 
-def _gbm_curves_from_shards(
+def _gbm_checkpoint_curve(
     config_name: str,
-    predictions: pl.DataFrame,
-    checkpoints: tuple[int, ...],
-) -> list[dict[str, Any]]:
-    target = "eval_actual" if "eval_actual" in predictions.columns else "actual"
-    curves = []
-    for checkpoint in checkpoints:
-        frame = predictions.filter(pl.col("checkpoint") == checkpoint)
-        metric = cross_sectional_ic(
-            frame,
-            frame,
-            pred_col="prediction",
-            ret_col=target,
-            date_col="timestamp",
-            entity_col="symbol",
-            min_obs=5,
-        )
-        curves.append(
-            {
-                "config": config_name,
-                "iteration": checkpoint,
-                "ic_mean": float(metric["ic_mean"]),
-                "ic_std": float(metric.get("ic_std", 0.0)),
-            }
-        )
-    return curves
+    checkpoint: int,
+    frame: pl.DataFrame,
+) -> dict[str, Any]:
+    """One learning-curve point, from that checkpoint's predictions alone.
+
+    Taking one checkpoint's frame rather than the whole prediction set is what lets the caller
+    publish and score a checkpoint, release it, and move to the next.
+    """
+    target = "eval_actual" if "eval_actual" in frame.columns else "actual"
+    metric = cross_sectional_ic(
+        frame,
+        frame,
+        pred_col="prediction",
+        ret_col=target,
+        date_col="timestamp",
+        entity_col="symbol",
+        min_obs=5,
+    )
+    return {
+        "config": config_name,
+        "iteration": checkpoint,
+        "ic_mean": float(metric["ic_mean"]),
+        "ic_std": float(metric.get("ic_std", 0.0)),
+    }
 
 
 def _write_gbm_runtime_fields(path: Path, **fields: float) -> None:
@@ -2512,7 +2520,7 @@ def _reuse_gbm_batch_fold(candidate: _GBMBatchCandidate, fold_id: int) -> bool:
         resolved_settings=_gbm_fold_settings(candidate, fold_id),
     ):
         return False
-    candidate.frames.append(pl.read_parquet(shard))
+    candidate.shards.append(shard)
     candidate.reused_folds.append(fold_id)
     return True
 
@@ -2524,11 +2532,11 @@ def _run_gbm_batch_fold(candidate: _GBMBatchCandidate, fold: dict[str, Any]) -> 
     if fold_id in candidate.reused_folds or fold_id in candidate.fitted_folds:
         return
     try:
-        frame, reused, elapsed = _fit_or_reuse_gbm_fold(candidate, fold)
+        shard, reused, elapsed = _fit_or_reuse_gbm_fold(candidate, fold)
     except Exception as exc:
         _fail_gbm_batch_candidate(candidate, exc)
         return
-    candidate.frames.append(frame)
+    candidate.shards.append(shard)
     candidate.fit_elapsed_s += elapsed
     (candidate.reused_folds if reused else candidate.fitted_folds).append(fold_id)
 
@@ -2566,19 +2574,28 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
     assert candidate.training is not None
     assert candidate.attempt is not None
     try:
-        if len(candidate.frames) != len(candidate.context.fold_ids):
+        if len(candidate.shards) != len(candidate.context.fold_ids):
             raise RuntimeError(
-                f"GBM candidate produced {len(candidate.frames)} of "
+                f"GBM candidate produced {len(candidate.shards)} of "
                 f"{len(candidate.context.fold_ids)} fold shards"
             )
         _write_gbm_training_manifest(candidate.training, candidate.context.fold_ids)
-        predictions = pl.concat(candidate.frames).sort("checkpoint", "symbol", "timestamp", "fold")
         prediction_results = []
+        curves = []
         checkpoints = tuple(
             int(item["value"]) for item in candidate.spec["computation"]["checkpoint_schedule"]
         )
+        # One checkpoint at a time, read back from the fold shards this configuration already
+        # persisted. Concatenating every fold and then filtering held the whole prediction set
+        # plus a copy of the slice; a nasdaq configuration is 3.5 GB whole and 0.35 GB a slice.
         for checkpoint in checkpoints:
-            frame = predictions.filter(pl.col("checkpoint") == checkpoint).drop("checkpoint")
+            frame = (
+                pl.scan_parquet(candidate.shards)
+                .filter(pl.col("checkpoint") == checkpoint)
+                .drop("checkpoint")
+                .sort("symbol", "timestamp", "fold")
+                .collect()
+            )
             prediction_results.append(
                 study.results.publish_predictions(
                     candidate.training,
@@ -2593,6 +2610,9 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
                     label=candidate.spec["label"],
                 )
             )
+            curves.append(_gbm_checkpoint_curve(candidate.spec["config_name"], checkpoint, frame))
+            del frame
+        gc.collect()
         curves_path = (
             candidate.training.root
             / "run_log"
@@ -2600,7 +2620,6 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
             / candidate.training.hash
             / "learning_curves.parquet"
         )
-        curves = _gbm_curves_from_shards(candidate.spec["config_name"], predictions, checkpoints)
         _write_learning_curves(curves_path, curves)
         diagnostics = {
             "cache_hit": False,
