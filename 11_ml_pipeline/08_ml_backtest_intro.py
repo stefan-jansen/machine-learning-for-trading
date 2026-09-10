@@ -19,9 +19,9 @@
 # **Docker image**: `ml4t`
 #
 # **Purpose**: pedagogical end-to-end backtest comparing ML-generated signals
-# against momentum and equal-weight baselines on the ETF panel. Shows that
-# positive IC does not guarantee portfolio profitability — turnover and
-# transaction costs eat the predictive edge.
+# against momentum and equal-weight baselines on the ETF panel. Shows what
+# happens to a ranking signal once turnover and transaction costs are charged
+# against it.
 #
 # **Learning objectives**
 #
@@ -29,10 +29,10 @@
 # - Convert signals to long-only top-10 portfolios with equal weights
 # - Compute gross / net Sharpe, annualized return, volatility, drawdown, and
 #   turnover
-# - Quantify how transaction-cost drag (10 bps per side) discriminates
+# - Quantify how transaction-cost drag, charged at `COST_BPS` per side, separates
 #   high-turnover ML strategies from low-turnover baselines
 #
-# **Book reference**: Section 11.6 — Linear Models Across Nine Case Studies
+# **Book reference**: Section 11.6 - Linear Models Across Nine Case Studies
 # (the chapter synthesis paragraph on IC vs net Sharpe).
 #
 # **Prerequisites**
@@ -48,25 +48,23 @@
 # constraints is *Chapter 17*; transaction-cost modeling is *Chapter 18*.
 
 # %% tags=[]
-"""From Signals to Returns: The Reality Check — pedagogical backtest showing IC does not guarantee profitability."""
+"""From Signals to Returns: The Reality Check - a pedagogical backtest of ranking signals net of cost."""
 
-import warnings
 from datetime import date
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from IPython.display import Markdown, display
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler
-
-warnings.filterwarnings("ignore")
 
 from data import load_etfs
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -125,13 +123,16 @@ if MAX_FOLDS > 0:
 print(f"CV folds: {len(splits)}")
 
 # %% [markdown] tags=[]
-# ## Walk-Forward Prediction (8 Folds)
+# ## Walk-Forward Prediction
 #
-# We use the canonical CV splits from the `setup.yaml` evaluation section: 8 folds, each with
-# 10Y training and 1Y validation, stepping forward annually with a 1-month purge gap.
+# The splits come from the `evaluation` section of the case study's `setup.yaml`, which
+# declares eight folds of ten years' training and one year's validation, stepping
+# forward annually. `label_buffer="21D"` purges the 21 sessions a 21-day forward label
+# needs, so no training row's label resolves inside its own validation window. The cell
+# above prints how many folds this run actually used.
 #
 # For each fold we train Ridge and Logistic once, then predict across the entire validation window.
-# Momentum uses `ret_126d` directly — no training needed.
+# Momentum ranks on `ret_126d` directly, with no training step.
 
 
 # %% tags=[]
@@ -147,10 +148,13 @@ def rank_top_n(assets, scores, top_n):
     return {s: w for s in selected}
 
 
+# %% [markdown] tags=[]
+# Ridge and Logistic are fitted once per fold on that fold's training window, at the
+# library's default regularization strengths. Choosing those strengths honestly is
+# `04_nested_cv_hpo`; what this notebook varies is what happens to a signal once it is
+# traded.
+
 # %% tags=[]
-# Train Ridge and Logistic models on each fold's training set.
-# These are simple default hyperparameters (alpha=1.0, C=1.0) for pedagogy —
-# production runs would use tuned hyperparameters from the walk-forward pipeline.
 fold_models = []
 
 for fold in splits:
@@ -192,7 +196,7 @@ train_summary
 #
 # For each month-end rebalance date within the validation window, we rank
 # symbols by each signal and select the top-N for equal-weight long portfolios.
-# Momentum uses `ret_126d` directly — no model needed.
+# Momentum ranks on `ret_126d` directly, with no model.
 
 # %% tags=[]
 all_predictions = []
@@ -263,10 +267,9 @@ for strat in strategies:
     strat_weights = [(d, w) for d, s, w in all_weights if s == strat]
     if not strat_weights:
         continue
-    # CV splits arrive newest-first, so sort rebalance snapshots chronologically
-    # before the daily simulation walk. Without this, only the most recent fold's
-    # weights ever fire because the chronological dates_array loop never sees the
-    # earlier-dated snapshots come back in time.
+    # CV splits arrive newest-first and the simulation walks dates forward, so the
+    # snapshots are sorted chronologically here; left as they came, only the most recent
+    # fold's weights would ever fire.
     strat_weights.sort(key=lambda dw: dw[0])
 
     T = len(dates_array)
@@ -286,11 +289,8 @@ for strat in strategies:
     snap_idx = 0
 
     for t, d in enumerate(dates_array):
-        # Earn today's return on the weights held into today's close FIRST, then
-        # rebalance at the close so the new weights apply from the next bar. The
-        # signal at a rebalance date is only known at that day's close, so the
-        # positions it implies cannot capture the same day's return — applying
-        # them before computing the return would be a one-day look-ahead.
+        # Return first on the weights held into the close, then rebalance: the signal is
+        # known at that close, so the positions it implies start earning from the next bar.
         day_rets_row = ret_matrix[t]
         valid = ~np.isnan(day_rets_row)
         if current_w.sum() > 0 and valid.any():
@@ -308,8 +308,8 @@ for strat in strategies:
 # %% [markdown] tags=[]
 # ## Performance Summary
 #
-# Annualized Sharpe (gross and net of costs), return, volatility, max drawdown,
-# and average annual turnover across the 2016–2023 test period.
+# Annualized Sharpe (gross and net of costs), return, volatility, max drawdown and
+# average annual turnover, over the validation window the folds span.
 
 
 # %% tags=[]
@@ -374,9 +374,9 @@ summary
 # %% [markdown] tags=[]
 # ## Equity Curves and Turnover
 #
-# Two-panel comparison: growth of \$1 (top; solid = gross, dashed = net of cost)
-# and monthly turnover (bottom) across all four strategies over the 2016–2023
-# test period.
+# Two panels over the validation window: growth of \$1 on top, where a solid line is
+# gross and the dashed line of the same colour is that strategy net of cost, and
+# one-sided turnover at each monthly rebalance below.
 
 # %% tags=[]
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), height_ratios=[3, 1], sharex=True)
@@ -412,13 +412,9 @@ for strat in strategies:
 
 ax1.set_ylabel(r"Growth of \$1")
 ax1.legend(loc="upper left", frameon=False, fontsize=8)
-ax1.set_title(
-    "ETF Strategies: ML vs Momentum vs Equal-Weight (2016-2023)\n"
-    "solid = gross, dashed = net of cost",
-    fontsize=11,
-)
+ax1.set_title(rf"Growth of \$1 by strategy, {first_val:%Y} to {last_val:%Y}")
 
-# Panel (b): monthly turnover bars
+# Monthly turnover bars
 for strat in ["momentum", "ridge", "logistic"]:
     to = results[strat]["turnover"][mask]
     reb_mask = to > 0
@@ -437,19 +433,22 @@ ax2.set_ylabel("Turnover (%)")
 ax2.set_xlabel("Date")
 ax2.legend(loc="upper right", frameon=False, fontsize=8)
 
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels on a shared date axis. Top: cumulative growth of one dollar for the four "
+    "strategies, a solid line per strategy for gross returns and a dashed line for the same "
+    "strategy net of cost. Bottom: one-sided turnover as bars at each monthly rebalance, for "
+    "the three active strategies.",
+)
 
 # %% [markdown] tags=[]
 # ## IC Comparison
 #
-# Rolling cross-sectional IC from cached predictions. Positive IC for ML models does not
-# guarantee portfolio profitability — turnover costs close the gap.
+# Cross-sectional IC per rebalance date, smoothed over a rolling twelve rebalances. IC
+# scores the ranking; the equity curves above score what holding that ranking cost.
 
 # %% tags=[]
-# Long-format DataFrame across all rebalance dates and assets, with one
-# prediction column per signal. Cross-sectional IC per date is then a single
-# vectorized call per signal.
+# One row per rebalance date and asset, one prediction column per signal.
 panel_rows = []
 for reb_date, assets, y_actual, mom_scores, ridge_preds, logit_probs in all_predictions:
     for j, sym in enumerate(assets):
@@ -508,51 +507,88 @@ for col, color, label in [
 ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
 ax.set_ylabel("Rolling 12-Month IC (Spearman)")
 ax.set_xlabel("Date")
-ax.set_title("Cross-Sectional IC: Positive IC Does Not Guarantee Profitability")
+ax.set_title("Rolling 12-month cross-sectional IC by signal")
 ax.legend(frameon=False)
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Rolling 12-month cross-sectional Spearman IC for momentum, Ridge and Logistic against "
+    "the rebalance date, against a dashed line at zero.",
+)
 
-print("\n=== Mean Cross-Sectional IC ===")
-for col in ["momentum", "ridge", "logistic"]:
-    mean_ic = ic_df[col].drop_nulls().mean()
-    print(f"  {col:12s}: {mean_ic:.4f}")
+# A signal scores only on dates priced by enough symbols for a rank correlation, so a
+# reduced run can leave one with no defined IC at all. Report that rather than a number.
+_mean_ic = {col: ic_df[col].drop_nulls().mean() for col in ["momentum", "ridge", "logistic"]}
+_scored = {name: float(value) for name, value in _mean_ic.items() if value is not None}
+_unscored = [name for name, value in _mean_ic.items() if value is None]
+
+# %% tags=["results"]
+_metrics = {row["strategy"]: row for row in summary.iter_rows(named=True)}
+_best_net = max(_metrics, key=lambda name: _metrics[name]["sharpe_net"])
+_by_turnover = sorted(_metrics, key=lambda name: _metrics[name]["ann_turnover_pct"])
+_drag = {name: _metrics[name]["sharpe_gross"] - _metrics[name]["sharpe_net"] for name in _metrics}
+_lines = [
+    (
+        "- Mean cross-sectional IC: "
+        + ", ".join(f"{name} {value:+.3f}" for name, value in _scored.items())
+        + (f" (undefined for {', '.join(_unscored)})" if _unscored else "")
+        if _scored
+        else "- No signal has a defined cross-sectional IC in this run: no rebalance date "
+        "carried enough symbols to rank."
+    ),
+    f"- Highest net Sharpe: **{_best_net}** at {_metrics[_best_net]['sharpe_net']:.2f}, "
+    f"turning over {_metrics[_best_net]['ann_turnover_pct']:.0f}% a year.",
+    "- Annual turnover, ascending: "
+    + ", ".join(f"{name} {_metrics[name]['ann_turnover_pct']:.0f}%" for name in _by_turnover),
+    f"- Sharpe given up to cost at {COST_BPS} bps per side, in the same order: "
+    + ", ".join(f"{name} {_drag[name]:.2f}" for name in _by_turnover),
+]
+if _scored:
+    _lines.insert(
+        1,
+        f"- Highest mean cross-sectional IC: **{max(_scored, key=lambda n: _scored[n])}**.",
+    )
+display(Markdown("\n".join(_lines)))
 
 # %% [markdown] tags=[]
-# **Interpretation**: Ridge achieves the highest IC ($+0.022$) yet
-# equal-weight — with no informational signal — delivers the best net Sharpe
-# (0.64) thanks to its low turnover (~$9\%$/year, the drift correction
-# back to $1/N$ at each monthly rebalance). Active strategies turn over far
-# more aggressively — momentum at $\approx 491\%$/year, Ridge at
-# $\approx 665\%$/year, Logistic at $\approx 678\%$/year, roughly 50–75× the
-# equal-weight baseline. The turnover penalty is cleanest between momentum and
-# Ridge: they earn the *same* gross Sharpe (0.48), but Ridge nets only 0.41
-# versus momentum's 0.43 — the difference is entirely the cost of its higher
-# turnover. Logistic's negative cross-sectional IC ($-0.005$) shows that
-# probability-based ranking does not translate to a return-ordered cross-section
-# on this horizon (its high net Sharpe rides its low realized volatility, not IC).
-# The cost gap is clearest in the gross-to-net spread: equal-weight loses ~0.00
-# Sharpe, momentum 0.05, Ridge 0.07, Logistic 0.10 — exactly the ordering
-# predicted by their turnover. This motivates turnover-penalized objectives and
-# portfolio constraints in *Chapters 17–18*.
+# **Interpretation.** The two rankings above are built from different things and do not
+# have to agree. Mean IC scores how well a signal orders next month's returns. Net
+# Sharpe scores what was left after holding the portfolio that ordering implies and
+# paying to change it. A signal can rank well and still finish behind a rule with no
+# signal at all, because the cost of acting on a ranking is charged against every
+# rebalance while the ranking itself is free.
+#
+# Equal weight is the useful contrast: it holds every asset and trades only the drift
+# back to $1/N$ each month, so its gross and net Sharpe are nearly the same number. The
+# active strategies re-pick a top-N list each month and pay for the whole difference
+# between consecutive lists. The Sharpe that costs is the cost rate times the fraction
+# traded, divided by that strategy's own volatility, so turnover sets the order and
+# volatility moves a strategy within it: two strategies that trade the same amount give
+# up different amounts of Sharpe when one of them is the steadier.
+#
+# A signal whose IC is near zero or negative can still post a respectable net Sharpe,
+# and the ranking is not the only thing that could produce it. A long-only top-N
+# portfolio drawn from a shared universe inherits most of that universe's return
+# whatever the ranking says, and a lower realized volatility raises the ratio without
+# raising the return at all. Read the IC column and the Sharpe column as answers to two
+# questions, not as one score twice.
+# Turnover-penalized objectives and trading constraints are the response, and Chapters
+# 17 and 18 develop them.
 
 # %% [markdown] tags=[]
 # ## Key Takeaways
 #
-# 1. **Positive IC does not guarantee portfolio profitability.** Ridge ranks
-#    future returns with the highest IC ($+0.022$) yet finishes last on net
-#    Sharpe among the four strategies — the rank-correlation signal is real
-#    but the implementation costs it.
-# 2. **Turnover is the discriminator.** Equal-weight rebalancing back to
-#    $1/N$ generates only $\approx 9\%$ annual turnover (drift correction),
-#    while momentum runs at $\approx 491\%$ and the ML models at
-#    $\approx 665$–$678\%$. The gross-to-net Sharpe spread tracks turnover
-#    exactly: equal $\approx 0.00$, momentum $0.05$, Ridge $0.07$, Logistic $0.10$
-#    at 10 bps per side.
-# 3. **Transaction costs belong in the objective.** Regularization controls
-#    coefficient magnitude but not position changes. Turnover-penalized
-#    objectives or trading constraints (*Chapters 17–18*) are needed to
-#    make ML signals cost-effective on this kind of cross-section.
+# 1. **A ranking score and a portfolio result are different measurements.** Mean IC
+#    says how well a signal orders the cross-section; net Sharpe says what holding the
+#    implied portfolio returned after costs. The table above shows how far apart the
+#    two orderings can be on the same eight folds.
+# 2. **Turnover is what separates them.** Cost is charged on the difference between
+#    consecutive weight vectors, so at a fixed cost per side the Sharpe given up is
+#    proportional to how much a strategy trades. Equal weight trades only its monthly
+#    drift back to $1/N$; a monthly top-N re-pick trades most of the book.
+# 3. **Put transaction costs in the objective.** Regularization controls coefficient
+#    magnitude, not position change, so a penalized fit is not a low-turnover fit.
+#    Turnover-penalized objectives and trading constraints (*Chapters 17 and 18*) are
+#    what make a ranking signal worth acting on at this cost level.
 #
 # **Next**: *Chapter 16* develops production backtesting with proper execution
 # modeling. *Chapter 17* adds portfolio construction with turnover constraints,
