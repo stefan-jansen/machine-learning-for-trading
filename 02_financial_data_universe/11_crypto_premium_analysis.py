@@ -873,12 +873,14 @@ print(
 # ### Implications for the funding-arbitrage case study
 #
 # - **Direction**: the mean premium is negative for every contract in this panel, and the mean
-#   funding rate is *positive* for nearly all of them. The signs disagree because the
-#   transform is not monotone through zero: every premium within the clamp of the interest
-#   rate settles at the interest rate exactly, which is positive, so a premium distribution
-#   centred slightly below zero still pays longs-to-shorts on average. Read direction off the
-#   realized funding column in the per-symbol table above, never off the premium's sign. Both
-#   are properties of this window and not laws.
+#   realized funding rate is *positive* for nearly all of them. The transform is monotone - a
+#   larger premium never produces a smaller funding rate - but it does not preserve sign: it
+#   has a plateau at the interest rate covering every premium within the clamp of it, and the
+#   interest rate is positive. Whether that plateau is enough to carry the mean across zero
+#   depends on how much of the distribution sits below the plateau and how far, which is a
+#   question about this sample and not an implication. In this sample it does. Read direction
+#   off the realized funding column in the per-symbol table above, never off the premium's
+#   sign, and treat both as properties of this window rather than laws.
 # - **Regimes**: the rolling premium changes sign for long stretches, so a static threshold
 #   fires in one regime and never in the other. `case_studies/crypto_perps_funding/` carries
 #   the regime-aware version.
