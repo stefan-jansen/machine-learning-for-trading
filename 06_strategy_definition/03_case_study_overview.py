@@ -36,7 +36,6 @@
 # %%
 """Case Study Overview: Cross-strategy summary for Chapter 6."""
 
-import warnings
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -45,13 +44,11 @@ import yaml
 from matplotlib.patches import Patch
 
 from utils.paths import REPO_ROOT
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # ML4T role colors, matching the CV schematics in 02_cv_foundations: training is
-# the slate main series, validation the amber highlight, the sealed holdout a muted neutral.
+# the slate main series, validation the amber highlight, the holdout a muted neutral.
 TRAIN_C, VAL_C, HOLDOUT_C = COLORS["slate"], COLORS["amber"], COLORS["silver_muted"]
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -150,6 +147,10 @@ def _normalize_setup_yaml(case_id: str, cfg: dict) -> dict:
             "decision_cadence": cadence.replace("_", " "),
             "cost_model": costs.get("class", "").title(),
         },
+        # The declared cost block, kept verbatim: the discussion below turns on the
+        # spread estimates in it, and quoting them in prose would put a number on the
+        # page that no run can correct when a config changes.
+        "costs": costs,
         "diagnostics": {
             "train_size": _fmt_window(ev.get("train_size", "N/A")),
             "test_size": _fmt_window(ev.get("val_size", "N/A")),
@@ -315,7 +316,7 @@ asset_df
 # Each case study defines a walk-forward evaluation protocol. The key parameters are:
 # - **Training window**: How much history to use for model fitting
 # - **Test window**: Validation fold duration
-# - **Holdout period**: Sealed data for final confirmation
+# - **Holdout period**: Data set aside for final confirmation
 
 # %%
 protocol_rows = []
@@ -341,7 +342,7 @@ protocol_df
 # - Training windows range from 6M (microstructure) to 10Y (firm characteristics),
 #   reflecting both data availability and stationarity assumptions
 # - Fold counts vary from 2 (shorter histories: crypto, microstructure, options) to 16 (US equities)
-# - All case studies have a sealed holdout; this discipline is non-negotiable
+# - Every case study sets a holdout aside; this discipline is non-negotiable
 
 # %% [markdown]
 # ---
@@ -377,10 +378,34 @@ cost_df = pl.DataFrame(cost_rows)
 cost_df
 
 # %% [markdown]
+# The class alone does not say what the friction is. Each `setup.yaml` declares its own
+# cost components, in whatever unit that market quotes: basis points a leg, ticks,
+# a percentage of the option premium. Printing the declared block for the two extremes
+# is the only way to compare them without a number going stale in the prose here.
+
+
+# %%
+def print_costs(block: dict, indent: int = 2) -> None:
+    """Print a declared cost block, one entry per line, nesting by indent."""
+    for key, value in block.items():
+        if isinstance(value, dict):
+            print(f"{' ' * indent}{key}:")
+            print_costs(value, indent + 2)
+        else:
+            print(f"{' ' * indent}{key}: {value}")
+
+
+for case_id in ("fx_pairs", "sp500_options"):
+    print(f"{DISPLAY_NAMES[case_id]} - costs declared in config/setup.yaml:")
+    print_costs(all_results[case_id]["costs"])
+    print()
+
+# %% [markdown]
 # **What to notice**:
-# - FX majors have the tightest spreads (1-3 bps per leg; crosses 3-8 bps),
-#   enabling daily horizons — see `case_studies/fx_pairs/config/setup.yaml`
-# - Options spreads are wide relative to premium (2-5%), making costs the binding constraint
+# - FX carries the tightest quoted spreads of the nine, in single-digit basis points a
+#   leg and tighter on the majors than the crosses, which is what lets it decide daily
+# - An option's spread is quoted against its own premium rather than against notional,
+#   and at the fraction printed above the cost is the binding constraint on the strategy
 # - Horizon choice aligns with cost: higher costs push toward longer holding periods
 
 # %% [markdown]
@@ -503,7 +528,7 @@ def plot_coverage(coverage_data):
     legend_elements = [
         Patch(facecolor=TRAIN_C, label="Training"),
         Patch(facecolor=VAL_C, label="Validation"),
-        Patch(facecolor=HOLDOUT_C, label="Holdout (sealed)"),
+        Patch(facecolor=HOLDOUT_C, label="Holdout (set aside)"),
     ]
     ax.legend(
         handles=legend_elements,
@@ -514,7 +539,13 @@ def plot_coverage(coverage_data):
         edgecolor="gray",
     )
     ax.set_title("Prediction Coverage Across Case Studies")
-    fig.show()
+    show_with_alt(
+        fig,
+        "One horizontal bar per case study on a shared year axis, each bar split into "
+        "a slate training span, an amber validation span and a muted holdout span in "
+        "that order. The bars start and end in different years, so the left and right "
+        "edges are ragged, and the holdout spans line up more closely than the rest.",
+    )
 
 
 # %%
@@ -614,7 +645,7 @@ reference_df
 # | **Cost** | Cost model class (Dom=Dominant, Mat=Material) |
 # | **Train** | Training window size |
 # | **Folds** | Number of walk-forward validation folds |
-# | **Holdout** | Sealed holdout period years |
+# | **Holdout** | Years of the holdout period |
 # | **Track** | Chapter sequence where this case study appears |
 
 # %% [markdown]
@@ -655,8 +686,8 @@ technique_df
 #    to 10 years (firm characteristics), reflecting data availability and
 #    stationarity assumptions.
 #
-# 4. **Holdout discipline**: All case studies reserve a sealed holdout period that
-#    is never used for development decisions. This discipline is essential for
+# 4. **Holdout discipline**: Every case study reserves a holdout period that is set
+#    aside and never used for development decisions. This discipline is essential for
 #    honest performance estimation.
 #
 # 5. **Coverage varies**: Historical depth ranges from recent (2020+ for crypto)
