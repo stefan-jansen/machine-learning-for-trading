@@ -2681,7 +2681,13 @@ def run_dl_cv(
     config_results: list[dict[str, Any]] = []
     all_curves: list[dict] = []
     training_log: list[dict] = []
-    complete_prediction_frames: list[pl.DataFrame] = []
+    # (config, epoch) of every checkpoint that covers all folds, in the order the loop finds
+    # them. Recording the pair rather than the frame is what keeps post-processing from holding
+    # the same rows three times over: every slice appended here was cut from `all_predictions`,
+    # which stays resident, and concatenating the slices at the end made a third copy. One
+    # sequence configuration is every checkpoint epoch on every fold - twenty epochs over two
+    # folds where gradient boosting has ten checkpoints - so the copies are not small.
+    complete_slices: list[tuple[str, int]] = []
     log_dir = save_dir / "_incremental_logs" if save_dir is not None else None
     incremental_logs = pl.DataFrame()
     if log_dir is not None and log_dir.exists():
@@ -2724,7 +2730,7 @@ def run_dl_cv(
                         "ic_n_days": ic_n_days,
                     }
                 )
-                complete_prediction_frames.append(ep_df)
+                complete_slices.append((config_name, int(epoch)))
                 epoch_scores.append((epoch, ic_mean, ic_std, ic_n_days))
 
         if epoch_scores:
@@ -2835,11 +2841,26 @@ def run_dl_cv(
     del config_acc
     gc.collect()
 
+    # Cut in the order the loop recorded them, so the row order is the one the accumulating list
+    # produced. The cuts are lazy and collected once, so the slices are never all materialised
+    # alongside the frame they came from and the result they go into. `all_predictions` is not
+    # read after this and is the largest thing alive.
     complete_predictions = (
-        pl.concat(complete_prediction_frames, how="diagonal_relaxed")
-        if complete_prediction_frames
+        pl.concat(
+            [
+                all_predictions.lazy().filter(
+                    (pl.col("config") == slice_config)
+                    & (pl.col("epoch").cast(pl.Int64) == slice_epoch)
+                )
+                for slice_config, slice_epoch in complete_slices
+            ],
+            how="diagonal_relaxed",
+        ).collect()
+        if complete_slices
         else pl.DataFrame()
     )
+    del all_predictions
+    gc.collect()
 
     learning_curves = pl.DataFrame(all_curves) if all_curves else pl.DataFrame()
     training_log_df = pl.DataFrame(training_log) if training_log else pl.DataFrame()
