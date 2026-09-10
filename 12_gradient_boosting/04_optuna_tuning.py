@@ -521,6 +521,20 @@ def fold_is_scorable(dates_va, min_obs=IC_MIN_OBS):
     return bool((per_date["len"] >= min_obs).any())
 
 
+def widest_cross_section(dates_va, y_hat):
+    """Largest spread of predictions inside a single validation date.
+
+    Zero means the model returned one number per date, which leaves the
+    cross-section with no order and Spearman with nothing to measure.
+    """
+    per_date = (
+        pl.DataFrame({"timestamp": dates_va, "prediction": y_hat})
+        .group_by("timestamp")
+        .agg((pl.col("prediction").max() - pl.col("prediction").min()).alias("spread"))
+    )
+    return float(per_date["spread"].max())
+
+
 all_folds = [prepare_fold_data(i) for i in range(n_folds)]
 fold_data = [fold for fold in all_folds if fold_is_scorable(fold[4])]
 if len(fold_data) < len(all_folds):
@@ -551,7 +565,7 @@ def walkforward_objective(trial: optuna.Trial) -> float:
     }
 
     ics = []
-    for X_tr, y_tr, X_va, y_va, dates_va, symbols_va in fold_data:
+    for fold_idx, (X_tr, y_tr, X_va, y_va, dates_va, symbols_va) in enumerate(fold_data):
         model = LGBMRegressor(**params)
         model.fit(
             X_tr,
@@ -559,10 +573,14 @@ def walkforward_objective(trial: optuna.Trial) -> float:
             eval_set=[(X_va, y_va)],
             callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=0)],
         )
-        ic = cross_sectional_ic_mean(y_va, model.predict(X_va), dates_va, symbols_va)
+        y_hat = model.predict(X_va)
+        ic = cross_sectional_ic_mean(y_va, y_hat, dates_va, symbols_va)
         if not np.isfinite(ic):
             # Same folds for every trial, or no value at all: averaging whichever folds
             # a configuration managed to rank would score each trial on its own set.
+            # Record the widest cross-section so an absence has a reason attached.
+            trial.set_user_attr("unranked_fold", fold_idx)
+            trial.set_user_attr("widest_cross_section", widest_cross_section(dates_va, y_hat))
             raise optuna.TrialPruned
         ics.append(ic)
 
@@ -579,7 +597,36 @@ start_time = time.time()
 wf_study.optimize(walkforward_objective, n_trials=N_TRIALS, show_progress_bar=True)
 wf_time = time.time() - start_time
 
-print(f"Walk-forward HPO: best mean IC = {wf_study.best_value:.4f}")
+# A trial is pruned when it cannot rank one of the folds, so a fold set short enough
+# that one hard fold is most of the evidence can prune every trial. Read that as a
+# statement about the folds rather than an error.
+wf_completed = [
+    trial for trial in wf_study.trials if trial.state == optuna.trial.TrialState.COMPLETE
+]
+unranked = sorted(
+    {
+        trial.user_attrs["unranked_fold"]
+        for trial in wf_study.trials
+        if "unranked_fold" in trial.user_attrs
+    }
+)
+print(f"Walk-forward HPO: {len(wf_completed)} of {len(wf_study.trials)} trials scored")
+if wf_completed:
+    print(f"Best mean IC across folds: {wf_study.best_value:.4f}")
+else:
+    widest = max(
+        (
+            trial.user_attrs["widest_cross_section"]
+            for trial in wf_study.trials
+            if "widest_cross_section" in trial.user_attrs
+        ),
+        default=float("nan"),
+    )
+    print(
+        f"No configuration ranked fold(s) {unranked}, so every trial was pruned and the "
+        f"averaged search selected nothing. Widest spread within a date there: {widest:.2e}. "
+        "The comparison below reports the single-fold search alone."
+    )
 print(f"Wall time: {wf_time:.1f}s ({wf_time / study_time:.1f}x single-fold)")
 
 # %% [markdown]
@@ -589,36 +636,38 @@ print(f"Wall time: {wf_time:.1f}s ({wf_time / study_time:.1f}x single-fold)")
 # test fold to see which generalizes better.
 
 # %%
-# Single-fold tuned model (already trained above)
 single_test_ic = cross_sectional_ic_mean(
     y_test, tuned_model.predict(X_test), dates_test, symbols_test
 )
 
-# Walk-forward tuned model
-wf_params: dict[str, Any] = {
-    **wf_study.best_params,
-    "n_estimators": 500,
-    "random_state": SEED,
-    "verbose": -1,
-    "n_jobs": -1,
+rows = {
+    "method": ["Single-fold HPO"],
+    "best_val_ic": [round(study.best_value, 4)],
+    "test_ic": [round(single_test_ic, 4)],
+    "wall_time_s": [round(study_time, 1)],
 }
-wf_model = LGBMRegressor(**wf_params)
-wf_model.fit(
-    X_train,
-    y_train,
-    eval_set=[(X_val, y_val)],
-    callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=0)],
-)
-wf_test_ic = cross_sectional_ic_mean(y_test, wf_model.predict(X_test), dates_test, symbols_test)
-
-tuning_comparison = pl.DataFrame(
-    {
-        "method": ["Single-fold HPO", "Walk-forward HPO"],
-        "best_val_ic": [round(study.best_value, 4), round(wf_study.best_value, 4)],
-        "test_ic": [round(single_test_ic, 4), round(wf_test_ic, 4)],
-        "wall_time_s": [round(study_time, 1), round(wf_time, 1)],
+if wf_completed:
+    wf_params: dict[str, Any] = {
+        **wf_study.best_params,
+        "n_estimators": 500,
+        "random_state": SEED,
+        "verbose": -1,
+        "n_jobs": -1,
     }
-)
+    wf_model = LGBMRegressor(**wf_params)
+    wf_model.fit(
+        X_train,
+        y_train,
+        eval_set=[(X_val, y_val)],
+        callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=0)],
+    )
+    wf_test_ic = cross_sectional_ic_mean(y_test, wf_model.predict(X_test), dates_test, symbols_test)
+    rows["method"].append("Walk-forward HPO")
+    rows["best_val_ic"].append(round(wf_study.best_value, 4))
+    rows["test_ic"].append(round(wf_test_ic, 4))
+    rows["wall_time_s"].append(round(wf_time, 1))
+
+tuning_comparison = pl.DataFrame(rows)
 tuning_comparison
 
 # %% [markdown]
@@ -632,6 +681,17 @@ tuning_comparison
 # could not rank is a property of the trial, so the trial has no value and is pruned.
 # Scoring either case at minus one would enter a perfect inverse ranking into the
 # average, which on four folds moves the mean by a quarter.
+#
+# Refusing to score a fold has a consequence worth seeing. A fold's IC is undefined when
+# no validation date carries `IC_MIN_OBS` names, which the filter above removes before
+# the search, and also when the predictions tie inside every date. Early stopping
+# produces the second case: on a fold whose validation loss stops improving at the first
+# iteration, the fit is one shallow tree, every name on a date lands in the same leaf,
+# and the cross-section has no order to rank. Escaping that is a matter of how many
+# configurations the search draws. Over all eight folds and `N_TRIALS` at its default,
+# some configuration ranks every one of them; with both cut down, every trial can end
+# pruned, and the cell above then names the unranked fold and the comparison below
+# carries one row instead of two.
 #
 # What is left is the shape Section 12.4 warns about. The margins between tuned and
 # untuned on the holdout are small, and the walk-forward search costs many times the
