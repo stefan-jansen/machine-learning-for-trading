@@ -877,9 +877,17 @@ if mbo is not None and len(mbo) > 0:
 # The spread is what a round trip costs before any price impact: buy at the ask, sell at
 # the bid, and the difference is gone. Four views of it follow - how it moved through the
 # window, how its values were distributed, where the mid price went, and whether it
-# varied with the price level. The last is worth checking because a spread quoted in
-# basis points has the price in its denominator, so any relationship between the two is
-# a statement about the tick size rather than about liquidity.
+# varied with the price level.
+#
+# The last panel needs reading carefully, because two different things would produce a
+# tilt in it. A spread quoted in basis points has the price in its denominator, so the
+# same dollar spread reads smaller at a higher price whatever liquidity does. And the
+# dollar spread itself moves with liquidity, which is the effect anyone would want to
+# see. This scatter cannot separate the two: it shows whether a relationship exists,
+# not which mechanism produced it.
+#
+# DataBento stamps its messages in UTC and nothing here converts them, so the time axes
+# below are UTC rather than exchange-local.
 
 # %%
 if lob is not None and len(lob) > 0:
@@ -899,7 +907,7 @@ if lob is not None and len(lob) > 0:
     ax.plot(lob_pd["timestamp"], lob_pd["spread_bps"], alpha=0.7, linewidth=0.8)
     ax.axhline(lob_pd["spread_bps"].mean(), color="red", linestyle="--", label="Mean", alpha=0.7)
     ax.set_title("Spread through the window")
-    ax.set_xlabel("Time (US/Eastern)")
+    ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Spread (bps)")
     ax.legend()
 
@@ -917,7 +925,7 @@ if lob is not None and len(lob) > 0:
     ax = axes[1, 0]
     ax.plot(lob_pd["timestamp"], lob_pd["mid_price"], alpha=0.7, linewidth=0.8)
     ax.set_title("Mid price through the window")
-    ax.set_xlabel("Time (US/Eastern)")
+    ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Price ($)")
 
     # Spread vs price
@@ -944,7 +952,13 @@ if lob is not None and len(lob) > 0:
 # each snapshot's imbalance against the mid-price change that followed it. Read the shape
 # of the cloud rather than any single point: a relationship would show as a tilt, and its
 # absence as a round blob. One symbol over one window cannot settle the question either
-# way, which is why `03_itch_lob_analysis` asks it across a cross-section.
+# way.
+#
+# `03_itch_lob_analysis` runs a related test across a cross-section of stocks, and it is
+# a different quantity: order-flow imbalance, which counts shares added and removed over
+# an interval, against the return over the following minute. Depth imbalance here is a
+# snapshot of what is resting. The two are cousins, not the same predictor at the same
+# horizon.
 
 # %%
 # Depth statistics and data preparation

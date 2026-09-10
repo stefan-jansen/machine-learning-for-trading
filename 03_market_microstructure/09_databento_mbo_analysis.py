@@ -628,22 +628,25 @@ if multi_day is not None and len(multi_day) > 0:
         ["ofi", "ofi_lag1", "markout_1", "markout_5", "markout_10"]
     ).to_pandas()
 
-    # Roughly 1/sqrt(n) for independent draws, and larger here because the windows overlap.
-    n_bars = len(pdf)
-    naive_se = 1 / np.sqrt(n_bars) if n_bars > 1 else float("nan")
     print("Correlation of OFI(t-1) with the return over the following window\n")
-    print(f"Minute bars in the panel: {n_bars:,}")
     print(
-        f"A correlation of zero would show a standard error of about {naive_se:.4f} on "
-        f"independent draws, and more than that here because the windows overlap.\n"
+        "The standard error is roughly 1/sqrt(n) for independent draws and larger here, "
+        "because the forward windows overlap. Each horizon has its own n: a longer "
+        "window loses more bars at the end of each session.\n"
     )
-    print(f"{'Horizon':<12} {'Correlation':>12} {'In naive SEs':>14}")
-    print("-" * 40)
+    print(f"{'Horizon':<10}{'Bars':>10}{'Correlation':>14}{'In naive SEs':>15}")
+    print("-" * 49)
 
     for h in [1, 5, 10, 30]:
-        if f"markout_{h}" in pdf.columns:
-            corr = pdf["ofi_lag1"].corr(pdf[f"markout_{h}"])
-            print(f"{h:>3} min      {corr:>12.4f}   {corr / naive_se:>13.1f}")
+        col = f"markout_{h}"
+        if col not in pdf.columns:
+            continue
+        pair = pdf[["ofi_lag1", col]].dropna()
+        if len(pair) < 2:
+            continue
+        corr = pair["ofi_lag1"].corr(pair[col])
+        naive_se = 1 / np.sqrt(len(pair))
+        print(f"{h:>3} min   {len(pair):>10,}{corr:>14.4f}{corr / naive_se:>15.1f}")
 
 # %% [markdown]
 # Read that table against its last column rather than its middle one. A Pearson
@@ -658,11 +661,16 @@ if multi_day is not None and len(multi_day) > 0:
 # And returns are serially correlated within a session. Each of those shrinks the
 # effective number of independent observations below the bar count.
 #
-# So a sign that flips between horizons is not a finding about horizons, and a
-# correlation inside a standard error of zero is not a weak signal but an absent one.
-# The question worth asking of a microstructure signal is economic rather than
-# statistical - whether any implied magnitude is larger than the cost of trading it - and
-# the next panels put that to it directly.
+# So a sign that flips between horizons is not a finding about horizons. And a
+# correlation inside a standard error of zero does not establish that there is nothing
+# there - an imprecise estimate is what a real but small effect also looks like on this
+# much data. What it establishes is that this sample does not measure a linear
+# relationship; whether one exists, and in which direction, is left open.
+#
+# That is why the question worth asking of a microstructure signal is economic rather
+# than statistical: whether any implied magnitude is larger than the cost of trading it.
+# A relationship too small to distinguish from zero on thousands of bars is also too
+# small to pay for a round trip, and the next panels put that comparison directly.
 
 # %%
 if multi_day is not None and len(multi_day) > 0:
@@ -862,9 +870,11 @@ if multi_day is not None and len(multi_day) > 0:
 # ## Key Takeaways
 #
 # 1. **Read a correlation against its standard error, not against zero.** The table
-#    prints both, and the second column is what says whether the first is a measurement.
-#    Where the estimate sits inside a standard error, the sign carries no information and
-#    a flip between horizons is not a horizon effect.
+#    prints the sample size, the estimate and their ratio, and it is the ratio that says
+#    whether the estimate is a measurement. An estimate inside one standard error leaves
+#    the question open rather than answering it in the negative: a real effect too small
+#    for this sample looks exactly the same. What it does rule out is reading the sign,
+#    or treating a flip between horizons as a horizon effect.
 #
 # 2. **Overlapping forward windows are not independent observations.** A ten-minute return
 #    measured every minute shares nine minutes with its neighbour, so the effective sample
