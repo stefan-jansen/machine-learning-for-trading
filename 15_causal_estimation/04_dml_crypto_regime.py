@@ -521,12 +521,18 @@ if len(T_res_int) > 100:
 
     print(f"\n  Regime Interaction (Driscoll-Kraay, single model): {interaction_effect:.4f}")
     print(f"    SE: {interaction_se:.4f}, t={interaction_t:.2f}, p={interaction_p:.3f}")
+    # The reported difference, its standard error and its t all come from this one fit;
+    # pairing the two-subgroup difference with the interaction's t would mix two models.
+    effect_diff_reported = interaction_effect
     t_diff = interaction_t
     se_diff = interaction_se
+    diff_source = "interaction, single Driscoll-Kraay fit"
 else:
     interaction_effect = interaction_se = interaction_t = interaction_p = float("nan")
+    effect_diff_reported = effect_diff
     t_diff = t_diff_independent
     se_diff = se_diff_independent
+    diff_source = "difference of the two subgroup fits, independence approximation"
 
 print(f"  -> |t| on the interaction: {abs(t_diff):.2f}")
 
@@ -767,14 +773,20 @@ fig.update_layout(
     height=440,
     title_text="Premium against forward return, raw and after residualization",
     margin=dict(t=90, b=70, l=70, r=40),
+    # Each panel carries exactly one point cloud and one fitted line, and the axis titles
+    # name both, so the legend only repeated two identically coloured slope entries.
+    showlegend=False,
 )
+# Subplot titles default to 16pt, larger than the figure title above them.
+fig.update_annotations(font_size=12)
 show_plotly_with_alt(
     fig,
-    "Two scatter panels of the same sample. The left panel plots the raw premium z-score "
-    "against the forward 8-hour return; the right plots the residualized treatment against "
-    "the residualized outcome after the confounders are partialled out. Each carries a "
-    "straight fitted line through the origin, the naive slope on the left and the DML slope "
-    "on the right. Both point clouds are wide relative to the slope of either line.",
+    "Two scatter panels. The left plots a sample of the raw premium z-scores against the "
+    "forward 8-hour return; the right plots the residualized treatment against the "
+    "residualized outcome on the cross-fitted rows, after the confounders are partialled "
+    "out. Each panel carries one straight fitted line through the origin, the naive slope "
+    "on the left and the DML slope on the right, and both lines are close to flat against "
+    "point clouds that span the full height of their panels.",
 )
 
 # %%
@@ -802,15 +814,19 @@ show_plotly_with_alt(
     "are small relative to their error bars, and every error bar spans zero.",
 )
 
+# %% [markdown]
+# No ratio of the two regime estimates appears here. Both are small relative to their own
+# standard errors, so a quotient of them divides two numbers whose signs the data does not
+# pin down, and it moves for reasons that carry no information. The interaction answers the
+# same question and arrives with a standard error.
+
 # %%
 # Quantitative summary for takeaways
 se_inflation_naive = se_naive_hac / se_naive_iid
 se_inflation_dml = dml_se_hac / dml_se_iid
-regime_ratio = effect_high / effect_low if effect_low != 0 else np.nan
-
 print(f"Driscoll-Kraay over iid SE, naive: {se_inflation_naive:.1f}x, DML: {se_inflation_dml:.1f}x")
 print(f"Confounding bias (naive vs DML): {bias_pct:+.1f}%")
-print(f"Regime effect ratio (high/low vol): {regime_ratio:.2f}x")
+print(f"Regime interaction (high minus low): {effect_diff_reported:+.6f} (t={t_diff:.2f})")
 
 # %% [markdown]
 # ## Key Takeaways
@@ -875,7 +891,7 @@ refutation_str = (
     if np.isfinite(z_score)
     else "insufficient successful permutations"
 )
-print(f"Regime difference: {effect_diff:.4f} (t={t_diff:.2f})")
+print(f"Regime difference: {effect_diff_reported:.4f} (t={t_diff:.2f}, {diff_source})")
 print(f"Block permutation refutation: {refutation_str}")
 
 # %% [markdown]
