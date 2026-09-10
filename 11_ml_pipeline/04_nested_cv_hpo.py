@@ -938,11 +938,19 @@ show_with_alt(
 # is worth when the alpha it picked was chosen without seeing the fold it is scored on. Where
 # the bars are equal, the two procedures happened to select the same alpha.
 #
-# The right panel says why the gap appears and why it is not constant. The single-loop choice
-# swings across orders of magnitude from fold to fold, because it is free to chase whatever
-# the evaluation fold rewards; the nested choice moves smoothly. A selection rule that lands
-# somewhere different every time it is asked is not a rule, and the score it produces is a
-# score for that fold rather than an estimate of anything.
+# The gap has one cause and it is not in the right panel: the single-loop procedure picks its
+# alpha using the same fold it is then scored on, so its score is partly a report on how well
+# the choice fitted that fold. Nested selection picks on an inner split and scores on data
+# the choice never saw, which is what makes its number an estimate of the procedure rather
+# than of one fold.
+#
+# The right panel is worth reading alongside that and does not establish it. It shows the
+# single-loop choice swinging across orders of magnitude while the nested choice moves
+# smoothly, which is a fact about these five folds. Choosing a different alpha for different
+# training data is what an adaptive procedure does and is not itself a defect - nested CV
+# evaluates that procedure honestly whether its choice is stable or not, and a procedure that
+# picked the same alpha every time would be no less exposed to selection bias if it picked it
+# on the evaluation fold.
 
 
 # %% [markdown] tags=[]
