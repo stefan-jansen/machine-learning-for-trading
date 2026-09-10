@@ -701,7 +701,7 @@ else:
     axes[1].set_xlabel("Preset")
     axes[1].set_ylabel("Speedup (CPU time / GPU time)")
     axes[1].axhline(y=1, color="gray", linestyle="--", linewidth=0.5)
-    axes[1].set_title("GPU time divided by CPU time")
+    axes[1].set_title("CPU time divided by GPU time")
     axes[1].legend(fontsize=8)
 
     fig.suptitle(
