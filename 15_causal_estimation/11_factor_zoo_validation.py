@@ -385,8 +385,11 @@ post_table
 # ## 7. Compare uncertainty and selection breadth
 #
 # The left panel compares the same SPY loading before and after PCA conditioning, with
-# Newey-West intervals at the conventional two-sided level. The right panel shows how many
-# of the ten PCA controls enter the post-selection union.
+# Newey-West intervals at the conventional two-sided level. The right panel shows what each
+# of the two LASSO steps selected, since the union that enters the final regression is only
+# as interesting as the two selections behind it: an outcome equation that keeps the whole
+# basis makes the union the whole basis whatever the candidate equation chose, and
+# post-double-selection then reduces to controlling for everything.
 
 # %%
 factor_positions = np.arange(len(candidate_names))
@@ -394,7 +397,8 @@ naive_coef = np.array([result["coef"] for result in naive_results])
 naive_se = np.array([result["se"] for result in naive_results])
 post_coef = np.array([result["coef"] for result in post_results])
 post_se = np.array([result["se"] for result in post_results])
-union_size = np.array([result["n_union"] for result in post_results])
+outcome_selected = np.array([result["n_outcome"] for result in post_results])
+candidate_selected = np.array([result["n_candidate"] for result in post_results])
 figure_subtitle = (
     f"HAC estimates; {N}-ETF factor zoo; {return_wide['timestamp'].min()} "
     f"to {return_wide['timestamp'].max()}"
@@ -430,9 +434,25 @@ axes[0].set_yticks(factor_positions, candidate_names)
 axes[0].set_xlabel("SPY loading (slope)")
 _ = axes[0].legend(loc="best")
 
-axes[1].barh(factor_positions, union_size, color=COLORS["blue"], alpha=0.85)
+axes[1].barh(
+    factor_positions - 0.18,
+    outcome_selected,
+    height=0.34,
+    color=COLORS["blue"],
+    alpha=0.85,
+    label="Selected for SPY",
+)
+axes[1].barh(
+    factor_positions + 0.18,
+    candidate_selected,
+    height=0.34,
+    color=COLORS["amber"],
+    alpha=0.85,
+    label="Selected for the candidate",
+)
 axes[1].set_xlim(0, N_PCA_FACTORS)
 axes[1].set_xlabel("Selected PCA controls (count)")
+axes[1].legend(loc="lower right", frameon=False, fontsize=8)
 axes[1].invert_yaxis()
 
 add_message_title(
@@ -445,8 +465,10 @@ show_with_alt(
     "Two panels sharing a vertical axis of candidate factor names. The left panel plots each "
     "factor's SPY loading twice, the naive estimate and the post-double-selection estimate at "
     "slightly offset heights with different marker shapes, each with a horizontal "
-    "Newey-West interval and a vertical line at zero. The right panel is a horizontal bar "
-    "chart of how many of the ten PCA controls entered the selection union for that factor.",
+    "Newey-West interval and a vertical line at zero. The right panel is a grouped "
+    "horizontal bar chart of how many of the ten PCA controls each LASSO selected for that "
+    "factor, one bar for the SPY equation and one for the candidate equation, with a legend "
+    "naming them; the regression uses their union.",
 )
 
 # %% [markdown]

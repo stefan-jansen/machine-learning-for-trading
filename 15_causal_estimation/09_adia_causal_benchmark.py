@@ -723,7 +723,8 @@ show_plotly_with_alt(
     fig,
     "Grouped bar chart with one pair of bars per causal role, the conditional-independence "
     "heuristic beside the supervised model, on a shared accuracy axis running from zero to "
-    "one. A legend above the plot names the two methods.",
+    "one. A legend above the plot names the two methods. The heuristic's bar sits at or near "
+    "zero on several roles, which are the ones its fixed rule never assigns.",
 )
 
 # %% [markdown]
@@ -759,15 +760,19 @@ fig.update_layout(
     title="Row-normalized confusion matrix of the out-of-fold predictions",
     xaxis_title="Predicted category",
     yaxis_title="True category",
+    # Plotly counts heatmap rows from the bottom, which puts the two axes in opposite
+    # orders and runs the correct-prediction diagonal from bottom left to top right.
+    yaxis=dict(autorange="reversed"),
     height=560,
     margin=dict(l=115, b=100, t=90, r=60),
 )
 show_plotly_with_alt(
     fig,
-    "Heatmap of the row-normalized confusion matrix over the causal roles, true category on "
-    "the vertical axis and predicted category on the horizontal one. Each cell prints its "
-    "rate as a percentage of that true category's nodes and carries the underlying count in "
-    "its hover label; darker cells are higher rates.",
+    "Heatmap of the row-normalized confusion matrix over the causal roles, true category "
+    "down the vertical axis and predicted category across the horizontal one in the same "
+    "order, so the correct-prediction diagonal runs from the top left to the bottom right. "
+    "Each cell prints its rate as a percentage of that true category's nodes and carries the "
+    "underlying count in its hover label; darker cells are higher rates.",
 )
 
 # %% [markdown]
@@ -801,8 +806,9 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Horizontal bar chart of the twelve features carrying the largest share of LightGBM gain, "
-    "ordered by that share, each with a horizontal error bar giving its spread across the "
-    "cross-validation folds.",
+    "largest at the top, each with a horizontal error bar giving its spread across the "
+    "cross-validation folds. The axis is a percentage of total gain and the top features sit "
+    "close together, so the ordering among them is within the error bars.",
 )
 
 # %% [markdown]
@@ -816,7 +822,7 @@ show_plotly_with_alt(
 method_names = [
     "Local CI heuristic",
     "Local grouped-CV LightGBM",
-    "ADIA winner (reported)",
+    "ADIA top score (reported)",
 ]
 method_scores = [baseline_accuracy, oof_accuracy, 0.7670]
 method_colors = [COLORS["neutral"], COLORS["blue"], COLORS["amber"]]
@@ -844,8 +850,9 @@ show_plotly_with_alt(
     fig,
     "Bar chart of three balanced-accuracy scores with the value printed above each bar: the "
     "local conditional-independence heuristic, the local grouped-cross-validation LightGBM "
-    "model, and the score reported by the ADIA challenge entry. The third bar is drawn in "
-    "amber to mark that it comes from a different dataset.",
+    "model, and the top score reported in the ADIA challenge. The third bar is drawn in amber "
+    "to mark that it comes from a different dataset, and a subtitle under the title repeats "
+    "that it is not a like-for-like comparison.",
 )
 
 # %% [markdown]

@@ -911,7 +911,8 @@ show_plotly_with_alt(
     "an arrow for every contemporaneous edge the NOTEARS fit retains on the full sample. "
     "Arrow thickness follows the edge weight and arrow colour separates edges recovered in "
     "most block-bootstrap resamples from the rest, as the legend below the plot states. Each "
-    "arrow's hover label carries its weight and its bootstrap frequency.",
+    "arrow's hover label carries its weight and its bootstrap frequency, and an asset the "
+    "fit gives no retained edge sits on the ellipse unconnected.",
 )
 
 # Lagged effects from the causal-learn VAR-LiNGAM fit
@@ -926,7 +927,8 @@ show_plotly_with_alt(
     "Network diagram with the same assets in the same positions, and an arrow for every "
     "lagged edge the pruned VAR-LiNGAM fit retains. Arrow colour separates positive from "
     "negative coefficients, as the legend below the plot states, thickness follows the "
-    "coefficient's size, and the hover label carries its value.",
+    "coefficient's size, and the hover label carries its value. An asset the pruned fit "
+    "leaves with no lagged edge sits on the ellipse unconnected.",
 )
 
 # %% [markdown]

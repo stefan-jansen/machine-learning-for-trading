@@ -205,7 +205,8 @@ show_with_alt(
     "Line chart of autocorrelation against lag in trading days, one line per series, with a "
     "marker at each lag. A shaded horizontal band marks the region where the absolute "
     "autocorrelation is below one tenth, a horizontal line marks zero, and a dashed vertical "
-    "line marks the maximum lag the causal search uses.",
+    "line marks the maximum lag the causal search uses. Every series starts at one by "
+    "definition at lag zero and drops inside the band by the first lag, where they all stay.",
 )
 
 # %% [markdown]
@@ -402,10 +403,11 @@ if edge_stability:
     ax.legend(loc="lower right", frameon=False)
     show_with_alt(
         fig,
-        "Horizontal bar chart, one bar per candidate lagged edge, ordered by the share of "
-        "block-bootstrap resamples in which the edge was recovered. A dashed vertical line "
-        "marks the robustness threshold, and bars that reach it are drawn in amber against "
-        "blue for the rest.",
+        "Horizontal bar chart of the ten lagged edges most often recovered, most frequent at "
+        "the top, each bar the share of block-bootstrap resamples that found it on an axis "
+        "running from zero to one hundred percent. A dashed vertical line marks the "
+        "robustness threshold, and a bar reaching it is drawn in amber against blue for the "
+        "rest.",
     )
 else:
     print("No edges recovered in any bootstrap resample - the null is unanimous.")
