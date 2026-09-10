@@ -16,7 +16,7 @@
 # %% [markdown]
 # # Conditional Autoencoders: Nonlinear Factor Loadings
 #
-# **Docker image**: `ml4t-gpu`
+# **Docker image**: `ml4t-py312`
 #
 # **Chapter 14: Latent Factor Models**
 #
@@ -714,6 +714,9 @@ print(f"Largest MSE-ratio deviation from the zero-return forecast: {maximum_mse_
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True, constrained_layout=True)
 axes[0].scatter(names, mse_ratios, color=colors, s=55)
 zero_line(axes[0], at=1.0)
+# scatter takes its data limits from the marker centres, so a point at the maximum is
+# clipped by half its radius against the top of the axes.
+axes[0].margins(y=0.2)
 axes[0].set_ylabel("MSE ratio vs zero forecast")
 add_message_title(axes[0], "Forward MSE ratio against the zero-return forecast")
 axes[1].errorbar(
@@ -803,7 +806,15 @@ ax.set_xlabel("Representative latent factor")
 ax.set_ylabel("Current characteristic rank")
 for row in range(loading_correlations.shape[0]):
     for column in range(loading_correlations.shape[1]):
-        ax.text(column, row, f"{loading_correlations[row, column]:.2f}", ha="center", va="center")
+        value = loading_correlations[row, column]
+        ax.text(
+            column,
+            row,
+            f"{value:.2f}",
+            ha="center",
+            va="center",
+            color="white" if abs(value) > 0.6 else COLORS["neutral"],
+        )
 fig.colorbar(image, ax=ax, label="Spearman correlation")
 add_message_title(ax, "Characteristic ranks against one member's factor loadings")
 show_with_alt(
