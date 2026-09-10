@@ -476,8 +476,9 @@ show_with_alt(
 # the theory: it exists so the function always returns something a downstream consumer can
 # treat as a probability, and where it binds, the method has failed on this panel rather than
 # answered it. The reading to take from the left of this chart is that a three-agent panel this
-# far from even odds cannot support an independence assumption, not that the aggregate is
-# whatever the floor happens to be set to.
+# far from even odds, under an independence assumption, is mapped outside the unit interval by
+# this formula, which therefore has no answer to give: not that the aggregate is whatever the
+# floor happens to be set to, and not that these three agents are in fact correlated.
 #
 # Nothing in this run estimates $\rho$, and the confidence values feeding the weighted variant
 # are the extremity heuristic from [`04_research_agent`](04_research_agent.ipynb) rather than
