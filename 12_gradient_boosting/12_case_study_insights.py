@@ -26,7 +26,7 @@
 # **Learning objectives**
 #
 # - For each case study, read the highest-IC GBM configuration's average daily
-#   Spearman IC with HAC 95 % CI on the primary label
+#   Spearman IC with HAC interval on the primary label
 # - Compare GBM design choices - loss function, tree depth, optimal iteration
 #   count - and locate the operating regime that achieves the highest IC
 # - Inspect per-fold IC distributions and the validation to holdout decay where
@@ -35,7 +35,7 @@
 #   treating fold summaries as an uncertainty estimator, faceted across labels
 # - Extend the comparison across labels (horizon view) and across the
 #   classification ↔ regression metric symmetry
-# - Inspect feature-importance rank shift versus Ridge, per-fold rank
+# - Inspect feature-importance rank shift versus the linear baseline, per-fold rank
 #   stability, and the TabM-vs-GBM-vs-linear three-way picture
 #
 # **Book reference**: Section 12.6 - Gradient Boosting Across Nine Case Studies.
@@ -45,11 +45,16 @@
 # adds TabM rows. Teaching notebooks NB01-NB11 cover the underlying techniques.
 
 # %%
-"""Case Study Insights: Gradient Boosting cross-case-study registry aggregation."""
+"""Case Study Insights: Gradient Boosting cross-case-study registry aggregation.
+
+Every comparison below ranks only configurations that covered the same folds and the
+same number of days.
+"""
 
 import sqlite3
 import warnings
 
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -61,11 +66,9 @@ from IPython.display import Markdown, display
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from scipy.stats import rankdata
+from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.metrics import roc_auc_score
 
-# %%
-# Every comparison below ranks only configurations that covered the same folds
-# and the same number of days, so a shorter evaluation window cannot win.
 from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     PRIMARY_LABELS,
@@ -87,9 +90,17 @@ from case_studies.utils.model_analysis import (
 )
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging, ml4t_palette
+from utils.style import COLORS, ml4t_diverging, ml4t_palette, show_with_alt
 
-warnings.filterwarnings("ignore")
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
 
 # %% tags=["parameters"]
 FAMILY = "gbm"
@@ -107,7 +118,7 @@ set_global_seeds(SEED)
 # (7 / 15 / 31 / 63 leaves) × 3 regression loss functions (MSE / MAE /
 # Huber), evaluated at 10 boosting checkpoints per configuration. Direction
 # labels add a binary-logistic variant. The headline metric is average daily
-# cross-sectional Spearman IC with a HAC 95 % confidence interval on the primary label
+# cross-sectional Spearman IC with a HAC confidence interval on the primary label
 # (`prediction_metrics.ic_mean_daily`, `ic_ci_lo`, `ic_ci_hi`, `ic_t_hac`).
 # The linear family (Ch11) and TabM (`tabular_dl`) are loaded as baselines.
 
@@ -141,7 +152,7 @@ coverage_df
 # ## 2. Cross-CS Forest of Highest-IC GBM Configurations
 #
 # For each case study, the GBM configuration with the highest average daily IC
-# on the primary label is plotted with its HAC 95 % CI. Filled markers
+# on the primary label is plotted with its HAC interval. Filled markers
 # indicate $|t_{HAC}| > 2$ (CI excludes zero); open markers indicate the CI
 # overlaps zero.
 
@@ -169,10 +180,15 @@ gbm_rank1.select(
 fig, forest_ax = plot_cross_cs_forest(
     gbm_rank1,
     family=FAMILY,
-    title="Highest-IC GBM per case study (primary label, average daily IC ± HAC 95 % CI)",
+    title="Highest-IC GBM per case study, with HAC intervals",
 )
 forest_ax.set_xlabel("Average daily IC (HAC 95 % CI)")
-fig.show()
+show_with_alt(
+    fig,
+    "Forest plot of average daily IC with a HAC interval, one row per case study on its "
+    "primary label, against a vertical line at zero. A filled marker is an interval that "
+    "excludes zero and an open one an interval that does not.",
+)
 
 # %% [markdown]
 # The next cell derives the cross-case conclusion from the selected rows, naming
@@ -199,7 +215,7 @@ display(
 #
 # How much does each design knob change the IC at the primary label? Three
 # subsections trace the structured grid: loss function (3a), tree depth (3b),
-# and checkpoint dynamics (3c). Each is presented with HAC 95 % CIs so the
+# and checkpoint dynamics (3c). Each is presented with HAC intervals so the
 # resolution between operating points stays explicit.
 
 
@@ -220,7 +236,7 @@ print(
 #
 # For each case study, the highest-IC configuration is selected within each
 # regression loss family, then the three (case study, loss) IC values are plotted
-# side by side with HAC 95 % CI bars.
+# side by side with HAC interval bars.
 
 # %%
 loss_best = (
@@ -283,10 +299,13 @@ ax.set_xticks(x)
 ax.set_xticklabels(cs_order, rotation=35, ha="right")
 ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
 ax.set_ylabel("Average daily IC (HAC 95 % CI)")
-ax.set_title("Highest-IC GBM by loss function per case study (primary regression label)")
+ax.set_title("Highest-IC GBM by loss function and case study")
 ax.legend(frameon=False, fontsize=9, loc="best")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Grouped bars of average daily IC, one group per case study and one bar per loss "
+    "function, against a line at zero.",
+)
 
 # %%
 # Aggregate: which loss achieves the highest of the three on each CS?
@@ -361,9 +380,13 @@ for i in range(len(cs_labels)):
                 fontsize=8,
                 color=COLORS["silver"] if abs(v) > 0.6 * vmax else COLORS["neutral"],
             )
-ax.set_title("Highest-IC GBM by leaf profile (rows: case studies, cols: leaves)")
+ax.set_title("Highest-IC GBM by leaf profile and case study")
 fig.colorbar(im, ax=ax, fraction=0.045, pad=0.04, label="Average daily IC")
-fig.show()
+show_with_alt(
+    fig,
+    "Heatmap of average daily IC with one row per case study and one column per leaf "
+    "count, each cell shaded by its value against the colour bar.",
+)
 
 # %%
 depth_spread = (
@@ -411,8 +434,7 @@ print(
 )
 
 # %%
-# Order case studies by the iteration of their argmax IC (early to late),
-# breaking ties by argmax IC magnitude.
+# Ordered by the iteration of each case study's peak IC, ties by peak magnitude.
 peak_table = (
     ckpt_df.group_by("short_name")
     .agg(
@@ -442,19 +464,19 @@ for i, cs in enumerate(cs_order):
     ax.plot(x, ic, "o-", color=color, linewidth=1.6, markersize=4)
     ax.axvline(argmax, color=color, linewidth=0.6, linestyle=":", alpha=0.7)
     ax.axhline(0, color=COLORS["neutral"], linewidth=0.6, linestyle="--")
-    ax.set_title(f"{cs}  ({cfg.replace('_', ' ')}, peak @ {argmax})", fontsize=9)
+    ax.set_title(f"{cs}  ({cfg.replace('_', ' ')})", fontsize=9)
     if i % 3 == 0:
         ax.set_ylabel("IC (mean across folds)")
     if i // 3 == 2:
         ax.set_xlabel("Boosting iteration")
 min_peak = int(peak_table["argmax_iter"].min())
 max_peak = int(peak_table["argmax_iter"].max())
-fig.suptitle(
-    f"GBM selected-configuration checkpoint peaks span {min_peak} to {max_peak} trees",
-    fontsize=10,
+fig.suptitle("Validation IC against boosting iteration, per case study", fontsize=10)
+show_with_alt(
+    fig,
+    "One small panel per case study, each showing validation IC against boosting "
+    "iteration for that case study's selected configuration, with the peak marked.",
 )
-fig.tight_layout()
-fig.show()
 
 # %%
 peak_table
@@ -515,9 +537,12 @@ ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
 ax.set_xticks(positions)
 ax.set_xticklabels(present, rotation=30, ha="right")
 ax.set_ylabel("Per-fold Spearman IC")
-ax.set_title("Per-fold IC distribution for the highest-IC GBM configuration (primary label)")
-fig.tight_layout()
-fig.show()
+ax.set_title("Per-fold IC of the highest-IC GBM configuration")
+show_with_alt(
+    fig,
+    "Box plots of per-fold Spearman IC, one box per case study with the individual folds "
+    "overlaid as points, against a dashed line at zero.",
+)
 
 # %%
 gbm_positive_majority = gbm_fold_summary.filter(pl.col("pct_positive") > 0.5)[
@@ -670,9 +695,7 @@ def plot_holdout_decay(decay_df: pl.DataFrame) -> plt.Figure:
     ax.invert_yaxis()
     ax.axvline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
     ax.set_xlabel("Average daily IC (HAC 95 % CI)")
-    ax.set_title(
-        "Validation → holdout dumbbell for the highest-IC GBM configuration (primary label)"
-    )
+    ax.set_title("Validation and holdout IC for the highest-IC GBM configuration")
     ax.legend(handles=holdout_legend(), loc="best", frameon=False, fontsize=9)
     fig.tight_layout()
     return fig
@@ -682,9 +705,20 @@ def plot_holdout_decay(decay_df: pl.DataFrame) -> plt.Figure:
 # The completed chart is rendered only when an exact selected holdout row exists.
 
 # %%
-if not holdout_df.is_empty():
+if holdout_df.is_empty():
+    display(
+        Markdown(
+            "**No holdout chart**: no case study in this run has a holdout result for its "
+            "selected GBM configuration, so there is nothing to join a validation IC to."
+        )
+    )
+else:
     fig = plot_holdout_decay(decay_df)
-    fig.show()
+    show_with_alt(
+        fig,
+        "One horizontal line per case study joining its validation IC to its holdout IC, "
+        "with a marker at each end, against a dashed line at zero.",
+    )
 
 # %%
 holdout_names = holdout_df["short_name"].to_list() if not holdout_df.is_empty() else []
@@ -714,13 +748,14 @@ linear_rank1 = collect_rank1_per_cs(
 linear_fold = collect_fold_ic_per_cs(linear_rank1)
 
 
+# %% [markdown]
+# `select_rank1` makes a family's own candidates comparable - same folds, same number of
+# days - but it does that within a family. Two families can each be internally
+# comparable and still be scored over different windows, which is what the day counts
+# printed below reveal. Subtracting across such a pair charges a window difference to
+# the model family, so those pairs are dropped.
+
 # %%
-# `select_rank1` makes a family's own candidates comparable - same folds, same
-# number of days - but it does that within a family. Two families can each be
-# internally comparable and still be scored over different windows, which is what
-# the day counts printed below reveal. Subtracting across such a pair attributes
-# a window difference to the model family, so those pairs are dropped rather than
-# shown with a caveat.
 delta_all = (
     gbm_rank1.select(
         "case_study",
@@ -749,7 +784,7 @@ if not delta_excluded.is_empty():
     display(
         Markdown(
             f"**Excluded for unequal coverage:** {delta_excluded.height} of "
-            f"{delta_all.height} case studies have a GBM and a Linear winner scored "
+            f"{delta_all.height} case studies have a selected GBM and a selected Linear configuration scored "
             "over a different number of days. Their difference would mix a window "
             "effect into a family effect, so they are left out of the chart below."
         )
@@ -759,9 +794,9 @@ if not delta_excluded.is_empty():
 if delta_primary.is_empty():
     display(
         Markdown(
-            "**No comparison survives.** No case study has a GBM and a Linear "
-            "winner scored over the same number of days, so there is no matched "
-            "primary-label delta to report."
+            "**No comparison is possible.** No case study has a selected GBM and a "
+            "selected Linear configuration scored over the same number of days, so there "
+            "is no matched primary-label delta to report."
         )
     )
 else:
@@ -790,16 +825,19 @@ if not delta_primary.is_empty():
     ax.invert_yaxis()
     ax.set_xlabel("Average daily IC point-estimate delta (GBM - Linear)")
     ax.set_title("Matched-coverage GBM minus Linear at the primary label")
-    fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "Horizontal bars of the difference in average daily IC between the GBM and the "
+        "linear model on matched coverage, one bar per case study, against a line at zero.",
+    )
 
 # %%
 n_positive = delta_primary.filter(pl.col("delta") > 0).height
 display(
     Markdown(
         f"**Computed comparison.** GBM has the higher daily-IC point estimate in "
-        f"{n_positive} of the {delta_primary.height} case studies whose two winners were "
-        f"scored over the same number of days, out of {delta_all.height} with a winner in "
+        f"{n_positive} of the {delta_primary.height} case studies whose two selections were "
+        f"scored over the same number of days, out of {delta_all.height} with a selection in "
         "both families. This chart is descriptive: the two model families have separate "
         "daily-series HAC intervals, so no paired-fold confidence claim is attached to "
         "their difference."
@@ -846,8 +884,8 @@ def regression_labels(cs: str, family: str) -> list[str]:
 
 # %% [markdown]
 # Both families pass through the same complete-coverage selector, which makes
-# each family's winner comparable against its own alternatives. It does not make
-# the two winners comparable to each other, so the join below keeps only the
+# each family's selection comparable against its own alternatives. It does not make
+# the two selections comparable to each other, so the join below keeps only the
 # cells where both were scored over the same number of days.
 
 # %%
@@ -894,7 +932,7 @@ facet_all = (
     .with_columns(delta=pl.col("gbm_ic") - pl.col("lin_ic"))
     .sort(["short_name", "label"])
 )
-# Same cross-family coverage rule as 5a: each family's winner is comparable
+# Same cross-family coverage rule as 5a: each family's selection is comparable
 # within its own family, which does not make the two comparable to each other.
 facet_excluded = facet_all.filter(pl.col("gbm_days") != pl.col("lin_days"))
 facet_df = facet_all.filter(pl.col("gbm_days") == pl.col("lin_days"))
@@ -903,7 +941,7 @@ if not facet_excluded.is_empty():
     display(
         Markdown(
             f"**Excluded for unequal coverage:** {facet_excluded.height} of "
-            f"{facet_all.height} (case study, label) cells pair winners scored over a "
+            f"{facet_all.height} (case study, label) cells pair selections scored over a "
             "different number of days."
         )
     )
@@ -912,8 +950,8 @@ if not facet_excluded.is_empty():
 if facet_df.is_empty():
     display(
         Markdown(
-            "**No comparison survives.** No (case study, label) cell pairs a GBM and a "
-            "Linear winner scored over the same number of days."
+            "**No comparison is possible.** No (case study, label) cell pairs a selected "
+            "GBM and a selected Linear configuration scored over the same number of days."
         )
     )
 else:
@@ -950,15 +988,18 @@ if not facet_df.is_empty():
     ax.invert_yaxis()
     ax.axvline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
     ax.set_xlabel("Average daily IC delta (GBM − Linear)")
-    ax.set_title("GBM minus Linear, faceted by label within each case study")
-    fig.tight_layout()
-    fig.show()
+    ax.set_title("GBM minus Linear, by label within each case study")
+    show_with_alt(
+        fig,
+        "Horizontal bars of the IC difference between the GBM and the linear model, one "
+        "bar per label grouped by case study, against a line at zero.",
+    )
 
 # %%
 if facet_df.is_empty():
     display(
         Markdown(
-            "**No horizon comparison.** Every (case study, label) cell paired winners "
+            "**No horizon comparison.** Every (case study, label) cell paired selections "
             "scored over a different number of days, so there is no matched range to "
             "report."
         )
@@ -1023,11 +1064,9 @@ if plot_horizon.height > 0:
     markers = ["o", "s", "D", "^", "v", "P", "X", "*"]
     linestyles = ["-", "--", "-.", ":", "-", "--", "-.", ":"]
     for idx, cs in enumerate(cs_sorted):
-        # Sorted on (horizon_days, label), not horizon_days alone. Two targets can
-        # share a horizon - sp500_equity_option_analytics trains both fwd_ret_5d
-        # and fwd_ret_risk_adj_5d, and HORIZON_DAYS maps both to 5.0 - and their
-        # tie order decides which point the line and the CI band reach first, so
-        # sorting on the horizon alone made the published figure differ run to run.
+        # Sorted on (horizon_days, label): two targets can share a horizon, and their tie
+        # order decides which point the line reaches first, so sorting on the horizon
+        # alone made the figure differ run to run.
         sub = plot_horizon.filter(pl.col("short_name") == cs).sort(["horizon_days", "label"])
         if sub.height < 2:
             continue
@@ -1054,8 +1093,11 @@ if plot_horizon.height > 0:
     ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
     ax.set_title("Highest-IC GBM configuration across regression horizons")
     ax.legend(loc="best", frameon=False, fontsize=8, ncol=2)
-    fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "Average daily IC against label horizon on a log axis, one line per case study, "
+        "against a line at zero.",
+    )
 
 # %%
 horizon_ranges = (
@@ -1269,7 +1311,7 @@ ax.set_yticks(y)
 ax.set_yticklabels(labels_y)
 ax.invert_yaxis()
 ax.set_xlabel("Average daily IC (HAC 95 % CI)")
-ax.set_title("(a) GBM classification score → IC vs continuous return")
+ax.set_title("Classification score against the continuous return")
 
 ax = axes[1]
 auc = sym_df["reg_score_auc"].to_numpy()
@@ -1279,10 +1321,15 @@ ax.set_yticks(y)
 ax.set_yticklabels([])
 ax.invert_yaxis()
 ax.set_xlabel("AUC (regression score, pooled OOF)")
-ax.set_title("(b) GBM regression score → AUC vs binary direction")
+ax.set_title("Regression score against the binary direction")
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels. Left: the classification score's IC against the continuous return, one "
+    "row per pair with its HAC interval, against a line at zero. Right: the regression "
+    "score's pooled out-of-fold AUC against the binary direction, against a line at one "
+    "half.",
+)
 
 # %%
 direction_a_positive = sym_df.filter(pl.col("cls_score_ic") > 0).height
@@ -1296,15 +1343,15 @@ display(
     Markdown(
         f"**Computed metric symmetry.** Direction A is positive in {direction_a_positive} of "
         f"{sym_df.height} matched cells. Direction B is available in {direction_b_valid.height} "
-        f"cells, with maximum absolute distance from 0.5 of {max_auc_distance:.4f}."
+        f"cells, with maximum absolute distance from chance of {max_auc_distance:.4f}."
     )
 )
 
 # %% [markdown]
 # ## 7. Interpretability
 #
-# Three diagnostics use saved booster + Ridge coefficient artifacts: feature-
-# importance rank shift versus Ridge (7a), per-fold rank stability of GBM
+# Three diagnostics read the fold models each selected run saved: feature-importance
+# rank shift against the linear baseline (7a), per-fold rank stability of GBM
 # importances (7b), and the TabM-vs-GBM-vs-Linear three-way picture (7c).
 
 
@@ -1312,23 +1359,48 @@ display(
 NON_FEATURE_COLS = {"timestamp", "symbol", "stock_id", "product", "position", "instrument_id"}
 IMPORTANCE_CASES = ["etfs", "sp500_options", "us_firm_characteristics", "us_equities_panel"]
 
+# A penalized fit drives coefficients to exactly zero, and a feature the model does not
+# use has no rank. Ranking those alongside the rest would fill the comparison with ties
+# broken by feature name, so they come out and the surviving count is reported.
+ZERO_TOL = 1e-12
 
-def _load_ridge_importance(cs: str, training_hash: str, config_name: str) -> dict[str, float]:
-    """Mean absolute coefficients from one selected linear training identity."""
-    coef_path = (
-        get_case_study_dir(cs) / "run_log" / "training" / training_hash / "coefficients.parquet"
-    )
-    if not coef_path.exists():
-        return {}
-    coefficients = pl.read_parquet(coef_path)
-    if "config_name" in coefficients.columns:
-        coefficients = coefficients.filter(pl.col("config_name") == config_name)
-    ridge_only = coefficients.filter(pl.col("feature") != "_intercept_")
-    if ridge_only.is_empty():
+
+def _load_linear_importance(cs: str, training_hash: str) -> dict[str, float]:
+    """Mean absolute coefficient per feature, over the folds of one linear training run.
+
+    The pipeline stores each fold's fitted estimator under the run's `models`
+    directory; the coefficients live on the estimator rather than in a table of
+    their own. Features the model zeroed in every fold are dropped.
+    """
+    models_dir = get_case_study_dir(cs) / "run_log" / "training" / training_hash / "models"
+    fold_paths = sorted(models_dir.glob("fold_*.joblib")) if models_dir.exists() else []
+    rows = []
+    for fold_path in fold_paths:
+        with warnings.catch_warnings():
+            # Read for `coef_` only, never to predict, so an estimator pickled by a
+            # different scikit-learn is safe to unpickle here.
+            warnings.filterwarnings(
+                "ignore", category=InconsistentVersionWarning, module="sklearn.base"
+            )
+            payload = joblib.load(fold_path)
+        names = list(payload["feature_names"])
+        coef = np.asarray(payload["model"].coef_, dtype=float).ravel()
+        if coef.size != len(names):
+            raise RuntimeError(
+                f"{cs} {training_hash}: {fold_path.name} carries {coef.size} coefficients "
+                f"against {len(names)} feature names, so the two cannot be paired."
+            )
+        rows.extend(
+            {"feature": name, "abs_coef": abs(float(value))}
+            for name, value in zip(names, coef, strict=True)
+        )
+    if not rows:
         return {}
     return dict(
-        ridge_only.group_by("feature")
-        .agg(pl.col("coefficient").abs().mean().alias("abs_coef"))
+        pl.DataFrame(rows)
+        .group_by("feature")
+        .agg(pl.col("abs_coef").mean())
+        .filter(pl.col("abs_coef") > ZERO_TOL)
         .sort("abs_coef", descending=True)
         .iter_rows()
     )
@@ -1341,35 +1413,34 @@ def _load_ridge_importance(cs: str, training_hash: str, config_name: str) -> dic
 # %%
 def _feature_ranks(
     gbm_imp_df: pl.DataFrame,
-    ridge_imp: dict[str, float],
+    linear_imp: dict[str, float],
 ) -> tuple[dict[str, int], dict[str, int]]:
     gbm_imp = dict(
         gbm_imp_df.group_by("feature").agg(pl.col("importance").mean().alias("imp")).iter_rows()
     )
-    # Ties are broken by feature name, not by set iteration order. Gain
-    # importances tie readily - every feature the booster never split on scores
-    # zero - and `sorted` is stable, so ranking a set left the tied block in
-    # whatever order that set happened to iterate. Python randomizes string
-    # hashing per process, so the same registries produced different ranks from
-    # one run to the next.
-    common = sorted(set(gbm_imp) & set(ridge_imp))
+    # Ties break by feature name rather than by set iteration order: gain importances tie
+    # readily, and with per-process string hashing the same registries produced different
+    # ranks from one run to the next.
+    common = sorted(set(gbm_imp) & set(linear_imp))
     gbm_order = sorted(common, key=lambda feature: (-gbm_imp[feature], feature))
-    ridge_order = sorted(common, key=lambda feature: (-ridge_imp[feature], feature))
+    linear_order = sorted(common, key=lambda feature: (-linear_imp[feature], feature))
     return (
         {feature: rank for rank, feature in enumerate(gbm_order, 1)},
-        {feature: rank for rank, feature in enumerate(ridge_order, 1)},
+        {feature: rank for rank, feature in enumerate(linear_order, 1)},
     )
 
 
 # %% [markdown]
-# ### 7a. Feature importance - GBM versus Ridge rank shift
+# ### 7a. Feature importance - GBM versus the linear baseline
 #
-# For each case study with both saved boosters and Ridge coefficient
-# parquets, features are ranked by GBM gain importance (mean across folds)
-# and by Ridge mean |coefficient|. The rank shift `lin_rank − gbm_rank` is
-# positive for features GBM promotes over Ridge (typically interaction or
-# regime features) and negative for features Ridge promotes over GBM
-# (typically monotonic predictors).
+# For each case study that saved both boosters and linear fold models, features are
+# ranked by GBM gain importance and by the linear model's mean |coefficient|, both
+# averaged across folds. The rank shift `linear_rank − gbm_rank` is positive for
+# features the GBM promotes over the linear model (typically interaction or regime
+# features) and negative for features the linear model promotes (typically monotonic
+# predictors). The baseline is whichever linear configuration validation selected, so
+# a sparse fit such as a lasso contributes only the features it kept; `n_common_features`
+# says how many that leaves.
 
 
 # %%
@@ -1385,11 +1456,12 @@ def feature_rank_shift(cs: str) -> dict | None:
         gbm_row["training_hash"],
         gbm_row["config_name"],
         top_n=50,
+        num_iteration=gbm_row["checkpoint_value"],
     )
     if gbm_imp_df.is_empty():
         return None
-    ridge_imp = _load_ridge_importance(cs, linear_row["training_hash"], linear_row["config_name"])
-    gbm_ranks, ridge_ranks = _feature_ranks(gbm_imp_df, ridge_imp)
+    linear_imp = _load_linear_importance(cs, linear_row["training_hash"])
+    gbm_ranks, linear_ranks = _feature_ranks(gbm_imp_df, linear_imp)
     if not gbm_ranks:
         return None
     shifts = pl.DataFrame(
@@ -1397,8 +1469,8 @@ def feature_rank_shift(cs: str) -> dict | None:
             {
                 "feature": f,
                 "gbm_rank": gbm_ranks[f],
-                "ridge_rank": ridge_ranks[f],
-                "rank_shift": ridge_ranks[f] - gbm_ranks[f],
+                "linear_rank": linear_ranks[f],
+                "rank_shift": linear_ranks[f] - gbm_ranks[f],
             }
             for f in gbm_ranks
         ]
@@ -1409,7 +1481,7 @@ def feature_rank_shift(cs: str) -> dict | None:
         "n_common_features": shifts.height,
         "median_abs_shift": float(shifts["rank_shift"].abs().median()),
         "max_gbm_promotion": int(shifts["rank_shift"].max() or 0),
-        "max_ridge_promotion": int(-min_shift if min_shift else 0),
+        "max_linear_promotion": int(-min_shift if min_shift else 0),
         "_shifts": shifts,
     }
 
@@ -1422,7 +1494,7 @@ rank_shift_summary = [
     entry for cs in IMPORTANCE_CASES if (entry := feature_rank_shift(cs)) is not None
 ]
 
-print(f"Computed GBM-vs-Ridge rank shifts for {len(rank_shift_summary)} case studies.")
+print(f"Computed GBM-vs-linear rank shifts for {len(rank_shift_summary)} case studies.")
 shift_summary_df = (
     pl.DataFrame(
         [{k: v for k, v in r.items() if not k.startswith("_")} for r in rank_shift_summary]
@@ -1433,12 +1505,21 @@ shift_summary_df = (
 shift_summary_df
 
 # %%
-if rank_shift_summary:
+if not rank_shift_summary:
+    display(
+        Markdown(
+            "**No promotion chart**: no case study has both a GBM importance artifact and "
+            "linear fold models, so there is no pair of rankings to difference."
+        )
+    )
+else:
+    # Each panel ranks its own case study's features, so the y axes carry different
+    # categories and cannot be shared: one shared axis would draw the last panel's
+    # feature names beside every panel's bars.
     fig, axes = plt.subplots(
         1,
         len(rank_shift_summary),
         figsize=(4.5 * len(rank_shift_summary), 4.5),
-        sharey=True,
     )
     if len(rank_shift_summary) == 1:
         axes = [axes]
@@ -1456,11 +1537,16 @@ if rank_shift_summary:
         ax.set_yticks(y)
         ax.set_yticklabels(plot_set["feature"].to_list(), fontsize=7)
         ax.axvline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
-        ax.set_xlabel("Ridge rank − GBM rank (positive = GBM promotion)")
+        ax.set_xlabel("Linear rank − GBM rank (positive = GBM promotion)")
         ax.set_title(entry["short_name"])
-    fig.suptitle("Top GBM promotions and Ridge promotions per case study")
-    fig.tight_layout()
-    fig.show()
+    fig.suptitle("Feature rank difference between the linear baseline and the GBM")
+    show_with_alt(
+        fig,
+        "One panel per case study of horizontal bars, each panel labelled with its own "
+        "features and each bar's length the difference between that feature's "
+        "linear-baseline rank and its GBM rank, against a line at zero; bars to the right "
+        "are features the GBM ranks higher.",
+    )
 
 # %% [markdown]
 # Rank shifts are descriptive diagnostics of how the two model families use
@@ -1512,6 +1598,7 @@ def feature_rank_stability(cs: str) -> dict | None:
         row["training_hash"],
         row["config_name"],
         top_n=30,
+        num_iteration=row["checkpoint_value"],
     )
     if gbm_imp_df.is_empty():
         return None
@@ -1554,7 +1641,13 @@ stability_rows = [
 ]
 
 stability_df = pl.DataFrame(stability_rows)
-print("Per-fold feature-rank stability for the top-10 GBM features per case study:")
+if stability_rows:
+    print("Per-fold feature-rank stability for the top-10 GBM features per case study:")
+else:
+    print(
+        "No case study cleared the bar for this diagnostic: it needs saved boosters, at "
+        "least two complete folds and at least three features ranked in all of them."
+    )
 stability_df
 
 # %%
@@ -1567,6 +1660,13 @@ if not stability_df.is_empty():
             f"{least_stable['mean_pairwise_rank_corr']:+.2f} ({least_stable['short_name']}) to "
             f"{most_stable['mean_pairwise_rank_corr']:+.2f} ({most_stable['short_name']}). "
             "Treat this as a regime-stability diagnostic, not as model-performance inference."
+        )
+    )
+else:
+    display(
+        Markdown(
+            "**No stability figures**: the table above is empty, so there is no rank "
+            "correlation to report."
         )
     )
 
@@ -1584,13 +1684,15 @@ tabm_rank1 = collect_rank1_per_cs(
     family="tabular_dl",
 )
 
-# Same coverage rule as 5a and 5b, applied across three families instead of two.
-# Each family's winner is comparable within its own family and not necessarily to
-# the others, so a family is shown for a case study only where it covers the same
-# number of days as that case study's GBM winner. GBM is the reference because
-# this frame is built from it and the chart is ordered by it. A family that does
-# not match becomes null and is drawn as a gap, exactly as a family with no
-# result at all already is.
+# %% [markdown]
+# The same coverage rule as the two sections above, across three families instead of
+# two. Each family's selection is comparable within its own family and not necessarily
+# to the others, so a family appears for a case study only where it covers the same
+# number of days as that case study's GBM selection. GBM is the reference because this
+# frame is built from it and the chart is ordered by it. A family that does not match
+# becomes null and is drawn as a gap, exactly as a family with no result at all is.
+
+# %%
 three_way = (
     gbm_rank1.select(
         "case_study",
@@ -1637,8 +1739,8 @@ if not coverage_masked.is_empty():
     display(
         Markdown(
             f"**Masked for unequal coverage:** {n_masked_cells} case study/family "
-            f"cells across {coverage_masked.height} case studies have a winner scored over "
-            "a different number of days than the GBM winner, so they are left blank rather "
+            f"cells across {coverage_masked.height} case studies have a selection scored over "
+            "a different number of days than the GBM selection, so they are left blank rather "
             "than plotted beside it."
         )
     )
@@ -1680,15 +1782,18 @@ ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
 ax.set_xticks(x)
 ax.set_xticklabels(cs_sorted, rotation=35, ha="right")
 ax.set_ylabel("Average daily IC")
-ax.set_title("Linear / GBM / TabM highest-validation-IC per case study (primary label)")
+ax.set_title("Highest validation IC by model family and case study")
 ax.legend(frameon=False, fontsize=9, loc="best")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Grouped bars of highest validation IC, one group per case study and one bar per "
+    "model family, against a line at zero.",
+)
 
 # %% [markdown]
 # The comparison is coverage-explicit in both directions: a family with no result
-# stays null, and so does a family whose winner was scored over a different number
-# of days than the GBM winner it would sit beside. Neither is replaced by a result
+# stays null, and so does a family whose selection was scored over a different number
+# of days than the GBM selection it would sit beside. Neither is replaced by a result
 # from another label or a different validation span.
 
 # %%
@@ -1717,7 +1822,7 @@ display(
 # %%
 if delta_primary.is_empty():
     delta_takeaway = (
-        "- No case study has a GBM and a Linear winner scored over the same number of "
+        "- No case study has a selected GBM and a selected Linear configuration scored over the same number of "
         "days, so there is no matched primary-label comparison to summarize.\n"
     )
 else:

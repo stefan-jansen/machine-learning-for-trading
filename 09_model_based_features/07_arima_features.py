@@ -14,30 +14,43 @@
 # ---
 
 # %% [markdown]
-# # ARIMA Feature Extraction
+# # ARIMA as a Feature Extractor
+#
+# **Chapter 9 | Section 9.3**
 #
 # **Docker image**: `ml4t`
 #
-# This notebook demonstrates ARIMA as a **feature extractor** rather than a
-# standalone forecaster. The output is the ARIMA point forecast, evaluated as a
-# predictive feature (IC/RMSE) across orders and symbols.
+# ARIMA is normally introduced as a forecasting model, and judged by whether its forecasts
+# are accurate. This notebook uses it differently: the forecast is not the answer, it is a
+# **column**, one number per session that a later model reads alongside everything else.
+# That changes what has to be checked. An accurate forecast is not required; what is
+# required is that the column is computable on the day it is stamped, that it varies over
+# time, and that what it carries is not already in the other columns.
 #
-# **Learning Objectives**:
-# - Select ARIMA order using ACF/PACF and information criteria (AIC/BIC)
-# - Build ARIMA point forecasts and evaluate them as features (IC, RMSE)
-# - Compare AR, AIC-selected, and naive baselines across the ETF universe
-# - Diagnose why simple ARIMA mean models extract limited signal from daily returns
+# **Learning objectives**
 #
-# **Book Reference**: Chapter 9, Section 9.3 (Volatility Features)
+# - Read an ACF and a PACF to propose an order for a model of this family, and check the
+#   proposal against an information criterion over a grid.
+# - Explain why a forecast made several steps ahead settles at a constant, and why that
+#   makes it useless as a column however good the model is.
+# - Build the one-step-ahead version that does vary, by filtering a series under parameters
+#   fitted on an earlier block, and say what makes that construction causal.
+# - Measure what the column is worth on one asset and then on a hundred, and read a
+#   distribution of results rather than one number.
 #
-# **Prerequisites**: `01_visual_diagnostics` for stationarity testing,
-# `03_fractional_differencing` for memory-preserving transforms.
+# **Book reference**
+#
+# Chapter 9, Section 9.3 (Volatility Features).
+#
+# **Prerequisites**
+#
+# `01_visual_diagnostics` for stationarity and for the ACF and the Ljung-Box test.
 
 # %% [markdown]
-# ## 1. Setup and Imports
+# ## Setup
 
 # %%
-"""ARIMA Feature Extraction - build ARIMA point forecasts and evaluate them as features (IC/RMSE)."""
+"""ARIMA as a feature extractor - one-step forecasts as a column, not as an answer."""
 
 import warnings
 
@@ -47,636 +60,534 @@ import plotly.graph_objects as go
 import polars as pl
 from IPython.display import display
 from ml4t.diagnostic.evaluation.autocorrelation import analyze_autocorrelation
-from ml4t.diagnostic.evaluation.stationarity import analyze_stationarity
 from ml4t.diagnostic.metrics import pooled_ic
 from plotly.subplots import make_subplots
 from scipy.stats import ConstantInputWarning
-from statsmodels.tools.sm_exceptions import (
-    ConvergenceWarning,
-    InterpolationWarning,
-    ValueWarning,
-)
+from statsmodels.tools.sm_exceptions import ConvergenceWarning, ValueWarning
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import acf, adfuller, pacf
 
-# Silence known-benign modeling noise (no-frequency date index, non-convergent grid
-# fits, constant-input IC, KPSS interpolation) so outputs stay clean.
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=ValueWarning)
-warnings.filterwarnings("ignore", category=ConvergenceWarning)
-warnings.filterwarnings("ignore", category=InterpolationWarning)
-warnings.filterwarnings("ignore", category=ConstantInputWarning)
-
+from case_studies.utils.temporal import arima_one_step_forecast
 from data import load_etfs
-from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS  # sets the ml4t Plotly template as the default
+from utils.style import COLORS, show_plotly_with_alt
+
+# statsmodels warns once per fit that a date index carries no declared frequency. Trading
+# days have no frequency to declare, the models here index by position, and the notice
+# repeats once per symbol.
+warnings.filterwarnings("ignore", category=ValueWarning, module="statsmodels.tsa.base.tsa_model")
+warnings.filterwarnings("ignore", category=FutureWarning, module="statsmodels.tsa.base.tsa_model")
+# A constant forecast has no rank correlation with anything. The order that produces one is
+# in the table below on purpose, showing NaN, and the notice repeats for every such call.
+warnings.filterwarnings(
+    "ignore", category=ConstantInputWarning, module="ml4t.diagnostic.metrics.ic"
+)
 
 # %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
-MAX_SYMBOLS = 0  # 0 = all symbols
 START_DATE = "2015-01-01"
 END_DATE = "2024-12-01"
 TEST_START = "2024-01-01"
+MAX_SYMBOLS = 0  # 0 reads every symbol in the panel
 SEED = 42
 
 # %%
 set_global_seeds(SEED)
 
-# Configuration
-
-# ETF symbols
-etf_data = load_etfs()
-ALL_SYMBOLS = etf_data["symbol"].unique().sort().to_list()
-SYMBOLS = ALL_SYMBOLS[:MAX_SYMBOLS] if MAX_SYMBOLS > 0 else ALL_SYMBOLS
-
-# For single-symbol demonstration (used in educational sections)
-SYMBOL = "SPY"
-
-print("ARIMA Baseline Configuration:")
-print(f"  Symbols: {len(SYMBOLS)} ({', '.join(SYMBOLS)})")
-print(f"  Train: {START_DATE} to {TEST_START}")
-print(f"  Test: {TEST_START} to {END_DATE}")
-
 # %% [markdown]
-# ## 2. Load ETF Price Data
+# ## The data
 #
-# Load from ETF universe for cross-chapter consistency.
-
+# The ETF panel, split at `TEST_START` into a block the models are fitted on and a block
+# they are only ever read over. One symbol carries the walk-through; the whole panel
+# carries the measurement at the end, because one symbol's result is one draw.
 
 # %%
-# Filter ETF data to date range (once, for all symbols)
-start_dt = pl.col("timestamp") >= pl.lit(START_DATE).str.to_date()
-end_dt = pl.col("timestamp") <= pl.lit(END_DATE).str.to_date()
-etf_data = etf_data.filter(start_dt & end_dt)
+DEMONSTRATION_SYMBOL = "SPY"
 
-print(f"  ETF data: {len(etf_data):,} observations across {etf_data['symbol'].n_unique()} assets")
+etfs = (
+    load_etfs()
+    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
+)
+symbols = etfs["symbol"].unique().sort().to_list()
+if MAX_SYMBOLS > 0:
+    symbols = symbols[:MAX_SYMBOLS]
 
 
-def get_symbol_data(symbol: str) -> pd.DataFrame:
-    """Extract single symbol from pre-loaded ETF data.
-
-    Uses the already-loaded etf_data for efficiency.
-    """
-    data = (
-        etf_data.filter(pl.col("symbol") == symbol)
+def symbol_frame(symbol: str) -> pd.DataFrame:
+    """One symbol's closes and returns, indexed by session, as statsmodels wants them."""
+    frame = (
+        etfs.filter(pl.col("symbol") == symbol)
         .sort("timestamp")
         .with_columns(returns=pl.col("close").pct_change())
         .drop_nulls()
+        .select(["timestamp", "close", "returns"])
+        .to_pandas()
     )
-
-    # Convert to pandas with date index (statsmodels expects pandas)
-    # NOTE: statsmodels ARIMA requires pandas DataFrame with DatetimeIndex
-    df = data.select(["timestamp", "close", "returns"]).to_pandas()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.set_index("timestamp")
-
-    return df
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    return frame.set_index("timestamp")
 
 
-print(f"Loading {SYMBOL} data from ETF universe...")
-df = get_symbol_data(SYMBOL)
-print(f"  Observations: {len(df)}")
-print(f"  Date range: {df.index.min().date()} to {df.index.max().date()}")
+spy = symbol_frame(DEMONSTRATION_SYMBOL)
+split_at = pd.Timestamp(TEST_START)
+train, test = spy[spy.index < split_at], spy[spy.index >= split_at]
+
+print(f"Panel: {len(symbols)} symbols, {etfs.height:,} rows")
+print(f"{DEMONSTRATION_SYMBOL}: {len(train):,} training sessions to {train.index.max().date()}")
+print(f"{DEMONSTRATION_SYMBOL}: {len(test):,} test sessions from {test.index.min().date()}")
 
 # %% [markdown]
-# ## 3. Stationarity Testing
+# ## What the model is fitted to
 #
-# ARIMA requires stationary series. We test prices (non-stationary) and returns (stationary).
+# ARIMA has three orders. The **autoregressive** order $p$ is how many past values of the
+# series enter; the **moving average** order $q$ is how many past shocks enter; the
+# **integration** order $d$ is how many times the series is differenced before either of
+# those applies. Differencing is what makes the model applicable to a series that wanders,
+# and it is the reason the family is usually shown on prices.
+#
+# Here the model is fitted to returns, which are already the first difference of the log
+# price, so $d = 0$ throughout. The ADF test below is the check that this is right; the
+# reasoning behind it is in `01_visual_diagnostics`.
 
 # %%
-print("Augmented Dickey-Fuller Test for Stationarity:")
-print("-" * 50)
-
-# Test prices
-adf_price = adfuller(df["close"].dropna())
-print(f"Prices:   ADF={adf_price[0]:.4f}, p={adf_price[1]:.4f}")
-print(f"          {'STATIONARY' if adf_price[1] < 0.05 else 'NON-STATIONARY'}")
-
-# Test returns
-adf_ret = adfuller(df["returns"].dropna())
-print(f"Returns:  ADF={adf_ret[0]:.4f}, p={adf_ret[1]:.4f}")
-print(f"          {'STATIONARY' if adf_ret[1] < 0.05 else 'NON-STATIONARY'}")
-
-print("\n→ We model RETURNS (stationary), not prices.")
+stationarity = pd.DataFrame(
+    [
+        {
+            "series": name,
+            "ADF statistic": adfuller(values.dropna(), autolag="AIC")[0],
+            "ADF p-value": adfuller(values.dropna(), autolag="AIC")[1],
+        }
+        for name, values in [("close", spy["close"]), ("returns", spy["returns"])]
+    ]
+)
+display(stationarity)
 
 # %% [markdown]
-# ## 4. ACF/PACF Analysis
+# ## What the correlogram proposes
 #
-# ACF helps identify MA order (q), PACF helps identify AR order (p).
-
+# The autocorrelation function suggests the moving-average order and the partial
+# autocorrelation function suggests the autoregressive order: the lag at which each drops
+# inside its confidence band is the order it proposes. On daily returns both are inside the
+# band nearly everywhere, which proposes a very low order and is the first sign of how much
+# there is here to model.
 
 # %%
-def plot_acf_pacf(series: pd.Series, title: str):
-    """Plot ACF and PACF for a series."""
-    acf_vals = acf(series.dropna(), nlags=20)
-    pacf_vals = pacf(series.dropna(), nlags=20)
+ACF_LAGS = 20
 
-    fig = make_subplots(rows=1, cols=2, subplot_titles=("ACF", "PACF"))
 
-    # ACF
-    fig.add_trace(
-        go.Bar(x=list(range(len(acf_vals))), y=acf_vals, name="ACF", marker_color=COLORS["blue"]),
+def correlogram(series: pd.Series, claim: str) -> go.Figure:
+    """ACF and PACF side by side, with the band inside which a bar is indistinguishable from zero."""
+    values = series.dropna()
+    band = 1.96 / np.sqrt(len(values))
+
+    figure = make_subplots(rows=1, cols=2, subplot_titles=("ACF", "PACF"))
+    for column, estimates in enumerate(
+        [acf(values, nlags=ACF_LAGS), pacf(values, nlags=ACF_LAGS)], start=1
+    ):
+        figure.add_trace(
+            go.Bar(x=list(range(len(estimates))), y=estimates, marker_color=COLORS["blue"]),
+            row=1,
+            col=column,
+        )
+        for edge in (band, -band):
+            figure.add_hline(
+                y=edge, line_dash="dash", line_color=COLORS["neutral"], row=1, col=column
+            )
+        figure.update_xaxes(title_text="Lag, sessions", row=1, col=column)
+    figure.update_yaxes(title_text="Correlation", row=1, col=1)
+    figure.update_layout(title_text=claim, showlegend=False, height=340)
+    return figure
+
+
+show_plotly_with_alt(
+    correlogram(
+        spy["returns"],
+        f"Daily {DEMONSTRATION_SYMBOL} returns carry almost no linear dependence"
+        "<br><sup>Bars inside the dashed band are indistinguishable from zero at the five "
+        "percent level</sup>",
+    ),
+    "Two bar charts side by side, the autocorrelation function and the partial "
+    "autocorrelation function of daily returns at lags zero to twenty. Both start at one at "
+    "lag zero and then sit close to zero, mostly inside the dashed confidence band, with a "
+    "handful of bars reaching just outside it.",
+)
+
+# %%
+suggestion = analyze_autocorrelation(spy["returns"].dropna().to_numpy())
+print(f"Order suggested from the correlogram: {suggestion.suggested_arima_order}")
+
+# %% [markdown]
+# ## Why a multi-step forecast cannot be a feature
+#
+# The obvious way to produce a forecast for a test period is to fit once and ask for as
+# many steps as the period is long. For a stationary model that produces something useless,
+# and the reason is structural rather than a defect of the fit: with no new observations to
+# condition on, the forecast at step $h$ is the model's expectation given the last observed
+# value, and for a stationary process that expectation decays to the unconditional mean
+# geometrically. Within a handful of steps every forecast is the same number.
+#
+# How fast that happens depends on the fitted persistence rather than on stationarity
+# alone, so the demonstration below prints the first and last forecasts and the spread
+# across the whole test period, against the spread of the returns the column is meant to
+# track. Scale by itself settles nothing: a forecast equal to the target divided by a
+# thousand would rank the sessions exactly as the target does. What matters is where the
+# variation sits. After a handful of steps this forecast repeats one number, so the little
+# variation it has is confined to the first few sessions of the block, and any ordering it
+# supplies over the block is decided by those.
+
+# %%
+static_fit = ARIMA(train["returns"], order=(1, 0, 0)).fit()
+static_forecast = static_fit.forecast(steps=len(test)).to_numpy()
+
+print(f"First five forecasts: {np.round(static_forecast[:5] * 100, 4)} percent")
+print(f"Last five forecasts:  {np.round(static_forecast[-5:] * 100, 4)} percent")
+print(f"Spread across the whole test period: {static_forecast.std() * 100:.2e} percent")
+print(f"Spread of the returns it is meant to track: {test['returns'].std() * 100:.4f} percent")
+
+# %% [markdown]
+# ## The forecast that does vary
+#
+# The version that works forecasts one step at a time: at each session, the model conditions
+# on everything observed up to that session and predicts the next one. There are two ways to
+# do that and both are causal. **Filtering** holds the parameters where the training block
+# put them and runs the state recursion forward, so no test observation influences a
+# parameter and the cost is one fit. **Refitting on an expanding window** re-estimates at
+# each step from the observations that precede it, which costs one fit per session and lets
+# the parameters follow the data. This notebook filters, because the cost of refitting a
+# hundred symbols daily is real and the parameters of a model this small barely move; a
+# series whose dynamics genuinely change would be a reason to pay it.
+#
+# `arima_one_step_forecast` is the shared implementation, and it exists because two
+# neighbouring calls do something else. `apply(endog, refit=True)` re-estimates on the array
+# it is handed, which would fit every prediction on the block it is emitted over;
+# `forecast(h)` continues past the end of the data rather than filtering across it, so it
+# returns as many values as you asked for rather than one per row. The helper passes
+# `refit=False` explicitly, which is also the installed default, and then checks that the
+# parameters did not in fact move, so a changed default upstream fails loudly rather than
+# turning the column into an in-sample fit.
+
+# %%
+full_returns = spy["returns"].to_numpy()
+one_step = arima_one_step_forecast(static_fit, full_returns)
+one_step_test = one_step[len(train) :]
+
+print(
+    f"Spread of the one-step forecasts over the test period: {one_step_test.std() * 100:.4f} percent"
+)
+print(
+    f"Spread of the multi-step forecasts, for comparison: {static_forecast.std() * 100:.2e} percent"
+)
+
+# %%
+figure = make_subplots(
+    rows=2,
+    cols=1,
+    subplot_titles=(
+        "The multi-step forecast settles; the one-step forecast tracks",
+        "One is a spike, the other has a distribution",
+    ),
+    vertical_spacing=0.12,
+)
+
+sessions = test.index[: min(120, len(test))]
+for name, values, color in [
+    ("Realized return", test["returns"].to_numpy(), COLORS["neutral"]),
+    ("One-step forecast", one_step_test, COLORS["blue"]),
+    ("Multi-step forecast", static_forecast, COLORS["copper"]),
+]:
+    figure.add_trace(
+        go.Scatter(x=sessions, y=values[: len(sessions)] * 100, name=name, line=dict(color=color)),
         row=1,
         col=1,
     )
 
-    # PACF
-    fig.add_trace(
-        go.Bar(
-            x=list(range(len(pacf_vals))), y=pacf_vals, name="PACF", marker_color=COLORS["blue"]
+for name, values, color in [
+    ("Realized return", test["returns"].to_numpy(), COLORS["neutral"]),
+    ("One-step forecast", one_step_test, COLORS["blue"]),
+]:
+    figure.add_trace(
+        go.Histogram(
+            x=values * 100, name=name, opacity=0.55, nbinsx=50, marker_color=color, showlegend=False
         ),
-        row=1,
-        col=2,
+        row=2,
+        col=1,
     )
 
-    # 95% significance bands (±1.96/√n): coefficients inside are noise
-    n = len(series)
-    sig = 1.96 / np.sqrt(n)
-    for col in [1, 2]:
-        fig.add_hline(y=sig, line_dash="dash", line_color=COLORS["neutral"], row=1, col=col)
-        fig.add_hline(y=-sig, line_dash="dash", line_color=COLORS["neutral"], row=1, col=col)
-
-    fig.update_xaxes(title_text="Lag (trading days)", row=1, col=1)
-    fig.update_xaxes(title_text="Lag (trading days)", row=1, col=2)
-    fig.update_yaxes(title_text="Autocorrelation", row=1, col=1)
-    fig.update_yaxes(title_text="Partial autocorrelation", row=1, col=2)
-    fig.update_layout(
-        height=340,
-        title_text=title,
-        showlegend=False,
-    )
-    return fig
-
-
-fig = plot_acf_pacf(
-    df["returns"],
-    f"Daily {SYMBOL} returns show negligible autocorrelation at every lag"
-    "<br><sup>Dashed lines mark the 95% band (±1.96/√n); bars inside are indistinguishable from zero</sup>",
+figure.update_xaxes(title_text="Session", row=1, col=1)
+figure.update_yaxes(title_text="Percent", row=1, col=1)
+figure.update_xaxes(title_text="Daily return, percent", row=2, col=1)
+figure.update_yaxes(title_text="Count", row=2, col=1)
+figure.update_layout(
+    height=560, barmode="overlay", title_text="Only one of the two forecasts is a column"
 )
-fig.show()
-
-print("\nACF/PACF Interpretation:")
-print("  - Returns show little autocorrelation (efficient market)")
-print("  - Low ACF/PACF suggests AR(0) or AR(1) may suffice")
-print("  - This is typical: returns are hard to predict from past returns")
+show_plotly_with_alt(
+    figure,
+    "Two stacked panels. The top draws the realized daily returns against two forecasts "
+    "over the first months of the test period: the multi-step forecast is a flat line, "
+    "while the one-step forecast moves with the returns at a much smaller amplitude. The "
+    "bottom overlays the histogram of realized returns with the histogram of the one-step "
+    "forecasts, which is far narrower and centred near zero.",
+)
 
 # %% [markdown]
-# ### ml4t-diagnostic: Automated Order Suggestion
+# ## Choosing the order
 #
-# The manual ACF/PACF interpretation above requires visual inspection.
-# `analyze_autocorrelation()` examines significant lags programmatically
-# and suggests an ARIMA order - a useful sanity check before grid search.
-
-# %%
-stat_check = analyze_stationarity(df["returns"].dropna().values)
-acf_analysis = analyze_autocorrelation(df["returns"].dropna().values)
-
-print("=== ml4t-diagnostic: Pre-Modeling Diagnostics ===")
-print(f"Stationarity: {stat_check.consensus} (agreement: {stat_check.agreement_score:.2f})")
-print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
-
-# %% [markdown]
-# The diagnostic confirms returns are stationary (no differencing needed, d=0)
-# and suggests a low-order ARIMA - consistent with the efficient market
-# expectation of minimal autocorrelation in returns.
-
-# %% [markdown]
-# ## 5. Train/Test Split
-
-# %%
-# Split at TEST_START
-test_start_dt = pd.Timestamp(TEST_START)
-train = df[df.index < test_start_dt]
-test = df[df.index >= test_start_dt]
-
-print(f"Train: {len(train)} obs ({train.index.min().date()} to {train.index.max().date()})")
-print(f"Test:  {len(test)} obs ({test.index.min().date()} to {test.index.max().date()})")
-
-# %% [markdown]
-# ## 6. Baseline Models
-
-# %%
-results = {}
-
-
-# Model 1: Naive (predict last value = 0 for returns)
-def naive_forecast(train_ret, n_forecast):
-    """Naive forecast: predict 0 (random walk for prices = 0 for returns)."""
-    return np.zeros(n_forecast)
-
-
-naive_pred = naive_forecast(train["returns"], len(test))
-naive_ic = pooled_ic(test["returns"].values, naive_pred)
-naive_rmse = np.sqrt(np.mean((test["returns"].values - naive_pred) ** 2))
-
-results["Naive (0)"] = {"ic": naive_ic, "rmse": naive_rmse, "predictions": naive_pred}
-print("Model 1: Naive (predict 0)")
-print(f"  IC: {naive_ic:.4f}, RMSE: {naive_rmse:.6f}")
-
-
-# %%
-# Model 2: Naive (predict mean)
-def mean_forecast(train_ret, n_forecast):
-    """Predict historical mean."""
-    return np.full(n_forecast, train_ret.mean())
-
-
-mean_pred = mean_forecast(train["returns"], len(test))
-mean_ic = pooled_ic(test["returns"].values, mean_pred)
-mean_rmse = np.sqrt(np.mean((test["returns"].values - mean_pred) ** 2))
-
-results["Mean"] = {"ic": mean_ic, "rmse": mean_rmse, "predictions": mean_pred}
-print("\nModel 2: Historical Mean")
-print(f"  IC: {mean_ic:.4f}, RMSE: {mean_rmse:.6f}")
-
-# %% [markdown]
-# ## 7. AR Models
-
-# %%
-# Model 3: AR(1)
-print("\nModel 3: AR(1)")
-ar1 = ARIMA(train["returns"], order=(1, 0, 0))
-ar1_fit = ar1.fit()
-ar1_pred = ar1_fit.forecast(steps=len(test))
-
-ar1_ic = pooled_ic(test["returns"].values, ar1_pred.values)
-ar1_rmse = np.sqrt(np.mean((test["returns"].values - ar1_pred.values) ** 2))
-
-results["AR(1)"] = {"ic": ar1_ic, "rmse": ar1_rmse, "predictions": ar1_pred.values}
-print(f"  AR(1) coef: {ar1_fit.params.get('ar.L1', ar1_fit.params.iloc[1]):.4f}")
-print(f"  IC: {ar1_ic:.4f}, RMSE: {ar1_rmse:.6f}")
-
-# Model 4: AR(5)
-print("\nModel 4: AR(5)")
-ar5 = ARIMA(train["returns"], order=(5, 0, 0))
-ar5_fit = ar5.fit()
-ar5_pred = ar5_fit.forecast(steps=len(test))
-
-ar5_ic = pooled_ic(test["returns"].values, ar5_pred.values)
-ar5_rmse = np.sqrt(np.mean((test["returns"].values - ar5_pred.values) ** 2))
-
-results["AR(5)"] = {"ic": ar5_ic, "rmse": ar5_rmse, "predictions": ar5_pred.values}
-print(f"  IC: {ar5_ic:.4f}, RMSE: {ar5_rmse:.6f}")
-
-# %% [markdown]
-# ## 8. ARIMA Model Selection
+# The grid below fits every combination of a small autoregressive and moving-average order
+# and reports the **Akaike information criterion**, which scores a fit by its likelihood and
+# charges it for each parameter. The lowest score is the usual choice.
 #
-# We search over a grid of (p, d, q) and select based on AIC/BIC.
+# The grid also records whether the optimiser converged. That notice is a
+# `ConvergenceWarning`, and it is worth catching rather than silencing: a criterion computed
+# from a fit that did not converge is a number the optimiser stopped next to, not the
+# maximum it was looking for, and comparing it against a converged one ranks them on
+# different things.
 
 # %%
-print("\nModel Selection: Grid Search")
-print("-" * 50)
+AR_ORDERS, MA_ORDERS = range(4), range(3)
 
-best_aic = np.inf
-best_order = None
-best_model = None
 
-# Grid search (limited for speed)
-p_range = range(0, 4)
-q_range = range(0, 3)
-d = 0  # Returns are already stationary
+def fit_recording_convergence(series: pd.Series, order: tuple[int, int, int]):
+    """Fit, and report whether the optimiser said it converged rather than printing it."""
+    with warnings.catch_warnings(record=True) as raised:
+        warnings.simplefilter("always", ConvergenceWarning)
+        fitted = ARIMA(series, order=order).fit()
+    converged = not any(issubclass(entry.category, ConvergenceWarning) for entry in raised)
+    return fitted, converged
 
-model_results = []
 
-for p in p_range:
-    for q in q_range:
+grid_rows = []
+for p in AR_ORDERS:
+    for q in MA_ORDERS:
         try:
-            model = ARIMA(train["returns"], order=(p, d, q))
-            fit = model.fit()
-            model_results.append({"p": p, "q": q, "aic": fit.aic, "bic": fit.bic})
-
-            if fit.aic < best_aic:
-                best_aic = fit.aic
-                best_order = (p, d, q)
-                best_model = fit
+            fitted, converged = fit_recording_convergence(train["returns"], (p, 0, q))
         except (ValueError, np.linalg.LinAlgError):
             continue
-
-if model_results:
-    model_df = pd.DataFrame(model_results).sort_values("aic")
-    print("Top 5 models by AIC:")
-    display(model_df.head())
-
-    print(f"Best model: ARIMA{best_order} (AIC: {best_aic:.2f})")
-
-# %%
-# Forecast with best model
-if best_model:
-    best_pred = best_model.forecast(steps=len(test))
-    best_ic = pooled_ic(test["returns"].values, best_pred.values)
-    best_rmse = np.sqrt(np.mean((test["returns"].values - best_pred.values) ** 2))
-
-    results[f"ARIMA{best_order}"] = {
-        "ic": best_ic,
-        "rmse": best_rmse,
-        "predictions": best_pred.values,
-    }
-    print(f"\nBest ARIMA{best_order}:")
-    print(f"  IC: {best_ic:.4f}, RMSE: {best_rmse:.6f}")
-
-# %% [markdown]
-# ## 9. Rolling Forecast (Walk-Forward)
-#
-# For a more realistic evaluation, we use rolling 1-step-ahead forecasts.
-
-# %%
-print("\nRolling 1-Step-Ahead Forecast (Walk-Forward):")
-print("-" * 50)
-
-# Rolling forecast with AR(1)
-rolling_preds = []
-rolling_actuals = []
-
-# Initial training window
-window_size = len(train)
-full_returns = df["returns"].values
-
-# Rolling forecast iterations
-n_rolling = len(test)
-
-for i in range(n_rolling):
-    # Fit on expanding window
-    train_window = full_returns[: window_size + i]
-
-    # Quick AR(1) fit; statsmodels can fail on rank-deficient or non-stationary
-    # windows - fall back to zero forecast in that rare case.
-    try:
-        model = ARIMA(train_window, order=(1, 0, 0))
-        fit = model.fit()
-        pred = fit.forecast(steps=1)[0]
-    except (ValueError, np.linalg.LinAlgError):
-        pred = 0.0
-
-    rolling_preds.append(pred)
-    rolling_actuals.append(full_returns[window_size + i])
-
-rolling_preds = np.array(rolling_preds)
-rolling_actuals = np.array(rolling_actuals)
-
-rolling_ic = pooled_ic(rolling_actuals, rolling_preds)
-rolling_rmse = np.sqrt(np.mean((rolling_actuals - rolling_preds) ** 2))
-
-results["AR(1) Rolling"] = {"ic": rolling_ic, "rmse": rolling_rmse, "predictions": rolling_preds}
-print(f"AR(1) Rolling IC: {rolling_ic:.4f}, RMSE: {rolling_rmse:.6f}")
-
-# %% [markdown]
-# ## 10. Results Comparison
-
-# %%
-summary_rows = [{"model": name, "ic": r["ic"], "rmse": r["rmse"]} for name, r in results.items()]
-summary_df = pd.DataFrame(summary_rows)
-display(summary_df)
-
-# Best model by IC (skip NaN entries - constant predictions yield undefined IC)
-finite = summary_df[summary_df["ic"].notna()]
-if not finite.empty:
-    best_row = finite.loc[finite["ic"].idxmax()]
-    print(
-        f"Best by IC (excluding constant predictions): {best_row['model']} ({best_row['ic']:.4f})"
-    )
-
-# %% [markdown]
-# ## 11. Visualization
-
-# %%
-# Plot comparison (returns shown in %; static multi-step forecasts are out-of-sample)
-models_to_plot = ["Naive (0)", "AR(1)", f"ARIMA{best_order}" if best_order else "AR(1)"]
-model_colors = {
-    "Naive (0)": COLORS["copper"],
-    "AR(1)": COLORS["blue"],
-    f"ARIMA{best_order}": COLORS["amber"],
-}
-
-fig = make_subplots(
-    rows=2,
-    cols=1,
-    subplot_titles=(
-        "Forecasts flatten within days; realized returns keep moving",
-        "The AR(1) forecast distribution is a spike next to the return distribution",
-    ),
-)
-
-# Sample of actual vs predicted
-n_plot = min(100, len(test))
-
-fig.add_trace(
-    go.Scatter(
-        x=list(range(n_plot)),
-        y=test["returns"].values[:n_plot] * 100,
-        name="Actual",
-        line=dict(color=COLORS["neutral"]),
-    ),
-    row=1,
-    col=1,
-)
-
-for model_name in models_to_plot:
-    if model_name in results:
-        fig.add_trace(
-            go.Scatter(
-                x=list(range(n_plot)),
-                y=results[model_name]["predictions"][:n_plot] * 100,
-                name=model_name,
-                line=dict(color=model_colors.get(model_name, COLORS["copper"]), dash="dot"),
-            ),
-            row=1,
-            col=1,
+        grid_rows.append(
+            {"p": p, "q": q, "AIC": fitted.aic, "BIC": fitted.bic, "converged": converged}
         )
 
-# %%
-# Histograms
-fig.add_trace(
-    go.Histogram(
-        x=test["returns"].values * 100,
-        name="Actual",
-        opacity=0.5,
-        nbinsx=50,
-        marker_color=COLORS["neutral"],
-    ),
-    row=2,
-    col=1,
-)
-fig.add_trace(
-    go.Histogram(
-        x=results["AR(1)"]["predictions"] * 100,
-        name="AR(1) Pred",
-        opacity=0.5,
-        nbinsx=50,
-        marker_color=COLORS["blue"],
-    ),
-    row=2,
-    col=1,
-)
-
-fig.update_xaxes(title_text="Test-period trading day", row=1, col=1)
-fig.update_yaxes(title_text="Daily return (%)", row=1, col=1)
-fig.update_xaxes(title_text="Daily return (%)", row=2, col=1)
-fig.update_yaxes(title_text="Count", row=2, col=1)
-fig.update_layout(
-    height=560,
-    title_text="ARIMA point forecasts collapse to the mean; realized returns do not",
-    barmode="overlay",
-)
-fig.show()
+grid = pd.DataFrame(grid_rows).sort_values("AIC")
+display(grid.head())
+print(f"Grid fits that did not converge: {(~grid['converged']).sum()} of {len(grid)}")
 
 # %% [markdown]
-# **Reading the table.** AR(1) on this train/test split lands a small positive
-# IC (≈ +0.07), which is the most that any single-asset ARIMA model produces
-# here. The AIC-best ARIMA - `ARIMA(3, 0, 2)` - flips sign and lands a small
-# *negative* IC; AR(5) is also negative. This is a useful illustration of two
-# things at once: longer AR/MA orders overfit in-sample at the cost of OOS
-# rank correlation, and the AIC-best model is not the IC-best model. The
-# Naive (0) and Mean baselines have constant predictions, so their IC is
-# undefined (NaN) - they are RMSE benchmarks, not rank-correlation
-# benchmarks.
+# ## What each order is worth as a column
 #
-# **Why ARIMA struggles with returns on this dataset**:
-# 1. **Low autocorrelation**: the ACF of daily SPY returns is statistically
-#    indistinguishable from zero at most lags, leaving little linear structure
-#    for an ARIMA mean model to exploit
-# 2. **Heteroskedasticity**: variance changes over time, so a constant-variance
-#    mean model is misspecified (GARCH addresses this in `08_garch_volatility`)
+# Every converged order is refitted on the training block and filtered one step at a time
+# across the whole series, and the resulting column is scored over the test block against
+# the return it was trying to predict. The **information coefficient** is the rank
+# correlation between the two.
 #
-# **When ARIMA works**:
-# - Trending series (moving averages, cumulative metrics)
-# - Seasonal patterns (explicit or multiplicative)
-# - Non-financial time series (weather, sales, etc.)
-
-# %% [markdown]
-# ## 12. Multi-Symbol ARIMA Forecasting
-#
-# Apply the rolling 1-step-ahead walk-forward from Section 9 to every symbol and
-# collect the predictions as a standardized feature file for downstream chapters.
-# Each symbol fits AR(1) once on its training window, then rolls one day ahead
-# through the test period using the actual most recent return, so the saved feature
-# varies over time rather than collapsing to a per-symbol constant (which is what a
-# single static multi-step forecast would produce).
+# A rank correlation needs a column that varies across the sessions it is scored over. The
+# multi-step forecast repeats one number after its first few, so a coefficient computed for
+# it would rest on a handful of sessions at the start of the block. It is left out for that
+# reason, not because the correlation cannot be computed.
 
 # %%
-print("\n" + "=" * 60)
-print("MULTI-SYMBOL ARIMA FORECASTING")
-print("=" * 60)
-
-
-def run_arima_for_symbol(symbol: str) -> tuple[pl.DataFrame | None, dict]:
-    """Run a rolling 1-step-ahead AR(1) walk-forward for a single symbol.
-
-    We fit AR(1) once on the training window and then roll one step ahead through
-    the test period, each prediction using the actual most recent return:
-    ``y_hat_t = mu + phi * (y_{t-1} - mu)``. This is causal (every input precedes
-    its target) and genuinely time-varying, so it does not collapse the way a single
-    static multi-step forecast (``fit.forecast(steps=len(test))``) does - that
-    collapses to the unconditional mean within a few steps for an AR(1) on returns,
-    yielding a near-constant, degenerate feature.
-
-    This is the fixed-parameter form of the walk-forward demonstrated for a single
-    symbol in Section 9. For AR(1) it matches the expanding-window refit to within
-    ~0.03% (correlation > 0.999 on SPY) while scaling to the full universe without a
-    per-day refit, so it is what we use to build the saved multi-symbol feature.
-
-    Returns (predictions DataFrame or None, summary dict) - summary is always
-    populated with the symbol and an `ic` (NaN if skipped).
-    """
-    summary = {"symbol": symbol, "n_predictions": 0, "ic": float("nan"), "status": "ok"}
-
-    symbol_df = get_symbol_data(symbol)
-    if len(symbol_df) < 252:
-        summary["status"] = "insufficient_data"
-        return None, summary
-
-    test_start_dt = pd.Timestamp(TEST_START)
-    train_data = symbol_df[symbol_df.index < test_start_dt]
-    test_data = symbol_df[symbol_df.index >= test_start_dt]
-
-    if len(train_data) < 100 or len(test_data) < 10:
-        summary["status"] = "insufficient_split"
-        return None, summary
-
-    # Fit AR(1) once on the training window, then roll 1-step-ahead over the test
-    # period using actual observed lagged returns (no refit, no look-ahead).
-    full_returns = symbol_df["returns"].values
-    n_train = len(train_data)
-    n_test = len(test_data)
+scored_rows = []
+for row in grid.itertuples():
+    if not row.converged:
+        continue
+    order = (row.p, 0, row.q)
     try:
-        fit = ARIMA(train_data["returns"], order=(1, 0, 0)).fit()
-        mu, phi = fit.params[0], fit.params[1]
-    except (ValueError, np.linalg.LinAlgError) as exc:
-        summary["status"] = f"fit_failed: {type(exc).__name__}"
-        return None, summary
-
-    y_prev = full_returns[n_train - 1 : n_train + n_test - 1]
-    preds = mu + phi * (y_prev - mu)
-
-    ic = pooled_ic(test_data["returns"].values, preds)
-    summary["n_predictions"] = n_test
-    summary["ic"] = ic
-
-    pred_df = pl.DataFrame(
+        fitted, _ = fit_recording_convergence(train["returns"], order)
+        column = arima_one_step_forecast(fitted, full_returns)[len(train) :]
+    except (ValueError, np.linalg.LinAlgError):
+        continue
+    scored_rows.append(
         {
-            "timestamp": test_data.index.values,
-            "symbol": symbol,
-            "y_true": test_data["returns"].values,
-            "y_pred": preds,
-            "model_id": "arima_ar1_rolling",
-            "fold_id": 0,
-            "horizon": "1d",
-            "dataset": "etf",
+            "order": f"ARIMA{order}",
+            "AIC": row.AIC,
+            "information coefficient": pooled_ic(column, test["returns"].to_numpy()),
+            "RMSE": float(np.sqrt(np.mean((test["returns"].to_numpy() - column) ** 2))),
         }
     )
-    return pred_df, summary
 
-
-# Process all symbols (one AR(1) fit each, then a vectorized 1-step roll).
-all_predictions = []
-symbol_summaries = []
-print(f"Processing {len(SYMBOLS)} symbols (rolling 1-step walk-forward)...")
-
-for symbol in SYMBOLS:
-    pred_df, summary = run_arima_for_symbol(symbol)
-    symbol_summaries.append(summary)
-    if pred_df is not None:
-        all_predictions.append(pred_df)
-
-ic_summary_df = pd.DataFrame(symbol_summaries)
-display(ic_summary_df.sort_values("ic", ascending=False, na_position="last"))
-
-# Combine predictions
-if all_predictions:
-    multi_symbol_df = pl.concat(all_predictions)
-    print(
-        f"Total predictions: {len(multi_symbol_df):,} rows across {len(all_predictions)} symbols. "
-        f"Mean IC: {ic_summary_df['ic'].mean():+.4f}, "
-        f"share positive: {(ic_summary_df['ic'] > 0).mean():.1%}"
-    )
-else:
-    multi_symbol_df = pl.DataFrame()
-    print("No predictions generated")
-
-# %% [markdown]
-# ## 13. Save Predictions for Downstream Chapters
-#
-# Output standardized predictions file for cross-model comparison.
-# Schema: timestamp, symbol, y_true, y_pred, model_id, fold_id, horizon, dataset
+scored = pd.DataFrame(scored_rows).sort_values("information coefficient", ascending=False)
+display(scored)
 
 # %%
-# Save ARIMA predictions
-MODEL_DIR = get_case_study_dir("etfs") / "models" / "time_series"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
+lowest_aic = scored.loc[scored["AIC"].idxmin()]
+highest_ic = scored.iloc[0]
+print(
+    f"Lowest AIC:                  {lowest_aic['order']}, IC {lowest_aic['information coefficient']:+.4f}"
+)
+print(
+    f"Highest information coefficient: {highest_ic['order']}, IC {highest_ic['information coefficient']:+.4f}"
+)
+print(f"RMSE across every order spans {scored['RMSE'].min():.6f} to {scored['RMSE'].max():.6f}")
 
-if len(multi_symbol_df) > 0:
-    output_path = MODEL_DIR / "arima_predictions.parquet"
-    multi_symbol_df.write_parquet(output_path)
-    # Show a repo-root-relative path so the output carries no machine-specific prefix.
-    repo_root = get_case_study_dir("etfs").parents[1]
-    display_path = output_path.relative_to(repo_root)
-    print(f"Saved multi-symbol predictions to {display_path}")
-    print(f"  Shape: {multi_symbol_df.shape}")
-    print(f"  Assets: {multi_symbol_df['symbol'].n_unique()}")
-    print(
-        f"  Date range: {multi_symbol_df['timestamp'].min()} to {multi_symbol_df['timestamp'].max()}"
+# %% [markdown]
+# The two criteria need not agree, and on this split they do not have to for a reason worth
+# stating. The information criterion scores the fit on the training block, in likelihood;
+# the information coefficient scores a column on the test block, in rank agreement. A model
+# can win the first by fitting the training block's noise more closely and lose the second
+# on the block it never saw. Selecting on the criterion and reporting the coefficient, as
+# here, keeps that separation visible; selecting on the coefficient would be selecting on
+# the block being reported.
+#
+# The RMSE column is the third thing to notice, and it is the sharpest of the three. Every
+# forecast here is small next to the return it predicts, so the squared error is dominated
+# by the return itself and barely notices which model produced the forecast. The order that
+# scores lowest on RMSE is the one with no dynamics at all, whose forecast is a constant:
+# predicting nothing is the least wrong thing to do when the thing being predicted is
+# almost all noise. That order also has no information coefficient, because a rank
+# correlation with a constant is undefined. Ranking these models on RMSE would be ranking
+# them on the variance of the test block.
+
+# %% [markdown]
+# ## Across the panel
+#
+# One split on one symbol gives one information coefficient. Running the same construction
+# on every symbol in the panel gives a distribution, and the distribution is what says
+# whether the column carries anything.
+#
+# Each symbol is fitted on its own training block and filtered across its own series, so a
+# symbol with a shorter history is handled the same way as one with a longer one.
+
+# %%
+PANEL_ORDER = (1, 0, 0)
+MINIMUM_SESSIONS = 252
+
+
+def one_step_column(symbol: str) -> dict:
+    """Fit on the training block, filter across the whole series, score the test block."""
+    frame = symbol_frame(symbol)
+    if len(frame) < MINIMUM_SESSIONS:
+        return {"symbol": symbol, "status": "too short", "information coefficient": np.nan}
+
+    symbol_train = frame[frame.index < split_at]
+    symbol_test = frame[frame.index >= split_at]
+    if len(symbol_train) < 100 or len(symbol_test) < 10:
+        return {"symbol": symbol, "status": "split too small", "information coefficient": np.nan}
+
+    try:
+        fitted, converged = fit_recording_convergence(symbol_train["returns"], PANEL_ORDER)
+        column = arima_one_step_forecast(fitted, frame["returns"].to_numpy())
+    except (ValueError, np.linalg.LinAlgError) as failure:
+        return {
+            "symbol": symbol,
+            "status": type(failure).__name__,
+            "information coefficient": np.nan,
+        }
+
+    return {
+        "symbol": symbol,
+        "status": "scored",
+        "converged": converged,
+        "test sessions": len(symbol_test),
+        "information coefficient": pooled_ic(
+            column[len(symbol_train) :], symbol_test["returns"].to_numpy()
+        ),
+    }
+
+
+panel = pd.DataFrame([one_step_column(symbol) for symbol in symbols])
+scored_panel = panel[panel["status"] == "scored"]
+
+print(f"Symbols scored: {len(scored_panel)} of {len(panel)}")
+print(f"Fits whose optimiser did not converge: {(~scored_panel['converged']).sum()}")
+print(
+    "Information coefficient across the panel: "
+    f"median {scored_panel['information coefficient'].median():+.4f}, "
+    f"quartiles {scored_panel['information coefficient'].quantile(0.25):+.4f} "
+    f"to {scored_panel['information coefficient'].quantile(0.75):+.4f}"
+)
+print(f"Share above zero: {(scored_panel['information coefficient'] > 0).mean():.1%}")
+print(
+    "Median by convergence: "
+    + ", ".join(
+        f"{'converged' if converged else 'did not converge'} "
+        f"{group['information coefficient'].median():+.4f} ({len(group)} symbols)"
+        for converged, group in scored_panel.groupby("converged")
     )
-else:
-    print("WARNING: No predictions to save")
+)
 
-print("ARIMA baseline demonstration complete")
+# %%
+figure = go.Figure(
+    go.Histogram(x=scored_panel["information coefficient"], nbinsx=30, marker_color=COLORS["blue"])
+)
+figure.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
+figure.update_layout(
+    title_text=f"The panel's forecasts straddle zero at order {PANEL_ORDER}",
+    xaxis_title="Information coefficient over the test block",
+    yaxis_title="Symbols",
+    height=340,
+)
+show_plotly_with_alt(
+    figure,
+    "A histogram of the information coefficient across every scored symbol in the panel, "
+    "with a dashed line at zero. The distribution is broad and centred close to the line, "
+    "with symbols on both sides and no clear separation from zero, and one symbol far out "
+    "to the right of the rest.",
+)
+
+# %% [markdown]
+# The distribution is the answer, and it is a more useful one than a single symbol's number
+# would have been. Its quartiles span zero while its median sits a little above it, which
+# says the column is weakly and unreliably informative about direction rather than either
+# useless or usable, and it puts the single-symbol result earlier inside the spread of what
+# the panel produces rather than out on its own.
+#
+# Do not read the share above zero as a hundred votes. These are ETFs on overlapping
+# universes, so their returns are highly correlated and so are their forecast errors; the
+# number of independent observations behind that share is far smaller than the number of
+# symbols, and no test here says how much smaller.
+#
+# The convergence split is the other thing to look at before believing the distribution.
+# A sixth of these fits stopped without the optimiser reporting convergence, and their
+# parameters are wherever it stopped rather than at a maximum. They are in the distribution
+# above, and printing the two medians beside each other is the cheap check on whether that
+# matters here. It does: the two medians are not the same, and the symbols whose fits did
+# not converge sit closer to zero than the ones that did, so the panel's headline number is
+# being pulled by fits that never reached a maximum. They stay in nonetheless, because
+# removing them would select the panel on how easy each symbol was to fit, which is a
+# property of the optimiser and not of the market. The honest report is both medians.
+#
+# Two properties of returns explain it, and both are the subject of what follows. The linear
+# dependence a model of this family reads is nearly absent from daily returns, which the
+# correlogram said at the start. And the variance of returns changes over time while this
+# model assumes it does not, so the model is misspecified in the one dimension where daily
+# returns are strongly predictable. That dimension is what `08_garch_volatility` models.
+
+# %% [markdown]
+# ## The features this notebook produces
+#
+# | Column | How it is built | Causal |
+# |---|---|---|
+# | one-step forecast | fitted on the training block, then filtered one step at a time across the series | yes |
+# | fitted order | the grid's lowest-AIC order, chosen on the training block alone | yes |
+# | residual | the realized return minus the one-step forecast, which is what a volatility model reads next | yes |
+#
+# The multi-step forecast is deliberately not on the list. It repeats one number after its
+# first few steps, so any score over the test block rests on those few sessions rather than
+# on the block.
+
+# %% [markdown]
+# ## Key takeaways
+#
+# 1. **A forecast is a column, and a column has to vary where it is scored.** A multi-step
+#    forecast from a stationary model decays to the unconditional mean within a few steps,
+#    so almost every session it covers carries the same number whatever the model's
+#    accuracy.
+# 2. **One-step-ahead is a horizon, not a parameter policy.** Filtering under fixed
+#    parameters and refitting on an expanding window are both causal and differ in cost and
+#    in whether the parameters follow the data. What is not causal is refitting on a window
+#    that includes the value being predicted, which is what `apply(endog, refit=True)` on
+#    the prediction block, or a whole-sample fit, does.
+# 3. **An information criterion and an information coefficient measure different things on
+#    different blocks**, and a model can lead on one and not the other. Select on the
+#    criterion, which reads the training block, and report the coefficient.
+# 4. **Do not silence a convergence warning.** A criterion from a fit that did not converge
+#    is not comparable with one that did, and catching the warning turns it into a column
+#    of the grid instead of noise the reader never sees.
+# 5. **One symbol is one draw.** The panel's distribution of information coefficients
+#    straddles zero, which is the finding; a single symbol's number sits inside that spread.
+#
+# **Known limitations.** One split at one date, so nothing here separates the model from the
+# period it was tested in. The panel's symbols overlap heavily in what they hold, so its
+# hundred results are far fewer than a hundred independent observations. And the whole
+# notebook models the mean of returns, which is the part of a return series that is hardest
+# to predict; the same family applied to a volatility proxy behaves quite differently, which
+# is the next notebook's subject.
+#
+# **Next**: `08_garch_volatility` models the variance this notebook assumed was constant.

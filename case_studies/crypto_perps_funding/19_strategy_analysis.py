@@ -149,7 +149,7 @@ if catalog.height != len(pool.members):
     raise RuntimeError("the backtest catalog does not describe every candidate")
 
 # %% [markdown]
-# The selected configuration, and the pool it was selected from. The stage column says how far
+# The selected configuration, and the pool it came from. The stage column says how far
 # down the funnel the selection came from: a baseline row means neither sizing nor an overlay
 # improved on equal weight for that ranking.
 
@@ -418,7 +418,7 @@ holdout_predictions = study.predictions.table().filter(pl.col("split") == "holdo
 # The second is that the registered result is the replay of that configuration. `stage` says a
 # row was produced from a holdout prediction set and nothing more, so a query keyed on it would
 # also return a run of some other allocator over the same window, or one left by a superseded
-# selection. The resolver matches the holdout backtest to the carrier by strategy
+# selection. The resolver matches the holdout backtest to the selected configuration by strategy
 # specification, which is the link that actually establishes lineage, so the metrics below are
 # restricted to the hash it returns.
 carrier_lineage = resolve_solvent_carrier("crypto_perps_funding")

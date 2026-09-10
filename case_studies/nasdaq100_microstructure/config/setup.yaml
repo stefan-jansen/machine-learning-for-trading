@@ -703,29 +703,38 @@ modeling:
     # CUDA-free environment fail on a requirement nobody wrote down. A run on other
     # hardware sets the notebook's DEVICE parameter, which is then what gets registered.
     device: gpu
-    # How many training windows one sequence configuration draws per fold. This is the only
-    # case study that needs the key: every row of a panel starts a window, and this panel is
-    # minute bars, so an uncapped fold builds about 4.0 million near-identical overlapping
-    # sequences where the daily case studies build tens of thousands. Measured on the
-    # canonical plan, 2026-09-02: fold 0 has 4,066,041 training rows and fold 1 has 3,997,571,
-    # across 115 symbols, so uncapped is 5.4x this value and the family's cost goes with it.
+    # How far apart the training windows of one sequence configuration sit, counted in
+    # label horizons. This is the only case study that needs the key: every row of a panel
+    # starts a window, and this panel is minute bars, so an unspaced fold builds about 4.0
+    # million near-identical overlapping sequences where the daily case studies build tens
+    # of thousands. Measured on the canonical plan, 2026-09-02: fold 0 has 4,066,041
+    # training rows and fold 1 has 3,997,571, across 115 symbols.
     #
-    # **This number is a compute budget, not a modelling claim, and it is stated that way
-    # deliberately.** It has been 750,000 since the original release and was carried unchanged
-    # through the stage-06 rebuild that moved the folds underneath it, so nothing derives it.
-    # For scale: consecutive windows share 59 of their 60 observations, one window per 60-bar
-    # lookback would give about 67,800 per fold, and one per 15-minute label horizon about
-    # 271,000. At 750,000 a window is drawn every 5.4 minutes, which is finer than the horizon,
-    # so neighbouring training windows still carry overlapping labels.
+    # One window per label horizon. Consecutive windows of a symbol then carry labels that
+    # do not overlap: the window ending at t is scored on the return from t to t+H, and the
+    # next one starts at t+H. Every window is still an example the model has to fit; what
+    # changes is that no two of them are the same example seen twice.
     #
-    # Overlapping training windows are not wrong - they are correlated examples rather than
-    # invalid ones, and a noisy intraday target is a reasonable place to want many of them.
-    # What is missing is an argument for this value rather than another, and the value is now
-    # part of the training identity, so the argument has to exist before the number can be
-    # defended. That is ml4t/agent-workspace#1015. It is left at 750,000 here because changing
-    # it changes what every deep-learning result in this chapter describes, and that is a
-    # decision to take on the evidence rather than hours before a production run.
-    max_train_sequences: 750000
+    # Declared in horizons rather than in windows because the horizon differs by label, and
+    # one line then covers all four: `fwd_ret_15m` and `fwd_dir_15m` stride 15 observations,
+    # `fwd_ret_5m` strides 5 and `fwd_ret_60m` strides 60, each spacing its own labels
+    # exactly. A single count could only be right for one of them. On fold 0 the primary
+    # label draws about 271,000 windows, and the count is derived at run time and printed,
+    # not written down here - it differs between folds because the folds differ in length.
+    #
+    # This replaces `max_train_sequences: 750000`, which had been carried unchanged since
+    # the original release and through the stage-06 rebuild that moved the folds underneath
+    # it, so nothing derived it. At 750,000 a window was drawn every 5.4 minutes, finer than
+    # the 15-minute horizon, so neighbouring training windows carried overlapping labels and
+    # the extra 2.8x of them were re-presentations of examples already in the batch. That is
+    # not wrong - correlated examples are not invalid ones - but it was a number with no
+    # argument behind it, and the number is part of the training identity
+    # (ml4t/agent-workspace#1015).
+    #
+    # `max_train_sequences` is still available and is what a case study declares when it
+    # wants the overlap: it fixes the count and lets the spacing follow. The two are
+    # mutually exclusive.
+    train_sequence_stride_horizons: 1
   gbm:
     libraries: [lightgbm]
     preset: default

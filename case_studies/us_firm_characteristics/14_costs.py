@@ -123,20 +123,20 @@ COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 # case study does not report, and [`17_strategy_analysis`](17_strategy_analysis.ipynb) would
 # find no cost rows for the one it does.
 #
-# `resolve_solvent_carrier` also refuses a carrier whose equity reached zero. This book is
-# long-short with no margin call, so a run can compound through zero and carry a Sharpe
-# computed on a balance that no longer exists - and such a Sharpe can top a ranking. It
-# raises rather than quietly sweeping the runner-up, because substituting a different
-# configuration is the divergence the shared resolver exists to remove.
+# `resolve_solvent_carrier` also refuses a selected configuration whose equity reached zero. This
+# book is long-short with no margin call, so a run can compound through zero and carry a Sharpe
+# computed on a balance that no longer exists - and such a Sharpe can top a ranking. It raises
+# rather than quietly sweeping the runner-up, because substituting a different configuration is the
+# divergence the shared resolver exists to remove.
 #
-# Which stage the carrier came from is printed rather than assumed.
+# Which stage the selected configuration came from is printed rather than assumed.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY_ID)
 
-# The label is the carrier's, not the case study's declared primary. They are the same here,
-# and reading it from the carrier is what keeps the prices and the predictions loaded below
-# on the same label the swept configuration was fitted and ranked on.
+# The label is the selected configuration's, not the case study's declared primary. They are the
+# same here, and reading it from the selected configuration is what keeps the prices and the
+# predictions loaded below on the same label the swept configuration was fitted and ranked on.
 if carrier["label"] != LABEL:
     print(f"Carrier is on {carrier['label']}, not the declared primary label {LABEL}.")
     LABEL = carrier["label"]

@@ -1654,7 +1654,7 @@ for ax, (data, label, color) in zip(axes, components, strict=False):
 
 axes[-1].set_xlabel("Time Step")
 fig.suptitle(
-    f"Diffusion-TS Learned Decomposition at Intermediate Noise (t={t_vis}/{CONFIG['timesteps']})",
+    "Diffusion-TS separates trend from season under intermediate noise",
     fontsize=12,
     y=1.02,
 )
@@ -2117,12 +2117,12 @@ for regime_id in range(n_active_regimes):
     sns.despine(ax=ax_gen)
 
 # Column titles
-axes[0, 0].set_title(
-    f"Historical (vol: Low={np.std(sequences[seq_regime_labels == 0][:, :, 0]):.4f}, High={np.std(sequences[seq_regime_labels == 1][:, :, 0]):.4f})"
-)
-axes[0, 1].set_title(
-    f"Generated (vol: Low={np.std(regime_samples[0][:, :, 0]):.4f}, High={np.std(regime_samples[1][:, :, 0]):.4f})"
-)
+# The per-regime volatilities are not in the column titles: two four-decimal numbers there
+# are a result the reader has to check against the panels, and they move on every re-run.
+# The cell after next plots their full distribution per regime, which is the comparison
+# those two numbers were standing in for.
+axes[0, 0].set_title("Historical")
+axes[0, 1].set_title("Generated")
 axes[-1, 0].set_xlabel("Time Step")
 axes[-1, 1].set_xlabel("Time Step")
 fig.suptitle("Conditional Generation Separates Volatility Regimes", fontsize=12, y=1.02)

@@ -8,7 +8,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.3
 #   kernelspec:
-#     display_name: Python 3 (ipykernel)
+#     display_name: Python 3
 #     language: python
 #     name: python3
 # ---
@@ -16,53 +16,57 @@
 # %% [markdown]
 # # Regime as Feature
 #
+# **Chapter 9 | Section 9.5**
+#
 # **Docker image**: `ml4t`
 #
-# This notebook demonstrates the **regime-as-feature** methodology: using
-# regime probabilities as input features to ML models, rather than switching
-# between specialized models based on detected regime.
+# The last three notebooks built regime labels and probabilities. This one spends them, and
+# the question is not whether the regime is real but how a predictive model should receive it.
+# Two designs are available and they differ in what happens when the regime call is wrong.
 #
-# **Learning Objectives**:
-# - Implement regime probabilities as ML features (vs hard switching)
-# - Compare regime-as-feature vs mixture-of-experts approaches
-# - Evaluate regime-aware vs baseline model performance
-# - Handle transition period instability in regime features
+# Give the model the regime probability as one more column and it stays one model, fitted on
+# every session, free to use the column or ignore it. Split the training data by regime and
+# fit one model per state, and each model sees only its own regime's sessions and a
+# misclassified session at prediction time is routed to a model that never saw its kind.
 #
-# **Book Reference**: Chapter 9, Section 9.5 (Regime Features)
+# The comparison only means something if the regime feature is built the way it would be in
+# production, which is the constraint that shapes the whole notebook: the hidden Markov model
+# is refit inside every fold, on the training block alone, and the probabilities it produces
+# come from a forward recursion that conditions on the past.
 #
-# **Prerequisites**: `11_hmm_regimes` for HMM regime detection and
-# `12_wasserstein_regimes` for distribution-based regime clustering.
+# **Learning objectives**
 #
-# ### Scope: methodology demonstration, not lookahead-safe production
+# - Build a regime feature inside a walk-forward loop, so that no fold's feature was fitted
+#   on that fold's test block.
+# - Fit the same predictive model with and without that feature and read the difference
+#   against the spread across folds rather than as a single number.
+# - Build the mixture-of-experts alternative and see what splitting the training data costs.
+# - Read a feature importance that comes out near zero, and say what it does and does not
+#   tell you about the feature.
 #
-# The HMM in this notebook is fit on the **full sample** before the downstream
-# regressors are evaluated via `TimeSeriesSplit`. The full-sample HMM fit
-# means the regime probabilities used as features carry information from
-# future folds into the training set; the downstream CV metrics are therefore
-# biased upward. The notebook serves as a **methodology demonstration**: it
-# shows how to wire regime probabilities into a regression and contrasts the
-# regime-as-feature pattern with mixture of experts. The reported RMSE and R²
-# illustrate the *mechanics*, not lookahead-safe out-of-sample performance.
+# **Book reference**
 #
-# Lookahead-safe regime features (HMM refit inside each walk-forward fold,
-# filtered probabilities for the test period only) are demonstrated in the
-# case studies under `case_studies/` from Chapter 16 onward, where regime
-# features enter the per-case-study feature pipeline with point-in-time
-# discipline. The walk-forward caveat is repeated inline at the HMM-fit cell
-# below.
+# Chapter 9, Section 9.5 (Regime features).
+#
+# **Prerequisites**
+#
+# `11_hmm_regimes` for the hidden Markov model and for the filtered-against-smoothed
+# distinction. `12_wasserstein_regimes` for the clustering alternative.
+# `06_strategy_definition/02_cv_foundations` for why the folds below carry a gap.
+
+# %% [markdown]
+# ## Setup
 
 # %%
-"""Regime as Feature — use regime probabilities as ML input features for regime-aware prediction."""
+"""Regime as feature - regime probabilities inside a walk-forward predictive model."""
 
+import logging
 import warnings
-
-warnings.filterwarnings("ignore", category=FutureWarning)
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
-from hmmlearn.hmm import GaussianHMM
 from IPython.display import display
 from ml4t.engineer.features.ml import regime_conditional_features, rolling_entropy
 from ml4t.engineer.features.regime import (
@@ -75,628 +79,613 @@ from ml4t.engineer.features.volatility import (
     realized_volatility,
     volatility_regime_probability,
 )
+from ml4t.engineer.logging import setup_logging
+from sklearn.base import clone
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 
+from case_studies.utils.temporal import (
+    filtered_state_probs,
+    fit_hmm_restarts,
+    relabel_states,
+    sort_states_by_variance,
+)
 from data import load_etfs, load_macro
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, FIGSIZE, show_with_alt
+
+setup_logging(level=logging.ERROR)  # per-call timing notices from the indicator library
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
 START_DATE = "2005-01-01"
 END_DATE = "2024-06-30"
+FORECAST_HORIZON = 5
+VOLATILITY_WINDOW = 21
+MOMENTUM_WINDOWS = (21, 63)
+N_STATES = 2
+N_RESTARTS = 3
 N_SPLITS = 5
+MINIMUM_REGIME_SESSIONS = 20
 SEED = 42
 
 # %%
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## Load Data and Create Features
+# ## The data and the target
+#
+# SPY daily closes and the volatility index, joined on the session. The features are the ones
+# a reader has already met: the return, a rolling standard deviation of it, two momentum sums
+# over different lengths, and the volatility index measured against its own recent level so
+# the column is comparable across two decades in which the index's average moved.
+#
+# The target is the sum of the next `FORECAST_HORIZON` returns. It reaches that many sessions
+# into the future, which is what makes the gap in the folds below necessary: a training block
+# ending at session $t$ contains targets built from returns up to $t + 4$, so a test block
+# starting at $t + 1$ would be predicting sessions its own training labels already saw.
 
 # %%
-# Load SPY from ETF universe
-etfs = load_etfs(symbols=["SPY"])
-spy = etfs.select(["timestamp", "close"]).rename({"close": "SP500"}).sort("timestamp")
+SESSIONS_PER_YEAR = 252
 
-# Load VIX from FRED macro
-macro = load_macro()
-vix = macro.select(["timestamp", "vixcls"]).rename({"vixcls": "VIXCLS"}).sort("timestamp")
-
-# Join SPY and VIX
-data = spy.join(vix, on="timestamp", how="inner").drop_nulls().sort("timestamp")
-
-# Filter date range
-data = data.filter(
-    (pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
-    & (pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
+prices = load_etfs(symbols=["SPY"]).select(["timestamp", "close"]).sort("timestamp")
+volatility_index = (
+    load_macro().select(["timestamp", "vixcls"]).rename({"vixcls": "volatility_index"})
 )
 
-# Feature engineering in Polars (before pandas conversion)
-data = (
-    data.with_columns(
-        returns=pl.col("SP500").log().diff() * 100,
+panel = (
+    prices.join(volatility_index, on="timestamp", how="inner")
+    .drop_nulls()
+    .sort("timestamp")
+    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
+    .with_columns(returns=pl.col("close").log().diff() * 100)
+    .with_columns(
+        volatility=pl.col("returns").rolling_std(VOLATILITY_WINDOW) * np.sqrt(SESSIONS_PER_YEAR),
+        momentum_short=pl.col("returns").rolling_sum(MOMENTUM_WINDOWS[0]),
+        momentum_long=pl.col("returns").rolling_sum(MOMENTUM_WINDOWS[1]),
+        index_level=pl.col("volatility_index").rolling_mean(VOLATILITY_WINDOW),
     )
     .with_columns(
-        volatility=pl.col("returns").rolling_std(window_size=21) * np.sqrt(252),
-        momentum_21=pl.col("returns").rolling_sum(window_size=21),
-        momentum_63=pl.col("returns").rolling_sum(window_size=63),
-        vix_ma=pl.col("VIXCLS").rolling_mean(window_size=21),
+        index_deviation=(pl.col("volatility_index") - pl.col("index_level"))
+        / pl.col("volatility_index").rolling_std(MOMENTUM_WINDOWS[1])
     )
-    .with_columns(
-        vix_zscore=(pl.col("VIXCLS") - pl.col("vix_ma"))
-        / pl.col("VIXCLS").rolling_std(window_size=63),
-    )
+    .with_columns(target=pl.col("returns").rolling_sum(FORECAST_HORIZON).shift(-FORECAST_HORIZON))
     .drop_nulls()
 )
 
-# Convert to pandas for sklearn and hmmlearn
-# NOTE: sklearn, hmmlearn require numpy/pandas input
-df = data.to_pandas().set_index("timestamp")
-df.index = pd.DatetimeIndex(df.index)
+frame = panel.to_pandas().set_index("timestamp")
+frame.index = pd.DatetimeIndex(frame.index)
 
-# Target: 5-day forward return (pandas for shift(-5) which is look-ahead)
-df["target"] = df["returns"].shift(-5).rolling(5).sum()
-df = df.dropna()
+BASE_FEATURES = ["returns", "volatility", "momentum_short", "momentum_long", "index_deviation"]
+REGIME_FEATURE = "probability_of_the_volatile_state"
 
-print(f"Data: {len(df)} observations from {df.index.min()} to {df.index.max()}")
+print(f"Sessions: {len(frame):,}, {frame.index.min().date()} to {frame.index.max().date()}")
+print(f"Target: sum of the next {FORECAST_HORIZON} returns, in percent")
+print(f"Target mean {frame['target'].mean():.4f}, standard deviation {frame['target'].std():.4f}")
+display(frame[[*BASE_FEATURES, "target"]].tail(3))
 
 # %% [markdown]
-# ## Regime Detection with HMM
+# ## The regime feature, built one fold at a time
 #
-# We refit a simple 2-state HMM here for self-containedness. See
-# `11_hmm_regimes` for a thorough treatment of initialization, model
-# selection, and label switching.
+# This is the cell the notebook exists for. `TimeSeriesSplit` gives five expanding training
+# blocks, each followed by a test block, and a gap of `FORECAST_HORIZON` sessions between them
+# so no training target overlaps a test session. Inside each fold:
 #
-# **Critical**: We use **filtered** probabilities (forward algorithm only)
-# as features. Smoothed probabilities use future data and would introduce
-# look-ahead bias into the downstream ML models.
+# 1. The hidden Markov model is fitted on the training block's returns and volatility, from
+#    several starts, keeping the fit with the highest training likelihood. Nothing from the
+#    test block enters the fit.
+# 2. Its states are renumbered by fitted variance, so state one is the more volatile one in
+#    every fold. Expectation maximization returns states in an arbitrary order, and a feature
+#    named for one of them means different things across folds without this step.
+# 3. Filtered probabilities are computed by forward recursion over every session up to the end
+#    of the test block. The recursion at session $t$ conditions on sessions up to $t$, and the
+#    parameters it uses were fitted on the training block, so a test-block value is a quantity
+#    that could have been computed on the day.
+#
+# What this costs is that the feature is not one column but five, one per fold, and they
+# disagree with each other on the sessions they share. That is the honest situation: a regime
+# probability is a function of what had been fitted at the time, and the number a reader sees
+# for a given session depends on which fold asked.
+
+# %%
+splits = list(TimeSeriesSplit(n_splits=N_SPLITS, gap=FORECAST_HORIZON).split(frame))
+observations = frame[["returns", "volatility"]].to_numpy()
+
+VOLATILE_STATE = N_STATES - 1
+
+fold_probability: list[np.ndarray] = []
+fold_state: list[np.ndarray] = []
+fold_rows = []
+
+for fold, (train_index, test_index) in enumerate(splits, start=1):
+    fitted = fit_hmm_restarts(
+        observations[train_index], n_states=N_STATES, random_state=SEED, n_restarts=N_RESTARTS
+    )
+    prefix = observations[: test_index[-1] + 1]
+    raw = filtered_state_probs(fitted.model, prefix)
+    states, probabilities = relabel_states(
+        raw.argmax(axis=1), raw, sort_states_by_variance(fitted.model)
+    )
+    fold_probability.append(probabilities[:, VOLATILE_STATE])
+    fold_state.append(states)
+
+    volatile = probabilities[test_index, VOLATILE_STATE]
+    fold_rows.append(
+        {
+            "fold": fold,
+            "training sessions": len(train_index),
+            "test sessions": len(test_index),
+            "test block starts": frame.index[test_index[0]].date(),
+            "training log likelihood": fitted.log_likelihood,
+            "restarts rejected or failed": fitted.n_rejected + fitted.n_failed,
+            "mean probability of the volatile state, test block": float(volatile.mean()),
+            "test sessions called volatile": int((volatile > 0.5).sum()),
+        }
+    )
+
+display(pd.DataFrame(fold_rows).set_index("fold").T)
+
+# %% [markdown]
+# The mean probability of the volatile state differs across the test blocks, which is what a
+# regime feature is supposed to do, and the fold covering 2020 is the one to check that
+# against. The restart column should be read too: a fold where restarts failed is a fold whose
+# feature came from fewer starting points than the others.
+
+# %% [markdown]
+# ## Three designs, one loop
+#
+# Every design sees the same folds, the same features and the same fold-local regime feature.
+# They differ only in what they do with it.
+#
+# - **Baseline** fits one model on `BASE_FEATURES` and never sees the regime.
+# - **Regime as feature** fits one model on `BASE_FEATURES` plus the filtered probability of
+#   the volatile state.
+# - **Mixture of experts** fits one model per hard state on `BASE_FEATURES` alone, using the
+#   training block's states to split the training rows, and routes each test session to the
+#   model for its own state. A state with fewer than `MINIMUM_REGIME_SESSIONS` training rows
+#   gets no model of its own, and its test sessions fall back to the other one.
+#
+# The scaler is refitted on each fold's training block and applied to the test block, which
+# matters more than it looks: a scaler fitted on the whole sample carries the test block's
+# mean and variance into the training data, and does it silently.
 
 
 # %%
-def compute_filtered_probs(model: GaussianHMM, X: np.ndarray) -> np.ndarray:
-    """Compute filtered probabilities P(state_t | obs_{1:t}).
+def evaluate_single_model(estimator, features: list[str], regime_column: bool) -> pd.DataFrame:
+    """Fit one model per fold on `features`, optionally with the fold's regime probability."""
+    rows = []
+    for fold, ((train_index, test_index), probability) in enumerate(
+        zip(splits, fold_probability, strict=True), start=1
+    ):
+        design = frame[features].to_numpy()
+        if regime_column:
+            # The fold's recursion stops at the end of its test block, so the column is only
+            # defined that far; every index either loop uses lies inside it.
+            column = np.full(len(frame), np.nan)
+            column[: len(probability)] = probability
+            design = np.column_stack([design, column])
 
-    Uses the forward algorithm internally, then normalizes.
-    Note: uses hmmlearn's private _compute_log_likelihood API.
-    """
-    framelogprob = model._compute_log_likelihood(X)
-    n_samples = X.shape[0]
-    n_components = model.n_components
-
-    log_startprob = np.log(model.startprob_ + 1e-300)
-    log_transmat = np.log(model.transmat_ + 1e-300)
-
-    fwdlattice = np.zeros((n_samples, n_components))
-    fwdlattice[0] = log_startprob + framelogprob[0]
-
-    for t in range(1, n_samples):
-        for j in range(n_components):
-            fwdlattice[t, j] = framelogprob[t, j] + np.logaddexp.reduce(
-                fwdlattice[t - 1] + log_transmat[:, j]
-            )
-
-    log_normalizer = np.logaddexp.reduce(fwdlattice, axis=1, keepdims=True)
-    return np.exp(fwdlattice - log_normalizer)
-
-
-# %%
-# Prepare data for HMM
-X_hmm = df[["returns", "volatility"]].values
-
-# Fit HMM with 2 states
-n_states = 2
-hmm_model = GaussianHMM(
-    n_components=n_states,
-    covariance_type="full",
-    n_iter=100,
-    random_state=42,
-)
-hmm_model.fit(X_hmm)
-
-# Filtered (causal) probabilities; hard states are their argmax so both are
-# consistent and use only past/current observations. We deliberately do NOT
-# use `hmm_model.predict(X_hmm)`: that is Viterbi global decoding, which
-# conditions on the entire sample (including future observations) and must
-# not feed test-time expert routing (see 11_hmm_regimes, which saves
-# argmax-of-filtered states for the same reason).
-regime_probs = compute_filtered_probs(hmm_model, X_hmm)
-df["regime"] = regime_probs.argmax(axis=1)
-
-# Label states by volatility (ensure consistent labeling)
-regime_vols = df.groupby("regime")["volatility"].mean()
-low_vol_state = regime_vols.idxmin()
-high_vol_state = regime_vols.idxmax()
-
-# Rename to ensure state 0 = low vol, state 1 = high vol
-# Simplified label switching — see 11_hmm_regimes for variance-based sorting
-if low_vol_state == 1:
-    df["regime"] = 1 - df["regime"]
-    regime_probs = regime_probs[:, ::-1]
-
-df["prob_high_vol"] = regime_probs[:, 1]
-df["prob_low_vol"] = regime_probs[:, 0]
-
-print("=== Regime Characteristics ===")
-for regime in [0, 1]:
-    mask = df["regime"] == regime
-    label = "Low Vol" if regime == 0 else "High Vol"
-    pct = mask.mean() * 100
-    mean_ret = df.loc[mask, "returns"].mean()
-    mean_vol = df.loc[mask, "volatility"].mean()
-    print(f"{label}: {pct:.1f}% of time, mean ret: {mean_ret:.3f}%, vol: {mean_vol:.1f}%")
-
-# %% [markdown]
-# **Walk-forward caveat**: The HMM above is fit on the full dataset for
-# demonstration simplicity. In production, the HMM must be refit inside
-# each walk-forward fold — fit on training data, then extract filtered
-# probabilities only for the test period. The full-sample fit here means
-# regime features carry information from future folds into the training
-# set, biasing the downstream CV results upward. The comparison below
-# still illustrates the *relative* benefit of regime-as-feature vs
-# mixture-of-experts, but absolute performance numbers should not be
-# taken at face value.
-
-# %% [markdown]
-# ## Approach 1: Regime-as-Feature
-#
-# Include the regime probability as a feature in a single model.
-#
-# **Properties relative to mixture of experts**:
-# - Single model to maintain rather than one per regime
-# - Smooth transitions at regime boundaries (the feature varies continuously)
-# - Model learns the weighting of regime information from the data
-# - Misclassified regimes degrade the feature, not the model assignment
-
-# %%
-# Define feature sets
-base_features = ["returns", "volatility", "momentum_21", "momentum_63", "vix_zscore"]
-regime_features = base_features + ["prob_high_vol"]
-
-# Prepare data
-X_base = df[base_features].values
-X_regime = df[regime_features].values
-y = df["target"].values
-
-# Time-series cross-validation. gap=5 purges the 5 bars whose forward-return
-# target (shift(-5).rolling(5)) overlaps the test fold — see the label-buffer
-# (purge) discussion in 06_strategy_definition/02_cv_foundations.
-tscv = TimeSeriesSplit(n_splits=N_SPLITS, gap=5)
-
-# Scale features
-scaler_base = StandardScaler()
-scaler_regime = StandardScaler()
-
-
-def evaluate_model(model_class, X, y, scaler, **kwargs):
-    """Evaluate model with time-series cross-validation."""
-    scores_rmse = []
-    scores_r2 = []
-
-    for train_idx, test_idx in tscv.split(X):
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
-
-        # Scale
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        # Fit and predict
-        model = model_class(**kwargs)
-        model.fit(X_train_scaled, y_train)
-        y_pred = model.predict(X_test_scaled)
-
-        scores_rmse.append(np.sqrt(mean_squared_error(y_test, y_pred)))
-        scores_r2.append(r2_score(y_test, y_pred))
-
-    return np.mean(scores_rmse), np.mean(scores_r2)
-
-
-# Evaluate models with and without regime features
-print("=== Approach 1: Regime-as-Feature ===\n")
-print("Ridge Regression:")
-rmse_base, r2_base = evaluate_model(Ridge, X_base, y, scaler_base, alpha=1.0)
-rmse_regime, r2_regime = evaluate_model(Ridge, X_regime, y, scaler_regime, alpha=1.0)
-print(f"  Without regime: RMSE={rmse_base:.4f}, R²={r2_base:.4f}")
-print(f"  With regime:    RMSE={rmse_regime:.4f}, R²={r2_regime:.4f}")
-improvement_ridge = (rmse_base - rmse_regime) / rmse_base * 100
-print(f"  Improvement:    {improvement_ridge:.2f}% RMSE reduction")
-
-print("\nGradient Boosting:")
-rmse_base_gb, r2_base_gb = evaluate_model(
-    GradientBoostingRegressor,
-    X_base,
-    y,
-    scaler_base,
-    n_estimators=100,
-    max_depth=3,
-    random_state=42,
-)
-rmse_regime_gb, r2_regime_gb = evaluate_model(
-    GradientBoostingRegressor,
-    X_regime,
-    y,
-    scaler_regime,
-    n_estimators=100,
-    max_depth=3,
-    random_state=42,
-)
-print(f"  Without regime: RMSE={rmse_base_gb:.4f}, R²={r2_base_gb:.4f}")
-print(f"  With regime:    RMSE={rmse_regime_gb:.4f}, R²={r2_regime_gb:.4f}")
-improvement_gb = (rmse_base_gb - rmse_regime_gb) / rmse_base_gb * 100
-print(f"  Improvement:    {improvement_gb:.2f}% RMSE reduction")
-
-# %% [markdown]
-# ## Approach 2: Mixture of Experts
-#
-# **Alternative approach**: Train separate models for each regime and switch between them.
-#
-# **Advantages**:
-# - Models can capture fundamentally different dynamics
-# - More interpretable (separate coefficients per regime)
-#
-# **Disadvantages**:
-# - Less data per model (training split by regime)
-# - Sharp transitions at regime boundaries
-# - Sensitive to regime misclassification
-# - Multiple models to maintain
-
-
-# %%
-def mixture_of_experts_cv(X, y, regimes, model_class, tscv, **kwargs):
-    """Evaluate mixture of experts with time-series CV."""
-    scores_rmse = []
-    scores_r2 = []
-
-    for train_idx, test_idx in tscv.split(X):
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
-        regime_train = regimes[train_idx]
-        regime_test = regimes[test_idx]
-
-        # Scale
         scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        model = clone(estimator)
+        model.fit(
+            scaler.fit_transform(design[train_index]), frame["target"].to_numpy()[train_index]
+        )
+        predicted = model.predict(scaler.transform(design[test_index]))
+        actual = frame["target"].to_numpy()[test_index]
+        rows.append(
+            {
+                "fold": fold,
+                "root mean squared error": float(np.sqrt(mean_squared_error(actual, predicted))),
+                "r squared": float(r2_score(actual, predicted)),
+            }
+        )
+    return pd.DataFrame(rows).set_index("fold")
 
-        # Train separate models per regime
-        models = {}
-        for r in [0, 1]:
-            mask = regime_train == r
-            if mask.sum() < 20:  # Not enough data
+
+def evaluate_mixture_of_experts(estimator, features: list[str]) -> pd.DataFrame:
+    """One model per state, fitted on that state's training rows and routed to by state."""
+    rows = []
+    for fold, ((train_index, test_index), states) in enumerate(
+        zip(splits, fold_state, strict=True), start=1
+    ):
+        design = frame[features].to_numpy()
+        target = frame["target"].to_numpy()
+
+        scaler = StandardScaler()
+        train_design = scaler.fit_transform(design[train_index])
+        test_design = scaler.transform(design[test_index])
+
+        experts = {}
+        for state in range(N_STATES):
+            inside = states[train_index] == state
+            if inside.sum() < MINIMUM_REGIME_SESSIONS:
                 continue
-            model = model_class(**kwargs)
-            model.fit(X_train_scaled[mask], y_train[mask])
-            models[r] = model
+            expert = clone(estimator)
+            expert.fit(train_design[inside], target[train_index][inside])
+            experts[state] = expert
 
-        # Predict using regime-specific models
-        y_pred = np.zeros(len(y_test))
-        for r in [0, 1]:
-            mask = regime_test == r
-            if r in models and mask.sum() > 0:
-                y_pred[mask] = models[r].predict(X_test_scaled[mask])
-            elif mask.sum() > 0:
-                # Fallback if no model for this regime
-                fallback_model = list(models.values())[0]
-                y_pred[mask] = fallback_model.predict(X_test_scaled[mask])
+        predicted = np.empty(len(test_index))
+        fallback = next(iter(experts.values()))
+        routed = states[test_index]
+        for state in range(N_STATES):
+            selected = routed == state
+            if selected.any():
+                predicted[selected] = experts.get(state, fallback).predict(test_design[selected])
 
-        scores_rmse.append(np.sqrt(mean_squared_error(y_test, y_pred)))
-        scores_r2.append(r2_score(y_test, y_pred))
+        actual = target[test_index]
+        rows.append(
+            {
+                "fold": fold,
+                "root mean squared error": float(np.sqrt(mean_squared_error(actual, predicted))),
+                "r squared": float(r2_score(actual, predicted)),
+                "experts fitted": len(experts),
+            }
+        )
+    return pd.DataFrame(rows).set_index("fold")
 
-    return np.mean(scores_rmse), np.mean(scores_r2)
-
-
-print("=== Approach 2: Mixture of Experts ===\n")
-regimes = df["regime"].values
-
-print("Ridge Regression (separate models per regime):")
-rmse_moe, r2_moe = mixture_of_experts_cv(X_base, y, regimes, Ridge, tscv, alpha=1.0)
-print(f"  RMSE={rmse_moe:.4f}, R²={r2_moe:.4f}")
-print(f"  vs Single model: {'Better' if rmse_moe < rmse_base else 'Worse'}")
-print(f"  vs Regime-as-feature: {'Better' if rmse_moe < rmse_regime else 'Worse'}")
-
-print("\nGradient Boosting (separate models per regime):")
-rmse_moe_gb, r2_moe_gb = mixture_of_experts_cv(
-    X_base,
-    y,
-    regimes,
-    GradientBoostingRegressor,
-    tscv,
-    n_estimators=100,
-    max_depth=3,
-    random_state=42,
-)
-print(f"  RMSE={rmse_moe_gb:.4f}, R²={r2_moe_gb:.4f}")
-print(f"  vs Single model: {'Better' if rmse_moe_gb < rmse_base_gb else 'Worse'}")
-print(f"  vs Regime-as-feature: {'Better' if rmse_moe_gb < rmse_regime_gb else 'Worse'}")
-
-# %% [markdown]
-# ## Comparison Summary
 
 # %%
-# Collect results
-results = pd.DataFrame(
-    {
-        "Approach": [
-            "Baseline (no regime)",
-            "Regime-as-Feature",
-            "Mixture of Experts",
-        ],
-        "Ridge RMSE": [rmse_base, rmse_regime, rmse_moe],
-        "Ridge R²": [r2_base, r2_regime, r2_moe],
-        "GB RMSE": [rmse_base_gb, rmse_regime_gb, rmse_moe_gb],
-        "GB R²": [r2_base_gb, r2_regime_gb, r2_moe_gb],
-    }
-)
-
-display(results)
-
-# Best approach
-best_rmse = results["GB RMSE"].min()
-best_approach = results.loc[results["GB RMSE"].idxmin(), "Approach"]
-print(f"\nBest approach (GB by RMSE): {best_approach}")
-
-# %% [markdown]
-# ## Visualizing Regime-Aware Predictions
-
-# %%
-# Train final model with regime features on last 80% of data
-split_idx = int(len(df) * 0.8)
-X_train_final = X_regime[:split_idx]
-X_test_final = X_regime[split_idx:]
-y_train_final = y[:split_idx]
-y_test_final = y[split_idx:]
-
-scaler_final = StandardScaler()
-X_train_scaled = scaler_final.fit_transform(X_train_final)
-X_test_scaled = scaler_final.transform(X_test_final)
-
-model_final = GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=42)
-model_final.fit(X_train_scaled, y_train_final)
-y_pred_final = model_final.predict(X_test_scaled)
-
-# Get test period data
-test_dates = df.index[split_idx:]
-test_df = df.iloc[split_idx:].copy()
-test_df["predicted"] = y_pred_final
-test_df["actual"] = y_test_final
-
-# %%
-fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True)
-
-# Price with regime coloring
-ax = axes[0]
-colors = [COLORS["blue"], COLORS["copper"]]  # Low vol (calm) vs high vol (stress)
-regime_names = ["Low Vol", "High Vol"]
-for regime in range(2):
-    mask = test_df["regime"] == regime
-    ax.scatter(
-        test_df.index[mask],
-        test_df.loc[mask, "SP500"],
-        c=colors[regime],
-        s=1,
-        alpha=0.5,
-        label=regime_names[regime],
-    )
-ax.set_ylabel("S&P 500 (index level)")
-ax.set_title("Test-Period S&P 500 Colored by Detected Regime")
-ax.legend(loc="upper left")
-
-# Regime probabilities
-ax = axes[1]
-ax.fill_between(
-    test_df.index,
-    0,
-    test_df["prob_high_vol"],
-    alpha=0.7,
-    color=COLORS["copper"],
-    label="P(High Vol)",
-)
-ax.set_ylabel("Probability")
-ax.set_title("Filtered High-Volatility Regime Probability")
-
-# Predictions vs Actual
-ax = axes[2]
-ax.plot(
-    test_df.index,
-    test_df["actual"],
-    label="Actual",
-    linewidth=0.8,
-    alpha=0.7,
-    color=COLORS["neutral"],
-)
-ax.plot(
-    test_df.index,
-    test_df["predicted"],
-    label="Predicted",
-    linewidth=0.8,
-    alpha=0.9,
-    color=COLORS["blue"],
-)
-ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
-ax.set_ylabel("5-Day Return (%)")
-ax.set_title("Regime-Aware Model: Predicted vs Actual 5-Day Returns")
-ax.legend()
-
-# Prediction error by regime
-ax = axes[3]
-test_df["error"] = test_df["predicted"] - test_df["actual"]
-for regime in range(2):
-    mask = test_df["regime"] == regime
-    ax.scatter(
-        test_df.index[mask],
-        test_df.loc[mask, "error"],
-        c=colors[regime],
-        s=5,
-        alpha=0.5,
-        label=f"{regime_names[regime]} error",
-    )
-ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
-ax.set_ylabel("Prediction Error (%)")
-ax.set_title("Prediction Errors Are Larger in the High-Vol Regime")
-ax.legend()
-
-plt.show()
-
-# %% [markdown]
-# ## Feature Importance Analysis
-
-# %%
-# Feature importance from the regime-aware model
-feature_importance = pd.DataFrame(
-    {"Feature": regime_features, "Importance": model_final.feature_importances_}
-).sort_values("Importance", ascending=True)
-
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.barh(feature_importance["Feature"], feature_importance["Importance"], color=COLORS["blue"])
-ax.set_xlabel("Impurity-based importance (Gradient Boosting)")
-ax.set_title("Regime Probability Contributes Little; Base Features Dominate")
-plt.show()
-
-# %% [markdown]
-# **Interpretation**: If `prob_high_vol` ranks among the top features, the model
-# is learning regime-conditional relationships — the regime-as-feature approach
-# is adding value beyond what the base features provide. If it ranks low, the
-# base features may already capture the regime information implicitly (e.g.,
-# volatility correlates with regime state).
-
-# %% [markdown]
-# ## Error Analysis by Regime
-
-# %%
-print("=== Error Analysis by Regime ===\n")
-for regime in [0, 1]:
-    mask = test_df["regime"] == regime
-    label = "Low Vol" if regime == 0 else "High Vol"
-    rmse = np.sqrt(mean_squared_error(test_df.loc[mask, "actual"], test_df.loc[mask, "predicted"]))
-    r2 = r2_score(test_df.loc[mask, "actual"], test_df.loc[mask, "predicted"])
-    n = mask.sum()
-    print(f"{label} Regime (n={n}):")
-    print(f"  RMSE: {rmse:.4f}")
-    print(f"  R²:   {r2:.4f}")
-    print()
-
-# %% [markdown]
-# ## Technical Pitfalls
-#
-# See Section 9.5 and `11_hmm_regimes` for a thorough treatment of HMM
-# estimation pitfalls (EM sensitivity, label switching, number-of-states
-# selection). The key practical concern for regime-as-feature is
-# **walk-forward discipline**: refit the HMM inside each CV fold to avoid
-# leaking future regime information into training features.
-
-# %% [markdown]
-# ## Summary Statistics for Chapter
-
-# %%
-summary = {
-    "Data observations": len(df),
-    "Date range": f"{df.index.min().date()} to {df.index.max().date()}",
-    "Low vol regime %": f"{(df['regime'] == 0).mean():.1%}",
-    "High vol regime %": f"{(df['regime'] == 1).mean():.1%}",
-    "Baseline RMSE (GB)": f"{rmse_base_gb:.4f}",
-    "Regime-as-Feature RMSE (GB)": f"{rmse_regime_gb:.4f}",
-    "Mixture of Experts RMSE (GB)": f"{rmse_moe_gb:.4f}",
-    "Improvement from regime feature": f"{improvement_gb:.2f}%",
-    "Regime feature importance": f"{feature_importance[feature_importance['Feature'] == 'prob_high_vol']['Importance'].values[0]:.3f}",
+ESTIMATORS = {
+    "ridge": Ridge(alpha=1.0),
+    "gradient boosting": GradientBoostingRegressor(
+        n_estimators=100, max_depth=3, random_state=SEED
+    ),
 }
 
-print("\n=== Summary for Chapter ===")
-for key, value in summary.items():
-    print(f"{key}: {value}")
+per_fold = {}
+for name, estimator in ESTIMATORS.items():
+    per_fold[(name, "baseline")] = evaluate_single_model(estimator, BASE_FEATURES, False)
+    per_fold[(name, "regime as feature")] = evaluate_single_model(estimator, BASE_FEATURES, True)
+    per_fold[(name, "mixture of experts")] = evaluate_mixture_of_experts(estimator, BASE_FEATURES)
+
+summary = pd.DataFrame(
+    [
+        {
+            "estimator": name,
+            "design": design,
+            "mean error across folds": table["root mean squared error"].mean(),
+            "spread of the error across folds": table["root mean squared error"].std(),
+            "worst fold's error": table["root mean squared error"].max(),
+            "mean r squared": table["r squared"].mean(),
+        }
+        for (name, design), table in per_fold.items()
+    ]
+).set_index(["estimator", "design"])
+
+display(summary)
 
 # %% [markdown]
-# ## ml4t-engineer: Temporal Feature Generation
+# Read the spread column before the mean. The five folds cover different market conditions, and
+# the error moves between folds by roughly an order of magnitude more than it moves between
+# designs. That is the first thing the table says, and it is the reason a single averaged number
+# with no spread beside it would mislead.
 #
-# So far we used HMM probabilities as regime features. `ml4t-engineer`
-# provides a richer feature toolkit combining regime indicators, volatility
-# features, and entropy — all as Polars expressions composable in
-# `with_columns()`. This demonstrates the feature catalog that would feed
-# into downstream ML models (Ch11-12).
+# The r squared column is the other thing to read, and it is negative or close to zero
+# throughout. A negative r squared means the model predicts the test block worse than that
+# block's own mean would, which is the normal outcome for a five-session return forecast from
+# five features and is why the chapter treats regime information as conditioning rather than
+# as a signal.
+
+# %% [markdown]
+# ## The paired difference, and what five folds can support
+#
+# The designs share their folds, so a fold-by-fold difference removes whatever made a fold
+# hard. That is worth doing and it is not a test. A paired difference has variance
+# $\mathrm{Var}(A) + \mathrm{Var}(B) - 2\,\mathrm{Cov}(A, B)$, so pairing helps in proportion to
+# the covariance, and with five folds that are nested inside one another the covariance is not
+# something five numbers can estimate. What the column below supports is a direction and a
+# magnitude, not a claim of significance.
 
 # %%
-# Reload data as Polars for ml4t-engineer feature generation
-etfs = load_etfs(symbols=["SPY"])
-spy_pl = (
-    etfs.select(["timestamp", "open", "high", "low", "close", "volume"])
+paired = pd.DataFrame(
+    {
+        f"{name}: {design} minus baseline": (
+            per_fold[(name, design)]["root mean squared error"]
+            - per_fold[(name, "baseline")]["root mean squared error"]
+        )
+        for name in ESTIMATORS
+        for design in ("regime as feature", "mixture of experts")
+    }
+)
+display(paired.T.assign(mean=paired.mean(), folds_improved=(paired < 0).sum()))
+
+# %% [markdown]
+# ## The last fold, drawn
+#
+# Every panel below is drawn from the final fold, whose training block is the longest and whose
+# test block is the most recent. The model is the gradient-boosted regime-as-feature design,
+# refitted here so its predictions can be looked at rather than only scored.
+
+# %%
+final_train, final_test = splits[-1]
+final_probability = fold_probability[-1]
+final_state = fold_state[-1]
+
+regime_column = np.full(len(frame), np.nan)
+regime_column[: len(final_probability)] = final_probability
+final_design = np.column_stack([frame[BASE_FEATURES].to_numpy(), regime_column])
+
+final_scaler = StandardScaler()
+final_model = GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=SEED)
+final_model.fit(
+    final_scaler.fit_transform(final_design[final_train]),
+    frame["target"].to_numpy()[final_train],
+)
+final_predicted = final_model.predict(final_scaler.transform(final_design[final_test]))
+
+test_dates = frame.index[final_test]
+test_actual = frame["target"].to_numpy()[final_test]
+test_probability = final_probability[final_test]
+test_state = final_state[final_test]
+
+print(f"Final fold test block: {test_dates[0].date()} to {test_dates[-1].date()}")
+print(
+    f"Test sessions in the volatile state: {int((test_state == VOLATILE_STATE).sum())} of {len(test_state)}"
+)
+
+# %%
+fig, axes = plt.subplots(3, 1, figsize=FIGSIZE["grid_3x2"], sharex=True)
+
+ax = axes[0]
+ax.plot(test_dates, frame["close"].to_numpy()[final_test], linewidth=0.9, color=COLORS["blue"])
+ax.fill_between(
+    test_dates,
+    frame["close"].to_numpy()[final_test].min(),
+    frame["close"].to_numpy()[final_test].max(),
+    where=test_state == VOLATILE_STATE,
+    alpha=0.2,
+    color=COLORS["copper"],
+)
+ax.set_ylabel("US dollars")
+ax.set_title("The volatile state falls on the drawdowns of the test block", fontsize=9)
+
+ax = axes[1]
+ax.fill_between(test_dates, 0, test_probability, alpha=0.6, color=COLORS["copper"])
+ax.axhline(0.5, color=COLORS["recede"], linestyle="--", linewidth=0.7)
+ax.set_ylabel("Probability")
+ax.set_title("The filtered probability is continuous, not a switch", fontsize=9)
+
+ax = axes[2]
+for state, color, name in (
+    (0, COLORS["blue"], "calm"),
+    (VOLATILE_STATE, COLORS["copper"], "volatile"),
+):
+    selected = test_state == state
+    ax.scatter(
+        test_dates[selected],
+        (final_predicted - test_actual)[selected],
+        s=5,
+        alpha=0.6,
+        color=color,
+        label=name,
+    )
+ax.axhline(0, color=COLORS["recede"], linestyle="--", linewidth=0.7)
+ax.set_ylabel("Percent")
+ax.set_xlabel("Session")
+ax.set_title("The errors are wider in the volatile state", fontsize=9)
+ax.legend(fontsize=7)
+
+fig.suptitle("The final fold: where the regime feature was high and what it bought")
+show_with_alt(
+    fig,
+    "Three stacked panels over the final fold's test block. The top plots the closing price "
+    "with shaded bands where the hard state is the volatile one, and the bands cover the "
+    "declines. The middle fills the filtered probability of that state against a dashed line "
+    "at one half; it rises and falls smoothly rather than stepping. The bottom scatters the "
+    "prediction error colored by state, and the volatile points spread further from zero "
+    "than the calm ones.",
+)
+
+# %%
+errors = pd.DataFrame(
+    [
+        {
+            "state": name,
+            "sessions": int((test_state == state).sum()),
+            "root mean squared error": float(
+                np.sqrt(
+                    mean_squared_error(
+                        test_actual[test_state == state], final_predicted[test_state == state]
+                    )
+                )
+            ),
+            "standard deviation of the target": float(test_actual[test_state == state].std()),
+        }
+        for state, name in ((0, "calm"), (VOLATILE_STATE, "volatile"))
+    ]
+).set_index("state")
+
+display(errors)
+
+# %% [markdown]
+# The error is larger in the volatile state, and the last column is what stops that being read
+# as a finding about the model: the target itself is more dispersed there by about as much, so
+# most of the difference is the question rather than the answer.
+#
+# What is left after that comparison is the part worth reading. In the volatile state the error
+# is a little larger than the target's own standard deviation, which is what a negative r
+# squared looks like at the level of one state: the model would have done better there by
+# predicting that state's mean. In the calm state it is a little smaller. Reporting the error
+# alone would have shown neither.
+
+# %% [markdown]
+# ## What the importance says, and what it does not
+#
+# The importance below is impurity-based: for each feature, the total reduction in squared
+# error over the splits that used it. It measures what the fitted trees did, and that is
+# narrower than what a reader usually wants it to mean.
+
+# %%
+importance = (
+    pd.DataFrame(
+        {
+            "feature": [*BASE_FEATURES, REGIME_FEATURE],
+            "importance": final_model.feature_importances_,
+        }
+    )
+    .sort_values("importance")
+    .set_index("feature")
+)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+ax.barh(importance.index, importance["importance"], color=COLORS["blue"])
+ax.set_xlabel("Reduction in squared error over the splits that used it")
+ax.set_title("Volatility carries the regime information the probability would add", fontsize=9)
+show_with_alt(
+    fig,
+    "A horizontal bar chart of six features ordered by impurity-based importance. The "
+    "rolling volatility and the two momentum sums take the largest bars, and the regime "
+    "probability takes one of the smallest.",
+)
+
+display(importance.T)
+
+# %% [markdown]
+# A near-zero importance here does not say the regime is uninformative. It says this model, on
+# these features, found little to split on that `volatility` did not already offer, and
+# `volatility` is one of the two series the hidden Markov model was fitted on. The regime
+# probability is a nonlinear summary of the same information with a persistence assumption
+# attached, and a tree that can already split on the raw series reaches most of it directly.
+#
+# Two things follow. Where the base features do not contain what the regime model reads, the
+# same column can rank far higher; the case studies from Chapter 16 use regime features
+# alongside cross-sectional signals that carry no volatility of their own. And an importance
+# split between two correlated columns is divided arbitrarily between them, so a low value on
+# one of a correlated pair is not evidence about either.
+
+# %% [markdown]
+# ## The same idea as a feature catalog
+#
+# The regime feature above was built by hand from a fitted model. `ml4t-engineer` supplies a
+# set of regime and volatility features as Polars expressions, composable in one
+# `with_columns()`, and this is what a downstream pipeline in Chapters 11 and 12 receives.
+#
+# One argument convention is worth stating because getting it wrong produces a plausible
+# column rather than an error. These expressions differ in what they take:
+# `realized_volatility`, `garch_forecast` and `rolling_entropy` read a **return** column, while
+# `hurst_exponent`, `choppiness_index`, `market_regime_classifier` and
+# `volatility_regime_probability` read **prices** and difference them internally. Handing
+# returns to one of the price expressions gives a column of numbers with the right shape and
+# the wrong meaning.
+
+# %%
+CATALOG_WINDOW = 20
+HURST_WINDOW = 100
+CHOPPINESS_WINDOW = 14
+ENTROPY_WINDOW = 50
+
+catalog = (
+    load_etfs(symbols=["SPY"])
+    .select(["timestamp", "open", "high", "low", "close", "volume"])
     .sort("timestamp")
+    .filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
+    .filter(pl.col("timestamp") <= pl.lit(END_DATE).str.to_date())
     .with_columns(returns=pl.col("close").pct_change())
     .drop_nulls()
+    .with_columns(
+        hurst=hurst_exponent("close", period=HURST_WINDOW),
+        choppiness=choppiness_index("high", "low", "close", period=CHOPPINESS_WINDOW),
+        trend_regime=market_regime_classifier("high", "low", "close", "volume"),
+        realized=realized_volatility("returns", period=CATALOG_WINDOW),
+        garch=garch_forecast("returns", horizon=1, alpha=0.1, beta=0.85),
+        entropy=rolling_entropy("returns", window=ENTROPY_WINDOW, n_bins=10),
+    )
+    .with_columns(**volatility_regime_probability("close", period=CATALOG_WINDOW))
 )
 
-# Generate a comprehensive feature set in one pipeline
-spy_features = spy_pl.with_columns(
-    hurst=hurst_exponent("close", period=100),
-    chop=choppiness_index("high", "low", "close", period=14),
-    regime=market_regime_classifier("high", "low", "close", "volume"),
-    rv_20=realized_volatility("returns", period=20),
-    garch_vol=garch_forecast("returns", horizon=1, alpha=0.1, beta=0.85),
-    entropy=rolling_entropy("returns", window=50, n_bins=10),
-)
-
-# Add volatility regime probabilities (returns dict of expressions)
-vol_regime_exprs = volatility_regime_probability("returns")
-spy_features = spy_features.with_columns(**vol_regime_exprs)
-
-print(f"Feature matrix: {spy_features.shape}")
-spy_features.select(["timestamp", "hurst", "chop", "regime", "rv_20", "garch_vol", "entropy"]).tail(
-    5
+print(f"Catalog: {catalog.height:,} sessions, {catalog.width} columns")
+display(
+    catalog.select(
+        ["timestamp", "hurst", "choppiness", "trend_regime", "realized", "garch", "entropy"]
+    ).tail(3)
 )
 
 # %% [markdown]
-# ### Regime-Conditional Features
+# ### Interactions without writing them out
 #
-# `regime_conditional_features()` creates interaction terms between a base
-# feature and detected regime — e.g., "momentum only in trending regime."
-# This avoids manual if/else logic and produces sparse features that tree
-# models can split on efficiently.
+# `regime_conditional_features` multiplies one feature by an indicator for each value of a regime
+# column, so each output column is the feature inside one regime and zero everywhere else. A
+# linear model then fits a separate coefficient per regime without any branching, and a tree model
+# gets a column that is already the interaction it would otherwise have to discover through two
+# splits.
+#
+# The regime values below are the three `market_regime_classifier` emits, and none of them is a
+# direction: one is a trending market, zero a transitional one, and minus one a range-bound or
+# choppy one. The classifier reads a trend-strength indicator and a choppiness indicator, neither
+# of which has a sign, so a market trending hard downward and one trending hard upward both come
+# back as one.
+#
+# `regime_conditional_features` names its output columns `feat_bear`, `feat_neutral` and
+# `feat_bull` from the values minus one, zero and one, which is the naming for a classifier whose
+# states are directional. For this classifier those names are wrong and only the numbers mean
+# anything, so the pairing is spelled out and checked below.
 
 # %%
-# Create regime-conditional momentum features
-cond_features = regime_conditional_features("returns", "regime", regime_values=[-1, 0, 1])
-spy_cond = spy_features.with_columns(**cond_features)
+REGIME_VALUES = [-1, 0, 1]  # what the classifier emits; the meanings are spelled out below
+REGIME_COLUMNS = ["feat_bear", "feat_neutral", "feat_bull"]
+REGIME_MEANING = ["range-bound", "transitional", "trending"]
 
-print("=== Regime-Conditional Features ===")
-for col_name in sorted(cond_features.keys()):
-    vals = spy_cond[col_name].drop_nulls()
-    non_zero = (vals != 0).sum()
-    print(f"  {col_name}: {non_zero} non-zero values ({100 * non_zero / len(vals):.1f}%)")
+conditional = regime_conditional_features("returns", "trend_regime", regime_values=REGIME_VALUES)
+assert sorted(conditional) == sorted(REGIME_COLUMNS), sorted(conditional)
+with_interactions = catalog.with_columns(**conditional)
+
+display(
+    pl.DataFrame(
+        [
+            {
+                "regime": regime,
+                "what the value means": meaning,
+                "column the helper named it": name,
+                "sessions in this regime": int((with_interactions["trend_regime"] == regime).sum()),
+                "sessions where the column is not zero": int((with_interactions[name] != 0).sum()),
+            }
+            for regime, name, meaning in zip(
+                REGIME_VALUES, REGIME_COLUMNS, REGIME_MEANING, strict=True
+            )
+        ]
+    )
+)
 
 # %% [markdown]
-# **Interpretation**: Each conditional feature is non-zero only during its
-# assigned regime, creating a natural interaction effect. For example,
-# `returns_bear` (regime=-1) captures momentum only during range-bound
-# periods, while `returns_bull` (regime=1) captures it during strong trends.
-# Tree-based models can learn regime-specific coefficients from these features.
+# Two things to read here. The session counts partition the sample, since every session gets
+# exactly one regime, and the classifier calls the market transitional on almost all of them: the
+# middle column carries nearly everything, and the trending and range-bound columns are sparse. A
+# coefficient on either of those is estimated from its own few hundred sessions alone, which is
+# the mixture-of-experts problem in a milder form.
+#
+# And the two counts per row differ. A session inside a regime whose return happens to be zero
+# gives a zero in its own column, so counting non-zero values undercounts the regime. That makes
+# no difference to a model, which reads the value and not the count, but it is the reason the
+# two columns are shown side by side rather than one being taken for the other.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Takeaways
 #
-# 1. **Regime-as-Feature** uses a single model with the regime probability
-#    as an additional feature; on this single-symbol test the GB
-#    Regime-as-Feature configuration achieves the lowest RMSE among the
-#    three configurations reported in the comparison table above
-# 2. **Mixture of Experts** trains a separate model per regime, which reduces
-#    the training sample per model and produces sharper transitions at
-#    regime boundaries
-# 3. **Regime probability importance varies with the base feature set** — on
-#    this single-symbol test `prob_high_vol` ranks low (~0.01 impurity-based
-#    importance) because the base features (notably `volatility`) already encode
-#    most of the regime signal; it can rank higher when the base features are
-#    less regime-informative
-# 4. **Error patterns differ by regime** — high-vol periods harder to predict
-# 5. **Watch for pitfalls** — EM sensitivity, label switching, overfitting
-# 6. **Cross-validate properly** — always use time-series CV for financial data
-# 7. **ml4t-engineer composes features declaratively** — regime indicators,
-#    volatility estimators, entropy, and conditional features in a single
-#    `with_columns()` pipeline
-# 8. **Regime-conditional features** create natural interaction terms that
-#    tree models exploit without manual feature engineering
+# 1. **A regime feature has to be refit inside the fold that uses it.** Fitting the hidden
+#    Markov model once on the whole sample and then splitting the folds puts every fold's test
+#    block into the parameters of its own feature. The cost of doing it correctly is one fit per
+#    fold and a feature that disagrees with itself across folds on the sessions they share.
+# 2. **Filtered probabilities, not smoothed ones.** `predict_proba` and Viterbi decoding both
+#    condition on the whole sequence. The forward recursion conditions on the past, which is
+#    what a value computed on the day can know.
+# 3. **Read the spread across folds before the mean.** The error moves more between folds than
+#    between designs here, and an averaged number with no spread beside it would have hidden
+#    that. Five nested folds cannot support a significance claim about the difference, however
+#    the pairing is done.
+# 4. **The mixture of experts pays for its sharpness in sample size.** Each expert sees only its
+#    own regime's training rows, and a misrouted test session reaches a model that never saw its
+#    kind. The single model with a regime column degrades instead of switching.
+# 5. **A low impurity importance on a regime column is a statement about the other columns.**
+#    Where `volatility` is already a feature, a probability fitted on volatility adds little that
+#    a tree cannot reach directly. The same column ranks higher where the base features carry no
+#    volatility of their own.
+# 6. **Check what each library expression consumes.** Half of the catalog above reads prices and
+#    differences them internally; handing those a return column produces a plausible number and
+#    no error.
 #
-# **Previous**: `11_hmm_regimes` for HMM estimation and filtered probability
-# extraction; `12_wasserstein_regimes` for distribution-based regime clustering.
-# **Next**: `14_panel_features` for cross-sectional and panel feature construction.
+# **Previous**: `11_hmm_regimes` fits the model whose probabilities this notebook spends, and
+# `12_wasserstein_regimes` the clustering alternative. **Next**: `14_panel_features` moves from
+# one series to a cross-section.

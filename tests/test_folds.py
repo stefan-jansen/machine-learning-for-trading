@@ -355,3 +355,45 @@ class TestPreparationStreams:
 
         assert len(out) == len(SPLITS)
         assert alive == [0, 0], "the raw set was memoised while the consumer was still reading it"
+
+
+class TestTheDesignMatrixIsBuiltInOneAllocation:
+    """polars is asked for C order; the alternative is building the matrix twice.
+
+    `_contiguous` pins the layout because a reduction over an F-ordered copy of the same values
+    does not give the same last bits. It used to be handed polars' default, which is Fortran
+    order, so it allocated a second full design matrix and both were alive until the first fell
+    out of scope. Asking polars for the layout removes that copy. What could break it is polars,
+    not this file, so the contract with polars is what these assert.
+    """
+
+    def test_polars_honours_the_requested_c_order(self) -> None:
+        frame = pl.DataFrame({name: [0.5, 1.5, 2.5, 3.5] for name in FEATURES})
+
+        matrix = frame.to_numpy(order="c")
+
+        assert matrix.flags.c_contiguous, "polars ignored order='c'; _contiguous would copy again"
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_the_requested_order_carries_the_same_values_as_the_default(self, dtype) -> None:
+        rng = np.random.default_rng(11)
+        columns = {name: rng.random(512) for name in FEATURES}
+        columns[FEATURES[0]][::7] = np.nan
+        frame = pl.DataFrame(columns).with_columns(
+            pl.col(FEATURES[0]).fill_nan(None), pl.col(FEATURES[1]).cast(pl.Float32)
+        )
+
+        default = np.ascontiguousarray(frame.to_numpy(), dtype=dtype)
+        requested = np.ascontiguousarray(frame.to_numpy(order="c"), dtype=dtype)
+
+        assert requested.dtype == default.dtype
+        assert np.array_equal(requested, default, equal_nan=True)
+
+    def test_a_prepared_fold_hands_the_model_a_c_ordered_matrix(self) -> None:
+        dataset = _dataset(missing=True)
+
+        folds = prepare_raw_folds(dataset, SPLITS, use_cache=False)
+
+        for fold in folds:
+            assert fold.X_train.flags.c_contiguous
+            assert fold.X_val.flags.c_contiguous

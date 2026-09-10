@@ -24,17 +24,11 @@
 # - Review Chapter 25.5 on broker acknowledgments, partial fills, and cancel/replace workflows.
 # - Familiarity with why production audit trails need durable storage beyond this in-memory demo.
 #
-# Understanding state transitions is critical for:
-#
-# 1. **Correct Order Handling**: Know when orders can be modified or canceled
-# 2. **Error Recovery**: Handle rejected or failed orders gracefully
-# 3. **Reconciliation**: Track order progression through the system
-# 4. **Audit Trails**: Log all state transitions for compliance
-#
 # ## Order Lifecycle Overview
 #
-# Figure 25.2 in the book contains the full state graph. The notebook later
-# renders selected operator paths; the transition table remains authoritative.
+# The book's Figure 25.2 draws the full state graph. The transition table built below is the
+# authoritative version of it, and the diagram this notebook renders later is a reading aid for
+# the paths an operator meets most.
 
 # %%
 """Model order states, transitions, and audit trails."""
@@ -47,17 +41,10 @@ from datetime import datetime
 from enum import Enum, auto
 
 import matplotlib.patches as mpatches
-
-# Visualization
 import matplotlib.pyplot as plt
 import polars as pl
 
-from utils.style import COLORS, FIGSIZE, add_message_title
-
-# matplotlibrc in repo root handles styling
-
-warnings.filterwarnings("ignore")
-
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% [markdown]
 # ## 1. Order States Definition
@@ -133,7 +120,7 @@ state_properties = pl.DataFrame(
 state_properties
 
 # %% [markdown]
-# **Finding:** The state-property table above makes the operational constraint explicit: not every visible
+# The state-property table above makes the operational constraint explicit: not every visible
 # order can be modified or canceled. That is why a live system needs state-aware logic instead of simple
 # boolean flags like "open" or "closed."
 
@@ -252,7 +239,7 @@ valid_events = pl.DataFrame(
 valid_events
 
 # %% [markdown]
-# **Finding:** The valid-event listing is the notebook's first reconciliation aid. It shows exactly which
+# The valid-event listing is the notebook's first reconciliation aid. It shows exactly which
 # state transitions are legal, so any unexpected broker callback can be diagnosed as either a valid ordering
 # anomaly (e.g., ack-lag) or a real bug.
 
@@ -462,10 +449,10 @@ print(f"\nFinal State: {order.state.name}")
 print(f"Filled: {order.filled_qty}/{order.qty} @ ${order.avg_fill_price:.2f}")
 
 # %% [markdown]
-# **Finding:** The lifecycle walkthrough shows a concrete path from acknowledgment to partial fill to final
+# The lifecycle walkthrough shows a concrete path from acknowledgment to partial fill to final
 # completion, with each transition logged as it happens.
 #
-# **Trading implication:** This is the minimum event trail a production system needs if it wants to explain
+# This is the minimum event trail a production system needs if it wants to explain
 # later why an order finished with a given fill quantity and average price.
 #
 # %%
@@ -513,22 +500,25 @@ assert after_invalid_fill == before_invalid_fill
 
 
 # %% [markdown]
-# **Finding:** The lifecycle walkthrough shows both valid progress and explicit rejection of invalid
+# The lifecycle walkthrough shows both valid progress and explicit rejection of invalid
 # transitions.
 #
-# **Trading implication:** State machines are useful because they make operational errors impossible to ignore;
+# State machines are useful because they make operational errors impossible to ignore;
 # an illegal broker event becomes a concrete exception instead of silent state corruption.
-#
-# %% [markdown]
-# ## 4. State Machine Visualization
-#
-# The visualization compresses the transition table into an operator-facing map. It is useful because live
-# order handling often fails from misunderstood paths rather than from bad syntax.
 
+# %% [markdown]
+# ## Drawing the state machine
+#
+# The transition table is authoritative and hard to hold in your head. The diagram below is the
+# same information laid out for reading, and the layout is chosen for that rather than for looks:
+# the path a successful order takes runs straight down a single column, so the happy case is a
+# line, and everything that can go wrong fans out to the right at its own height, so no two
+# arrows overlap and every failure is reachable by eye from the state it leaves.
+#
+# Live order handling fails from misunderstood paths far more often than from bad syntax, which
+# is what a picture of the paths is for.
 
 # %%
-# Successful path runs vertically in column 1; failure / pending paths
-# fan out to the right at distinct y-levels so arrows do not stack.
 STATE_POSITIONS = {
     OrderState.PENDING_NEW: (2, 9),
     OrderState.NEW: (2, 7),
@@ -706,18 +696,21 @@ def visualize_state_machine():
             va="center",
         )
 
-    plt.tight_layout()
     return fig
 
 
 fig = visualize_state_machine()
-plt.show()
+show_with_alt(
+    fig,
+    "State diagram of the order lifecycle. The path a filled order takes runs down the left as "
+    "pending, accepted, working, partially filled, filled. Rejection, cancellation and expiry "
+    "branch off to the right, and the terminal states have no outgoing arrows.",
+)
 
 # %% [markdown]
-# **Finding:** The diagram turns the transition table into a visual map of which paths end cleanly and which
-# end in rejection, cancellation, or expiry.
+# The diagram says which paths end cleanly and which end in rejection, cancellation or expiry.
 #
-# **Trading implication:** Operations teams need this kind of simplified state map because the same order may
+# Operations teams need this kind of simplified state map because the same order may
 # spend time in several active and pending states before the final outcome is known.
 #
 # %% [markdown]
@@ -779,11 +772,11 @@ order_summary = pl.DataFrame(
 order_summary
 
 # %% [markdown]
-# **Finding:** The summary table makes it clear that identical submission logic can end in fills, cancels,
+# The summary table makes it clear that identical submission logic can end in fills, cancels,
 # or rejections depending on the transition path. That is why reconciliation has to inspect lifecycle
 # history, not just terminal state.
 #
-# **Trading implication:** Production logs should retain both the final order status and the transition count
+# Production logs should retain both the final order status and the transition count
 # so teams can spot unusually long or complex paths before they become operational incidents.
 #
 # %%
@@ -850,15 +843,18 @@ ax.set_yticks([])
 ax.set_xticks(range(n_steps))
 ax.set_xticklabels([f"T{i}" for i in range(n_steps)])
 
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    f"Timeline of {len(orders)} order lifecycles across {n_steps} event steps, one row each. "
+    "Identical submissions diverge: some run to filled, others end in rejection or "
+    "cancellation, and the step at which each diverges is visible on the horizontal axis.",
+)
 
 # %% [markdown]
-# **Finding:** The order summary and timeline plots connect each final order state back to its transition
-# history, which is exactly what reconciliation and compliance reviews require.
-#
-# **Trading implication:** In production, storing both the current state and the transition path is what lets
-# teams explain fills, cancels, and rejections after the fact.
+# Two orders submitted identically can end in different states, and the timeline shows where each
+# one turned. That is the reason to store the path and not only the final state: an order that
+# reads `CANCELED` says nothing about whether it was working for an hour first, and the answer
+# decides whether a reconciliation break is a broker problem or a strategy one.
 #
 # %% [markdown]
 # ## Key Takeaways

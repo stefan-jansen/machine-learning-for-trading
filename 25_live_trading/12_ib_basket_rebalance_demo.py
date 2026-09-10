@@ -16,7 +16,7 @@
 # # Interactive Brokers Basket Rebalance Demo
 #
 # **Chapter 25: Live Trading Systems**
-# **Section**: 25.2 (Interactive Brokers Integration)
+# **Section Reference**: 25.2 (Integrating with Interactive Brokers)
 #
 # **Docker image**: `ml4t` (requires IB TWS/Gateway running on host port 7497)
 #
@@ -27,7 +27,7 @@
 #
 # 1. **Reconciliation.** Compare current IB positions against model-target positions and compute the
 #    order basket required to close the gap. In production this is the *only* place position drift gets
-#    corrected — without reconciliation, every divergence compounds.
+#    corrected, and without it every divergence compounds.
 # 2. **Basket planning and optional submission.** Build the complete delta basket. Only an explicitly
 #    authorized paper run routes it concurrently through `SafeBroker`.
 # 3. **Post-fill attribution contract.** The optional paper path compares fills with the last completed
@@ -48,8 +48,8 @@
 #
 # **Prerequisites**
 # - Chapter 25.2 for IB connectivity; Chapter 25.5 for the order state machine.
-# - IB TWS or Gateway running with paper-account API access enabled (required — the notebook fails
-#   loudly when no session is reachable, never substitutes a mock).
+# - IB TWS or Gateway running with paper-account API access enabled. This is required: the
+#   notebook fails loudly when no session is reachable and never substitutes a mock.
 
 # %% [markdown]
 # ## 1. Setup and Configuration
@@ -86,6 +86,13 @@ def run_demo(awaitable):
         return run_async(awaitable)
 
 
+# %% [markdown]
+# `MARKET_DATA_TYPE` decides which quote TWS returns. Leaving it at `None` keeps whatever the
+# session is configured for, which is the right choice when the paper account carries live Level 1
+# subscriptions. A paper account without them rejects MARKET orders with "No market data
+# available...", so this notebook asks for delayed quotes instead. The four values TWS accepts are
+# 1 for real time, 2 for frozen, 3 for delayed and 4 for delayed frozen.
+
 # %% tags=["parameters"]
 IB_HOST = "127.0.0.1"
 IB_PORT = 7497
@@ -120,12 +127,7 @@ MAX_ORDER_USD = 12_000
 MAX_DAILY_LOSS_USD = 5_000
 WARMUP_DAYS = 60
 OUTSIDE_RTH = False  # set True to permit extended-hours execution on market orders
-# IB market-data type: None leaves TWS at its configured default (use this if
-# the paper account has live Level 1 subscriptions). Paper accounts without
-# market-data subscriptions reject MARKET orders with "No market data
-# available..." — set this to 3 (delayed) to fall back to delayed quotes.
-# 1=real-time, 2=frozen, 3=delayed, 4=delayed-frozen.
-MARKET_DATA_TYPE: int | None = 3
+MARKET_DATA_TYPE: int | None = 3  # delayed quotes; see above
 SUBMIT_PAPER_ORDERS = False  # explicit opt-in only; publication execution is read-only
 
 # %%
@@ -145,14 +147,14 @@ print(f"Host/port: {IB_HOST}:{IB_PORT}  client_id={CLIENT_ID}")
 print(f"Order submission: {'ENABLED' if SUBMIT_PAPER_ORDERS else 'DISABLED (planning only)'}")
 
 # %% [markdown]
-# **Finding:** The configuration banner makes the deployment envelope explicit. Position and order caps are
-# risk controls, not guidelines — they are enforced by `SafeBroker`, so exceeding them raises before the
-# order reaches IB.
+# The configuration banner makes the deployment envelope explicit. Position and order caps are
+# risk controls rather than guidelines: `SafeBroker` enforces them, so exceeding one raises before
+# the order reaches IB.
 
 # %% [markdown]
 # ## 2. Connect to IB Paper Session
 #
-# The notebook requires a reachable IB paper session — there is no silent fallback. If TWS or IB Gateway
+# The notebook requires a reachable IB paper session and has no silent fallback. If TWS or IB Gateway
 # is not running on the configured host and port, the cell prints actionable setup instructions and exits.
 # Demos that quietly substitute mock state when the real broker is missing are inconsistent with the
 # operational discipline this chapter is teaching.
@@ -212,15 +214,15 @@ broker = run_demo(open_ib_session())
 print(f"\nVerified IB paper session connected at {IB_HOST}:{IB_PORT}")
 
 # %% [markdown]
-# **Finding:** Reaching this line means the paper session is real. Every subsequent order, position
+# Reaching this line means the paper session is real. Every subsequent order, position
 # snapshot, and reconciliation diff reflects the broker's authoritative state, not an in-process
 # simulation.
 
 # %% [markdown]
 # ## 3. Wrap in SafeBroker and Reconcile Persisted State
 #
-# `SafeBroker` enforces position and order caps, persists kill-switch state across runs, and — on
-# `connect()` — diffs the persisted snapshot from the previous session against the broker's current
+# `SafeBroker` enforces position and order caps, persists kill-switch state across runs, and on
+# `connect()` diffs the persisted snapshot from the previous session against the broker's current
 # positions and pending orders. A non-clean report means something changed between sessions
 # (uncleared after-hours order, manual close, partial fill landed after the last persist), and the
 # notebook must stop and let the operator investigate before submitting a basket.
@@ -267,10 +269,10 @@ print(
 print(f"Reconciliation: clean (state file {display_path(STATE_FILE)})")
 
 # %% [markdown]
-# **Finding:** `SafeBroker.connect()` is the single place where stale-session damage gets caught.
+# `SafeBroker.connect()` is the single place where stale-session damage gets caught.
 # A previous run that left orders pending after-hours, a manual flatten in the GUI, or a partial fill
-# that landed after the last persist all show up as a non-clean reconciliation report — the notebook
-# refuses to launch the basket until the operator resolves the divergence. The position and order
+# that landed after the last persist all show up as a non-clean reconciliation report, and the
+# notebook refuses to launch the basket until the operator resolves the divergence. The position and order
 # caps that follow apply uniformly because every leg flows through `safe_broker`.
 
 # %% [markdown]
@@ -430,7 +432,7 @@ print(f"Latest close table: {len(latest_close)} symbols")
 # %% [markdown]
 # ## 5. Signal Computation and Target Basket
 #
-# The signal is a simple 20-day momentum proxy — adequate for a live-mechanics demonstration, even though
+# The signal is a simple 20-day momentum proxy, adequate for a live-mechanics demonstration even though
 # Chapter 6 establishes that naïve momentum on its own is insufficient as a research-grade factor. The
 # target basket longs the top `TOP_K_LONG` by signal and leaves everything else flat.
 
@@ -493,7 +495,7 @@ fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# **Finding:** Printing the head of the target basket before any order is sent makes the intended
+# Printing the head of the target basket before any order is sent makes the intended
 # portfolio state auditable. In production the same table is logged and stored as the rebalance intent,
 # so that post-fill state can be compared against it.
 
@@ -526,7 +528,7 @@ current_positions = run_demo(fetch_current_positions(broker, UNIVERSE))
 
 # %% [markdown]
 # `reconcile` joins current and target positions and emits a `delta_qty`
-# column — the per-symbol order instruction that drives the basket
+# column, the per-symbol order instruction that drives the basket
 # submission step.
 
 
@@ -547,7 +549,7 @@ print(f"\nReconciliation: {len(orders_needed)} orders needed to reach target")
 print(orders_needed.select(["symbol", "current_qty", "target_qty", "delta_qty", "last_close"]))
 
 # %% [markdown]
-# **Finding:** The delta table is the audit surface. Each row justifies exactly one order; rows that
+# The delta table is the audit surface. Each row justifies exactly one order; rows that
 # vanish (delta already zero) are implicit parity confirmations. A production run would checkpoint this
 # table before any submission, so a mid-rebalance crash can resume from the same intent.
 
@@ -651,8 +653,8 @@ if len(submissions_frame):
     print(submissions_frame)
 
 # %% [markdown]
-# **Finding:** The fills frame is the first place an execution problem becomes visible — a row with a
-# `rejected` status or a large gap between `fill_price` and `last_close` is a signal the operator must
+# The fills frame is the first place an execution problem becomes visible. A row with a `rejected`
+# status, or a large gap between `fill_price` and `last_close`, is something the operator has to
 # investigate before the next rebalance.
 
 # %% [markdown]
@@ -660,7 +662,7 @@ if len(submissions_frame):
 #
 # `submit_order_async` returns as soon as the order is queued; fills arrive asynchronously via IB
 # callbacks. A short sleep lets routing complete, after which re-fetching positions reflects the
-# executed basket. A residual delta after this wait indicates an unfilled or rejected order — exactly
+# executed basket. A residual delta after this wait means an unfilled or rejected order, which is
 # what the operator needs to see before the next rebalance cycle.
 
 
@@ -915,9 +917,9 @@ print(f"\nIB paper session closed at {datetime.now(UTC).isoformat(timespec='seco
 #
 # 1. **Reconciliation is the loop.** A daily rebalance is not "submit these orders"; it is "diff current
 #    against target, then submit only the delta." The diff table is the audit artefact.
-# 2. **Basket I/O belongs in `asyncio.gather`, order controls belong in `SafeBroker`.** Parallelising
-#    submission is a latency optimisation; enforcing caps is a risk control. Keeping them at separate
-#    layers prevents one concern from overriding the other.
+# 2. **Basket I/O is parallelised in `asyncio.gather`; order controls stay in `SafeBroker`.**
+#    Parallelising submission is a latency optimisation and enforcing caps is a risk control, and
+#    separating the two layers keeps one from overriding the other.
 # 3. **Post-fill reconciliation is a separate step.** The same reconciliation routine used to *plan*
 #    the basket is used to *verify* the basket. Residual deltas name the specific failure modes.
 # 4. **Execution cost is a monitoring signal, not a KPI.** When paper submission is enabled, drift in
@@ -927,8 +929,9 @@ print(f"\nIB paper session closed at {datetime.now(UTC).isoformat(timespec='seco
 #    targets each newly opened leg for the closing auction, subject to exchange acceptance
 #    and cutoff rules. Planning mode creates no exposure to flatten.
 # 6. **Live-trading data sources come from the broker.** Warmup bars and pre-submission quotes both
-#    come from IB in this notebook — research-time loaders (which may have a different cutoff date,
-#    survivor universe, or vendor) belong in the training pipeline, not in the live execution path.
+#    come from IB in this notebook. A research-time loader can carry a different cutoff date, a
+#    different survivor universe or a different vendor, so the training pipeline reads from one and
+#    the live execution path does not.
 #    Chapter 25.6's feature-parity discussion applies: when the live and training data sources differ,
 #    the signal ranks names the model was never validated on.
 #

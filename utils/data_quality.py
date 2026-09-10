@@ -124,6 +124,21 @@ def print_coverage(
     print(f"  Unique times: {cov['unique_times']:,}")
 
 
+# An adjusted price panel applies one cumulative ratio to each OHLC field separately, and
+# the four multiplications do not round identically. A bar whose high IS its close then
+# stores two float64 values a bit or two apart, and a strict `high >= close` reports it as
+# a violation of an invariant the data does not actually break. Measured on the ETF panel
+# in 02_financial_data_universe/03_etfs_eda: 760 of 470,662 rows, largest breach 2.01e-16
+# of the close against a float64 epsilon of 2.22e-16.
+#
+# The tolerance is relative because the same panel spans closes from 5.60 to 862.50, so a
+# fixed absolute epsilon is two orders of magnitude too coarse at one end and too fine at
+# the other. Four epsilons covers the ~1 ulp that two independently rounded products can
+# differ by, with headroom, and is still ~11 orders of magnitude below the smallest
+# violation a real data defect produces: one cent on a $100 bar is 1e-4 relative.
+OHLC_RELATIVE_TOLERANCE = 4 * 2.220446049250313e-16
+
+
 def check_ohlc_invariants(
     df: pl.DataFrame,
     open_col: str = "open",
@@ -131,6 +146,7 @@ def check_ohlc_invariants(
     low_col: str = "low",
     close_col: str = "close",
     volume_col: str = "volume",
+    rtol: float = OHLC_RELATIVE_TOLERANCE,
 ) -> pl.DataFrame:
     """Check OHLC data quality invariants.
 
@@ -142,6 +158,14 @@ def check_ohlc_invariants(
     - low <= close
     - volume >= 0 (if volume column exists)
 
+    The ordering comparisons are inexact. Each is evaluated against a tolerance
+    proportional to the magnitudes being compared, because an adjusted price panel
+    stores a bar whose high IS its close as two float64 values a bit apart - the
+    cumulative adjustment ratio is applied to each field separately and the products
+    do not round identically. A strict comparison reports those bars as violations of
+    an invariant the data does not break. ``volume >= 0`` stays exact: zero has no
+    rounding neighbourhood to allow for.
+
     For each check, only rows where all relevant columns are non-null are
     considered. This prevents null comparisons from distorting percentages
     (important for TAQ data where trade columns may be null for no-trade bars).
@@ -150,6 +174,9 @@ def check_ohlc_invariants(
         df: DataFrame with OHLC columns
         open_col, high_col, low_col, close_col: Column names for OHLC
         volume_col: Column name for volume (optional)
+        rtol: Relative tolerance for the ordering comparisons. The default,
+            ``OHLC_RELATIVE_TOLERANCE``, admits float64 adjustment noise and nothing
+            a real data defect would produce. Pass 0.0 for exact comparisons.
 
     Returns:
         DataFrame with check names and valid_pct columns
@@ -157,6 +184,11 @@ def check_ohlc_invariants(
     results = []
     total_rows = df.height
     cols = set(df.columns)
+
+    def _at_least(greater: str, lesser: str) -> pl.Expr:
+        """``greater >= lesser`` allowing ``rtol`` scaled to the pair's magnitude."""
+        slack = rtol * pl.max_horizontal(pl.col(greater).abs(), pl.col(lesser).abs())
+        return pl.col(greater) >= pl.col(lesser) - slack
 
     def _check_invariant(name: str, condition: pl.Expr, required_cols: list[str]) -> None:
         """Check an invariant on rows where all required columns are non-null."""
@@ -182,35 +214,35 @@ def check_ohlc_invariants(
     if {high_col, low_col}.issubset(cols):
         _check_invariant(
             "high_gte_low",
-            pl.col(high_col) >= pl.col(low_col),
+            _at_least(high_col, low_col),
             [high_col, low_col],
         )
 
     if {high_col, open_col}.issubset(cols):
         _check_invariant(
             "high_gte_open",
-            pl.col(high_col) >= pl.col(open_col),
+            _at_least(high_col, open_col),
             [high_col, open_col],
         )
 
     if {high_col, close_col}.issubset(cols):
         _check_invariant(
             "high_gte_close",
-            pl.col(high_col) >= pl.col(close_col),
+            _at_least(high_col, close_col),
             [high_col, close_col],
         )
 
     if {low_col, open_col}.issubset(cols):
         _check_invariant(
             "low_lte_open",
-            pl.col(low_col) <= pl.col(open_col),
+            _at_least(open_col, low_col),
             [low_col, open_col],
         )
 
     if {low_col, close_col}.issubset(cols):
         _check_invariant(
             "low_lte_close",
-            pl.col(low_col) <= pl.col(close_col),
+            _at_least(close_col, low_col),
             [low_col, close_col],
         )
 

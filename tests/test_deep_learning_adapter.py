@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import os
 from datetime import datetime
 from importlib.metadata import version
@@ -12,7 +13,10 @@ import pytest
 
 from case_studies.research import CVSpec, LabelDefinition, Study
 from case_studies.utils import deep_learning, tabular_dl
-from case_studies.utils.deep_learning import resolve_dl_max_train_sequences
+from case_studies.utils.deep_learning import (
+    resolve_dl_max_train_sequences,
+    resolve_dl_train_sequence_stride,
+)
 from tests.test_research_workspace import _seed_release
 
 
@@ -634,3 +638,402 @@ class TestDeclaredMaxTrainSequences:
             resolve_dl_max_train_sequences({"max_train_sequences": -1})
         with pytest.raises(ValueError, match="zero or positive"):
             resolve_dl_max_train_sequences({}, -1)
+
+
+class TestDeclaredTrainSequenceStride:
+    """`modeling.dl.train_sequence_stride_horizons` spaces the windows and derives the count.
+
+    The count form fixes the number of windows, so two folds of different length get
+    different spacing and the spacing is whatever the arithmetic lands on. Nasdaq's 750,000
+    drew one window every 5.4 minutes against a 15-minute label, so consecutive training
+    windows carried overlapping labels - a number carried since the original release with
+    nothing deriving it (ml4t/agent-workspace#1015). Declaring the spacing instead makes the
+    one line cover every label, because each label strides its own horizon.
+    """
+
+    @staticmethod
+    def _minute_grid(n: int = 400) -> pl.Series:
+        start = _dt.datetime(2024, 1, 2, 14, 30)
+        return pl.Series("timestamp", [start + _dt.timedelta(minutes=i) for i in range(n)])
+
+    def test_absent_declaration_strides_nothing_so_no_registered_identity_moves(self):
+        assert resolve_dl_train_sequence_stride({}, horizon="15min", dates=None) == 0
+        assert resolve_dl_train_sequence_stride(None, horizon="15min", dates=None) == 0
+
+    def test_one_horizon_on_a_minute_grid_is_the_horizon_in_minutes(self):
+        grid = self._minute_grid()
+        assert (
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 1}, horizon="15min", dates=grid
+            )
+            == 15
+        )
+
+    def test_the_same_declaration_covers_every_label_because_each_strides_its_own(self):
+        """One line, four labels. A single count could only be right for one of them."""
+        grid = self._minute_grid()
+        config = {"train_sequence_stride_horizons": 1}
+        strides = {
+            horizon: resolve_dl_train_sequence_stride(config, horizon=horizon, dates=grid)
+            for horizon in ("5min", "15min", "60min")
+        }
+        assert strides == {"5min": 5, "15min": 15, "60min": 60}
+
+    def test_more_than_one_horizon_multiplies_the_spacing(self):
+        grid = self._minute_grid()
+        assert (
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 4}, horizon="15min", dates=grid
+            )
+            == 60
+        )
+
+    def test_the_grid_is_measured_not_assumed(self):
+        """nasdaq declares a 15-minute decision cadence and trains on the minute grid.
+
+        Dividing the horizon by the declared cadence would give 1 where the answer is 15.
+        """
+        start = _dt.datetime(2024, 1, 2, 14, 30)
+        quarter_hourly = pl.Series(
+            "timestamp", [start + _dt.timedelta(minutes=15 * i) for i in range(200)]
+        )
+        assert (
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 1}, horizon="15min", dates=quarter_hourly
+            )
+            == 1
+        )
+
+    def test_declaring_both_forms_is_refused_rather_than_one_winning_silently(self):
+        with pytest.raises(ValueError, match="declare one"):
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 1, "max_train_sequences": 750_000},
+                horizon="15min",
+                dates=self._minute_grid(),
+            )
+
+    def test_a_non_positive_declaration_is_refused(self):
+        with pytest.raises(ValueError, match="positive number of label"):
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 0},
+                horizon="15min",
+                dates=self._minute_grid(),
+            )
+
+    def test_a_horizon_with_no_fixed_length_in_seconds_is_refused_not_guessed(self):
+        """A day, a week and a month have no fixed length on a trading calendar."""
+        with pytest.raises(ValueError, match="sub-daily label horizon"):
+            resolve_dl_train_sequence_stride(
+                {"train_sequence_stride_horizons": 1},
+                horizon="21D",
+                dates=self._minute_grid(),
+            )
+
+    def test_nasdaq_declares_the_stride_and_no_count(self):
+        """The case study this exists for, read from the file the run reads."""
+        import yaml
+
+        setup = yaml.safe_load(
+            (
+                Path(__file__).resolve().parents[1]
+                / "case_studies/nasdaq100_microstructure/config/setup.yaml"
+            ).read_text()
+        )
+        dl = setup["modeling"]["dl"]
+        assert dl["train_sequence_stride_horizons"] == 1
+        assert "max_train_sequences" not in dl
+
+
+def test_run_dl_cv_assembles_predictions_in_config_then_epoch_order(tmp_path) -> None:
+    """What the runner returns is what its own incremental files hold, in the same order.
+
+    Post-processing used to hold the whole prediction set three times over: the frame read back
+    from the incremental parquet files, a filtered copy per configuration, and every eligible
+    epoch slice appended to a list that was then concatenated. Reading one slice back at a time
+    removes those copies, and the thing that could go wrong is order: a single pass over the
+    whole set returns file order, not configuration-then-epoch order. Registry identity does
+    not depend on the order - `published_prediction_digest` sorts its row hashes - but every
+    artifact the runner writes does.
+    """
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    symbols = ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
+    frames = []
+    for symbol in symbols:
+        first = rng.normal(size=len(dates))
+        second = rng.normal(size=len(dates))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "symbol": symbol,
+                    "timestamp": dates,
+                    "f1": first,
+                    "f2": second,
+                    "target": 0.1 * first + 0.05 * second + 0.01 * rng.normal(size=len(dates)),
+                }
+            )
+        )
+    dataset = pd.concat(frames, ignore_index=True)
+    splits = [
+        {
+            "fold": 0,
+            "train_start": dates[0],
+            "train_end": dates[59],
+            "val_start": dates[60],
+            "val_end": dates[79],
+        },
+        {
+            "fold": 1,
+            "train_start": dates[0],
+            "train_end": dates[79],
+            "val_start": dates[80],
+            "val_end": dates[119],
+        },
+    ]
+    config_names = ("nlinear", "lstm_h64")
+    configs = [
+        {
+            "family": "deep_learning",
+            "config_name": name,
+            "n_epochs": 4,
+            "checkpoint_interval": 1,
+            "batch_size": 16,
+            "params": {"architecture": architecture, "lookback": 5},
+        }
+        for name, architecture in zip(config_names, ("nlinear", "lstm"), strict=True)
+    ]
+
+    result = deep_learning.run_dl_cv(
+        dataset,
+        splits,
+        configs=configs,
+        n_features=2,
+        feature_names=["f1", "f2"],
+        label_col="target",
+        date_col="timestamp",
+        entity_col="symbol",
+        device="cpu",
+        register=False,
+        save_dir=tmp_path,
+        seed=0,
+    )
+
+    shards = sorted((tmp_path / "_incremental").glob("*.parquet"))
+    assert shards, "the runner wrote no incremental predictions to reassemble from"
+    persisted = pl.concat(
+        [
+            pl.read_parquet(path).cast({"timestamp": pl.Datetime("us")}, strict=False)
+            for path in shards
+        ],
+        how="diagonal_relaxed",
+    )
+    expected_folds = sorted(int(split["fold"]) for split in splits)
+    parts = []
+    for config_name in config_names:
+        for_config = persisted.filter(pl.col("config") == config_name)
+        for epoch in sorted(for_config["epoch"].unique().to_list()):
+            for_epoch = for_config.filter(pl.col("epoch") == epoch)
+            if sorted(for_epoch["fold_id"].unique().to_list()) == expected_folds:
+                parts.append(for_epoch)
+    assert len(parts) == len(config_names) * 4
+
+    assert result["all_predictions"].equals(pl.concat(parts, how="diagonal_relaxed"))
+
+
+def test_flush_writes_one_shard_per_checkpoint_and_never_rewrites_one(tmp_path) -> None:
+    """A checkpoint's predictions are written once, to a file of their own.
+
+    The sequence runner reaches a checkpoint and hands the writer every checkpoint fitted
+    so far, so a writer that keeps one file per fold rebuilds and rewrites the whole fold
+    at every checkpoint: quadratic in the schedule, and on a nasdaq fold - four million
+    validation rows over twenty checkpoints - about ten gigabytes resident to write a file
+    it had already written nineteen times.
+    """
+    import numpy as np
+
+    from case_studies.utils.registry.store import (
+        flush_fold_predictions,
+        incremental_prediction_shards,
+    )
+
+    incr_dir = tmp_path / "_incremental"
+    incr_dir.mkdir()
+    n = 8
+    dates = np.array(["2024-01-02"] * n, dtype="datetime64[us]")
+    entities = np.array(list("ABCDEFGH"))
+    y_val = np.arange(n, dtype=np.float64)
+
+    reached: dict[int, np.ndarray] = {}
+    written_at: dict[int, int] = {}
+    for epoch in (1, 2, 3):
+        reached[epoch] = np.full(n, float(epoch))
+        flush_fold_predictions(
+            incr_dir, "nlinear", 2, reached, dates, entities, y_val, "timestamp", "symbol"
+        )
+        written_at[epoch] = (incr_dir / f"nlinear_fold2_ep{epoch}.parquet").stat().st_mtime_ns
+
+    shards = incremental_prediction_shards(incr_dir, "nlinear")
+    assert [(stem, epoch) for stem, epoch, _path in shards] == [
+        ("nlinear_fold2", 1),
+        ("nlinear_fold2", 2),
+        ("nlinear_fold2", 3),
+    ]
+    for _stem, epoch, path in shards:
+        frame = pl.read_parquet(path)
+        assert frame["epoch"].unique().to_list() == [epoch]
+        assert path.stat().st_mtime_ns == written_at[epoch], (
+            f"checkpoint {epoch}'s shard was rewritten by a later checkpoint"
+        )
+
+
+def test_run_dl_cv_holds_one_checkpoint_slice_at_a_time(tmp_path, monkeypatch) -> None:
+    """Post-processing reads a checkpoint back, scores it, and drops it.
+
+    It used to reassemble every incremental save into one frame and cut slices out of
+    that, so the whole prediction set stayed resident with a per-config copy and a
+    per-epoch copy beside it.
+    """
+    import weakref
+
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(1)
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    symbols = ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
+    frames = []
+    for symbol in symbols:
+        first = rng.normal(size=len(dates))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "symbol": symbol,
+                    "timestamp": dates,
+                    "f1": first,
+                    "f2": rng.normal(size=len(dates)),
+                    "target": 0.1 * first + 0.01 * rng.normal(size=len(dates)),
+                }
+            )
+        )
+    dataset = pd.concat(frames, ignore_index=True)
+    splits = [
+        {
+            "fold": 0,
+            "train_start": dates[0],
+            "train_end": dates[59],
+            "val_start": dates[60],
+            "val_end": dates[79],
+        },
+        {
+            "fold": 1,
+            "train_start": dates[0],
+            "train_end": dates[79],
+            "val_start": dates[80],
+            "val_end": dates[119],
+        },
+    ]
+    configs = [
+        {
+            "family": "deep_learning",
+            "config_name": name,
+            "n_epochs": 4,
+            "checkpoint_interval": 1,
+            "batch_size": 16,
+            "params": {"architecture": architecture, "lookback": 5},
+        }
+        for name, architecture in (("nlinear", "nlinear"), ("lstm_h64", "lstm"))
+    ]
+
+    slices: list[weakref.ReferenceType] = []
+    read_shards = deep_learning._read_prediction_shards
+
+    def tracking_read(paths):
+        frame = read_shards(paths)
+        if frame.height:
+            slices.append(weakref.ref(frame))
+        return frame
+
+    monkeypatch.setattr(deep_learning, "_read_prediction_shards", tracking_read)
+
+    alive_at_each_scoring: list[int] = []
+    score = deep_learning._decision_time_checkpoint_metrics
+
+    def tracking_score(frame, **kwargs):
+        alive_at_each_scoring.append(sum(ref() is not None for ref in slices))
+        return score(frame, **kwargs)
+
+    monkeypatch.setattr(deep_learning, "_decision_time_checkpoint_metrics", tracking_score)
+
+    result = deep_learning.run_dl_cv(
+        dataset,
+        splits,
+        configs=configs,
+        n_features=2,
+        feature_names=["f1", "f2"],
+        label_col="target",
+        date_col="timestamp",
+        entity_col="symbol",
+        device="cpu",
+        register=False,
+        save_dir=tmp_path,
+        seed=0,
+    )
+
+    assert result["all_predictions"].height > 0
+    assert len(alive_at_each_scoring) == len(configs) * 4
+    assert alive_at_each_scoring == [1] * len(alive_at_each_scoring), (
+        f"a scored checkpoint found {max(alive_at_each_scoring)} prediction frames alive; "
+        f"post-processing is holding slices across checkpoints"
+    )
+
+
+def test_checkpoint_sorted_reconstruction_matches_a_whole_frame_sort() -> None:
+    """Sorting each checkpoint gives every published slice the rows a whole-frame sort gave.
+
+    The reconstruction's only reader cuts one checkpoint out of the frame, and inside one
+    checkpoint the `epoch` key is a constant, so the two orders can only differ on rows the
+    published slice does not contain. Sorting the whole frame instead costs about three
+    times its input; on a nasdaq reconstruction that is roughly 21 GB to produce a 7 GB
+    frame.
+    """
+    import numpy as np
+
+    from case_studies.utils.deep_learning import _sorted_by_checkpoint
+
+    rng = np.random.default_rng(4)
+    entities = np.array(["C", "A", "B", "A", "C", "B"])
+    stamps = np.array(
+        ["2024-01-03", "2024-01-02", "2024-01-02", "2024-01-03", "2024-01-02", "2024-01-03"],
+        dtype="datetime64[us]",
+    )
+    frames: dict[int, list[pl.DataFrame]] = {}
+    for checkpoint in (10, 5):
+        for fold in (1, 0):
+            frames.setdefault(checkpoint, []).append(
+                pl.DataFrame(
+                    {
+                        "timestamp": stamps,
+                        "symbol": entities,
+                        "fold_id": fold,
+                        "y_score": rng.normal(size=len(entities)),
+                        "y_true": rng.normal(size=len(entities)),
+                        "config": "nlinear",
+                        "epoch": checkpoint,
+                    }
+                )
+            )
+    whole = pl.concat([part for parts in frames.values() for part in parts]).sort(
+        "symbol", "timestamp", "fold_id", "epoch"
+    )
+    context = SimpleNamespace(entity_col="symbol", date_col="timestamp")
+
+    by_checkpoint = _sorted_by_checkpoint(frames, context)
+
+    assert sorted(by_checkpoint["epoch"].unique().to_list()) == [5, 10]
+    for checkpoint in (5, 10):
+        assert whole.filter(pl.col("epoch") == checkpoint).equals(
+            by_checkpoint.filter(pl.col("epoch") == checkpoint)
+        ), f"checkpoint {checkpoint} publishes a different slice than a whole-frame sort"

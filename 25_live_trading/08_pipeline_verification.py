@@ -18,21 +18,30 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Chapter**: 25 - Live Trading Systems
-# **Section**: 25.6 (Pipeline Verification)
-# **Learning Outcome**: LO4 - Implement pipeline verification tests
+# **Book Reference**: Chapter 25, Section 25.6 (Ensuring technical parity through pipeline
+# verification)
 #
-# This notebook implements the verification methodology from Section 25.6:
-# 1. **Feature Parity**: Same inputs → same features
-# 2. **Prediction Consistency**: Same features → same predictions
-# 3. **Sizing Logic**: Same signals → same order sizes
-# 4. **Automated Regression**: CI-friendly test suite
+# [`01_unified_framework_demo`](01_unified_framework_demo.ipynb) compared two engines on the one
+# thing a crossover strategy produces: its signals. That is enough to show the idea and not
+# enough to deploy on. A live pipeline can agree about signals and still disagree about the
+# feature that produced them, the prediction the feature fed, or the order size the signal turned
+# into, and each of those failures reaches a different part of the book's stack.
 #
-# **Key Principle**: If backtest and live pipelines produce identical outputs
-# for identical inputs, we have **technical parity**.
+# So parity is checked stage by stage, and each stage is a gate rather than a report. Features
+# from the same bars must be identical. Predictions from the same features must be identical.
+# Order sizes from the same signals must be identical. A test that merely prints its
+# disagreements is a test nobody notices failing, which is the reason the suite below counts its
+# gates and the last cell asserts on that count.
 #
-# **Prerequisites**: Familiarity with Chapter 16 strategy simulation and Section 25.6's parity-testing
-# workflow. The notebook assumes the reader wants to verify an implementation, not just inspect a model.
+# **Learning Objectives**
+# - Split a parity claim into stages, so a failure names the layer that broke it
+# - Build a deterministic tape that two pipelines can be run against, without depending on
+#   anything a reader's machine controls
+# - Separate a difference that must not exist from one that is expected and must be declared
+# - Leave behind a suite that fails a continuous-integration run rather than describing itself
+#
+# **Prerequisites**: [`01_unified_framework_demo`](01_unified_framework_demo.ipynb) for the
+# single-stage version of this comparison.
 
 # %%
 """Pipeline Verification: stage-by-stage backtest vs live parity checks."""
@@ -49,32 +58,44 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    import numpy as np
-    from async_utils import run_async
-    from ml4t.backtest import OrderSide, Strategy
-    from ml4t.backtest.types import Order, OrderStatus, OrderType
-    from ml4t.live import LiveRiskConfig
-    from ml4t.live.safety import SafeBroker, VirtualPortfolio
-    from ml4t.live.wrappers import ThreadSafeBrokerWrapper
+# The broker adapters pull in websockets' legacy module, which deprecates itself on import.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets\.legacy")
+
+import numpy as np
+from async_utils import run_async
+from ml4t.backtest import OrderSide, Strategy
+from ml4t.backtest.types import Order, OrderStatus, OrderType
+from ml4t.live import LiveRiskConfig
+from ml4t.live.safety import SafeBroker, VirtualPortfolio
+from ml4t.live.wrappers import ThreadSafeBrokerWrapper
 
 from utils.reproducibility import set_global_seeds
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+# force=True is deliberate: an imported library may already have attached a root handler, and
+# without it basicConfig would silently do nothing and the notebook's log lines would not appear.
 logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s - %(message)s",
     stream=sys.stdout,
     force=True,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pipeline_verification")
 
 print("[OK] Components imported")
 
+# %% [markdown]
+# ## Settings
+#
+# `N_BARS` is how many bars the synthetic tape carries. Thirty is enough for the longest feature
+# window to warm up and still leave bars for every stage to be compared over, and small enough
+# that a failure can be read row by row.
+#
+# `SEED` fixes the tape. A parity test compares two pipelines against each other, so what matters
+# is not which tape they get but that they get the same one, on every machine, every time.
+
 # %% tags=["parameters"]
 N_BARS = 30
-SEED = 12345  # Pinned for §25.6 deterministic harness
+SEED = 12345
 
 # %%
 set_global_seeds(SEED)
@@ -291,15 +312,18 @@ class VerifiableStrategy(Strategy):
 # Determinism matters here because any randomness would weaken the causal link between a mismatch and the code
 # path that produced it. The notebook is trying to isolate technical divergence, not market noise.
 
+# %% [markdown]
+# A parity test is only as good as the tape both pipelines read, so the tape has to be identical
+# on every machine that runs it. Seeding the generators is the easy half. The harder half is that
+# a per-symbol offset derived from Python's built-in `hash()` would not be: `hash()` on a string
+# is randomised per process unless the interpreter starts with a fixed `PYTHONHASHSEED`, which a
+# notebook cannot set for itself. Two runs would then read two different tapes and any
+# disagreement would be unattributable. The offsets are written out instead.
+
 # %%
 set_global_seeds(SEED)
 
 SYMBOLS = ["SPY", "QQQ"]
-
-# Static per-symbol offsets ensure the test tape is identical across processes,
-# independent of PYTHONHASHSEED. Python's built-in hash() is process-randomised
-# unless the interpreter is launched with a fixed PYTHONHASHSEED, which the
-# notebook cannot control on a reader's machine.
 SYMBOL_OFFSETS = {"SPY": 101, "QQQ": 202}
 
 

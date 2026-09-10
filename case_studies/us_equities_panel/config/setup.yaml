@@ -196,9 +196,11 @@ model_based:
     # sensitive to - is estimated from too few volatility cycles.
     burnin: 504
     # How often the variance model is re-estimated. A quarter, which on this panel is
-    # 3,178 series re-estimated about 110 times each. Section 4b measures what the cadence
-    # buys: the fitted persistence of a US equity moves slowly, so a faster cadence would
-    # multiply the fits without moving the emitted volatility.
+    # 3,160 series - the rest carry less than the burn-in above and take the market-level
+    # volatility - re-estimated 58 times each on average, 110 times for a series that
+    # spans the whole sample, and about 183,000 times in all. Section 4b measures what the
+    # cadence buys: the fitted persistence of a US equity moves slowly, so a faster cadence
+    # would multiply the fits without moving the emitted volatility.
     refit_every: 63
     # The specification the maximum-likelihood fit estimates, declared here rather than
     # written into the notebook's call, so what "the GARCH feature" names on this panel is

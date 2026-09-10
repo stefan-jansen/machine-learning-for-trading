@@ -274,8 +274,7 @@ for label in labels:
         overlays.extend(result.hash for result in execution.results)
         print(
             f"{label} / {control['name']}: {len(execution.results)} backtests registered\n"
-            f"  this execution: {execution.n_computed} computed, "
-            f"{execution.n_reused} served from the registry"
+            f"  this execution: {execution.disclosure()}"
         )
 
 # %% [markdown]

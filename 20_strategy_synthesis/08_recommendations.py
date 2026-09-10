@@ -22,7 +22,7 @@
 # pipeline from signal detection through holdout validation, and which
 # fail — and why?
 #
-# Every gate verdict and metric here is derived from the data produced by
+# Every gate outcome and metric here is derived from the data produced by
 # NB00–NB05; the HTM cost-cascade figures (which reproduce
 # htm_cost_sensitivity.parquet) and the S&P 500 Options cost handling are the
 # only hardcoded elements.
@@ -40,7 +40,6 @@
 """Ch20 NB06 — Final recommendations derived from pipeline data."""
 
 import json
-import warnings
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
@@ -48,9 +47,8 @@ import numpy as np
 import polars as pl
 from matplotlib.patches import FancyBboxPatch, Patch
 
-warnings.filterwarnings("ignore")
-
 from utils.paths import get_chapter_dir
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %%
 MAX_SYMBOLS = 0
@@ -128,28 +126,33 @@ for cs, data in synthesis.items():
         positive_ic.add(cs)
 stages.append(("Positive IC", positive_ic))
 
-# Gate 2: Positive validation Sharpe (carrier signal-stage SR > 0).
-# Uses the carrier's validation ML Sharpe (`backtest.ml_sharpe`), not
-# `risk.baseline_sharpe` — the latter is null for case studies whose risk
-# stage is not applicable (sp500_options HTM, us_firm vectorized, nasdaq
-# before the ensemble cost/risk pass), which would drop them at the
-# validation gate even though their carrier validation Sharpe is positive.
+# %% [markdown]
+# **Gate 2 - positive validation Sharpe.** The gate reads the selected configuration's
+# validation ML Sharpe rather than the risk stage's baseline Sharpe. The latter is null for
+# case studies whose risk stage does not apply - sp500_options under hold-to-maturity, the
+# vectorized us_firm_characteristics path, and nasdaq before its ensemble cost and risk pass -
+# so reading it would drop them at the validation gate even though their selected
+# configuration's validation Sharpe is positive.
+
+# %%
 positive_val_sharpe = set()
 for cs in positive_ic:
     bt = synthesis[cs]["pipeline_summary"].get("backtest", {})
     val_sr = bt.get("ml_sharpe")
     # Validation applies to every case study; drop only on a genuine
-    # non-positive carrier Sharpe (FX Pairs, val −0.004).
+    # non-positive selection Sharpe (FX Pairs, val −0.004).
     if val_sr is None or val_sr > 0:
         positive_val_sharpe.add(cs)
 stages.append(("Val Sharpe > 0", positive_val_sharpe))
 
+# %% [markdown]
+# **Gate 3 - transaction costs.** Net Sharpe has to stay positive at the case study's
+# actual cost level. A case study whose cost stage does not apply passes through rather than
+# being eliminated: sp500_options uses the option-native bid-ask accounting of §18.8 rather than
+# a basis-point sweep. A gate drops a case study only on a genuine negative outcome at a stage
+# that applies to it.
+
 # %%
-# Gate 3: Survives transaction costs (net Sharpe > 0 at actual cost level).
-# A case study whose cost stage is not applicable (sp500_options uses §18.8
-# option-native bid-ask accounting, not a bps sweep) passes through rather
-# than being eliminated — a gate drops a case study only on a genuine
-# negative verdict at an applicable stage.
 cost_surviving = set()
 for cs in positive_val_sharpe:
     costs = synthesis[cs]["pipeline_summary"]["costs"]
@@ -170,15 +173,18 @@ for cs in cost_surviving:
         holdout_passing.add(cs)
 stages.append(("Holdout SR > 0", holdout_passing))
 
-# Gate 5: Risk overlay doesn't destroy the edge, and active uncertainty evidence
-# is sufficient for a deployment-facing classification. Case studies whose risk
-# stage is not applicable (sp500_options HTM expiration structure;
-# us_firm_characteristics vectorized path with portfolio overlays purged)
-# pass through rather than being eliminated.
+# %% [markdown]
+# **Gate 5 - the risk overlay leaves an edge, and the uncertainty evidence supports a
+# deployment-facing classification.** As with the cost gate, a case study whose risk stage does
+# not apply passes through rather than being eliminated: sp500_options because of its
+# hold-to-maturity expiration structure, and us_firm_characteristics because its vectorized path
+# has its portfolio overlays purged.
+
+# %%
 all_gates_pass = set()
 for cs in holdout_passing:
     if cs == NASDAQ_ID:
-        # The fixed carrier is positive on point estimate, but both corrected
+        # The fixed configuration is positive on point estimate, but both corrected
         # validation and holdout intervals cross zero. Broad cost and risk grids
         # are also deferred to v3.1, so it cannot clear the evidence gate.
         continue
@@ -241,7 +247,7 @@ for i, (bar, count) in enumerate(zip(bars, stage_counts, strict=False)):
                 f"−{delta}: {', '.join(dropped_names)}",
                 xy=(i - 0.5, (stage_counts[i - 1] + count) / 2),
                 fontsize=7.5,
-                color="#c0392b",
+                color=COLORS["negative"],
                 ha="center",
                 va="center",
                 style="italic",
@@ -251,11 +257,19 @@ ax.set_xticks(range(len(stage_names)))
 ax.set_xticklabels(stage_names, rotation=30, ha="right", fontsize=10)
 ax.set_ylabel("Case Studies Remaining")
 ax.set_ylim(0, 10.5)
-ax.set_title("Pipeline Attrition Across Five Gates")
-ax.axhline(y=0, color="black", linewidth=0.5)
-
-fig.tight_layout()
-fig.show()
+ax.axhline(y=0, color=COLORS["neutral"], linewidth=0.5)
+add_message_title(
+    ax,
+    "Case studies remaining after each of the five gates",
+    subtitle="Each bar is annotated with the count; the drop between bars names who left",
+)
+show_with_alt(
+    fig,
+    "A bar per pipeline gate, left to right in pipeline order, each labelled with the number "
+    "of case studies still passing at that point. The bars step down from left to right and "
+    "never recover, and the gap between consecutive bars carries an italic note naming the "
+    "case studies dropped there.",
+)
 
 # %% [markdown]
 # The funnel tells a clear story: most case studies produce positive IC
@@ -336,10 +350,9 @@ def classify_exclusions():
                 {"cs": display, "detail": f"Max DD = {worst_dd:.0f}%"}
             )
 
-        # A holdout interval that spans zero says the window cannot tell this strategy from one
-        # with no edge. That is a different finding from failing a gate, and it is read from the
-        # row rather than asserted, so it applies to whichever case studies it happens to be true
-        # of rather than to one named in advance.
+        # A holdout interval spanning zero says the window cannot tell this strategy from
+        # one with no edge, which is not the same as failing a gate. Read from the row, so it
+        # names whichever case studies it is true of rather than one fixed in advance.
         if not ho:
             exclusions["No holdout evidence"].append(
                 {"cs": display, "detail": "No holdout row in the registry"}
@@ -461,10 +474,9 @@ def build_evidence_profile():
         modest_decay = holdout_decay is not None and holdout_decay < 0.50
         evidence_resolved = cs != NASDAQ_ID
 
-        # Gate tally as passed/applicable. Not-applicable stages (cost or
-        # risk) are excluded from both numerator and denominator rather than
-        # counted as failures, so a case study is never penalized for a stage
-        # its canonical strategy does not run.
+        # Gate tally as passed/applicable. A stage that does not apply leaves both the
+        # numerator and the denominator rather than counting as a failure, so no case study
+        # is penalized for a stage its canonical strategy never runs.
         gate_flags = [
             (True, positive_ic),
             (not cost_na, survives_costs),
@@ -565,7 +577,7 @@ for cs, data in synthesis.items():
         and ho_sharpe > 0
         and costs.get("survives_costs", False)
         and cs != "sp500_options"  # Known evidence issue: spread overwhelms signal
-        and cs != NASDAQ_ID  # Fixed-carrier intervals cross zero; broad grids deferred
+        and cs != NASDAQ_ID  # Fixed-configuration intervals cross zero; broad grids deferred
     )
 
     structural_rows.append(
@@ -631,7 +643,7 @@ if full_pass.height > 0 and gate_miss.height > 0:
 #   the most generous half-spread assumption tested, while CME futures passes the downstream gates
 #   on a moderate IC because its costs are small relative to its edge.
 # - The top-ranked model family is a weaker predictor than frequency and
-#   cost structure. Deep-learning and GBM rank-1 configurations both appear
+#   cost structure. Deep-learning and GBM selected configurations both appear
 #   in the full-pass group.
 
 # %% [markdown]
@@ -665,20 +677,20 @@ for row in evidence_df.iter_rows(named=True):
 # stability at the cost of a small reduction in peak Sharpe. The
 # experiment was carried out outside this notebook (on the per-fold
 # return series, not on the per-fold Sharpe summaries that the registry
-# stores at the rank-1 level for most case studies in this iteration).
+# stores for the selected configuration in most case studies this iteration).
 # The finding documented in the chapter prose: a minority of case
 # studies see lower per-fold dispersion under the blend, the rest do
-# not, and the median peak Sharpe sacrificed is roughly 0.3.
+# not, and the peak Sharpe given up has a median the chapter prose states.
 #
 # The result is not registered, since this is not the iteration in
-# which we are scoring ensembles against single-model rank-1
-# configurations. It belongs in the "next iteration" list at the
-# end of this section.
+# which we are scoring ensembles against single-model selected
+# configurations. The "next iteration" list at the end of this section
+# carries it.
 #
 # NASDAQ-100 is the bounded exception in this release: its ensemble was fixed
 # before holdout scoring as diversification under overlapping validation
 # uncertainty. The corrected positive linear holdout is a comparator only and
-# cannot be used to reselect the carrier or describe the ensemble as an ex-post
+# cannot be used to reselect the selected configuration or describe the ensemble as an ex-post
 # rescue.
 
 # %% [markdown]
@@ -689,7 +701,7 @@ for row in evidence_df.iter_rows(named=True):
 #    each gate. Each gate drops cases for a different reason.
 #
 # 2. **Signal is necessary but not sufficient**: all 9 case studies
-#    show positive IC; 8 of 9 show positive signal-stage Sharpe; the
+#    show positive IC; 8 of 9 show positive baseline-stage Sharpe; the
 #    pipeline gradually narrows the set further through costs, holdout
 #    validation, and evidence-quality checks.
 #
@@ -703,11 +715,11 @@ for row in evidence_df.iter_rows(named=True):
 #    implementation infeasibility, and evidence-quality failure.
 #    Each points to a different second-iteration response.
 #
-# 5. **Evidence quality ≠ headline Sharpe**: a high managed Sharpe paired
-#    with a fatal cost environment (S&P 500 Options: best Sharpe −0.28 even
-#    at the lowest cost rung of the HTM cascade) or a holdout collapse
-#    (S&P 500 Eq+Opt: managed Sharpe 2.39 but holdout −0.73) is not evidence
-#    one would act on. The pipeline's downstream gates flag that gap.
+# 5. **Evidence quality is not the headline Sharpe**: a high managed Sharpe paired
+#    with a fatal cost environment (S&P 500 Options, whose best Sharpe stays negative
+#    even at the lowest cost rung of the HTM cascade) or with a holdout that reverses
+#    it (S&P 500 Eq+Opt) is not evidence one would act on. The evidence snapshot above
+#    prints both pairs, and the pipeline's downstream gates flag the gap.
 #
 # 6. **The pipeline matters more than any single model**: the full
 #    journey from data to holdout determines the evidence a case study
@@ -749,4 +761,4 @@ for row in evidence_df.iter_rows(named=True):
 #
 # The value of the workflow is the reproducible, auditable process that
 # can be applied to new data, new markets, and new hypotheses, not the
-# specific numbers in any single rank-1 row.
+# specific numbers in any single selected-configuration row.

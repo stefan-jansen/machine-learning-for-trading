@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
@@ -18,8 +19,7 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Chapter 25: Live Trading Systems**
-# **Section**: 25.7 (The Deployment Loop)
+# **Book Reference**: Chapter 25, Section 25.7 (Operational readiness)
 #
 # This notebook is the chapter's anchor demonstration of the end-to-end
 # deployment cycle. Where the rest of the book trains, evaluates, and
@@ -35,7 +35,7 @@
 # 3. **Retrain** a Ridge regressor with the regularisation strength the
 #    case study identified, using the financial-only feature subset.
 # 4. **Persist** the deployment artefacts under
-#    `25_live_trading/live_artifacts/etfs/`.
+#    `25_live_trading/output/etfs_deployment/`.
 # 5. **Predict** the live window's cross-sections.
 # 6. **Replay** the live window through `ml4t.backtest.Engine` to produce
 #    the offline reference signal tape - the trade record a deterministic
@@ -55,8 +55,8 @@
 # - Chapter 6: Strategy research for ETFs (case study setup)
 # - Chapter 8: Financial feature engineering
 # - Chapter 11: Linear models on tabular features
-# - Chapter 25.3: Alpaca integration and paper trading
-# - Chapter 25.6: Pipeline verification
+# - Chapter 25.3: Integrating with Alpaca
+# - Chapter 25.6: Ensuring technical parity through pipeline verification
 # - Chapter 26: Repeated model serving and monitoring
 #
 # **Learning Objectives**
@@ -87,8 +87,7 @@ import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
-
+import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, OrderSide, Strategy
@@ -98,15 +97,25 @@ from sklearn.preprocessing import StandardScaler
 
 from data import load_etfs, load_macro
 from utils.paths import display_path, get_chapter_dir, get_output_dir
+from utils.style import COLORS, add_message_title, show_with_alt
 
 CHAPTER_DIR = get_chapter_dir(25)
 
 from _etfs_features import build_yield_curve, compute_financial_features, feature_columns
 from async_utils import run_async
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# basicConfig is a no-op once a handler exists, and importing the feature libraries installs one,
+# so configuring the root logger here would leave two handlers attached and print every line
+# twice. Give this notebook its own logger and its own handler instead, and leave the root alone.
 logger = logging.getLogger("etfs_deployment")
-logging.getLogger("ml4t").setLevel(logging.WARNING)
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(_handler)
+for _noisy in ("ml4t", "mlquant", "mlquant.features"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 # %% tags=["parameters"]
 RIDGE_ALPHA = 1_000_000.0  # ridge_a1000000.0 from the ETF case study's CV sweep
@@ -459,6 +468,42 @@ print(f"Backtest total return: {backtest_results['total_return_pct']:.2f}%")
 print(f"Backtest signals: {len(strategy_backtest.signal_log)}")
 
 # %% [markdown]
+# ### What the replay looks like over the window
+#
+# The return above is one number for a year, and it hides the two things a deployment review asks
+# first: whether the strategy made its money steadily or in one stretch, and how deep it went
+# underwater on the way. A single figure answers both, and neither is available from the summary.
+#
+# This is the offline reference tape, not a live result. It is what a deterministic replay of the
+# live window would have produced, and it exists to be reconciled against the basket actually
+# staged below.
+
+# %%
+equity_dates = [ts for ts, _ in engine_backtest.equity_curve]
+equity_values = np.asarray([value for _, value in engine_backtest.equity_curve], dtype=float)
+drawdown = equity_values / np.maximum.accumulate(equity_values) - 1.0
+
+fig, axes = plt.subplots(2, 1, sharex=True, height_ratios=[3, 1])
+axes[0].plot(equity_dates, equity_values, color=COLORS["blue"], linewidth=1.4)
+axes[0].axhline(INITIAL_CASH, color=COLORS["neutral"], linestyle="--", linewidth=1)
+axes[0].set_ylabel("Account value (USD)")
+axes[1].fill_between(equity_dates, drawdown * 100, 0, color=COLORS["negative"], alpha=0.35)
+axes[1].set_ylabel("Drawdown (%)")
+axes[1].set_xlabel("Date")
+add_message_title(
+    axes[0],
+    "The offline replay of the live window, and what it gave back on the way",
+    subtitle="Deterministic replay through the backtest engine, not a live result",
+)
+show_with_alt(
+    fig,
+    "Two stacked panels over the live window. The upper panel is account value against a dashed "
+    f"line at the {INITIAL_CASH:,.0f} starting balance, ending at "
+    f"{backtest_results['final_value']:,.0f}. The lower panel is drawdown from the running peak, "
+    f"reaching {drawdown.min():.1%} at its worst.",
+)
+
+# %% [markdown]
 # ## 8. Live Submission through Alpaca Paper Equities
 #
 # The execution leg stages the **latest scheduled** rebalance basket for
@@ -574,11 +619,19 @@ async def submit_basket(rows: list[dict]) -> list[dict]:
 
 exec_results = run_async(submit_basket(basket.to_dicts()))
 
-# Four-bucket basket disposition for Ch26 monitoring:
-#   - intended_basket: every leg in the latest scheduled top-K cross-section
-#   - attempted_basket: legs that reached broker.submit_order_async (excludes dry_run / no_ref_price)
-#   - accepted_basket: legs the broker acknowledged with status='submitted'
-#   - failed_basket: legs the broker rejected (status='submit_failed')
+# %% [markdown]
+# ### Four buckets, not one status
+#
+# A leg of the basket can end up in one of four places, and collapsing them loses the thing worth
+# monitoring. **Intended** is every symbol the strategy selected. **Attempted** is the subset that
+# actually reached the broker, which excludes a dry run and a leg with no reference price.
+# **Accepted** is what the broker acknowledged, and **failed** is what it rejected.
+#
+# The gap between intended and accepted is where a deployment quietly stops matching its research.
+# A run that intended five and accepted three has a two-name difference from the strategy it is
+# supposed to be running, and no equity curve will show that.
+
+# %%
 SUBMIT_ATTEMPTED_STATUSES = {"submitted", "submit_failed"}
 intended_basket = sorted(r["symbol"] for r in exec_results)
 attempted_basket = sorted(
@@ -628,10 +681,12 @@ exec_summary
 # that produce no orders.
 
 # %% [markdown]
-# ### Offline Tape Normalisation
+# ### Flattening the offline tape
 #
-# `_normalise` flattens the strategy's signal log into `(date, symbol, side, delta)` tuples so the
-# reconciliation can pivot quickly on date and side.
+# The strategy's signal log is a list of dicts carrying a timestamp object. The reconciliation
+# below compares baskets by date, so the log is flattened to date, symbol, side and share delta,
+# with the timestamp reduced to a date string. Sorting makes two runs over the same window
+# comparable without depending on the order the engine happened to emit signals in.
 
 
 # %%
@@ -649,10 +704,6 @@ offline_tape = _normalise(strategy_backtest.signal_log)
 print(f"Offline reference tape: {len(offline_tape)} signals over the live window")
 
 latest_ts_key = latest_ts.date().isoformat() if hasattr(latest_ts, "date") else str(latest_ts)[:10]
-# Reconciliation compares the strategy's intended basket against the offline replay,
-# not just the accepted legs. A leg the broker rejected still represents a parity
-# claim ("the strategy chose this symbol"). The accepted_basket is reported separately
-# in the run record's four-bucket disposition for downstream monitoring.
 live_basket_symbols = intended_basket
 last_offline_date = latest_ts_key
 last_offline_basket = sorted(latest_rebalance["targets"])

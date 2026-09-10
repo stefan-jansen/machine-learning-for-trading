@@ -22,622 +22,620 @@
 #
 # ## Purpose
 #
-# Macroeconomic data presents unique challenges for trading models: different release cadences
-# (monthly CPI, weekly claims, quarterly GDP), revision histories, and the critical requirement
-# of point-in-time correctness. This notebook demonstrates how to align multi-frequency macro
-# data for daily trading models using pre-downloaded FRED data.
+# The previous notebook established that the shipped macro panel sits on a calendar-day grid
+# with every series carried forward from the date it is stamped with. That grid is convenient
+# and, used directly, wrong for a backtest, because a macro observation is stamped with the
+# period it *measures* and not with the day it was *published*. The January unemployment rate is
+# stamped 1 January and reaches the public in early February. Read straight off the grid, a
+# model dated 15 January is trading on a number nobody had for another three weeks.
+#
+# This notebook closes that gap. It attaches a publication date to each observation, rebuilds
+# the daily panel so that every date carries only what had been released by then, measures how
+# far the two versions differ, and then builds features on the corrected panel. It finishes with
+# the second source of the same error: the value that was published first is often not the value
+# that is in the database today.
 #
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Load and explore pre-downloaded FRED macro data
-# - Understand release lag and its impact on point-in-time correctness
-# - Align multi-frequency data to a common daily timeline
-# - Create stationary macro features (z-scores, regimes, momentum)
-# - Use ALFRED vintage data for true point-in-time backtesting
+#
+# - Recover the period an observation measures from the date it is stamped with, given the
+#   series' release frequency.
+# - Compute the date an observation became public, from the end of its period and its release
+#   lag, and state where that lag comes from.
+# - Rebuild a daily panel with a backward as-of join so that each date carries only what was
+#   published by then, and measure how many days of look-ahead the naive version carried.
+# - Build stationary features - changes, z-scores and regimes - with windows counted on the
+#   grid they are named for.
+# - Compare a series as first published against the same series as it stands after revision,
+#   and say what that difference does to a backtest.
+# - Join a macro panel onto a price series without letting the macro grid create trading days
+#   that do not exist.
 #
 # ## Prerequisites
 #
-# - Run `06_fred_macro_eda` first for basic FRED data orientation
-# - Run the macro data download script: `python data/macro/download.py`
+# - [`06_fred_macro_eda`](06_fred_macro_eda.ipynb) for what the shipped panel contains.
+# - `python data/macro/download.py` for the panel itself, and
+#   `python data/macro/download_alfred.py` for the initial-release panel used in Part 6.
 #
 # ## Cross-References
 #
-# - **Upstream**: `06_fred_macro_eda` (basic FRED intro), `data/macro/download.py`
-# - **Downstream**: Chapter 8 `macro_regime_features.py`
+# - **Upstream**: [`06_fred_macro_eda`](06_fred_macro_eda.ipynb), `data/macro/download.py`
+# - **Downstream**: `08_financial_features/04_fundamentals_macro_calendar.py` (macro regime features)
 # - **Related**: [`09_onchain_fundamentals`](09_onchain_fundamentals.ipynb) (crypto fundamentals)
 
 # %%
-"""Macro Data Alignment — align multi-frequency macro data for daily trading models with PIT correctness."""
+"""Macro Data Alignment - align multi-frequency macro data for daily trading models with PIT correctness."""
 
-import warnings
-from datetime import date
-
+import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
-from data import load_etfs, load_macro
-from utils import ML4T_DATA_PATH
-from utils.reproducibility import set_global_seeds
+from data import load_etfs, load_macro, load_macro_metadata
+from data.macro.loader import load_macro_initial_release
 
 # Importing utils.style registers and activates the ML4T Plotly template
 # (palette, fonts, backgrounds) as the repo-wide default.
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
-warnings.filterwarnings("ignore")
-
-print(f"Data directory: {ML4T_DATA_PATH}")
-
+# %% [markdown]
+# Two settings decide what the notebook shows rather than how it computes. The charts open in
+# 2020 so the COVID shock and the tightening cycle are both in frame, and the price join at the
+# end uses the most liquid US equity ETF as the thing a macro feature would be attached to.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-SEED = 42
-
-# %%
-set_global_seeds(SEED)
+VIZ_START = "2020-01-01"  # left edge of every windowed chart
+PRICE_SYMBOL = "SPY"  # the price series the macro features are joined onto in Part 7
 
 # %% [markdown]
-# ## 1. The Multi-Frequency Challenge
+# ## 1. Two dates, and why only one of them is usable
 #
-# Different macro series are released at different frequencies:
+# Every macro observation carries a **reference period**, the stretch of time it measures, and a
+# **release date**, the day the statistical agency published it. FRED stamps an observation with
+# the first day of its reference period, which is convenient for lining series up and is not a
+# date on which anyone knew the value.
 #
-# | Series | Frequency | Release Lag | Example |
-# |--------|-----------|-------------|---------|
-# | **S&P 500** | Daily | Real-time | Market close |
-# | **Initial Claims** | Weekly | 5 days | Thursday for prior week |
-# | **CPI** | Monthly | ~15 days | Mid-month for prior month |
-# | **GDP** | Quarterly | 30+ days | Advance, preliminary, final |
-# | **10Y Treasury** | Daily | Real-time | Market rate |
-#
-# The key challenge: **How do you use monthly CPI in a daily trading model without look-ahead bias?**
-
-# %%
-# Frequency overview
-frequencies = pl.DataFrame(
-    {
-        "series": ["S&P 500", "Initial Claims", "CPI", "GDP", "10Y Treasury"],
-        "frequency": ["Daily", "Weekly", "Monthly", "Quarterly", "Daily"],
-        "typical_lag_days": [0, 5, 15, 30, 0],
-        "observations_per_year": [252, 52, 12, 4, 252],
-    }
-)
-
-frequencies
+# The gap between them is the **release lag**, and it has two parts: the period has to finish,
+# and then the agency needs time to collect and publish. Both parts have to be paid.
 
 # %% [markdown]
-# ## 2. Loading Pre-Downloaded FRED Data
+# The lags below are counted in calendar days from the **end** of the reference period, which is
+# how each agency states its own schedule. The length of the period is added separately, in the
+# next section, from the series' release frequency. Writing the lag this way rather than as a
+# distance from the stamp is what keeps a monthly series from appearing four weeks early: the
+# Bureau of Labor Statistics publishes the employment report for a month on the first Friday of
+# the month after, which is at most seven days past the period end and about thirty-six days past
+# the stamp FRED puts on it.
 #
-# The download script (`data/macro/download.py`) fetches macro data from FRED and
-# saves two files:
-#
-# - **`fred_macro.parquet`**: Daily-aligned with forward-fill (ready for models)
-# - **`fred_macro_raw.parquet`**: Native frequencies (for point-in-time analysis)
-#
-# Key series in the dataset:
-#
-# | Series ID | Description | Use Case |
-# |-----------|-------------|----------|
-# | `t10y2y` | 10Y-2Y Treasury Spread | Yield curve slope, recession indicator |
-# | `vixcls` | VIX Volatility Index | Market fear gauge |
-# | `unrate` | Unemployment Rate | Labor market health |
-# | `cpiaucsl` | Consumer Price Index | Inflation |
-# | `dff` | Federal Funds Rate | Monetary policy |
-# | `icsa` | Initial Jobless Claims | Weekly economic pulse |
+# **These are schedule bounds, not recorded release dates.** A release schedule that says "the
+# first Friday" or "around the middle of the month" gives a range, so each lag below is set at
+# the late end of its range: the panel is then a few days conservative rather than occasionally
+# a day early, and a day early is the failure that matters. What removes the approximation
+# entirely is the vintage date attached to each observation in an archive, which is what Part 6
+# uses; this panel does not carry one.
 
 # %%
-# Load pre-downloaded macro data
-macro_df = load_macro()
-
-# Normalize column names to lowercase (test fixture uses uppercase)
-macro_df = macro_df.rename({c: c.lower() for c in macro_df.columns})
-
-print(f"Loaded macro data: {macro_df.shape[0]:,} rows × {macro_df.shape[1]} columns")
-print(f"Date range: {macro_df['timestamp'].min()} to {macro_df['timestamp'].max()}")
-print(f"Columns: {macro_df.columns}")
-
-# %%
-macro_df.tail(10)
-
-# %%
-print("Data availability (non-null observations):")
-for col in macro_df.columns:
-    if col != "timestamp":
-        non_null = macro_df[col].drop_nulls().len()
-        pct = 100 * non_null / len(macro_df)
-        print(f"  {col:12s}: {non_null:>6,} ({pct:>5.1f}%)")
-
-# %% [markdown]
-# ## 3. Point-in-Time: Understanding Release Lag
-#
-# **The critical insight**: Macro data is NOT available on the observation date.
-#
-# Example: January CPI measures prices during January, but is released ~February 12th.
-# A model running on February 1st should NOT use January CPI—it wasn't public yet.
-#
-# This is why we need **release dates** (when data became known) vs **observation dates**
-# (the period the data describes).
-
-# %%
-# Release lag configuration (typical values)
 RELEASE_LAGS = {
-    "dff": 0,  # Real-time (daily)
-    "dgs10": 0,  # Real-time (daily)
-    "dgs2": 0,  # Real-time (daily)
-    "t10y2y": 0,  # Real-time (calculated from daily)
-    "vixcls": 0,  # Real-time (market-derived)
-    "icsa": 5,  # Weekly claims: ~5 day lag
-    "walcl": 7,  # Fed balance sheet: ~7 day lag
-    "cpiaucsl": 15,  # CPI: ~15 days after month end
-    "cpilfesl": 15,  # Core CPI: ~15 days
-    "pcepi": 25,  # PCE: ~25 days
-    "unrate": 5,  # Employment report: ~5 days after month
-    "payems": 5,  # Nonfarm payrolls: ~5 days
-    "civpart": 5,  # Labor force participation: ~5 days
-    "indpro": 15,  # Industrial production: ~15 days
-    "m2sl": 20,  # Money supply: ~20 days
-    "gdp": 30,  # GDP: ~30 days (advance estimate)
-    "gdpc1": 30,  # Real GDP: ~30 days
+    "icsa": 5,  # weekly claims: Thursday, for the week ending the previous Saturday. Exact.
+    "walcl": 2,  # Fed H.4.1: Thursday afternoon, for the Wednesday balance sheet
+    "unrate": 7,  # employment situation: the first Friday after the month, so 1 to 7 days
+    "payems": 7,
+    "civpart": 7,
+    "cpiaucsl": 18,  # CPI: between the 10th and the 15th of the following month
+    "cpilfesl": 18,
+    "indpro": 18,  # industrial production, G.17: around the 15th to 17th
+    "m2sl": 28,  # money stock, H.6: the fourth Tuesday
+    "pcepi": 31,  # personal income and outlays: near the end of the following month
+    "gdp": 31,  # GDP advance estimate: the last week of the month after the quarter
+    "gdpc1": 31,
 }
+# Daily market series carry no lag: the value for a date is published that evening.
+DAILY_SERIES = [
+    "dff",
+    "dgs1",
+    "dgs2",
+    "dgs3",
+    "dgs5",
+    "dgs7",
+    "dgs10",
+    "dgs20",
+    "dgs30",
+    "t10y2y",
+    "vixcls",
+]
 
-print("Release Lags (days after observation period):")
-for series, lag in sorted(RELEASE_LAGS.items(), key=lambda x: x[1]):
-    print(f"  {series:12s}: {lag:>3} days")
+meta = load_macro_metadata()
+lag_table = (
+    meta.select("series", "description", "native_frequency")
+    .filter(pl.col("series").is_in(list(RELEASE_LAGS)))
+    .with_columns(
+        lag_after_period_end=pl.col("series").replace_strict(RELEASE_LAGS, return_dtype=pl.Int32)
+    )
+    .sort("native_frequency", "lag_after_period_end")
+)
+lag_table
+
+# %% [markdown]
+# ## 2. The panel as shipped
+#
+# The daily panel is what Part 3 corrects, so it is worth seeing its shape and its stamping
+# convention once more before it is changed. A monthly series changes value on the first day of
+# each month, which is the stamping convention stated above rather than a property of the data.
+
+# %%
+macro = load_macro().sort("timestamp")
+print(f"Rows: {len(macro):,}   Series: {len(macro.columns) - 1}")
+print(f"Span: {macro['timestamp'].min()} to {macro['timestamp'].max()}")
+
+first_changes = (
+    macro.select("timestamp", "cpiaucsl")
+    .with_columns(changed=pl.col("cpiaucsl") != pl.col("cpiaucsl").shift(1))
+    .filter(pl.col("changed") & (pl.col("timestamp").dt.year() == 2024))
+    .select("timestamp", "cpiaucsl")
+    .head(4)
+)
+print("The dates CPI takes a new value in 2024:")
+first_changes
+
+# %% [markdown]
+# ## 3. Re-dating an observation to the day it was published
+#
+# The correction has three steps, and none of them needs anything the panel does not already
+# carry. Take the reference period each observation belongs to; add the length of that period to
+# reach its end; add the release lag to reach the day it was published. Then a date in the daily
+# panel may carry an observation only if that publication date has already passed.
+#
+# The last step is a **backward as-of join**: for each row of the daily grid, take the most
+# recent observation whose publication date is on or before it. `join_asof` does exactly this
+# and does it in one pass, which matters here only for clarity - the alternative is a nested
+# loop that is easy to get subtly wrong at period boundaries.
+
+
+# %% [markdown]
+# Recovering the observations means finding the dates the forward fill starts carrying each new
+# value, and the two frequencies need different routes.
+#
+# A monthly or quarterly series is stamped on the first day of its period, so grouping the panel
+# by month or quarter and taking the first row recovers every release, including one that repeats
+# the previous reading.
+#
+# A weekly series is stamped on the weekday the agency chose - Saturday for jobless claims,
+# Wednesday for the Fed balance sheet - and no calendar library picks that boundary. What
+# identifies it is the data: the weekday on which the column changes most often is the weekday it
+# is stamped on. Selecting every panel row falling on that weekday then gives one row per week,
+# repeats included, which matters because the four-week average later in this notebook is an
+# average of four weeks and not of four distinct readings.
 
 
 # %%
-def apply_release_lag(df: pl.DataFrame, lag_days: dict[str, int]) -> pl.DataFrame:
-    """
-    Apply release lag to create point-in-time correct alignment.
+def stamp_weekday(values: pl.Series, dates: pl.Series) -> int:
+    """The weekday a weekly series is stamped on: the one its value changes on most often."""
+    changed = dates.filter(values.ne_missing(values.shift(1)))
+    return int(changed.dt.weekday().mode().item())
 
-    The forward-filled data already represents what's known at each date,
-    but we shift by release lag to account for publication delay.
 
-    For daily series (lag=0), no change needed.
-    For monthly series (lag>0), the value shouldn't appear until release date.
-
-    NOTE: This uses row-based shift, which assumes continuous daily data with
-    no gaps. For data with gaps (weekends, holidays), a 15-row shift may not
-    equal 15 calendar days. For production systems requiring exact calendar-day
-    precision, use date arithmetic instead:
-
-        df.with_columns(
-            pl.col("timestamp") + pl.duration(days=lag)
+def published_observations(panel: pl.DataFrame, series: str, frequency: str, lag: int):
+    """One row per release of `series`: its reference period, and the date it was published."""
+    rows = panel.select(
+        pl.col("timestamp").alias("stamped_on"), pl.col(series).alias("value")
+    ).drop_nulls()
+    period_length = {"monthly": "1mo", "quarterly": "1q"}.get(frequency)
+    if period_length is None:
+        # Weekly: every row on the stamping weekday, so a week repeating the previous reading is
+        # still an observation. The stamp already closes the week it covers.
+        weekday = stamp_weekday(rows["value"], rows["stamped_on"])
+        return (
+            rows.filter(pl.col("stamped_on").dt.weekday() == weekday)
+            .with_columns(period_end=pl.col("stamped_on"))
+            .with_columns(published_on=pl.col("period_end").dt.offset_by(f"{lag}d"))
         )
+    # Monthly or quarterly: stamped on the first day of the period, which runs to the day before
+    # the next one begins.
+    return (
+        rows.group_by(pl.col("stamped_on").dt.truncate(period_length).alias("period"))
+        .agg(pl.col("stamped_on").min(), pl.col("value").first())
+        .drop("period")
+        .sort("stamped_on")
+        .with_columns(
+            period_end=pl.col("stamped_on").dt.offset_by(period_length).dt.offset_by("-1d")
+        )
+        .with_columns(published_on=pl.col("period_end").dt.offset_by(f"{lag}d"))
+    )
 
-    For this educational notebook, the approximation is acceptable since:
-    1. Forward-filled macro data has no gaps (every trading day filled)
-    2. The lag values are approximate anyway (release schedules vary)
-    """
-    result = df.clone()
 
-    for col, lag in lag_days.items():
-        if col in df.columns and lag > 0:
-            # Shift values forward by lag rows (value appears later)
-            # Assumes continuous daily data without gaps
-            result = result.with_columns(pl.col(col).shift(lag).alias(col))
+# %% [markdown]
+# Applied to CPI, the three columns say the whole thing: the value stamped at the start of a
+# month describes that month, is complete at its end, and reaches the public around the middle
+# of the month after.
 
+# %%
+cpi_releases = published_observations(macro, "cpiaucsl", "monthly", RELEASE_LAGS["cpiaucsl"])
+cpi_releases.filter(pl.col("stamped_on").dt.year() == 2024).head(4)
+
+# %% [markdown]
+# The as-of join then rebuilds the daily column. Every series that is published on a lag is
+# rebuilt this way; the daily market series are carried through unchanged, because for them the
+# reference period and the publication date are the same day.
+
+
+# %%
+def point_in_time_panel(panel: pl.DataFrame, metadata: pl.DataFrame) -> pl.DataFrame:
+    """Rebuild `panel` so each date carries only what had been published by that date."""
+    frequency_of = dict(zip(metadata["series"], metadata["native_frequency"], strict=True))
+    result = panel.select("timestamp", *DAILY_SERIES)
+
+    for series, lag in RELEASE_LAGS.items():
+        releases = published_observations(panel, series, frequency_of[series], lag).select(
+            "published_on", pl.col("value").alias(series)
+        )
+        result = result.join_asof(
+            releases.sort("published_on"),
+            left_on="timestamp",
+            right_on="published_on",
+            strategy="backward",
+        ).drop("published_on")
     return result
 
 
-pit_df = apply_release_lag(macro_df, RELEASE_LAGS)
-pit_df.tail(10)
+pit = point_in_time_panel(macro, meta)
+print(f"Point-in-time panel: {pit.shape[0]:,} rows x {pit.shape[1]} columns")
+pit.select("timestamp", "cpiaucsl", "unrate", "gdp").tail(5)
 
 # %% [markdown]
-# ## 4. ALFRED: True Point-in-Time with Vintage Data
+# ### How much look-ahead the shipped panel carried
 #
-# **ALFRED (Archival FRED)** provides historical vintages—what values were known at specific
-# points in time. This is critical because macro data gets **revised after initial release**.
-#
-# ### Why Revisions Matter
-#
-# | Series | Initial Release | Typical Revision | Example |
-# |--------|-----------------|------------------|---------|
-# | **GDP** | Advance estimate ~30 days | ±1-2% | Q3 2023: 4.9% → 5.2% |
-# | **Nonfarm Payrolls** | First Friday | ±50K jobs | Mar 2024: 303K → 315K |
-# | **CPI** | ~15 days | Rare, seasonal adj. | Minor adjustments |
-#
-# Using **final revised data** in backtests creates **look-ahead bias**—your model uses
-# information that wasn't available when the trading decision was made.
-#
-# In production, you would use ALFRED-style queries (or a wrapper like `ml4t-data`) to download
-# a series as it existed on a given vintage date. This notebook illustrates the *conceptual*
-# divergence with a small revision example; the concrete API mechanics depend on your data access
-# layer and whether you store `realtime_start`/`realtime_end` style metadata.
-#
-# Example API pattern:
-# ```python
-# provider.fetch_ohlcv("GDP", start, end, vintage_date="2023-10-26")
-# ```
+# The two panels can be compared directly: on any date, how old is the newest observation each
+# of them offers? The naive panel offers the observation stamped at the start of the current
+# period; the point-in-time panel offers the newest one that had actually been published.
 
 # %%
-# Demonstrate revision impact (educational example)
-# In practice, use FREDProvider.fetch_ohlcv(..., vintage_date=...) for real vintage data
-
-revision_example = pl.DataFrame(
-    {
-        "quarter": ["Q3 2023", "Q3 2023", "Q3 2023", "Q3 2023"],
-        "release_type": ["Advance", "Second", "Third", "Annual Revision"],
-        "release_date": ["2023-10-26", "2023-11-29", "2023-12-21", "2024-03-28"],
-        "gdp_growth_annualized": [4.9, 5.2, 4.9, 5.2],
-    }
+comparison = (
+    macro.select("timestamp", pl.col("cpiaucsl").alias("as_shipped"))
+    .join(pit.select("timestamp", pl.col("cpiaucsl").alias("as_published")), on="timestamp")
+    .drop_nulls()
+    .with_columns(same=pl.col("as_shipped") == pl.col("as_published"))
 )
+print(f"Dates where the two panels agree on the CPI level: {comparison['same'].mean():.1%}")
 
-revision_example
+lead = (
+    comparison.filter(pl.col("timestamp") >= pl.lit(VIZ_START).str.to_date())
+    .select("timestamp", "as_shipped", "as_published")
+    .unpivot(index="timestamp", variable_name="panel", value_name="cpi")
+)
+fig = px.line(
+    lead.to_pandas(),
+    x="timestamp",
+    y="cpi",
+    color="panel",
+    color_discrete_map={"as_shipped": COLORS["copper"], "as_published": COLORS["blue"]},
+    title="The shipped panel steps up seven weeks before the release it reports",
+    labels={"timestamp": "Date", "cpi": "CPI index level", "panel": ""},
+)
+fig.update_layout(height=420, legend=dict(orientation="h", y=1.02, yanchor="bottom"))
+show_plotly_with_alt(
+    fig,
+    "Two staircase lines of the CPI index level from 2020, one from the panel as shipped and one re-dated to publication. They have the same shape and the published line steps up about seven weeks later at every step.",
+)
 
 # %% [markdown]
-# Using the final value (5.2%) in a backtest as of October 2023 would be
-# look-ahead bias — only the advance estimate (4.9%) was known then.
-#
-# ### Visualizing Signal Divergence from Revisions
-#
-# Let's create a concrete example showing how using revised data vs. original
-# release data leads to different trading signals. This demonstrates the
-# "performance gap" that PIT-incorrect backtests hide. With an "exceptional
-# growth" rule (GDP > 5%), the 2023 Q3 revision is the telling case: the advance
-# estimate (4.9%) does not fire the signal, but the final value (5.2%) does — so
-# a PIT-incorrect backtest reading the final value would take a trade that was
-# never actionable in real time.
+# The two lines are the same staircase offset horizontally, and the offset is the whole point.
+# Everything a model reads off the earlier line, it reads before the number existed. The offset
+# is largest for GDP, whose reference period is a quarter, and smallest for weekly claims.
 
 # %%
-# Create revision history based on documented 2023 GDP revisions
-# In production, use: FREDProvider.fetch_ohlcv("GDP", vintage_date=...)
-gdp_revisions = pl.DataFrame(
-    {
-        "quarter": ["Q1", "Q2", "Q3", "Q4"],
-        "advance_estimate": [1.3, 2.1, 4.9, 3.3],  # What traders knew at release
-        "final_value": [2.0, 2.1, 5.2, 3.4],  # What backtests often use incorrectly
-    }
-)
-
-# Simple signal: "Exceptional growth" = GDP > 5.0%
-gdp_signals = gdp_revisions.with_columns(
-    (pl.col("advance_estimate") > 5.0).alias("signal_advance"),
-    (pl.col("final_value") > 5.0).alias("signal_final"),
-)
-
-signal_match = (
-    gdp_signals.select(pl.col("signal_advance") == pl.col("signal_final")).to_series().sum()
-)
-print(f"Signal agreement: {signal_match}/4 quarters")
-gdp_signals
-
-# %%
-# Visualize the divergence (single cell so the inline backend cannot capture an
-# un-laid-out intermediate render of the bars before the layout is applied).
-fig_revision = go.Figure()
-
-fig_revision.add_trace(
-    go.Bar(
-        name="Advance Estimate (PIT-Correct)",
-        x=gdp_revisions["quarter"].to_list(),
-        y=gdp_revisions["advance_estimate"].to_list(),
-        marker_color=COLORS["blue"],
-        text=[f"{v:.1f}%" for v in gdp_revisions["advance_estimate"].to_list()],
-        textposition="outside",
+staleness = []
+for series, lag in RELEASE_LAGS.items():
+    frequency = meta.filter(pl.col("series") == series)["native_frequency"][0]
+    releases = published_observations(macro, series, frequency, lag)
+    staleness.append(
+        {
+            "series": series,
+            "frequency": frequency,
+            "median_days_stamp_to_publication": int(
+                (releases["published_on"] - releases["stamped_on"]).dt.total_days().median()
+            ),
+        }
     )
-)
-
-fig_revision.add_trace(
-    go.Bar(
-        name="Final Value (Look-Ahead Bias)",
-        x=gdp_revisions["quarter"].to_list(),
-        y=gdp_revisions["final_value"].to_list(),
-        marker_color=COLORS["amber"],
-        text=[f"{v:.1f}%" for v in gdp_revisions["final_value"].to_list()],
-        textposition="outside",
-    )
-)
-
-fig_revision.add_hline(
-    y=5.0,
-    line_dash="dash",
-    line_color=COLORS["copper"],
-    annotation_text="Signal Threshold (5%)",
-    annotation_position="top left",
-)
-
-fig_revision.update_layout(
-    title="Only the revised Q3 GDP crosses the 5% signal line - a trade PIT data never takes",
-    barmode="group",
-    yaxis_title="GDP Growth (% annualized)",
-    xaxis_title="Quarter (2023)",
-    height=450,
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-)
-
-fig_revision.show()
+pl.DataFrame(staleness).sort("median_days_stamp_to_publication", descending=True)
 
 # %% [markdown]
-# ## 5. Creating Macro Features
+# ## 4. Features, with windows counted on the grid they name
 #
-# Raw macro values are often non-stationary (trending over time). For ML models, we create
-# features that are:
+# A raw macro level trends and a model fitted on it will fit the trend. The usual corrections
+# are a change over a window, a z-score against a rolling window, and a threshold classification
+# into regimes.
 #
-# - **Stationary**: Changes, growth rates, z-scores
-# - **Regime-indicative**: Threshold-based classifications
-# - **Momentum-based**: Recent changes vs longer-term trends
-
+# The one thing to be careful about is what a window means here. This panel has a row per
+# **calendar** day, so a window of 252 rows is 252 calendar days, which is eight months and not
+# the trading year the number is normally shorthand for. Every window below is therefore named
+# and counted in calendar days: 365 for a year, 90 for a quarter, 30 for a month.
 
 # %%
-def create_macro_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Create trading features from aligned macro data."""
-    result = df.clone()
+CALENDAR_YEAR, CALENDAR_QUARTER, CALENDAR_MONTH = 365, 90, 30
 
-    # Yield Curve Features (T10Y2Y)
-    if "t10y2y" in df.columns:
-        result = result.with_columns(
-            [
-                # Level
-                pl.col("t10y2y").alias("yield_curve_spread"),
-                # Regime classification
-                pl.when(pl.col("t10y2y") < 0)
-                .then(pl.lit("inverted"))
-                .when(pl.col("t10y2y") < 0.5)
-                .then(pl.lit("flat"))
-                .when(pl.col("t10y2y") < 1.5)
-                .then(pl.lit("normal"))
-                .otherwise(pl.lit("steep"))
-                .alias("yield_curve_regime"),
-                # Momentum (20-day change)
-                (pl.col("t10y2y") - pl.col("t10y2y").shift(20)).alias("yield_curve_momentum_20d"),
-                # Rolling z-score (252-day)
-                (
-                    (pl.col("t10y2y") - pl.col("t10y2y").rolling_mean(252))
-                    / pl.col("t10y2y").rolling_std(252)
-                ).alias("yield_curve_zscore_252d"),
-            ]
-        )
-
-    # VIX Volatility Features
-    if "vixcls" in df.columns:
-        result = result.with_columns(
-            [
-                pl.col("vixcls").alias("vix"),
-                # Regime classification
-                pl.when(pl.col("vixcls") < 15)
-                .then(pl.lit("low_vol"))
-                .when(pl.col("vixcls") < 25)
-                .then(pl.lit("normal_vol"))
-                .when(pl.col("vixcls") < 35)
-                .then(pl.lit("elevated_vol"))
-                .otherwise(pl.lit("high_vol"))
-                .alias("volatility_regime"),
-                # Momentum (5-day change)
-                (pl.col("vixcls") - pl.col("vixcls").shift(5)).alias("vix_momentum_5d"),
-                # Rolling z-score (63-day / 3-month)
-                (
-                    (pl.col("vixcls") - pl.col("vixcls").rolling_mean(63))
-                    / pl.col("vixcls").rolling_std(63)
-                ).alias("vix_zscore_63d"),
-            ]
-        )
-
-    # Unemployment Features
-    if "unrate" in df.columns:
-        result = result.with_columns(
-            [
-                pl.col("unrate").alias("unemployment_rate"),
-                # Regime
-                pl.when(pl.col("unrate") < 4.0)
-                .then(pl.lit("tight"))
-                .when(pl.col("unrate") < 6.0)
-                .then(pl.lit("normal"))
-                .otherwise(pl.lit("recession"))
-                .alias("labor_market_regime"),
-                # 1-month change (21 trading days)
-                (pl.col("unrate") - pl.col("unrate").shift(21)).alias("unemployment_change_1m"),
-                # 12-month change
-                (pl.col("unrate") - pl.col("unrate").shift(252)).alias("unemployment_change_1y"),
-            ]
-        )
-
-    # CPI/Inflation Features
-    # Important: CPI is a monthly series in levels. If it's been forward-filled to daily,
-    # using shift(252) (trading days) is NOT a true year-over-year calculation.
-    # A simple approximation on daily grids is 365 calendar days.
-    if "cpiaucsl" in df.columns:
-        result = result.with_columns(
-            [
-                # Year-over-year inflation (365 calendar days for monthly forward-filled data)
-                (pl.col("cpiaucsl") / pl.col("cpiaucsl").shift(365) - 1).alias("inflation_yoy"),
-                # Inflation regime
-                pl.when((pl.col("cpiaucsl") / pl.col("cpiaucsl").shift(365) - 1) < 0.02)
-                .then(pl.lit("low"))
-                .when((pl.col("cpiaucsl") / pl.col("cpiaucsl").shift(365) - 1) < 0.04)
-                .then(pl.lit("moderate"))
-                .otherwise(pl.lit("high"))
-                .alias("inflation_regime"),
-            ]
-        )
-
-    # Initial Claims Features
-    # Note: If weekly claims have been forward-filled to daily, rolling windows over days
-    # are smoothing proxies, not true "4-week averages" over weekly observations.
-    if "icsa" in df.columns:
-        result = result.with_columns(
-            [
-                pl.col("icsa").alias("initial_claims"),
-                # Smoothing proxy on daily grid; for a true 4-week average, compute on weekly data first.
-                pl.col("icsa").rolling_mean(20).alias("claims_smooth_20d"),
-                # Regime
-                pl.when(pl.col("icsa") < 250000)
-                .then(pl.lit("strong"))
-                .when(pl.col("icsa") < 350000)
-                .then(pl.lit("normal"))
-                .otherwise(pl.lit("weak"))
-                .alias("claims_regime"),
-            ]
-        )
-
-    return result
-
-
-# Create features
-macro_features = create_macro_features(pit_df)
-
-# List new features
-original_cols = set(macro_df.columns)
-feature_cols = [c for c in macro_features.columns if c not in original_cols and c != "timestamp"]
-
-print(f"Created {len(feature_cols)} macro features:")
-for col in sorted(feature_cols):
-    print(f"  - {col}")
-
-# %%
-# Display sample of macro features
-display_cols = ["timestamp", "yield_curve_spread", "yield_curve_regime", "vix", "volatility_regime"]
-if "unemployment_rate" in macro_features.columns:
-    display_cols.extend(["unemployment_rate", "labor_market_regime"])
-
-macro_features.select([c for c in display_cols if c in macro_features.columns]).tail(10)
+features = pit.with_columns(
+    # Yield curve: level, momentum over a quarter, and position within its own year.
+    yield_curve_change_90d=pl.col("t10y2y") - pl.col("t10y2y").shift(CALENDAR_QUARTER),
+    yield_curve_zscore_365d=(pl.col("t10y2y") - pl.col("t10y2y").rolling_mean(CALENDAR_YEAR))
+    / pl.col("t10y2y").rolling_std(CALENDAR_YEAR),
+    yield_curve_regime=pl.when(pl.col("t10y2y") < 0)
+    .then(pl.lit("inverted"))
+    .when(pl.col("t10y2y") < 0.5)
+    .then(pl.lit("flat"))
+    .when(pl.col("t10y2y") < 1.5)
+    .then(pl.lit("normal"))
+    .otherwise(pl.lit("steep"))
+    .alias("yield_curve_regime"),
+    # Volatility: a shorter memory, because the VIX mean-reverts in weeks rather than years.
+    vix_change_30d=pl.col("vixcls") - pl.col("vixcls").shift(CALENDAR_MONTH),
+    vix_zscore_90d=(pl.col("vixcls") - pl.col("vixcls").rolling_mean(CALENDAR_QUARTER))
+    / pl.col("vixcls").rolling_std(CALENDAR_QUARTER),
+    volatility_regime=pl.when(pl.col("vixcls") < 15)
+    .then(pl.lit("calm"))
+    .when(pl.col("vixcls") < 25)
+    .then(pl.lit("normal"))
+    .when(pl.col("vixcls") < 35)
+    .then(pl.lit("unsettled"))
+    .otherwise(pl.lit("frightened"))
+    .alias("volatility_regime"),
+    # Labour market: the change over a year, which is what recession dating reads.
+    unemployment_change_365d=pl.col("unrate") - pl.col("unrate").shift(CALENDAR_YEAR),
+    labor_market_regime=pl.when(pl.col("unrate") < 4.0)
+    .then(pl.lit("tight"))
+    .when(pl.col("unrate") < 6.0)
+    .then(pl.lit("normal"))
+    .otherwise(pl.lit("slack"))
+    .alias("labor_market_regime"),
+    # Inflation: a year-over-year rate off an index level, on a calendar-day grid.
+    inflation_yoy=pl.col("cpiaucsl") / pl.col("cpiaucsl").shift(CALENDAR_YEAR) - 1,
+)
+features.select(
+    "timestamp",
+    "yield_curve_regime",
+    "volatility_regime",
+    "labor_market_regime",
+    "inflation_yoy",
+).tail(5)
 
 # %% [markdown]
-# ## 6. Visualizing Macro Regimes
+# ### The four-week claims average, computed on weekly observations
+#
+# The Department of Labor reports a four-week moving average of initial claims alongside the
+# weekly number, because the weekly series is noisy. The average is over four weekly
+# observations, so it is computed on the weekly observations and then joined back onto the daily
+# grid. A rolling mean taken over the forward-filled daily panel is a different statistic: it
+# averages carried-forward days, which weights each week by how many days of the window it
+# happened to occupy.
 
 # %%
-# Prepare data for visualization (2020 onwards for readability)
-VIZ_START_DATE = date(2020, 1, 1)
+claims_releases = published_observations(
+    macro, "icsa", "weekly", RELEASE_LAGS["icsa"]
+).with_columns(claims_4wk_average=pl.col("value").rolling_mean(4))
+features = features.join_asof(
+    claims_releases.select("published_on", "claims_4wk_average").sort("published_on"),
+    left_on="timestamp",
+    right_on="published_on",
+    strategy="backward",
+).drop("published_on")
+features.select("timestamp", "icsa", "claims_4wk_average").tail(5)
 
-viz_df = (
-    macro_features.filter(pl.col("timestamp") >= VIZ_START_DATE)
-    .filter(pl.col("yield_curve_spread").is_not_null())
-    .to_pandas()
-)
+# %% [markdown]
+# ## 5. What the regimes look like
+#
+# Three of the four regime classifications are worth seeing against the series that produced
+# them, because a threshold that never fires and a threshold that fires constantly are both
+# useless and both invisible from the definition alone.
 
-# Build the three-panel macro-indicator figure in a SINGLE cell so the
-# inline backend cannot capture a yield-curve-only intermediate render
-# (feedback_split_cell_figure_bug).
+# %%
+viz = features.filter(pl.col("timestamp") >= pl.lit(VIZ_START).str.to_date()).to_pandas()
+
 fig = make_subplots(
     rows=3,
     cols=1,
     shared_xaxes=True,
-    subplot_titles=("Yield Curve Spread (10Y-2Y)", "Unemployment Rate", "VIX Volatility Index"),
+    subplot_titles=(
+        "Yield curve spread, 10-year minus 2-year",
+        "Unemployment rate, as published",
+        "VIX",
+    ),
     vertical_spacing=0.08,
 )
-
-# Yield curve
 fig.add_trace(
-    go.Scatter(
-        x=viz_df["timestamp"],
-        y=viz_df["yield_curve_spread"],
-        mode="lines",
-        name="10Y-2Y Spread",
-        line={"color": COLORS["blue"]},
-    ),
+    go.Scatter(x=viz["timestamp"], y=viz["t10y2y"], mode="lines", line={"color": COLORS["blue"]}),
     row=1,
     col=1,
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["negative"], row=1, col=1)
-
-# Unemployment
-if "unemployment_rate" in viz_df.columns:
-    fig.add_trace(
-        go.Scatter(
-            x=viz_df["timestamp"],
-            y=viz_df["unemployment_rate"],
-            mode="lines",
-            name="Unemployment",
-            line={"color": COLORS["slate"]},
-        ),
-        row=2,
-        col=1,
-    )
-
-# VIX
-if "vix" in viz_df.columns:
-    fig.add_trace(
-        go.Scatter(
-            x=viz_df["timestamp"],
-            y=viz_df["vix"],
-            mode="lines",
-            name="VIX",
-            line={"color": COLORS["copper"]},
-        ),
-        row=3,
-        col=1,
-    )
-    fig.add_hline(y=20, line_dash="dash", line_color=COLORS["neutral"], row=3, col=1)
-
+fig.add_trace(
+    go.Scatter(x=viz["timestamp"], y=viz["unrate"], mode="lines", line={"color": COLORS["slate"]}),
+    row=2,
+    col=1,
+)
+fig.add_trace(
+    go.Scatter(x=viz["timestamp"], y=viz["vixcls"], mode="lines", line={"color": COLORS["copper"]}),
+    row=3,
+    col=1,
+)
+fig.add_hline(y=20, line_dash="dash", line_color=COLORS["neutral"], row=3, col=1)
+fig.update_yaxes(title_text="Percentage points", row=1, col=1)
+fig.update_yaxes(title_text="% of labour force", row=2, col=1)
+fig.update_yaxes(title_text="Index", row=3, col=1)
 fig.update_layout(
     height=700,
-    title_text="Yield-curve inversion, unemployment, and VIX trace the 2020-2025 macro regimes",
+    title_text="The three series the regime classifications are cut from",
     showlegend=False,
 )
-fig.update_yaxes(title_text="Spread (%)", row=1, col=1)
-fig.update_yaxes(title_text="Rate (%)", row=2, col=1)
-fig.update_yaxes(title_text="Index", row=3, col=1)
-
-fig.show()
-
-# %% [markdown]
-# ## 7. Regime Distribution Analysis
-
-# %%
-# Analyze regime distributions
-print("Regime Distributions (2020+):\n")
-
-regime_cols = [c for c in macro_features.columns if c.endswith("_regime")]
-analysis_df = macro_features.filter(pl.col("timestamp") >= VIZ_START_DATE)
-
-for col in regime_cols:
-    if col in analysis_df.columns:
-        counts = (
-            analysis_df.filter(pl.col(col).is_not_null())
-            .group_by(col)
-            .len()
-            .sort("len", descending=True)
-        )
-        total = counts["len"].sum()
-        print(f"{col}:")
-        for row in counts.iter_rows():
-            pct = 100 * row[1] / total
-            print(f"  {row[0]:15s}: {row[1]:>5,} ({pct:>5.1f}%)")
-        print()
-
-# %% [markdown]
-# ## 8. Combining with Price Data
-#
-# The ultimate goal: use macro features as inputs to trading strategies. The pre-aligned
-# daily macro data can be joined directly with price data.
-
-
-# %%
-def combine_with_prices(
-    macro_df: pl.DataFrame, prices_df: pl.DataFrame, date_col: str = "timestamp"
-) -> pl.DataFrame:
-    """Combine macro features with price data via left join on date."""
-    return prices_df.join(macro_df, on=date_col, how="left")
-
-
-# Load real SPY closes and align to the macro window
-price_data = (
-    load_etfs(symbols=["SPY"], start_date=str(VIZ_START_DATE))
-    .sort("timestamp")
-    .with_columns(spy_return=pl.col("close").pct_change())
-    .select(timestamp="timestamp", spy_close="close", spy_return="spy_return")
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels sharing a time axis from 2020: the ten-year minus two-year Treasury spread with a zero line, the unemployment rate as published, and the VIX with a rule at twenty.",
 )
 
-# Combine: SPY trading days on the left, daily-aligned macro features attached
-combined = combine_with_prices(macro_features, price_data)
-
-cols = ["timestamp", "spy_close", "spy_return", "yield_curve_regime", "volatility_regime"]
-if "labor_market_regime" in combined.columns:
-    cols.append("labor_market_regime")
-combined.select([c for c in cols if c in combined.columns]).tail(10)
+# %%
+regime_columns = [c for c in features.columns if c.endswith("_regime")]
+shares = pl.concat(
+    [
+        features.filter(pl.col("timestamp") >= pl.lit(VIZ_START).str.to_date())
+        .drop_nulls(column)
+        .group_by(column)
+        .len()
+        .rename({column: "regime"})
+        .with_columns(classification=pl.lit(column), share=pl.col("len") / pl.col("len").sum())
+        for column in regime_columns
+    ]
+)
+fig = px.bar(
+    shares.to_pandas(),
+    x="share",
+    y="classification",
+    color="regime",
+    orientation="h",
+    title="Every regime label is reached, and none covers the whole window",
+    labels={"share": "Share of days since the window opened", "classification": ""},
+)
+fig.update_layout(height=320, xaxis_tickformat=".0%")
+show_plotly_with_alt(
+    fig,
+    "Horizontal stacked bars, one per regime classification, showing the share of days each regime label held. Every classification is split across several labels and none is filled by a single one.",
+)
 
 # %% [markdown]
-# ## 9. Key Takeaways
+# ## 6. The second look-ahead: revisions
 #
-# | Concept | Implementation |
-# |---------|---------------|
-# | **Point-in-Time** | Apply release lag; use ALFRED vintage queries for historical accuracy |
-# | **Frequency Alignment** | Pre-download handles forward-fill; apply additional lag for release delay |
-# | **Stationarity** | Transform levels to changes, growth rates, and z-scores |
-# | **Regimes** | Threshold-based classifications for interpretable signals |
+# Re-dating an observation to its publication date fixes *when* a value becomes visible. It does
+# nothing about *which* value. A statistical agency publishes an estimate and then revises it,
+# sometimes for years, and the number sitting in the database today is the revised one. A
+# backtest that reads today's database reads a number that did not exist on the date it trades.
 #
-# **Common Pitfalls**:
-# - Using observation date instead of release date → look-ahead bias
-# - Using final revised values instead of vintage data → look-ahead bias
-# - Raw levels instead of stationary transforms → spurious correlations
-# - Ignoring release calendar → using information before it's public
+# The archive that answers this is ALFRED, which keeps every vintage FRED has ever published.
+# `data/macro/download_alfred.py` materializes one slice of it: for each observation date, the
+# value as first released. Comparing that against the current panel measures the revisions
+# directly, on real data, rather than describing them.
+
+# %%
+initial = load_macro_initial_release()
+revisable = [c for c in initial.columns if c != "timestamp" and c in macro.columns]
+
+vintages = initial.select("timestamp", *revisable).join(
+    macro.select("timestamp", *revisable), on="timestamp", how="inner", suffix="_current"
+)
+
+
+def revision_episodes(frame: pl.DataFrame, column: str) -> pl.DataFrame:
+    """The distinct revisions of `column`, one row each, from two forward-filled panels.
+
+    Both panels carry each value forward over weekends and holidays, so a single revised
+    Friday reading shows up as three differing panel dates. Consecutive differing dates that
+    carry the same pair of values are one revision, and are collapsed here.
+    """
+    differing = (
+        frame.select(
+            "timestamp",
+            first_published=pl.col(column),
+            current=pl.col(f"{column}_current"),
+        )
+        .with_columns(revision=pl.col("first_published") - pl.col("current"))
+        .filter(pl.col("revision").abs() > 1e-9)
+        .sort("timestamp")
+    )
+    if differing.is_empty():
+        return differing.with_columns(episode=pl.lit(None, dtype=pl.Int64))
+    # A new episode starts where the dates are not consecutive, or where either side takes a
+    # new value: comparing only the difference merges runs that happen to differ by as much.
+    breaks = (
+        ((pl.col("timestamp") - pl.col("timestamp").shift(1)).dt.total_days() > 1)
+        | pl.col("first_published").ne_missing(pl.col("first_published").shift(1))
+        | pl.col("current").ne_missing(pl.col("current").shift(1))
+    )
+    return (
+        differing.with_columns(episode=breaks.fill_null(True).cum_sum())
+        .group_by("episode")
+        .agg(
+            pl.col("timestamp").min().alias("observation_date"),
+            pl.col("first_published").first(),
+            pl.col("current").first(),
+            pl.col("revision").first(),
+        )
+        .sort("observation_date")
+    )
+
+
+revision_summary = pl.DataFrame(
+    [
+        {
+            "series": column,
+            "panel_dates_compared": len(vintages),
+            "revisions": len(revision_episodes(vintages, column)),
+            "largest_revision": float(
+                (vintages[column] - vintages[f"{column}_current"]).abs().max()
+            ),
+        }
+        for column in revisable
+    ]
+).sort("largest_revision", descending=True)
+revision_summary
+
+# %% [markdown]
+# These are daily market rates, the series least likely to be revised at all, and they are
+# revised: a handful of observations in each, by amounts that are small against the level and
+# large against a day's move. Series built from surveys move far more. Gross domestic product is
+# published as an advance estimate about four weeks after the quarter, revised twice within
+# three months, and revised again in each of the following years' annual updates.
+#
+# The consequence for a strategy is not that the numbers are slightly different. It is that a
+# rule with a threshold in it can fire on the revised series and not on the released one, and a
+# backtest reading the revised series will report a trade that could not have been taken. The
+# chart below shows where the two vintages of the ten-year yield actually part company.
+
+# %%
+gap = revision_episodes(vintages, "dgs10")
+print(f"Times the 10-year yield has been revised since the archive begins: {len(gap)}")
+gap
+
+# %% [markdown]
+# ## 7. Joining macro onto prices
+#
+# The join direction is the last place this can go wrong. Prices exist on trading days and the
+# macro panel exists on every calendar day, so joining the price series onto the macro panel
+# would invent a row for every weekend and holiday, each with a null price that a later
+# forward-fill would quietly fill. Prices go on the left; the macro columns are attached to the
+# days on which trading actually happened.
+
+# %%
+prices = (
+    load_etfs(symbols=[PRICE_SYMBOL], start_date=VIZ_START)
+    .sort("timestamp")
+    .select("timestamp", close="close")
+    .with_columns(daily_return=pl.col("close").pct_change())
+)
+combined = prices.join(features, on="timestamp", how="left")
+
+print(f"Trading days: {len(prices):,}")
+print(f"Rows after the join: {len(combined):,}")
+print(f"Rows with no macro attached: {combined['yield_curve_regime'].is_null().sum()}")
+combined.select(
+    "timestamp", "close", "daily_return", "yield_curve_regime", "volatility_regime"
+).tail(5)
+
+# %% [markdown]
+# ## Key Takeaways
+#
+# 1. A macro observation is stamped with the period it measures, not the day it was published.
+#    The distance between the two is the length of the period plus the agency's release lag, and
+#    both parts have to be subtracted before a backtest may read the value.
+# 2. A backward as-of join on the publication date is the operation that enforces it: for each
+#    date, the most recent observation that had already been released. It is one call, and the
+#    hand-rolled alternatives get period boundaries wrong.
+# 3. A window is counted in rows, so its meaning depends on the grid. On a calendar-day panel,
+#    252 rows is eight months rather than a trading year. Name the window for the grid it runs
+#    on, or move to the grid the name assumes.
+# 4. A statistic whose inputs were carried forward is not the statistic its name claims. A
+#    four-week average of a weekly series is computed on the weekly observations; a rolling mean
+#    over the forward-filled daily panel weights each week by how many days it happened to
+#    cover.
+# 5. Publication date and vintage are two separate corrections, and doing the first does not do
+#    the second. Even daily market rates are revised after the fact, and any rule with a
+#    threshold in it can fire on the revised series and not on the released one.
+# 6. Put the price series on the left of the join and attach the macro columns to it. The macro
+#    panel has a row for every calendar day, so a join with the macro panel on the left produces
+#    weekend and holiday rows that were never trading days.

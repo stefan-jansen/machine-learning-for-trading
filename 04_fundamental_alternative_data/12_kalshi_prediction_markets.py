@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -18,445 +18,450 @@
 #
 # **Chapter 4: Fundamental and Alternative Data**
 # **Docker image**: `ml4t`
+# **Section Reference**: Section 4.4 (Understanding Alternative Data)
 #
 # ## Purpose
 #
-# Kalshi is the first CFTC-regulated prediction market in the US, offering binary
-# contracts on economic, market, and policy events. This notebook loads real Kalshi
-# OHLCV data and demonstrates how to build event probability indicators for ML
-# feature engineering and regime detection.
+# A prediction market contract pays one dollar if a stated event happens and nothing if it does
+# not. Its price is therefore a probability, quoted directly, with no model in between: a contract
+# on "the federal funds rate is above four and a quarter percent at the April 2027 meeting"
+# trading at fourteen cents is a fourteen percent chance, priced by people with money at stake.
+#
+# Kalshi is the first such exchange the Commodity Futures Trading Commission has designated in the
+# United States, which makes it a legal venue rather than an offshore one and puts its data in
+# reach of an institutional research pipeline. This notebook reads its Federal Reserve rate
+# contracts, repairs the ingestion artifacts a thinly traded feed produces, checks the one
+# arbitrage relation the contracts have to satisfy, and measures whether there is enough trading
+# behind the prices to build a feature on.
 #
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Understand Kalshi contract structure and implied probability pricing
-# - Load and explore real OHLCV data from the Kalshi API
-# - Build event probability indicators for ML pipelines
-# - Assess prediction market data quality for systematic use
+#
+# - Read a binary event contract's price as a probability, and decode a ticker into the event it
+#   settles on.
+# - Detect the ingestion artifacts a carry-forward feed produces, and repair them without letting
+#   a repair introduce information from the future.
+# - Read a family of contracts on the same event at different thresholds as a distribution, and
+#   check the monotonicity that distribution has to satisfy.
+# - Measure the trading behind a quoted price, and distinguish a price that moved from a price
+#   that was carried.
+# - Build the probability features a rate-sensitive strategy would use, and say what the sample
+#   supports.
+#
+# ## Prerequisites
+#
+# ```bash
+# python data/prediction_markets/download.py
+# ```
 #
 # ## Cross-References
 #
-# - **Upstream**: `data/prediction_markets/download.py` (fetches data)
-# - **Downstream**: Chapter 8 event features, macro regime indicators
-# - **Related**: [`13_polymarket_prediction_markets`](13_polymarket_prediction_markets.ipynb) (crypto-based alternative)
+# - **Upstream**: `data/prediction_markets/download.py`
+# - **Related**: [`13_polymarket_prediction_markets`](13_polymarket_prediction_markets.ipynb) (the unregulated, higher-volume alternative)
 
 # %%
 """Kalshi Prediction Markets - build event probability indicators from regulated binary contracts."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
+import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
 from data.prediction_markets.loader import load_kalshi
 from utils.paths import get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
-
-# %% [markdown]
-# ## 1. Kalshi Contract Structure
-#
-# Kalshi contracts are binary event contracts that settle at \$0 or \$1.
-# The contract price represents the market's implied probability of the event.
-#
-# | Feature | Description |
-# |---------|-------------|
-# | **Regulation** | CFTC-regulated (legal in US) |
-# | **Settlement** | USD (real dollars) |
-# | **Position Limit** | \$25,000 per contract |
-# | **Trading Hours** | 24/7 |
-# | **Min Tick** | \$0.01 |
-#
-# ### Ticker Format
-#
-# `KXFED-27APR-T4.25` decodes as:
-# - **KXFED**: Federal Funds Rate series
-# - **27APR**: April 2027 FOMC meeting
-# - **T4.25**: threshold - contract pays \$1 if rate is **above** 4.25%
-#
-# The `close` price is the implied probability (0–1) that the rate will
-# exceed the threshold at that meeting.
-
-# %% [markdown]
-# ## 2. Load Kalshi Data
-#
-# We load pre-downloaded OHLCV data from the Kalshi API. The download script
-# (`data/prediction_markets/download.py`) fetches all configured economic series
-# and stores them in canonical OHLCV format.
+MOMENTUM_DAYS = 5  # window the change in implied probability is measured over
+VOLATILITY_DAYS = 10  # window its standard deviation and z-score are measured over
+CONFIDENT_PROBABILITY = 0.2  # a contract within this of zero or one is treated as settled
 
 # %%
-df = load_kalshi()
-
-print(f"Loaded {len(df):,} observations across {df['symbol'].n_unique()} contracts")
-print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
-
-df.group_by("symbol").len().rename({"len": "days"}).sort("symbol")
-
-# %%
-df.head(10)
+OUTPUT_DIR = get_output_dir(4, "kalshi")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
-# ### Data Integrity Check
+# ## 1. What a contract is
 #
-# These KXFED contracts are thinly traded: only a handful of bars carry any volume, and
-# the rest are daily carry-forward snapshots. Two problems follow. First, some fields are
-# corrupt: a price of exactly 0 (open, low, or close) while the high still holds the prior
-# level is an ingestion artifact, since a live contract trades inside (0, 1) and never
-# prints a true zero the same day it closes near 0.9. Second, on a zero-volume day there
-# is no genuine intraday range at all, so a `low` far below the `close` is stale rather
-# than traded. The one reliable field is `close` (the implied probability). We therefore
-# carry the last valid close forward within each contract and rebuild every non-traded
-# bar as a flat snapshot at that close, keeping raw OHLC only where the bar actually
-# traded. Left unhandled, these artifacts inflate both the close-price range (misranking a
-# near-certain contract as "most active") and the intraday range shown in Section 6.
+# A Kalshi contract settles at one dollar or nothing, so its price sits between the two and is
+# read as the probability of the event. The tick is a cent, which sets the resolution of that
+# probability at one percentage point.
+#
+# **What this feed carries is the bid, not a mid or a trade.** The downloader takes
+# `yes_bid` - the highest price anyone is currently offering to pay for the YES side - so every
+# price below is a lower bound on what the market thinks, short by whatever the spread is. On a
+# liquid contract that is a cent; on the contracts here, where days pass without a trade, it can
+# be a great deal more, and nothing in the file says how much.
+#
+# | Property | Value |
+# |----------|-------|
+# | Regulator | Commodity Futures Trading Commission |
+# | Settlement | US dollars |
+# | Position limit | Twenty-five thousand dollars per contract |
+# | Trading hours | Continuous |
+# | Minimum tick | One cent |
+#
+# ### Reading a ticker
+#
+# `KXFED-27APR-T4.25` names three things: `KXFED` is the federal funds rate series, `27APR` is the
+# April 2027 meeting of the Federal Open Market Committee, and `T4.25` is the threshold. The
+# contract pays if the rate is **above** four and a quarter percent after that meeting, so its
+# price is the market's probability of that.
+#
+# The threshold is what makes the series interesting. One contract gives one probability; a
+# ladder of thresholds on the same meeting gives the whole distribution, which Part 4 draws.
+
+# %% [markdown]
+# ## 2. The data, and how much trading is behind it
+#
+# The first three numbers to establish are how many bars there are, how many of them recorded a
+# trade, and how many recorded a change in price. On a market this young those are very different
+# numbers, and everything after depends on which one a statistic is really counting.
+
+# %%
+raw = load_kalshi()
+print(f"Bars: {len(raw):,} across {raw['symbol'].n_unique()} contracts")
+print(f"Dates: {raw['timestamp'].min()} to {raw['timestamp'].max()}")
+print(f"Bars recording a trade: {int((raw['volume'] > 0).sum())}")
+print(f"Contracts traded in the whole sample: {raw['volume'].sum():,.0f}")
+raw.head(5)
+
+# %% [markdown]
+# Five traded bars out of several hundred is the fact that governs the rest of the notebook. The
+# price on every other bar is a quote carried forward, which is a real number - somebody is
+# willing to trade there - and is not a transaction.
+
+# %% [markdown]
+# ### The artifacts a carry-forward feed produces
+#
+# Two problems follow from the thinness, and both have to be dealt with before anything is
+# computed.
+#
+# A price field of exactly zero alongside a positive high is an ingestion artifact. A live
+# contract trades strictly inside zero and one, and one that closes near ninety cents cannot have
+# printed a true zero the same day. Left in, a single such bar makes a pinned contract look like
+# the widest-ranging one in the universe.
+#
+# On a bar with no volume there is also no intraday range: the high and the low are carried from
+# whenever the contract last traded, so the distance between them measures the age of the quote
+# rather than the day's uncertainty. The close is the only field worth keeping on such a bar.
+
+# %%
+suspect = (pl.col("high") > 0.0) & (
+    (pl.col("open") == 0.0) | (pl.col("low") == 0.0) | (pl.col("close") == 0.0)
+)
+artifacts = raw.filter(suspect).select(
+    "timestamp", "symbol", "open", "high", "low", "close", "volume"
+)
+print(f"Bars with a zero price field alongside a positive high: {len(artifacts)}")
+artifacts.head(8)
 
 # %%
 traded = pl.col("volume") > 0
-
-# Report the clearest ingestion artifacts: a price field of exactly 0 with a positive high.
-zero_price_mask = (pl.col("high") > 0.0) & (
-    (pl.col("open") == 0.0) | (pl.col("low") == 0.0) | (pl.col("close") == 0.0)
-)
-artifact_bars = (
-    df.filter(zero_price_mask)
-    .select("timestamp", "symbol", "open", "high", "low", "close", "volume")
-    .sort("timestamp", "symbol")
-)
-print(f"Zero-price artifact bars (a price field of 0 with a positive high): {artifact_bars.height}")
-print(f"Genuinely traded bars (volume > 0): {df.filter(traded).height} of {df.height}")
-
-# Repair: null any close that collapsed to 0, carry the last valid close forward (and
-# backward for a leading gap) within each contract, then rebuild every non-traded bar as
-# a flat snapshot at that close so no spurious intraday range survives.
-df = (
-    df.sort("symbol", "timestamp")
+kalshi = (
+    raw.sort("symbol", "timestamp")
     .with_columns(
+        # Null the impossible closes, then carry the last real one forward. Only forward:
+        # a backward fill would put a later price on an earlier date, which is the exact
+        # look-ahead this chapter exists to prevent, and it is invisible once done.
         pl.when((pl.col("close") == 0.0) & (pl.col("high") > 0.0))
         .then(None)
         .otherwise(pl.col("close"))
         .alias("close")
     )
-    .with_columns(pl.col("close").forward_fill().over("symbol").alias("close"))
-    .with_columns(pl.col("close").backward_fill().over("symbol").alias("close"))
+    .with_columns(pl.col("close").forward_fill().over("symbol"))
     .with_columns(
+        # A bar that did not trade is a flat snapshot at its close, not a range.
         pl.when(traded).then(pl.col("open")).otherwise(pl.col("close")).alias("open"),
         pl.when(traded).then(pl.col("high")).otherwise(pl.col("close")).alias("high"),
         pl.when(traded).then(pl.col("low")).otherwise(pl.col("close")).alias("low"),
     )
 )
-
-artifact_bars
+print(f"Bars with no usable close after the repair: {kalshi['close'].null_count()}")
+print(
+    f"Prices still outside the zero-to-one range: {kalshi.filter((pl.col('close') < 0) | (pl.col('close') > 1)).height}"
+)
 
 # %% [markdown]
-# ## 3. Contract Universe
+# ## 3. The contract universe
 #
-# All contracts are from the KXFED (Federal Reserve) series, covering different
-# rate thresholds for upcoming FOMC meetings. Each threshold represents a
-# different market expectation about the terminal rate.
+# With the artifacts out, each contract can be summarized by where its probability started and
+# ended, how often that probability changed at all, and how often it changed because somebody
+# traded.
 
 # %%
-contracts = (
-    df.sort("timestamp")
+summary = (
+    kalshi.sort("timestamp")
     .group_by("symbol")
     .agg(
-        pl.col("close").last().alias("latest_prob"),
-        pl.col("close").first().alias("initial_prob"),
-        pl.col("volume").sum().alias("total_volume"),
-        pl.col("timestamp").min().alias("first_date"),
-        pl.col("timestamp").max().alias("last_date"),
-        pl.len().alias("observations"),
+        pl.col("close").first().alias("first_probability"),
+        pl.col("close").last().alias("last_probability"),
+        (pl.col("close").max() - pl.col("close").min()).alias("probability_range"),
+        pl.col("close").diff().ne(0).sum().alias("days_the_price_moved"),
+        (pl.col("volume") > 0).sum().alias("days_traded"),
+        pl.len().alias("bars"),
     )
-    .sort("symbol")
+    .sort("probability_range", descending=True)
 )
-contracts
+summary
 
 # %% [markdown]
-# ## 4. Probability Evolution
+# The gap between the last two columns is the whole story of this dataset. Prices move far more
+# often than trades happen, because the quote is revised whether or not anyone crosses it. That
+# is not a defect - a revised quote carries information - but it fixes what a statistic computed
+# on this series is measuring, which is quote revisions and not trading.
+
+# %% [markdown]
+# ## 4. A threshold ladder is a distribution
 #
-# The implied probability for each contract evolves over time as the market
-# incorporates new information about Fed policy. Higher thresholds have lower
-# probabilities (less likely the rate exceeds a high level).
+# All the contracts here are on the federal funds rate, and several share a meeting at different
+# thresholds. Since each pays if the rate is *above* its threshold, reading a meeting's contracts
+# in threshold order gives the market's implied survival function for the rate: the probability of
+# exceeding each level.
+#
+# That structure carries an ordering. A higher threshold is harder to exceed, so the market's
+# probability for it cannot exceed a lower threshold's.
+#
+# Checking that ordering on these prices is a **diagnostic and not an arbitrage test**, because
+# the prices are bids. Two contracts with different spreads can show a higher threshold's bid
+# above a lower one while their midpoints are correctly ordered, and nothing is tradeable: an
+# arbitrage needs the higher threshold's bid against the lower threshold's ask, net of fees.
+#
+# So a violation here says the bid ordering is broken and does not say why. Two spreads of
+# different widths and two quotes of different ages both produce it, and separating them needs
+# the ask side, which this feed does not carry. It is still worth running, because a feed that
+# never violates the ordering is one whose quotes move together, and that is a property to know
+# about before either price is used.
+
+# %% [markdown]
+# The downloader is configured for six Kalshi series and only the rate series uses the
+# meeting-and-threshold ticker shape, so the ladder is built from the contracts whose ticker
+# matches that shape rather than from everything loaded. A contract from another series reaches
+# the notebook as an unparsed row rather than as a crash or, worse, as a threshold read off the
+# wrong part of its name.
 
 # %%
-# Volume is near zero across these contracts, so "most active" means the widest range
-# in implied probability (on the cleaned data), which flags the genuine battleground
-# thresholds rather than a data glitch.
-price_range = (
-    df.group_by("symbol")
-    .agg((pl.col("close").max() - pl.col("close").min()).alias("range"))
-    .sort("range", descending=True)
+THRESHOLD_TICKER = r"^KXFED-(?<meeting>[0-9]{2}[A-Z]{3})-T(?<threshold>[0-9]+(?:\.[0-9]+)?)$"
+
+# Select the threshold contracts first, then take their own latest date: taking the panel's
+# latest date first would return nothing whenever another series traded more recently.
+threshold_contracts = (
+    kalshi.with_columns(parsed=pl.col("symbol").str.extract_groups(THRESHOLD_TICKER))
+    .unnest("parsed")
+    .drop_nulls("meeting")
+    .with_columns(pl.col("threshold").cast(pl.Float64))
+)
+ladder = (
+    threshold_contracts.filter(pl.col("timestamp") == threshold_contracts["timestamp"].max())
+    .select("meeting", "threshold", "symbol", probability="close")
+    .sort("meeting", "threshold")
+    if not threshold_contracts.is_empty()
+    else threshold_contracts.select("meeting", "threshold", "symbol", probability=pl.col("close"))
+)
+print(f"Contracts loaded: {kalshi['symbol'].n_unique()}")
+print(f"Of those, rate-threshold contracts: {threshold_contracts['symbol'].n_unique()}")
+violations = ladder.with_columns(rises=pl.col("probability").diff().over("meeting") > 0).filter(
+    pl.col("rises")
+)
+print(f"Meetings with a threshold ladder: {ladder['meeting'].n_unique()}")
+print(f"Places where a higher threshold's bid exceeds a lower threshold's: {len(violations)}")
+ladder
+
+# %%
+# Ties on contract count are broken by meeting label so the same meeting is drawn on every run.
+widest_meeting = (
+    ladder.group_by("meeting").len().sort(["len", "meeting"], descending=[True, False])["meeting"]
+)
+fig = px.line(
+    ladder.filter(pl.col("meeting") == widest_meeting[0]).to_pandas()
+    if len(widest_meeting)
+    else ladder.to_pandas(),
+    x="threshold",
+    y="probability",
+    markers=True,
+    title="A ladder of thresholds prices the whole distribution of outcomes",
+    labels={
+        "threshold": "Rate threshold (%)",
+        "probability": "Probability the rate is above the threshold",
+    },
+    color_discrete_sequence=[COLORS["blue"]],
+)
+fig.update_layout(height=380, yaxis_tickformat=".0%", yaxis_range=[0, 1.02])
+show_plotly_with_alt(
+    fig,
+    "Line chart with markers of the probability the federal funds rate exceeds each traded "
+    "threshold at one meeting, falling from near certainty at the lowest threshold to almost "
+    "nothing at the highest, with the steepest fall between the middle two.",
 )
 
-top_contracts = price_range.head(3)["symbol"].to_list()
+# %% [markdown]
+# The curve falls fastest between the thresholds the market thinks are live, which is where the
+# distribution has its mass. The difference between two adjacent points is roughly the
+# probability the rate lands between those two levels - roughly, because each point is a bid and
+# the difference of two bids carries both spreads.
 
-fig = go.Figure()
-palette = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
+# %% [markdown]
+# ## 5. How the probabilities moved
+#
+# Over time, each contract's price traces the market's changing view. The contracts whose
+# thresholds sit near the expected rate move; the ones far above or below it stay pinned, because
+# no news plausibly changes their answer.
 
-for sym, color in zip(top_contracts, palette, strict=False):
-    data = df.filter(pl.col("symbol") == sym).sort("timestamp").to_pandas()
-    fig.add_trace(
-        go.Scatter(
-            x=data["timestamp"],
-            y=data["close"],
-            mode="lines",
-            name=sym,
-            line=dict(color=color, width=2),
-        )
-    )
+# %%
+most_movement = summary.head(3)["symbol"].to_list()
+paths = kalshi.filter(pl.col("symbol").is_in(most_movement)).sort("timestamp")
 
+fig = px.line(
+    paths.to_pandas(),
+    x="timestamp",
+    y="close",
+    color="symbol",
+    title="Thresholds near the expected rate move; the rest stay pinned",
+    labels={"timestamp": "Date", "close": "Implied probability", "symbol": ""},
+    color_discrete_sequence=[COLORS["blue"], COLORS["amber"], COLORS["copper"]],
+)
 fig.update_layout(
-    title="Battleground Fed-rate thresholds hover near even odds while far thresholds stay pinned",
-    xaxis_title="Date",
-    yaxis_title="Implied Probability",
-    yaxis=dict(tickformat=".0%", range=[0, 1.05]),
     height=400,
+    yaxis_tickformat=".0%",
+    yaxis_range=[0, 1.05],
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
 )
-
-fig.show()
-
-# %% [markdown]
-# The contracts with rate thresholds near the current rate show the most
-# price movement - these are the "battleground" levels where the market
-# is genuinely uncertain. Contracts far from the current rate trade near
-# 0 or 1 with little movement.
+show_plotly_with_alt(
+    fig,
+    "Line chart of the implied probability of the three contracts whose prices moved most, each "
+    "a step function that holds a level for weeks and then jumps.",
+)
 
 # %% [markdown]
-# ## 5. Multi-Threshold View
-#
-# Looking at all thresholds for a single meeting gives a snapshot of the
-# market's full probability distribution over rate outcomes.
+# Every path is a staircase rather than a curve, and that shape is the sample rather than the
+# market: with a handful of price revisions per contract over three months, the series is flat
+# between them by construction.
 
 # %%
-# Group by meeting date prefix
-meetings = {}
-for sym in df["symbol"].unique().to_list():
-    # KXFED-27APR-T4.25 → 27APR
-    parts = sym.split("-")
-    if len(parts) >= 3:
-        meeting = parts[1]
-        meetings.setdefault(meeting, []).append(sym)
-
+meetings = sorted(
+    kalshi.with_columns(meeting=pl.col("symbol").str.split("-").list.get(1))["meeting"].unique()
+)
 fig = make_subplots(
     rows=len(meetings),
     cols=1,
     shared_xaxes=True,
-    subplot_titles=[f"Meeting: {m}" for m in sorted(meetings.keys())],
+    subplot_titles=[f"Meeting {m}" for m in meetings],
     vertical_spacing=0.08,
 )
-
-for i, (meeting, symbols) in enumerate(sorted(meetings.items()), 1):
-    for sym in sorted(symbols):
-        data = df.filter(pl.col("symbol") == sym).sort("timestamp").to_pandas()
-        threshold = sym.split("-T")[-1] if "-T" in sym else sym
+for row, meeting in enumerate(meetings, 1):
+    for symbol in sorted(kalshi.filter(pl.col("symbol").str.contains(meeting))["symbol"].unique()):
+        series = kalshi.filter(pl.col("symbol") == symbol).sort("timestamp")
         fig.add_trace(
             go.Scatter(
-                x=data["timestamp"],
-                y=data["close"],
+                x=series["timestamp"],
+                y=series["close"],
                 mode="lines",
-                name=f"T{threshold}",
-                showlegend=(i == 1),
+                name=symbol.split("-T")[-1] + "%",
+                showlegend=(row == 1),
             ),
-            row=i,
+            row=row,
             col=1,
         )
-    fig.update_yaxes(tickformat=".0%", range=[0, 1.05], row=i, col=1)
-
+    fig.update_yaxes(tickformat=".0%", range=[0, 1.05], row=row, col=1)
 fig.update_layout(
     height=250 * len(meetings),
-    title_text="Each FOMC meeting's threshold ladder maps the market's full rate distribution",
+    title_text="Each meeting's ladder holds its ordering as the whole curve shifts",
+)
+show_plotly_with_alt(
+    fig,
+    "One panel per Federal Open Market Committee meeting, each showing the implied probability "
+    "path of every traded threshold for that meeting. Within each panel the lines keep their "
+    "vertical ordering throughout.",
 )
 
-fig.show()
-
 # %% [markdown]
-# ## 6. Day-over-Day Probability Dynamics
+# ## 6. Features, and what this sample supports
 #
-# These markets trade on only a handful of days in the sample; the rest are zero-volume
-# carry-forward snapshots with no genuine intraday range. Intraday high/low is therefore
-# not a meaningful signal here. What moves is the day-over-day implied probability (the
-# `close` path), so we summarize each contract by how many days it actually traded and by
-# the volatility of its daily probability changes. Contracts whose threshold sits near the
-# expected rate show the largest daily moves.
-
-# %%
-df_enriched = df.sort("symbol", "timestamp").with_columns(
-    pl.col("close").diff().over("symbol").alias("prob_change"),
-)
-
-activity = (
-    df_enriched.group_by("symbol")
-    .agg(
-        (pl.col("volume") > 0).sum().alias("traded_days"),
-        pl.col("volume").sum().round(1).alias("total_volume"),
-        pl.col("prob_change").std().round(4).alias("daily_prob_vol"),
-        pl.col("prob_change").abs().max().round(4).alias("max_daily_move"),
-    )
-    .sort("daily_prob_vol", descending=True, nulls_last=True)
-)
-
-activity
-
-# %%
-ad = activity.to_pandas()
-fig = go.Figure(go.Bar(x=ad["symbol"], y=ad["daily_prob_vol"], marker_color=COLORS["blue"]))
-fig.update_layout(
-    title="Near-the-money Fed thresholds carry the most daily probability movement",
-    xaxis_title="Contract",
-    yaxis_title="Std. of daily probability change",
-    height=400,
-)
-fig.update_xaxes(tickangle=-45)
-fig.show()
-
-# %% [markdown]
-# ## 7. Event Indicators for ML
+# The features a rate-sensitive strategy would take from this feed are the ones any probability
+# path suggests: how far it has moved recently, how variable those moves are, where it sits
+# against its own recent range, and whether it has settled near certainty.
 #
-# Transform Kalshi probabilities into ML-ready features. Since `close`
-# is already the implied probability, we derive momentum, volatility,
-# and regime indicators directly.
+# The intraday range is deliberately not among them. After the repair, a non-traded bar has a high
+# and a low equal to its close, so a range feature would be zero on every bar except the five that
+# traded, and would be measuring the repair rather than the market.
 
 # %%
-LOOKBACK = 5
-VOL_WINDOW = 10
-
-kalshi_features = df.sort("symbol", "timestamp").with_columns(
-    (pl.col("close") - pl.col("close").shift(LOOKBACK).over("symbol")).alias("prob_momentum"),
-    pl.col("close").diff().rolling_std(VOL_WINDOW).over("symbol").alias("prob_volatility"),
-    pl.when(pl.col("close").rolling_std(VOL_WINDOW).over("symbol") > 0)
-    .then(
-        (pl.col("close") - pl.col("close").rolling_mean(VOL_WINDOW).over("symbol"))
-        / pl.col("close").rolling_std(VOL_WINDOW).over("symbol")
-    )
-    .otherwise(0.0)
-    .alias("prob_zscore"),
-    ((pl.col("close") > 0.8) | (pl.col("close") < 0.2)).cast(pl.Int8).alias("high_confidence"),
-    (pl.col("high") - pl.col("low")).alias("uncertainty"),
+features = kalshi.sort("symbol", "timestamp").with_columns(
+    probability_change=(pl.col("close") - pl.col("close").shift(MOMENTUM_DAYS)).over("symbol"),
+    probability_volatility=pl.col("close").diff().rolling_std(VOLATILITY_DAYS).over("symbol"),
+    # A window in which the price never moved has no scale to standardize against, so the
+    # z-score is undefined there. Substituting zero would read as "exactly at its average".
+    probability_zscore=(
+        pl.when(pl.col("close").rolling_std(VOLATILITY_DAYS) > 0)
+        .then(
+            (pl.col("close") - pl.col("close").rolling_mean(VOLATILITY_DAYS))
+            / pl.col("close").rolling_std(VOLATILITY_DAYS)
+        )
+        .otherwise(None)
+    ).over("symbol"),
+    near_certain=(
+        (pl.col("close") > 1 - CONFIDENT_PROBABILITY) | (pl.col("close") < CONFIDENT_PROBABILITY)
+    ).cast(pl.Int8),
 )
 
-print(f"Feature matrix: {kalshi_features.shape}")
-kalshi_features.select(
-    "timestamp", "symbol", "close", "prob_momentum", "prob_volatility", "high_confidence"
-).head(10)
-
-# %%
-# Feature distributions for the most active contract
-active_sym = top_contracts[0]
-active_features = kalshi_features.filter(
-    (pl.col("symbol") == active_sym) & pl.col("prob_momentum").is_not_null()
+defined = features.select(
+    pl.len().alias("bars"),
+    pl.col("probability_change").is_not_null().sum().alias("change_defined"),
+    (pl.col("probability_change") != 0).sum().alias("change_non_zero"),
+    pl.col("probability_zscore").is_not_null().sum().alias("zscore_defined"),
 )
-
-fig = make_subplots(
-    rows=1,
-    cols=2,
-    subplot_titles=("Probability Momentum", "Probability Z-Score"),
-)
-
-fig.add_trace(
-    go.Histogram(
-        x=active_features["prob_momentum"].to_list(),
-        nbinsx=30,
-        name="Momentum",
-        marker_color=COLORS["blue"],
-    ),
-    row=1,
-    col=1,
-)
-
-fig.add_trace(
-    go.Histogram(
-        x=active_features["prob_zscore"].to_list(),
-        nbinsx=30,
-        name="Z-Score",
-        marker_color=COLORS["slate"],
-    ),
-    row=1,
-    col=2,
-)
-
-fig.update_layout(
-    title=f"Probability momentum and z-score center near zero for {active_sym}",
-    height=350,
-    showlegend=False,
-)
-
-fig.show()
+defined
 
 # %% [markdown]
-# ## 8. Data Quality Assessment
+# The last two columns are the measurement this section exists for. The momentum feature is
+# defined on most bars and non-zero on few of them, and the z-score is undefined wherever the
+# price held still for the whole window. A model fitted on these columns would be fitting a
+# handful of events dressed as a daily panel.
 #
-# Two checks matter for prediction-market data: whether any bars were corrupt (caught
-# and repaired at load), and how much genuine price variation each contract carries.
+# That is a statement about this snapshot and not about the method. The construction is the right
+# one and the feed will support it once the market is older; what a reader should take from the
+# table is the habit of counting how many of a feature's values are real before using it.
 
 # %%
-print(f"Zero-price artifact bars caught and repaired at load: {artifact_bars.height}")
-artifact_bars
-
-# %%
-quality_df = (
-    df.group_by("symbol")
-    .agg(
-        pl.len().alias("observations"),
-        pl.col("volume").mean().round(3).alias("avg_volume"),
-        (pl.col("close").max() - pl.col("close").min()).round(3).alias("price_range"),
-    )
-    .sort("price_range", descending=True)
-)
-quality_df
-
-# %%
-qd = quality_df.to_pandas()
-fig = go.Figure(go.Bar(x=qd["symbol"], y=qd["price_range"], marker_color=COLORS["blue"]))
-fig.update_layout(
-    title="After repair, close-price range concentrates in near-the-money thresholds",
-    xaxis_title="Contract",
-    yaxis_title="Close price range",
-    height=400,
-)
-fig.update_xaxes(tickangle=-45)
-fig.show()
+features.select(
+    "timestamp",
+    "symbol",
+    "close",
+    "probability_change",
+    "probability_volatility",
+    "probability_zscore",
+    "near_certain",
+).tail(8)
 
 # %% [markdown]
-# After repairing the corrupt bars, price variation reflects real market movement.
-# Volume is near zero across the universe, so the range in implied probability, not
-# turnover, is the useful activity signal: contracts whose thresholds sit near the
-# expected rate move the most and carry the richest information for ML features.
-
-# %% [markdown]
-# ## 9. Save Enriched Data
+# ## 7. Saving the feature panel
 
 # %%
-output_dir = get_output_dir(4, "kalshi")
-output_dir.mkdir(parents=True, exist_ok=True)
-
-output_file = output_dir / "kalshi_features.parquet"
-kalshi_features.write_parquet(output_file)
-
-print(f"Saved {len(kalshi_features)} observations to {output_file}")
+output_file = OUTPUT_DIR / "kalshi_features.parquet"
+features.write_parquet(output_file)
+print(f"Wrote {len(features):,} rows to {output_file}")
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Implied probability = close price**: Kalshi contract prices directly encode
-#    the market's probability estimate for the event, no transformation needed
+# 1. A binary contract's price is a probability with no model between the two, which is what makes
+#    a prediction market worth reading: every other forecast in a pipeline has to be calibrated,
+#    and this one is quoted. Check which price the feed carries, though. This one is the highest
+#    standing bid for the YES side, so it is short of the market's view by a spread that a thin
+#    book can make large.
+# 2. A ladder of thresholds on the same event is a distribution, and its ordering is worth
+#    checking: a higher threshold's probability cannot exceed a lower one's. On bid prices that is
+#    a staleness diagnostic rather than an arbitrage test, since an arbitrage compares a bid
+#    against an ask.
+# 3. Separate the bars that traded from the bars that were carried. A carried quote still holds
+#    information, but a statistic computed over both is measuring quote revisions, and a feature
+#    named for volume or for intraday range is measuring the carry.
+# 4. Repair forward, never backward. Filling a leading gap from a later value puts tomorrow's
+#    price on today's date, and nothing downstream will show that it happened.
+# 5. Count how many of a feature's values are real before fitting anything on it. A column that is
+#    defined on every row and non-zero on a handful is a panel in shape only.
 #
-# 2. **Threshold structure**: Multiple contracts per meeting create a full
-#    probability distribution over rate outcomes - richer than a single forecast
-#
-# 3. **Feature engineering**: Momentum, volatility, and z-score of probability
-#    paths provide regime-detection signals for rate-sensitive strategies
-#
-# 4. **Liquidity caveat**: Economic event contracts are still early-stage;
-#    volume is thin compared to traditional derivatives markets
-#
-# 5. **Screen for corrupt bars first**: thin, carry-forward markets are prone to
-#    ingestion artifacts (a positive high with a zero close). Detect and repair them
-#    before ranking or feature engineering, or a single bad bar distorts both.
-#
-# **Next**: See [`13_polymarket_prediction_markets`](13_polymarket_prediction_markets.ipynb) for the higher-liquidity
-# crypto-based alternative and cross-platform comparison.
+# **Next**: [`13_polymarket_prediction_markets`](13_polymarket_prediction_markets.ipynb) reads the
+# unregulated venue, where the volume is orders of magnitude larger and the trade-offs are
+# different.

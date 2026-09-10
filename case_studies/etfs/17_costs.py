@@ -64,7 +64,7 @@ import polars as pl
 import yaml
 from plotly.subplots import make_subplots
 
-from case_studies.research import open_study, split_unpublished_members
+from case_studies.research import open_study, reuse_disclosure, split_unpublished_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
@@ -108,14 +108,15 @@ WORKSPACE: str = ""
 # %% [markdown]
 # ## 1. What is being re-priced, and under what
 #
-# The combinations are the highest-Sharpe validation runs across every stage a carrier can come
-# from - the equal-weight baseline, the allocation sweep and the risk overlay - not the allocation
-# stage alone. Each later stage is an alternative to the one before it rather than an improvement
-# on it by construction: where every allocator lands below the equal-weight parent it was built
-# from, an allocation-only rule would carry forward a strategy the earlier notebook measured as
-# worse than doing nothing, and where every risk control hurts, an overlay-only rule would charge
-# costs against an overlay the sweep just found unhelpful. Which stage wins is decided by
-# measurement here and printed below, not by which stages this query happens to name.
+# The combinations are the highest-Sharpe validation runs across every stage a selected
+# configuration can come from - the equal-weight baseline, the allocation sweep and the risk
+# overlay - not the allocation stage alone. Each later stage is an alternative to the one before it
+# rather than an improvement on it by construction: where every allocator lands below the
+# equal-weight parent it was built from, an allocation-only rule would carry forward a strategy the
+# earlier notebook measured as worse than doing nothing, and where every risk control hurts, an
+# overlay-only rule would charge costs against an overlay the sweep just found unhelpful. Which
+# stage wins is decided by measurement here and printed below, not by which stages this query
+# happens to name.
 #
 # They are re-priced rather than re-selected: the prediction, the concentration and the allocator
 # are held exactly as registered, and the only thing that moves is the cost model. That is what
@@ -171,17 +172,17 @@ if not LIVE_PREDICTIONS:
 print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 
 # %%
-# The stages the sweep may draw its carrier from. This is not a free choice: it is exactly the set
-# `resolve_canonical_rank1_lineage` selects over,
-# and the two have to agree. Pool anything narrower and they can name different configurations -
-# the curve below would then describe a strategy `20_strategy_analysis` does not report, and that
-# notebook would find no cost rows for the carrier it did select.
+# The stages the sweep may draw the configuration it overlays from. This is not a free choice: it is
+# exactly the set `resolve_canonical_rank1_lineage` selects over, and the two have to agree. Pool
+# anything narrower and they can name different configurations - the curve below would then describe
+# a strategy `20_strategy_analysis` does not report, and that notebook would find no cost rows for
+# the configuration it did select.
 #
 # Breadth is also what keeps the risk question empirical. The risk stage files one row per named
 # control and none for the un-overlaid strategy, so a pool of `risk_overlay` alone would force an
-# overlay onto the carrier even where every control hurt it - letting the shape of a query decide
-# what the sweep is supposed to measure. `signal` and `allocation` are how an un-overlaid
-# configuration wins when it deserves to.
+# overlay onto the selected configuration even where every control hurt it - letting the shape of a
+# query decide what the sweep is supposed to measure. `signal` and `allocation` are how an
+# un-overlaid configuration wins when it deserves to.
 #
 # `cost_sensitivity` stays out: pooling it would let a cost-charged run re-enter the selection it
 # is a consequence of. It is also the terminal stage, which is why taking everything before it
@@ -200,7 +201,7 @@ PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sens
 
 
 def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
-    """The highest-Sharpe validation runs across every stage the carrier may come from.
+    """The highest-Sharpe validation runs across every stage the selected configuration may come from.
 
     Each stage is asked for its whole ranked list and the pool is sorted afterwards, rather than
     taking `top_n` from each and merging them: truncating first lets one stage's leader hold a
@@ -277,7 +278,7 @@ for row in top_combos.iter_rows(named=True):
 # separately and differenced. A negative difference is the stage saying its controls did not help,
 # which is a result and not a failure.
 #
-# Both sides are restricted to the same live population the carrier was selected from. Without
+# Both sides are restricted to the same live population the selection ran over. Without
 # that, a retired or unpublished generation can supply either Sharpe, and the difference would
 # then compare a number the sweep would never carry against one it might.
 _best: dict[str, float | None] = {}
@@ -292,7 +293,7 @@ for _stage in ("risk_overlay", "allocation"):
     )
     _best[_stage] = None if _frame.is_empty() else _frame["sharpe"][0]
 if _best["risk_overlay"] is None:
-    print("  Risk overlay: no run registered, so the carrier above is un-overlaid.")
+    print("  Risk overlay: no run registered, so the selected configuration above is un-overlaid.")
 elif _best["allocation"] is None:
     print(f"  Risk overlay: {_best['risk_overlay']:+.3f}, with no allocation run to compare it to.")
 else:
@@ -412,8 +413,8 @@ def sweep_costs(regime: str, grid, apply_costs) -> tuple[int, list[dict]]:
             )
 
     print(
-        f"{regime} sweep in {time.time() - started:.0f}s: {registered - served} computed, "
-        f"{served} served from the registry, {len(failures)} failed"
+        f"{regime} sweep in {time.time() - started:.0f}s: "
+        f"{reuse_disclosure(registered - served, served, len(failures))}"
     )
     return registered, failures
 
@@ -436,10 +437,10 @@ ps_done, ps_failures = sweep_costs(
 # %%
 # Every hash this sweep registered has to have landed at `cost_sensitivity`. It is checked rather
 # than assumed because the stage is inferred from the spec, and the spec being priced is a clone of
-# the carrier's - so a carrier from the risk stage brings its risk block along, and an inference
-# that read that block before the chapter tag would file the whole curve as new risk overlays. The
-# readback below would then report an empty stage, which points at the sweep rather than at the
-# classification. This names it.
+# the selected configuration's - so a selection from the risk stage brings its risk block along, and
+# an inference that read that block before the chapter tag would file the whole curve as new risk
+# overlays. The readback below would then report an empty stage, which points at the sweep rather
+# than at the classification. This names it.
 _misfiled = {
     _hash: _stage
     for _hash, _stage in ((_hash, _stage_of(_hash)) for _hash in sorted(SWEPT_COST_HASHES))
@@ -671,7 +672,8 @@ show_plotly_with_alt(
 # And every point is measured on validation folds; the holdout is not consulted.
 
 # %% [markdown]
-# **Next**: [`18_holdout_predictions`](18_holdout_predictions.ipynb) refits the carrier this
-# sweep priced on the history before the holdout window, [`19_holdout_backtest`](19_holdout_backtest.ipynb)
-# trades it there, and [`20_strategy_analysis`](20_strategy_analysis.ipynb) reports the whole
-# progression. This is the last stage that selects; nothing after it chooses anything.
+# **Next**: [`18_holdout_predictions`](18_holdout_predictions.ipynb) refits the selected
+# configuration this sweep priced on the history before the holdout window,
+# [`19_holdout_backtest`](19_holdout_backtest.ipynb) trades it there, and
+# [`20_strategy_analysis`](20_strategy_analysis.ipynb) reports the whole progression. This is the
+# last stage that selects; nothing after it chooses anything.

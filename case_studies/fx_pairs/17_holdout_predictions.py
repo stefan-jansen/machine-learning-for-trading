@@ -42,8 +42,8 @@
 #
 # **Book reference**: Chapters 16-20
 #
-# **Prerequisite**: `16_costs`. The carrier is resolved from the registered validation
-# backtests, so every stage that registers one must have run.
+# **Prerequisite**: `16_costs`. The selected configuration is resolved from the registered
+# validation backtests, so every stage that registers one must have run.
 
 # %%
 """Refit the validation-selected FX configuration on the holdout interval."""
@@ -82,17 +82,16 @@ CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 # %% tags=["results"]
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
-# The carrier is the highest-Sharpe registered VALIDATION backtest across the baseline,
-# allocation and risk-overlay stages, restricted to runs that stayed solvent. It is resolved
-# from the registry rather than named here, so this notebook cannot select a configuration that
-# the validation stages did not rank first.
-# `15_risk_management` froze the set the holdout is allowed to choose from, and that set is
-# passed into the resolution rather than checked against its answer. The two are different
-# tests: when a conformal candidate is in the field the resolver re-ranks every candidate on
-# the timestamps they all share, so a row that was never admitted still decides how far that
-# intersection reaches and therefore which admitted row wins. fx has 194 conformal backtests,
-# so this is a live path here rather than a hypothetical one. Checking membership afterwards
-# would pass while the answer had already been changed by an ineligible row.
+# The selected configuration is the highest-Sharpe registered VALIDATION backtest across the
+# baseline, allocation and risk-overlay stages, restricted to runs that stayed solvent. It is
+# resolved from the registry rather than named here, so this notebook cannot select a configuration
+# that the validation stages did not rank first. `15_risk_management` froze the set the holdout is
+# allowed to choose from, and that set is passed into the resolution rather than checked against its
+# answer. The two are different tests: when a conformal candidate is in the field the resolver
+# re-ranks every candidate on the timestamps they all share, so a row that was never admitted still
+# decides how far that intersection reaches and therefore which admitted row wins. fx has 194
+# conformal backtests, so this is a live path here rather than a hypothetical one. Checking
+# membership afterwards would pass while the answer had already been changed by an ineligible row.
 holdout_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
 carrier = resolve_solvent_carrier(CASE_STUDY_ID, admitted=frozenset(holdout_candidates.members))
 print(
@@ -106,10 +105,10 @@ prediction_record = validation_prediction.registry_record()
 CHECKPOINT_KIND = prediction_record["checkpoint_kind"]
 CHECKPOINT_VALUE = prediction_record["checkpoint_value"]
 
-# The label the carrier was fitted on decides which observation grid the holdout interval is
-# stepped back along, so it is read from the carrier rather than assumed. FX carries three
-# labels on one daily grid, which is exactly the coincidence that would let an assumption here
-# survive untested.
+# The label the selected configuration was fitted on decides which observation grid the holdout
+# interval is stepped back along, so it is read from the selected configuration rather than assumed.
+# FX carries three labels on one daily grid, which is exactly the coincidence that would let an
+# assumption here survive untested.
 observation_timeline = (
     pl.read_parquet(study.root / "labels" / f"{carrier['label']}.parquet")
     .get_column("timestamp")
@@ -158,7 +157,7 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ## Refit the carrier on the holdout fold
+# ## Refit the selected configuration on the holdout fold
 #
 # The request is reconstructed from the immutable validation specification with only the fold
 # geometry re-keyed, so the holdout model differs from the validation model in what it was

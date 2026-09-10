@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # Strategy Analysis for the US Equities Panel
+# # US equities panel: what the one holdout was spent on, and what it bought
 #
 # This notebook reads the immutable validation backtest set, applies the selection rule to it, and
 # resolves the holdout evaluation of whatever that rule chose. The selection rule is one sentence:
@@ -33,8 +33,11 @@
 # **Book reference**: Chapters 16-20 for signal evaluation, allocation, trading costs, risk, and
 # strategy assessment.
 #
-# **Prerequisites**: the strategy execution notebooks must have published the canonical validation
-# set, and the holdout notebooks must have registered the refit and its backtest.
+# **Prerequisites**: [`18_risk_management`](18_risk_management.ipynb) has frozen the per-label
+# validation strategy set this notebook opens, and the holdout notebooks have registered the refit
+# and its backtest.
+#
+# **What it writes**: nothing. It reads the registry, applies the selection rule and reports.
 
 # %%
 """Read-only assessment of one validation and holdout lineage."""
@@ -60,7 +63,7 @@ from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     select_holdout_self_backtest,
 )
-from utils.style import COLORS, show_with_alt
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -97,19 +100,16 @@ if validation_set.member_kind != "backtest":
 # once, and the holdout it leads to is used once - so what the ranking is taken over decides what
 # that single use buys. A set spanning `fwd_ret_1d`, `fwd_ret_5d` and `fwd_ret_21d` would rank a
 # one-day-horizon Sharpe against a twenty-one-day one and spend the holdout on a cross-horizon
-# comparison, which is not the question the funnel asks. `reference/CASE_STUDY_PIPELINE.md`
-# section 4 runs the funnel per label and every other case study compares within one label; this
-# notebook is held to the same rule. Requiring `label_artifact` to be constant across the set is how
+# comparison, which is not the question the funnel asks. Every case study in the book runs the
+# funnel once per label for that reason. Requiring `label_artifact` to be constant across the set
+# is how
 # that is enforced, and it is why the set this notebook opens is one of the per-label sets rather
 # than a union of them. `feature_artifacts` and `cv` are allowed to vary: within a label the funnel
-# ranks model families against each other, and they do not share a feature lineage.
+# ranks model families against each other, and they do not share a feature lineage -
+# `latent_factors` builds `feature_artifacts` from `input_lineage["files"]` and the rest from
+# `["artifacts"]`. Requiring all three constant would reject every set the funnel produces.
 
 # %% tags=["results"]
-# One label, many families. `label_artifact` must be constant across the set - that is what makes
-# the ranking a within-label one - while `feature_artifacts` and `cv` may vary, because the funnel
-# ranks model families against each other and they do not share a feature lineage: latent_factors
-# builds feature_artifacts from input_lineage["files"] and the rest from ["artifacts"]. Requiring
-# all three constant would reject every set the funnel actually produces.
 CONSTANT_IDENTITY_FIELDS = {"label_artifact"}
 comparable_fields = set(validation_set.comparison_contract.get("comparable_fields", ()))
 varying_identity_fields = CONSTANT_IDENTITY_FIELDS & comparable_fields
@@ -266,14 +266,12 @@ if not required_selection_metrics <= set(selection_evidence.columns) or any(
 
 selection_evidence = selection_evidence.sort(["sharpe", "backtest_hash"], descending=[True, False])
 if selected_validation.hash not in selection_evidence["backtest_hash"].to_list():
-    raise ValueError("the selected carrier is not among the candidates this table describes")
-# The table is ordered by the stored Sharpe, which is descriptive. Where its first row is not
-# the carrier, the two orderings disagree and saying so is the point of showing the table: the
-# stored column compares configurations over whatever span each one priced, and the selection
-# compares them over the span they share.
+    raise ValueError("the selected configuration is not among the candidates this table describes")
+# The stored Sharpe orders the table; the selection ordered over the shared span. Where the two
+# disagree the line below says so.
 if selection_evidence["backtest_hash"][0] != selected_validation.hash:
     print(
-        f"stored-Sharpe order leads with {selection_evidence['backtest_hash'][0]}; the carrier "
+        f"stored-Sharpe order leads with {selection_evidence['backtest_hash'][0]}; the selected configuration "
         f"is {selected_validation.hash}, selected over the sessions every candidate prices"
     )
 selection_evidence
@@ -335,14 +333,20 @@ if holdout_training.hash == selected_training.hash:
         "the holdout carries the validation training identity, which means it was not refitted"
     )
 
-# The resolver matches on the declared configuration - family, config name, label, checkpoint -
-# and on the strategy specification. That is enough to find the replay and not enough to prove it
-# is the SAME configuration: a refit under changed feature artifacts or changed model parameters
-# keeps its config_name and would match. So the derived specification is rebuilt here from the
-# selected validation spec and its identity compared against the one the holdout registered
-# under. The training hash covers the feature lineage, the model parameters and the CV interval,
-# so agreement is the whole claim rather than a sample of it. Disagreement means the holdout on
-# file answers a different question from the one the validation selection asked.
+# %% [markdown]
+# **Finding the holdout replay is not the same as proving it is the same configuration.** The
+# resolver matches on the declared configuration - family, configuration name, label, checkpoint -
+# and on the strategy specification, and a refit under changed feature artifacts or changed model
+# parameters keeps its configuration name and would match all of that.
+#
+# So the specification the holdout should have been fitted under is rebuilt here from the selected
+# validation specification, and its identity is compared against the one the holdout actually
+# registered under. That hash covers the feature lineage, the model parameters and the
+# cross-validation interval, so agreement is the whole claim rather than a sample of it.
+# Disagreement means the holdout on file answers a different question from the one the validation
+# selection asked.
+
+# %% tags=["results"]
 expected_holdout_spec = build_holdout_training_spec(
     study,
     selected_training.spec(),
@@ -587,7 +591,7 @@ for column, period in enumerate(("validation", "holdout")):
     summary[period] = (float(wealth[-1] - 1.0), float(drawdown.min()))
     axes[0, column].plot(returns["timestamp"], wealth - 1.0, color=COLORS["blue"])
     axes[0, column].axhline(0, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
-    axes[0, column].set_title(f"{period.title()} Cumulative Return")
+    axes[0, column].set_title(f"{period} cumulative return")
     axes[1, column].fill_between(
         returns["timestamp"],
         drawdown,
@@ -595,11 +599,14 @@ for column, period in enumerate(("validation", "holdout")):
         color=COLORS["negative"],
         alpha=0.35,
     )
-    axes[1, column].set_title(f"{period.title()} Drawdown")
+    axes[1, column].set_title(f"{period} drawdown")
 axes[0, 0].set_ylabel("Cumulative return")
 axes[1, 0].set_ylabel("Drawdown")
-fig.suptitle("Locked Strategy Across Validation and Holdout Windows")
-fig.tight_layout()
+add_message_title(
+    axes[0, 0],
+    "Cumulative return and drawdown, validation and holdout",
+    subtitle="Each column keeps its own dates; drawdown is measured from that window's own peak",
+)
 # The alt text reads the two end points and the two troughs from the frames rather than describing
 # a shape, so a window described as ending ahead when it does not is a claim the data refutes.
 _read = "; ".join(

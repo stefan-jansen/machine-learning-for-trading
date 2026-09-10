@@ -590,7 +590,7 @@ fig.update_yaxes(title_text="Annualized volatility", col=1)
 fig.update_xaxes(title_text="Date", row=2)
 fig.update_layout(
     height=500,
-    title="Range-based estimators track SPY volatility more smoothly than close-to-close (21-day)",
+    title="Range estimators track SPY volatility more smoothly than close-to-close",
 )
 fig.show()
 

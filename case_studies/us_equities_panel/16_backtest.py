@@ -35,9 +35,9 @@
 # **Every member of every model population is backtested, not a shortlist.** A model that ranked
 # poorly on information coefficient is still run, because ranking accuracy and strategy
 # performance are different questions - a model can order the cross-section well and trade so much
-# that nothing survives turnover, or rank indifferently and hold a book that does. Selecting on
-# the ranking measure before backtesting would decide the second question with the answer to the
-# first.
+# that turnover consumes the whole of it, or rank indifferently and hold a book that does not.
+# Selecting on the ranking measure before backtesting would decide the second question with the
+# answer to the first.
 #
 # **This is where selection genuinely begins.** Every notebook so far has said "selection happens
 # in `16_backtest`". This notebook produces the validation backtests it happens on; the choice
@@ -78,8 +78,10 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
+    population_supersedes,
     run_backtests,
 )
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
@@ -120,6 +122,9 @@ PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-21d-ipca-v1",
 ]
 EXECUTION_TIER = "canonical"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 WORKSPACE = "experiments"
 PREVIEW_LABELS = []
 PREVIEW_FAMILIES = []
@@ -131,16 +136,17 @@ MAX_SYMBOLS = 0
 # ## 2. Every model, no shortlist
 #
 # The named sets above are opened and their membership checked, and every member goes on to be
-# backtested. Nothing here filters on a predictive metric, for the reason the preamble gives: a
-# model that ranks the cross-section well can still trade too much to survive turnover, and one
-# that ranks indifferently can hold a book that works. Deciding the second question with the answer
-# to the first is the mistake the whole design avoids.
+# backtested. Both tiers resolve the study through `open_study`, which reads the labels and
+# features in place and redirects only writes, so a preview run scores the same inputs a canonical
+# one does and cannot publish over it.
+#
+# Nothing here filters on a predictive metric, for the reason the preamble gives: a
+# model that ranks the cross-section well can still trade too much for anything to be left after
+# turnover, and one that ranks indifferently can hold a book that works. Deciding the second
+# question with the answer to the first is the mistake the whole design avoids.
 
 # %%
 preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
-# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
-# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
-# publish over it.
 if EXECUTION_TIER == "canonical":
     if preview_filters or PREVIEW_MAX_PREDICTIONS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -228,7 +234,12 @@ prediction_population
 #
 # **The top-*k* grid is a strategy decision, not a tuning knob.** Holding 20 names a side and
 # holding 50 are different strategies with different concentration and different turnover, and
-# both are backtested rather than one being chosen in advance.
+# both are backtested rather than one being chosen in advance.#
+# `SUPERSEDES_POPULATION` and `SUPERSEDES_SETS` name the generation this run replaces. A population
+# and a candidate set are both immutable, so a re-run that admits different members has to say
+# which snapshot it supersedes or the registry refuses the write. Both default to empty, which is
+# right for a first run and for a reader's clean clone; `population_supersedes` and
+# `candidate_set_supersedes` withhold a declared hash wherever offering it would be refused.
 
 # %%
 backtest_config = get_backtest_config(CASE_STUDY_ID)
@@ -306,9 +317,13 @@ if planned_population.get_column("backtest_hash").n_unique() != planned_populati
 
 official_population = None
 if EXECUTION_TIER == "canonical":
+    population_name = POPULATION_NAME or "us-equities-baseline-v1"
     official_population = OfficialPopulation.create(
         study,
-        name="us-equities-baseline-v1",
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
         member_kind="backtest",
         members=tuple(planned_population.get_column("backtest_hash")),
     )
@@ -404,6 +419,11 @@ execution_diagnostics
 #
 # One frozen set per label, under a name the later notebooks open by. Only an unnarrowed canonical
 # run publishes one, because a name must not mean two different member sets at two different times.
+#
+# **The freeze is also the comparability check.** Nothing is declared comparable, so
+# `CandidateSet.create` requires every field of the protocol to be identical across the members:
+# two rows that measured their Sharpe on different folds are not two rankings of one thing, and
+# this is what refuses to freeze them together.
 
 # %% tags=["results"]
 set_rows = []
@@ -421,13 +441,13 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # Nothing is declared comparable, so every field of the protocol has to be identical
-        # across the members. That is the guard: two rows that measured their Sharpe on different
-        # folds are not two rankings of one thing, and this is what refuses to freeze them
-        # together.
+        result_set_name = f"us-equities-{label_name}-baseline-v1"
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
-            name=f"us-equities-{label_name}-baseline-v1",
+            name=result_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=result_set_name, declared=SUPERSEDES_SETS.get(result_set_name, "")
+            ),
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}
@@ -475,10 +495,9 @@ ax.set_xlim(-0.5, len(groups) - 0.5)
 ax.set_ylabel("Validation Sharpe")
 add_message_title(
     ax,
-    "What the plainest sizing rule was worth, before any cost",
-    subtitle="One point per complete equal-weight validation backtest",
+    "Validation Sharpe of the equal-weight backtests, by label and family",
+    subtitle="One point per complete equal-weight validation backtest, gross of costs",
 )
-fig.tight_layout()
 show_with_alt(
     fig,
     "A strip plot with one column per label and model family. Each point is one complete "
@@ -493,7 +512,8 @@ show_with_alt(
 # **A ranking and a strategy are not the same thing, and this is where they separate.** Every model
 # was scored on how well it ordered the cross-section. What it earns depends on that order *and*
 # on how often the order changes, because every change is a trade. A model can rank well and turn
-# its book over so fast that nothing survives, and the previous notebooks had no way to see it.
+# its book over so fast that turnover consumes what the ranking earned, and the previous notebooks
+# had no way to see it.
 #
 # **Equal weight is what makes the comparison about the models.** Nothing here estimates anything
 # from the data beyond the predictions themselves, so a difference between two rows is a difference

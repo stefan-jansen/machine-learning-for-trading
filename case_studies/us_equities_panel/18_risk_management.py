@@ -33,16 +33,17 @@
 #
 # **An overlay only ever removes.** It cannot enter a position the strategy did not take, so it
 # can only cut a loss short or cut a gain short, and which of the two it does more of is exactly
-# what the sweep measures. Fourteen controls are declared across the three kinds, spanning stops
-# from 3% to 15% and trailing stops from 1% to 20%, so the sweep says how the effect moves with the
-# threshold rather than whether one chosen threshold helped.
+# what the sweep measures. Fourteen controls are declared across the three kinds, each kind swept
+# from its tightest declared threshold to its loosest, so the sweep says how the effect moves with
+# the threshold rather than whether one chosen threshold helped.
 #
 # **The thing to check first is whether the overlays changed anything at all.** A control that
 # never fires returns the unprotected book unchanged in every digit, and so does a control that was
 # declared in one shape and read by the engine in another. One result cannot tell those apart: both
-# produce a row identical to the book it was laid on. Fourteen different rules, spanning a 3% stop
-# to a 40-bar time exit, all declining to act on one book and agreeing to the last digit would be
-# the second and not the first, and it would read on the page as a finding about risk control.
+# produce a row identical to the book it was laid on. Fourteen different rules, spanning the
+# tightest declared stop to the longest declared time exit, all declining to act on one book and
+# agreeing to the last digit would be the second and not the first, and it would read on the page
+# as a finding about risk control.
 #
 # So the results section compares each overlay against the strategy it was laid on rather than
 # reporting its performance alone. **A difference proves the control acted; matching statistics
@@ -85,8 +86,10 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
+    population_supersedes,
     run_backtests,
 )
 from case_studies.research.strategy import strategy_warmup_periods
@@ -112,6 +115,9 @@ ALLOCATION_SET_NAMES = [
 ]
 VALIDATION_SET_NAME_TEMPLATE = "us-equities-{label}-validation-strategies-v1"
 EXECUTION_TIER = "canonical"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 WORKSPACE = "experiments"
 PREVIEW_LABELS = []
 PREVIEW_MAX_SOURCE_ROWS = 0
@@ -204,14 +210,16 @@ if eligible.is_empty() or not ineligible.is_empty():
 # **Sweeping overlays across several strategies at once would confound the two.** A table in which
 # both the strategy and the control vary cannot say whether a difference came from the rule or from
 # the book it was applied to.
-
-# %% tags=["results"]
-# Prices are cached by (label, warmup), not once per label. A strategy's identity digests the
+#
+#
+# **Prices are cached by label and warmup, not once per label.** A strategy's identity digests the
 # price frame it was handed, and the allocator underneath each overlay needs a different amount of
 # history before it can decide anything - none for the ones reading only the predictions, a
 # volatility window for the per-stock ones, a longer lookback for the ones estimating a covariance
 # matrix. So each member has to receive the frame its own warmup implies, and the cache key is
 # what keeps that true while loading each distinct frame once.
+
+# %% tags=["results"]
 _price_cache: dict[tuple[str, int], object] = {}
 
 
@@ -262,6 +270,12 @@ selected_sources.select(
 # results: each one against the strategy it was laid on, on the trade count and the Sharpe. A
 # difference establishes that the control acted. Matching values establish only that those two
 # statistics did not move, and leave every other outcome undetermined.
+#
+# `SUPERSEDES_POPULATION` and `SUPERSEDES_SETS` name the generation this run replaces. A population
+# and a candidate set are both immutable, so a re-run that admits different members has to say
+# which snapshot it supersedes or the registry refuses the write. Both default to empty, which is
+# right for a first run and for a reader's clean clone; `population_supersedes` and
+# `candidate_set_supersedes` withhold a declared hash wherever offering it would be refused.
 
 # %%
 risk_requests = []
@@ -378,9 +392,13 @@ if planned_population.get_column("backtest_hash").n_unique() != planned_populati
 
 official_population = None
 if EXECUTION_TIER == "canonical":
+    population_name = POPULATION_NAME or "us-equities-risk-overlay-v1"
     official_population = OfficialPopulation.create(
         study,
-        name="us-equities-risk-overlay-v1",
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
         member_kind="backtest",
         members=tuple(planned_population.get_column("backtest_hash")),
     )
@@ -479,8 +497,13 @@ execution_diagnostics
 # ranking only the last of them would exclude an un-overlaid book that was better than every
 # overlaid one. [`19_costs`](19_costs.ipynb) derives its pool from the same stage sequence for the
 # same reason.
+#
+# **The freeze is also the comparability check.** Nothing is declared comparable, so
+# `CandidateSet.create` requires every field of the protocol to be identical across the members:
+# two rows that measured their Sharpe on different folds are not two rankings of one thing, and
+# this is what refuses to freeze them together.
 
-# %% tags=["results"]
+# %%
 completed_risk = study.backtests.table(include_preview=True).filter(
     pl.col("backtest_hash").is_in(planned_population.get_column("backtest_hash"))
 )
@@ -492,17 +515,44 @@ if (
     or completed_risk.filter(pl.col("sharpe").is_null() | ~pl.col("sharpe").is_finite()).height
 ):
     raise RuntimeError("The risk catalog is incomplete or mis-staged")
-# Did the overlay change anything? Each result is compared against the strategy it was laid on, on
-# the two axes the catalog carries: the trade count and the Sharpe. A row that differs on either
-# acted - there is no other way for the numbers to move. A row identical on both moved neither of
-# the two statistics compared here - which is weaker than "changed nothing", since two
-# different return paths can share a Sharpe and a trade count while differing in total return or in
-# drawdown, and weaker still than "never fired": a stop can close a position the next rebalance
-# would have closed anyway, replacing one exit with an earlier one and leaving the count where it
-# was. What would settle whether a control fired is a per-control trigger count, which the backtest
-# does not surface into the catalog today.
+
+# %% [markdown]
+# **Did the control fire, and did anything move?** Those are two questions and the catalog answers
+# both.
+#
+# `risk_triggers` counts how many times the installed control acted during the backtest, recorded
+# by the engine as it installs each rule. Its three states are what separate the cases nothing else
+# on this page can tell apart:
+#
+# - **A positive count** is a control that fired. Whether that changed anything measurable is the
+#   second question below.
+# - **Zero** is a control that was installed and never reached its threshold. That is a result:
+#   a wide stop on a book that never drew down that far has nothing to do.
+# - **Null** is no control installed at all - the engine records a count for every rule it builds,
+#   so a null where a control was declared means the declaration did not reach the engine.
+#
+# Reading it is what this stage owes, because a sweep of fourteen settings that all report the same
+# numbers is a finding about risk control if they were installed and a defect in the wiring if they
+# were not.
+#
+# The second question is whether the numbers moved, and each result is compared against the
+# strategy it was laid on across the two axes the catalog carries: the trade count and the Sharpe.
+# A row that differs on either acted; a row identical on both moved neither of those two
+# statistics, which is weaker than "changed nothing", because two different return paths can share
+# a Sharpe and a trade count while differing in total return or in drawdown. It is weaker still
+# than "never fired" - a stop can close a position the next rebalance would have closed anyway,
+# replacing one exit with an earlier one and leaving the count where it was - and that is exactly
+# the gap the trigger count fills.
+#
+# **So the movement check has three outcomes, not two.** A row is CHANGED when either comparison is
+# true, because one difference is enough to establish the control acted. It is UNCHANGED only when
+# both are false and both were comparable. Anything else is UNKNOWN: a comparison that could not be
+# made is not evidence of sameness, and collapsing it into one would manufacture the signature this
+# check exists to detect.
+
+# %% tags=["results"]
 overlay_effect = (
-    completed_risk.select("label", "backtest_hash", "sharpe", "num_trades")
+    completed_risk.select("label", "backtest_hash", "sharpe", "num_trades", "risk_triggers")
     .join(
         planned_population.select("backtest_hash", "risk", "source_backtest_hash"),
         on="backtest_hash",
@@ -528,13 +578,17 @@ overlay_effect = (
         .then(None)
         .otherwise(pl.col("sharpe") != pl.col("source_sharpe")),
     )
-    .select("label", "risk", "num_trades", "source_num_trades", "trades_moved", "sharpe_moved")
+    .select(
+        "label",
+        "risk",
+        "risk_triggers",
+        "num_trades",
+        "source_num_trades",
+        "trades_moved",
+        "sharpe_moved",
+    )
     .sort("label", "risk")
 )
-# Three outcomes, not two. A row is CHANGED when either comparison is true, because one difference
-# is enough to establish the control acted. It is UNCHANGED only when both are false and both were
-# comparable. Anything else is UNKNOWN - a comparison that could not be made is not evidence of
-# sameness, and collapsing it into one would manufacture the signature this check exists to detect.
 _changed = overlay_effect.get_column("trades_moved").fill_null(False) | overlay_effect.get_column(
     "sharpe_moved"
 ).fill_null(False)
@@ -550,6 +604,23 @@ print(
     f"laid on; {n_unchanged} match it on both compared statistics; {n_unknown} could not be "
     "fully compared"
 )
+_triggers = overlay_effect.get_column("risk_triggers")
+n_fired = int((_triggers.fill_null(0) > 0).sum())
+n_silent = int((_triggers == 0).sum())
+n_uninstalled = int(_triggers.is_null().sum())
+print(
+    f"{n_fired} of {overlay_effect.height} controls fired at least once; {n_silent} were installed "
+    f"and never reached their threshold; {n_uninstalled} installed no rule at all"
+)
+# The engine records a count for every rule it builds, so a row that declared a control and
+# registered no count is one whose declaration never reached it. That is the failure C17 names,
+# and it is the only one of the three states that is not a result.
+if n_uninstalled:
+    raise RuntimeError(
+        f"{n_uninstalled} of {overlay_effect.height} overlay results registered no trigger count, "
+        "so their declared control was never installed and the row is named for behaviour that "
+        "did not run"
+    )
 if n_unchanged and not n_changed and not n_unknown:
     print(
         "  No declared control moved either the trade count or the Sharpe. Neither statistic "
@@ -562,13 +633,13 @@ set_rows = []
 if EXECUTION_TIER == "canonical":
     for label in completed_risk.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # Nothing is declared comparable, so every field of the protocol has to be identical
-        # across the members. That is the guard: two rows that measured their Sharpe on different
-        # folds are not two rankings of one thing, and this is what refuses to freeze them
-        # together.
+        result_set_name = f"us-equities-{label_name}-risk-overlay-v1"
         result_set = study.backtests.freeze(
             completed_risk.filter(pl.col("label") == label),
-            name=f"us-equities-{label_name}-risk-overlay-v1",
+            name=result_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=result_set_name, declared=SUPERSEDES_SETS.get(result_set_name, "")
+            ),
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}
@@ -588,9 +659,15 @@ if EXECUTION_TIER == "canonical":
             != validation_candidates.height
         ):
             raise ValueError(f"Selection-eligible strategy sets overlap for {label}")
+        validation_set_name = VALIDATION_SET_NAME_TEMPLATE.format(label=label_name)
         validation_set = study.backtests.freeze(
             validation_candidates,
-            name=VALIDATION_SET_NAME_TEMPLATE.format(label=label_name),
+            name=validation_set_name,
+            supersedes=candidate_set_supersedes(
+                study,
+                name=validation_set_name,
+                declared=SUPERSEDES_SETS.get(validation_set_name, ""),
+            ),
         )
         set_rows.append(
             {
@@ -625,19 +702,17 @@ compatible_sets
 # sample, one strategy per label, and no correction for having looked at fourteen. A flat line
 # means the measured Sharpe did not move across the declared settings, which is weaker than it
 # sounds in two directions: two different thresholds can produce the same exits, and two different
-# return paths can share a Sharpe. It is not evidence that the controls never fired. Nothing on
-# this page can settle that, and the trigger count that would is not something the backtest
-# records.
+# return paths can share a Sharpe. It is not evidence that the controls never fired; the
+# `risk_triggers` column above is what settles that, and it is read there rather than inferred
+# from the shape of any line here.
 
 # %%
 control_axes = {
     control["name"]: (control["type"], float(control.get("threshold", control.get("bars"))))
     for control in get_position_risk_controls(CASE_STUDY_ID)
 }
-# The Sharpe of the strategy each label's overlays were laid on, which is the line they have to
-# clear. Asserted rather than assumed to be one per label: `top_n` is read from the sweep
-# configuration, and a label carrying two sources would need two reference lines, not one drawn
-# from whichever row a dict happened to keep.
+# One source per label is asserted rather than assumed: `top_n` comes from the sweep
+# configuration, and a label with two sources needs two reference lines.
 _sources_per_label = selected_sources.group_by("label").len()
 if (_sources_per_label.get_column("len") != 1).any():
     raise ValueError(
@@ -700,13 +775,12 @@ axes[0].set_ylabel("Validation Sharpe")
 axes[-1].legend(fontsize=8, frameon=False)
 add_message_title(
     axes[0],
-    "Loosening the control, against the book it was laid on",
+    "Validation Sharpe against each risk control's threshold",
     subtitle=(
         "Validation Sharpe against each control's own threshold, one line per label, with the "
         "unprotected strategy dashed"
     ),
 )
-fig.tight_layout()
 # The alt text counts rather than asserts: whether any line turns over is the question the sweep
 # exists to answer, and a panel described as peaking when it does not is a claim the data refutes.
 _peaks = (
@@ -751,12 +825,15 @@ show_with_alt(
 #
 # **Check that the overlays moved something before reading what they did.** A result matching the
 # unprotected book on both compared statistics has not been shown to change anything, and matching
-# across every declared setting is a reason to confirm the controls reach the engine rather than a
-# finding about risk control. Neither question is settled by these two columns; a per-control
-# trigger count would settle the first, and the backtest does not surface one today.
+# across every declared setting is a reason to check that the controls reached the engine rather
+# than a finding about risk control. The two compared columns do not settle it on their own; the
+# `risk_triggers` count does, and a row that declared a control and installed none stops the
+# notebook rather than being reported as a result. A row installed and never triggered is a
+# result: it says the threshold was never reached on this book.
 #
 # **An overlay can only remove, so it reshapes a return distribution rather than shifting it.** It
-# truncates the left tail by closing losers early and truncates the right by closing winners early,
+# truncates the left tail by closing losing positions early and truncates the right by closing
+# profitable ones early,
 # and which effect dominates is a property of how the strategy's returns actually arrive. A book
 # whose gains come from a few positions running a long way is one an early exit hurts.
 #

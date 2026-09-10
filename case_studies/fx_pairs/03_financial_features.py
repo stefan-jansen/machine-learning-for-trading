@@ -58,6 +58,11 @@ from ml4t.engineer.features.momentum import rsi
 from ml4t.engineer.features.volatility.garman_klass_volatility import garman_klass_volatility
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.feature_engineering import (
     EPS,
     assert_values_agree,
@@ -812,6 +817,76 @@ record = write_artifact(
 )
 print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')} under digest {record['digest']}")
 
+# %% [markdown]
+# ## What the matrix holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# how much sits at exactly zero, how far the extreme values are from the body, whether anything is
+# constant. A threshold crossed there asks for a sentence of explanation and settles nothing on
+# its own.
+#
+# The second is the question a null count cannot reach. **Coverage is measured against the keys
+# the labels declare, not against the rows this matrix happens to hold.** A matrix emitting a
+# thousand rows where a million were owed carries no nulls at all and is wrong; nothing inside it
+# can say so, because the missing rows are not there to be counted. A `(symbol, timestamp)`
+# carrying a label and no feature row is one no model can be asked to score, and it is lost to
+# every family at once before any of them is fitted.
+#
+# A shortfall against that reference is not by itself a defect, so the matrix declares where it is
+# entitled to be short first. One null policy is applied and it names one carrier, and that
+# carrier's cost is the sum of two windows rather than one: `zscore_126d` standardizes a
+# 126-session return over a 252-session trailing window, so a pair owes nothing until it has both -
+# 377 prior sessions, not the 252 the z-score window alone would suggest. Naming only the outer
+# window would report the inner one as a defect on every pair at once. The budget below is
+# assembled from the carrier's own name and the configured windows rather than typed in, and it is
+# counted per pair. What the sign-off answers for is the residual: keys inside a pair's own span,
+# where no window explains them.
+
+# %%
+CARRIER_HORIZON = int(CARRIER.split("_")[1].rstrip("d"))
+LEADING_BUDGET = WINDOWS["zscore"] + CARRIER_HORIZON - 1
+print(
+    f"leading budget {LEADING_BUDGET} sessions = {CARRIER_HORIZON} of return behind {CARRIER} "
+    f"plus {WINDOWS['zscore']} standardizing it, less the row they share"
+)
+
+report = quality_report(
+    features,
+    name="financial features",
+    key_columns=["symbol", "timestamp"],
+    expected=label_universe(CASE_DIR, keys=["symbol", "timestamp"]),
+    keys=["symbol", "timestamp"],
+    entity="symbol",
+    session="timestamp",
+    expected_missing={
+        "leading": (
+            LEADING_BUDGET,
+            f"the return horizon and standardizing window behind {CARRIER}",
+        )
+    },
+)
+render_quality_report(report)
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Coverage is 90.27% of the keys the labels declare, and every one of the 7,540 missing keys is
+# the carrier warming up.** All 20 pairs lose exactly 377 sessions and not one loses 378: the
+# median and the maximum are the same number, so there is no distribution here to interpret. That
+# is `zscore_126d` needing 126 sessions of return and 252 more to standardize it over, and it is
+# the whole of the shortfall. **The residual is zero.**
+#
+# The uniformity is what makes the number readable. Every pair quotes on every session in this
+# panel, so a warmup that is identical across pairs is what a correct one looks like; a pair
+# short by a different amount would mean its price history starts late or has a hole, and none
+# does. **20 keys carry a feature row and no label** - one per pair, the last session, where the
+# one-session forward return has no next price.
+#
+# The 90.27% is worth stating plainly rather than leaving as a percentage: a 377-session warmup
+# against a 3,874-session panel costs a tenth of the sample, and it buys the standardized
+# multi-horizon returns the model stages rank on. That is a design choice this notebook makes and
+# the reader can now see the price of.
+#
 # %% [markdown]
 # ## Key takeaways
 #

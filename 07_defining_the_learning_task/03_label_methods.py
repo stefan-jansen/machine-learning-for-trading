@@ -155,18 +155,18 @@ spy.head()
 
 # %%
 # 21 trading days is a common "one month" convention in daily data
-horizon = 21
+HORIZON = 21
 
 labels_returns = fixed_time_horizon_labels(
     spy,
-    horizon=horizon,
+    horizon=HORIZON,
     method="returns",
     price_col="close",
 )
 
 # Discover the produced label column robustly
-fh_label_col = first_col_matching_any(labels_returns, [f"{horizon}", "label_return", "label"])
-print(f"Fixed Horizon Labels (horizon={horizon}):")
+fh_label_col = first_col_matching_any(labels_returns, [f"{HORIZON}", "label_return", "label"])
+print(f"Fixed Horizon Labels (horizon={HORIZON}):")
 print(f"  Column added: {fh_label_col}")
 labels_returns.select(["timestamp", "close", fh_label_col]).head(10)
 
@@ -179,7 +179,7 @@ labels_returns.select(["timestamp", "close", fh_label_col]).head(10)
 # %%
 labels_binary = fixed_time_horizon_labels(
     spy,
-    horizon=horizon,
+    horizon=HORIZON,
     method="binary",
     price_col="close",
 )
@@ -207,10 +207,10 @@ display(labels_binary.group_by(binary_label_col).len().sort(binary_label_col))
 spy_anchors = spy.with_columns(
     [
         # Close-to-close: standard approach
-        (pl.col("close").shift(-horizon) / pl.col("close") - 1).alias("ret_close_to_close"),
+        (pl.col("close").shift(-HORIZON) / pl.col("close") - 1).alias("ret_close_to_close"),
         # Next-open-to-open: decision at close(t), execute at open(t+1), exit at open(t+horizon+1)
         # Holding for `horizon` trading days means exit is horizon+1 bars from decision
-        (pl.col("open").shift(-(horizon + 1)) / pl.col("open").shift(-1) - 1).alias(
+        (pl.col("open").shift(-(HORIZON + 1)) / pl.col("open").shift(-1) - 1).alias(
             "ret_next_open_to_open"
         ),
     ]
@@ -285,7 +285,7 @@ fig.update_xaxes(title_text="Return Difference", row=2, col=1)
 fig.update_yaxes(title_text="Count", row=2, col=1)
 fig.update_layout(
     height=550,
-    title_text=f"Anchor Choice Nets to Zero on Average but Moves Every Trade ({horizon}-day horizon)",
+    title_text=f"Anchor choice nets to zero but moves every trade ({HORIZON}-day)",
     font=dict(size=12),
     showlegend=True,
     legend=dict(x=0.02, y=0.98),
@@ -315,7 +315,7 @@ spy_anchors.select(
 # Binary percentile: Is return in top 25%?
 labels_ts_pct = rolling_percentile_binary_labels(
     spy,
-    horizon=horizon,
+    horizon=HORIZON,
     percentile=75,  # Top 25%
     direction="long",
     lookback_window=252,  # 1 year rolling window
@@ -339,7 +339,7 @@ if threshold_col:
         labels_ts_pct.to_pandas(),
         x="timestamp",
         y=threshold_col[0],
-        title=f"The Rolling 75th-Percentile Threshold Adapts to Volatility Regimes ({horizon}-day returns)",
+        title=f"The rolling threshold adapts to volatility regimes ({HORIZON}-day)",
     )
     fig.update_layout(height=350, xaxis_title="Date", yaxis_title="Return Threshold")
     fig.show()
@@ -355,7 +355,7 @@ if threshold_col:
 # %%
 # Compute forward returns and cross-sectional rank for the entire ETF universe
 etf_with_fwd = etf_filtered.with_columns(
-    [(pl.col("close").shift(-horizon) / pl.col("close") - 1).over("symbol").alias("fwd_return")]
+    [(pl.col("close").shift(-HORIZON) / pl.col("close") - 1).over("symbol").alias("fwd_return")]
 ).drop_nulls(subset=["fwd_return"])
 
 etf_cs = etf_with_fwd.with_columns(
@@ -394,7 +394,7 @@ etf_cs = etf_cs.with_columns(
     ]
 )
 
-print(f"Cross-Sectional Labels ({horizon}d horizon, {quintile_threshold}th percentile cutoffs):")
+print(f"Cross-Sectional Labels ({HORIZON}d horizon, {quintile_threshold}th percentile cutoffs):")
 print(f"  Total observations: {len(etf_cs):,}")
 display(etf_cs.group_by("cs_label").len().sort("cs_label"))
 
@@ -484,7 +484,7 @@ fig.update_layout(
     height=400,
     title="Cross-Sectional Return Thresholds Widen in Volatile Markets",
     xaxis_title="Date",
-    yaxis_title=f"{horizon}-day Return Threshold",
+    yaxis_title=f"{HORIZON}-day Return Threshold",
 )
 fig.show()
 
@@ -870,7 +870,7 @@ n_symbols = etf_with_fwd["symbol"].n_unique()
 
 # For fixed-horizon labels sampled at every bar, uniqueness ≈ 1/H so N_eff ≈ N/H.
 # This is what the section text quotes; we keep it to compare against the measurement.
-N_eff_approx = N_nominal / horizon
+N_eff_approx = N_nominal / HORIZON
 
 
 def measure_n_eff(n_labels: int, h: int) -> tuple[float, float]:
@@ -882,23 +882,23 @@ def measure_n_eff(n_labels: int, h: int) -> tuple[float, float]:
 
 # Single asset: SPY. This is the number quoted for a one-series study.
 spy_labels = etf_with_fwd.filter(pl.col("symbol") == "SPY").height
-spy_mean_u, spy_n_eff = measure_n_eff(spy_labels, horizon)
+spy_mean_u, spy_n_eff = measure_n_eff(spy_labels, HORIZON)
 
 # Full panel: sum N_eff across symbols (each symbol has its own length).
 panel_n_eff = 0.0
 for (_sym,), grp in etf_with_fwd.group_by("symbol"):
-    if grp.height > horizon:
-        panel_n_eff += measure_n_eff(grp.height, horizon)[1]
+    if grp.height > HORIZON:
+        panel_n_eff += measure_n_eff(grp.height, HORIZON)[1]
 
 panel_mean_u = panel_n_eff / N_nominal
 se_inflation = np.sqrt(N_nominal / panel_n_eff)
 
-print(f"Fixed-horizon ETF labels (H={horizon}):")
+print(f"Fixed-horizon ETF labels (H={HORIZON}):")
 print(f"  Symbols:              {n_symbols}")
 print(f"  Nominal N (panel):    {N_nominal:,}")
 print()
 print(f"  SPY: labels           {spy_labels:,}")
-print(f"       avg uniqueness   {spy_mean_u:.4f}   (≈ 1/(H+1) = {1 / (horizon + 1):.4f})")
+print(f"       avg uniqueness   {spy_mean_u:.4f}   (≈ 1/(H+1) = {1 / (HORIZON + 1):.4f})")
 print(f"       N_eff (measured) {spy_n_eff:,.0f}")
 print()
 print(f"  Panel: avg uniqueness {panel_mean_u:.4f}")
@@ -913,7 +913,7 @@ print(
 )
 print()
 print("  Note: a label spans H+1 bars inclusive of both endpoints, so maximal")
-print(f"  overlap gives w = 1/(H+1) = {1 / (horizon + 1):.4f}, not 1/H = {1 / horizon:.4f}.")
+print(f"  overlap gives w = 1/(H+1) = {1 / (HORIZON + 1):.4f}, not 1/H = {1 / HORIZON:.4f}.")
 print("  That is why the measured N_eff sits slightly below the N/H shortcut.")
 
 # %% [markdown]
@@ -1074,7 +1074,7 @@ if horizon_col is not None and "t_value" in labels_trend.columns:
 # Simple primary signal: buy when 20-day momentum is positive
 spy_meta = spy.with_columns(
     signal=pl.when(pl.col("close") > pl.col("close").shift(20)).then(1).otherwise(-1),
-    fwd_return=(pl.col("close").shift(-horizon) / pl.col("close") - 1),
+    fwd_return=(pl.col("close").shift(-HORIZON) / pl.col("close") - 1),
 ).drop_nulls()
 
 # Create meta-labels: was the signal profitable?
@@ -1219,7 +1219,7 @@ def label_diagnostics(
 
 
 # Example: run diagnostics on fixed horizon labels
-label_diagnostics(labels_returns, fh_label_col, title_prefix=f"Fixed Horizon ({horizon}d)")
+label_diagnostics(labels_returns, fh_label_col, title_prefix=f"Fixed Horizon ({HORIZON}d)")
 
 # %% [markdown]
 # ## 9. Label Method Comparison

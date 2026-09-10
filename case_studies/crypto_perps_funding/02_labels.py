@@ -65,6 +65,7 @@ import yaml
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.feature_engineering import rolling_zscore
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
 from data import load_crypto_perps
@@ -678,6 +679,87 @@ for name, base in base_rates.items():
         f"\n  base rate    {base}\n  consumed by  {readers[name]}"
     )
 
+# %% [markdown]
+# ## What the labels hold, and what they owe
+#
+# Two questions about the files this stage just wrote, and the rows that are there answer only one
+# of them. The first is what is in each column - nulls, how much sits at exactly zero, how far the
+# extreme values are from the body, whether anything is constant. A threshold crossed there asks
+# for a sentence and settles nothing on its own: half the rows at zero is a defect in a return and
+# is what a balanced direction label is meant to look like.
+#
+# The second is coverage, and it needs a denominator that is not the labels themselves. **The
+# reference is `bars`** - every settlement period a perpetual actually traded in, which is the set
+# a forward return could in principle have been computed on. Comparing one label to the other
+# three would hide any period where all four are absent together; comparing them to the bar panel
+# cannot.
+#
+# A percentage alone decides nothing, so each label declares where it is entitled to be short
+# before the number is printed. A forward return owes no value in the last `horizon` settlement
+# periods of a symbol's history, because the price that resolves it is past the end of the window.
+# The two discretised labels are functions of the primary return and inherit its horizon exactly,
+# which the table should show as identical shortfalls rather than as a coincidence. The count is
+# per symbol, so a perpetual that lists mid-sample pays on its own periods. What the sign-off then
+# answers for is the residual: keys missing inside a symbol's own span, where no horizon explains
+# them.
+
+# %%
+LABEL_HORIZONS = {
+    **HORIZONS,
+    BINARY_LABEL: HORIZONS[PRIMARY_LABEL],
+    THREE_CLASS_LABEL: HORIZONS[PRIMARY_LABEL],
+}
+expected_keys = bars.select(["symbol", "timestamp"]).unique()
+print(
+    f"bar panel: {expected_keys.height:,} traded (symbol, period) keys across "
+    f"{expected_keys['symbol'].n_unique()} perpetuals and "
+    f"{expected_keys['timestamp'].n_unique()} settlement periods\n"
+)
+for name in ALL_LABELS:
+    written = labels_df.select(["symbol", "timestamp", name]).drop_nulls()
+    render_quality_report(
+        quality_report(
+            written,
+            name=name,
+            key_columns=["symbol", "timestamp"],
+            expected=expected_keys,
+            keys=["symbol", "timestamp"],
+            entity="symbol",
+            session="timestamp",
+            expected_missing={
+                "trailing": (
+                    LABEL_HORIZONS[name],
+                    f"{LABEL_HORIZONS[name]}-period forward window past the end of the window",
+                )
+            },
+        )
+    )
+    print()
+
+# %% [markdown]
+# ### Sign-off
+#
+# **All four labels are complete, and the two discretised ones inherit the primary's shortfall to
+# the key.** The bar panel offers 108,298 traded keys across 19 perpetuals and 6,575 eight-hour
+# settlement periods. `fwd_ret_8h` reaches 99.98% and `fwd_ret_24h` 99.93%; each of the 19
+# perpetuals loses exactly its label's horizon at the end of the window - one period and three -
+# and none spends more. `fwd_dir_8h` and `fwd_dir_8h_3c` are missing the same 27 keys as
+# `fwd_ret_8h`, which is what a function of the primary return should look like and is worth
+# reading off the table rather than assuming: a discretisation that lost rows of its own would
+# show a different number here.
+#
+# **The residual is 8 keys at the eight-hour horizon and 24 at the daily, in the same four
+# perpetuals both times.** They sit inside a symbol's own span at exactly twice its horizon, which
+# is two breaks in that perpetual's bar coverage, each costing one forward window. At 0.02% of the
+# panel it changes no fold and no ranking, and it is printed so that it stays that size.
+#
+# **No column crossed a distribution threshold in any of the four.** None is constant and none
+# carries a non-finite value. The direction labels sit near half at each value, which is what a
+# balanced indicator is supposed to do; the zero-share ceiling exists to catch a *return* that is
+# mostly zero and is deliberately loose enough not to fire on a label that is meant to be half
+# zeros. The two return labels carry the heavy tails a perpetual's eight-hour return has, and
+# nothing is winsorized here.
+#
 # %% [markdown]
 # ## Key takeaways
 #

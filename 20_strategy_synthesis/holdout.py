@@ -540,7 +540,7 @@ def has_holdout_predictions(cs_id: str, *, top_n: int = 5) -> bool:
     # holdout can cover the current top-N. `ValueError` is this module's own refusal after
     # the dedupe; `NoSelectableCandidates` is the canonical selector's for an empty pool -
     # an initialised registry with no eligible validation backtest, a population that
-    # publishes nothing, a carrier pin left over from an earlier sweep. Answering False
+    # publishes nothing, a selected configuration pin left over from an earlier sweep. Answering False
     # sends the caller to `generate_holdout`, which asks the same selector again without a
     # guard and reports whichever refusal applies from inside the driver's own handler.
     try:

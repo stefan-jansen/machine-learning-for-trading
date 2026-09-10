@@ -551,15 +551,27 @@ def load_gbm_feature_importance(
     config_name: str,
     *,
     top_n: int,
+    num_iteration: int | None = None,
 ) -> pl.DataFrame:
-    """Load booster importance from one selected GBM training identity."""
+    """Load booster importance from one selected GBM training identity.
+
+    Training saves every boosting round, while a configuration is selected at one
+    checkpoint along that trajectory. Pass that checkpoint as `num_iteration` and
+    the importance is measured over the first that many trees, which is the model
+    the selection actually chose; leave it None to read the whole booster.
+    """
     import lightgbm as lgb
 
     case_dir = get_case_study_dir(case_study)
-    booster_dir = case_dir / "run_log" / "training" / training_hash / "boosters"
-    if not booster_dir.exists():
-        booster_dir = case_dir / "run_log" / "models" / training_hash / "boosters"
-    if not booster_dir.exists():
+    # The training stage writes boosters under the run's own models directory. The two
+    # older layouts are kept because run logs predating that move still carry them.
+    candidates = [
+        case_dir / "run_log" / "training" / training_hash / "models" / "boosters",
+        case_dir / "run_log" / "training" / training_hash / "boosters",
+        case_dir / "run_log" / "models" / training_hash / "boosters",
+    ]
+    booster_dir = next((path for path in candidates if path.exists()), None)
+    if booster_dir is None:
         return pl.DataFrame()
 
     rows = []
@@ -568,6 +580,8 @@ def load_gbm_feature_importance(
         with contextlib.suppress(ValueError):
             fold_id = int(fold_text)
             model = lgb.Booster(model_file=str(booster_file))
+            if num_iteration is not None and num_iteration < model.num_trees():
+                model = lgb.Booster(model_str=model.model_to_string(num_iteration=num_iteration))
             rows.extend(
                 {
                     "config_name": config_name,

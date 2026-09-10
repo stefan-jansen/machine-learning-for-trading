@@ -432,6 +432,7 @@ def _rehydrate_agent(d: dict[str, Any]) -> AgentForecastArtifact:
         p_yes=d["p_yes"],
         rationale=d.get("rationale", ""),
         traces=[_rehydrate_trace(t) for t in d.get("traces", [])],
+        forecast_produced=d.get("forecast_produced", True),
         confidence=d.get("confidence", 0.5),
         sentiment=Sentiment(d.get("sentiment", "neutral")),
         key_findings=list(d.get("key_findings", [])),

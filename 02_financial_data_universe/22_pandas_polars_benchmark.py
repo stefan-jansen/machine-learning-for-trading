@@ -1361,7 +1361,7 @@ fig.update_xaxes(title_text="pandas time (s)", row=2, col=2)
 fig.update_yaxes(title_text="Polars time (s)", row=2, col=2)
 
 fig.update_layout(
-    title_text=f"pandas {PANDAS_VERSION} vs Polars {POLARS_VERSION} Benchmark (Scale: {ACTIVE_SCALE})",
+    title_text=f"pandas {PANDAS_VERSION} vs Polars {POLARS_VERSION}, {ACTIVE_SCALE} scale",
     height=800,
     showlegend=True,
     barmode="group",

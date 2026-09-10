@@ -73,7 +73,6 @@
 
 import multiprocessing
 import os
-import warnings
 from concurrent.futures import ProcessPoolExecutor
 
 import matplotlib.pyplot as plt
@@ -90,6 +89,14 @@ from ml4t.engineer.features.fdiff import ffdiff
 from statsmodels.tsa.stattools import adfuller
 
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.artifact_quality import (
+    MissingExpectation,
+    explain_column_gaps,
+    label_universe,
+    quality_report,
+    render_column_gaps,
+    render_quality_report,
+)
 from case_studies.utils.cv_window import (
     configured_labels,
     modeling_fold_boundaries,
@@ -109,8 +116,6 @@ from utils.modeling import resolve_label_buffer, resolve_label_horizon
 from utils.paths import REPO_ROOT, display_path, get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 # Production defaults. Papermill overrides these for the reduced continuous-integration run.
@@ -1772,6 +1777,122 @@ show_with_alt(
 # [`05_evaluation`](05_evaluation.ipynb).
 
 # %% [markdown]
+# ## G. What the artifact holds, and what it owes
+#
+# Three questions about the file this stage just wrote. The first is what is in each column -
+# nulls, zeros, the distance from the body of the distribution to its tail, whether anything is
+# constant. A threshold crossed there asks for a sentence of explanation and settles nothing on
+# its own.
+#
+# The second is whether every key the labels declare got a row at all. That is the same reference
+# stage 03 answers to, so the two shortfalls can be read side by side.
+#
+# The third is the one the other two cannot reach, and it is the question that matters here. **A
+# fitted feature is undefined until its model has an estimation window.** A refit schedule still
+# writes a row at every session an ETF trades; it leaves the fitted *value* null through the
+# window. Key coverage therefore reports a complete artifact while a column is absent for an
+# eighth of the panel, and the next stage reads the column. So each family declares the prefix it
+# owes, derived from the schedule rather than typed in, and every null outside a declared prefix
+# is this stage's to answer for.
+
+# %%
+report = quality_report(
+    model_based,
+    name="model-based features",
+    key_columns=KEY_COLS,
+    expected=label_universe(CASE_DIR, keys=KEY_COLS),
+    keys=KEY_COLS,
+    entity="symbol",
+    session="timestamp",
+)
+render_quality_report(report)
+
+# %% [markdown]
+# ### Where each column's missing values sit
+#
+# Each family declares what it owes on its own terms: the regime model owes its burn-in plus the
+# volatility window it reads, the volatility model owes its own burn-in per fund, and a reference
+# series owes every session before the fund it tracks existed.
+
+# %%
+_sessions = label_universe(CASE_DIR, keys=KEY_COLS).select("timestamp").unique().sort("timestamp")
+
+
+def _sessions_before(first_value: object) -> int:
+    """Panel sessions strictly before a market-wide series has its first value."""
+    return int(_sessions.filter(pl.col("timestamp") < first_value).height)
+
+
+COLUMN_EXPECTATIONS: dict[str, dict[str, MissingExpectation]] = {}
+for _col in REGIME_COLS:
+    COLUMN_EXPECTATIONS[_col] = {
+        "leading": (
+            HMM_BURNIN_SESSIONS + VOL_WINDOW,
+            f"{HMM_BURNIN_SESSIONS} sessions of regime burn-in on top of the "
+            f"{VOL_WINDOW}-session realized volatility the model reads",
+        )
+    }
+for _col in GARCH_COLS:
+    COLUMN_EXPECTATIONS[_col] = {
+        "leading": (
+            GARCH_BURNIN_SESSIONS + 1,
+            f"{GARCH_BURNIN_SESSIONS} sessions of volatility burn-in per ETF, plus the session "
+            "whose return opens the series",
+        )
+    }
+for _col in ffd_cols:
+    _first = ffd_features.filter(pl.col(_col).is_not_null())["timestamp"].min()
+    COLUMN_EXPECTATIONS[_col] = {
+        "leading": (
+            _sessions_before(_first),
+            f"the reference series has no observation before {str(_first)[:10]}",
+        )
+    }
+
+gaps = explain_column_gaps(
+    model_based,
+    columns=FEATURE_COLS,
+    entity="symbol",
+    session="timestamp",
+    expected=COLUMN_EXPECTATIONS,
+)
+render_column_gaps(gaps)
+
+# %%
+_residual = gaps["residual"].height
+print(
+    f"{len(FEATURE_COLS)} columns over {model_based.height:,} keys; "
+    f"{_residual:,} null value(s) sit where no declaration puts them"
+)
+
+# %% [markdown]
+# **Sign-off.** Every null in this artifact sits inside a prefix some model declares, and the
+# residual is zero.
+#
+# The three regime columns are one market-wide series broadcast to every ETF, so all 85 funds
+# lose the same 777 sessions: 756 of regime burn-in on top of the 21-session realized volatility
+# the regime model reads. The conditional volatility is fitted per fund, and every one of the 100
+# loses exactly 505 sessions - its own 504-session burn-in plus the session whose return opens
+# the series. A late-listing fund pays that burn-in later in calendar time, never a longer one.
+# The fractionally differenced reference series are market-wide too and begin when the reference
+# ETF does; HYG's 318 sessions are the deepest of them, and they are the opening of the sample
+# before that fund existed rather than a fit that failed. No column carries an interior null,
+# which is the position no window length can account for and the only one that would call for a
+# fix instead of a declaration.
+#
+# Two other numbers in the output need a sentence each. The 500 keys the label universe does not
+# declare are 100 funds times the five sessions at the end of the sample, 2025-12-24 to
+# 2025-12-31: the forward return needs five sessions of future to exist and the sample stops, so
+# features are defined where the label is not. A feature stage running past the last labelled
+# session is correct, and the modeling stages join on the label. The tail ratio flagged on
+# `regime_transition` is the feature behaving as designed - the probability of leaving the
+# current state is near zero on almost every session and spikes at the handful of sessions where
+# the regime actually turns, which is a distribution with a long right tail by construction and
+# not a scaling defect. Both regime columns that share it, `regime_prob_stress` and
+# `regime_log_duration`, sit inside the thresholds.
+#
+# The stage is accepted.
+
 # ## Key takeaways
 #
 # - **Fit on a schedule, not inside a fold.** A fold model is estimated on the fold's whole

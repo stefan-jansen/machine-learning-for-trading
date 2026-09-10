@@ -215,6 +215,33 @@ class Result:
                         backtest["identity_version"],
                         origin,
                     )
+        # A causal hash is a real row in the same registry file, and saying "unknown" about
+        # it sends the reader looking for a run that is sitting right there. `Result` models
+        # training, prediction and backtest; causal runs are registered by
+        # `register_causal_run` into `causal_runs` and read through
+        # `case_studies.research.causal.CausalResult`, which is a separate model because a
+        # causal identity has no training hash to hang off. Checked only on the way out, so
+        # the found path pays nothing for it.
+        for root, _namespace, _origin in roots:
+            db_path = root / "run_log" / "registry.db"
+            if not db_path.exists():
+                continue
+            with closing(sqlite3.connect(db_path)) as db:
+                has_table = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'causal_runs'"
+                ).fetchone()
+                if has_table is None:
+                    continue
+                row = db.execute(
+                    "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (result_hash,)
+                ).fetchone()
+            if row is not None:
+                raise KeyError(
+                    f"{result_hash!r} is a causal run in {db_path}, which Result does not "
+                    "model. Read it with case_studies.research.causal.CausalResult.open("
+                    "study, causal_hash), and note that migrate_equivalent_training_identity "
+                    "does not reach causal rows - a causal re-run refits rather than migrates."
+                )
         raise KeyError(f"Unknown result hash {result_hash!r}")
 
     @property
@@ -752,5 +779,21 @@ class ResultsCatalog:
                 partial.append((result_hash, reason))
         return partial
 
-    def open(self, result_hash: str, *, include_preview: bool = False) -> Result:
+    def open(self, result_hash: str, *, include_preview: bool | None = None) -> Result:
+        """Resolve a hash out of this study's registry, in this study's own tier.
+
+        `include_preview` defaults to the study's `execution_tier`, not to False. Every
+        caller arrives here with a hash it read out of *this* study's registry, so under a
+        preview study that hash lives in the preview registry and nowhere else. A fixed
+        False sent all of them to search canonical and released only, and
+        `open_selection_field`'s live ranking raised KeyError on the first member it had
+        just ranked. `declare_official_population` had already worked around it by passing
+        True at its own call site; deciding it here covers the three that had not.
+
+        Under a canonical study the default is False exactly as before, and even when it is
+        True `Result.open` appends the preview root *after* canonical and released, so a
+        hash that resolves canonically still resolves canonically.
+        """
+        if include_preview is None:
+            include_preview = self.study.execution_tier is ExecutionTier.PREVIEW
         return Result.open(self.study, result_hash, include_preview=include_preview)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import date, datetime, timedelta
 from enum import Enum, StrEnum
 from uuid import uuid4
 
@@ -91,14 +92,24 @@ class AgentTrace:
 class AgentForecastArtifact:
     """Rich output from a single research agent run.
 
-    Includes the forecast, reasoning trace, confidence/sentiment
-    metadata, and token usage for cost tracking.
+    Holds the probability, the reasoning trace behind it, heuristic
+    confidence and sentiment metadata, and token usage for cost tracking.
+
+    `forecast_produced` separates an agent that committed to a probability
+    from one that ran out of turns. Both carry a `p_yes`; only the first is a
+    forecast, and treating the second as one puts an unearned 0.5 into every
+    average downstream.
     """
 
     agent_id: str
     p_yes: float
     rationale: str
     traces: list[AgentTrace] = field(default_factory=list)
+
+    # False when the loop ended on its step budget rather than on a forecast
+    # action. `p_yes` then holds the loop's fallback value, which is not a
+    # judgement and must not be aggregated as one.
+    forecast_produced: bool = True
 
     # Rich output fields
     confidence: float = 0.5
@@ -251,11 +262,14 @@ class QualityGateResult:
 class AgentState:
     """Explicit agent state for checkpoint/replay.
 
-    Captures everything the agent knows at a point in time,
-    separate from the LLM's context window.
+    Holds what the agent has established at a point in the run, separate from
+    the LLM's context window: the question and its cutoff, the evidence
+    gathered, the tool calls that gathered it, the quality-gate verdicts, and
+    whether synthesis has run. `to_json` / `from_json` round-trip the whole
+    record, which is what makes a run resumable and an ablation cheap.
     """
 
-    ticker: str = ""
+    question: str = ""
     cutoff_date: str = ""
     run_id: str = field(default_factory=lambda: uuid4().hex[:12])
     evidence: list[dict] = field(default_factory=list)
@@ -274,7 +288,7 @@ class AgentState:
         data = json.loads(json_str)
         quality_gates = [QualityGateResult(**item) for item in data.get("quality_gates", [])]
         return cls(
-            ticker=data.get("ticker", ""),
+            question=data.get("question", ""),
             cutoff_date=data.get("cutoff_date", ""),
             run_id=data.get("run_id", uuid4().hex[:12]),
             evidence=data.get("evidence", []),
@@ -283,6 +297,145 @@ class AgentState:
             quality_gates=quality_gates,
             synthesis_status=data.get("synthesis_status", "pending"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Quality gates over AgentState
+# ---------------------------------------------------------------------------
+
+
+def parse_iso_date(value: str) -> date | None:
+    """Parse an ISO date, returning None for missing or malformed values."""
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def check_coverage_gate(
+    state: AgentState,
+    min_items: int = 3,
+    required_types: list[str] | None = None,
+) -> QualityGateResult:
+    """Check that evidence covers the required types and meets the minimum count."""
+    required_types = required_types or ["search_results", "base_rate"]
+    present_types = {item["type"] for item in state.evidence}
+    missing = set(required_types) - present_types
+
+    if missing:
+        return QualityGateResult(
+            gate_name="coverage",
+            passed=False,
+            reason=f"Missing evidence types: {', '.join(sorted(missing))}",
+            details={"required": required_types, "present": sorted(present_types)},
+        )
+    if len(state.evidence) < min_items:
+        return QualityGateResult(
+            gate_name="coverage",
+            passed=False,
+            reason=f"Only {len(state.evidence)} evidence items (need {min_items})",
+            details={"count": len(state.evidence), "min_required": min_items},
+        )
+    return QualityGateResult(
+        gate_name="coverage",
+        passed=True,
+        reason=f"{len(state.evidence)} items covering {len(present_types)} types",
+        details={"count": len(state.evidence), "types": sorted(present_types)},
+    )
+
+
+def check_freshness_gate(
+    state: AgentState,
+    *,
+    as_of: datetime,
+    max_age_hours: int = 24,
+) -> QualityGateResult:
+    """Check that no evidence was retrieved outside the allowed age window."""
+    stale_items = []
+
+    for item in state.evidence:
+        ts_str = item.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(ts_str)
+            age = as_of - ts
+            if age < timedelta(0):
+                stale_items.append({"type": item["type"], "age_hours": "future"})
+            elif age > timedelta(hours=max_age_hours):
+                stale_items.append(
+                    {"type": item["type"], "age_hours": round(age.total_seconds() / 3600, 1)}
+                )
+        except (ValueError, TypeError):
+            stale_items.append({"type": item["type"], "age_hours": "unknown"})
+
+    if stale_items:
+        return QualityGateResult(
+            gate_name="freshness",
+            passed=False,
+            reason=f"{len(stale_items)} evidence items exceed {max_age_hours}h age limit",
+            details={"stale_items": stale_items, "max_age_hours": max_age_hours},
+        )
+    return QualityGateResult(
+        gate_name="freshness",
+        passed=True,
+        reason=f"All evidence within {max_age_hours}h window",
+        details={"max_age_hours": max_age_hours, "item_count": len(state.evidence)},
+    )
+
+
+def check_consistency_gate(state: AgentState) -> QualityGateResult:
+    """Check that every search result is dated and published before the cutoff."""
+    issues = []
+    cutoff = parse_iso_date(state.cutoff_date)
+    if cutoff is None:
+        return QualityGateResult(
+            gate_name="consistency",
+            passed=False,
+            reason="Cutoff date is missing or invalid",
+            details={"cutoff_date": state.cutoff_date},
+        )
+
+    for item in state.evidence:
+        content = item.get("content", {})
+        if isinstance(content, dict):
+            for r in content.get("results", []):
+                pub = r.get("published", "")
+                if not pub:
+                    issues.append(f"Missing publication date: '{r.get('title', '')[:50]}'")
+                    continue
+                published = parse_iso_date(pub)
+                if published is None:
+                    issues.append(f"Invalid publication date: '{r.get('title', '')[:50]}'")
+                    continue
+                if published >= cutoff:
+                    issues.append(
+                        f"Post-cutoff result: '{r.get('title', '')[:50]}' "
+                        f"(published {published}, cutoff {cutoff})"
+                    )
+
+    if issues:
+        return QualityGateResult(
+            gate_name="consistency",
+            passed=False,
+            reason=f"{len(issues)} cutoff violations found",
+            details={"issues": issues},
+        )
+    return QualityGateResult(
+        gate_name="consistency",
+        passed=True,
+        reason="All result dates precede the cutoff",
+        details={"checks_run": ["date_presence", "date_parse", "cutoff_enforcement"]},
+    )
+
+
+def run_quality_gates(state: AgentState, *, as_of: datetime) -> list[QualityGateResult]:
+    """Run every gate, store the outcomes on the state, and return them."""
+    gates = [
+        check_coverage_gate(state),
+        check_freshness_gate(state, as_of=as_of),
+        check_consistency_gate(state),
+    ]
+    state.quality_gates = gates
+    return gates
 
 
 def _json_default(value: object) -> object:

@@ -46,12 +46,9 @@
 
 import json
 import sqlite3
-import warnings
 
 import matplotlib.pyplot as plt
 import polars as pl
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import CandidateSet, Study, open_selection_field
 from case_studies.research.holdout import build_holdout_training_spec
@@ -205,7 +202,7 @@ print(
 )
 
 # %% [markdown]
-# ## 2. Which holdout prediction set belongs to this carrier
+# ## 2. Which holdout prediction set belongs to this configuration
 #
 # The holdout fit is a different training run from the validation fit by
 # construction - a different interval is a different computation - so the two
@@ -213,7 +210,7 @@ print(
 # configuration name would accept a fit of the same model over the wrong window.
 #
 # Rather than compare fields and hope the list is complete, this derives the
-# identity the carrier's configuration *should* have on the holdout, by the same
+# identity the selected configuration *should* have on the holdout, by the same
 # `build_holdout_training_spec` [`18_holdout_predictions`](18_holdout_predictions.ipynb)
 # fits, and requires a registered prediction under exactly that hash. The
 # derivation is deterministic and costs a dataset read rather than a fit, so the
@@ -257,7 +254,7 @@ EXPECTED_HOLDOUT_SPEC = build_holdout_training_spec(
 EXPECTED_HOLDOUT_TRAINING = training_hash_from_spec(EXPECTED_HOLDOUT_SPEC)
 _expected_fold = EXPECTED_HOLDOUT_SPEC["computation"]["cv"]["folds"][0]
 print(
-    f"The carrier's holdout fit is {EXPECTED_HOLDOUT_TRAINING}: "
+    f"The selected configuration's holdout fit is {EXPECTED_HOLDOUT_TRAINING}: "
     f"train {str(_expected_fold['train_start'])[:10]} to {str(_expected_fold['train_end'])[:10]}, "
     f"evaluate {str(_expected_fold['val_start'])[:10]} to {str(_expected_fold['val_end'])[:10]}"
 )
@@ -266,7 +263,7 @@ matches = [row for row in holdout_rows if row[1] == EXPECTED_HOLDOUT_TRAINING]
 if not matches:
     raise RuntimeError(
         f"no holdout prediction is registered under {EXPECTED_HOLDOUT_TRAINING}, the identity "
-        f"this carrier's configuration derives. Run 18_holdout_predictions. The registry holds "
+        f"this configuration's configuration derives. Run 18_holdout_predictions. The registry holds "
         + (
             ", ".join(f"{row[0]} (training {row[1]})" for row in holdout_rows)
             if holdout_rows
@@ -289,7 +286,7 @@ if (holdout_kind, holdout_value) != carrier_checkpoint:
     )
 print(
     f"Holdout prediction {HOLDOUT_PREDICTION_HASH} from training {HOLDOUT_TRAINING_HASH}, "
-    f"the validation carrier {carrier_training_hash} refitted over the holdout interval "
+    f"the validation configuration {carrier_training_hash} refitted over the holdout interval "
     f"at {holdout_kind}={holdout_value}"
 )
 
@@ -334,13 +331,13 @@ pl.DataFrame(
 # %% [markdown]
 # ## 3. Run the selected strategy on the holdout window
 #
-# The specification is the carrier's own, cloned and re-pointed at the holdout
+# The specification is the selected configuration's own, cloned and re-pointed at the holdout
 # predictions. Nothing about the strategy is re-derived here: re-deriving it
 # would let a change anywhere upstream alter what the holdout evaluates without
 # the change being visible as a different selection.
 #
 # Prices are loaded for the holdout window with the allocator's warmup prefix.
-# The covariance estimator this carrier uses needs history before its first
+# The covariance estimator this configuration uses needs history before its first
 # rebalance, and without the prefix it would fall back to an imputed warmup on
 # exactly the dates the result is read from.
 
@@ -602,11 +599,11 @@ fig.show()
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. The strategy run here is the carrier's own specification, cloned and
+# 1. The strategy run here is the selected configuration's own specification, cloned and
 #    re-pointed at the holdout predictions. Nothing about it was re-derived, so
 #    a change upstream would show up as a different selection rather than as a
 #    quietly different holdout.
-# 2. The holdout prediction set is matched to the carrier by comparing the two
+# 2. The holdout prediction set is matched to the selected configuration by comparing the two
 #    training specifications field by field, because a holdout refit is a
 #    different training identity and cannot be matched on a hash.
 # 3. A validation figure is the maximum of a search and is optimistic. A single

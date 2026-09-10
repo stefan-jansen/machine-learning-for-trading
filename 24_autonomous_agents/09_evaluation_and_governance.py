@@ -18,35 +18,45 @@
 #
 # **Docker image**: `ml4t`
 #
-# This notebook is the **capstone** of the Chapter 24 workshop. It demonstrates
-# scoring-rule arithmetic, reliability bins, calibration transforms, and ablation
-# mechanics using author-selected synthetic probabilities. It also implements
-# security controls including the Warden pattern and injection defense.
+# Everything the chapter has built so far produces probabilities that nobody has checked. This
+# notebook is the machinery for checking them, and the controls that have to be in place before
+# anyone acts on one: proper scoring rules, reliability diagrams, calibration fitting done
+# without cheating, a proxy that enforces tool policy, and a scan for text written to hijack
+# the agent reading it.
+#
+# **Every probability on this page was chosen after its question had resolved.** They are
+# committed inputs that exist to make the arithmetic reproducible and identical on every
+# machine. That means no score, bin, transform or comparison below measures how good any
+# forecaster is: the demonstration is of the method, and a real evaluation needs forecasts
+# recorded before their questions resolved. Nothing else in this notebook repeats that caveat;
+# it applies to every number in it.
 #
 # **Learning Objectives**:
-# - Compute Brier score, log score, ECE, and sharpness
-# - Build reliability-bin diagrams without treating them as empirical evidence
-# - Demonstrate `find_optimal_d` on synthetic arithmetic inputs
-# - Compare aggregation and transform formulas on the same synthetic panel
-# - Implement the Warden proxy pattern for tool-call authorization
-# - Demonstrate fail-closed handling of detected prompt injection payloads
+# - Score a set of probability forecasts four ways, and say what each measure rewards and what
+#   it is blind to
+# - Read a reliability diagram to find where a forecaster is over- or under-confident, rather
+#   than only how far off it is on average
+# - Fit a calibration transform without scoring it on the rows it was fitted to, and see what
+#   the difference is worth
+# - Enforce read-only, source and rate policy in a proxy between the agent and its tools
+# - Scan untrusted text for injection payloads and refuse them, without treating the scan as a
+#   defence on its own
 #
-# **Book Reference**: Chapter 24, Sections 24.7 (evaluation), 24.8 (production:
-# reliability, replay, contamination control), 24.9 (security and governance)
+# **Book Reference**: Chapter 24, Section 24.7 (Multi-agent forecasting systems), Section 24.9
+# (Preparing for production) and Section 24.10 (Security and governance)
 #
-# **Prerequisites**: NB04-NB08 (full forecasting pipeline).
+# **Prerequisites**: [`05_aggregation_math`](05_aggregation_math.ipynb) (scoring and
+# calibration arithmetic), [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) (the
+# pipeline being evaluated).
 
 # %%
 """Scoring, Replay, and Security: capstone evaluation and governance."""
 
 import hashlib
 import re
-import warnings
 from collections.abc import Callable
 from typing import NamedTuple
 from urllib.parse import urlparse
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -55,7 +65,7 @@ from agent_observability import TRACES_DIR, RunTrace
 from agent_pipeline import (
     brier_score,
     expected_calibration_error,
-    find_optimal_d,
+    fit_extremization_exponent,
     log_score,
     logodds_extremize,
     neyman_extremize,
@@ -65,17 +75,36 @@ from agent_pipeline import (
 from agent_schemas import AgentForecastArtifact, ForecastResult
 from IPython.display import Markdown, display
 
-from utils.style import COLORS, FIGSIZE, add_message_title
-
-# %% tags=["parameters"]
-# This committed input contains author-selected synthetic probabilities. They
-# were assigned after resolution solely to make the arithmetic reproducible.
-# The notebook has no live-model or search path.
-SYNTHETIC_INPUT = "09_evaluation_and_governance_20260615T191431Z_d5030378899c.json"
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% [markdown]
-# Stable identifiers derive from exact question text. This makes record
-# alignment independent of panel order.
+# ## Settings
+#
+# `SYNTHETIC_INPUT` names the committed record holding the probabilities every calculation
+# below runs on. It contains no model calls and no search results, and it is loaded rather than
+# generated so the arithmetic is identical on every machine.
+#
+# `NEYMAN_CORRELATION` is the pairwise correlation assumed when the three probabilities in each
+# record are aggregated, matching [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb).
+#
+# `RELIABILITY_BINS` is how many groups the reliability diagram splits the forecasts into. Four
+# is chosen for ten questions: fewer averages the pattern away, more leaves bins holding a
+# single question.
+#
+# `EXPONENT_RANGE` bounds the grid search for the calibration exponent. Its lower end is a
+# floor on how much a transform may compress toward even odds and its upper end a ceiling on
+# how far it may push toward certainty. A fit that lands on either end has not found a minimum,
+# and the notebook below checks for exactly that.
+
+# %% tags=["parameters"]
+SYNTHETIC_INPUT = "09_evaluation_and_governance_20260615T191431Z_d5030378899c.json"
+NEYMAN_CORRELATION = 0.3
+RELIABILITY_BINS = 4
+EXPONENT_RANGE = (0.5, 3.0)
+
+# %% [markdown]
+# Records are keyed by a hash of the exact question text, so a record and a question line up
+# regardless of the order either list happens to be in.
 
 
 # %%
@@ -85,13 +114,14 @@ def _question_id(question: str) -> str:
 
 
 # %% [markdown]
-# ## Evaluation Panel
+# ## The Evaluation Panel
 #
-# A panel of 10 resolved binary questions supplies answer keys for a worked
-# arithmetic example. The probabilities used below are author-selected
-# synthetic inputs, not forecasts produced before resolution. Consequently,
-# no score, bin, transform, or ablation below measures empirical forecast
-# accuracy, calibration, or value relative to a market.
+# Ten resolved binary questions, each with a known outcome. Resolution is what makes them
+# usable at all: a scoring rule needs something to score against, which is why the chapter's
+# two forecasting questions - both still open when they were captured - cannot appear here.
+#
+# Ten is small. It is enough to show what each measure does and far too few to estimate any of
+# them, which is worth keeping in view when the reliability bins below hold two questions each.
 
 # %%
 panel = get_evaluation_panel()
@@ -101,26 +131,21 @@ for q in panel:
     print(f"  [{outcome}] id={_question_id(q.question)}  {q.question[:60]}")
 
 # %% [markdown]
-# ## Synthetic probabilities + Neyman aggregation
+# ## From Three Probabilities to One
 #
-# The input records contain three author-selected probabilities per question.
-# Neyman aggregation at $\rho = 0.3$ turns them into one synthetic ensemble
-# probability. This exercises the same arithmetic as NB08 without claiming
-# that an agent produced the values before resolution.
+# Each record holds three probabilities for its question, standing in for a three-agent panel.
+# Neyman aggregation folds them into one, using the same call
+# [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) makes, so what is scored below is
 
 
 # %%
 def _build_result(q, agent_probs: list[float]) -> ForecastResult:
-    """Fold a question's per-agent probabilities into a ForecastResult.
-
-    This is the same Neyman formula used by the pipeline, applied here only to
-    author-selected arithmetic inputs.
-    """
+    """Fold a question's per-agent probabilities into a ForecastResult."""
     artifacts = [
         AgentForecastArtifact(agent_id=f"agent_{i}", p_yes=p, rationale="")
         for i, p in enumerate(agent_probs)
     ]
-    aggregation = neyman_extremize(agent_probs, base=0.5, correlation=0.3)
+    aggregation = neyman_extremize(agent_probs, base=0.5, correlation=NEYMAN_CORRELATION)
     final_p = aggregation.extremized_probability or aggregation.raw_probability
     return ForecastResult(
         question=q,
@@ -131,9 +156,10 @@ def _build_result(q, agent_probs: list[float]) -> ForecastResult:
 
 
 # %% [markdown]
-# The committed input is aligned by a stable question identifier, never by row
-# position. Exact identity, uniqueness, cutoff, resolution, and coverage
-# assertions fail before any arithmetic if the fixture or input changes.
+# Records are matched to questions by identifier, never by row position, and the assertions
+# below fail before any arithmetic runs if the two lists have drifted apart. That matters more
+# than it looks: a silent misalignment would pair each forecast with someone else's outcome and
+# produce scores that are wrong in a way no plot would reveal.
 
 
 # %%
@@ -162,29 +188,32 @@ results = [
 predictions = [r.final_probability for r in results]
 outcomes = [r.question.resolved_outcome for r in results]
 
-print("Mode: AUTHOR-SELECTED SYNTHETIC ARITHMETIC")
-print(f"Identity and metadata aligned: {len(records_by_id)}/{len(panel)} questions")
-print(f"Synthetic ensemble arithmetic complete: {len(results)} questions")
+print(f"Aligned {len(records_by_id)} of {len(panel)} questions by identifier")
+print(f"Ensemble probability computed for {len(results)} questions")
 
 # %% [markdown]
-# The input file is committed and immutable during execution. It contains no
-# LLM calls or search results. The runner binds its exact SHA-256 digest so the
-# same synthetic values, question IDs, and metadata drive every calculation.
-
-# %%
-print(f"Loaded {len(results)} synthetic records from {SYNTHETIC_INPUT}")
-
-# %% [markdown]
-# ## Scoring: Proper Scoring Rules
+# ## Four Ways to Score a Probability
 #
-# We compute four common formulas on the synthetic inputs:
+# A probability forecast cannot be right or wrong, so it is scored rather than checked. Four
+# measures, each answering a different question:
 #
-# | Metric | Measures | Ideal |
-# |--------|----------|-------|
-# | **Brier score** | Mean squared error | 0.0 |
-# | **Log score** | Information content | 0.0 |
-# | **ECE** | Calibration | 0.0 |
-# | **Sharpness** | Decisiveness | 0.5 (max) |
+# **Brier score** is the mean squared distance between the forecast and the outcome, counting
+# the outcome as one or zero. It is a **proper scoring rule**: it is minimized by stating what
+# you actually believe, so no strategy of hedging or exaggerating improves it. Lower is better.
+#
+# **Log score** is also proper, and it punishes confident errors far harder: a forecast of
+# certainty against an outcome that happens is unbounded, where Brier caps at one. Which of
+# the two to report follows from how much a confident error costs in the application.
+#
+# **Expected calibration error** asks whether the numbers mean what they say. Group the
+# forecasts by the probability stated and compare each group's average forecast against how
+# often those events happened; the weighted average of those gaps is the error. Lower is
+# better, and it can be driven to zero by forecasting the base rate every time.
+#
+# **Sharpness** is the average distance from even odds, and it is the only one of the four
+# that is not a quality on its own. Forecasting certainty every time maximizes it. It exists to
+# be read against calibration: of two forecasters equally calibrated, the sharper one is more
+# useful, and a sharp forecaster who is not calibrated is confidently wrong.
 
 # %%
 model_brier = brier_score(predictions, outcomes)
@@ -192,68 +221,43 @@ model_log = log_score(predictions, outcomes)
 model_ece = expected_calibration_error(predictions, outcomes)
 model_sharp = sharpness(predictions)
 
-metrics_df = pl.DataFrame(
+pl.DataFrame(
     [
+        {"metric": "Brier score", "value": round(model_brier, 4), "direction": "lower is better"},
+        {"metric": "Log score", "value": round(model_log, 4), "direction": "lower is better"},
         {
-            "metric": "Brier score (lower is better)",
-            "synthetic": round(model_brier, 4),
+            "metric": "Expected calibration error",
+            "value": round(model_ece, 4),
+            "direction": "lower is better",
         },
         {
-            "metric": "Log score (lower is better)",
-            "synthetic": round(model_log, 4),
-        },
-        {
-            "metric": "ECE (lower is better)",
-            "synthetic": round(model_ece, 4),
-        },
-        {
-            "metric": "Sharpness (higher is better)",
-            "synthetic": round(model_sharp, 4),
+            "metric": "Sharpness",
+            "value": round(model_sharp, 4),
+            "direction": "read against calibration",
         },
     ]
 )
-
 # %% [markdown]
-# Small multiples preserve each metric's scale. Each bar reports one worked
-# calculation, not measured forecast performance.
-
-# %%
-fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["grid_2x2"])
-for ax, row in zip(axes.flat, metrics_df.iter_rows(named=True), strict=True):
-    ax.bar(["Synthetic input"], [row["synthetic"]], color=COLORS["blue"], width=0.55)
-    ax.set_ylabel(row["metric"].split(" (")[0])
-    ax.set_ylim(bottom=0)
-add_message_title(
-    axes[0, 0],
-    "Four scoring formulas summarize the same synthetic probability panel",
-    subtitle="Author-selected post-resolution inputs; arithmetic demonstration only",
-)
-fig.tight_layout()
-fig.show()
-plt.show()
-
-# %% [markdown]
-# **Methodology note**: These values illustrate the scoring framework. The
-# probabilities were selected after outcomes were known, so the results are not
-# estimates of accuracy, calibration, or comparative forecast quality. An
-# empirical study requires forecasts timestamped before resolution.
-
-# %% [markdown]
-# ## Reliability-bin arithmetic
+# ## Reliability: Where the Miscalibration Is
 #
-# This diagram groups synthetic probabilities and binary answer keys. It shows
-# how reliability-bin arithmetic works, not whether any forecaster is calibrated.
+# A single calibration number says how far off a forecaster is on average and not where. A
+# **reliability diagram** answers the second question: group the forecasts into bins by the
+# probability stated, and plot how often the events in each bin actually happened. A
+# well-calibrated forecaster's bins sit on the diagonal - the ones called seventy percent come
+# true about seventy percent of the time. Bins above the diagonal are under-confidence and bins
+# below it are over-confidence, and a forecaster can be one at the low end and the other at the
+# high end, which is exactly what a summary number hides.
+#
+# Bin count is the choice that decides what the diagram shows. Too few and every bin averages
+# away the pattern; too many and each bin holds one or two questions and the plot is noise.
+# Ten questions is far too few for either to work, which is why every bin here carries its
+# count on the chart: the sample size is the thing the reader most needs to see.
 
 # %%
-bins = reliability_bins(predictions, outcomes, n_bins=4)
+bins = reliability_bins(predictions, outcomes, n_bins=RELIABILITY_BINS)
 avg_pred = [b["avg_predicted"] for b in bins]
 avg_obs = [b["avg_observed"] for b in bins]
 counts = [b["count"] for b in bins]
-
-# %% [markdown]
-# The diagonal is an identity reference. Bar labels expose how few values
-# support each frequency. Fixed zero-to-one axes keep sparse bins from visually
-# exaggerating differences.
 
 # %%
 fig, ax = plt.subplots()
@@ -289,79 +293,107 @@ add_message_title(
     "Reliability-bin arithmetic depends on how synthetic values are grouped",
     subtitle="Four equal-width bins; author-selected inputs, not calibration evidence",
 )
-ax.legend()
-ax.set_xlim(-0.05, 1.05)
-ax.set_ylim(-0.05, 1.05)
 ax.set_aspect("equal")
-fig.tight_layout()
-fig.show()
-plt.show()
-
+show_with_alt(
+    fig,
+    f"Reliability diagram with {len(bins)} equal-width bins on a square axis from zero to one. "
+    "Each bar puts the observed frequency of a bin against the average probability forecast in "
+    "it, with a dashed diagonal for perfect calibration and an n label giving how many "
+    f"questions fall in each bin. The largest bin holds {max(counts)} of the ten questions.",
+)
 # %% [markdown]
-# ## In-sample transform fit
+# ## Fitting a Calibration Transform, Twice
 #
-# `find_optimal_d` chooses a logit-scaling parameter on the complete synthetic
-# panel. The before/after values demonstrate optimization arithmetic only.
+# `fit_extremization_exponent` grid-searches the log-odds exponent that minimizes Brier score,
+# as in [`05_aggregation_math`](05_aggregation_math.ipynb). Run it on all ten rows and it
+# reports an improvement over the same ten rows it chose the exponent from, which is the number
+# almost every calibration claim quietly is.
+#
+# A grid search reports where it stopped, and where it stopped is not always where the score
+# bottoms out. If the minimum lies outside the range searched, the returned exponent is the end
+# of the range: a clamp reported as an optimum. `at_search_boundary` is what tells the two
+# apart, and it has to be read before the exponent is.
 
 # %%
-cal_result = find_optimal_d(predictions, outcomes)
-print(f"Optimal d:        {cal_result.optimal_d:.3f}")
+cal_result = fit_extremization_exponent(predictions, outcomes, exponent_range=EXPONENT_RANGE)
+print(f"Fitted exponent:  {cal_result.optimal_exponent:.3f}")
+print(f"Searched range:   {cal_result.searched_range[0]} to {cal_result.searched_range[1]}")
+print(f"At the boundary:  {cal_result.at_search_boundary}")
 print(f"Brier (before):   {cal_result.brier_before:.4f}")
 print(f"Brier (after):    {cal_result.brier_after:.4f}")
-print(f"Improvement:      {cal_result.improvement_pct:.1f}%")
 
-# Apply the fitted transform
-transformed_preds = [logodds_extremize(p, cal_result.optimal_d) for p in predictions]
-cal_brier = brier_score(transformed_preds, outcomes)
-print(f"\nIn-sample transformed Brier: {cal_brier:.4f} (from {model_brier:.4f})")
+in_sample_preds = [logodds_extremize(p, cal_result.optimal_exponent) for p in predictions]
+in_sample_brier = brier_score(in_sample_preds, outcomes)
+print(f"\nIn-sample Brier after the transform: {in_sample_brier:.4f} (from {model_brier:.4f})")
 
 # %% [markdown]
-# ## Leave-one-row-out transform sensitivity
+# The search stops at the low end of its range. These probabilities are more extreme than their
+# outcomes support, and the panel wants more compression than an exponent of one half delivers,
+# so the reported figure is where the search ran out rather than where the score is lowest.
+# Widening the range would move it further down and keep going.
 #
-# Each synthetic row receives a parameter fitted on the other nine. This keeps
-# its own answer key outside the transform fit used for that row. The exercise
-# illustrates excluded-row arithmetic, not empirical calibration or performance.
+# The clamp is not a bug in the search: a transform that compresses without limit ends at the
+# base rate, which scores well and forecasts nothing. It is a finding about the inputs, and it
+# is the reason the exponent has to be read alongside the range it was found in.
+
+# %% [markdown]
+# ## The Same Fit, Scored Honestly
+#
+# Ten questions cannot be split into a training panel and a test panel and leave anything to
+# fit on, so the alternative is to fit ten times. Each row is transformed by an exponent chosen
+# from the other nine, which means the row's own outcome never influenced the exponent applied
+# to it. That is **leave-one-out** cross-validation, and at this sample size it is the only
+# available way to score a fitted transform without scoring it on itself.
+#
+# The spread of the ten fitted exponents is worth as much as the score. A stable exponent means
+# the panel agrees about the correction; exponents that swing with the row that was removed
+# mean the fit is chasing individual questions and will not carry to new ones.
 
 
 # %%
 def _leave_one_out_transform(
     forecasts: list[float], resolved: list[float]
 ) -> tuple[list[float], list[float]]:
-    """Fit the logit transform without the answer key being scored."""
+    """Transform each forecast with an exponent fitted on every other row."""
     transformed: list[float] = []
-    fold_d: list[float] = []
+    fold_exponents: list[float] = []
     for held_out in range(len(forecasts)):
         train_p = [p for i, p in enumerate(forecasts) if i != held_out]
         train_y = [y for i, y in enumerate(resolved) if i != held_out]
-        fitted = find_optimal_d(train_p, train_y)
-        fold_d.append(fitted.optimal_d)
-        transformed.append(logodds_extremize(forecasts[held_out], fitted.optimal_d))
-    return transformed, fold_d
+        fitted = fit_extremization_exponent(train_p, train_y, exponent_range=EXPONENT_RANGE)
+        fold_exponents.append(fitted.optimal_exponent)
+        transformed.append(logodds_extremize(forecasts[held_out], fitted.optimal_exponent))
+    return transformed, fold_exponents
 
 
 # %%
-loo_preds, loo_d = _leave_one_out_transform(predictions, outcomes)
+loo_preds, loo_exponents = _leave_one_out_transform(predictions, outcomes)
 loo_brier = brier_score(loo_preds, outcomes)
-print(f"Leave-one-out Brier: {loo_brier:.4f}")
-print(f"Fold transform d range: {min(loo_d):.3f} to {max(loo_d):.3f}")
+print(f"Leave-one-out Brier:      {loo_brier:.4f}")
+print(f"Fitted exponent range:    {min(loo_exponents):.3f} to {max(loo_exponents):.3f}")
 
 # %% [markdown]
-# The in-sample fit uses all ten answer keys, while the leave-one-row-out
-# calculation excludes the key being transformed. Neither number evaluates a
-# forecaster because the probabilities were author-selected after resolution.
-
-# %% [markdown]
-# ## Formula comparisons
+# The two Brier scores are identical here, and the reason is the clamp rather than the
+# transform generalising. Every fold's search ran to the same lower bound, so every row was
+# transformed by the same exponent whether or not its own outcome was in the fit, and there is
+# nothing for the two numbers to differ by.
 #
-# Applying several formulas to the same synthetic rows makes their numerical
-# effects concrete. It does not identify component value or causal contribution.
-# We compare:
-# 1. **Agents + Neyman**: the two-phase configuration run above
-# 2. **Simple mean** (no extremization)
-# 3. **Single agent** (no diversity)
-# 4. **LOO transformed** (Neyman outputs with excluded-row logit scaling)
+# That is what a boundary fit costs an evaluation: the comparison that was supposed to say how
+# much fitting on the scored rows is worth cannot say anything, because the fit never had room
+# to overfit. On a panel where the minimum falls inside the range, the in-sample score is the
+# better of the two and the gap between them is what the fitting bought itself.
 #
-# Empirical ablations of debate, supervision, or other NB08 stages require
+# The measures above scored one set of probabilities. Running all four against several
+# aggregation rules on the same rows shows something the single column cannot: the rules
+# disagree about which configuration to prefer.
+#
+# The four configurations are the ensemble with Neyman extremization, the plain mean of the
+# three probabilities, one agent's probability on its own, and the ensemble after the
+# leave-one-out transform.
+#
+# Comparing the pipeline's actual stages - what the debate is worth, what the supervisor is
+# worth - would need forecasts recorded before their questions resolved, which is what
+# [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) produces and cannot yet score.
 # timestamped pre-resolution forecasts and are outside this worked example.
 
 # %%
@@ -395,9 +427,9 @@ ablation_df = pl.DataFrame(
 
 fig, axes = plt.subplots(2, 2, figsize=FIGSIZE["grid_2x2"])
 metric_labels = {
-    "brier": "Brier Score",
-    "log": "Log Loss",
-    "ece": "Expected Calibration Error",
+    "brier": "Brier score",
+    "log": "Log score",
+    "ece": "Expected calibration error",
     "sharpness": "Sharpness",
 }
 for ax, (metric, label) in zip(axes.flat, metric_labels.items(), strict=True):
@@ -409,38 +441,49 @@ for ax, (metric, label) in zip(axes.flat, metric_labels.items(), strict=True):
     ax.set_xticks([])
 add_message_title(
     axes[0, 0],
-    "Aggregation and transform choices change the synthetic-panel arithmetic",
-    subtitle="Author-selected post-resolution inputs; no empirical comparison",
+    "The four rules disagree about which configuration to prefer",
+    subtitle="Same probabilities and answer keys throughout; lower is better except sharpness",
 )
-fig.tight_layout()
-fig.show()
-plt.show()
+show_with_alt(
+    fig,
+    "Four horizontal bar charts, one per metric, comparing the same four configurations: "
+    "Neyman aggregation, the simple mean, a single agent, and the leave-one-out transform. "
+    "Brier score, log score and expected calibration error each order the configurations "
+    "differently, and sharpness orders them differently again.",
+)
 
 # %% [markdown]
-# **How to read the comparison**: Each row applies a different formula to the
-# same synthetic probabilities and answer keys. Differences demonstrate
-# sensitivity to aggregation or transformation. They do not show that one
-# component improves real forecasts.
+# Each row applies a different rule to the same probabilities and answer keys, so the
+# differences between rows are the rules and nothing else. Reading them as evidence that one
+# configuration forecasts better would require the probabilities to have been produced before
+# the outcomes were known, which these were not.
 #
-# The next cell derives the numerical interpretation from the computed metrics.
+# What the rows do show is which choices the arithmetic is sensitive to at this panel size.
+# Watch what happens to sharpness relative to the scoring rules: a transform that pushes
+# probabilities toward the ends raises sharpness whatever it does to the score, which is why
+# sharpness cannot be read as a quality on its own.
 
 # %%
 display(
     Markdown(
-        f"**Synthetic arithmetic.** Neyman aggregation yields sharpness "
-        f"{model_sharp:.2f} and Brier {model_brier:.3f} on these author-selected "
-        f"values. The in-sample transform reaches {cal_brier:.4f}; the "
-        f"leave-one-row-out calculation is {loo_brier:.4f}. Because the inputs "
-        "were selected after resolution, none of these values measures forecast "
-        "accuracy, calibration, or component value."
+        f"**On this panel.** Neyman aggregation gives sharpness {model_sharp:.2f} and Brier "
+        f"{model_brier:.3f}. Fitting the transform on all ten rows reaches "
+        f"{in_sample_brier:.4f} and fitting it on nine and applying it to the tenth reaches "
+        f"{loo_brier:.4f}, a difference of {abs(in_sample_brier - loo_brier):.4f}. That "
+        "difference is normally the price of fitting on the rows being scored; here it is "
+        "zero for the reason given above, because every fold's search stopped at the same "
+        "bound."
     )
 )
 
 # %% [markdown]
 # ## Security: The Warden Pattern
 #
-# Section 24.9 describes the **Warden proxy**: a filter that sits between the
-# agent and external tools, enforcing policies on every tool call.
+# Section 24.10 describes the **Warden proxy**: a filter between the agent and its tools that
+# checks every call against a policy before it executes. The reason it sits there rather than
+# in the prompt is that a prompt is a request and a proxy is a control. An agent told not to
+# write files sometimes writes files; an agent whose write calls never reach a filesystem
+# cannot.
 
 
 # %%
@@ -662,46 +705,58 @@ for payload in payloads:
 # |-----------|---------|----------|
 # | LLM01: Prompt Injection | fail-closed input scan + Warden | This notebook |
 # | LLM02: Insecure Output | Warden policy enforcement | This notebook |
-# | LLM04: Data Poisoning | Point-in-time cutoff dates | NB02, NB04 |
-# | LLM06: Excessive Agency | Read-only architecture | NB04 |
+# | LLM04: Data Poisoning | Publication-date cutoffs on retrieved evidence | `02_tool_contracts` |
+# | LLM06: Excessive Agency | Read-only tools, no order path | `02_tool_contracts` |
 # | LLM07: System Prompt Leakage | No secrets in prompts | All notebooks |
-# | LLM08: Excessive Autonomy | Quality gates + abstention | NB03 |
-
+# | LLM08: Excessive Autonomy | Quality gates and abstention | `03_state_and_memory` |
 # %% [markdown]
-# ## Replay: Frozen Tool Responses
+# ## Replay Against Frozen Evidence
 #
-# For reproducible evaluation, we can freeze tool responses and replay the pipeline
-# with different LLM parameters. The tool executor log from NB08 serves as the
-# frozen dataset.
-
-# %%
-print("Replay Concept:")
-print("  1. Save search results from production run (NB08)")
-print("  2. Create a 'frozen' search client that returns cached responses")
-print("  3. Re-run pipeline with different LLM/parameters")
-print("  4. Compare: same evidence → different synthesis")
-print()
-print("This isolates the LLM's contribution from search variability.")
-print("Key metric: synthesis divergence across replays.")
+# Every stage of this chapter's pipeline has two sources of variation: what the search API
+# returned, and what the model did with it. Comparing two configurations without separating
+# them compares both at once, and the search index moves between runs.
+#
+# Freezing the evidence removes one of them. The execution log that
+# [`08_forecasting_pipeline`](08_forecasting_pipeline.ipynb) saves holds every query and every
+# document a run retrieved, so a search client that replays from it hands a second run exactly
+# the evidence the first one saw. Whatever then differs is the model, the prompt, or the
+# aggregation, and the difference is attributable. It also makes the comparison repeatable
+# after the documents have gone.
+#
+# What the frozen replay cannot do is tell you whether the second configuration is better. It
+# holds the evidence fixed, not the truth: scoring still needs resolved questions and forecasts
+# recorded before they resolved.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Proper scoring rules** (Brier, log, ECE, sharpness) provide complementary
-#    views; no single formula summarizes every property
-# 2. **Synthetic inputs** can teach scoring and transform mechanics, but they
-#    provide no empirical evidence about forecast accuracy or calibration
-# 3. **Formula comparisons** show how aggregation choices move worked-example
-#    values without establishing incremental component value
-# 4. **The Warden pattern** enforces tool-level policies (read-only, domain
-#    allowlists, rate limits) as a proxy between agent and external APIs
-# 5. **Prompt injection defense** combines fail-closed scanning with tool-policy
-#    enforcement and output validation; no single filter is sufficient
-# 6. **Hash-bound synthetic inputs** make the arithmetic reproducible; an
-#    empirical study additionally requires pre-resolution forecast provenance
+# 1. **A probability is scored, not checked.** Brier and log score both reward being right and
+#    being right confidently, and they disagree about how much: log score punishes a confident
+#    error without bound, Brier does not. Which one to report follows from how expensive a
+#    confident error is in the application.
+# 2. **Calibration and sharpness pull against each other, and only one of them is free.**
+#    Anyone can be perfectly calibrated by forecasting the base rate every time, and anyone can
+#    be maximally sharp by forecasting zero or one. The pair has to be read together, and
+#    sharpness on its own is not a quality to maximize.
+# 3. **A transform fitted on the rows it is scored on reports the improvement it was
+#    constructed to produce.** The in-sample and leave-one-out numbers here differ for that
+#    reason and for no other.
+# 4. **Enforce tool policy in a proxy, fail closed.** An allowlist that denies what it has not
+#    been told about still holds when a tool nobody thought of appears; a blocklist does not.
+# 5. **Input scanning is a filter, not a defence.** It catches the payloads it has patterns
+#    for. The reason to run it anyway is that it is cheap and independent of the Warden, and a
+#    payload has to get past both.
+# 6. **Freeze the evidence before comparing configurations**, or the comparison includes
+#    whatever the search index did that day.
 #
-# **Optional next**: [`10_framework_comparison`](10_framework_comparison.ipynb) expresses the same pipeline
-# in different agent frameworks (native SDK, CrewAI, LangGraph).
+# **Known limitations of what is built here.** Every probability on this page was chosen after
+# its question resolved, so no number here estimates accuracy or calibration. Ten questions
+# would be too few to estimate them from even if the forecasts had been genuine. The injection
+# patterns are a handful of regular expressions against a threat that adapts, and the Warden
+# enforces the policies it is given and nothing about whether they are the right ones.
 #
-# **Book**: Sections 24.8 and 24.9 cover production reliability, replay,
-# contamination control, and the full OWASP threat model for LLM agents.
+# **Optional next**: [`10_framework_comparison`](10_framework_comparison.ipynb) expresses the
+# same pipeline in three agent frameworks.
+#
+# **Book**: Section 24.9 covers production reliability, replay and contamination control, and
+# section 24.10 the full OWASP threat model for LLM agents.

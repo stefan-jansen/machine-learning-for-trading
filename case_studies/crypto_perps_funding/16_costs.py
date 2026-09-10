@@ -267,8 +267,7 @@ for label in labels:
         cost_runs.extend(result.hash for result in execution.results)
         print(
             f"{label} @ {level:g} bps: {len(execution.results)} backtests registered\n"
-            f"  this execution: {execution.n_computed} computed, "
-            f"{execution.n_reused} served from the registry"
+            f"  this execution: {execution.disclosure()}"
         )
 
 # %% [markdown]

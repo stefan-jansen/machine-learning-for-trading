@@ -759,3 +759,50 @@ def test_no_prediction_is_emitted_at_an_inserted_cell():
     }
     assert scored, "S0 produced no windows at all"
     assert not (scored & absent), f"windows are scored at inserted cells {sorted(scored & absent)}"
+
+
+class TestTheDeclaredWindowStride:
+    """`train_sequence_stride` spaces the training windows; the count follows.
+
+    `max_train_sequences` is the other form: it fixes the total and derives the spacing,
+    so two folds of different length get different spacing. On nasdaq's minute panel the
+    750,000-window budget drew one window every 5.4 minutes against a 15-minute label, so
+    consecutive windows carried overlapping labels (ml4t/agent-workspace#1015).
+    """
+
+    @staticmethod
+    def _sample(counts, *, stride=0, max_sequences=0):
+        from case_studies.utils.sequence_dataset import _sample_sequence_positions
+
+        return _sample_sequence_positions(np.asarray(counts, dtype=np.int64), max_sequences, stride)
+
+    def test_a_stride_takes_every_nth_endpoint_of_each_symbol(self):
+        [offsets] = self._sample([100], stride=15)
+        assert offsets.tolist() == list(range(0, 100, 15))
+
+    def test_the_count_follows_the_stride_and_differs_between_folds(self):
+        """The property the count form cannot have: the same spacing in both folds."""
+        long_fold, short_fold = (
+            self._sample([4_066_041], stride=15),
+            self._sample([3_997_571], stride=15),
+        )
+        assert len(long_fold[0]) == 271_070
+        assert len(short_fold[0]) == 266_505
+        assert np.diff(long_fold[0]).max() == np.diff(short_fold[0]).max() == 15
+
+    def test_a_symbol_shorter_than_the_stride_keeps_its_first_window(self):
+        """Striding never drops a symbol from the universe."""
+        offsets = self._sample([3, 1, 0], stride=15)
+        assert offsets[0].tolist() == [0]
+        assert offsets[1] is None  # one endpoint, taken whole
+        assert offsets[2] is None  # none to take
+
+    def test_no_stride_leaves_the_count_form_untouched(self):
+        assert self._sample([100, 100], stride=0, max_sequences=0) == [None, None]
+        capped = self._sample([100, 100], stride=0, max_sequences=50)
+        assert sum(len(o) for o in capped) == 50
+
+    def test_the_stride_wins_over_a_count_because_a_run_declares_one_or_the_other(self):
+        """`resolve_dl_train_sequence_stride` refuses both; this is the sampler's half."""
+        [offsets] = self._sample([100], stride=15, max_sequences=90)
+        assert offsets.tolist() == list(range(0, 100, 15))

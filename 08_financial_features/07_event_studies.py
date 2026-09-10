@@ -521,7 +521,7 @@ if len(result["daily_aar"]) > 0:
     fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
 
     fig.update_layout(
-        title="Momentum breakouts earn ~1.3% abnormal return by the event day, then partly fade",
+        title="Momentum breakouts earn abnormal return by the event day, then fade",
         xaxis_title="Trading days relative to event",
         yaxis_title="Cumulative average abnormal return (%)",
         height=500,
@@ -556,7 +556,7 @@ if len(result["daily_aar"]) > 0:
     fig.add_vline(x=0, line_dash="dash", line_color=COLORS["amber"])
 
     fig.update_layout(
-        title="The abnormal return is earned on the breakout day; surrounding days are noise",
+        title="The abnormal return is earned on the breakout day; other days are noise",
         xaxis_title="Trading days relative to event",
         yaxis_title="Average abnormal return (%)",
         height=400,

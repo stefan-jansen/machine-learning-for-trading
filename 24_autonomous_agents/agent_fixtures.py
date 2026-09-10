@@ -155,10 +155,11 @@ def get_demo_questions(n: int = 3) -> list[ForecastQuestion]:
 #       gives adversarial debate and supervisor reconciliation something to work
 #       on.
 #
-# The contrast is the lesson: forecast spread is a property of how contested the
-# question's evidence is, not of the temperature setting. NB09 deliberately uses
-# a separate panel of *resolved* questions instead, because scoring calibration
-# needs known outcomes.
+# The contrast is the lesson: how far apart a panel lands tracks how contested
+# the question's evidence is. Nothing in the chapter varies sampling settings
+# between agents, so the spread is not attributable to them. 09 uses a separate
+# panel of *resolved* questions, because scoring calibration needs known
+# outcomes.
 
 CHAPTER_CLEAR_QUESTION = ForecastQuestion(
     question="Will the US enter a recession by the end of 2026?",
@@ -190,9 +191,8 @@ CHAPTER_CONTESTED_QUESTION = ForecastQuestion(
 def get_chapter_clear_question() -> ForecastQuestion:
     """Return the pinned one-directional question (NB06 agreement demo).
 
-    The public evidence points one way, so independent research agents reach
-    similar forecasts: the "spread comes from the question, not the temperature"
-    result. See the module note on pinned chapter questions.
+    The public evidence points one way, so agents running the same prompt and
+    tools land close together. See the module note on pinned chapter questions.
     """
     return CHAPTER_CLEAR_QUESTION
 

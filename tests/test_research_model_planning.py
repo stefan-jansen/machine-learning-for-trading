@@ -147,15 +147,87 @@ def test_planned_fold_major_runner_attempts_later_group_after_failure(
         return [SimpleNamespace(index=1, error=None, result=object())]
 
     monkeypatch.setattr(module, batch_name, observed_batch)
+    # `base` is the dict the planner builds. A panel is already in it, so the runner's reload
+    # branch stays out of a test about failure ordering.
     payload = (
-        ("first", [(0, {})], object(), {}),
-        ("second", [(1, {})], object(), {}),
+        ("first", [(0, {})], {"mds": object()}, {}),
+        ("second", [(1, {})], {"mds": object()}, {}),
     )
 
     with pytest.raises(RuntimeError, match="injected compatibility-group failure"):
         module.run_model_plan(SimpleNamespace(), payload)
 
     assert calls == ["first", "second"]
+
+
+@pytest.mark.parametrize(
+    ("module", "batch_name"),
+    [(linear, "_run_batch_group"), (gbm, "_run_gbm_batch_group")],
+)
+def test_planned_runner_holds_one_panel_at_a_time(monkeypatch, module, batch_name) -> None:
+    """The plan payload carries no modeling dataset, and the runner keeps one alive.
+
+    The planner used to leave `base["mds"]` in every payload entry, so a call spanning four
+    labels held four modeling datasets from planning to the last fit - 22.53 GiB resident on
+    `nasdaq100_microstructure` before a single fit, measured 2026-09-10, and the third label is
+    where its `06_linear` died at 48.6 GB. What is pinned here is the shape that fixes it: the
+    panel is absent from the payload, loaded when its group is reached, and gone afterwards.
+    """
+    panels = {"first": object(), "second": object()}
+    loaded: list[str] = []
+    alive_when_each_group_ran: list[list[str]] = []
+    payload = (
+        (
+            "first",
+            [(0, {"label": "first", "execution_tier": "canonical", "preview_reductions": {}})],
+            {"mds": None, "label_ref": None},
+            {},
+        ),
+        (
+            "second",
+            [(1, {"label": "second", "execution_tier": "canonical", "preview_reductions": {}})],
+            {"mds": None, "label_ref": None},
+            {},
+        ),
+    )
+
+    def fake_load(study, request, *args, **kwargs):
+        label = request["label"]
+        loaded.append(label)
+        return None, panels[label]
+
+    def fake_load_gbm(case_study, label, **kwargs):
+        loaded.append(label)
+        return panels[label]
+
+    if module is linear:
+        monkeypatch.setattr(module, "_load_inputs", fake_load)
+    else:
+        monkeypatch.setattr(
+            "utils.modeling.load_modeling_dataset",
+            lambda case_study, label, **kwargs: fake_load_gbm(case_study, label, **kwargs),
+        )
+        for _, indexed, base, _ in payload:
+            base["label_ref"] = SimpleNamespace(name=indexed[0][1]["label"])
+
+    def observed_batch(study, indexed_requests, key, base, **kwargs):
+        alive_when_each_group_ran.append(
+            [name for name, _, entry, _ in payload if entry["mds"] is not None]
+        )
+        return [SimpleNamespace(index=indexed_requests[0][0], error=None, result=object())]
+
+    monkeypatch.setattr(module, batch_name, observed_batch)
+    study = SimpleNamespace(
+        case_study="cs",
+        require_writable=lambda: None,
+        activate=lambda tier: None,
+    )
+
+    module.run_model_plan(study, payload)
+
+    assert loaded == ["first", "second"]
+    assert alive_when_each_group_ran == [["first"], ["second"]]
+    assert [entry["mds"] for _, _, entry, _ in payload] == [None, None]
 
 
 def test_planned_tabm_runner_attempts_later_group_after_failure(monkeypatch) -> None:

@@ -14,32 +14,52 @@
 # ---
 
 # %% [markdown]
-# # Prediction Uncertainty: MC Dropout and Deep Ensembles
+# # From a point forecast to an interval: MC Dropout, deep ensembles, conformal
 #
 # **Docker image**: `ml4t-gpu`
 #
-# This notebook implements two complementary approaches to uncertainty estimation:
-# **MC Dropout** (Gal and Ghahramani, 2016) and **Deep Ensembles** (Lakshminarayanan
-# et al., 2017). Both produce candidate uncertainty estimates around point
-# predictions; the empirical work below shows those raw estimates require
-# calibration before they can be used in position sizing.
+# Every model in this chapter has returned one number per fund per day, and every
+# comparison has ranked those numbers. But a position size is not set by a forecast
+# alone: two funds with the same expected return and different confidence do not
+# deserve the same exposure. This notebook asks what a network can say about how sure
+# it is, and then whether that answer means anything.
 #
-# **Learning Objectives**:
-# - Implement MC Dropout by keeping dropout active at inference time
-# - Train Deep Ensembles with independently initialized models
-# - Compare calibration: does predicted uncertainty track actual error?
-# - Apply **split-conformal calibration** to convert raw spreads into intervals
-#   with controlled empirical coverage
-# - Decompose epistemic vs aleatoric uncertainty
+# It takes three steps, and the third is the one that matters.
 #
-# **Book Reference**: Chapter 13, Section 13.8 (Prediction Uncertainty)
+# **MC Dropout** (Gal and Ghahramani, 2016) keeps dropout switched on at inference and
+# runs the same input through the network many times, treating the spread of those
+# passes as uncertainty. It costs nothing extra to train.
+#
+# **Deep ensembles** (Lakshminarayanan et al., 2017) train several networks that
+# differ only in initialisation and data order, and treat their disagreement as
+# uncertainty. It costs a full training run per member.
+#
+# Both produce a number with the units of a return. Neither produces a number with a
+# coverage property, and the empirical coverage table below is where that becomes
+# visible. **Split-conformal calibration** is the step that converts a spread into an
+# interval with a coverage claim - under an exchangeability assumption this setup
+# does not fully satisfy, which is stated where it bites rather than in a footnote.
+#
+# **Learning objectives**:
+# - Implement both methods and say precisely what quantity each one's spread is the
+#   spread *of*.
+# - Read an empirical coverage table and say what an under-covered interval means for
+#   a position-sizing rule built on it.
+# - Apply split-conformal calibration in both its plain and normalized forms, and say
+#   which of the two actually uses the model's uncertainty estimate.
+# - Name the exchangeability assumption conformal needs and the two places this
+#   notebook violates it.
+#
+# **Book Reference**: Chapter 13, Section 13.8 (Quantifying prediction uncertainty)
 #
 # **Prerequisites**: ETF features (`case_studies/etfs/`)
 
 # %%
 """Prediction Uncertainty - implement MC Dropout and Deep Ensembles for confidence estimation."""
 
-import warnings
+import os
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import numpy as np
 import plotly.graph_objects as go
@@ -54,14 +74,16 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS  # activates the ml4t Plotly template on import
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # COLORS activates the ml4t Plotly template on import
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 SEED = 42
 MAX_SYMBOLS = 0
 LOOKBACK = 60
+LABEL_HORIZON = 21
 HIDDEN_SIZE = 32
 DROPOUT = 0.2
 MC_SAMPLES = 50
@@ -75,7 +97,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 set_global_seeds(SEED)
-# Extra determinism flags for CUDA training in this notebook
+torch.use_deterministic_algorithms(True)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
@@ -96,9 +118,34 @@ df = mds.dataset.drop_nulls(subset=FEATURE_COLS + [TARGET_COL])
 print(f"Features ({len(FEATURE_COLS)}): {FEATURE_COLS}")
 print(f"Target: {TARGET_COL}")
 print(f"Rows after dropna: {len(df):,}")
+per_date = df.group_by(mds.date_col).len().sort(mds.date_col)
+print(
+    f"{df[mds.date_col].min()} to {df[mds.date_col].max()}, "
+    f"{df[mds.entity_cols[0]].n_unique()} funds; funds per date "
+    f"{per_date['len'].min()} to {per_date['len'].max()}, median {per_date['len'].median():.0f}"
+)
+print(
+    f"Label {TARGET_COL}: mean {df[TARGET_COL].mean():+.5f}, "
+    f"standard deviation {df[TARGET_COL].std():.5f}"
+)
 
 # %% [markdown]
 # ## Sequence Creation and Temporal Split
+#
+# Two housekeeping steps before the split, both of which affect what the models see.
+#
+# NaN and infinite feature values are replaced with zero. The features are already
+# standardized returns and a NaN here means a missing observation at a series
+# boundary, so zero is the standardized mean rather than an invented value.
+# Forward-filling within a symbol would be the other option and would not leak - it
+# only ever reads earlier observations - but it would present a stale value as a
+# current one, which for a trailing-return feature says the return was unchanged
+# rather than unknown. The count is printed so a large number cannot pass unnoticed.
+#
+# The rows are then put in one canonical order, by date and then symbol. The sequence
+# builder pools assets in whatever order the frame yields them, and that order is not
+# fixed between runs - which changes which examples land in which mini-batch, and with
+# it every number below, seeds notwithstanding.
 
 # %%
 X, y, timestamps, symbols = create_sequences_multi_asset(
@@ -110,24 +157,44 @@ X, y, timestamps, symbols = create_sequences_multi_asset(
     symbol_col=mds.entity_cols[0],
 )
 
-# Replace NaN/inf with zero - acceptable here because features are already
-# standardized returns where NaN typically indicates missing data at series
-# boundaries. Forward-fill is an alternative but risks lookahead in panel data.
 n_nan = np.isnan(X).sum() + np.isinf(X).sum()
-X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-y = np.nan_to_num(y, nan=0.0).astype(np.float32)
+
+# One canonical row order, by date then symbol, so mini-batch composition does not
+# depend on the order the sequence builder happened to pool assets in.
+sequence_order = np.lexsort((symbols.astype(str), timestamps))
+X = np.nan_to_num(X[sequence_order], nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+y = np.nan_to_num(y[sequence_order], nan=0.0).astype(np.float32)
+timestamps = timestamps[sequence_order]
+symbols = symbols[sequence_order]
 
 print(f"Sequences: {X.shape[0]:,}, shape: {X.shape}")
 print(f"NaN/inf values replaced with 0: {n_nan:,}")
 
-# %%
-# Date-based 60/20/20 temporal split
-unique_dates = np.sort(np.unique(timestamps))
-train_end_date = unique_dates[int(len(unique_dates) * 0.6)]
-val_end_date = unique_dates[int(len(unique_dates) * 0.8)]
+# %% [markdown]
+# ### Splitting by date, with a gap for the label horizon
+#
+# The split is by date, at fixed fractions of the trading days, and an example belongs
+# to the partition the date it carries falls in. The label is a `LABEL_HORIZON`-session
+# forward return, so an example dated within that many sessions of a boundary has an
+# outcome resolved by days on the far side; those examples are dropped.
+#
+# The gap matters more here than in the notebooks before it. The validation split is
+# not only where training stops early - it is also the calibration set for the
+# conformal intervals further down, and a conformal guarantee needs the calibration
+# residuals to be exchangeable with the test residuals. Validation examples whose
+# outcomes land inside the test period are not.
 
-train_mask = timestamps < train_end_date
-val_mask = (timestamps >= train_end_date) & (timestamps < val_end_date)
+# %%
+unique_dates = np.sort(np.unique(timestamps))
+train_boundary_idx = int(len(unique_dates) * 0.6)
+val_boundary_idx = int(len(unique_dates) * 0.8)
+train_end_date = unique_dates[train_boundary_idx]
+val_end_date = unique_dates[val_boundary_idx]
+train_label_cutoff = unique_dates[train_boundary_idx - LABEL_HORIZON]
+val_label_cutoff = unique_dates[val_boundary_idx - LABEL_HORIZON]
+
+train_mask = timestamps < train_label_cutoff
+val_mask = (timestamps >= train_end_date) & (timestamps < val_label_cutoff)
 test_mask = timestamps >= val_end_date
 
 X_train, y_train = X[train_mask], y[train_mask]
@@ -136,15 +203,31 @@ X_test, y_test = X[test_mask], y[test_mask]
 test_dates, test_symbols = timestamps[test_mask], symbols[test_mask]
 
 print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test: {len(X_test):,}")
+print(
+    f"Purged {LABEL_HORIZON} target dates before each boundary: "
+    f"validation starts {train_end_date}, test starts {val_end_date}"
+)
 
 # %% [markdown]
-# **Cross-sectional IC helper**: every method below scores predictions with the
-# same daily Spearman correlation between forecast and forward return, averaged
-# over the test window. Defining it once keeps the comparison consistent.
+# **Cross-sectional IC helper**: every method below scores predictions with the same
+# daily Spearman correlation between forecast and forward return, averaged over the
+# test window. Defining it once keeps the comparison consistent.
+#
+# A date's IC is undefined when a model predicts the same value for every fund on it:
+# the predicted ranks are all tied and there is nothing to correlate. The library
+# returns `NaN` for such a date, and polars treats `NaN` and null as different values,
+# so `drop_nulls` alone leaves it in place and one of them makes the whole mean `NaN`.
+# Both are filtered here, and the count of dates the mean was taken over is returned
+# alongside it.
 
 
 # %%
 def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    Returns the mean and the defined/total date counts. Filters both null and NaN,
+    since polars `drop_nulls` leaves NaN in place.
+    """
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "prediction": y_pred})
     ret_df = pl.DataFrame({"timestamp": dates, "symbol": syms, "forward_return": y_true})
     ic_per_date = cross_sectional_ic_series(
@@ -155,8 +238,9 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, syms):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
-    return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
+    defined = ic_per_date.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+    mean_ic = float(defined["ic"].mean()) if defined.height else float("nan")
+    return {"ic": mean_ic, "n_defined": defined.height, "n_total": ic_per_date.height}
 
 
 # %% [markdown]
@@ -179,9 +263,11 @@ ridge.fit(X_train_scaled, y_train)
 y_ridge = ridge.predict(X_test_scaled)
 
 ridge_mse = np.mean((y_ridge - y_test) ** 2)
-ridge_ic = cross_sectional_ic_mean(y_test, y_ridge, test_dates, test_symbols)
+ridge_result = cross_sectional_ic_mean(y_test, y_ridge, test_dates, test_symbols)
+ridge_ic = ridge_result["ic"]
 
 print(f"Ridge baseline - MSE: {ridge_mse:.6f}, IC: {ridge_ic:+.4f}")
+print(f"IC defined on {ridge_result['n_defined']} of {ridge_result['n_total']} test dates")
 
 # %% [markdown]
 # ---
@@ -341,21 +427,23 @@ mc_mean = mc_preds.mean(axis=0)
 mc_std = mc_preds.std(axis=0)
 
 mc_mse = np.mean((mc_mean - y_test) ** 2)
-mc_ic = cross_sectional_ic_mean(y_test, mc_mean, test_dates, test_symbols)
+mc_result = cross_sectional_ic_mean(y_test, mc_mean, test_dates, test_symbols)
+mc_ic = mc_result["ic"]
 
 print(f"MC Dropout ({MC_SAMPLES} samples) - MSE: {mc_mse:.6f}, IC: {mc_ic:+.4f}")
+print(f"IC defined on {mc_result['n_defined']} of {mc_result['n_total']} test dates")
 print(f"Mean uncertainty (std): {mc_std.mean():.6f}")
 print(f"Ridge baseline IC for reference: {ridge_ic:+.4f}")
 
 # %% [markdown]
-# **Interpretation**: averaging $T$ stochastic forward passes gives the MC
-# Dropout point estimate above. With only two LSTM layers at 0.2 dropout, the
-# stochastic passes produce highly correlated outputs and the spread of the
-# resulting distribution is small in absolute terms. Whether the MC mean beats
-# Ridge here is rerun-sensitive on this 8-feature ETF panel (see catalog
-# `rerun_history`); what is stable is that the dropout-spread magnitude is far
-# smaller than the scale of 21-day forward returns. Both observations matter
-# for the calibration check below.
+# **Interpretation**: averaging `MC_SAMPLES` stochastic forward passes gives the MC
+# Dropout point estimate above. Two LSTM layers at a dropout rate of `DROPOUT` produce
+# highly correlated passes, so the spread of the resulting distribution is small in
+# absolute terms - compare the printed mean standard deviation against the label's own
+# standard deviation printed with the data. Which of the MC mean and the ridge
+# baseline scores higher moves between runs on this panel; the size of the
+# dropout spread relative to the return scale does not. The second observation is what
+# the calibration check below turns on.
 
 # %% [markdown]
 # ### Calibration Helper
@@ -491,12 +579,18 @@ fig.add_trace(
 fig.update_xaxes(title_text="Test Sample Index", row=1, col=2)
 fig.update_yaxes(title_text="Forward Return", row=1, col=2)
 fig.update_layout(
-    width=900,
     height=400,
-    title_text="MC Dropout's spread is tiny relative to the scale of forward returns",
+    title_text="MC Dropout: predicted spread against error, and against the return scale",
     showlegend=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. The left scatters absolute prediction error against the predicted "
+    "standard deviation, one point per test example. The right plots 100 consecutive "
+    "test points: the MC Dropout mean as a line, a shaded 95 percent band around it, "
+    "and the actual forward returns as markers. The band is far narrower than the "
+    "scatter of actual returns around it.",
+)
 
 # %% [markdown]
 # ---
@@ -599,22 +693,29 @@ ens_mean = member_preds.mean(axis=0)
 ens_std = member_preds.std(axis=0)
 
 ens_mse = np.mean((ens_mean - y_test) ** 2)
-ens_ic = cross_sectional_ic_mean(y_test, ens_mean, test_dates, test_symbols)
+ens_result = cross_sectional_ic_mean(y_test, ens_mean, test_dates, test_symbols)
+ens_ic = ens_result["ic"]
 
 print(f"Deep Ensemble ({N_ENSEMBLE} members) - MSE: {ens_mse:.6f}, IC: {ens_ic:+.4f}")
+print(f"IC defined on {ens_result['n_defined']} of {ens_result['n_total']} test dates")
 print(f"Mean uncertainty (std): {ens_std.mean():.6f}")
 
 # Report individual member ICs for context
 for i in range(N_ENSEMBLE):
-    m_ic = cross_sectional_ic_mean(y_test, member_preds[i], test_dates, test_symbols)
+    m_ic = cross_sectional_ic_mean(y_test, member_preds[i], test_dates, test_symbols)["ic"]
     print(f"  Member {i} IC: {m_ic:+.4f}")
 
 # %% [markdown]
-# **Interpretation**: The ensemble mean typically outperforms individual members
-# through error averaging - the diversity among members cancels correlated
-# errors. The spread of member-level ICs reflects the functional diversity that
-# makes ensemble uncertainty informative: wider spread means members learned
-# genuinely different functions from the same data.
+# **Interpretation**: the member ICs printed above compare how well each member ranks
+# funds, and the ensemble mean's IC against their range says how much averaging
+# helped - it helps when members make errors that partly cancel.
+#
+# Note that this says nothing about the uncertainty estimate. An IC is a rank
+# statistic, so two members can score identically while predicting quite different
+# magnitudes, and the ensemble's uncertainty is `ens_std`: the per-example standard
+# deviation across members, printed above as a mean and plotted as a histogram below.
+# Whether that quantity is informative is the calibration question, and it is answered
+# by the uncertainty-error diagnostics, not by the IC spread.
 
 # %% [markdown]
 # ### Calibration Analysis
@@ -628,14 +729,17 @@ print(f"  vs MC Dropout above: {unc_err_corr_mc:+.3f}")
 ens_cal_table
 
 # %% [markdown]
-# **Interpretation**: compare the ensemble correlation above against the MC
-# Dropout figure. Each ensemble member converges to a genuinely different local
-# optimum, so ensemble disagreement captures more functional diversity than the
-# subnetwork sampling inside a single MC Dropout model. On this run the
-# ensemble's correlation is positive while MC Dropout's is near zero - the
-# expected ordering - but neither is large enough to be a strong calibration
-# signal on its own. The split-conformal section below converts these raw
-# spreads into intervals with controlled coverage.
+# **Interpretation**: the two correlations are printed together above, so read them
+# side by side. The argument for expecting the ensemble's to be larger is that its
+# members are separate optimisations that can land in different places, where MC
+# Dropout samples subnetworks of one trained model - a narrower kind of variation. The
+# run either bears that out or does not.
+#
+# What neither number can be is a calibration guarantee. A rank correlation between
+# predicted spread and absolute error says the ordering carries some information; it
+# says nothing about whether an interval of a given width contains the outcome as
+# often as it claims. That is what the coverage table measures, and what the
+# split-conformal section is for.
 
 # %% [markdown]
 # ### Epistemic vs Aleatoric Decomposition
@@ -737,9 +841,15 @@ fig.add_trace(
 fig.update_xaxes(title_text="Ensemble Std Dev", row=1, col=2)
 fig.update_yaxes(title_text="Count", row=1, col=2)
 fig.update_layout(
-    width=900, height=400, title_text="Ensemble members disagree, giving a spread of uncertainties"
+    height=400,
+    title_text="Individual ensemble members, and the distribution of their disagreement",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels. The left plots each ensemble member's predictions over a slice of "
+    "test points, with the ensemble mean drawn over them. The right is a histogram of "
+    "the per-example standard deviation across members.",
+)
 
 # %% [markdown]
 # ---
@@ -806,19 +916,23 @@ fig.update_xaxes(title_text="Predicted Uncertainty (std)", row=1, col=2)
 fig.update_yaxes(title_text="Absolute Error", row=1, col=1)
 fig.update_yaxes(title_text="Absolute Error", row=1, col=2)
 fig.update_layout(
-    width=900,
     height=400,
-    title_text="Both raw spreads track error weakly; the ensemble's is the wider, more informative one",
+    title_text="Predicted uncertainty against absolute error, for both methods",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two scatter panels on matching axes, absolute error against predicted standard "
+    "deviation. The left panel is MC Dropout, the right the deep ensemble. The "
+    "horizontal spread of each cloud shows how much uncertainty each method reports.",
+)
 
 # %% [markdown]
 # ### Coverage Probability
 #
 # A complementary calibration diagnostic: what fraction of actual values fall
 # within the predicted confidence intervals? We compute empirical coverage at
-# 50%, 80%, and 95% nominal levels for both methods using the Gaussian
-# assumption ($\mu \pm z_\alpha \cdot \sigma$).
+# the `nominal_levels` below for both methods, using the Gaussian assumption
+# ($\mu \pm z_\alpha \cdot \sigma$).
 
 # %%
 nominal_levels = [0.50, 0.80, 0.95]
@@ -880,17 +994,25 @@ coverage_df
 # We need validation predictions from MC Dropout and the ensemble. We re-run
 # inference on the val split.
 #
-# **Caveat - calibration set overlaps the early-stopping set.** The conformal
-# quantiles below are computed on the same `X_val` split that `train_lstm` used
-# for early stopping. The models have therefore been tuned to minimize error on
-# exactly these points, so the residuals $|y_{\text{val}} - \hat\mu_{\text{val}}|$
-# are biased *downward* and the resulting intervals are mildly optimistic - they
-# slightly under-cover relative to a strict split-conformal guarantee, which
-# requires a calibration set exchangeable with the test set and untouched during
-# training. A production pipeline carves a third, dedicated calibration split
-# before training; we reuse the validation split here to keep the notebook to a
-# single train/val/test partition. Read the coverage numbers as an upper bound
-# on real-world calibration quality, not a finite-sample guarantee.
+# **Two reasons the guarantee does not strictly hold here.** Both are about
+# exchangeability, which is the one assumption split-conformal makes.
+#
+# First, the calibration set is the early-stopping set. The quantiles below come from
+# the same `X_val` split `train_lstm` stopped on, so the models were selected to make
+# these exact residuals small. That biases $|y_{\text{val}} - \hat\mu_{\text{val}}|$
+# downward and makes the intervals mildly optimistic. A production pipeline carves a
+# third, dedicated calibration split before training; this notebook reuses the
+# validation split to stay on one train/validation/test partition.
+#
+# Second, the labels overlap. A `LABEL_HORIZON`-session forward return shares days
+# with its neighbours, so residuals within a split are strongly dependent rather than
+# exchangeable draws, and the effective sample size behind each quantile is far below
+# the row count. The split above purges the boundary, which stops calibration
+# residuals from resolving inside the test period; it does nothing about the
+# dependence within each split.
+#
+# So read the coverage below as what these intervals achieved on this test set, not as
+# a finite-sample guarantee that they will.
 
 # %%
 X_val_t = torch.FloatTensor(X_val).to(DEVICE)
@@ -950,6 +1072,16 @@ EPS = 1e-8
 nominal_levels_conf = [0.50, 0.80, 0.95]
 conf_rows = []
 
+# Normalized conformal is invariant to rescaling sigma by a constant, so what decides
+# whether it differs from plain conformal is how much sigma VARIES, not how large it
+# is. Print that, and how close sigma gets to EPS, before reading the widths.
+for _name, _sd in [("MC Dropout", mc_std_val), ("Deep Ensemble", ens_std_val)]:
+    print(
+        f"{_name} validation sigma: mean {_sd.mean():.3e}, "
+        f"coefficient of variation {_sd.std() / _sd.mean():.3f}, "
+        f"minimum {_sd.min():.3e} (EPS is {EPS:.0e})"
+    )
+
 for level in nominal_levels_conf:
     alpha = 1 - level
 
@@ -993,28 +1125,40 @@ conformal_df = pl.DataFrame(conf_rows)
 conformal_df
 
 # %% [markdown]
-# **Interpretation**: split-conformal calibration **restores coverage**. The plain
-# variant reaches its nominal rate at every level - the raw Gaussian intervals were
-# under-covered by an order of magnitude - and it assigns the same width to every
-# test point. The normalized variant scales width by the model's own $\hat\sigma$,
-# which pays off only when $\hat\sigma$ carries real, well-conditioned information.
-# For the Deep Ensemble, whose member disagreement gives a genuine spread of predicted
-# std, normalized conformal holds coverage near nominal at roughly the plain average
-# width while adapting locally. For MC Dropout it is a cautionary case: its predicted
-# std collapses toward zero, so the normalized variant has almost nothing to adapt to,
-# and dividing validation residuals by a near-degenerate $\hat\sigma$ is numerically
-# fragile - the normalized quantile is dominated by the smallest std values, so the MC
-# normalized width is unstable from run to run (sometimes close to the plain width,
-# sometimes inflated by orders of magnitude when a single validation std lands near
-# zero). Either way it buys nothing over plain conformal, whose coverage is already at
-# nominal. The lesson is that normalized (locally adaptive) conformal needs a
-# non-degenerate uncertainty estimate; when the base spread is uninformative, plain
-# conformal is the safer choice.
+# **Reading the table.** Compare the empirical coverage column against the nominal
+# level, and the two variants against each other at the same level.
 #
-# The marginal coverage guarantee is distribution-free under exchangeability
-# (Vovk et al. 2005) - the only assumption is that validation and test residuals
-# come from the same distribution, which is the same assumption underlying any
-# held-out evaluation.
+# The plain variant uses no $\hat\sigma$ at all: it takes a quantile of the held-out
+# absolute residuals and gives every test point that same half-width. So its coverage
+# is a statement about the calibration procedure, not about either uncertainty method.
+# The normalized variant divides each residual by the model's own $\hat\sigma$ before
+# taking the quantile, then multiplies back at test time - which is the only place in
+# this notebook where MC Dropout's or the ensemble's spread does any work.
+#
+# A small $\hat\sigma$ is not itself a problem. Multiplying every $\hat\sigma$ by a
+# constant divides the quantile by that constant and multiplies the width back by it,
+# leaving the intervals unchanged - so the normalized variant is scale-invariant, and a
+# method reporting standard deviations of $10^{-5}$ is on the same footing as one
+# reporting $10^{-1}$. A $\hat\sigma$ that is exactly constant reproduces the plain
+# widths.
+#
+# What decides the outcome is how much $\hat\sigma$ varies, and whether it varies
+# where the errors are. The coefficients of variation printed above are the first thing
+# to read. A $\hat\sigma$ that barely varies leaves the normalized variant doing what
+# plain conformal already does. A $\hat\sigma$ that varies without tracking error
+# still redistributes width - some test points get a narrower interval and some a wider
+# one - but it allocates that width by something unrelated to where the model is
+# actually wrong. Marginal coverage still holds, because the quantile is chosen to make
+# it hold; what degrades is coverage *per point*, which is the property a position
+# sizer built on these intervals would rely on. The widths and coverage in the table
+# are the evidence, not the size of $\hat\sigma$.
+#
+# The scale invariance does break at the bottom, where $\hat\sigma$ approaches `EPS`.
+# The printed minima say whether that is in play.
+#
+# The marginal coverage guarantee is distribution-free (Vovk et al. 2005), but it is
+# not assumption-free: it needs calibration and test residuals to be exchangeable,
+# which the two paragraphs above the calibration set out is not the case here.
 
 # %% [markdown]
 # ### Uncertainty-Based Prediction Filtering
@@ -1030,14 +1174,21 @@ q75_ens = np.percentile(ens_std, 75)
 mc_keep = mc_std <= q75_mc
 ens_keep = ens_std <= q75_ens
 
-mc_ic_full = cross_sectional_ic_mean(y_test, mc_mean, test_dates, test_symbols)
-mc_ic_filtered = cross_sectional_ic_mean(
+mc_full_result = cross_sectional_ic_mean(y_test, mc_mean, test_dates, test_symbols)
+mc_filtered_result = cross_sectional_ic_mean(
     y_test[mc_keep], mc_mean[mc_keep], test_dates[mc_keep], test_symbols[mc_keep]
 )
-
-ens_ic_full = cross_sectional_ic_mean(y_test, ens_mean, test_dates, test_symbols)
-ens_ic_filtered = cross_sectional_ic_mean(
+ens_full_result = cross_sectional_ic_mean(y_test, ens_mean, test_dates, test_symbols)
+ens_filtered_result = cross_sectional_ic_mean(
     y_test[ens_keep], ens_mean[ens_keep], test_dates[ens_keep], test_symbols[ens_keep]
+)
+
+mc_ic_full, ens_ic_full = mc_full_result["ic"], ens_full_result["ic"]
+mc_ic_filtered, ens_ic_filtered = mc_filtered_result["ic"], ens_filtered_result["ic"]
+print(
+    f"Dates the IC is defined on - MC {mc_full_result['n_defined']} full, "
+    f"{mc_filtered_result['n_defined']} filtered; ensemble "
+    f"{ens_full_result['n_defined']} full, {ens_filtered_result['n_defined']} filtered"
 )
 
 filter_rows = [
@@ -1070,26 +1221,26 @@ filter_df
 # simple quartile filtering moves IC only a few thousandths.
 
 # %% [markdown]
-# ### Connections to Other Chapters
+# ### Where this connects
 #
-# - **Calibration methods** (section 11.3): Platt scaling and isotonic regression
-#   can post-process the raw uncertainty estimates above into better-calibrated
-#   probabilities. The split-conformal section here implements the
-#   distribution-free analog for regression intervals; see section 11.5 for the
-#   general framework.
-# - **Conformal allocation** (Chapter 17 case studies): the
-#   `conformal_weighted` allocator (`case_studies/utils/allocation.py`) consumes
-#   per-prediction Mondrian widths produced by `case_studies/utils/conformal.py`
-#   - the same construction shown here, generalized to (symbol, fold)-stratified
-#   calibration on the registry's stored predictions.
-# - **Foundation model calibration**: The base architectures in `01_core_architectures`
-#   and `04_transformers` can be wrapped with these uncertainty methods. TSFMs
-#   (section 13.6) face additional calibration challenges from pretraining
-#   distribution mismatch - see section 13.8 for discussion.
-# - **Position sizing** (Chapter 19): Scale exposure inversely with ensemble
-#   uncertainty - when ensemble members strongly agree, increase allocation.
-# - **Model saving**: For production use, save ensemble members via
-#   `torch.save(model.state_dict(), path)` and reload with matching architecture.
+# - **The general framework** is Section 11.5, "Quantifying predictive uncertainty",
+#   which covers calibration for classification - Platt scaling and isotonic
+#   regression - alongside the distribution-free interval construction used here.
+# - **Conformal allocation** is where these widths are actually spent. The
+#   `conformal_weighted` allocator in `case_studies/utils/allocation.py` consumes
+#   per-prediction widths built by `case_studies/utils/conformal.py`: the same
+#   construction as this section, stratified by symbol and fold over the registry's
+#   stored predictions rather than a single split.
+# - **Position sizing** from an uncertainty estimate is Chapter 17's territory, where
+#   allocators turn scores into weights, and Section 19.7, "Adaptive risk controls
+#   without leakage", for the timing question - an exposure rule that reads a
+#   quantity computed with future information is the same defect as a leaky feature.
+# - **Wrapping other architectures**: nothing here is specific to the LSTM.
+#   `01_core_architectures` and `04_transformers` take dropout and can be ensembled
+#   the same way. The foundation models in `09_foundation_models` are the harder
+#   case: their calibration depends on a pretraining distribution you cannot inspect.
+# - **Saving ensemble members**: `torch.save(model.state_dict(), path)` per member,
+#   reloaded into a matching architecture.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1097,37 +1248,40 @@ filter_df
 # 1. **MC Dropout is cheap**: Run $T$ forward passes through a single trained model.
 #    No extra training cost - just keep dropout active via `model.train()` at inference.
 #
-# 2. **Deep Ensembles are better-calibrated**: Training $M$ independent models from
-#    different initializations captures functional diversity. Ensemble disagreement
-#    tracks absolute error more reliably than MC Dropout's dropout-spread on this
-#    dataset, but costs $M \times$ training time.
+# 2. **A deep ensemble costs $M$ trainings and buys functional diversity.** Members
+#    differ only in their initialisation and their data order, so their disagreement
+#    is a measure of how underdetermined the fit is. Whether that disagreement tracks
+#    error better than dropout spread is measured above, in the two scatter panels and
+#    the correlations printed beside them - read those rather than assuming an
+#    ordering.
 #
-# 3. **Both capture epistemic uncertainty**: Uncertainty is highest where the model
-#    has seen less data or where patterns are ambiguous. This maps directly to
-#    **position sizing** - reduce exposure when the model is uncertain.
+# 3. **A spread is not an interval until something calibrates it.** Both methods
+#    produce a number with the units of the label, and neither produces a number with
+#    a coverage property. The empirical coverage table is where that gap is visible,
+#    and it is the reason the conformal section exists.
 #
-# 4. **Raw uncertainty is not calibrated**: Gaussian intervals from either method
-#    are severely under-covered (~0-20% empirical against 50%/80%/95% nominal).
-#    The qualitative ordering - ensemble correlation positive, MC Dropout near
-#    zero - is stable across reruns; the precise magnitudes are not.
+# 4. **Split-conformal converts a spread into a coverage claim - under one
+#    assumption.** Calibrating against held-out residuals needs those residuals to be
+#    exchangeable with the test ones. Here they are not, twice over: the calibration
+#    split is also the early-stopping split, and overlapping forward-return labels
+#    make residuals dependent within each split. The measured coverage is what these
+#    intervals achieved, not what they are guaranteed to achieve.
 #
-# 5. **Split-conformal restores coverage**: Calibrating either method's spreads
-#    against validation residuals produces intervals that achieve their nominal
-#    coverage rate on the held-out test set in finite samples, with no
-#    distributional assumption beyond exchangeability. This is the operational
-#    fix for using uncertainty estimates in risk-aware position sizing.
+# 5. **The normalized variant is where the uncertainty estimate earns its keep.**
+#    Plain conformal gives every test point the same width and needs no $\hat\sigma$
+#    at all. Only the normalized variant uses the model's own spread, so comparing the
+#    two is what says whether MC Dropout or the ensemble contributed anything beyond a
+#    constant.
 #
-# 6. **Aleatoric uncertainty requires architecture changes**: Separating data noise
-#    from model uncertainty needs heteroscedastic output heads (predicting both
-#    $\mu$ and $\sigma^2$), which neither baseline method provides.
+# 6. **Separating aleatoric from epistemic needs a different head.** Splitting data
+#    noise from model uncertainty requires an output that predicts $\mu$ and
+#    $\sigma^2$ together; neither method here provides one, so the decomposition
+#    below is bounded by what a point-prediction head can express.
 #
-# 7. **Practical guidance**: Use MC Dropout when compute is limited or the model
-#    already has dropout. Use Deep Ensembles when calibration quality matters
-#    for risk management. In both cases, layer split-conformal calibration on
-#    top before using intervals downstream.
+# **Known limitations.** One chronological split of one ETF panel, one label horizon,
+# one seed, one architecture, and a calibration set that doubles as the
+# early-stopping set. Every coverage number is a single test-set measurement, not a
+# guarantee.
 #
-# **Next**: See `11_library_landscape` for high-level forecasting libraries
-# (Darts, NeuralForecast, sktime) that wrap these architectures.
-#
-# **Book**: Section 13.8 discusses uncertainty quantification theory and the
-# connection to Bayesian deep learning.
+# **Next**: `11_library_landscape` puts these architectures behind the interfaces the
+# forecasting libraries expose, so a model swap stops being a rewrite.

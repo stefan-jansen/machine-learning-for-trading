@@ -250,6 +250,7 @@ class ResearchAgent:
         p_yes = 0.5
         rationale = ""
         raw_action: dict = {}
+        forecast_produced = False
 
         for step in range(1, self.max_steps + 1):
             response, usage = self.llm.complete_with_usage(messages, json_mode=True)
@@ -284,6 +285,7 @@ class ResearchAgent:
                 p_yes = action["p_yes"]
                 rationale = action["rationale"]
                 raw_action = action
+                forecast_produced = True
                 traces.append(AgentTrace(step=step, action="forecast", llm_raw=response))
                 break
 
@@ -299,7 +301,9 @@ class ResearchAgent:
                     )
                 )
         else:
-            # Loop exhausted without a forecast: record forced default
+            # Loop exhausted without a forecast. p_yes keeps its initial value,
+            # which forecast_produced=False marks as a non-answer rather than a
+            # judgement, so aggregation can drop it.
             rationale = "Max steps reached without forecast"
             traces.append(AgentTrace(step=self.max_steps, action="forced_default"))
 
@@ -308,6 +312,7 @@ class ResearchAgent:
             p_yes=p_yes,
             rationale=rationale,
             traces=traces,
+            forecast_produced=forecast_produced,
             confidence=extract_confidence(raw_action),
             sentiment=extract_sentiment(p_yes),
             key_findings=extract_key_findings(rationale),

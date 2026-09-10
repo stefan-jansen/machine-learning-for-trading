@@ -70,6 +70,11 @@ import polars as pl
 import yaml
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.feature_engineering import (
     assert_values_agree,
     assign_families,
@@ -1055,6 +1060,169 @@ record = write_artifact(
 print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}, digest {record['digest']}")
 print(f"Read by 04_model_based_features.py and 05_evaluation.py, on {PANEL_KEY}")
 
+# %% [markdown]
+# ## What the matrix holds, and what it owes
+#
+# Everything above describes what was built. This last section describes what came out, and it
+# asks two questions rather than one.
+#
+# The first is the usual one: what is in each column - how much is null, how much is exactly
+# zero, how far the extreme values sit from the body, whether a column is constant. A threshold
+# crossed here is a request for a sentence of explanation, not a verdict. A 45% null share is a
+# defect in a closing price and expected in a measure taken between two expiries; half the rows
+# at zero is a defect in a return and correct in a direction indicator. Only the column's own
+# meaning settles it, so the check reports and this notebook signs off.
+#
+# The second question is the one a null count cannot reach. **Coverage is measured against the
+# keys the labels declare, not against the rows this matrix happens to hold.** A matrix that
+# emits a thousand rows where a million were owed carries no nulls at all and is wrong; nothing
+# inside it can say so, because the missing rows are not there to be counted. The labels are the
+# right reference because a `(symbol, timestamp)` carrying a label and no feature row is one no
+# model can be asked to score - it is lost to every family at once, before any of them is fitted.
+#
+#
+# A shortfall against that reference is not by itself a defect, so the matrix declares where it is
+# entitled to be short before the number is printed. Two mechanisms decide it, and both are
+# already stated above rather than invented here. `KEEP_IF_PRESENT` keeps a key only where the
+# lagged ATM implied volatility and the trailing realized volatility both exist, so a security
+# owes nothing until `realized_vol` has filled and the surface has been quoted `IV_LAG` sessions
+# earlier - and the extract's first quoted session is itself later than the price panel's open,
+# which shifts every security's first usable row by the same amount. The budget below is that sum,
+# derived from the windows and the inputs rather than typed in. What the sign-off answers for is
+# the residual: keys inside a security's own span, and securities that spend more than the sum.
+
+# %%
+LEADING_BUDGET = W["realized_vol"][0] + IV_LAG
+print(
+    f"leading budget {LEADING_BUDGET} sessions = {W['realized_vol'][0]} of trailing realized "
+    f"volatility + {IV_LAG} of surface lag"
+)
+
+report = quality_report(
+    features,
+    name="financial features",
+    key_columns=PANEL_KEY,
+    expected=label_universe(CASE_DIR, keys=PANEL_KEY),
+    keys=PANEL_KEY,
+    entity="symbol",
+    session="timestamp",
+    expected_missing={
+        "leading": (LEADING_BUDGET, "trailing realized volatility, then the surface lag"),
+        "interior": (None, f"the surface carries no usable lagged {KEEP_IF_PRESENT[0]}"),
+    },
+)
+render_quality_report(report)
+
+# %% [markdown]
+# Two of those four rows are declared, and a declaration is only worth having if the notebook then
+# shows it holds. Both checks below ask the same question in the same way: for the keys a
+# mechanism is supposed to account for, did the input carry a row this stage dropped, or did it
+# never carry one? Measured at the lag the matrix actually reads - a surface row on the day of a
+# hole is irrelevant when the row the feature needs is the one before it.
+
+# %%
+sessions = daily.select("timestamp").unique().sort("timestamp").with_row_index("i")
+usable = surface_raw.filter(pl.col(KEEP_IF_PRESENT[0]).is_not_null()).select(PANEL_KEY).unique()
+
+
+def carried_at_lag(keys: pl.DataFrame) -> int:
+    """How many of ``keys`` the surface could have been built from, one lag earlier."""
+    return (
+        keys.join(sessions, on="timestamp")
+        .with_columns((pl.col("i") - IV_LAG).alias("i"))
+        .join(sessions, on="i", suffix="_src")
+        .select("symbol", pl.col("timestamp_src").alias("timestamp"))
+        .join(usable, on=PANEL_KEY, how="semi")
+        .height
+    )
+
+
+classified = report["missing_classified"]
+interior = classified.filter(pl.col("where") == "interior")
+if interior.height:
+    recoverable = carried_at_lag(interior.select(PANEL_KEY))
+    print(
+        f"interior: of {interior.height:,} holes the surface carries a usable "
+        f"{KEEP_IF_PRESENT[0]} at the lag the matrix reads for {recoverable:,} "
+        f"({recoverable / interior.height:.2%}); the rest have no source row to build from"
+    )
+
+over = (
+    report["missing_per_entity"]
+    .filter((pl.col("where") == "leading") & (pl.col("sessions") > LEADING_BUDGET))
+    .with_columns((pl.col("sessions") - LEADING_BUDGET).alias("excess"))
+)
+if over.height:
+    first_quote = usable.group_by("symbol").agg(pl.col("timestamp").min().alias("first_quote"))
+    opens = (
+        label_universe(CASE_DIR, keys=PANEL_KEY)
+        .group_by("symbol")
+        .agg(pl.col("timestamp").min().alias("panel_open"))
+    )
+    late = (
+        over.join(first_quote, on="symbol", how="left")
+        .join(opens, on="symbol", how="left")
+        .filter(pl.col("first_quote").is_null() | (pl.col("first_quote") > pl.col("panel_open")))
+    )
+    print(
+        f"leading: {over.height} securities spend more than the {LEADING_BUDGET}-session budget, "
+        f"{int(over['excess'].sum()):,} sessions between them; the surface's first quote arrives "
+        f"after the panel opens for {late.height} of them, which no window length covers"
+    )
+
+# %% [markdown]
+# ### Sign-off
+#
+# **Coverage is 76.0% - 481,184 of the 629,444 keys the five labels declare - and it is the
+# number a declaration was needed for.** A quarter of the universe absent is either the extract
+# or a defect, and the percentage cannot say which. The classification does. 136,482 of the
+# 151,210 missing keys are interior, inside a security's own quoted range, which no window length
+# explains; the check above then asks the only question that settles them, and asks it at the lag
+# the matrix reads rather than at the session itself. **The surface carries a usable
+# `iv_30_atm` one session earlier for 143 of the 136,482.** Every other interior key has no
+# source row to build a feature from.
+#
+# So the shortfall is the licensed extract, not this stage: a forward return needs a price and
+# survives any session the security traded, while every column here needs a quoted surface that
+# resolved, and the surface is quoted for a name on far fewer sessions than the tape is. Stating
+# it here matters because a reader otherwise meets it downstream as an unexplained gap in a
+# leaderboard, with no way to tell a narrow universe from a weak model - and because it is lost to
+# every family at once, before any of them is fitted, so no model stage can recover one of them.
+#
+# **At the front, 609 securities pay the 21-session budget and 312 pay more, 2,171 sessions
+# between them.** The budget is the 20-session realized volatility plus the one-session surface
+# lag, and for 311 of those 312 the surface's first quote arrives after the price panel opens for
+# that name, which no window length was ever going to cover. **The residual is 139 keys** - 16
+# where the security has no feature row at all and 123 after its last - or 0.02% of the universe.
+#
+# **2,950 keys carry a feature row and no label**, across 588 symbols and the whole sample. These
+# are the mirror case - a surface quoted on a session the label file does not cover - and at 0.6%
+# of the matrix they are carried rather than dropped, because a feature row with no label is
+# simply never joined.
+#
+# **`term_ratio_z_63` is null on 96.2% of rows, and that is worse than it looks.** Of the 207,567
+# rows where its input `term_ratio_atm` is present, 189,439 carry no z-score. The window is the
+# reason: a 63-session standardization needs 63 observations of a column that is itself 56.9%
+# null, and a rolling window over a sparse series almost never fills. The column is kept because
+# where it does resolve it is the standardized quantity the model stages want, but a reader should
+# know it speaks for one row in twenty-six and treat any importance it earns accordingly. The
+# other term-structure z-scores below it inherit a milder form of the same arithmetic.
+#
+# **The remaining null flags are the option-derived columns, and they are expected.** A measure
+# taken between two expiries needs both to solve, so `term_ratio_atm`, `term_convexity` and
+# `term_slope_far_atm` sit near half. `mom_252d` and `mom_skip_recent` are at 20.9% because a
+# 252-session window cannot fill for a name with less than a year of history in the sample. How a
+# model treats a missing value is a modelling choice, made in the model stages and not here.
+#
+# **Tails.** The four heavy-tail flags are all on *changes*: `d_iv_30_atm`, `d_skew_rr_30_25d`,
+# `iv_mom_5d` and `iv_mom_21d`. A daily change in implied volatility is near zero most days and
+# occasionally very large, so a ratio of the 99.9th percentile to the 75th of 30 to 95 is the
+# distribution behaving, not an outlier to winsorize. The cross-sectional percentile columns
+# beside them are bounded by construction, and those are what the model stages rank on.
+#
+# **No column is constant and none carries a non-finite value.** Both would be flagged
+# unconditionally above, and neither is.
+#
 # %% [markdown]
 # ## Key takeaways
 #

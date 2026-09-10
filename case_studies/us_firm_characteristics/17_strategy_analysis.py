@@ -250,7 +250,7 @@ print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 # Resolved before the guard because the guard asks about this holdout, not about holdouts
 # in general. §6 re-resolves it and checks the two agree.
 # `resolve_solvent_carrier` rather than the bare lineage resolver: same selection, and it
-# additionally refuses a carrier whose equity reached zero.
+# additionally refuses a selected configuration whose equity reached zero.
 _lineage = resolve_solvent_carrier(CASE_STUDY)
 _expected_holdout = _lineage["holdout_backtest_hash"]
 with sqlite3.connect(str(_db)) as _con:
@@ -335,7 +335,7 @@ if (
     # The lineage is passed rather than re-derived inside. Left to itself the populator
     # ranks the registry on raw Sharpe, which is a fourth selector beside the resolver,
     # this notebook and the costs sweep - and here it picked the retired conformal
-    # generation, so the pairs described a carrier the case study does not report.
+    # generation, so the pairs described a selected configuration the case study does not report.
     # The cohort call above is scoped to `LIVE_PREDICTIONS` and this one is not: the
     # pairs are selected from every registered prediction set. Stated rather than
     # defaulted; narrowing it changes published numbers and is

@@ -16,7 +16,7 @@
 # # Interactive Brokers Paper Trading Demo
 #
 # **Chapter**: 25 - Live Trading Systems
-# **Section**: 25.2 (Interactive Brokers Integration)
+# **Section Reference**: 25.2 (Integrating with Interactive Brokers)
 # **Learning Outcome**: LO2 - Connect ml4t-backtest strategies to live brokers
 #
 # **Docker image**: `ml4t` (requires IB TWS/Gateway running on host port 7497)
@@ -44,6 +44,13 @@
 
 import os
 
+# %% [markdown]
+# `MARKET_DATA_TYPE` decides which quote TWS returns. Leaving it at `None` keeps whatever the
+# session is configured for, which is the right choice when the paper account carries live
+# Level 1 subscriptions. A paper account without them rejects MARKET orders with "No market
+# data available...", so this notebook asks for delayed quotes instead. The four values TWS
+# accepts are 1 for real time, 2 for frozen, 3 for delayed and 4 for delayed frozen.
+
 # %% tags=["parameters"]
 # Production defaults. Papermill may inject overrides for CI.
 IB_HOST = "127.0.0.1"
@@ -52,15 +59,7 @@ CLIENT_ID = 10  # Use unique ID per notebook
 ACCOUNT = os.environ.get(
     "IB_ACCOUNT"
 )  # set IB_ACCOUNT=DU... before running; None picks the session default
-
-# IB market-data type: None leaves TWS at its configured default (use this if
-# the paper account has live Level 1 subscriptions). Paper accounts without
-# market-data subscriptions reject MARKET orders with "No market data
-# available..."; set this to 3 (delayed) to fall back to delayed quotes.
-# 1=real-time, 2=frozen, 3=delayed, 4=delayed-frozen.
-MARKET_DATA_TYPE: int | None = 3
-
-# Test settings
+MARKET_DATA_TYPE: int | None = 3  # delayed quotes; see above
 SYMBOLS = ["SPY", "QQQ", "IWM"]  # ETFs to monitor
 WARMUP_DAYS = 10  # Must provide at least lookback + 1 daily closes
 LIVE_DURATION_SECONDS = 75
@@ -100,13 +99,10 @@ from ml4t.live.safety import SafeBroker
 print("[OK] ml4t.live components imported successfully")
 
 # %% [markdown]
-# **Finding**: The import check confirms that the live-engine, broker, and feed abstractions are available
-# before any Interactive Brokers connection is attempted. That separates environment setup failures from
-# broker-session failures.
-#
-# **Trading implication**: Live deployment debugging is faster when infrastructure imports and network
-# connectivity are validated as distinct gates instead of being collapsed into one opaque error.
-#
+# The import check runs before any Interactive Brokers connection is attempted, so an environment
+# that is missing a package fails differently from a session that cannot reach TWS. Collapsing the
+# two into one opaque error is what makes a live deployment slow to debug.
+
 # %% [markdown]
 # ## 1. Connect to Interactive Brokers
 #
@@ -129,12 +125,11 @@ print(f"IBBroker configured for {IB_HOST}:{IB_PORT}")
 print(f"Account selection: {'configured paper account' if ACCOUNT else 'session default'}")
 print(f"Client ID: {CLIENT_ID}")
 
+
 # %% [markdown]
-# **Finding**: The broker configuration printout turns host, port, account, and client ID into visible
-# runtime state rather than hidden constants. That is the minimum context needed before opening a session.
-#
-# **Trading implication**: Many live-trading failures come from account or session mismatches, so notebooks
-# should surface connection parameters before they attempt authentication.
+# Host, port, account and client ID are printed rather than left as constants in a cell above,
+# because an account or session mismatch is one of the most common live failures and is invisible
+# until something has already been submitted to the wrong place.
 #
 
 
@@ -193,13 +188,11 @@ except Exception as exc:
     raise RuntimeError("IB paper session unreachable") from exc
 
 # %% [markdown]
-# **Finding**: The connection block fails loudly with an actionable checklist when TWS is unreachable
-# rather than silently substituting placeholder data. That prevents the reader from confusing transport
-# availability with strategy correctness.
-#
-# **Trading implication**: Broker health checks belong ahead of any signal loop because a disconnected
-# broker is an operational state, not just another data-point in the strategy.
-#
+# When TWS is unreachable the connection block prints a checklist and stops, rather than
+# substituting placeholder data and letting the rest of the notebook read as if it had traded.
+# A disconnected broker is an operational state, which is why the check comes before the signal
+# loop rather than inside it.
+
 # %% [markdown]
 # ## 2. Request Historical Data
 #
@@ -278,12 +271,10 @@ except Exception:
 assert set(historical_data) == set(SYMBOLS)
 
 # %% [markdown]
-# **Finding**: The warm-up section shows the exact inputs used to initialize indicators before the engine is
-# allowed to trade. That is the bridge between research assumptions and live-state initialization.
-#
-# **Trading implication**: Live systems need a deterministic warm-up path; otherwise positions can be sized
-# from incomplete indicators during the first minutes after reconnect or market open.
-#
+# The warm-up prints the exact bars the indicators are initialized from. Without a deterministic
+# warm-up path, the first minutes after a reconnect or an open size positions from indicators that
+# are still filling.
+
 # %% [markdown]
 # ## 3. Strategy Definition
 #
@@ -344,7 +335,7 @@ class MomentumStrategy(Strategy):
 # Before going live, we wrap the broker with `SafeBroker` which provides:
 # - Shadow mode (virtual orders routed through `VirtualPortfolio`, never to IB)
 # - Position and order value caps, rate limiting, kill switch
-# - Persisted `RiskState` (daily-loss counter survives restarts)
+# - Persisted `RiskState`, so the daily-loss counter is read back after a restart
 # - Startup reconciliation: `safe_broker.connect()` diffs the persisted snapshot from the previous run
 #   against the broker's current positions and pending orders
 
@@ -466,12 +457,10 @@ async def run_live_demo(duration_seconds: int = 30):
 # outer `finally` block can always release the IB session.
 
 # %% [markdown]
-# **Finding**: The notebook keeps the same strategy and risk configuration regardless of whether the live
-# feed is active. Only the transport layer changes.
-#
-# **Trading implication**: Separating market connectivity from strategy logic is what makes a live stack
-# testable; when the feed changes, the trading rules should not.
-#
+# The strategy and the risk configuration are the same whether or not the live feed is active;
+# only the transport changes. Keeping that boundary is what makes the stack testable, and it means
+# a change of feed is never a change of trading rule.
+
 # %% [markdown]
 # ## 6. Order Submission Demo
 #
@@ -503,6 +492,17 @@ async def fetch_ib_snapshot(symbol: str) -> float | None:
     return None
 
 
+# %% [markdown]
+# Every order below is preceded by a real snapshot quote pulled from IB and recorded on
+# `SafeBroker`, never a research-time price and never an in-memory mock. That ordering is the
+# operational discipline the chapter is teaching. Delayed data is enough to demonstrate it;
+# whether the account carries live subscriptions is an account-level question.
+#
+# The two quantities are sized to fit `max_order_value` at current SPY and QQQ levels, so the
+# demo shows a virtual fill rather than the cap rejection. Every other control still applies to
+# each leg.
+
+
 # %%
 async def demonstrate_order_submission():
     """Show order submission in shadow mode using live IB snapshot quotes."""
@@ -510,12 +510,6 @@ async def demonstrate_order_submission():
     print("ORDER SUBMISSION DEMO (Shadow Mode)")
     print("=" * 60)
 
-    # Pull a delayed snapshot quote per symbol from IB and seed SafeBroker's
-    # staleness cache with it. This is the operational discipline the chapter
-    # is teaching: every order is preceded by a real, current observation -
-    # never a research-time price, never an in-memory mock. Delayed data is
-    # acceptable for paper-account demonstrations; live subscriptions are an
-    # account-level concern, not a notebook-level one.
     print("\nFetching delayed snapshot quotes from IB...")
     snapshot_prices = {}
     for symbol in SYMBOLS:
@@ -527,10 +521,6 @@ async def demonstrate_order_submission():
         print(f"   {symbol}: ${price:,.2f}")
     assert set(snapshot_prices) == set(SYMBOLS)
 
-    # Order quantities are sized to fit max_order_value=$10,000 at current
-    # SPY/QQQ levels so the demo shows a successful virtual fill rather
-    # than the cap rejection. SafeBroker still applies every other layer
-    # (staleness, daily loss, kill switch) on each leg.
     orders = [("SPY", 10), ("QQQ", 12)]
 
     for symbol, qty in orders:
@@ -568,12 +558,10 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"nest_asy
 run_async(run_shadow_workflow())
 
 # %% [markdown]
-# **Finding**: The order demo surfaces the shadow portfolio after each submission, so the reader can verify
-# how intent becomes inventory without exposing capital.
-#
-# **Trading implication**: Shadow-mode order routing is where many production bugs first appear because the
-# strategy, broker adapter, and risk guard all interact at once.
-#
+# The shadow portfolio is printed after each submission, so the path from intent to inventory is
+# visible without capital at risk. That path is where production bugs surface first, because the
+# strategy, the broker adapter and the risk guard all interact on it at once.
+
 # %% [markdown]
 # ## 7. Clean Shutdown
 #
@@ -623,11 +611,10 @@ print("completed the IB shadow workflow without sending an order to the venue.")
 # %% [markdown]
 # ## Key Takeaways
 #
-# **Finding**: IB adds more connectivity and market-structure complexity than Alpaca, but the notebook still
-# demonstrates that the execution architecture can remain strategy-agnostic.
+# IB carries more connectivity and market-structure complexity than Alpaca, and the execution
+# architecture above absorbs all of it without the strategy knowing. Once connectivity, warm-up
+# and the shadow-mode controls are standard, moving a strategy between brokers is a configuration
+# change rather than a rewrite.
 #
-# **Trading implication**: Once broker connectivity, warm-up, and shadow-mode controls are standardized, a
-# strategy can move between brokers with much less implementation risk.
-#
-# **Next**: Compare the simpler REST-style path in `04_alpaca_paper_trading_demo.py`, then move to
-# `08_pipeline_verification.py` to check that research outputs and live inputs still match.
+# **Next**: Compare the simpler REST-style path in `04_alpaca_paper_trading_demo`, then move to
+# `08_pipeline_verification` to check that research outputs and live inputs still match.

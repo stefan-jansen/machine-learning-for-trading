@@ -1,6 +1,8 @@
 # Chapter 9: Model-Based Feature Extraction
 
-The chapter reframes diagnostics as more than preprocessing checks. Stationarity tests, break diagnostics, and fractional differencing become feature generators in their own right, helping the reader think about persistence, structural instability, and memory preservation as inputs to downstream models rather than as one-time gates before modeling begins. It matters because many financial series are only usable once we understand what kind of temporal object they are and how much transformation is justified.
+Chapter 8 built features by aggregating observed data and applying deterministic transformations to it. This chapter builds them from **fitted procedures**: coefficients, persistence measures and latent states on one side, and filtered estimates, innovations, forecasts, conditional variances, regime probabilities and posterior uncertainty on the other. The recipe is the same throughout. Fit a procedure to the training data and use its outputs as columns.
+
+The chapter is organized by extraction method rather than by economic family, because one fitted procedure generates several kinds of feature: a Kalman filter yields a level, a trend, an innovation and an uncertainty; a GARCH model yields a conditional volatility and a persistence parameter; a regime model yields probabilities, durations and a transition structure. What does not change across any of them is the point-in-time requirement. Every estimate, state, forecast and probability has to be computable from information available at the moment it is dated, re-estimated inside the walk-forward protocol, and versioned with the features it produced.
 
 ## Learning Objectives
 
@@ -23,47 +25,51 @@ The chapter reframes diagnostics as more than preprocessing checks. Stationarity
 
 ### 9.1 Diagnostics and Stationarity Features
 
-This section reframes diagnostics as more than preprocessing checks. Stationarity tests, break diagnostics, and fractional differencing become feature generators in their own right, helping the reader think about persistence, structural instability, and memory preservation as inputs to downstream models rather than as one-time gates before modeling begins. It matters because many financial series are only usable once we understand what kind of temporal object they are and how much transformation is justified.
+Model-based features often begin as diagnostics, and here the diagnostics play both roles. They decide what preprocessing a series needs, and they produce quantities that go downstream as columns: a rolling stationarity statistic as a regime indicator, a detected break date as a conditioning variable, a persistence estimate as a summary of how fast shocks decay.
 
-- [`01_visual_diagnostics`](01_visual_diagnostics.ipynb) — This notebook demonstrates the complete diagnostic workflow for financial time series: visual inspection, stationarity tests, autocorrelation analysis, and rolling diagnostic features. Uses etfs, macro data.
-- [`02_structural_breaks`](02_structural_breaks.ipynb) — This notebook demonstrates classical and ML-based methods for detecting structural breaks in financial time series. Uses etfs data.
-- [`03_fractional_differencing`](03_fractional_differencing.ipynb) — This notebook demonstrates fractional differentiation (FFD), a technique that achieves stationarity while preserving as much memory as possible. Uses etf_data, etfs data.
+- [`01_visual_diagnostics`](01_visual_diagnostics.ipynb) — The diagnostic sequence for a financial series, from plotting it through stationarity tests and autocorrelation to the rolling versions of the same statistics as features. Uses etfs and macro data.
+- [`02_structural_breaks`](02_structural_breaks.ipynb) — Where a series changes regime, found by the classical tests and by a change-point search, and how a break date becomes a column. Uses etfs data.
+- [`03_fractional_differencing`](03_fractional_differencing.ipynb) — Differencing by a fractional order, which reaches stationarity while keeping more of the memory than a first difference does. Uses etfs data.
 
 ### 9.2 Transforming Signals to Uncover Hidden Structure
 
-This section shows why rolling statistics are often too lossy for serious temporal feature engineering. Kalman filters, spectral methods, wavelets, and path signatures each recover a different hidden aspect of sequential structure: latent state, cycles, scale-localized behavior, and path geometry. Readers should care because this is where the chapter moves beyond familiar moving averages and rolling vol into genuinely richer representations of time series, while still keeping causal deployment constraints in view.
+Rolling statistics discard most of what a sequence contains. A Kalman filter recovers latent state, spectral methods recover cycles, wavelets recover behavior local to a scale, and path signatures recover the geometry of the path. Each is a richer representation than a moving average, and each has to be made causal before it can be a feature.
 
-- [`04_kalman_filter`](04_kalman_filter.ipynb) — This notebook demonstrates the Kalman filter as a production feature extractor: level estimation, trend detection, innovation (surprise) signals, and dynamic hedge ratio estimation. Uses etfs data.
-- [`05_spectral_features`](05_spectral_features.ipynb) — This notebook demonstrates frequency-domain feature engineering: wavelet decomposition for multi-resolution analysis, rolling FFT for production spectral features, and Welch's method for robust power spectral density estimation. Uses etfs data.
-- [`06_path_signatures`](06_path_signatures.ipynb) — > Docker required: This notebook uses esig, which is an x86-only package > not included in the default environment. Run with: > `bash > docker compose --profile py312 run --rm py312 python 09_model_based_features/06_path_signatures.py > ` Uses etfs data.
+- [`04_kalman_filter`](04_kalman_filter.ipynb) — The filter as a feature extractor: level, trend, the innovation as a surprise measure, and a hedge ratio that moves. Uses etfs data.
+- [`05_spectral_features`](05_spectral_features.ipynb) — Frequency-domain features, from a wavelet decomposition through a rolling transform to a power spectral density estimate. Uses etfs data.
+- [`06_path_signatures`](06_path_signatures.ipynb) — The signature of a path as a feature set, and what its terms say that a set of moments does not. Needs the `ml4t-py312` image; see the runtime note below. Uses etfs data.
 
 ### 9.3 Volatility Features
 
-This is one of the chapter's strongest sections because it treats volatility as the most forecastable part of the problem and shows how fitted models convert that predictability into usable features. ARIMA residuals, GARCH-family outputs, HAR coefficients, and roughness measures all become summaries of persistence, asymmetry, and horizon structure rather than isolated econometric artifacts. Readers should care because these are practical building blocks for both prediction and risk-sensitive downstream decisions.
+Volatility is the most forecastable part of the problem, and this section turns that predictability into columns. ARIMA residuals and forecast intervals, the GARCH family's conditional variance and persistence, HAR's horizon weights, and a roughness exponent are each a summary of persistence, asymmetry or horizon structure.
 
-- [`07_arima_features`](07_arima_features.ipynb) — This notebook demonstrates ARIMA as a feature extractor rather than a standalone forecaster. The key outputs — residuals, forecast values, and forecast uncertainty — feed into downstream ML pipelines.
-- [`08_garch_volatility`](08_garch_volatility.ipynb) — This notebook extracts volatility features from GARCH family models: conditional volatility, persistence parameters, and leverage effects. Uses etfs, symbol_returns data.
-- [`09_har_rough_volatility`](09_har_rough_volatility.ipynb) — This notebook covers multi-horizon volatility modeling and the Hurst exponent as features for ML trading systems. Uses etfs data.
+- [`07_arima_features`](07_arima_features.ipynb) — ARIMA read as a feature extractor rather than a forecaster: its residuals, its forecasts and the width of its intervals. Uses etfs data.
+- [`08_garch_volatility`](08_garch_volatility.ipynb) — Conditional volatility, the persistence parameters, and the asymmetry between a rise and a fall. Uses etfs data.
+- [`09_har_rough_volatility`](09_har_rough_volatility.ipynb) — Volatility at three horizons in one linear model, the range-based estimators it is built from, and the roughness exponent. Uses etfs and Nasdaq-100 minute data.
 
 ### 9.4 Uncertainty Features
 
-This section makes an important conceptual move: the model's uncertainty is itself informative. Posterior widths, forecast standard errors, and interval widths help distinguish between a strong estimate and a weakly identified one, even when the point forecast is the same. That matters in trading because signal strength, sizing, and interpretation should depend not only on what the model predicts, but also on how confident the model is.
+A model's uncertainty is itself informative. A posterior width, a forecast standard error and an interval width separate a well identified estimate from a weakly identified one when the point forecast is the same, which is what a position size should depend on.
 
-- [`10_uncertainty_features`](10_uncertainty_features.ipynb) — This notebook demonstrates Bayesian and frequentist approaches to extracting uncertainty features — posterior distributions and prediction intervals become ML inputs, not just diagnostics. Uses etfs data.
+- [`10_uncertainty_features`](10_uncertainty_features.ipynb) — A stochastic volatility model refit forward, the sampler diagnostics that decide whether its posterior is worth reading, and the forecast interval as a column. Uses etfs data.
 
 ### 9.5 Regime Features
 
-This section explains how changing market environments can be encoded as features, ranging from transparent threshold rules to HMMs, Markov-switching models, and distribution-based clustering. Its most valuable message is that regime information is usually better used as soft conditioning input than as a brittle hard switch between separate models. Readers should care because regime awareness often changes how other signals should be interpreted, especially near transitions and stress episodes.
+A changing market environment can be encoded as a feature, by a transparent threshold rule, by a hidden Markov model, or by clustering whole distributions. The message that matters is that regime information works better as soft conditioning than as a hard switch between separate models, because the regime call is least certain exactly where it matters most.
 
-- [`11_hmm_regimes`](11_hmm_regimes.ipynb) — This notebook provides a thorough introduction to HMMs for financial regime detection, from first principles through production considerations. Uses etfs, macro data.
-- [`12_wasserstein_regimes`](12_wasserstein_regimes.ipynb) — This notebook implements the methodology from "Clustering Market Regimes Using the Wasserstein Distance" (Horvath et al., 2021). Instead of clustering on moment features (mean, variance, skewness), each time window is treated as an empirical distribution and clustered using optimal transport.
-- [`13_regime_as_feature`](13_regime_as_feature.ipynb) — This notebook demonstrates the regime-as-feature methodology: using regime probabilities as input features to ML models, rather than switching between specialized models based on detected regime. Uses etfs, macro data.
+- [`11_hmm_regimes`](11_hmm_regimes.ipynb) — Regime inference from first principles, filtered against smoothed, measured against two rules that estimate nothing. Uses etfs and macro data.
+- [`12_wasserstein_regimes`](12_wasserstein_regimes.ipynb) — Each window treated as a distribution and clustered under the Wasserstein distance, following Horvath et al. (2021), against a two-moment summary of the same windows. Uses S&P 500 index data.
+- [`13_regime_as_feature`](13_regime_as_feature.ipynb) — The regime probability as a column against a model per regime, with the regime model refit inside every fold. Uses etfs and macro data.
 
 ### 9.6 Cross-Sectional and Panel Features
 
-Here the chapter bridges from asset-by-asset temporal modeling to the multi-asset workflow used later in the book. Raw temporal outputs become more useful once ranked across the universe, benchmark-adjusted, translated into pairwise states, or aggregated into market-wide summaries. This section matters because it turns model-based feature engineering from a single-series exercise into something usable for real cross-sectional prediction and portfolio construction.
+A conditional volatility of a quarter means one thing for a utility and another for a biotech. Temporal features are computed asset by asset from each series' own history, and they become more useful once ranked across a universe, measured against a benchmark, paired, or aggregated.
 
-- [`14_panel_features`](14_panel_features.ipynb) — This notebook demonstrates panel-level temporal features: pairwise relationships (cointegration, Kalman hedge ratios, O-U half-life) and cross-sectional transforms (ranking, relative features, universe aggregation). Uses etfs data.
+- [`14_panel_features`](14_panel_features.ipynb) — Cointegration and a filtered hedge ratio on one pair, then cross-sectional ranks, benchmark-relative features and universe aggregates on a panel. Uses etfs data.
+
+### 9.7 Summary
+
+- [`case_study_temporal_summary`](case_study_temporal_summary.ipynb) — What the nine case studies' model-based feature stages wrote, read from the artifact schemas, and what a schema cannot tell you about it. Uses case study artifacts.
 
 ## Running the Notebooks
 
@@ -75,9 +81,9 @@ uv run python 09_model_based_features/<notebook>.py
 uv run pytest tests/test_notebooks.py -v -k "09_model_based_features"
 ```
 
-> Runtime: `07_arima_features` ~1-2 min, `10_uncertainty_features` ~3 min (PyMC NUTS sampling); all other notebooks <40 s on a laptop.
+> Runtime, measured on a workstation: `10_uncertainty_features` about three minutes, which is the sampler; every other notebook in the chapter finishes in under 40 seconds.
 >
-> `06_path_signatures` requires the `ml4t-py312` Docker image (the `esig` library is x86-only and not in the default environment):
+> `06_path_signatures` requires the `ml4t-py312` Docker image, because `esig` has no Python 3.14 wheel:
 >
 > ```bash
 > docker compose --profile py312 run --rm py312 \

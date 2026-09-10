@@ -236,4 +236,4 @@ execution.catalog_rows.sort("label", "request_name")
 # fires is an exit that the signal did not ask for, and often a re-entry afterwards. So an
 # overlay that improves Sharpe here can still be the worse strategy once friction is priced, and
 # the two notebooks have to be read together rather than in sequence. This is also why the
-# carrier is priced with its overlay in place rather than bare.
+# selected configuration is priced with its overlay in place rather than bare.

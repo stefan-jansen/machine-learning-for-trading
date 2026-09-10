@@ -40,7 +40,6 @@
 """Ch20 Friction Survival — cross-case-study cost-sweep analysis from registry."""
 
 import json
-import warnings
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -55,7 +54,6 @@ from case_studies.utils.analytics import (
 from utils.paths import get_chapter_dir
 from utils.style import show_with_alt
 
-warnings.filterwarnings("ignore")
 pl.Config.set_tbl_rows(20)
 
 # %% tags=["parameters"]
@@ -72,12 +70,12 @@ ACTIVE_CS_LIST = [cs for cs in CS_LIST if cs not in DEFERRED_V31_CASE_STUDIES]
 #
 # Ch18 backtests vary commission + slippage across a grid of cost levels
 # while holding the signal and allocation constant. We read the sweep for
-# each case study's **release carrier** -- the declared configuration across
+# each case study's **release configuration** -- the one declared across
 # the signal, allocation, and risk-overlay stages --
 # so the breakeven measured here is the cost survival of the strategy the
 # chapter actually deploys, not of whichever allocator happened to be best
 # at zero cost. NASDAQ-100 is excluded from the v3.0 cross-case cost surface:
-# its bounded active scope has no corrected carrier cost grid, so that broad
+# its bounded active scope has no corrected cost grid for its selection, so that broad
 # regeneration is deferred to v3.1 rather than mixed with historical timing.
 
 # %%
@@ -117,7 +115,7 @@ costs_df.head(5)
 gross_df = costs_df.filter(pl.col("cost_bps") == 0)
 net_df = costs_df.filter(pl.col("cost_bps") > 0)
 
-# One allocator per case study (the carrier's); this selects it.
+# One allocator per case study (the selected configuration's); this selects it.
 best_alloc = (
     gross_df.sort("sharpe", descending=True)
     .unique(subset=["case_study"], keep="first")
@@ -320,7 +318,7 @@ show_with_alt(
 # ## Breakeven Cost Thresholds by Frequency
 #
 # Breakeven cost is the maximum per-leg cost (in bps) at which the
-# deployed carrier still produces a positive Sharpe ratio. It is the cost
+# deployed configuration still produces a positive Sharpe ratio. It is the cost
 # budget that the signal supports before becoming unprofitable.
 
 # %%
@@ -471,19 +469,20 @@ display(
 #
 # The S&P 500 Options case study was validated using executable-label
 # backtesting, pricing straddle entries and exits at actual bid/ask quotes rather
-# than at an assumed bps cost. That case study has no carrier cost sweep, so it
+# than at an assumed bps cost. That case study has no selected configuration cost sweep, so it
 # does not appear in any table above; the figures below are quoted from its own
 # evaluation and are not computed here.
 #
-# - **Median round-trip spread**: 1091 bps of premium (10.9%)
-# - **Best executable Sharpe**: −1.05 (across 5 predictions × 8 schemes)
-# - **Three-label decomposition** (best GBM, `leaves_15_mae`, `ew_top5`):
-#   mid-unhedged Sharpe = +2.70, mid-DH Sharpe = +0.43, executable Sharpe = −1.50
-# - **Spread-adjusted ranking** (optimizing signal + spread jointly) improves
-#   Sharpe from −1.50 to −0.30, but stays negative
+# Its own evaluation carries the numbers; the shape of them is what belongs here. The median
+# round-trip spread on those straddles is a large double-digit percentage of the premium, and
+# every executable Sharpe in the sweep is negative. Decomposing one prediction across three
+# labels separates where that goes: priced at the mid and unhedged the Sharpe is strongly
+# positive, delta-hedging at the mid takes most of it, and pricing the same trades at the quotes
+# a desk would actually get turns it negative. Ranking on signal and spread jointly recovers
+# part of the gap and does not close it.
 #
-# The ML signal is real (IC = 0.068), but the 15.4 pp average spread impact
-# per trade overwhelms the per-period signal. A generic bps cost sweep
+# The ML signal is real - the IC is positive - but the average spread impact per trade is many
+# times the per-period signal it has to pay for. A generic bps cost sweep
 # misrepresents this case study because the cost is predominantly the
 # bid-ask spread, not commission. The teaching point is that strategy
 # design must jointly optimize for signal quality and execution costs:
@@ -517,7 +516,7 @@ if not summary.is_empty():
     # separate cleanly instead of stacking on a constant-x degenerate column.
     assumed_floor = max(float(summary["assumed_cost_bps"].min()), 0.5)
 
-    # Monthly carriers share x (turnover ≈ 0.05) and pair up on y: ETFs and
+    # Monthly selected configurations share x (turnover ≈ 0.05) and pair up on y: ETFs and
     # US Firms at 50, CME and SP500 Eq+Opt at 30. Fan their labels vertically
     # so the two pairs stay legible despite the superimposed markers.
     label_offsets = {
@@ -640,7 +639,7 @@ display(
 #
 # ## Known Limitations
 #
-# - Only case studies with a carrier cost sweep appear. NASDAQ-100 is excluded by
+# - Only case studies with a selected configuration cost sweep appear. NASDAQ-100 is excluded by
 #   `DEFERRED_V31_CASE_STUDIES` pending a corrected cost grid, and the rest have
 #   no sweep because their registries are being rebuilt. The loaded count is
 #   printed at the top.

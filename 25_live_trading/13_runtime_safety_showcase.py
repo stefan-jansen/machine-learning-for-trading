@@ -18,7 +18,7 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Section Reference**: 25.7 (Operational Readiness)
+# **Section Reference**: 25.7 (Operational readiness)
 #
 # **Implementation Skills**:
 # - `ml4t.live.safety`: enforced `max_data_staleness_seconds` and `max_daily_loss`
@@ -29,7 +29,7 @@
 #
 # **Why This Notebook Exists**
 #
-# `10_safety_risk_demo` walks through the configurable risk surface — the knobs the strategy
+# `10_safety_risk_demo` walks through the configurable risk surface, the settings the strategy
 # author exposes to the operator. This notebook exercises the runtime trust contract: what
 # happens *under failure* in the kinds of scenarios a live deployment must survive. A pre-flight
 # checklist is only useful if the controls actually fire when the conditions they protect
@@ -45,9 +45,9 @@
 # - Use the `ml4t-live` CLI to inspect the persisted state file out of process.
 #
 # **Prerequisites**
-# - `ml4t-live >= 0.1.0` installed (`uv sync` from repo root).
+# - `ml4t-live` installed at the version `pyproject.toml` pins (`uv sync` from repo root).
 # - Read §25.7 for the operational framing; `10_safety_risk_demo` for the configurable surface.
-# - No broker credentials, no exchange access — every demo runs against a synthetic broker.
+# - No broker credentials and no exchange access: every demo runs against a synthetic broker.
 
 # %% [markdown]
 # ## Setup
@@ -57,7 +57,7 @@
 # order, and account-value snapshots without involving a live venue.
 
 # %%
-"""Runtime Safety Showcase — stale-data, daily-loss, reconciliation, and engine health states."""
+"""Runtime Safety Showcase: stale-data, daily-loss, reconciliation, and engine health states."""
 
 import asyncio
 import json
@@ -65,7 +65,6 @@ import logging
 import os
 import tempfile
 import time
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -94,7 +93,7 @@ def run_demo(awaitable):
 
 
 # %% tags=["parameters"]
-# Production defaults — Papermill may inject overrides
+# Production defaults; papermill may inject overrides
 STALE_DATA_WAIT_SECONDS = 1.5  # how long to sleep before retrying with stale data
 KILL_SWITCH_LOSS_USD = 1_000.0  # synthetic equity drawdown driving the trip
 HEALTH_OBSERVATION_SECONDS = 6  # total wall time spent observing engine health states
@@ -205,15 +204,15 @@ class DemoBroker(DemoBrokerQueries):
 # ## 1. Stale-Data Rejection
 #
 # `SafeBroker` keeps a `MarketSnapshot` per asset whenever the engine receives bars. Every
-# order intent runs through `_check_data_staleness`, which compares the snapshot age to
+# order intent is checked against that snapshot's age and
 # `LiveRiskConfig.max_data_staleness_seconds`. Orders against a snapshot older than that
-# threshold raise `RiskLimitError` — the freshest known price is no longer trustworthy enough
-# to size against.
+# threshold raise `RiskLimitError`, because the freshest known price is no longer trustworthy
+# enough to size against.
 #
 # The demo below sets a 1-second staleness threshold, accepts one order against a fresh
 # snapshot, then waits past the threshold and submits another order. The second order must
-# fail. No retry, no fallback to a stale price — the strategy must wait for fresh data or
-# stand down.
+# fail. There is no retry and no fallback to a stale price: the strategy waits for fresh data
+# or stands down.
 
 
 # %%
@@ -252,7 +251,7 @@ stale_safe = SafeBroker(
 )
 run_demo(stale_safe.connect())
 
-# Fresh snapshot — order accepted
+# Fresh snapshot, order accepted
 stale_safe._record_market_data(datetime.now(UTC), {"DEMO": {"close": 100.0}}, {})
 fresh_order = run_demo(stale_safe.submit_order_async("DEMO", 10))
 print(f"fresh_data_order: accepted ({fresh_order.order_type.value} {fresh_order.quantity} DEMO)")
@@ -271,23 +270,22 @@ run_demo(stale_safe.disconnect())
 _cleanup_state_path(stale_state)
 
 # %% [markdown]
-# **Finding**: the second order never reaches the broker adapter. The `RiskLimitError` carries
-# the measured age and the configured threshold, which gives the operator exactly the diagnostic
-# needed to decide whether to widen the staleness window, investigate the feed, or halt.
+# The second order never reaches the broker adapter, and the `RiskLimitError` carries both the
+# measured age and the configured threshold, which is what the operator needs to decide between
+# widening the staleness window, investigating the feed, and halting.
 #
-# **Trading implication**: a feed that goes silent during a venue outage is a common live
-# failure mode, and trading on the last known price during the outage is exactly how a
-# stop-loss strategy ends up turning into a momentum-against strategy. The staleness check is
-# the runtime-trust counterpart to the pre-flight requirement that "prices are current rather
-# than stale" stated in §25.7.
+# A feed that goes silent during a venue outage is a common live failure, and trading on the
+# last known price through the outage is how a stop-loss strategy turns into its own opposite.
+# The staleness check is the runtime enforcement of §25.7's pre-flight requirement that prices
+# be current rather than stale.
 
 # %% [markdown]
 # ## 2. Auto Kill-Switch Trip on Daily-Loss Breach
 #
-# `_check_daily_loss` runs on every order submission. It reads the broker's account value,
-# anchors `session_start_equity` on first call, and computes intraday loss as
-# $\max(0, \text{session\_start\_equity} - \text{current\_equity})$. When the loss exceeds
-# `LiveRiskConfig.max_daily_loss`, the kill switch latches and the order is rejected.
+# Every order submission also reads the broker's account value. The first read anchors the
+# session's starting equity; each later one measures the intraday loss as the drop from that
+# anchor, floored at zero. When the loss exceeds `LiveRiskConfig.max_daily_loss`, the kill
+# switch latches and the order is rejected.
 #
 # The demo simulates an equity drawdown by mutating the broker's `account_value` mid-session.
 # The first order anchors the session start; the equity drops; the next order trips the
@@ -334,7 +332,7 @@ print(
 run_demo(killswitch_safe.disconnect())
 
 # %% [markdown]
-# ### 2a. Latch Survives `SafeBroker` Reconstruction
+# ### 2a. Reconstructing `SafeBroker` from the State File
 #
 # A real engine restart re-instantiates `SafeBroker` from its state file. The latch and the
 # activation reason persist; the next order is rejected before it reaches any risk check
@@ -370,17 +368,16 @@ run_demo(killswitch_safe2.disconnect())
 _cleanup_state_path(killswitch_state)
 
 # %% [markdown]
-# **Finding**: the kill-switch behaviour is the runtime-trust counterpart to the operational
-# requirement that "the kill switch should remain independent of the component it controls"
-# from §25.7. Because the latch lives in a state file, an engine crash and reconnect does not
+# The kill switch enforces §25.7's requirement that it remain independent of the component it
+# controls. Because the latch lives in a state file, an engine crash and reconnect does not
 # silently re-enable trading; the operator must explicitly clear the latch before the engine
-# resumes. The Friday-after-hours pile-up that motivated NB12's startup-reconciliation pattern
-# is an analogous failure mode in the position dimension; this is the same pattern in the
-# P&L dimension.
+# resumes. The Friday-after-hours pile-up that motivated the startup reconciliation in
+# `12_ib_basket_rebalance_demo` is the same failure in the position dimension rather than
+# the P&L dimension.
 #
-# **Trading implication**: latching the kill switch in persistent state is what makes the
-# control useful for emergencies. A non-persistent kill switch is just a flag in process
-# memory, and the worst time to discover that is during the recovery from a disorderly day.
+# Latching the switch in persistent state is what makes it usable in an emergency. A
+# non-persistent kill switch is a flag in process memory, and the recovery from a disorderly
+# day is the worst time to discover the difference.
 
 # %% [markdown]
 # ## 3. Reconciliation Report on a Divergent State File
@@ -439,16 +436,15 @@ assert report["unexpected_positions"] == {"MSFT": 5.0}
 assert len(report["missing_pending_orders"]) == 1
 
 # %% [markdown]
-# **Finding**: the report names exactly which positions and orders disagree, in which
-# direction. `missing_positions` are positions the persisted state expected and the broker no
-# longer reports — typically a manual flatten, an after-hours fill, or an overnight
+# The report names which positions and orders disagree, and in which direction. `missing_positions` are positions the persisted state expected and the broker no
+# longer reports, typically after a manual flatten, an after-hours fill, or an overnight
 # corporate action. `unexpected_positions` are positions present at the broker that the
-# persisted state did not know about — typically a fill that landed after the last persist,
+# persisted state did not know about, typically a fill that landed after the last persist,
 # or a position created out of band.
 #
 # Reading the report is half the task; resolving it is the other half. The operator either
-# investigates the divergence in the broker GUI and re-runs once it's understood, or — when
-# the divergence is known to be benign — clears the persisted state and reconnects to a
+# investigates the divergence in the broker GUI and re-runs once it is understood, or, when
+# the divergence is known to be benign, clears the persisted state and reconnects to a
 # clean baseline.
 
 # %%
@@ -487,10 +483,10 @@ run_demo(recon_safe_clean.disconnect())
 _cleanup_state_path(clean_state)
 
 # %% [markdown]
-# **Trading implication**: every production launcher should treat a non-clean reconciliation
-# report the same way it treats a failed authentication probe — refuse to launch and wait for
-# operator action. NB12 implements that policy; the IB basket loop will not submit if the
-# report is not clean.
+# A production launcher should treat a non-clean reconciliation report the same way it treats
+# a failed authentication probe: refuse to launch and wait for
+# operator action. `12_ib_basket_rebalance_demo` implements that policy: the IB basket loop
+# will not submit if the report is not clean.
 
 # %% [markdown]
 # ## 4. Engine Health States
@@ -500,7 +496,7 @@ _cleanup_state_path(clean_state)
 # `ok`, `feed_silent`, `idle_market_closed`, and `broker_disconnected`. The demo below
 # constructs a tiny engine over a synthetic feed and a no-op strategy, runs it for a short
 # bounded window, halts the feed, and reports the health transitions. No real venue, no
-# broker connectivity — only the engine's own bookkeeping.
+# broker connectivity, only the engine's own bookkeeping.
 #
 # The toy feed declares no equity symbols, so the engine treats it as a continuous
 # market. This removes wall-clock session dependence and makes the health sequence
@@ -509,8 +505,8 @@ _cleanup_state_path(clean_state)
 
 # %%
 @dataclass
-class _DummyStrategy(Strategy):
-    """Strategy that ignores every bar — health-state observation only."""
+class IdleStrategy(Strategy):
+    """Strategy that ignores every bar, so only the health state is under observation."""
 
     bars_seen: int = 0
 
@@ -534,7 +530,7 @@ class _DummyStrategy(Strategy):
 # #### Toy market-data feed
 #
 # A minimal async feed that emits a fixed number of bars then goes silent.
-# Pairing it with `_DummyStrategy` lets the LiveEngine's health-state
+# Pairing it with `IdleStrategy` lets the LiveEngine's health-state
 # transitions surface (`waiting_for_data` → `ok` → `feed_silent`) without
 # any real market dependency.
 
@@ -579,7 +575,7 @@ class _ToyFeed:
 # %%
 broker_h = DemoBroker()
 feed_h = _ToyFeed(initial_bars=2, start_delay_seconds=0.2, bar_interval_seconds=0.05)
-strategy_h = _DummyStrategy()
+strategy_h = IdleStrategy()
 engine = LiveEngine(
     strategy=strategy_h,
     broker=broker_h,
@@ -648,14 +644,13 @@ assert observed_health == [
 health_timeline
 
 # %% [markdown]
-# **Finding**: the printed sequence dedupes consecutive identical health states, so the
-# observed output is `stopped → waiting_for_data → ok → feed_silent → stopped`.
+# The printed sequence dedupes consecutive identical health states, so the observed output is `stopped → waiting_for_data → ok → feed_silent → stopped`.
 # A short initial delay makes the waiting state observable, and the feed's continuous-market
 # contract removes equity-session dependence. None of the transitions require a real venue.
 #
-# **Trading implication**: `runtime_status()` is what a watchdog or supervisor process reads.
-# The categories are deliberately narrow because operators need to act on them under stress —
-# `feed_silent` triggers a different response than `broker_disconnected` even though both
+# `runtime_status()` is what a watchdog or supervisor process reads.
+# The categories are deliberately narrow because operators act on them under stress:
+# `feed_silent` calls for a different response than `broker_disconnected` even though both
 # look like "data stopped" from inside the strategy loop.
 
 # %%
@@ -677,6 +672,6 @@ print("Temporary state artifacts: cleaned")
 # 4. **Engine health states** reduce the runtime to a small operator-facing vocabulary that a
 #    supervisor process can consume directly.
 #
-# **Next**: NB10 covers the configurable risk surface; NB12 shows the same controls in a live
-# IB paper basket-rebalance setting; §25.7 ties the abstract pre-flight requirements to the
+# **Next**: `10_safety_risk_demo` covers the configurable risk surface;
+# `12_ib_basket_rebalance_demo` shows the same controls in a live IB paper basket rebalance; §25.7 ties the abstract pre-flight requirements to the
 # enforced runtime behaviours demonstrated here.

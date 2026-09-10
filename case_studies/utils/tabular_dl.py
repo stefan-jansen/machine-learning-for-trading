@@ -1960,7 +1960,11 @@ def _train_tabm_fold(
 # ---------------------------------------------------------------------------
 
 
-from case_studies.utils.registry.store import flush_fold_predictions
+from case_studies.utils.registry.store import (
+    clear_fold_predictions,
+    flush_fold_predictions,
+    incremental_prediction_files,
+)
 
 
 def _decision_time_checkpoint_metrics(
@@ -2051,11 +2055,16 @@ def _checkpoint_prediction_frame(
 
 
 def _load_incremental_preds_for_config(incr_dir: Path, config_name: str) -> pl.DataFrame:
-    """Reassemble one config's predictions from its per-fold incremental saves."""
-    parquet_files = sorted(incr_dir.glob(f"{config_name}_fold*.parquet"))
+    """Reassemble one config's predictions from its per-checkpoint incremental saves.
+
+    The shards are read in the order :func:`incremental_prediction_files` defines - folds
+    by the lexicographic order of ``<config>_fold<fold>``, checkpoints ascending inside a
+    fold - which is the order one file per fold produced.
+    """
+    parquet_files = incremental_prediction_files(incr_dir, config_name)
     if not parquet_files:
         return pl.DataFrame()
-    return pl.concat([pl.read_parquet(f) for f in parquet_files])
+    return pl.read_parquet(parquet_files)
 
 
 def _load_cached_tabm_config(
@@ -2847,21 +2856,29 @@ def run_tabm_cv(
                         min_obs=5,
                     )["ic_mean"]
                     state["fold_checkpoint_ics"].setdefault(1, []).append(ic)
-                    fold_prediction_frame = _checkpoint_prediction_frame(
-                        candidate_key,
-                        fd["fold"],
-                        {1: preds},
-                        fd["val_dates"],
-                        fd["val_entities"],
-                        fd["y_val"],
-                        date_col,
-                        entity_col,
-                        eval_actual=fd["y_eval_val"] if eval_col else None,
-                        eval_col=eval_col or "eval_actual",
+                    # Built only where something reads it. On the incremental path the
+                    # writer builds the same rows again, so building it here was a second
+                    # copy of the fold nothing looked at.
+                    fold_prediction_frame = (
+                        _checkpoint_prediction_frame(
+                            candidate_key,
+                            fd["fold"],
+                            {1: preds},
+                            fd["val_dates"],
+                            fd["val_entities"],
+                            fd["y_val"],
+                            date_col,
+                            entity_col,
+                            eval_actual=fd["y_eval_val"] if eval_col else None,
+                            eval_col=eval_col or "eval_actual",
+                        )
+                        if (_recovery is not None or incr_dir is None)
+                        else None
                     )
                     if _recovery is not None:
                         state["prediction_frames"].append(fold_prediction_frame)
                     elif incr_dir is not None:
+                        clear_fold_predictions(incr_dir, candidate_key, fd["fold"])
                         flush_fold_predictions(
                             incr_dir,
                             candidate_key,
@@ -2976,21 +2993,26 @@ def run_tabm_cv(
                     continue
                 for ep, ic in checkpoint_ics.items():
                     state["fold_checkpoint_ics"].setdefault(ep, []).append(ic)
-                fold_prediction_frame = _checkpoint_prediction_frame(
-                    candidate_key,
-                    fd["fold"],
-                    checkpoint_preds,
-                    fd["val_dates"],
-                    fd["val_entities"],
-                    fd["y_val"],
-                    date_col,
-                    entity_col,
-                    eval_actual=fd["y_eval_val"] if eval_col else None,
-                    eval_col=eval_col or "eval_actual",
+                fold_prediction_frame = (
+                    _checkpoint_prediction_frame(
+                        candidate_key,
+                        fd["fold"],
+                        checkpoint_preds,
+                        fd["val_dates"],
+                        fd["val_entities"],
+                        fd["y_val"],
+                        date_col,
+                        entity_col,
+                        eval_actual=fd["y_eval_val"] if eval_col else None,
+                        eval_col=eval_col or "eval_actual",
+                    )
+                    if (_recovery is not None or incr_dir is None)
+                    else None
                 )
                 if _recovery is not None:
                     state["prediction_frames"].append(fold_prediction_frame)
                 elif incr_dir is not None:
+                    clear_fold_predictions(incr_dir, candidate_key, fd["fold"])
                     flush_fold_predictions(
                         incr_dir,
                         candidate_key,
@@ -3242,6 +3264,9 @@ def run_tabm_cv(
                 if strict:
                     raise
                 print(f"    WARN: incremental registration failed for {artifact_name}: {exc}")
+        # One configuration's predictions at a time. Without this the last configuration's
+        # frame is still alive when every configuration's is read back below.
+        del cfg_all_preds, prediction_parts
         gc.collect()
 
     failures = {
@@ -3252,11 +3277,17 @@ def run_tabm_cv(
     direct_failure = next(iter(failures.values()), None) if _recovery is None else None
     prediction_frames = [*cached_prediction_frames, *in_memory_prediction_frames]
     if incr_dir is not None and _recovery is None:
-        for candidate_key in completed_candidate_keys:
-            frame = _load_incremental_preds_for_config(incr_dir, candidate_key)
-            if frame.height:
-                prediction_frames.append(frame)
+        # One read across every completed configuration's shards, in the order one file per
+        # fold produced.
+        shard_paths = [
+            path
+            for candidate_key in completed_candidate_keys
+            for path in incremental_prediction_files(incr_dir, candidate_key)
+        ]
+        if shard_paths:
+            prediction_frames.append(pl.read_parquet(shard_paths))
     all_predictions = pl.concat(prediction_frames) if prediction_frames else pl.DataFrame()
+    del prediction_frames
     execution_diagnostics = {
         "base_fold_preparation_s": preparation_elapsed_s,
         "base_fold_preparations": preparation_count,

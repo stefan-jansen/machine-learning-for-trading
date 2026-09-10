@@ -34,7 +34,7 @@ For notebooks requiring libraries without Python 3.14 wheels:
 | Notebook | Library |
 |----------|---------|
 | Ch05 `03_sigcwgan_signatures` | signatory |
-| Ch09 `06_path_signatures`, `12_wasserstein_regimes` | signatory, esig |
+| Ch09 `06_path_signatures` | signatory, esig |
 | Ch10 `01_word2vec`, `02_asset_embeddings`, `03_sentiment_evolution` | gensim |
 | Ch15 `06_fed_announcement_bsts` | tfcausalimpact (TFP BSTS) |
 

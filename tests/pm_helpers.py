@@ -67,6 +67,7 @@ overrides.yaml schema (per-notebook, all optional):
 """
 
 import ast
+import functools
 import json
 import os
 import re
@@ -176,6 +177,117 @@ def missing_required_env(overrides: dict) -> list[str]:
         return []
     names = [declared] if isinstance(declared, str) else list(declared)
     return [name for name in names if not (os.environ.get(name) or "").strip()]
+
+
+GPU_CAPABILITIES = ("torch", "lightgbm_cuda")
+
+
+# The message LightGBM raises when the build itself lacks CUDA, as opposed to when a build that
+# has it cannot get the card right now. Only the first is a property of the installation, and
+# only the first is a reason to skip: a busy 3090 is a reason to wait or to fail loudly, never to
+# report a notebook as needing hardware it has.
+_NO_CUDA_BUILD = "was not enabled in this build"
+
+
+@functools.lru_cache(maxsize=1)
+def _cuda_lightgbm_probe() -> str | None:
+    """None if a CUDA LightGBM fit works here, else why it did not.
+
+    Asked by fitting one stump rather than by reading a version or a build flag, because
+    LightGBM exposes no build-configuration attribute and the failure it produces is a
+    runtime `LightGBMError` out of `fit()`. Costs about 9ms on twenty rows, and is cached
+    so a session pays it once however many notebooks declare the capability.
+
+    The C library writes its `[LightGBM] [Fatal]` line straight to file descriptor 2, which
+    no Python-level redirect reaches, so the descriptor itself is pointed at the null device
+    for the duration of the probe. Descriptor 2 by number, not `sys.stderr.fileno()`: under
+    pytest's `--capture=sys` that attribute raises `UnsupportedOperation`, and under the
+    default fd capture it names the capture file rather than the stream the C library writes
+    to. A failure here is the answer, not an error to report.
+    """
+    try:
+        import lightgbm as lgb
+        import numpy as np
+    except ImportError:
+        return "lightgbm is not installed"
+    try:
+        saved = os.dup(2)
+    except OSError:  # no descriptor 2 to borrow; the noise is not worth failing over
+        saved = None
+    try:
+        with open(os.devnull, "w") as devnull:
+            if saved is not None:
+                os.dup2(devnull.fileno(), 2)
+            try:
+                lgb.train(
+                    {
+                        "objective": "binary",
+                        "device_type": "cuda",
+                        "verbose": -1,
+                        "num_leaves": 2,
+                        "min_data_in_leaf": 1,
+                    },
+                    lgb.Dataset(np.zeros((20, 2)), label=np.arange(20) % 2),
+                    num_boost_round=1,
+                )
+            except Exception as exc:  # noqa: BLE001 - the message is the answer
+                if _NO_CUDA_BUILD in str(exc):
+                    return "the installed LightGBM has no CUDA build"
+                return f"the CUDA LightGBM probe failed for another reason: {exc}"
+    finally:
+        if saved is not None:
+            os.dup2(saved, 2)
+            os.close(saved)
+    return None
+
+
+def gpu_skip_reason(overrides: dict) -> str | None:
+    """Why this notebook cannot run on this machine, or None if it can.
+
+    `gpu:` names the capability the notebook needs, not the fact that it wants a card.
+    The two in use are different things and are checked differently:
+
+    - ``torch`` - a CUDA device torch can see, which is what a `.to("cuda")` model needs.
+    - ``lightgbm_cuda`` - a LightGBM built with ``-DUSE_CUDA=1``, which is what
+      ``device_type="cuda"`` needs. The PyPI wheel this repo's lockfile resolves is not
+      one, so on a machine with an NVIDIA card and this repo's own environment, torch
+      reports CUDA and LightGBM still raises "CUDA Tree Learner was not enabled in this
+      build" from `fit()`. Checking torch for a LightGBM notebook let those four Ch19
+      notebooks run and fail rather than skip - ml4t/agent-workspace#862.
+
+    ``gpu: true`` is read as ``torch``, which is what it has always meant. A notebook needing
+    both writes a list - ``19_risk_management/07_drift_detection`` fits a LightGBM at
+    ``device_type="cuda"`` and separately reads ``torch.cuda.get_device_name`` - and it runs
+    only where every capability it names is present.
+    """
+    declared = overrides.get("gpu")
+    if not declared:
+        return None
+    if declared is True:
+        names = ["torch"]
+    elif isinstance(declared, str):
+        names = [declared]
+    else:
+        names = [str(name) for name in declared]
+    unknown = [name for name in names if name not in GPU_CAPABILITIES]
+    if unknown:
+        raise ValueError(
+            f"Invalid gpu={declared!r} - {', '.join(unknown)} is not one of "
+            f"{', '.join(GPU_CAPABILITIES)} (or true, which means torch)"
+        )
+    for name in names:
+        if name == "torch":
+            try:
+                import torch
+            except ImportError:
+                return "declares gpu: torch, and torch is not installed"
+            if not torch.cuda.is_available():
+                return "declares gpu: torch, and torch reports no CUDA device"
+        else:
+            failure = _cuda_lightgbm_probe()
+            if failure is not None:
+                return f"declares gpu: lightgbm_cuda, and {failure}"
+    return None
 
 
 def get_reruns(overrides: dict) -> int:
@@ -1162,6 +1274,93 @@ def _collect_preview_reductions(parameters: dict) -> dict:
     return resolved
 
 
+def _is_canonical_tier_test(node: ast.expr) -> bool:
+    """Is this the `EXECUTION_TIER == "canonical"` comparison itself?"""
+    return (
+        isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "EXECUTION_TIER"
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Eq)
+        and isinstance(node.comparators[0], ast.Constant)
+        and node.comparators[0].value == "canonical"
+    )
+
+
+def _refused_by_guard(test: ast.expr) -> frozenset[str]:
+    """Names a guard refuses, or nothing if the guard is a requirement rather than a refusal.
+
+    A refusal reads `if A or B or C: raise` - every operand a bare name, so the guard fires when
+    any of them is truthy, which is to say when the caller supplied one. A requirement reads
+    `if not X or len(X) != len(set(X)): raise`, and fires when the caller did NOT supply one.
+    They sit side by side in the same canonical branch (`16_backtest.py` has both), and reading
+    the second as a refusal would strip `PREDICTION_SET_NAMES` - a parameter the canonical run
+    needs. Any `not`, comparison or call in an operand marks the guard as the second kind.
+    """
+    operands = (
+        test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or) else [test]
+    )
+    names: set[str] = set()
+    for operand in operands:
+        if not isinstance(operand, ast.Name):
+            return frozenset()
+        names.add(operand.id)
+    return frozenset(names)
+
+
+def canonically_refused_parameters(py_path: Path) -> frozenset[str]:
+    """Parameters this notebook's own canonical branch raises on, read from its source.
+
+    Preview-only-ness is a property of the notebook, not of the name. The `PREVIEW_` prefix
+    covers most of it by convention, but `MAX_SYMBOLS` carries no prefix and is a preview-only
+    reduction for `us_equities_panel` 16 through 19 while being a legitimate canonical parameter
+    elsewhere - so it can be neither stripped globally nor left in. The notebook already answers
+    the question in the only place that can: `if EXECUTION_TIER == "canonical": if ... raise`.
+    This reads that answer instead of restating it in a list here, which is the same reason the
+    prefix replaced the fourteen-name list it grew out of.
+
+    Both guard shapes in the fleet are handled - the nested `if EXECUTION_TIER == "canonical":`
+    with the refusal inside it, and the flattened `if EXECUTION_TIER == "canonical" and (...)`.
+    The result is intersected with what the parameters cell declares, so a local aggregate like
+    `preview_filters` drops out; the `PREVIEW_`-prefixed names behind it are stripped by prefix
+    anyway, and the aggregate is not a parameter anyone can pass.
+    """
+    source = py_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(py_path))
+    cells = _percent_cell_bounds(source)
+    tagged = [cell for cell in cells if PARAMETERS_CELL_MARKER in cell[0]]
+    if not tagged:
+        return frozenset()
+    declared = {
+        name for name, line in _top_level_bindings(tree) if tagged[-1][1] <= line <= tagged[-1][2]
+    }
+
+    refused: set[str] = set()
+
+    def walk(node: ast.AST, in_canonical: bool) -> None:
+        if isinstance(node, ast.If):
+            here, inner = in_canonical, node.test
+            if isinstance(node.test, ast.BoolOp) and isinstance(node.test.op, ast.And):
+                rest = [v for v in node.test.values if not _is_canonical_tier_test(v)]
+                if len(rest) < len(node.test.values):
+                    here = True
+                inner = rest[0] if len(rest) == 1 else None
+            elif _is_canonical_tier_test(node.test):
+                here, inner = True, None
+            if here and inner is not None and any(isinstance(s, ast.Raise) for s in node.body):
+                refused.update(_refused_by_guard(inner))
+            for statement in node.body:
+                walk(statement, here)
+            for statement in node.orelse:
+                walk(statement, in_canonical)
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child, in_canonical)
+
+    walk(tree, False)
+    return frozenset(refused & declared)
+
+
 def injected_parameters(
     py_path: Path,
     parameters: dict | None,
@@ -1193,27 +1392,30 @@ def injected_parameters(
     ``generate_intermediates.py``'s default ``--through-stage 8``. A higher stage bound, or
     the same guard added to an earlier notebook, reaches it.
 
-    **The prefix narrows the gap; it does not close it.** Preview-only-ness is a property of
-    the notebook, not of the name. ``MAX_SYMBOLS`` carries no prefix and is a preview-only
-    reduction for ``us_equities_panel`` 16 through 19, whose canonical branch refuses it
-    (``16_backtest.py:99``) while ``tests/overrides.yaml`` declares it for all four - so a
-    canonical run of those still fails on its first cell. It cannot be added to the strip
-    either: elsewhere it is a legitimate canonical parameter, which
-    ``test_injected_parameters_keeps_everything_else_on_a_canonical_run`` pins. Deciding this
-    properly means reading which names a notebook's own canonical branch refuses, or marking
-    the entry in the override file; both are design changes that belong with whoever owns the
-    preview contract.
+    **The prefix narrows the gap and the notebook closes it.** Preview-only-ness is a property
+    of the notebook, not of the name. ``MAX_SYMBOLS`` carries no prefix and is a preview-only
+    reduction for ``us_equities_panel`` 16 through 19, whose canonical branch refuses it, while
+    being a legitimate canonical parameter for 57 other entries - which
+    ``test_injected_parameters_keeps_everything_else_on_a_canonical_run`` pins. So it can be
+    neither stripped by name nor left in, and no list here can decide it. Only the notebook can,
+    and it already does: ``canonically_refused_parameters`` reads the refusal out of the
+    notebook's own ``EXECUTION_TIER == "canonical"`` guard. Naming the four here instead would
+    have gone stale the same way the fourteen ``PREVIEW_`` names did.
 
-    What is here covers every ``PREVIEW_``-prefixed name, plus ``DEVICE_SCOPED_NAMES`` - and
-    those only for an entry that declares ``DEVICE``, which is what confines them to the
-    entries where the population name exists to carry the device. ``MAX_SYMBOLS`` stays out
-    for the reason above: it is a legitimate canonical parameter elsewhere.
+    What is here covers every ``PREVIEW_``-prefixed name, whatever the notebook's own guard
+    refuses, and ``DEVICE_SCOPED_NAMES`` - the last only for an entry that declares ``DEVICE``,
+    which is what confines them to the entries where the population name exists to carry the
+    device. The device pair stays separate rather than folding into the guard read: no notebook
+    refuses ``DEVICE`` or ``POPULATION_NAME``, because a canonical run of a CPU-fitted population
+    is wrong for a reason the notebook expresses by refusing to publish, not by raising.
     """
     if research_preview:
         return research_preview_parameters(py_path, parameters, output_dir)
     resolved = dict(parameters or {})
     for name in [key for key in resolved if key.startswith("PREVIEW_")]:
         resolved.pop(name)
+    for name in canonically_refused_parameters(py_path):
+        resolved.pop(name, None)
     if "DEVICE" in resolved:
         for name in DEVICE_SCOPED_NAMES:
             resolved.pop(name, None)

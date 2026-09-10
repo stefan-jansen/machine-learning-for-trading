@@ -14,6 +14,8 @@ Pins:
 
 from __future__ import annotations
 
+import math
+
 import polars as pl
 import pytest
 
@@ -357,3 +359,65 @@ def test_the_gate_refuses_a_feature_frame_that_holds_none_of_the_columns_named()
             feature_cols=model_based_cols,
             label_col="fwd_ret_15m",
         )
+
+
+def test_check_ohlc_invariants_tolerates_adjustment_rounding() -> None:
+    """A high that IS the close, one ulp below it, is not a violation.
+
+    An adjusted panel applies its cumulative ratio to each field separately, so the
+    two products can differ in the last bit even though the bar's high and close are
+    the same price. The strict comparison this replaced reported 760 such rows on the
+    ETF panel, all with a breach smaller than one float64 epsilon of the close.
+    """
+    close = 862.5 * 0.9873456789
+    high = math.nextafter(close, 0.0)  # one ulp below: the same price, rounded apart
+    assert high < close, "the fixture must actually breach a strict comparison"
+
+    df = pl.DataFrame(
+        {
+            "open": [close],
+            "high": [high],
+            "low": [math.nextafter(close, 0.0)],
+            "close": [close],
+            "volume": [1_000],
+        }
+    )
+    invariants = check_ohlc_invariants(df)
+    assert (invariants["valid_pct"] == 100.0).all()
+
+
+def test_check_ohlc_invariants_rtol_zero_restores_strict_comparison() -> None:
+    """The tolerance is what admits the ulp, not some other leniency in the check.
+
+    Without this, the test above would still pass if the comparison had been changed
+    to something that never fails, and nothing would say so.
+    """
+    close = 862.5 * 0.9873456789
+    df = pl.DataFrame(
+        {
+            "open": [close],
+            "high": [math.nextafter(close, 0.0)],
+            "low": [close],
+            "close": [close],
+            "volume": [1_000],
+        }
+    )
+    strict = check_ohlc_invariants(df, rtol=0.0)
+    row = strict.filter(pl.col("check") == "high_gte_close").row(0, named=True)
+    assert row["valid_pct"] == 0.0
+
+
+def test_check_ohlc_invariants_still_detects_a_real_violation() -> None:
+    """One cent on a $100 bar is 1e-4 relative, eleven orders above the tolerance."""
+    df = pl.DataFrame(
+        {
+            "open": [100.0],
+            "high": [99.99],  # a cent below the close: a genuine defect
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [1_000],
+        }
+    )
+    invariants = check_ohlc_invariants(df)
+    row = invariants.filter(pl.col("check") == "high_gte_close").row(0, named=True)
+    assert row["valid_pct"] == 0.0

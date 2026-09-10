@@ -33,7 +33,7 @@
 #   (equal weight, inverse volatility)
 # - Evaluate performance across crisis vs calm regimes
 #
-# **Book Reference**: Chapter 17, §17.8 (Deep Learning for Portfolio Construction)
+# **Book Reference**: Chapter 17, Section 17.8 (Deep learning for portfolio construction)
 #
 # **Prerequisites**: `11_dl_portfolio_allocation` (differentiable Sharpe concept)
 
@@ -43,16 +43,7 @@
 # %%
 """DeePM: regime-robust portfolio management with chronological evaluation."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
-# %%
-import hashlib
-import json
 import os
-from dataclasses import asdict
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -66,15 +57,13 @@ from deepm.graph import adjacency_to_attn_mask, build_macro_adjacency
 from deepm.inference import infer_risk_weights_rolling
 from deepm.model import DeepmPolicy
 from deepm.train import train_model
-from IPython.display import display
 from matplotlib.colors import ListedColormap
 from matplotlib.ticker import PercentFormatter
 from torch.utils.data import DataLoader
 
 from data import load_etfs
-from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill overrides for CI testing
@@ -84,144 +73,16 @@ SEQ_LEN = 84
 D_MODEL = 64
 SEED = 42
 DEVICE = "auto"
-# Cache-first defaults for expensive DeePM training.
-USE_CACHED_CHECKPOINTS_IF_AVAILABLE = True
-SAVE_CHECKPOINTS_TO_CACHE = True
-
-# %%
-OUTPUT_DIR = get_output_dir(17, "deepm_regime_robust")
-OUTPUT_DIR.mkdir(exist_ok=True)
-FULL_MODEL_CACHE_PATH = OUTPUT_DIR / "deepm_full_cache.pt"
-NOSM_MODEL_CACHE_PATH = OUTPUT_DIR / "deepm_no_softmin_cache.pt"
-CANONICAL_OUTPUT_DIR = get_chapter_dir(17) / "output" / "deepm_regime_robust"
-CANONICAL_FULL_MODEL_CACHE_PATH = CANONICAL_OUTPUT_DIR / "deepm_full_cache.pt"
-CANONICAL_NOSM_MODEL_CACHE_PATH = CANONICAL_OUTPUT_DIR / "deepm_no_softmin_cache.pt"
 
 # %% [markdown]
-# ### Cache Search Order
+# ### Determinism
 #
-# DeePM maintains separate caches for the full model and the no-SoftMin
-# ablation, so cache resolution checks multiple candidate paths.
-
-
-# %%
-def iter_cache_candidates(*paths: Path):
-    """Yield unique cache paths in priority order."""
-    seen: set[Path] = set()
-    for path in paths:
-        resolved = path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            yield path
-
-
-# %% [markdown]
-# ### Checkpoint Compatibility
-#
-# Reuse only checkpoints whose parameter keys and tensor shapes still match the
-# current architecture.
-
+# Two runs of the same code give the same weights only if every source of randomness is pinned.
+# `set_global_seeds` covers Python, NumPy and Torch; the cuDNN settings and the cuBLAS workspace
+# variable below cover the GPU kernels, which otherwise choose an algorithm by timing and so
+# vary between runs.
 
 # %%
-def state_dict_is_compatible(model, state_dict: dict) -> tuple[bool, str]:
-    """Return whether a cached state dict matches the current model layout."""
-    if not isinstance(state_dict, dict):
-        return False, "cache payload has no valid state_dict"
-
-    expected = model.state_dict()
-    expected_keys = set(expected.keys())
-    got_keys = set(state_dict.keys())
-    if expected_keys != got_keys:
-        missing = sorted(expected_keys - got_keys)
-        extra = sorted(got_keys - expected_keys)
-        parts = []
-        if missing:
-            parts.append(f"missing keys: {missing[:3]}")
-        if extra:
-            parts.append(f"unexpected keys: {extra[:3]}")
-        return False, "; ".join(parts)
-
-    mismatch = next(
-        (
-            f"{key} expected {tuple(expected_tensor.shape)} got "
-            f"{tuple(cached_shape) if cached_shape is not None else None}"
-            for key, expected_tensor in expected.items()
-            if (cached_shape := getattr(state_dict[key], "shape", None)) != expected_tensor.shape
-        ),
-        None,
-    )
-    if mismatch:
-        return False, f"shape mismatch ({mismatch})"
-
-    return True, ""
-
-
-# %% [markdown]
-# ### Cache Provenance
-#
-# Shape compatibility is necessary but insufficient. Bind each checkpoint to the
-# exact feature panel, universe, split, architecture, and training configuration.
-
-
-# %%
-def stable_panel_hash(feature_panel) -> str:
-    """Hash the complete ordered training panel and its labels."""
-    digest = hashlib.sha256()
-    digest.update(json.dumps(feature_panel.assets).encode())
-    digest.update(np.asarray(feature_panel.dates.view("i8")).tobytes())
-    for values in [
-        feature_panel.x,
-        feature_panel.y_fwd1,
-        feature_panel.vol_scale,
-        feature_panel.mask,
-    ]:
-        array = np.ascontiguousarray(values)
-        digest.update(str(array.dtype).encode())
-        digest.update(json.dumps(array.shape).encode())
-        digest.update(array.tobytes())
-    return digest.hexdigest()
-
-
-# %%
-def expected_cache_provenance(model, training_cfg, variant: str) -> dict:
-    """Return the exact identity required before loading a checkpoint."""
-    return {
-        "schema": "deepm-v2-unique-validation",
-        "variant": variant,
-        "panel_sha256": PANEL_SHA256,
-        "universe": list(panel.assets),
-        "train_end": str(train_end_date),
-        "validation_end": str(val_end_date),
-        "model": asdict(model_cfg),
-        "training": asdict(training_cfg),
-        "state_shapes": {key: tuple(value.shape) for key, value in model.state_dict().items()},
-    }
-
-
-# %%
-IN_TEST_OUTPUT_MODE = (
-    os.environ.get("ML4T_CHAPTER_OUTPUT_DIR") is not None or os.environ.get("ML4T_TEST_MODE") == "1"
-)
-USE_CACHED_CHECKPOINTS_IF_AVAILABLE = (
-    os.environ.get("ML4T_ALLOW_MODEL_CACHE", str(int(USE_CACHED_CHECKPOINTS_IF_AVAILABLE))) == "1"
-)
-SAVE_CHECKPOINTS_TO_CACHE = (
-    os.environ.get("ML4T_SAVE_MODEL_CACHE", str(int(SAVE_CHECKPOINTS_TO_CACHE))) == "1"
-)
-if IN_TEST_OUTPUT_MODE:
-    cache_exists = any(
-        path.exists()
-        for path in iter_cache_candidates(
-            FULL_MODEL_CACHE_PATH,
-            CANONICAL_FULL_MODEL_CACHE_PATH,
-            NOSM_MODEL_CACHE_PATH,
-            CANONICAL_NOSM_MODEL_CACHE_PATH,
-        )
-    )
-    if not cache_exists:
-        MAX_ITERS = min(MAX_ITERS, 80)
-        print(f"Bootstrap cache mode: MAX_ITERS reduced to {MAX_ITERS}")
-
 if DEVICE == "auto":
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device: {DEVICE}")
@@ -350,9 +211,12 @@ ax.set_xticks(range(N_ASSETS))
 ax.set_xticklabels(panel.assets, rotation=90, fontsize=7)
 ax.set_yticks(range(N_ASSETS))
 ax.set_yticklabels(panel.assets, fontsize=7)
-ax.set_title(f"Macro prior retains {graph_density:.0%} of possible attention links")
-fig.tight_layout()
-fig.show()
+print(f"The macro prior keeps {graph_density:.0%} of the possible attention links.")
+ax.set_title("The macro prior blocks attention between unrelated asset classes")
+show_with_alt(
+    fig,
+    "Binary matrix of the macro attention prior, assets on both axes, filled where an attention link is permitted and blank where the prior blocks it, with filled blocks along the asset-class groupings.",
+)
 
 # %% [markdown]
 # ## 5. Train/Validation/Test Split and Datasets
@@ -455,6 +319,11 @@ model = DeepmPolicy(
 )
 model.to(DEVICE)
 
+# Keep the initial weights. The ablation in section 9 is constructed after this model has
+# trained, by which point the random stream has moved on, so building it fresh would give it
+# a different starting point and the comparison would carry two changes rather than one.
+initial_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
 n_params = sum(p.numel() for p in model.parameters())
 print(f"DeePM parameters: {n_params:,}")
 
@@ -467,24 +336,6 @@ print(f"DeePM parameters: {n_params:,}")
 # $$\mathcal{L}(\theta) = -\text{SR}_{\text{pool}} - \lambda \cdot \text{SoftMin}_\tau(\{SR_b\})$$
 #
 # This learns regime robustness without explicitly detecting or labeling regimes.
-
-
-# %%
-def save_training_cache(cache_path, state_dict, history_obj, provenance):
-    """Persist best state plus lightweight diagnostics for cache-first reruns."""
-    torch.save(
-        {
-            "best_state": state_dict,
-            "history": {
-                "steps": list(history_obj.steps),
-                "train_objective": list(history_obj.train_objective),
-                "train_sharpe_pool": list(history_obj.train_sharpe_pool),
-                "val_sharpe_pool": list(history_obj.val_sharpe_pool),
-            },
-            "provenance": provenance,
-        },
-        cache_path,
-    )
 
 
 # %%
@@ -511,71 +362,25 @@ print(f"Training for up to {MAX_ITERS} iterations...")
 print(f"SoftMin: tau={train_cfg.softmin_tau}, lambda={train_cfg.softmin_lambda}")
 
 # %%
-PANEL_SHA256 = stable_panel_hash(panel)
-full_cache_provenance = expected_cache_provenance(model, train_cfg, "full")
-print(f"Training panel SHA-256: {PANEL_SHA256[:16]}...")
+best_state, history = train_model(
+    model,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    static_meta=static_meta,
+    cfg=train_cfg,
+)
 
-# %%
-best_state = None
-history = None
-history_steps = []
-history_train_objective = []
-history_train_sharpe = []
-history_val_sharpe = []
+history_steps = list(history.steps)
+history_train_objective = list(history.train_objective)
+history_train_sharpe = list(history.train_sharpe_pool)
+history_val_sharpe = list(history.val_sharpe_pool)
 
-if USE_CACHED_CHECKPOINTS_IF_AVAILABLE:
-    for cache_path in iter_cache_candidates(FULL_MODEL_CACHE_PATH, CANONICAL_FULL_MODEL_CACHE_PATH):
-        if not cache_path.exists():
-            continue
-        cache_payload = torch.load(cache_path, map_location="cpu")
-        if isinstance(cache_payload, dict) and "best_state" in cache_payload:
-            if cache_payload.get("provenance") != full_cache_provenance:
-                print(f"Skipping wrong-provenance full-model cache at {cache_path}")
-                continue
-            candidate_state = cache_payload["best_state"]
-            is_compatible, reason = state_dict_is_compatible(model, candidate_state)
-            if not is_compatible:
-                print(f"Skipping incompatible full-model cache at {cache_path}: {reason}")
-                continue
-            best_state = candidate_state
-            history_payload = cache_payload.get("history", {})
-            history_steps = list(history_payload.get("steps", []))
-            history_train_objective = list(history_payload.get("train_objective", []))
-            history_train_sharpe = list(history_payload.get("train_sharpe_pool", []))
-            history_val_sharpe = list(history_payload.get("val_sharpe_pool", []))
-            print(f"Loaded full DeePM checkpoint from {cache_path}")
-            break
-
-
-# %%
-if best_state is None:
-    best_state, history = train_model(
-        model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        static_meta=static_meta,
-        cfg=train_cfg,
-    )
-
-    history_steps = list(history.steps)
-    history_train_objective = list(history.train_objective)
-    history_train_sharpe = list(history.train_sharpe_pool)
-    history_val_sharpe = list(history.val_sharpe_pool)
-
-    print(f"\nTraining complete: {len(history_steps)} eval points")
-    if not best_state:
-        print("WARNING: No valid checkpoint saved, using final model state")
-        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-    elif history_val_sharpe:
-        valid_sharpes = [s for s in history_val_sharpe if not np.isnan(s)]
-        if valid_sharpes:
-            print(f"Best validation Sharpe: {max(valid_sharpes):.3f}")
-
-
-# %%
-if SAVE_CHECKPOINTS_TO_CACHE and best_state and history is not None:
-    save_training_cache(FULL_MODEL_CACHE_PATH, best_state, history, full_cache_provenance)
-    print(f"Saved full DeePM checkpoint cache to {FULL_MODEL_CACHE_PATH}")
+print(f"Training complete: {len(history_steps)} evaluation points")
+if not best_state:
+    raise RuntimeError("Training kept no checkpoint; every evaluation produced a NaN objective.")
+valid_sharpes = [s for s in history_val_sharpe if not np.isnan(s)]
+if valid_sharpes:
+    print(f"Best validation Sharpe: {max(valid_sharpes):.3f}")
 
 # %% [markdown]
 # ### Training Diagnostics
@@ -593,8 +398,7 @@ ax.plot(
 )
 ax.set_xlabel("Iteration")
 ax.set_ylabel("Objective (higher = better)")
-final_training_objective = history_train_objective[-1] if history_train_objective else float("nan")
-ax.set_title(f"Training objective finishes at {final_training_objective:.2f}")
+ax.set_title("The training objective, which the loss negates and so maximizes")
 ax.legend()
 
 ax = axes[1]
@@ -615,16 +419,23 @@ ax.plot(
 ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5)
 ax.set_xlabel("Iteration")
 ax.set_ylabel("Pooled Sharpe")
-best_training_val = max(history_val_sharpe) if history_val_sharpe else float("nan")
-ax.set_title(f"Validation Sharpe peaks at {best_training_val:.2f}")
+ax.set_title("Validation Sharpe is what the kept checkpoint is chosen on")
 ax.legend()
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels against training iteration: the training objective on the left and the training and validation pooled Sharpe on the right, with a reference line at zero.",
+)
 
 # %% [markdown]
-# **Finding**: Cache-first execution preserves expensive DeePM training checkpoints and keeps
-# reruns focused on evaluation and diagnostics unless explicit retraining is required.
+# The left panel is the objective the loss negates, so higher is better and a rising trend is
+# what training is supposed to produce. It is recorded on each evaluation minibatch rather than
+# on the whole training window, so it moves around from point to point; the trend is the signal
+# and a single dip is not.
+#
+# The right panel is what decides when to stop. The training Sharpe can keep rising while the
+# validation Sharpe flattens, and the checkpoint kept is the one at the validation peak rather
+# than the one at the last iteration.
 
 # %% [markdown]
 # ## 9. Ablation Study
@@ -651,6 +462,9 @@ model_no_softmin = DeepmPolicy(
     adjacency_mask=attn_mask_tensor,
     cfg=model_cfg,
 )
+# Start from the weights the full model started from, so the only difference between the two
+# runs is the SoftMin term in the loss.
+model_no_softmin.load_state_dict(initial_state)
 model_no_softmin.to(DEVICE)
 
 nosm_cfg = TrainingConfig(
@@ -671,56 +485,18 @@ nosm_cfg = TrainingConfig(
 )
 
 # %%
-nosm_cache_provenance = expected_cache_provenance(model_no_softmin, nosm_cfg, "no-softmin")
-
-# %%
-print("Training No-SoftMin ablation...")
-best_state_nosm = None
-history_nosm = None
-
-if USE_CACHED_CHECKPOINTS_IF_AVAILABLE:
-    for cache_path in iter_cache_candidates(NOSM_MODEL_CACHE_PATH, CANONICAL_NOSM_MODEL_CACHE_PATH):
-        if not cache_path.exists():
-            continue
-        cache_payload_nosm = torch.load(cache_path, map_location="cpu")
-        if isinstance(cache_payload_nosm, dict) and "best_state" in cache_payload_nosm:
-            if cache_payload_nosm.get("provenance") != nosm_cache_provenance:
-                print(f"Skipping wrong-provenance no-SoftMin cache at {cache_path}")
-                continue
-            candidate_state_nosm = cache_payload_nosm["best_state"]
-            is_compatible, reason = state_dict_is_compatible(model_no_softmin, candidate_state_nosm)
-            if not is_compatible:
-                print(f"Skipping incompatible no-SoftMin cache at {cache_path}: {reason}")
-                continue
-            best_state_nosm = candidate_state_nosm
-            print(f"Loaded no-SoftMin checkpoint from {cache_path}")
-            break
-
-# %%
-if best_state_nosm is None:
-    best_state_nosm, history_nosm = train_model(
-        model_no_softmin,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        static_meta=static_meta,
-        cfg=nosm_cfg,
+print("Training the no-SoftMin ablation...")
+best_state_nosm, history_nosm = train_model(
+    model_no_softmin,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    static_meta=static_meta,
+    cfg=nosm_cfg,
+)
+if not best_state_nosm:
+    raise RuntimeError(
+        "The ablation kept no checkpoint; every evaluation produced a NaN objective."
     )
-
-    if not best_state_nosm:
-        print("WARNING: No valid checkpoint, using final model state")
-        best_state_nosm = {
-            k: v.detach().cpu().clone() for k, v in model_no_softmin.state_dict().items()
-        }
-
-# %%
-if SAVE_CHECKPOINTS_TO_CACHE and best_state_nosm and history_nosm is not None:
-    save_training_cache(
-        NOSM_MODEL_CACHE_PATH,
-        best_state_nosm,
-        history_nosm,
-        nosm_cache_provenance,
-    )
-    print(f"Saved no-SoftMin checkpoint cache to {NOSM_MODEL_CACHE_PATH}")
 
 # %% [markdown]
 # ### Compute Test-Period Returns for All Models
@@ -880,13 +656,18 @@ for label, r in method_returns.items():
     cum = (1 + r.dropna()).cumprod()
     ax.plot(cum.index, cum.values, label=label, color=method_colors[label])
 
-winner = max(sharpe_by_method, key=sharpe_by_method.get)
+print("Held-out annualized Sharpe, net of the cost schedule:")
+for name, value in sharpe_by_method.items():
+    print(f"  {name:<20} {value:+.2f}")
+
 ax.set_xlabel("Date")
 ax.set_ylabel("Cumulative Return")
-ax.set_title(f"{winner} leads held-out Sharpe at {sharpe_by_method[winner]:.2f} net of costs")
+ax.set_title("Held-out growth of four allocators, net of the cost schedule")
 ax.legend()
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Four cumulative return paths over the holdout for the full DeePM policy, the no-SoftMin ablation, equal weight and inverse volatility, net of the per-asset cost schedule.",
+)
 
 # %% [markdown]
 # **Trading implication**: Read terminal wealth together with Sharpe and drawdown. A
@@ -934,9 +715,13 @@ regime_results = pd.DataFrame(
 regime_results
 
 # %% [markdown]
-# **Finding**: The calm-versus-crisis gap is the direct diagnostic. A smaller gap in
-# this seeded run is consistent with the SoftMin objective, but attribution requires
-# replication across seeds and samples.
+# Read the gap column against what SoftMin actually optimizes. The penalty raises the Sharpe
+# ratio of the weakest *training* windows, which are consecutive blocks of the training period
+# and have nothing to do with SPY's volatility; the split here is a holdout diagnostic applied
+# afterwards. So the gap can move either way between the two variants without contradicting the
+# objective, and whichever way it moves in one seeded run is not an estimate of the SoftMin
+# effect. What the column does test is whether the policy that lifted its weakest training
+# windows also earns its Sharpe ratio in the volatile half of the holdout.
 
 # %% [markdown]
 # ## 12. Drawdown Analysis
@@ -978,7 +763,6 @@ drawdowns_panel = pd.DataFrame(
 drawdowns_panel.index.name = "timestamp"
 drawdowns_panel = drawdowns_panel.reset_index()
 drawdowns_panel["vol_median"] = float(vol_median)
-pl.from_pandas(drawdowns_panel).write_parquet(OUTPUT_DIR / "drawdowns.parquet")
 
 # %% [markdown]
 # ### Drawdown and Volatility Plot
@@ -1003,7 +787,11 @@ for dd, label, linestyle, linewidth in [
     )
 ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
 ax.set_ylabel("Drawdown")
-ax.set_title(f"Full DeePM max drawdown {dd_deepm.min():.1%} vs {dd_nosm.min():.1%} without SoftMin")
+print(
+    f"Deepest held-out drawdown: full DeePM {dd_deepm.min():.1%}, "
+    f"no-SoftMin ablation {dd_nosm.min():.1%}, equal weight {dd_ew.min():.1%}"
+)
+ax.set_title("Underwater paths of the two DeePM variants and equal weight")
 ax.legend()
 
 # %%
@@ -1026,15 +814,43 @@ ax.axhline(
 ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
 ax.set_ylabel("Volatility")
 ax.set_xlabel("Date")
-ax.set_title(f"Median SPY volatility threshold separates regimes at {vol_median:.0%}")
+ax.set_title("The regime split is the median of SPY's own trailing volatility")
 ax.legend()
 
-fig.tight_layout()
-display(fig)
+# The figure was closed on creation so the inline backend would not render it between the
+# two cells that fill its panels; displaying it explicitly is what puts it on the page.
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis: underwater curves for the two DeePM variants and equal weight on top, and SPY's trailing annualized volatility below, filled, with a dashed line at its median.",
+)
 
 # %% [markdown]
 # **Trading implication**: Drawdown shape matters as much as terminal Sharpe when allocator
 # capacity is constrained by investor tolerance and risk budgets.
+
+# %% [markdown] tags=["results"]
+# ### What this run produced
+#
+# Four allocators on one held-out period: the full DeePM policy, the same architecture trained
+# without the SoftMin term, and two allocators that fit nothing. Three tables carry the result.
+#
+# The held-out table is the aggregate comparison, net of the per-asset cost schedule the loss was
+# trained against. The regime table splits the same returns at the median of SPY's trailing
+# volatility and reports a Sharpe ratio on each side.
+#
+# Read that gap column as a diagnostic rather than as the objective's own score. SoftMin rewards
+# a higher Sharpe ratio in the training windows where it is lowest, and the windows it acts on
+# are consecutive blocks of the training period; it never sees SPY's volatility and never
+# penalizes a difference between these two regimes. A policy that improves the objective can
+# therefore widen the gap shown here. What the column tests is whether pushing up the weakest
+# training windows happened to produce a policy that also holds up in the volatile half of the
+# holdout, which is the claim the method is interesting for and not the one it optimizes. The
+# drawdown panel is the path behind both tables.
+#
+# Every one of these is a single training run at a single seed. Two networks differing only in
+# one loss term can land apart for reasons that have nothing to do with that term, and separating
+# the two would take repeated runs across seeds. What this notebook establishes is what the
+# mechanism does to one fitted policy, not the size of its effect.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1050,14 +866,16 @@ display(fig)
 #    ($\gamma_{\text{cost}}=0.5$ over the asset-specific cost schedule). Held-out
 #    evaluation then applies the full one-way basis-point schedule to normalized
 #    target-weight changes, including the initial entry trade.
-# 4. **Component-level ablations are out of scope for this notebook**. The
-#    SoftMin-vs-no-SoftMin comparison isolates the regime-robustness mechanism;
-#    isolating FiLM, V-VSN, or Directed Delay individually would require additional
-#    training runs that this teaching notebook does not perform.
+# 4. **One ablation isolates one mechanism.** Turning the SoftMin penalty off while holding
+#    the architecture, the data and the seed fixed is what makes the difference between the two
+#    rows attributable to the penalty. The same argument applied to FiLM, the variable-selection
+#    block or the Directed Delay would need one training run each, and Wood, Roberts and Zohren
+#    (2026) report those.
 #
-# **Next**: `09_allocator_comparison` for side-by-side allocator comparisons under
-# identical signal inputs. The cross-case-study external-validity comparison lives in
-# Ch20 ([`05_portfolio_allocation`](../20_strategy_synthesis/05_portfolio_allocation.ipynb)).
+# **Next**: Chapter 18 replaces the flat per-asset schedule charged here with cost models that
+# respond to order size, spread and market impact, which is what decides whether a turnover level
+# like this one is affordable. The cross-case-study allocator comparison lives in Ch20
+# ([`05_portfolio_allocation`](../20_strategy_synthesis/05_portfolio_allocation.ipynb)).
 #
-# **Book**: §17.8 discusses the DeePM framework in detail, including
+# **Book**: Section 17.8 discusses the DeePM framework in detail, including
 # the SoftMin robust objective and its connection to regime adaptation.

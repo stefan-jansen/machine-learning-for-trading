@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -164,10 +165,17 @@ def test_every_case_study_gbm_setup_resolves_the_shared_execution_contract() -> 
     assert {max_bin for _, max_bin, _ in resolved.values()} == {gbm.GBM_DEFAULT_MAX_BIN}
 
 
-def test_prepare_gbm_folds_keeps_continuous_classification_target() -> None:
-    frame = pd.DataFrame(
+def test_prepared_folds_keep_the_continuous_classification_target() -> None:
+    from case_studies.utils.folds import clear_memo
+    from utils.modeling import ModelingDataset
+
+    frame = pl.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"]),
+            "timestamp": [
+                datetime(2020, 1, 1),
+                datetime(2020, 1, 2),
+                datetime(2020, 1, 3),
+            ],
             "symbol": ["a", "b", "c"],
             "feature": [1.0, 2.0, 3.0],
             "label": [0.0, 1.0, 1.0],
@@ -177,27 +185,31 @@ def test_prepare_gbm_folds_keeps_continuous_classification_target() -> None:
     splits = [
         {
             "fold": 0,
-            "train_start": pd.Timestamp("2020-01-01"),
-            "train_end": pd.Timestamp("2020-01-01"),
-            "val_start": pd.Timestamp("2020-01-02"),
-            "val_end": pd.Timestamp("2020-01-03"),
+            "train_start": datetime(2020, 1, 1),
+            "train_end": datetime(2020, 1, 1),
+            "val_start": datetime(2020, 1, 2),
+            "val_end": datetime(2020, 1, 3),
         }
     ]
-
-    [fold] = gbm.prepare_gbm_folds(
-        frame,
-        splits,
-        ["feature"],
-        "label",
-        "timestamp",
-        "symbol",
+    mds = ModelingDataset(
+        dataset=frame,
+        feature_names=["feature"],
+        label_col="label",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        join_cols=["symbol", "timestamp"],
+        splits=splits,
+        label_buffer="5d",
         task_type="classification",
-        class_values=[0, 1],
+        class_values=[0.0, 1.0],
         eval_label_col="return",
     )
 
-    np.testing.assert_array_equal(fold["y_val"], np.array([1.0, 1.0], dtype=np.float32))
-    np.testing.assert_array_equal(fold["y_eval"], np.array([0.3, 0.4], dtype=np.float32))
+    clear_memo()
+    [fold] = gbm.prepare_gbm_folds_from_mds(mds, splits, use_cache=False)
+
+    np.testing.assert_array_equal(fold["y_val"], np.array([1.0, 1.0]))
+    np.testing.assert_array_equal(fold["y_eval"], np.array([0.3, 0.4]))
 
 
 def test_classification_ic_uses_continuous_eval_target(

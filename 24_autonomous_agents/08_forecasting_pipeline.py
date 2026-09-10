@@ -18,35 +18,41 @@
 #
 # **Docker image**: `ml4t`
 #
-# This notebook wires together all components from NB04–NB07 into the complete
-# **agent → aggregation → debate → supervisor** pipeline: the AIA Forecaster.
-# We build the `SupervisorAgent` and `AIAForecaster` classes inline, then run
-# the full pipeline on the chapter's two pinned, still-**unresolved** questions
-# (the recession question from NB06 and the rate-hike question from NB07).
-# Because the outcomes are not yet known, the pipeline produces probabilities
-# but does not score them. Brier and log-loss scoring against resolved
-# outcomes is the job of NB09.
+# The last four notebooks each built one piece. This one runs them as a sequence: a panel of
+# research agents, an aggregate over them, a debate between two sides of the aggregate, and a
+# supervisor that reads the panel, searches where the agents disagreed, and decides whether to
+# override. That is the **AIA Forecaster** architecture, and the point of assembling it is not
+# that four stages beat one; it is that a forecast produced this way can be taken apart when it
+# is wrong.
+#
+# Both questions the pipeline runs on were unresolved when the capture was taken. It produces
+# probabilities and cannot be scored, and neither can any claim that a later stage improved on
+# an earlier one. Scoring against known outcomes is
+# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb).
 #
 # **Learning Objectives**:
-# - Build the supervisor agent: disagreement detection, clarifying search, override
-# - Compose the four-phase pipeline into the `AIAForecaster` class
-# - Run the pipeline on multiple questions and inspect the full trace
-# - Track token usage across the complete pipeline
+# - Build a supervisor that finds where a panel disagreed, searches on those points, and
+#   returns its own probability
+# - Gate that supervisor's influence on the confidence it states, so it can adjust the ensemble
+#   without silently replacing it
+# - Compose four stages into one class whose settings are all declared in one place
+# - Read a stage-by-stage probability path and see which stage moved the answer
+# - Record a run in a form a scoring pipeline could later consume
 #
-# **Book Reference**: Chapter 24, Sections 24.7 (complete pipeline) and 24.8
-# (Production: persistence and replay)
+# **Book Reference**: Chapter 24, Sections 24.7 (Multi-agent forecasting systems) and 24.9
+# (Preparing for production)
 #
-# **Prerequisites**: NB04 (research agent), NB05 (aggregation), NB07 (debate).
+# **Prerequisites**: [`04_research_agent`](04_research_agent.ipynb),
+# [`05_aggregation_math`](05_aggregation_math.ipynb),
+# [`06_multi_agent_research`](06_multi_agent_research.ipynb),
+# [`07_adversarial_debate`](07_adversarial_debate.ipynb).
 
 # %%
 """Full Forecasting Pipeline: agent-debate-supervisor end-to-end."""
 
 import json
 import time
-import warnings
 from datetime import date
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -77,25 +83,46 @@ from agent_tools import (
 )
 from IPython.display import Markdown, display
 
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
+
+# %% [markdown]
+# ## Settings
+#
+# `RUN_LIVE` left at `False` replays the two pinned captures, one per question, and makes no
+# API calls.
+#
+# `N_AGENTS`, `MAX_STEPS` and `MAX_SEARCH_RESULTS` configure the research phase exactly as in
+# [`06_multi_agent_research`](06_multi_agent_research.ipynb). `DEBATE_ROUNDS` caps the
+# argument, and `NEYMAN_CORRELATION` is the pairwise correlation assumed when the panel is
+# aggregated.
+#
+# Three weights decide how much each later stage can move the answer, and they are the numbers
+# to argue with. `DEBATE_WEIGHT` is the debate midpoint's share of the post-debate probability.
+# `SUPERVISOR_MEDIUM_WEIGHT` is the supervisor's share when it states medium confidence; at
+# high confidence it replaces the value outright and at low confidence it is ignored.
+#
+# The three `CONFIDENCE_WHEN_*` values are what the pipeline reports as its own confidence in
+# each of those three cases. They are an ordering, not an estimate: a forecast the supervisor
+# overrode is marked as having had more reconciliation than one where it was ignored, and
+# nothing here measures whether either is more likely to be right.
 
 # %% tags=["parameters"]
-# RUN_LIVE=False (the default) replays the pinned 2026-06-09 traces named below,
-# one per question. It reloads each saved pipeline run and makes no API calls, so
-# every table and trace matches the chapter. Set RUN_LIVE=True (with API keys) to
-# forecast current questions live; that path produces different numbers.
 RUN_LIVE = False
 PINNED_TRACES = [
     "08_forecasting_pipeline_20260609T141954Z_ef5bca7b95bd.json",  # recession (clear)
     "08_forecasting_pipeline_20260609T142158Z_24e083e7fe54.json",  # rate hike (contested)
 ]
-
-# empty = auto-detect; "mock" for CI (live path only)
 LLM_PROVIDER = ""
 N_AGENTS = 3
 DEBATE_ROUNDS = 3
 MAX_STEPS = 5
 MAX_SEARCH_RESULTS = 5
+NEYMAN_CORRELATION = 0.3
+DEBATE_WEIGHT = 0.3
+SUPERVISOR_MEDIUM_WEIGHT = 0.4
+CONFIDENCE_WHEN_OVERRIDDEN = 0.8
+CONFIDENCE_WHEN_BLENDED = 0.6
+CONFIDENCE_WHEN_IGNORED = 0.5
 
 # %% [markdown]
 # ## Supervisor Prompts
@@ -338,9 +365,10 @@ class SupervisorAgent:
 # %% [markdown]
 # ## Pipeline helpers
 #
-# The pipeline reuses the debate implementation from NB07 through
-# `agent_specialists.DebateAgent`. The local helpers run the research ensemble
-# and apply the supervisor's confidence-gated override.
+# The debate stage is the implementation from
+# [`07_adversarial_debate`](07_adversarial_debate.ipynb), imported from
+# `agent_specialists`. What is local to this notebook is the research phase and the rule that
+# decides how much of the supervisor's opinion reaches the final number.
 
 
 # %%
@@ -360,9 +388,17 @@ def _run_research_agents(
 
 
 # %% [markdown]
-# The final blend lets high-confidence supervisors override the debate.
-# Medium confidence receives a 40% weight; low confidence leaves the
-# post-debate probability unchanged.
+# The supervisor has seen the agents' summaries and one round of clarifying searches; the
+# agents each did their own research. So the supervisor gets a say proportional to the
+# confidence it states, and never an unconditional one: it replaces the post-debate probability
+# only at high confidence, is mixed in at `SUPERVISOR_MEDIUM_WEIGHT` at medium, and is ignored
+# at low.
+#
+# The confidence values the pipeline attaches to its own output are stated conventions, not
+# measurements. They rank three outcomes - the supervisor overrode, it contributed, it was
+# ignored - so a consumer can order forecasts by how much reconciliation they received. Nothing
+# estimates them, and [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) is
+# where a confidence that means something has to come from.
 
 
 # %%
@@ -370,16 +406,18 @@ def _blend_final_probability(
     post_debate: float,
     supervisor_artifact: SupervisorArtifact,
 ) -> tuple[float, float]:
-    """Phase 4 → final: confidence-gated supervisor override. Returns (final_p, final_confidence)."""
+    """Phase 4 to final: confidence-gated supervisor override. Returns (p_yes, confidence)."""
     final_p = post_debate
-    final_confidence = 0.5
+    final_confidence = CONFIDENCE_WHEN_IGNORED
     if supervisor_artifact.p_yes is not None and supervisor_artifact.confidence == "high":
         final_p = supervisor_artifact.p_yes
-        final_confidence = 0.8
+        final_confidence = CONFIDENCE_WHEN_OVERRIDDEN
     elif supervisor_artifact.confidence == "medium":
         if supervisor_artifact.p_yes is not None:
-            final_p = 0.6 * post_debate + 0.4 * supervisor_artifact.p_yes
-        final_confidence = 0.6
+            final_p = (1 - SUPERVISOR_MEDIUM_WEIGHT) * post_debate + (
+                SUPERVISOR_MEDIUM_WEIGHT * supervisor_artifact.p_yes
+            )
+            final_confidence = CONFIDENCE_WHEN_BLENDED
     return max(0.01, min(0.99, final_p)), final_confidence
 
 
@@ -396,9 +434,12 @@ def _forecast_one(forecaster, question: ForecastQuestion) -> ForecastResult:
     agents = _run_research_agents(
         forecaster.llm, forecaster.search, question, forecaster.n_agents, forecaster.max_steps
     )
-    summaries = "\n\n---\n\n".join(format_agent_summary(agent) for agent in agents)
+    answered = [agent for agent in agents if agent.forecast_produced]
+    if not answered:
+        raise RuntimeError(f"no agent produced a forecast for: {question.question}")
+    summaries = "\n\n---\n\n".join(format_agent_summary(agent) for agent in answered)
     aggregation = neyman_extremize(
-        [agent.p_yes for agent in agents], base=0.5, correlation=forecaster.correlation
+        [agent.p_yes for agent in answered], base=0.5, correlation=forecaster.correlation
     )
     aggregate_p = aggregation.extremized_probability or aggregation.raw_probability
     debate = DebateAgent(
@@ -414,7 +455,8 @@ def _forecast_one(forecaster, question: ForecastQuestion) -> ForecastResult:
     supervisor = SupervisorAgent(llm=forecaster.llm, search=forecaster.search).run(
         question.question, summaries, cutoff_date=cutoff
     )
-    final_p, confidence = _blend_final_probability(0.7 * aggregate_p + 0.3 * midpoint, supervisor)
+    post_debate = (1 - DEBATE_WEIGHT) * aggregate_p + DEBATE_WEIGHT * midpoint
+    final_p, confidence = _blend_final_probability(post_debate, supervisor)
     tokens = sum((agent.token_usage for agent in agents), start=TokenUsage())
     tokens = tokens + debate.token_usage + supervisor.token_usage
     return ForecastResult(
@@ -468,18 +510,18 @@ class AIAForecaster:
 
 
 # %% [markdown]
-# ## Forecast Questions
+# ## The Two Questions
 #
-# We run the full pipeline on the chapter's two pinned questions: the
-# one-directional `CHAPTER_CLEAR_QUESTION` (recession), where the agents agreed
-# closely in NB06, and the contested `CHAPTER_CONTESTED_QUESTION` (rate hike),
-# where they spread out in NB07. Running both end-to-end shows how the aggregate,
-# debate, and supervisor stages behave on an easy question and a hard one. The
-# numbers are a dated point-in-time capture (2026-06-09). By default the notebook
-# *replays* the pinned trace for each question (`RUN_LIVE = False`): it reloads
-# the saved pipeline runs and makes no API calls, so the results are stable. Set
-# `RUN_LIVE = True` (with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY`) to forecast
-# current questions live, which is not reproducible.
+# The pipeline runs end to end on both of the chapter's pinned questions:
+# `CHAPTER_CLEAR_QUESTION`, the recession question where the research agents landed close
+# together in [`06_multi_agent_research`](06_multi_agent_research.ipynb), and
+# `CHAPTER_CONTESTED_QUESTION`, the rate-hike question where they spread out in
+# [`07_adversarial_debate`](07_adversarial_debate.ipynb). Running both shows what each stage
+# does when the panel already agrees and when it does not.
+#
+# Both were unresolved on the 2026-06-09 capture date, which is what makes them honest
+# forecasts and also what makes them unscoreable. Replayed by default; `RUN_LIVE = True` with
+# `ANTHROPIC_API_KEY` and `TAVILY_API_KEY` forecasts current questions instead.
 
 # %%
 questions = [get_chapter_clear_question(), get_chapter_contested_question()]
@@ -515,7 +557,7 @@ def _run_live_questions(questions_to_run: list[ForecastQuestion]) -> tuple[list,
             n_agents=N_AGENTS,
             max_steps=MAX_STEPS,
             debate_rounds=DEBATE_ROUNDS,
-            correlation=0.3,
+            correlation=NEYMAN_CORRELATION,
         )
         result = forecaster.forecast(q)
         run = RunTrace.from_result(
@@ -526,7 +568,7 @@ def _run_live_questions(questions_to_run: list[ForecastQuestion]) -> tuple[list,
                 "n_agents": N_AGENTS,
                 "max_steps": MAX_STEPS,
                 "debate_rounds": DEBATE_ROUNDS,
-                "correlation": 0.3,
+                "correlation": NEYMAN_CORRELATION,
             },
             llm_calls=tracer.calls,
             notes="Full AIA pipeline: research, aggregate, debate, supervisor.",
@@ -598,23 +640,19 @@ print(f"Total tokens across {len(results)} questions: {grand_total.total_tokens:
 summary_df
 
 # %% [markdown]
-# ## Detailed Pipeline Trace: Question 1
+# ## The Full Trace, One Question
 #
-# The full, untruncated trace for the first question, phase by phase, rendered
-# by the `agent_observability` helpers used throughout the arc. Together they
-# show exactly how each stage moves the probability: the research agents'
-# timelines (every query, document, and rationale), the debate transcript (both
-# sides' complete arguments and cited evidence), and the supervisor's
-# reconciliation (the disagreements it flagged, the clarifying searches it ran,
-# and its final verdict). Everything here was also persisted to the JSON trace
-# saved above, so this readout can be reproduced from disk with `RunTrace.load`.
+# The untruncated record for the first question, stage by stage, through the same
+# `agent_observability` helpers used across the chapter: each research agent's queries,
+# documents and rationale; the debate transcript with both sides' complete arguments; and the
+# supervisor's reconciliation, including the disagreements it flagged, the clarifying searches
+# it ran, and the probability it returned. All of it is in the saved JSON, so this readout can
+# be rebuilt from disk with `RunTrace.load` long after the run.
 
 # %%
 r = results[0]
-display(
-    {"text/plain": (f"Question: {r.question.question}\n\n{show_agents(r.agents)}")},
-    raw=True,
-)
+print(f"Question: {r.question.question}\n")
+print(show_agents(r.agents))
 
 # %%
 print("── Aggregation ──")
@@ -642,11 +680,15 @@ else:
     print("  duration:    n/a (replayed from pinned trace)")
 
 # %% [markdown]
-# ## Pipeline probability paths
+# ## Where the Probability Went
 #
-# A line per question makes the stage-to-stage movement visible. The market
-# price is a reference point, not a pipeline stage, so it appears first and
-# uses a neutral marker.
+# One line per question, one point per stage, in the order the pipeline ran them. This is the
+# figure to read before the final number: it shows which stage moved the answer and by how
+# much, and a stage that never moves anything on any question is a stage that is being paid
+# for and not used.
+#
+# The market price appears first, as a reference rather than a stage. It was shown to the
+# research agents, so it is where they started rather than something they were tested against.
 
 # %%
 flow_rows = []
@@ -678,21 +720,7 @@ for r in results:
         flow_rows.append({"question": q_short, "phase": name, "p_yes": p})
 
 flow_df = pl.DataFrame(flow_rows)
-market_gaps = [
-    (
-        "Rate-hike" if "hike rates" in r.question.question.lower() else "Recession",
-        abs(r.final_probability - r.question.current_market_price),
-    )
-    for r in results
-    if r.question.current_market_price is not None
-]
-farthest_question, _ = max(market_gaps, key=lambda item: item[1])
 
-# %% [markdown]
-# Each line uses the same stage order. The title identifies the question whose
-# final forecast ends farthest from its market prior in the current replay.
-
-# %%
 fig, ax = plt.subplots()
 phase_order = flow_df["phase"].unique(maintain_order=True).to_list()
 for i, (question_text, group) in enumerate(flow_df.group_by("question", maintain_order=True)):
@@ -705,18 +733,24 @@ for i, (question_text, group) in enumerate(flow_df.group_by("question", maintain
         color=[COLORS["blue"], COLORS["amber"]][i],
         label=question_text[0],
     )
-ax.set_xlabel("Pipeline Stage")
-ax.set_ylabel("Probability of Yes")
+ax.set_xlabel("Pipeline stage")
+ax.set_ylabel("Probability of yes")
 ax.set_ylim(0, 1)
 add_message_title(
     ax,
-    f"{farthest_question} forecast diverges most from its market prior",
-    subtitle="Pinned 2026-06-09 pipeline replay",
+    "Most of the pipeline's movement happens before the debate",
+    subtitle="Market price shown first as the agents' starting context, not a stage",
 )
 ax.legend(loc="best")
-fig.tight_layout()
-fig.show()
-plt.show()
+show_with_alt(
+    fig,
+    "Line chart of probability against pipeline stage, one line per question, running from "
+    f"the market price through the {N_AGENTS} research agents to the aggregate, the debate "
+    "midpoint, the supervisor and the final blend. The recession line runs from "
+    f"{results[0].question.current_market_price:.0%} to {results[0].final_probability:.0%} and "
+    f"the rate-hike line from {results[1].question.current_market_price:.0%} to "
+    f"{results[1].final_probability:.0%}.",
+)
 
 # %% [markdown]
 # ## Token use
@@ -728,14 +762,20 @@ print(f"  Input tokens: {grand_total.input_tokens:,}")
 print(f"  Output tokens: {grand_total.output_tokens:,}")
 
 # %% [markdown]
-# ## State Persistence
+# ## The Record a Scoring Pipeline Would Read
 #
-# Each forecast result can be serialized for replay and evaluation in NB09.
+# Everything above lives in memory. What a scoring or monitoring system needs is a flat record
+# per question: the forecast, the cutoff, the outcome if it is known, and enough of the
+# intermediate stages to attribute a bad forecast to one of them.
+#
+# Neither of these questions had resolved when the capture was taken, so `resolved_outcome` is
+# empty and nothing here can be scored.
+# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) builds the scoring rules
+# against a panel of questions whose outcomes are known, rather than against these two.
 
 # %%
-serialized = []
-for r in results:
-    entry = {
+serialized = [
+    {
         "question": r.question.question,
         "cutoff_date": r.question.cutoff_date,
         "final_probability": r.final_probability,
@@ -748,53 +788,63 @@ for r in results:
         "tokens": r.total_token_usage.total_tokens,
         "duration_s": r.duration_seconds,
     }
-    serialized.append(entry)
+    for r in results
+]
 
-print("Serialized results (for NB09 evaluation):")
-print(json.dumps(serialized, indent=2))
+print(json.dumps(serialized[0], indent=2))
+print(f"\n({len(serialized)} records; the second has the same shape)")
 
 # %% [markdown]
-# **Interpretation**: The pipeline produces probability estimates by progressively
-# refining through four phases. Each phase adds information: agents provide
-# diverse evidence, aggregation weights by independence, debate stress-tests
-# the consensus, and the supervisor catches disagreements. With live questions,
-# these are genuine forecasts on unresolved events, not recall of known
-# outcomes.
-#
-# The next cell computes the replay-specific interpretation from the pinned
-# artifacts. Provider prices are not part of the traces, so the notebook reports
-# token use rather than attaching a stale dollar estimate.
+# The pipeline moves a probability through four stages and records where it went. What it does
+# not establish is that any stage improved the estimate. The aggregation credits the panel with
+# an independence nobody measured. The debate narrows the two sides by a few points on the
+# contested question, which is a smaller disagreement and not a more accurate one. The
+# supervisor's confidence label is its own assertion about itself. Reading the stage-to-stage
+# movement as progressive refinement is the mistake this record exists to prevent, and it is
+# why the figure above draws the whole path rather than the endpoint.
 
 # %%
 recession, rate_hike = results
 display(
     Markdown(
-        "**Replay result.** "
-        f"The recession forecast ends at {recession.final_probability:.0%} "
-        f"against a {recession.question.current_market_price:.0%} market prior. "
-        f"The rate-hike forecast ends at {rate_hike.final_probability:.0%} "
-        f"against {rate_hike.question.current_market_price:.0%}, a "
-        f"{abs(rate_hike.final_probability - rate_hike.question.current_market_price):.0%} "
-        "gap. This is disagreement, not evidence of accuracy. NB09 scores "
-        "resolved forecasts with Brier and log loss."
+        "**This replay.** "
+        f"The recession forecast ends at {recession.final_probability:.1%} and the rate-hike "
+        f"forecast at {rate_hike.final_probability:.1%}, against market prices of "
+        f"{recession.question.current_market_price:.1%} and "
+        f"{rate_hike.question.current_market_price:.1%}. Neither distance is a comparison: "
+        "both market prices were in every research agent's prompt, so the pipeline was told "
+        "where the market stood before it looked at anything. And both questions were "
+        "unresolved when the capture was taken, so neither forecast can be scored."
     )
 )
-
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Four-phase pipeline**: agents → aggregation → debate → supervisor
-#    progressively refines probability estimates
-# 2. **Supervisor role**: detects disagreements, runs clarifying searches, and
-#    only overrides with high confidence, preserving agent diversity
-# 3. **Confidence-gated override**: the supervisor's probability only replaces
-#    the ensemble when confidence is "high"
-# 4. **Token cost scales linearly** with questions and agents
-# 5. **State persistence** enables replay with different parameters and systematic
-#    evaluation (NB09)
+# 1. **The value of a pipeline is that each stage is inspectable, not that each stage improves
+#    the answer.** Four stages give four places to look when a forecast is wrong. Whether any
+#    of them made it better is a scoring question, and scoring needs resolved questions.
+# 2. **An override needs a gate, and the gate needs a rule.** The supervisor can replace the
+#    ensemble only at high stated confidence, blends at medium, and is ignored at low. Without
+#    that, one model's second opinion silently outranks three agents' evidence.
+# 3. **A stated confidence is not a measured one.** Both the supervisor's own label and the
+#    scalar this pipeline attaches to the final probability are conventions. They order
+#    outcomes; they do not estimate anything.
+# 4. **Declare every constant that moves the final number in one place.** The blend
+#    weights, the correlation and the override thresholds decide the output, and a reader who
+#    cannot find them cannot evaluate the pipeline.
+# 5. **The stage-by-stage record is the deliverable.** One JSON file per question holds every
+#    prompt, every document, every intermediate probability, and it is what makes a forecast
+#    reviewable months later.
 #
-# **Next**: [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) scores these forecasts, builds
-# calibration curves, run ablations, and implement security controls.
+# **Known limitations of what is built here.** Both questions were unresolved when captured, so
+# nothing in this notebook can be scored and no claim about accuracy is available from it. The
+# market price is passed to every research agent, so the pipeline's distance from the market
+# is not an independent comparison. The blend weights and confidence scalars are conventions,
+# and no experiment here shows the four-stage output is better than the three-agent mean.
 #
-# **Book**: Sections 24.7-24.8 cover the complete pipeline architecture and
-# production deployment considerations.
+# **Next**: [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) builds the
+# scoring rules, calibration curves and security controls a pipeline like this needs before
+# anyone acts on it.
+#
+# **Book**: Section 24.7 covers the pipeline architecture and section 24.9 the production
+# considerations that follow from it.

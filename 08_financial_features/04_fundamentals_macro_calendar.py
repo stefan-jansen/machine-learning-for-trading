@@ -357,7 +357,7 @@ lo, hi = viz_aligned["roe"].min(), viz_aligned["roe"].max()
 pad = (hi - lo) * 0.25
 fig.update_layout(
     height=420,
-    title=f"Between filings ROE holds flat, stepping only on announcement dates ({viz_symbol})",
+    title=f"Between filings ROE steps only on announcement dates ({viz_symbol})",
     showlegend=False,
 )
 fig.update_xaxes(title_text="Trading day (2024)")
@@ -650,7 +650,7 @@ fig.add_hline(y=2, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 fig.add_hline(y=-2, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 fig.update_layout(
     height=560,
-    title="The yield-curve slope, EMA-smoothed and restated as a regime-relative z-score",
+    title="The yield-curve slope, EMA-smoothed and restated as a z-score",
     showlegend=False,
 )
 fig.update_yaxes(title_text="Spread (pct points)", row=1, col=1)
@@ -918,7 +918,7 @@ fig.add_trace(
 fig.add_hline(y=H_MAX, line_dash="dash", line_color=COLORS["copper"])
 fig.update_layout(
     height=420,
-    title="Days-to-earnings counts down to zero at each announcement, then resets - AAPL",
+    title="Days-to-earnings counts down to zero at each announcement, then resets",
     showlegend=False,
 )
 fig.update_xaxes(title_text="Date")
