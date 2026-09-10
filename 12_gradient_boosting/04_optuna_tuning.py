@@ -504,8 +504,33 @@ def prepare_fold_data(fold_idx):
 
 
 # Pre-load all fold data to avoid repeated I/O
-fold_data = [prepare_fold_data(i) for i in range(n_folds)]
-print(f"Prepared {n_folds} walk-forward folds for averaged HPO")
+# %% [markdown]
+# A date is scored only when at least `IC_MIN_OBS` names are priced on it, so a fold
+# whose validation window never reaches that width cannot be scored by any
+# configuration at all. Those folds come out here, before the search, which keeps the
+# set of scored folds a property of the data. Every trial is then scored on the same
+# folds, which is what makes two trial values comparable, and a configuration that
+# cannot rank one of them has no value rather than a partial one.
+
+# %%
+IC_MIN_OBS = 10
+
+
+def fold_is_scorable(dates_va, min_obs=IC_MIN_OBS):
+    """Whether any validation date in this fold carries enough names to rank."""
+    per_date = pl.DataFrame({"timestamp": dates_va}).group_by("timestamp").len()
+    return bool((per_date["len"] >= min_obs).any())
+
+
+all_folds = [prepare_fold_data(i) for i in range(n_folds)]
+fold_data = [fold for fold in all_folds if fold_is_scorable(fold[4])]
+if len(fold_data) < len(all_folds):
+    print(
+        f"Dropped {len(all_folds) - len(fold_data)} of {len(all_folds)} folds: no "
+        f"validation date carries {IC_MIN_OBS} names, so no configuration could be "
+        "scored on them."
+    )
+print(f"Scoring the averaged objective on {len(fold_data)} walk-forward folds")
 
 
 # %%
@@ -536,13 +561,12 @@ def walkforward_objective(trial: optuna.Trial) -> float:
             callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=0)],
         )
         ic = cross_sectional_ic_mean(y_va, model.predict(X_va), dates_va, symbols_va)
-        if np.isfinite(ic):
-            ics.append(ic)
+        if not np.isfinite(ic):
+            # Same folds for every trial, or no value at all: averaging whichever folds
+            # a configuration managed to rank would score each trial on its own set.
+            raise optuna.TrialPruned
+        ics.append(ic)
 
-    # A fold whose IC is undefined carries no information about these hyperparameters.
-    # Averaging it in as minus one would move a four-fold mean by a quarter.
-    if not ics:
-        raise optuna.TrialPruned
     return float(np.mean(ics))
 
 
@@ -632,10 +656,13 @@ tuning_comparison
 #    same family produces undefined ICs on some folds, which is the same fact from the
 #    other side.
 #
-# 4. **An undefined score is not a bad score.** How a search treats a fold it cannot
-#    score decides what it selects. Scoring it at the worst possible value teaches the
-#    sampler to avoid a region for the wrong reason; dropping it, and pruning the trial
-#    when nothing is left, keeps the objective a measurement.
+# 4. **An undefined score is not a bad score, and it is not a smaller sample either.**
+#    How a search treats a fold it cannot score decides what it selects. Scoring the
+#    fold at the worst possible value teaches the sampler to avoid a region for a reason
+#    nothing measured. Averaging over the folds a configuration did manage scores every
+#    trial on its own set, which rewards ranking one easy fold and predicting a constant
+#    everywhere else. What is left is to score every trial on the same folds, and to
+#    treat a trial that cannot as having no value.
 #
 # 5. **The trial budget is a parameter, and Section 12.4 gives its range.** The book
 #    suggests starting in the low hundreds and warns that beyond that the marginal gain
