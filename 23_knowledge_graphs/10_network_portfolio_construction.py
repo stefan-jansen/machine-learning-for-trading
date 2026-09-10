@@ -85,6 +85,10 @@ getLogger("matplotlib.font_manager").setLevel("ERROR")
 # Configuration
 MIN_DATE = "2015-01-01"
 
+# A cap below 1/N is infeasible: no weight vector on N assets can sum to one while
+# every position stays under it, and equal weight is the first thing to violate it.
+if MAX_WEIGHT * N_ASSETS < 1:
+    raise ValueError(f"MAX_WEIGHT={MAX_WEIGHT} cannot hold {N_ASSETS} assets summing to one")
 print(f"Assets: {N_ASSETS}")
 print(f"Estimation days: {ESTIMATION_DAYS}")
 print(f"Evaluation days: {EVALUATION_DAYS}")
@@ -487,7 +491,7 @@ for name, weights in portfolios.items():
     )
     assert np.isclose(weights.sum(), 1.0)
     assert weights.min() >= 0
-    assert weights.max() <= 0.10 + 1e-12
+    assert weights.max() <= MAX_WEIGHT + 1e-12
 
 concentration = pl.DataFrame(concentration_rows)
 print(concentration)
