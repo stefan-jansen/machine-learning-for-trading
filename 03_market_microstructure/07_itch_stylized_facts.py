@@ -60,33 +60,30 @@
 # %%
 """Microstructure Stylized Facts — bid-ask bounce, order flow dynamics, and the liquidity spectrum."""
 
-import warnings
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import pyarrow.compute as pc
 import pyarrow.dataset as ds
-import seaborn as sns
 from IPython.display import display  # noqa: F401
 
+from data.equities.loader import load_nasdaq_itch
 from utils.paths import display_path, get_output_dir, require_chapter_inputs
+from utils.style import COLORS, show_with_alt
 
-sns.set_style("whitegrid")
-
+# %% [markdown]
+# ### Declared parameters
+#
+# `MIN_TRADES` is the floor a ticker must clear to stand for one of the three liquidity
+# tiers compared in the last section. It is declared here and explained where the tiers
+# are drawn.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-MAX_SYMBOLS = 0  # 0 = all
+MIN_TRADES = 500
 
 # %%
-# Configuration - Unified output directory structure
-# All ITCH-related outputs under a single chapter directory
-from data.equities.loader import load_nasdaq_itch
-
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
 
 # Input: Parsed messages live under the canonical loader path (not under output/).
@@ -106,7 +103,7 @@ print(f"Input directory (trade summary): {display_path(TRADING_ACTIVITY_DIR)}")
 # - `trades.parquet`: Canonical tick-level trades (for analysis)
 #
 # Using the canonical trades file ensures we include enriched E/C data
-# (executions with stock attribution added by notebook 01).
+# (executions attributed to a ticker by `05_itch_trading_activity`).
 
 # %%
 # Load trade summary and canonical trades from notebook 05
@@ -212,9 +209,10 @@ def intraday_resample(trades_df: pl.DataFrame, ticker: str, freq: str = "5m") ->
 # We use the **Add** messages (`A`/`F`) to characterize order arrivals over the
 # session and the distribution of submitted order sizes, and we report the volume
 # removed by **partial-cancel** (`X`) messages as a share of submitted volume.
-# That share is deliberately small: full order removal happens through **Delete**
-# (`D`) messages, which drive the ~96% first-event termination rate quantified in
-# `04_itch_order_lifecycle_analysis`. This notebook does not re-derive that rate.
+# That share is small by construction rather than by finding: an `X` reduces an order's
+# size, and most orders leave the book whole, through a `D` delete.
+# `04_itch_order_lifecycle_analysis` measures how often each happens; this notebook
+# reports only the partial-cancel share and does not re-derive that rate.
 
 
 # %%
@@ -222,8 +220,9 @@ def load_add_cancel_for_ticker(base_dir: Path, ticker: str) -> tuple[pl.DataFram
     """
     Load 'A' (Add), 'F' (Add with Mpid), and 'X' (Cancel) for a single ticker.
 
-    For X (cancel) messages, prefers enriched files (from notebook 01's enrichment)
-    which include the stock column. Raw X messages only have stock_locate.
+    Raw X messages carry only a numeric stock_locate, so the enriched files that
+    05_itch_trading_activity writes are preferred where they exist: they carry the
+    ticker already joined on.
 
     Returns tuple of (adds_df, cancels_df)
     """
@@ -258,7 +257,7 @@ def load_add_cancel_for_ticker(base_dir: Path, ticker: str) -> tuple[pl.DataFram
     x_folder = base_dir / "X"
 
     if enriched_x.exists():
-        # Use enriched X (has stock column from notebook 01 enrichment)
+        # The enriched X file carries the ticker; the raw one carries only stock_locate.
         try:
             df = pl.read_parquet(enriched_x)
             cancel_df = df.filter(pl.col("stock") == ticker)
@@ -303,12 +302,9 @@ def analyze_order_flow_for_ticker(base_dir: Path, ticker: str) -> tuple[dict, pl
         print(f"{ticker}: No 'Add Order' messages found.")
         return {}, pl.DataFrame()
 
-    # Track whether the cancel-rate proxy can actually be computed. Raw X
-    # messages lack a 'stock' column, so cancels can only be attributed to a
-    # ticker via the enriched X file produced by notebook 01. If that file is
-    # absent, cancel_df comes back empty and the proxy collapses to 0 — a
-    # spurious zero, not a real "no cancels" result. The summary printer
-    # surfaces this so the reader doesn't read the zero as a finding.
+    # A raw X message names no ticker, so the partial-cancel share can only be computed
+    # from the enriched file. Without it the filtered frame is empty and the share is
+    # zero for want of data rather than for want of cancels, so the printer says which.
     cancel_data_available = (base_dir / "enriched" / "X.parquet").exists()
 
     results = {"ticker": ticker, "cancel_data_available": cancel_data_available}
@@ -382,15 +378,16 @@ def print_order_flow_summary(results: dict, add_df: pl.DataFrame) -> None:
     if results.get("cancel_data_available", True):
         print(f"Partial-cancel (X) shares:{results['total_shares_canceled']:>12,.0f}")
         print(f"  as % of submitted:      {results['cancel_rate_proxy']:>10.1%}")
-        print("  (X = partial cancels only; full order removal uses D/Delete;")
-        print("   see 04_itch_order_lifecycle_analysis for the ~96% termination rate)")
+        print(
+            "  X messages reduce an order; a D removes what is left of one. See "
+            "04_itch_order_lifecycle_analysis for how often each happens."
+        )
     else:
-        # The partial-cancel figure needs the enriched X file produced by
-        # notebook 01. When it is missing, raw X parquet lacks a 'stock' column
-        # so the filtered cancel_df is empty and the total trivially equals 0.
-        # Print this loudly so the reader does not mistake the zero for a finding.
-        print(f"Partial-cancel (X) shares:{'N/A':>12}")
-        print("  (enriched/X.parquet not found; re-run notebook 01 to enable this figure)")
+        print(f"Partial-cancel (X) shares:{'not available':>14}")
+        print(
+            "  enriched/X.parquet is absent, so cancels cannot be attributed to a "
+            "ticker. Run 05_itch_trading_activity to build it."
+        )
 
     if "avg_order_size" in results:
         print("\nOrder Size Statistics:")
@@ -425,14 +422,16 @@ def plot_order_flow(add_df: pl.DataFrame, ticker: str) -> None:
             # midnight ET (the exchange's local clock); strftime renders them directly.
             hour_labels = [ts.strftime("%H:%M") for ts in arrivals_pd["timestamp"]]
             fig, ax = plt.subplots(figsize=(10, 4))
-            ax.bar(range(len(arrivals_pd)), arrivals_pd["count"], color="steelblue")
+            ax.bar(range(len(arrivals_pd)), arrivals_pd["count"], color=COLORS["blue"])
             ax.set_xticks(range(len(arrivals_pd)))
             ax.set_xticklabels(hour_labels, rotation=45, ha="right")
-            ax.set_title(f"{ticker} - Order Arrivals by Hour")
-            ax.set_xlabel("Hour of session (ET)")
-            ax.set_ylabel("Number of Orders")
-            plt.tight_layout()
-            plt.show()
+            ax.set_title(f"{ticker}: orders submitted per hour")
+            ax.set_xlabel("Hour of session (US/Eastern)")
+            ax.set_ylabel("Orders submitted")
+            show_with_alt(
+                fig,
+                f"A bar chart for {ticker} with one bar per hour of the trading session, labelled with clock times along the horizontal axis and counting the add messages submitted in that hour on the vertical axis.",
+            )
 
     # Top order sizes
     if "shares" in add_df.columns:
@@ -537,7 +536,7 @@ if bounce_result and bounce_result["autocorrs"]:
 
     ax.set_xlabel("Lag (seconds)")
     ax.set_ylabel("Autocorrelation")
-    ax.set_title(f"Negative lag-1 autocorrelation is the bid-ask bounce — {high_sym}")
+    ax.set_title(f"{high_sym}: autocorrelation of trade-price returns by lag")
     ax.set_xticks(lags)
 
     # Add annotation
@@ -550,13 +549,17 @@ if bounce_result and bounce_result["autocorrs"]:
         color="red",
     )
 
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        f"A bar chart of the autocorrelation of {high_sym}'s trade-price returns against lag, with a horizontal line at zero and an arrow annotating the value at lag one. The lag-one bar is the one the surrounding text is about.",
+    )
 
-    print(f"\nBid-Ask Bounce Analysis for {high_sym}:")
-    print(f"  Lag-1 autocorrelation: {autocorrs[0]:.4f}")
-    print("  (Negative value confirms bounce between bid and ask)")
-    print("\n  Implication: Use mid-price returns, not trade-price returns!")
+    print(f"Trade-price return autocorrelation for {high_sym}:")
+    print(f"  Lag 1: {autocorrs[0]:.4f}")
+    print(
+        "  A negative value at lag 1 is what the bounce between bid and ask produces; a "
+        "return series built on mid prices does not carry it."
+    )
 
 
 # %% [markdown]
@@ -633,12 +636,15 @@ def compare_liquidity_metrics(trades_df: pl.DataFrame, tickers: list[str]) -> pl
     return pl.DataFrame(results)
 
 
+# %% [markdown]
+# The three tiers are drawn from names active enough to form one-minute bars. The
+# session's long tail runs to thousands of tickers with a handful of prints each, and a
+# ticker that printed twice has no intraday shape to compare: its volatility estimate
+# would be a statement about two moments rather than about the stock. `MIN_TRADES` is
+# the floor, and the tiers are the most active, the middle and the least active name
+# above it.
+
 # %%
-# Select stocks spanning the liquidity spectrum. We draw the tiers from the
-# *tradeable* universe — names with enough activity to form intraday bars —
-# because the long tail of the ITCH session (thousands of tickers with only a
-# handful of prints) cannot be resampled to one-minute bars and would drop out.
-MIN_TRADES = 500  # floor that guarantees each tier resamples to many 1-min bars
 if trade_summary is not None:
     tradeable = trade_summary.filter(pl.col("trade_count") >= MIN_TRADES)
     n_pool = len(tradeable)
@@ -690,30 +696,32 @@ if len(liquidity_comparison) > 0:
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    axes[0, 0].bar(tickers, volumes, color="steelblue", alpha=0.7)
+    axes[0, 0].bar(tickers, volumes, color=COLORS["blue"], alpha=0.7)
     axes[0, 0].set_yscale("log")
-    axes[0, 0].set_ylabel("Total Volume (shares, log scale)")
-    axes[0, 0].set_title("Daily Volume by Liquidity Tier")
+    axes[0, 0].set_ylabel("Shares traded (log scale)")
+    axes[0, 0].set_title("Shares traded over the session")
     axes[0, 0].tick_params(axis="x", rotation=45)
 
-    axes[0, 1].bar(tickers, volatilities, color="indianred", alpha=0.7)
-    axes[0, 1].set_ylabel("1-minute Return Volatility (bps)")
-    axes[0, 1].set_title("1-Minute Return Volatility by Tier")
+    axes[0, 1].bar(tickers, volatilities, color=COLORS["negative"], alpha=0.7)
+    axes[0, 1].set_ylabel("Standard deviation of 1-minute returns (bps)")
+    axes[0, 1].set_title("Volatility of one-minute returns")
     axes[0, 1].tick_params(axis="x", rotation=45)
 
-    axes[1, 0].bar(tickers, trade_sizes, color="green", alpha=0.7)
-    axes[1, 0].set_ylabel("Average Trade Size (shares)")
-    axes[1, 0].set_title("Trade Size by Liquidity Tier")
+    axes[1, 0].bar(tickers, trade_sizes, color=COLORS["positive"], alpha=0.7)
+    axes[1, 0].set_ylabel("Mean trade size (shares)")
+    axes[1, 0].set_title("Mean size of a trade")
     axes[1, 0].tick_params(axis="x", rotation=45)
 
-    axes[1, 1].bar(tickers, price_ranges, color="orange", alpha=0.7)
-    axes[1, 1].set_ylabel("Daily Price Range (%)")
-    axes[1, 1].set_title("Price Range (Impact Proxy)")
+    axes[1, 1].bar(tickers, price_ranges, color=COLORS["amber"], alpha=0.7)
+    axes[1, 1].set_ylabel("High minus low, as a share of the low (%)")
+    axes[1, 1].set_title("Range the price covered over the session")
     axes[1, 1].tick_params(axis="x", rotation=45)
 
-    plt.suptitle("The Liquidity Spectrum: How Microstructure Varies Across Stocks", fontsize=14)
-    plt.tight_layout()
-    plt.show()
+    fig.suptitle("Four measures of trading, for one ticker from each liquidity tier", fontsize=14)
+    show_with_alt(
+        fig,
+        "Four bar charts in a two-by-two grid, each with one bar per ticker and the same tickers along every horizontal axis. Clockwise from the top left: shares traded over the session on a logarithmic vertical axis, the standard deviation of one-minute returns in basis points, the range the price covered as a percentage, and the mean size of a trade in shares. Only the first uses a logarithmic scale.",
+    )
 
 # %%
 # Liquidity ratio summary
@@ -722,42 +730,44 @@ if len(liquidity_comparison) >= 2:
     values = liquidity_comparison["total_value"].to_numpy()
     value_ratio = values[0] / values[-1] if values[-1] > 0 else float("inf")
 
-    print("Key Insight:")
-    print(f"  Share-volume ratio (most vs least active): {share_ratio:,.0f}x")
-    print(f"  Dollar-value ratio (most vs least active):  {value_ratio:,.0f}x")
-    print("\n  → Turnover spans orders of magnitude across the spectrum, but 1-minute")
-    print("    return volatility does not track liquidity monotonically — it is driven")
-    print("    by name-specific factors and spikes only at the micro-cap extreme.")
-    print("  → Execution-cost magnitudes motivate the price impact analysis in Chapter 19.")
+    print("Most active against least active, among the tickers compared above:")
+    print(f"  Ratio of shares traded:      {share_ratio:,.0f}x")
+    print(f"  Ratio of dollars traded:     {value_ratio:,.0f}x")
+    print(
+        "\nCompare those two ratios against the volatility panel above. Turnover and "
+        "volatility are separate axes: a name can be thinly traded and quiet, or thinly "
+        "traded and violent, and the panel says which of these are which."
+    )
 
 # %% [markdown]
 # ## 6. Key Takeaways
 #
 # ### Market Microstructure Insights
 #
-# 1. **Volume Concentration**: A small number of tickers account for most trading activity.
-#    The top 50 stocks account for ~46% of total dollar volume (see `05_itch_trading_activity`).
+# 1. **Trade-price returns carry a mechanical negative autocorrelation.** Consecutive
+#    trades alternate between hitting the bid and lifting the ask, so the price series
+#    zig-zags across the spread whether or not the underlying value moved. A model fitted
+#    on trade-price returns learns that zig-zag first. Mid-price returns do not have it,
+#    which is why the rest of the book uses them.
+# 2. **Turnover and volatility are separate axes.** The four-panel comparison puts them
+#    side by side for the same tickers precisely so that neither can stand in for the
+#    other; a liquidity tier is not a volatility tier.
+# 3. **Plot volume on a log scale and returns on a linear one.** Shares traded spans
+#    orders of magnitude across a cross-section and a one-minute return does not, so one
+#    scale cannot serve both.
+# 4. **`X` and `D` remove size differently.** An `X` reduces an order; a `D` removes what
+#    is left of it. Reporting cancelled volume from `X` alone counts a small part of what
+#    leaves the book, and `04_itch_order_lifecycle_analysis` is where the whole picture
+#    is measured.
 #
-# 2. **Intraday U-Shape**: Volume and trading activity follow a characteristic
-#    pattern: high at the open and close, low at midday. This affects optimal
-#    execution timing.
+# ### Known limitations
 #
-# 3. **Bid-Ask Bounce**: Trade prices bounce between bid and ask, creating negative
-#    autocorrelation at tick level. Use mid-price returns for ML features.
-#
-# 4. **Liquidity Spectrum**: Turnover spans orders of magnitude across the tiers in
-#    this sample; dollar value runs into the thousands-fold range from the most to
-#    least active name (see the comparison above). Intraday return volatility, by
-#    contrast, does not track liquidity monotonically: the most active name is more
-#    volatile than the mid-tier, and only the micro-cap extreme stands out. Volatility
-#    reflects name-specific factors, not liquidity alone. Execution-cost magnitudes
-#    across liquidity tiers are not estimated here; price-impact modelling is the
-#    subject of Chapter 19.
-#
-# 5. **Order removal**: Partial-cancel (`X`) messages account for only a small
-#    share of submitted volume (0.3% for the most active name in this sample).
-#    Full order removal happens through Delete (`D`) messages, which drive the
-#    ~96% first-event termination rate quantified in `04_itch_order_lifecycle_analysis`.
+# - One venue, one session, and three tickers standing for their tiers. These are
+#   illustrations of regularities established elsewhere, not evidence for them.
+# - The autocorrelation is computed on one ticker's trade sequence, so it says nothing
+#   about how the effect varies with spread or tick size.
+# - Execution costs are not estimated anywhere in this notebook. The price-range panel is
+#   a range, not an impact estimate; Chapter 19 models impact.
 #
 # ### Bridge to Later Chapters
 #
@@ -769,7 +779,7 @@ if len(liquidity_comparison) >= 2:
 #
 # ### Next Steps
 #
-# - **`04_itch_order_lifecycle_analysis`**: Deep dive into why ~96% of orders cancel
+# - **`04_itch_order_lifecycle_analysis`**: how often orders are withdrawn, and how fast
 # - **`02_itch_lob_reconstruction`**: Build the LOB from message events
 # - **`16_itch_information_bars`**: Convert ticks to ML-ready bars
 #
