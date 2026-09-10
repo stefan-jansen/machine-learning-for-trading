@@ -956,7 +956,7 @@ ax.set_yticks(range(len(top15)))
 ax.set_yticklabels(top15["feature"].to_list())
 ax.invert_yaxis()
 ax.set_xlabel("Mean |Coefficient|")
-ax.set_title("Mean absolute coefficient by feature, L1 against L2")
+ax.set_title("Mean absolute L1 coefficient by feature, colored by sign")
 ax.legend(
     handles=[
         Patch(color=COLORS["blue"], label="Positive mean coefficient"),
