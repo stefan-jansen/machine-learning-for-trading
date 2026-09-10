@@ -57,14 +57,21 @@ import gc
 import os
 import time
 
+# %% [markdown]
+# ### Declared parameters
+#
+# `BENCHMARK_SCALE` selects the panel size. The production setting is the one §2.4 quotes,
+# and CI overrides it to the small scale through Papermill; `ACTIVE_SCALE` and the printed
+# row count below say which one produced the numbers on the page.
+
 # %% tags=["parameters"]
-# Production scale follows chapter §2.4 prose ("L scale, ~1 M OHLCV rows,
-# 64 MB in-memory in Polars"). Override via Papermill for CI: BENCHMARK_SCALE = "S".
 BENCHMARK_SCALE = "L"
 
+# %% [markdown]
+# `utils.storage_benchmarks` reads the scale from the environment when it is imported, so
+# the variable has to be set before the import rather than passed to a function afterwards.
+
 # %%
-# storage_benchmarks reads BENCHMARK_SCALE at import time, so the env var
-# must be set before the import below.
 os.environ["BENCHMARK_SCALE"] = BENCHMARK_SCALE
 
 import pandas as pd
@@ -91,7 +98,7 @@ from utils.storage_benchmarks import (
     time_write,
     validate_result,
 )
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 OUTPUT_DIR = get_output_dir(2, "storage_benchmark")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -361,11 +368,7 @@ print(f"Feather raw handle (memory-mapped, not materialized): {raw_handle_time:.
 fig = make_subplots(
     rows=1,
     cols=3,
-    subplot_titles=[
-        "Read time (lower is better)",
-        "Write time (lower is better)",
-        "File size (smaller is better)",
-    ],
+    subplot_titles=["Read", "Write", "Size"],
     horizontal_spacing=0.12,
 )
 
@@ -418,8 +421,9 @@ fig.update_xaxes(title_text="Seconds (log)", row=1, col=2, type="log")
 fig.update_xaxes(title_text="MB", row=1, col=3)
 
 _scale_word = {"S": "Small", "M": "Medium", "L": "Large"}.get(ACTIVE_SCALE, ACTIVE_SCALE)
+print(f"Benchmark panel: {_scale_word} scale, {total_rows:,} rows")
 fig.update_layout(
-    title_text=f"File-Format Comparison ({_scale_word} scale, {total_rows:,} rows)",
+    title_text="Read time, write time and file size by format",
     height=400,
     showlegend=False,
     paper_bgcolor=COLORS["bg_light"],
@@ -428,20 +432,34 @@ fig.update_layout(
     margin=dict(l=60, r=80, t=70, b=50),
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three horizontal-bar panels, one per format in each. The left and middle plot read and "
+    "write time on logarithmic axes, each bar labelled with its time in seconds and the "
+    "bars sorted shortest at the bottom. The right plots file size in megabytes on a linear "
+    "axis, each bar labelled and sorted the same way. The ordering of the formats differs "
+    "between the three panels.",
+)
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# - **Memory-mapping is not a read.** The Feather raw handle returns in
-#   microseconds because no data has been touched. The materialized read is
-#   the apples-to-apples comparison.
-# - **Columnar projection multiplies wins.** Reading two columns versus all
-#   nine is roughly proportional to the column-count ratio for Parquet and
-#   Feather; CSV barely benefits because every row must be parsed in full.
-# - **Compression collapses on disk, not in RAM.** Parquet writes the panel
-#   at roughly a quarter of the CSV size; the in-memory footprint after
-#   read-back is identical because both formats land in Arrow buffers.
+# - **Memory-mapping is not a read.** A raw Feather handle returns almost immediately
+#   because nothing has been touched yet; the cost arrives when a page is first accessed.
+#   The materialized read is the comparison that puts all four formats on one footing, and
+#   it is the one plotted above.
+# - **No format wins all three panels.** The fastest to read, the fastest to write and the
+#   smallest on disk are not the same format, so the choice is a trade rather than a
+#   ranking, and which axis binds depends on whether the panel is written once and read
+#   constantly or moved across a network.
+# - **Column projection is what makes the columnar formats fast, and CSV cannot have it.**
+#   Reading a couple of columns instead of the whole schema costs roughly in proportion to
+#   the columns asked for on Parquet and Feather. CSV barely benefits, because reaching a
+#   later field on a row means parsing every field before it.
+# - **Compression shrinks the file, not the frame.** Parquet writes the panel at a fraction
+#   of the CSV size, and the in-memory footprint after read-back is identical, because both
+#   land in the same Arrow buffers. A format choice is a decision about disk and network,
+#   and it does not change what the data costs once it is loaded.
 # - **HDF5 fixed format is single-shot.** It can read or write the entire
 #   panel but offers no column projection.
 #
