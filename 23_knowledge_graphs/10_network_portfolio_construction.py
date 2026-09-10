@@ -72,6 +72,9 @@ EVALUATION_DAYS = 252
 # score. Section 6 measures what it does to the weights.
 CENTRALITY_FLOOR = 0.01
 MAX_WEIGHT = 0.10
+# A date is a market date once this many symbols report on it. Section 2 uses it to
+# drop the stray provider rows dated to holidays; a subsampled panel needs a lower one.
+MIN_SYMBOLS_PER_DATE = 1_000
 SEED = 42
 
 # %%
@@ -116,12 +119,15 @@ print(f"Unique symbols: {df['symbol'].n_unique()}")
 market_dates = (
     df.group_by("timestamp")
     .agg(pl.col("symbol").n_unique().alias("symbols_observed"))
-    .filter(pl.col("symbols_observed") >= 1_000)
+    .filter(pl.col("symbols_observed") >= MIN_SYMBOLS_PER_DATE)
     .sort("timestamp")["timestamp"]
 )
 required_dates = ESTIMATION_DAYS + EVALUATION_DAYS
 if len(market_dates) < required_dates + 1:
-    raise ValueError(f"Need {required_dates + 1} broad-market dates, found {len(market_dates)}")
+    raise ValueError(
+        f"Need {required_dates + 1} dates carrying {MIN_SYMBOLS_PER_DATE} symbols or more, "
+        f"found {len(market_dates)}"
+    )
 
 return_dates = market_dates.tail(required_dates + 1)
 analysis_dates = return_dates.tail(required_dates)

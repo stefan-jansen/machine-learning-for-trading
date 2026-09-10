@@ -1120,6 +1120,17 @@
   docker_env: ml4t+neo4j
   timeout: 600
 23_knowledge_graphs/10_network_portfolio_construction:
+  # The test panel carries 56 tickers, so the production universe of 100 names and
+  # the 1,000-symbol market-date threshold both leave it with nothing: measured, the
+  # date filter returned 0 dates and the notebook raised. These four numbers size the
+  # same construction down to the fixture. Measured on a local replica of the fixture
+  # (production us_equities filtered to tests/create_test_data.py's ticker list):
+  # 813 dates clear a 40-symbol threshold, and the notebook runs clean in 7s.
+  parameters:
+    ESTIMATION_DAYS: 120
+    EVALUATION_DAYS: 60
+    MIN_SYMBOLS_PER_DATE: 40
+    N_ASSETS: 25
   timeout: 300
 23_knowledge_graphs/04_rag_comparison_benchmark:
   # Section 4 asserts `torch.cuda.is_available()`, then constructs the SentenceTransformer
