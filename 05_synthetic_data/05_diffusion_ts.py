@@ -1475,12 +1475,13 @@ for key, value in stats_results.items():
 # is well matched. Correlation error tests whether cross-asset dependence survived, and
 # autocorrelation error whether the weak serial dependence of daily returns did.
 #
-# Read each mean against the range printed beside it, not on its own. Four of the
-# printed numbers are means: the KS statistic, the mean error, the standard-deviation
-# error and the autocorrelation error each average over assets, while the correlation
-# error averages the absolute entries of the two correlation matrices, so it averages
-# over asset pairs. Three are not means. `n_assets` counts the assets, and the extreme
-# KS and autocorrelation values are each one asset's.
+# Read each mean against the range printed beside it, not on its own. Five of the nine
+# printed numbers are means. Four of those - the KS statistic, the mean error, the
+# standard-deviation error and the autocorrelation error - average over assets, while
+# the correlation error averages the absolute difference between corresponding entries
+# of the real and synthetic correlation matrices, so it averages over asset pairs. The
+# other four are not means: `n_assets` counts the assets, and the two extreme KS values
+# and the largest autocorrelation error are each one asset's.
 #
 # All of these errors are absolute, so a small mean cannot come from large errors
 # cancelling; it comes from many small ones diluting a few large ones. The extreme
