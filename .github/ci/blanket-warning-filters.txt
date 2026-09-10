@@ -84,13 +84,6 @@
 20_strategy_synthesis/00_holdout_predictions.py
 20_strategy_synthesis/03_signal_quality.py
 20_strategy_synthesis/04_signal_to_strategy.py
-22_rag_financial_research/01_sec_filing_pipeline.py
-22_rag_financial_research/03_hybrid_retrieval.py
-22_rag_financial_research/04_ragas_evaluation.py
-22_rag_financial_research/05_10k_rag_assistant.py
-22_rag_financial_research/06_esg_rag_vs_finetune.py
-22_rag_financial_research/07_institutional_holdings_graph.py
-22_rag_financial_research/08_rag_security.py
 case_studies/cme_futures/01_feasibility_analysis.py
 case_studies/cme_futures/02_labels.py
 case_studies/cme_futures/03_financial_features.py
