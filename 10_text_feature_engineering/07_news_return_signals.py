@@ -72,7 +72,6 @@ from utils.style import COLORS, FIGSIZE, show_with_alt
 # embedding pass below does not need it. `spearmanr` warns when a date's cross-section is
 # constant, which the IC code drops explicitly a few cells down.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-warnings.filterwarnings("ignore", message=".*input array is constant.*", module="scipy")
 
 pl.Config.set_fmt_str_lengths(80)
 
@@ -643,21 +642,15 @@ def score_sentiment_finbert(
     all_scores = []
     all_confidences = []
 
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
+    # `batch_size` goes to the pipeline rather than into a slicing loop here. Handed a plain
+    # list, the pipeline processes it one item at a time and says so on every GPU run; given
+    # the batch size it collates the batches itself, which is what the warning asks for.
+    for i, result in enumerate(classifier(texts, batch_size=batch_size)):
+        all_scores.append(label_to_score.get(result["label"], 0.0))
+        all_confidences.append(result["score"])
 
-        # FinBERT returns label and score
-        results = classifier(batch)
-
-        for result in results:
-            label = result["label"]
-            confidence = result["score"]
-            polarity = label_to_score.get(label, 0.0)
-            all_scores.append(polarity)
-            all_confidences.append(confidence)
-
-        if (i + batch_size) % 5000 == 0:
-            print(f"  Sentiment scored: {min(i + batch_size, len(texts)):,} / {len(texts):,}")
+        if (i + 1) % 5000 == 0:
+            print(f"  Sentiment scored: {i + 1:,} / {len(texts):,}")
 
     return np.array(all_scores), np.array(all_confidences)
 
@@ -1125,8 +1118,23 @@ if len(factor_with_returns) > 100:
     # shows up when something tries to use it as one.
     for (trade_date,), group in factor_with_returns.group_by("trade_date_str"):
         if len(group) >= 10:  # Minimum stocks per day
-            ic1, _ = spearmanr(group["news_surprise"], group["fwd_ret_1d"])
-            ic2, _ = spearmanr(group["weighted_surprise"], group["fwd_ret_1d"])
+            # A date whose signal takes one value across the whole cross-section has no
+            # rank correlation to compute. Skipping it is the same as dropping the NaN
+            # afterwards and does not make scipy warn about a case already handled.
+            constant_surprise = group["news_surprise"].n_unique() < 2
+            constant_weighted = group["weighted_surprise"].n_unique() < 2
+            if constant_surprise and constant_weighted:
+                continue
+            ic1 = (
+                np.nan
+                if constant_surprise
+                else spearmanr(group["news_surprise"], group["fwd_ret_1d"])[0]
+            )
+            ic2 = (
+                np.nan
+                if constant_weighted
+                else spearmanr(group["weighted_surprise"], group["fwd_ret_1d"])[0]
+            )
             if not np.isnan(ic1):
                 ic_surprise.append({"timestamp": trade_date, "ic": ic1})
             if not np.isnan(ic2):

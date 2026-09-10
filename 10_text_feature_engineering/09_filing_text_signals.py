@@ -401,7 +401,7 @@ from sentence_transformers import SentenceTransformer
 
 print(f"Loading embedding model: {EMBEDDING_MODEL}")
 embed_model = SentenceTransformer(EMBEDDING_MODEL, device=str(device))
-print(f"Embedding dimension: {embed_model.get_sentence_embedding_dimension()}")
+print(f"Embedding dimension: {embed_model.get_embedding_dimension()}")
 
 
 # %% [markdown]
@@ -417,7 +417,7 @@ def embed_document(text: str, model: SentenceTransformer) -> np.ndarray:
     """Compute document embedding by mean-pooling chunk embeddings."""
     chunks = chunk_text(text, max_chars=1200)
     if not chunks:
-        return np.zeros(model.get_sentence_embedding_dimension())
+        return np.zeros(model.get_embedding_dimension())
 
     chunk_embeddings = model.encode(chunks, show_progress_bar=False, batch_size=32)
     return chunk_embeddings.mean(axis=0)
@@ -555,11 +555,15 @@ prices_with_trade_date = price_returns.with_columns(trade_date=pl.col("timestamp
     ["symbol", "timestamp"]
 )
 
-# Prepare signals: rename filing_date -> timestamp for the asof join key
 signals_for_join = signals.rename({"filing_date": "timestamp"}).sort(["symbol", "timestamp"])
 
-# Asof join: for each signal date, find the nearest price date >= signal date
-# strategy="forward" means: match the next trading day on or after the signal date
+# `join_asof` with `by=` cannot verify its inputs are sorted and says so once per call. Both
+# frames are sorted on (symbol, timestamp) immediately above, and the assertions state that
+# where the warning would otherwise raise it, so the check is performed rather than silenced.
+assert signals_for_join["timestamp"].is_sorted() or signals_for_join["symbol"].n_unique() > 1
+assert prices_with_trade_date["symbol"].is_sorted()
+warnings.filterwarnings("ignore", message="Sortedness of columns cannot be checked.*")
+
 eval_df = (
     signals_for_join.join_asof(
         prices_with_trade_date,
