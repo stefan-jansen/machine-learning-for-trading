@@ -637,28 +637,28 @@ def compare_liquidity_metrics(trades_df: pl.DataFrame, tickers: list[str]) -> pl
 
 
 # %% [markdown]
-# The three tiers are drawn from names active enough to form one-minute bars. The
-# session's long tail runs to thousands of tickers with a handful of prints each, and a
-# ticker that printed twice has no intraday shape to compare: its volatility estimate
-# would be a statement about two moments rather than about the stock. `MIN_TRADES` is
-# the floor, and the tiers are the most active, the middle and the least active name
-# above it.
+# The comparison is drawn from names active enough to form one-minute bars. The session's
+# long tail runs to thousands of tickers with a handful of prints each, and a ticker that
+# printed twice has no intraday shape to compare: its volatility estimate would be a
+# statement about two moments rather than about the stock.
+#
+# Above the `MIN_TRADES` floor, five names are taken at even positions in the ranking by
+# traded value: the top, the three quartiles, and the bottom. Five spans the range while
+# staying readable on a bar chart, and taking them by position rather than by name means
+# the comparison follows the data rather than a list someone wrote down. Where fewer than
+# five clear the floor, whatever cleared it is compared instead.
 
 # %%
-if trade_summary is not None:
-    tradeable = trade_summary.filter(pl.col("trade_count") >= MIN_TRADES)
-    n_pool = len(tradeable)
-    if n_pool >= 5:
-        # `tradeable` is sorted by total_value descending; span it evenly.
-        tier_idx = [0, n_pool // 4, n_pool // 2, 3 * n_pool // 4, n_pool - 1]
-        spectrum_tickers = [tradeable["ticker"][i] for i in tier_idx]
-    elif n_pool > 0:
-        spectrum_tickers = tradeable["ticker"].to_list()
-    else:
-        spectrum_tickers = trade_summary["ticker"].to_list()
+tradeable = trade_summary.filter(pl.col("trade_count") >= MIN_TRADES)
+n_pool = len(tradeable)
+if n_pool >= 5:
+    # `tradeable` is sorted by traded value, descending; take five even positions in it.
+    tier_idx = [0, n_pool // 4, n_pool // 2, 3 * n_pool // 4, n_pool - 1]
+    spectrum_tickers = [tradeable["ticker"][i] for i in tier_idx]
+elif n_pool > 0:
+    spectrum_tickers = tradeable["ticker"].to_list()
 else:
-    # Fallback: well-known tickers across the liquidity spectrum
-    spectrum_tickers = ["AAPL", "MSFT", "INTC", "AMD", "UGA"]
+    spectrum_tickers = trade_summary["ticker"].to_list()
 
 liquidity_comparison = compare_liquidity_metrics(all_trades, spectrum_tickers)
 
@@ -713,14 +713,14 @@ if len(liquidity_comparison) > 0:
     axes[1, 0].tick_params(axis="x", rotation=45)
 
     axes[1, 1].bar(tickers, price_ranges, color=COLORS["amber"], alpha=0.7)
-    axes[1, 1].set_ylabel("High minus low, as a share of the low (%)")
-    axes[1, 1].set_title("Range the price covered over the session")
+    axes[1, 1].set_ylabel("5th-to-95th percentile spread of prices, over the median (%)")
+    axes[1, 1].set_title("How far the price ranged over the session")
     axes[1, 1].tick_params(axis="x", rotation=45)
 
     fig.suptitle("Four measures of trading, for one ticker from each liquidity tier", fontsize=14)
     show_with_alt(
         fig,
-        "Four bar charts in a two-by-two grid, each with one bar per ticker and the same tickers along every horizontal axis. Clockwise from the top left: shares traded over the session on a logarithmic vertical axis, the standard deviation of one-minute returns in basis points, the range the price covered as a percentage, and the mean size of a trade in shares. Only the first uses a logarithmic scale.",
+        "Four bar charts in a two-by-two grid, each with one bar per ticker and the same tickers along every horizontal axis. Clockwise from the top left: shares traded over the session on a logarithmic vertical axis, the standard deviation of one-minute returns in basis points, the fifth-to-ninety-fifth percentile spread of prices as a percentage of the median, and the mean size of a trade in shares. Only the first uses a logarithmic scale.",
     )
 
 # %%
@@ -762,8 +762,10 @@ if len(liquidity_comparison) >= 2:
 #
 # ### Known limitations
 #
-# - One venue, one session, and three tickers standing for their tiers. These are
+# - One venue, one session, and five tickers spanning the activity ranking. These are
 #   illustrations of regularities established elsewhere, not evidence for them.
+# - The price-range panel is a percentile spread over the median, not a high-minus-low
+#   range: it describes where prices sat rather than how far the extremes reached.
 # - The autocorrelation is computed on one ticker's trade sequence, so it says nothing
 #   about how the effect varies with spread or tick size.
 # - Execution costs are not estimated anywhere in this notebook. The price-range panel is
