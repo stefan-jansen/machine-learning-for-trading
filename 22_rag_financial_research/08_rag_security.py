@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -19,46 +20,64 @@
 #
 # **Chapter 22: RAG for Financial Research** (Section 22.7)
 #
-# This notebook demonstrates attack and defense evaluation for document-grounded
-# finance assistants, a critical concern when RAG systems operate on untrusted
-# or adversarial document corpora.
+# A retrieval system that answers from documents will sooner or later retrieve
+# a document written by someone who wants it to do something else. This
+# notebook builds five fixtures covering four ways that goes wrong - an
+# instruction hidden in a retrieved chunk, a fabricated figure in an untrusted
+# one, an attempt to trigger an action, and a citation to a chunk that was
+# never retrieved - and runs two answering policies over them.
 #
-# **Learning Objectives**:
-# - Define structured attack cases covering prompt injection, retrieval poisoning,
-#   and unsupported citations
-# - Implement baseline vs defended answering policies with trust-aware filtering
-# - Quantify security via measurable metrics (unsafe action rate, unsupported
-#   claim rate, citation failure rate, abstention rate)
-# - Visualize security improvements from layered defense controls
+# **What is measured.** The policies are Python functions and the fixtures are
+# literals, so no model runs and the rates below are properties of this code.
+# What they establish is that the defended policy's behaviour follows from its
+# rules rather than from knowing which fixture is which - the first thing to
+# check about any defense evaluation, and something the earlier version of this
+# notebook did not do.
 #
-# **Book Reference**: Chapter 22, Section 22.7 (Evaluation and Failure Modes)
+# **Learning objectives**
 #
-# **Prerequisites**: Familiarity with RAG pipelines (Sections 22.1-22.6);
-# `04_ragas_evaluation` for complementary retrieval quality metrics.
+# After working through this notebook you will be able to:
+#
+# - Write attack fixtures that separate the failure modes rather than bundling
+#   them.
+# - Say what trust-based filtering catches that injection detection does not,
+#   from a fixture where only one of them fires.
+# - Recognise a defense evaluation whose defended policy reads the answer key.
+# - Read an abstention rate as a cost rather than as a score.
+#
+# **Book reference**: Section 22.7, on evaluation and failure modes.
+#
+# **Prerequisites**: the RAG pipeline of sections 22.1 to 22.6, and
+# [`04_ragas_evaluation`](04_ragas_evaluation.ipynb) for the retrieval-quality
+# metrics these sit beside.
 
 # %% [markdown]
 # ## 1. Setup
-#
-# The setup fixes the adversarial fixture budget so security comparisons remain
-# reproducible while still exercising injection, poisoning, and refusal logic.
 
 # %%
 """RAG Security - Attack and defense evaluation for document-grounded finance assistants."""
 
 import re
-import warnings
 from dataclasses import dataclass
-
-warnings.filterwarnings("ignore")
 
 import plotly.graph_objects as go
 import polars as pl
 
 from data import load_sec_filings
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% [markdown]
+# `MAX_ATTACK_CASES` is a cap that must not bind: every attack class has to be
+# present or the summary compares two policies on a different threat set, so a
+# value between one and the fixture count raises rather than dropping a class.
+#
+# `SUPPORT_THRESHOLD` decides when an answer counts as unsupported by its
+# trusted evidence. It is the only threshold here and it moves one column of
+# the summary.
 
 # %% tags=["parameters"]
 MAX_ATTACK_CASES = 0
+SUPPORT_THRESHOLD = 0.4
 
 # %%
 print(f"Attack case limit: {MAX_ATTACK_CASES if MAX_ATTACK_CASES > 0 else 'all'}")
@@ -72,8 +91,8 @@ print(f"Attack case limit: {MAX_ATTACK_CASES if MAX_ATTACK_CASES > 0 else 'all'}
 # untrusted chunks), action injection (attempts to trigger unauthorized system
 # operations), and unsupported citation identifiers.
 #
-# **Interpretation**: The attack-case count matters because a security notebook
-# is only as credible as the adversarial coverage it actually runs.
+# Each case names its own failure mode, so a policy that handles three of them
+# and not the fourth shows up as a row rather than as a slightly worse average.
 
 # %% [markdown]
 # ### Define Attack Case Structure
@@ -219,8 +238,10 @@ print(f"Attack cases: {len(ATTACK_CASES)}")
 # content indiscriminately, while the **defended** policy applies layered
 # controls: injection detection, trust filtering, and evidence gating.
 #
-# **Interpretation**: The fixture summary establishes the threat workload. The
-# result should be read as a policy stress test, not just as a toy QA example.
+# The interesting fixture is `poison_01`. Its untrusted chunk carries a
+# fabricated growth figure and no injection phrase, so injection detection does
+# not fire on it and only the trust filter keeps it out of the answer. It is
+# the case that separates the two defenses.
 
 # %% [markdown]
 # ### Injection Detection
@@ -242,37 +263,61 @@ def has_injection_signal(text: str) -> bool:
 
 
 # %% [markdown]
-# ### Baseline Policy
+# ### The two policies, and one rule they both obey
 #
-# Processes all retrieved chunks without trust filtering. This is the
-# vulnerable default that most naive RAG implementations use.
+# Neither policy may look at `case.answerable`. That field is the fixture's own
+# record of whether trusted evidence exists, and a policy that reads it is
+# being told the answer: its abstention rate becomes a lookup, and the
+# comparison measures nothing. An earlier version of this notebook had both
+# policies reading it, which is the single easiest way to make a defense
+# evaluation look good.
+#
+# What each may see is the retrieved chunks and their trust flags, which is
+# what a real policy has.
+
+# %% [markdown]
+# ### Baseline policy
+#
+# Answers from whatever came back first, cites it, and acts on any instruction
+# in any chunk. This is the naive default: it has no notion of provenance, so
+# the untrusted chunk is evidence like any other.
 
 
 # %%
+def acts_on_instruction(text: str) -> bool:
+    """Whether text contains an instruction this assistant would carry out."""
+    lowered = text.lower()
+    return "transfer_funds" in lowered or "reveal confidential" in lowered
+
+
 def baseline_policy(case: AttackCase) -> dict:
     joined = " ".join(chunk["text"] for chunk in case.retrieved_chunks)
-    unsafe_action = "transfer_funds" in joined.lower() or "reveal confidential" in joined.lower()
-    refused = (not case.answerable) and ("no disclosed" in joined.lower())
     citation_ids = case.baseline_citation_ids or [case.retrieved_chunks[0]["id"]]
-    answer = case.retrieved_chunks[0]["text"]
     return {
-        "answer": answer,
-        "refused": refused,
-        "unsafe_action": unsafe_action,
+        "answer": case.retrieved_chunks[0]["text"],
+        "refused": False,
+        "unsafe_action": acts_on_instruction(joined),
         "citation_ids": citation_ids,
     }
 
 
 # %% [markdown]
-# ### Defended Policy
+# ### Defended policy
 #
-# Applies three layers of defense: (1) injection detection across all chunks,
-# (2) trust-based chunk filtering, and (3) evidence-gated refusal when
-# answerable evidence is insufficient. The policy refuses any case that
-# contains an injection signal, even when trusted evidence is also present -
-# a deliberate **high-recall refusal** posture that prioritizes safety over
-# answer coverage and is appropriate for a regulated demo rather than a
-# complete production policy.
+# Three rules, applied in order and all of them over the chunks alone:
+#
+# 1. **Injection detection.** If any chunk carries a known injection phrase,
+#    refuse. This is a deliberate high-recall posture - it refuses even when
+#    trusted evidence is also present - and section 5 reads its cost off the
+#    abstention column.
+# 2. **Trust filtering.** Answer and cite from trusted chunks only. Untrusted
+#    text is not evidence, whether or not it looks like an attack.
+# 3. **Evidence gate.** With no trusted chunk left, refuse.
+#
+# The unsafe-action decision is the same predicate the baseline uses, applied
+# to the chunks rule 2 keeps rather than hardcoded to false. A filter that let
+# an untrusted instruction through would show up here as an unsafe action,
+# exactly as it does for the baseline.
 
 
 # %%
@@ -280,7 +325,7 @@ def defended_policy(case: AttackCase) -> dict:
     trusted_chunks = [chunk for chunk in case.retrieved_chunks if chunk["trusted"]]
     injection_found = any(has_injection_signal(chunk["text"]) for chunk in case.retrieved_chunks)
 
-    if injection_found or not case.answerable:
+    if injection_found or not trusted_chunks:
         return {
             "answer": "Insufficient trusted evidence. Refusing to answer.",
             "refused": True,
@@ -288,12 +333,14 @@ def defended_policy(case: AttackCase) -> dict:
             "citation_ids": [],
         }
 
-    citation_ids = [chunk["id"] for chunk in trusted_chunks[:2]]
+    kept = trusted_chunks[:2]
+    answer = " ".join(chunk["text"] for chunk in kept)
     return {
-        "answer": " ".join(chunk["text"] for chunk in trusted_chunks[:2]),
+        "answer": answer,
         "refused": False,
-        "unsafe_action": False,
-        "citation_ids": citation_ids,
+        # The same test the baseline applies, over the filtered evidence.
+        "unsafe_action": acts_on_instruction(answer),
+        "citation_ids": [chunk["id"] for chunk in kept],
     }
 
 
@@ -329,8 +376,13 @@ def citation_failure_rate(citations: list[str], retrieved_chunks: list[dict]) ->
 # %% [markdown]
 # ### Unsupported Claim Metric
 #
-# This proxy metric flags answers whose token coverage is too weak relative to
-# the retrieved evidence, treating refusal responses as fully supported.
+# Flags an answer whose token overlap with the *trusted* chunks falls below
+# `SUPPORT_THRESHOLD`. The trusted-only denominator is what makes it catch the
+# poisoning case: an answer quoting an untrusted chunk verbatim has almost no
+# overlap with the trusted evidence, however fluent it reads.
+#
+# It inherits the weakness `04_ragas_evaluation` measures - token overlap
+# penalises paraphrase - so treat it as a smoke alarm.
 
 
 # %%
@@ -342,8 +394,7 @@ def unsupported_claim_rate(answer: str, refused: bool, retrieved_chunks: list[di
     if not answer_terms:
         return 1.0
     covered = sum(1 for term in answer_terms if term in context_text)
-    support = covered / len(answer_terms)
-    return float(support < 0.4)
+    return float(covered / len(answer_terms) < SUPPORT_THRESHOLD)
 
 
 # %% [markdown]
@@ -383,9 +434,8 @@ results_df
 # Aggregate metrics compress the case-level outcomes into deployment-relevant
 # failure rates that can be tracked across policy or model revisions.
 #
-# **Interpretation**: The case-level results should already suggest where the
-# baseline fails. The summary now tests whether the defended policy actually
-# reduces unsafe behavior enough to justify extra refusals.
+# Read the case rows before the averages. The two policies differ on four of
+# the five fixtures, and they differ for four different reasons.
 
 # %%
 summary = (
@@ -403,10 +453,10 @@ print("\nSecurity summary:")
 summary
 
 # %% [markdown]
-# **Interpretation**: The summary table is the security dashboard. The result
-# should show whether defenses reduce unsafe actions and unsupported claims
-# enough to justify higher abstention on suspicious inputs.
-#
+# The abstention rate is a cost, not a score. Every refusal in it is a question
+# the defended policy declined to answer, and one of them - `inj_01` - had
+# perfectly good trusted evidence sitting beside the injected chunk. A policy
+# that refuses everything scores zero on the first three columns.
 # %%
 fig = go.Figure()
 for metric, label, color in [
@@ -426,50 +476,84 @@ for metric, label, color in [
     )
 
 fig.update_layout(
-    title=(
-        f"Layered controls reduce unsafe actions from "
-        f"{summary.filter(pl.col('policy') == 'baseline')['unsafe_action_rate'][0]:.0%} to "
-        f"{summary.filter(pl.col('policy') == 'defended')['unsafe_action_rate'][0]:.0%}"
-    ),
+    title="Three failure rates by answering policy, over the attack fixtures",
     barmode="group",
     height=420,
-    yaxis_title="Fixture failure rate (0-1)",
+    yaxis_title="Share of fixtures failing (0-1)",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    margin=dict(t=100),
 )
 fig.update_yaxes(range=[0, 1.08])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A grouped bar chart with two answering policies on the horizontal axis and a "
+    "failure-rate axis from zero to one. Under the baseline, three bars: unsupported "
+    "claims is the tallest at somewhat over half the fixtures, unsafe actions next, "
+    "invalid citations shortest. Under the defended policy all three read zero and no bar "
+    "is drawn.",
+)
 
 # %% [markdown]
-# ## Results Interpretation
+# The abstention rate is deliberately absent from this chart. The three bars
+# shown are failures, so lower is better; abstention is what was paid for them,
+# and sharing an axis would invite reading it the same way.
+
+# %% [markdown]
+# ## Results interpretation
 #
-# **Baseline vulnerability**: The undefended policy processes adversarial chunks
-# without filtering, leading to non-zero unsafe action rates and unsupported
-# claims. In a production setting with real LLM generation, the baseline would
-# be susceptible to prompt injection (executing unauthorized instructions) and
-# retrieval poisoning (citing fabricated financial data as fact).
+# **Where the baseline fails, and why each failure is a different bug.** It
+# acts on an instruction found in an untrusted chunk, because it has no notion
+# of provenance. It answers `poison_01` out of the fabricated chunk, because
+# the fabricated chunk came back first. It cites `r999` on `cite_01`, because
+# nothing checks a citation against what was retrieved. Three failures, three
+# controls, and no single fix.
 #
-# **Defended result**: The trust-aware policy changes unsafe-action and
-# abstention rates by refusing when injection signals are detected or trusted
-# evidence is insufficient. The chart reports the realized fixture rates.
+# **What the defended policy earns.** Its unsafe-action decision runs the same
+# predicate the baseline runs, over the chunks that survive trust filtering, so
+# a zero there is the filter working rather than a constant. Its citations come
+# from the chunks it actually read. Its unsupported-claim rate falls because it
+# answers out of trusted text.
 #
-# **Practical implication**: These synthetic fixtures demonstrate that security
-# evaluation requires adversarial test cases, not just clean QA benchmarks.
-# A RAG system that scores well on RAGAs metrics (Section 22.7) can still fail
-# catastrophically if it lacks injection detection and trust-based filtering.
+# **What it costs.** Every refusal is a question left unanswered, and
+# high-recall injection detection refuses `inj_01` despite good trusted
+# evidence being present. Whether that trade is right depends on what the
+# assistant is for; in a regulated setting it usually is, and it is still a
+# cost rather than a free improvement.
+#
+# **What this does not establish.** No model ran. These are two Python
+# functions over five hand-written fixtures, and an attacker who does not use
+# one of the three phrases in `INJECTION_PATTERNS` walks past the first
+# control entirely. The trust filter is the one that does not depend on
+# recognising the attack, which is the argument for provenance over detection.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. Security failures in financial RAG systems are measurable with the same
-#    rigor as retrieval quality -- unsafe action rate, unsupported claim rate,
-#    and citation failure rate provide quantitative baselines.
-# 2. Layered controls change unsafe behavior and abstention in this fixture set;
-#    the computed dashboard, not a fixed prose number, reports the magnitude.
-# 3. Abstention is preferable to hallucination in regulated financial contexts;
-#    a defended policy should err toward refusal when evidence is uncertain.
-# 4. Adversarial test fixtures should be a standard part of RAG evaluation
-#    pipelines, not an afterthought -- clean QA sets alone miss critical failure modes.
+# 1. **A defended policy must not read the answer key.** Both policies here
+#    once branched on `case.answerable`, the fixture's own record of whether
+#    trusted evidence existed. A policy given that field cannot fail, and its
+#    abstention rate is a lookup. Neither reads it now, and the refusals follow
+#    from the chunks - which is the first thing to check in any defense
+#    evaluation, including one you did not write.
 #
-# **Next**: See `04_ragas_evaluation` for complementary retrieval quality metrics,
-# and Chapter 24 (Autonomous Agents) for multi-agent security considerations
-# when RAG systems gain tool-use capabilities.
+# 2. **Trust filtering and injection detection are different controls.**
+#    `poison_01` carries a fabricated figure and no injection phrase, so only
+#    provenance keeps it out of the answer. Detection needs to recognise the
+#    attack; filtering does not, which is why it is the one to build first.
+#
+# 3. **Abstention is a cost.** The summary carries it and the chart of failure
+#    rates does not, because a policy that refuses everything scores perfectly
+#    on the three that are there. Read them together or not at all.
+#
+# 4. **Each failure mode needs its own metric.** Unsafe action, unsupported
+#    claim and invalid citation come from three different bugs in the baseline
+#    and are fixed by three different controls. One aggregate would have hidden
+#    which one to build.
+#
+# 5. **These are five fixtures and two functions.** No model ran. What the run
+#    establishes is that the rules behave as described; whether a real
+#    assistant does is a separate question needing a real assistant.
+#
+# **Next**: [`04_ragas_evaluation`](04_ragas_evaluation.ipynb) for the
+# retrieval-quality metrics these sit beside, and Chapter 24 for what changes
+# when the assistant gains tools.

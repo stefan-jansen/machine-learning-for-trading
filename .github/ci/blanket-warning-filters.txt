@@ -87,7 +87,6 @@
 20_strategy_synthesis/00_holdout_predictions.py
 20_strategy_synthesis/03_signal_quality.py
 20_strategy_synthesis/04_signal_to_strategy.py
-22_rag_financial_research/08_rag_security.py
 case_studies/cme_futures/01_feasibility_analysis.py
 case_studies/cme_futures/02_labels.py
 case_studies/cme_futures/03_financial_features.py
