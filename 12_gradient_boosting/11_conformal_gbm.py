@@ -607,9 +607,9 @@ if all_metrics:
 
     show_with_alt(
         fig,
-        "Two bar panels sharing an asset-class axis. Left: empirical coverage per asset "
-        "class, each bar labelled, against a line at the nominal target. Right: mean "
-        "daily Spearman IC for the same folds, against a line at zero.",
+        "Two bar panels stacked on a shared asset-class axis. Above: empirical coverage "
+        "per asset class, each bar labelled, against a line at the nominal target. "
+        "Below: mean daily Spearman IC for the same folds, against a line at zero.",
     )
 
 # %% [markdown] tags=[]
