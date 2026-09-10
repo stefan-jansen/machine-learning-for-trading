@@ -401,22 +401,28 @@ print(f"Confounding bias (naive - DML): {bias:.4f} ({bias_pct:+.1f}%)")
 # heterogeneity model.
 
 # %% [markdown]
-# ### What a Subgroup Standard Error Can and Cannot Say Here
+# ### A Subgroup Is Episodes, So Its Standard Error Needs the Whole Grid
 #
 # The two fits below re-fit everything inside a regime, nuisance models included, which is a
 # different estimator from the full-sample one rather than the same estimator on fewer rows.
-# That is what makes them worth having, and it also costs them a contiguous time grid.
+# That is what makes them worth having, and it is also what breaks their time grid.
 #
 # A regime is a set of **episodes**, not an interval: the market moves in and out of high
-# volatility repeatedly. Handed only its own timestamps, the covariance estimator numbers
-# them consecutively, so the last bar of one episode and the first bar of the next become
-# neighbours however much calendar time separates them. Inside an episode the bandwidth
-# counts real 8-hour bars; across an episode boundary it compresses the gap to nothing. The
-# cell prints the episode counts and lengths so the size of that compression is visible.
+# volatility repeatedly, and the cell below prints how many episodes each regime has and how
+# long they run. Handed only its own timestamps, the covariance estimator numbers them
+# consecutively, so the last bar of one episode and the first bar of the next become
+# neighbours however much calendar time separates them. A bandwidth of `HAC_LAGS` bars then
+# counts *retained* bars and can reach across weeks that the regime was not active for.
 #
-# The consequence is where to read the regime comparison from. The subgroup intervals below
-# are indicative. The regime **difference** comes from the interaction model further down,
-# which is fitted on the full sample and therefore on an unbroken grid.
+# So the cross-fitting happens inside the regime and the standard error is taken on the full
+# grid. The residualized outcome and treatment go back to their own bars and every other bar
+# carries a zero. A zero contributes nothing to that bar's aggregated score, which is what an
+# inactive bar contributes, and it leaves the slope untouched - a zero row moves neither
+# `X'X` nor `X'y` - so what changes is only the thing that was wrong. Each fit prints what
+# the filtered grid would have reported beside what the full grid does.
+#
+# The regime **difference** still comes from the interaction model further down, which is
+# fitted on the full sample in one regression and needs none of this.
 
 # %%
 print("\nRegime-Conditional Treatment Effects (Regime-Stratified ATE)...")
@@ -440,43 +446,51 @@ for label, name in ((0, "Low"), (1, "High")):
         f"median {lengths.median():.0f} bars, longest {lengths.max()} bars"
     )
 
-print("\n  Low Volatility Regime:")
-if low_vol_mask.sum() > 100:
-    result_low = manual_dml_timeseries(
-        Y[low_vol_mask],
-        T[low_vol_mask],
-        X[low_vol_mask],
-        n_folds=3,
-        embargo=EMBARGO_PERIODS,
-        groups=decision_times[low_vol_mask],
-        hac_maxlags=HAC_LAGS,
-    )
-    effect_low = result_low["theta"]
-    se_low_hac = result_low["se_hac"]
-    t_low = result_low["t_stat_hac"]
-    print(f"    Effect: {effect_low:.4f} (t={t_low:.2f}, SE={se_low_hac:.4f})")
-else:
-    effect_low, se_low_hac, t_low = 0, 1, 0
-    print("    Insufficient data")
 
-print("\n  High Volatility Regime:")
-if high_vol_mask.sum() > 100:
-    result_high = manual_dml_timeseries(
-        Y[high_vol_mask],
-        T[high_vol_mask],
-        X[high_vol_mask],
-        n_folds=3,
+def regime_effect(mask, name):
+    """Cross-fit within one regime, then take the standard error on the full time grid.
+
+    A regime is a set of episodes with the other regime's bars between them. Handing the
+    filtered timestamps to the standard-error step makes the bars either side of a removed
+    stretch adjacent, so a bandwidth of 42 counts 42 *retained* bars and can reach across
+    months of calendar time. The residualized pair comes back on the full grid instead,
+    zero wherever this regime was not active: a zero score adds nothing to that bar's
+    aggregate, which is what an inactive bar contributes, and the kernel counts bars again.
+    The slope is unchanged by the padding - a zero row moves neither X'X nor X'y - so only
+    the standard error moves, which is the point.
+    """
+    if mask.sum() <= 100:
+        print(f"\n  {name}:\n    Insufficient data")
+        return 0.0, 1.0, 0.0
+
+    fit = manual_dml_timeseries(
+        Y[mask],
+        T[mask],
+        X[mask],
+        n_folds=CV_FOLDS,
         embargo=EMBARGO_PERIODS,
-        groups=decision_times[high_vol_mask],
+        groups=decision_times[mask],
         hac_maxlags=HAC_LAGS,
+        return_residuals=True,
     )
-    effect_high = result_high["theta"]
-    se_high_hac = result_high["se_hac"]
-    t_high = result_high["t_stat_hac"]
-    print(f"    Effect: {effect_high:.4f} (t={t_high:.2f}, SE={se_high_hac:.4f})")
-else:
-    effect_high, se_high_hac, t_high = 0, 1, 0
-    print("    Insufficient data")
+    y_full = np.zeros(len(decision_times))
+    t_full = np.zeros(len(decision_times))
+    y_full[mask] = np.nan_to_num(fit["Y_res"])
+    t_full[mask] = np.nan_to_num(fit["T_res"])
+    model = driscoll_kraay(y_full, t_full.reshape(-1, 1), decision_times)
+    effect, se, t_stat = float(model.params[0]), float(model.bse[0]), float(model.tvalues[0])
+
+    print(f"\n  {name}:")
+    print(f"    Effect: {effect:.4f} (t={t_stat:.2f}, SE={se:.4f})")
+    print(
+        f"    Standard error on the filtered grid would be {fit['se_hac']:.4f}, "
+        f"which counts retained bars rather than elapsed ones"
+    )
+    return effect, se, t_stat
+
+
+effect_low, se_low_hac, t_low = regime_effect(low_vol_mask, "Low Volatility Regime")
+effect_high, se_high_hac, t_high = regime_effect(high_vol_mask, "High Volatility Regime")
 
 # %%
 # Independence-of-subsets approximation; the interaction model below is the better answer.
