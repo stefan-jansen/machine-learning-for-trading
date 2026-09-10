@@ -298,23 +298,31 @@ else:
 
 
 # %%
-def block_bootstrap_blocks(values, block_size, rng):
-    """Draw overlapping blocks with replacement, stacked as separate datasets.
+LAG_CONTEXT = 2 * MAX_LAG  # tigramite's per-dataset cut; see the docstring below
 
-    The blocks are returned as an array of shape (blocks, block_size, variables) rather
-    than concatenated into one series. Concatenating them would put the last row of one
-    block next to the first row of another, and every lagged test PCMCI runs would then
-    read those adjacencies as time: with a block of twenty and a maximum lag of five, a
-    quarter of the lagged pairs at each seam join rows that are not consecutive. Those
-    pairs carry no dependence, so the contamination pushes every edge toward the null -
-    the same direction as the conclusion the chart is used to draw. Passed as separate
-    datasets to `analysis_mode="multiple"`, tigramite pools the blocks without ever
-    forming a pair across two of them.
+
+def block_bootstrap_blocks(values, block_size, rng, context=LAG_CONTEXT):
+    """Draw blocks with replacement, stacked as separate datasets with lag context.
+
+    The blocks are returned as an array of shape (blocks, context + block_size, variables)
+    rather than concatenated into one series. Concatenating them would put the last row of
+    one block next to the first row of another, and every lagged test PCMCI runs would then
+    read that adjacency as time: with a block of twenty and a maximum lag of five, a quarter
+    of the lagged pairs at each seam join rows that are not consecutive. Those pairs carry no
+    dependence, so the contamination biases every edge toward the null - the same direction
+    as the conclusion the chart is used to draw. Passed as separate datasets to
+    `analysis_mode="multiple"`, tigramite pools the blocks without ever forming a pair across
+    two of them.
+
+    Each dataset carries `context` rows of real history before its block. Without them
+    tigramite's `2 * tau_max` cut would take a fifth of every block, and the resample would
+    be running on half the observations of the fit whose stability it is measuring - which
+    also reads as instability on the chart.
     """
     n = len(values)
     n_blocks = n // block_size
-    starts = rng.integers(0, n - block_size + 1, size=n_blocks)
-    return np.stack([values[start : start + block_size] for start in starts])
+    starts = rng.integers(context, n - block_size + 1, size=n_blocks)
+    return np.stack([values[start - context : start + block_size] for start in starts])
 
 
 print(f"\nBootstrap stability analysis (n={N_BOOTSTRAP}, block_size={BLOCK_SIZE})...")
