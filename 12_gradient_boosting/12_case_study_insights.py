@@ -1456,6 +1456,7 @@ def feature_rank_shift(cs: str) -> dict | None:
         gbm_row["training_hash"],
         gbm_row["config_name"],
         top_n=50,
+        num_iteration=gbm_row["checkpoint_value"],
     )
     if gbm_imp_df.is_empty():
         return None
@@ -1597,6 +1598,7 @@ def feature_rank_stability(cs: str) -> dict | None:
         row["training_hash"],
         row["config_name"],
         top_n=30,
+        num_iteration=row["checkpoint_value"],
     )
     if gbm_imp_df.is_empty():
         return None

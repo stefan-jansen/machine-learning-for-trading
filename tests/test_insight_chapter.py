@@ -283,3 +283,48 @@ def test_gbm_feature_importance_still_reads_the_older_layouts(tmp_path, monkeypa
     result = insight_chapter.load_gbm_feature_importance("probe", "hash-b", "probe-config", top_n=2)
 
     assert result.height > 0
+
+
+def test_gbm_feature_importance_measures_only_the_selected_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    """Importance belongs to the model the selection chose, not to every saved round.
+
+    Training saves all boosting rounds; a configuration is selected at one checkpoint
+    along that trajectory. The booster here is fitted so that the first rounds split on
+    `early` and later rounds split on `late`, which makes the two readings disagree.
+    """
+    import lightgbm as lgb
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    early = rng.normal(size=400)
+    late = rng.normal(size=400)
+    # `early` alone explains the signal; `late` only explains what is left after the
+    # first rounds have fitted it, so it enters the booster late.
+    y = 5.0 * early + 0.05 * late
+    model = lgb.LGBMRegressor(
+        n_estimators=200, learning_rate=0.5, num_leaves=4, min_child_samples=5, verbose=-1
+    )
+    model.fit(np.column_stack([early, late]), y, feature_name=["early", "late"])
+    booster_dir = tmp_path / "case_studies" / "probe" / "run_log" / "training" / "h" / "models"
+    booster_dir = booster_dir / "boosters"
+    booster_dir.mkdir(parents=True)
+    model.booster_.save_model(str(booster_dir / "fold_0.txt"))
+    monkeypatch.setattr(
+        insight_chapter, "get_case_study_dir", lambda _cs: tmp_path / "case_studies" / "probe"
+    )
+
+    def gain(num_iteration):
+        frame = insight_chapter.load_gbm_feature_importance(
+            "probe", "h", "probe-config", top_n=2, num_iteration=num_iteration
+        )
+        return dict(frame.group_by("feature").agg(pl.col("importance").mean()).iter_rows())
+
+    first_three = gain(3)
+    everything = gain(None)
+
+    assert first_three["late"] < everything["late"]
+    assert insight_chapter.load_gbm_feature_importance(
+        "probe", "h", "probe-config", top_n=2, num_iteration=10_000
+    ).equals(insight_chapter.load_gbm_feature_importance("probe", "h", "probe-config", top_n=2))
