@@ -110,19 +110,22 @@
 #
 # ## Per-Sample Time Integration
 #
-# Two ODE-stepping strategies are available:
+# `ode_method` selects one of two fixed-step solvers, and both advance each row of a
+# batch by that row's own interval:
 #
-# - **Euler method**: Direct vectorized computation `h_new = h + dt * f(h)` where dt
-#   varies per sample. Fast and exact for the Euler case.
-# - **Adaptive methods (Dopri5)**: Uses `torchdiffeq.odeint` with a batch-averaged
-#   time span. The original GT-GAN paper relied on `torchode` (Lienen & Günnemann,
-#   2022) for per-sample integration in a single solver call, but its
-#   `torchtyping` dependency is incompatible with current PyTorch, so we use
-#   `torchdiffeq` here.
+# - **Euler**: one evaluation per step, `h_new = h + dt * f(h)`.
+# - **RK4**: four evaluations per step, combined as `h + (dt / 6)(k1 + 2 k2 + 2 k3 + k4)`.
 #
-# For genuinely irregular time series (e.g., information-theoretic bars), the
-# Euler path is preferred since it preserves per-sample dt; the adaptive path is
-# kept for completeness and matches what `torchdiffeq` provides.
+# Neither drift network takes the time as an input, so a step depends only on the width
+# of the interval and a column of `dt` values is enough to give every row its own step.
+# That is what `ode_evolve` below does. `torchdiffeq.odeint` is still used for the
+# generator, whose whole batch genuinely shares one time span; it takes a single grid
+# for a batched initial state, so it cannot be used where the rows differ.
+#
+# An adaptive solver would need per-sample step control. The GT-GAN paper used
+# `torchode` (Lienen & Günnemann, 2022) for that, but its `torchtyping` dependency is
+# incompatible with current PyTorch, so the config cell rejects any method other than
+# the two above.
 #
 # **Reference**: Lienen, M. & Günnemann, S. (2022). "torchode: A Parallel ODE
 # Solver for PyTorch." https://arxiv.org/abs/2210.12375
@@ -212,7 +215,7 @@ CONFIG = {
     # Bump when the architecture changes: nothing else in a checkpoint says what the
     # weights were fitted into, so older ones load whenever the shapes line up.
     # 2.1.0: the decoder integrates each sequence along its own timestamps.
-    "weights_version": "2.1.0",
+    "weights_version": "2.2.0",
 }
 
 if CONFIG["ode_method"] not in {"euler", "rk4"}:
@@ -729,10 +732,10 @@ class ODEDecoder(nn.Module):
         """
         h = torch.tanh(self.fc_init(z))
 
-        # Each row is integrated along its own query times. Integration starts just
-        # before the first one so that the first output is a state the ODE produced
-        # rather than the initial state itself.
-        prev = times[:, 0] - 1e-5
+        # Each row is integrated along its own query times from a fixed origin at zero,
+        # where create_irregular_sequences puts the start of every window; anchoring at
+        # the first query leaves a midpoint decode incomparable with an observation one.
+        prev = torch.zeros_like(times[:, 0])
 
         states = []
         for k in range(times.shape[1]):
@@ -1119,8 +1122,8 @@ if training_losses["recon"]:  # Only plot if we have training losses
         "reconstruction loss dropping steeply over the first few hundred steps and "
         "then running flat near zero. The right panel shows the discriminator's losses "
         "on real and on fake sequences together with the generator loss; all three "
-        "spike against one another in bursts through the first three quarters of "
-        "training and then settle onto a common flat level that holds to the end.",
+        "spike against one another in bursts through roughly the first half of training "
+        "and then settle onto a common flat level that holds to the end.",
     )
 
 # %% [markdown]
@@ -1200,17 +1203,19 @@ show_with_alt(
     fig,
     "Two scatter panels of the same flattened sequences, PCA on the left and t-SNE on "
     "the right, each overlaying real points and synthetic ones. In both panels the "
-    "synthetic points lie along a narrow band while the real points scatter widely "
-    "around it: in the PCA panel the band is horizontal, at one height and covering "
-    "part of the first component's range, and in the t-SNE panel it is a shallow arc "
-    "through the middle with the real points spread above, below and to either side.",
+    "synthetic points lie along a narrow band while the real points fall away from it. "
+    "In the PCA panel the band is horizontal, at one height and covering part of the "
+    "first component's range, with the real points scattered across the whole panel. In "
+    "the t-SNE panel it is a diagonal band falling from left to right, and the real "
+    "points form separate clusters above and to the left of it and one cluster above "
+    "its right end; almost none sit below it.",
 )
 
 # %% [markdown]
 # **Interpretation**: the two point clouds do not cover the same region. The synthetic
-# sequences project onto a narrow band in both panels while the real ones spread around
-# it, which is what a generator producing a family of similar sequences looks like under
-# a projection. Neither panel is a measurement: a projection into two dimensions can
+# sequences project onto a narrow band in both panels while the real ones fall elsewhere,
+# which is what a generator producing a family of similar sequences looks like under a
+# projection. Neither panel is a measurement: a projection into two dimensions can
 # separate sets a model cannot, and can hide a difference a model finds easily. The
 # discriminative score reported later in the notebook is the measured version of the
 # same question, and the interpolation section immediately below asks a different one -
@@ -1425,9 +1430,10 @@ show_plotly_with_alt(
     "Two stacked panels sharing a time axis and a vertical scale, both plotted at the "
     "same irregular observation times so their markers line up column for column. The "
     "upper panel is one real window of the close feature, a walk that reverses "
-    "direction repeatedly. The lower panel is the synthetic sequence decoded on that "
-    "same grid, a smooth line declining steadily from the first observation to the "
-    "last with none of the reversals above it.",
+    "direction repeatedly within a narrow band. The lower panel is the synthetic "
+    "sequence decoded on that same grid, a smooth curve rising from the first "
+    "observation to the last, steeply at first and then flattening, with none of the "
+    "reversals above it and covering far more of the shared vertical scale.",
 )
 
 # %% [markdown]
@@ -1438,8 +1444,9 @@ show_plotly_with_alt(
 # panels compare is the values the decoder returns when it is given a real window's
 # timestamps, against the values that window actually took, on a shared vertical scale.
 #
-# On this window the two differ in shape rather than in level. The real series reverses
-# direction repeatedly between observations and the synthetic one does not. A decoder
+# On this window the two differ in both. The real series stays inside a narrow band and
+# reverses direction repeatedly between observations; the synthetic one rises across most
+# of the shared vertical scale without a single reversal. A decoder
 # whose output is the state of an ODE evolving between query points is smooth wherever
 # the fitted dynamics are smooth, so one window raises that question rather than
 # settling it. The interpolation section earlier in the notebook is the measured
@@ -1658,8 +1665,13 @@ print(f"""
 # %% [markdown]
 # **Interpretation**: read the four rows together rather than choosing among them. The
 # discriminative accuracy and AUC sit at their maximum, so the classifier separates
-# synthetic from real without error. The TSTR ratio is several times its target, so a
-# predictor trained on the synthetic sequences transfers poorly to real ones. The
+# synthetic from real without error: whatever the sequences preserve is not enough to
+# fool a model that is looking for the difference. The TSTR ratio misses the band the
+# protocol allows, so a predictor fitted on the synthetic sequences carries more error on
+# real ones than a predictor fitted on real data does, by the margin the ratio above
+# gives. Those two rows are not the same finding: a classifier separating two sets
+# perfectly says nothing about how much of the predictive structure the second set
+# carries. The
 # bounded fraction clears its threshold, but it checks something narrower than its name
 # suggests. It encodes a real window, decodes at the midpoint between each pair of
 # observation times, and asks whether that value lands between the two neighbouring real
