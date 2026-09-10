@@ -1614,15 +1614,22 @@ print()
 print(f"  TSTR Ratio: {tstr_results['tstr_ratio']:.3f}")
 
 # %% [markdown]
-# **Interpretation**: raw accuracy is misleading here, because always predicting the
-# negative class already scores close to the printed baseline. The **TSTR ratio** is
-# the metric to read: near one means a synthetic-trained model performs comparably to
-# a real-trained one. Precision and recall on the extreme-move class say how well each
-# model finds the rare large moves rather than how often it is right overall.
+# **Interpretation**: the TSTR ratio is one accuracy divided by another, so it says
+# how the two models compare and nothing about whether either one works. Two models
+# that both fail put it at one just as readily as two that both succeed, and that is
+# the case here: read the printed accuracies against the naive baseline above them,
+# and read the real-trained recall on the extreme-move class. Precision and recall are
+# where a model that finds the rare large moves separates from one that predicts the
+# negative class throughout, and the accuracy column cannot make that distinction
+# because the positive class is a few percent of the test rows.
 #
-# **Trading context**: extreme-move prediction leans on volatility clustering. Recall
-# is the share of extreme moves caught; precision is how few of the alarms are false.
-# A ratio close to one says the synthetic data preserved that structure.
+# **Trading context**: extreme-move prediction leans on volatility clustering, so this
+# section was meant to ask whether the synthetic paths carry it. A ratio near one
+# answers that only once both models clear the baseline. Where they do not, the
+# comparison is between two models that learned nothing from either source, and the
+# question of volatility clustering is still open - the lag-1 autocorrelation reported
+# earlier is computed on returns, not on squared returns, so it does not settle it
+# either.
 
 # %% [markdown]
 # ### Sample Sequences and Decomposition
