@@ -328,9 +328,11 @@ def graph_retrieve(question: BenchmarkQuestion) -> list[str]:
 # ### Graph Token Budget
 #
 # Estimate the token cost of a structured-row response by concatenating the
-# selected fields with separators and applying the same rough words-per-token
-# multiplier the vector side uses, so the two budgets differ by representation
-# rather than by how they were counted. Neither is a tokenizer count.
+# four selected fields with separators and applying the same rough
+# words-per-token multiplier the vector side uses. Counting both budgets the
+# same way is all that buys: the two payloads still differ in how many rows
+# they carry and which fields each row spells out, and section 6 separates
+# those from the formatting. Neither figure is a tokenizer count.
 
 
 # %%
@@ -479,10 +481,13 @@ results.select(
 # recall wearing a comparative label. The vector figure is the only estimated
 # quantity here.
 #
-# The token figures compare a structured row against the prose sentence built
-# from the same fields, so the difference is a property of the two
-# representations rather than of the retrievers. It is worth knowing - a
-# relational answer is compact - and it is not a model efficiency result.
+# The token figures are each retriever's actual context budget, and three
+# things separate them. The relational side returns the 5 or 6 rows the
+# predicate matched while the vector side always returns `TOP_K_VECTOR` = 10,
+# so the count alone roughly halves it. Each relational row spells out four fields
+# and each prose row six, adding `shares` and `cusip`. Only what is left after
+# those two is formatting. The per-row figure below removes the count; the
+# field difference stays in it.
 
 # %%
 graph_summary = summary.filter(pl.col("system") == "graph").row(0, named=True)
@@ -492,6 +497,9 @@ recall_delta = graph_summary["avg_support_recall"] - vector_summary["avg_support
 token_reduction = 1.0 - (
     graph_summary["avg_retrieval_tokens"] / vector_summary["avg_retrieval_tokens"]
 )
+graph_per_row = graph_summary["avg_retrieval_tokens"] / graph_summary["avg_retrieved_docs"]
+vector_per_row = vector_summary["avg_retrieval_tokens"] / vector_summary["avg_retrieved_docs"]
+per_row_reduction = 1.0 - (graph_per_row / vector_per_row)
 
 print("\nReal-data comparison")
 print(
@@ -500,9 +508,15 @@ print(
 print(f"Vector support recall:            {vector_summary['avg_support_recall']:.2%}")
 print(f"  the difference, {recall_delta:.2%}, is one minus the vector figure and nothing more")
 print(
-    f"Retrieval tokens: {graph_summary['avg_retrieval_tokens']:.0f} for structured rows against "
-    f"{vector_summary['avg_retrieval_tokens']:.0f} for the prose form of the same rows "
-    f"({token_reduction:.0%} fewer)"
+    f"Context budget: {graph_summary['avg_retrieval_tokens']:.0f} tokens over "
+    f"{graph_summary['avg_retrieved_docs']:.1f} structured rows against "
+    f"{vector_summary['avg_retrieval_tokens']:.0f} over "
+    f"{vector_summary['avg_retrieved_docs']:.1f} prose rows ({token_reduction:.0%} fewer)"
+)
+print(
+    f"  per retrieved row: {graph_per_row:.0f} against {vector_per_row:.0f} tokens "
+    f"({per_row_reduction:.0%} fewer), which is the four structured fields against the "
+    "six-field sentence"
 )
 
 # %% [markdown]
@@ -566,12 +580,25 @@ axes[0].set_ylabel("Average support recall")
 axes[0].set_ylim(0, 1.15)
 axes[0].legend(frameon=False, ncol=2, loc="upper center")
 
-axes[1].bar(x - width / 2, graph_tokens, width, color=COLORS["blue"], label="Structured rows")
-axes[1].bar(x + width / 2, vector_tokens, width, color=COLORS["amber"], label="Prose rows")
+axes[1].bar(
+    x - width / 2,
+    graph_tokens,
+    width,
+    color=COLORS["blue"],
+    label="Structured rows (5-6 matched)",
+)
+axes[1].bar(
+    x + width / 2,
+    vector_tokens,
+    width,
+    color=COLORS["amber"],
+    label=f"Prose rows (top {TOP_K_VECTOR})",
+)
 axes[1].set_xticks(x, kind_labels)
 axes[1].set_ylabel("Average retrieval tokens")
-axes[1].set_title("Context size by representation, over the same retrieved rows", loc="left")
-axes[1].legend(frameon=False, ncol=2)
+axes[1].set_title("Context budget per question, over each retriever's own payload", loc="left")
+axes[1].set_ylim(0, max(vector_tokens) * 1.35)
+axes[1].legend(frameon=False, ncol=2, loc="upper center")
 
 add_message_title(
     axes[0],
@@ -583,8 +610,10 @@ show_with_alt(
     "Two stacked panels sharing three question-kind categories on the horizontal axis. Top: "
     "bars for vector retrieval's average support recall, well below a dashed horizontal "
     "reference line at one marking the relational oracle; the bars differ across the three "
-    "kinds and none reaches the line. Bottom: paired bars of average retrieval tokens, the "
-    "structured-row bar much shorter than the prose-row bar in every category.",
+    "kinds and none reaches the line. Bottom: paired bars of average retrieval tokens per "
+    "question, the structured-row bar roughly a quarter the height of the prose-row bar in "
+    "every category. The two bars cover different payloads: 5 or 6 matched rows of four "
+    "fields against the top ten rows of a six-field sentence.",
 )
 
 # %% [markdown]
@@ -632,11 +661,15 @@ print("COMPLETION_RECORD=" + json.dumps(completion_record, sort_keys=True))
 #    fixes the ceiling rather than that it ranks above anything. A benchmark with two
 #    estimated arms would be a different and more expensive notebook.
 #
-# 3. **The token difference is a representation difference.** Both budgets are
-#    the same rows: one as `institution | issuer | value | date`, the other as
-#    an English sentence saying the same thing. That a relational answer is
-#    compact is worth knowing and is not a measurement of retriever efficiency,
-#    and neither figure is a tokenizer count.
+# 3. **The token difference is three differences.** The relational side returns
+#    the rows its predicate matched, 5 or 6 of them; the vector side always
+#    returns ten, because a similarity ranking has no notion of when to stop.
+#    Each relational row is `institution | issuer | value | date` and each prose
+#    row spells out `shares` and `cusip` as well. The count roughly halves the
+#    budget on its own; the per-row figure printed above carries the extra
+#    fields together with the sentence scaffolding around them, which this
+#    notebook does not separate. None of the three is a measurement of
+#    retriever efficiency, and neither figure is a tokenizer count.
 #
 # 4. **Where the vector arm loses is worth reading per question kind**, and the
 #    per-question audit above is where to read it: one holder question is
