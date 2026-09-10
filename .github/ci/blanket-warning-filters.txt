@@ -26,7 +26,6 @@
 # features/model_based.parquet, whose sha256 keys every model fitted against it.
 
 03_market_microstructure/14_itch_bar_sampling.py
-03_market_microstructure/17_databento_bar_sampling.py
 07_defining_the_learning_task/_benchmark_utils.py
 16_strategy_simulation/01_backtest_first_principles.py
 16_strategy_simulation/02_futures_backtesting.py
