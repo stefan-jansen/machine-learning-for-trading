@@ -493,6 +493,15 @@ if KEY_SIGNAL in AVAILABLE_SIGNALS:
 # top fifths of the signal, and comparing them compares groups of different size and
 # composition.
 
+# %% [markdown]
+# Both causes turn out to be present, and the cross-section size is the more serious of the
+# two. A typical date carries single-digit names, which cannot be divided into five parts at
+# all, and most dates also carry at least one tie. Neither is a defect in this code: they are
+# what a signal built from news coverage looks like, because on any given day only a handful
+# of the universe was written about. What follows is that a quantile sort is the wrong
+# instrument here, and the daily information coefficient - which needs a ranking within the
+# date but not equal buckets - is the one to read.
+
 # %% tags=[]
 if KEY_SIGNAL in AVAILABLE_SIGNALS:
     per_date = (
