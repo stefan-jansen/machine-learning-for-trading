@@ -14,48 +14,50 @@
 # ---
 
 # %% [markdown]
-# # Causal Inference on Crypto Premiums: A Tale of Two Outcomes
+# # Outcome Choice and Causal Credibility in Crypto Funding Premiums
 #
 # **Chapter 15: Causal Estimation with ML**
 # **Docker image**: `ml4t`
-# **Section Reference**: See Section 15.2 for outcome choice and mechanism credibility
+# **Section Reference**: Section 15.2 on outcome choice, Section 15.3 for the validation
+# workflow, and Section 15.4 (Table 15.2) for the two-outcome contrast
 #
 # ## Purpose
-# This notebook demonstrates **why outcome choice matters for causal credibility**.
-# We analyze the same treatment (an extreme positive crypto-premium state) with
-# two different outcomes, showing that the robustness of causal claims depends
-# critically on the tightness of the mechanism connecting treatment to outcome.
-# The treatment is not the funding payment itself; it is the premium state
-# (perp price above spot by more than two standard deviations), which creates
-# funding pressure and arbitrage incentives.
+# One treatment, two outcomes, and two very different levels of causal credibility.
+# The treatment is the premium *state* rather than the funding payment: the perpetual
+# trading above spot by more than two standard deviations, which creates funding
+# pressure and an arbitrage incentive. The outcomes are forward returns, a broad market
+# variable exposed to everything that moves crypto, and forward premium reversion, which
+# the funding mechanism acts on directly. The same estimator, the same adjustment set and
+# the same validation battery reach different conclusions about the two.
 #
 # ## Learning Objectives
 # After completing this notebook, you will be able to:
-# - LO1: Apply DoWhy for DAG specification and sensitivity analysis
-# - LO2: Understand why mechanism tightness determines causal credibility
-# - LO3: Choose outcomes that support credible causal claims
-# - LO4: Interpret sensitivity analysis to assess claim fragility
+# - LO1: Specify a DAG in DoWhy and read the adjustment set it identifies
+# - LO2: Explain how the tightness of the treatment-outcome mechanism bounds credibility
+# - LO3: Choose an outcome whose mechanism the available controls can plausibly block
+# - LO4: Read a partial-R2 sensitivity analysis and the robustness value it reports
 #
 # ## Cross-References
-# - **Upstream**: Crypto Premium Index data (Chapter 2), causal foundations (Chapter 15)
-# - **Downstream**: Strategy validation (Chapter 16), risk assessment (Chapter 19)
-# - **Related**: [`04_dml_crypto_regime`](04_dml_crypto_regime.ipynb) (DML on same data)
+# - **Upstream**: crypto premium index and perpetual OHLCV from `data/crypto/download.py`
+# - **Downstream**: [`04_dml_crypto_regime`](04_dml_crypto_regime.ipynb) applies DML to the
+#   same data with regime heterogeneity
+# - **Related**: [`01_library_overview`](01_library_overview.ipynb) for where DoWhy sits
+#   among the chapter's libraries
 #
 # ## Data Requirements
 # - Crypto premium index at 8h frequency - loaded via `load_crypto_premium(frequency="8h")`
 # - Crypto perpetual futures OHLCV at 1h frequency - loaded via `load_crypto_perps(frequency="1h")`
-# Both are produced by the Chapter 2 data pipeline (``data/crypto/download.py``).
+#
+# Both are produced by `data/crypto/download.py`.
 #
 # ## Causal Design
 #
 # | Outcome              | Mechanism                              | Main validation tests                                                              |
 # |----------------------|----------------------------------------|------------------------------------------------------------------------------------|
-# | Forward 24h returns  | Indirect sentiment and risk channel    | OOS stability, placebo-date shift, return-scale and reversion-scale negative controls |
-# | Forward 24h premium  | Direct arbitrage-pressure channel      | OOS stability, placebo-date shift, return-scale and reversion-scale negative controls |
+# | Forward 24h returns  | Indirect sentiment and risk channel    | OOS stability, placebo-date shift, return-scale and reversion-scale negative controls, partial-R2 sensitivity |
+# | Forward 24h premium  | Direct arbitrage-pressure channel      | OOS stability, placebo-date shift, return-scale and reversion-scale negative controls, partial-R2 sensitivity |
 #
-# The computed comparison table appears at the end of the notebook. The
-# difference between a credible and questionable causal claim often is not
-# the method - it is the outcome you choose to study.
+# The computed comparison table appears at the end of the notebook.
 #
 # ## Causal Design Contract
 #
@@ -70,8 +72,7 @@
 # | Main failure modes        | Unobserved confounding (sentiment shocks), bad controls, mistimed treatment           |
 # | Estimand                  | ATE of entering the extreme-high-premium state - not the marginal effect of a one-unit change in premium z-score |
 #
-# **Prerequisites**: [`01_library_overview`](01_library_overview.ipynb) for library context;
-# crypto premium index data from Ch8 features pipeline
+# **Prerequisites**: [`01_library_overview`](01_library_overview.ipynb) for library context
 
 # %% [markdown]
 # ## The Crypto Funding Rate Mechanism
@@ -81,14 +82,32 @@
 # - **Funding rate** = periodic payment to close the gap
 # - **High premium** $\rightarrow$ longs pay shorts $\rightarrow$ pressure to close longs
 #
-# **Two Causal Questions**:
-# 1. Does extreme *high* premium $\rightarrow$ future **returns**? (What traders want to know)
-# 2. Does extreme *high* premium $\rightarrow$ premium **reversion**? (What arbitrageurs exploit)
+# **Two causal questions**:
+# 1. Does an extreme high premium cause future **returns**? This is what a directional
+#    trader wants to know.
+# 2. Does an extreme high premium cause premium **reversion**? This is what an
+#    arbitrageur acts on.
 #
-# These seem similar but have very different causal structures.
+# The two questions share a treatment and differ in how much of the world sits between
+# that treatment and the outcome.
 
 # %% [markdown]
-# ## Timing Protocol (CRITICAL for Causal Validity)
+# ## Setup
+#
+# Three third-party warnings are silenced by category and module. DoWhy compiles regular
+# expressions and docstrings with unescaped backslashes, which Python reports while
+# importing the package. pydot, which parses the graph string, calls pyparsing methods that
+# pyparsing has renamed. The third is a dead branch in DoWhy's `robustness_value_func`:
+# under its default significance level it compares against `1 / f_critical` where
+# `f_critical` is zero by construction, so the comparison is against infinity and never
+# fires. Convergence warnings and every other numerical warning stay visible.
+
+# %% [markdown]
+# ## Timing Protocol
+#
+# Causal validity here rests entirely on the ordering below: every confounder is
+# computed from bars that close before the treatment is measured, and every outcome
+# from bars that open after it.
 #
 # ```
 # Time:        t-168h         t-24h           t            t+24h
@@ -122,14 +141,22 @@ import pandas as pd
 import polars as pl
 import statsmodels.api as sm
 from dowhy import CausalModel
-from IPython.display import display
+from IPython.display import Markdown, display
 from scipy import stats
 
 from data import load_crypto_perps, load_crypto_premium
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
-warnings.filterwarnings("ignore")
+# Three third-party warnings, silenced by category and module; see the note above.
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=".*dowhy")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pydot")
+warnings.filterwarnings(
+    "ignore",
+    category=RuntimeWarning,
+    message="divide by zero encountered in scalar divide",
+    module=".*linear_sensitivity_analyzer",
+)
 
 # networkx 3.x compatibility (d_separated moved under d_separation)
 if not hasattr(nx.algorithms, "d_separated") and hasattr(
@@ -156,6 +183,11 @@ print(f"DoWhy version: {dowhy.__version__}")
 N_SAMPLES = 20000
 EXTREME_THRESHOLD = 2.0  # Z-score threshold
 REFUTATION_SIMULATIONS = 50
+
+# The backdoor adjustment set, declared once. Both DAGs below draw the same two edges into
+# the treatment and into their outcome, so both identify the same set, and every estimator
+# and diagnostic in the notebook conditions on exactly these two.
+CONTROLS = ("return_24h", "volatility_24h")
 
 # Train/test split date (temporal, not random)
 TRAIN_END_DATE = "2023-06-30"
@@ -201,11 +233,20 @@ btc = btc_prem.join(
 print(f"BTC data (8h): {btc.shape}")
 print(f"Date range: {btc['timestamp'].min()} to {btc['timestamp'].max()}")
 
-# %%
-# Feature engineering with STRICT timing discipline
-# All confounders must be computed from data BEFORE treatment time
+# %% [markdown]
+# ### Feature Engineering
+#
+# Every confounder is built from bars that close before the treatment is measured, and the
+# `shift(1)` on each rolling window is what enforces it. At the 8-hour cadence, 3 bars span
+# 24 hours and 21 bars span 7 days.
+#
+# The cell also builds two negative-control outcomes over 24-hour windows that end 48 hours
+# *before* the treatment, so the treatment cannot reach them. There is one on each headline
+# outcome's scale, a return and a premium change, so each estimate has a control measured in
+# its own units.
 
-# Step 1: Base features (8h frequency -- 3 bars = 24h, 21 bars = 7 days)
+# %%
+# Step 1: Base features
 btc = btc.with_columns(
     pl.col("premium_index_close").alias("premium"),
     pl.col("close").pct_change().alias("return_8h"),
@@ -230,10 +271,7 @@ btc = btc.with_columns(
     (pl.col("premium").shift(-3) - pl.col("premium")).alias("fwd_premium_change"),
     # Forward return: t to t+24h = 3 bars (OUTCOME 1: returns)
     pl.col("close").pct_change(n=3).shift(-3).alias("fwd_return_24h"),
-    # Negative-control outcomes: 24h windows ending 48h BEFORE treatment, so the
-    # treatment at time t cannot causally affect them. Two scales - one for the
-    # returns outcome, one for the reversion outcome - so each headline ATE has
-    # a same-scale negative control.
+    # Negative controls, one on each outcome's scale
     pl.col("close").pct_change(n=3).shift(6).alias("past_return_48h"),
     (pl.col("premium").shift(6) - pl.col("premium").shift(9)).alias("past_premium_change_48h"),
 )
@@ -256,12 +294,11 @@ print(f"After feature engineering: {btc.shape}")
 #
 # Because the outcome is 24-hour forward (3 bars at 8h frequency), training
 # rows within the last `HORIZON_BARS` of the cutoff would realize outcomes
-# *inside* the test window. We purge that boundary band so training outcomes
-# are fully observed before the test period begins.
+# *inside* the test window. That boundary band is purged, so every training outcome is
+# fully observed before the test period begins. The split boundary is cast to the data's
+# own timestamp dtype, which avoids a resolution or timezone mismatch.
 
 # %%
-# Cast the split boundary to match the data's timestamp dtype to avoid
-# resolution/timezone mismatches (e.g. Datetime('ms','UTC') vs Datetime('μs',None)).
 HORIZON_BARS = 3  # 24h forward outcome at 8h frequency
 PURGE_HOURS = 8 * HORIZON_BARS
 
@@ -297,10 +334,12 @@ print(
 )
 
 # %% [markdown]
-# ## 3. Descriptive Statistics: Mean Reversion Is Real
+# ## 3. Descriptive Statistics: Is There Anything to Explain?
 #
-# Before causal analysis, we verify the basic phenomenon using an AR(1)
-# regression of premium z-score on forward premium change in the training set.
+# Before any causal question, the association has to exist. An AR(1) regression of the
+# forward premium change on the premium z-score, fitted on the training set, measures it,
+# and the two reversion rates below count how often an extreme reading in either direction
+# is followed by a move back toward the mean within 24 hours.
 
 # %%
 slope, intercept, r, p, se = stats.linregress(
@@ -323,9 +362,9 @@ if extreme_low.sum() > 0:
     print(f"  Extreme LOW  -> rises in 24h: {low_reverts:.1%}")
 
 # %% [markdown]
-# Mean reversion is real and strong. The question is whether this association
-# reflects a *causal* effect of extreme premium on future outcomes -- and
-# whether the answer depends on which outcome we choose.
+# The association is there, and it is not subtle. Everything that follows is about whether
+# it reflects an effect of the premium state on what comes next, or the same forces showing
+# up in both, and about how far the answer depends on which outcome is asked about.
 
 # %% [markdown]
 # ## 4. Causal Graph Specification
@@ -374,14 +413,14 @@ digraph {
 }
 """
 
-# The two negative-control outcomes (`past_return_48h`, `past_premium_change_48h`)
-# are both pre-treatment and strictly unreachable from `extreme_high_premium`
-# by temporal ordering. A DAG for them would (correctly) omit any
-# `extreme_high_premium -> past_*` edge, so DoWhy's backdoor identification
-# returns zero by construction and gives no numeric diagnostic of residual
-# association. Section 9 therefore measures that residual association directly
-# with an OLS+HAC regression on the same adjustment set - a placebo
-# diagnostic, not an identifiable causal effect.
+
+# %% [markdown]
+# There is deliberately no DAG for the two negative-control outcomes. Both precede the
+# treatment, so a correct graph omits any edge from `extreme_high_premium` into them, and
+# DoWhy's backdoor identification then returns zero by construction: the graph rules the
+# path out and reports nothing about the data. Section 9 measures the residual association
+# directly instead, with an OLS regression on the same adjustment set, which is a placebo
+# diagnostic rather than an identifiable causal effect.
 
 # %% [markdown]
 # ### Identifying the Adjustment Set
@@ -460,14 +499,15 @@ def estimate_backdoor_ols_hac(
     df,
     outcome_col,
     treatment_col="extreme_high_premium",
-    controls=("return_24h", "volatility_24h"),
-    maxlags=3,
+    controls=CONTROLS,
+    maxlags=HORIZON_BARS,
 ):
     """Adjusted treatment effect with HAC (Newey-West) standard errors.
 
-    `maxlags=3` matches the 24-hour outcome horizon at 8h frequency. The
-    point estimate matches `backdoor.linear_regression` up to numerical
-    precision; the standard error is the HAC-corrected version.
+    The lag count defaults to `HORIZON_BARS`, the number of 8-hour bars the forward outcome
+    spans, because that is the window over which consecutive outcomes overlap and their
+    residuals are correlated by construction. The point estimate matches
+    `backdoor.linear_regression` up to numerical precision; the standard error does not.
     """
     cols = [treatment_col, *controls]
     X = sm.add_constant(df[cols])
@@ -484,92 +524,83 @@ def estimate_backdoor_ols_hac(
 # %% [markdown]
 # ### Refutation Tests
 #
-# Run placebo treatment and random common cause refutations. A credible
-# causal claim should survive both: the placebo effect should be near zero,
-# and adding a random confounder should not materially change the estimate.
+# Two of DoWhy's refuters run on each estimate. The **placebo-treatment** refuter permutes
+# the treatment column, which destroys any real treatment-outcome link while leaving the
+# marginal distributions intact: an estimate that stays large under permutation is being
+# produced by something other than the treatment. The **random-common-cause** refuter adds
+# an independent draw to the adjustment set, which cannot confound anything: an estimate
+# that moves is unstable to the adjustment set itself.
+#
+# Both are reported as ratios to the original estimate rather than as pass or fail, because
+# what counts as small depends on the estimate's own standard error, which the ratio does
+# not carry.
 
 
 # %%
 def run_refutations(model, estimand, estimate, n_sims=20):
-    """Run placebo and random-cause refutation tests.
+    """Run the placebo-treatment and random-common-cause refuters.
 
-    Returns dict mapping test name to (passed: bool, detail: str).
+    Returns a dict mapping test name to a ratio against the original estimate: the placebo
+    effect's magnitude, and the shift the random common cause induces. Both are unitless,
+    so they compare across the two outcomes.
     """
-    results = {}
+    denominator = max(abs(estimate.value), 1e-8)
 
-    # Placebo treatment
-    try:
-        refute_placebo = model.refute_estimate(
-            estimand,
-            estimate,
-            method_name="placebo_treatment_refuter",
-            placebo_type="permute",
-            num_simulations=n_sims,
-        )
-        passed = abs(refute_placebo.new_effect) < abs(estimate.value) * 0.5
-        results["Placebo"] = (passed, f"effect={refute_placebo.new_effect:.6f}")
-    except Exception as e:
-        results["Placebo"] = (False, str(e))
-
-    # Random common cause
-    try:
-        refute_random = model.refute_estimate(
-            estimand,
-            estimate,
-            method_name="random_common_cause",
-            num_simulations=n_sims,
-        )
-        change = abs(refute_random.new_effect - estimate.value) / max(abs(estimate.value), 1e-8)
-        passed = change < 0.3
-        results["Random Cause"] = (passed, f"change={change:.1%}")
-    except Exception as e:
-        results["Random Cause"] = (False, str(e))
-
-    return results
+    refute_placebo = model.refute_estimate(
+        estimand,
+        estimate,
+        method_name="placebo_treatment_refuter",
+        placebo_type="permute",
+        num_simulations=n_sims,
+    )
+    refute_random = model.refute_estimate(
+        estimand,
+        estimate,
+        method_name="random_common_cause",
+        num_simulations=n_sims,
+    )
+    return {
+        "Placebo treatment |effect| / |original|": abs(refute_placebo.new_effect) / denominator,
+        "Random common cause |shift| / |original|": abs(refute_random.new_effect - estimate.value)
+        / denominator,
+    }
 
 
 # %% [markdown]
 # ### Sensitivity Analysis
 #
-# Progressively stronger unobserved confounders are injected to test whether
-# the estimated effect flips sign. A robust effect survives strong confounding;
-# a fragile one flips at low confounder strength.
+# Section 15.3 poses the sensitivity question as *how strong would an omitted confounder
+# have to be to overturn the result*. For a linear backdoor estimate that question has a
+# closed-form answer: the **robustness value** is the partial $R^2$ an unobserved confounder
+# would need with both the treatment and the outcome, after the observed controls, to drive
+# the estimate to zero (Cinelli and Hazlett, 2020). DoWhy computes it through
+# `simulation_method="linear-partial-R2"`.
+#
+# The partial $R^2$ parameterization is what makes the two outcomes comparable. It is a
+# share of residual variance, so it does not inherit the scale of the outcome, and a
+# forward return measured in percent and a premium change measured in index points land on
+# the same axis. Passing the observed controls as `benchmark_common_causes` additionally
+# expresses a hypothetical confounder as a multiple of the ones already in the model.
 
 
 # %%
-def run_sensitivity(model, estimand, estimate):
-    """Test robustness to unobserved confounding at increasing strengths.
+def run_sensitivity(model, estimand, estimate, benchmark_covariates):
+    """Partial-R2 sensitivity analysis for a linear backdoor estimate.
 
-    Returns (sensitivity_results, flip_strength) where sensitivity_results
-    is a list of {strength, effect} dicts and flip_strength is the first
-    strength at which the effect sign flips (or None if it never flips).
+    Returns DoWhy's LinearSensitivityAnalyzer. Its `stats` carry the robustness value, the
+    robustness value at the 5% significance level, and the t-statistic of the unadjusted
+    estimate; `compute_bias_adjusted(r2tu, r2yu)` returns the estimate an omitted confounder
+    of that strength would leave.
     """
-    effect_strengths = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
-    sensitivity_results = []
-
-    for strength in effect_strengths:
-        try:
-            refute = model.refute_estimate(
-                estimand,
-                estimate,
-                method_name="add_unobserved_common_cause",
-                confounders_effect_on_treatment="binary_flip",
-                confounders_effect_on_outcome="linear",
-                effect_strength_on_treatment=strength,
-                effect_strength_on_outcome=strength,
-            )
-            sensitivity_results.append({"strength": strength, "effect": refute.new_effect})
-        except Exception:
-            pass
-
-    # Find flip point
-    original_sign = np.sign(estimate.value)
-    flip_strength = None
-    for r in sensitivity_results:
-        if np.sign(r["effect"]) != original_sign and flip_strength is None:
-            flip_strength = r["strength"]
-
-    return sensitivity_results, flip_strength
+    return model.refute_estimate(
+        estimand,
+        estimate,
+        method_name="add_unobserved_common_cause",
+        simulation_method="linear-partial-R2",
+        benchmark_common_causes=list(benchmark_covariates),
+        effect_fraction_on_treatment=[1],
+        effect_fraction_on_outcome=[1],
+    )
 
 
 # %% [markdown]
@@ -606,36 +637,32 @@ print(
     f"p: {hac_ret['p_hac']:.3f}"
 )
 
-# %%
-refut_ret = run_refutations(model_ret_train, estd_ret_train, est_ret_train, n_sims)
-for test_name, (passed, detail) in refut_ret.items():
-    print(f"  {test_name}: {'PASS' if passed else 'FAIL'} ({detail})")
+# %% [markdown]
+# DoWhy's refuters draw from numpy's legacy global stream, so it is reseeded before each
+# refutation block. Without that, the second outcome's draws would depend on how many the
+# first one consumed.
 
 # %%
 np.random.seed(SEED)
-sens_ret, flip_ret = run_sensitivity(model_ret_train, estd_ret_train, est_ret_train)
-max_tested = max(r["strength"] for r in sens_ret) if sens_ret else 0
+refut_ret = run_refutations(model_ret_train, estd_ret_train, est_ret_train, n_sims)
+for test_name, ratio in refut_ret.items():
+    print(f"  {test_name}: {ratio:.3f}")
 
-if flip_ret is not None:
-    sensitivity_ret = f"effect flips at sensitivity setting {flip_ret:.2f}"
-    print(f"Effect FLIPS at sensitivity setting {flip_ret:.2f}")
-else:
-    sensitivity_ret = f"effect survives through sensitivity setting {max_tested:.2f}"
-    print(f"Effect survives through sensitivity setting {max_tested:.2f}")
-print(f"Sensitivity-test result: {sensitivity_ret}")
+# %%
+sens_ret = run_sensitivity(model_ret_train, estd_ret_train, est_ret_train, CONTROLS)
+rv_ret = float(sens_ret.stats["robustness_value"])
+rv_alpha_ret = float(sens_ret.stats["robustness_value_alpha"])
+print(f"Unadjusted t-statistic: {sens_ret.stats['t_statistic']:.2f}")
+print(f"Robustness value: {rv_ret:.4f}")
+print(f"Robustness value at the 5% level: {rv_alpha_ret:.4f}")
 
 # %% [markdown]
-# DoWhy's `effect_strength_on_treatment` / `effect_strength_on_outcome`
-# settings are diagnostic perturbations, not calibrated economic effect
-# sizes - they say nothing about percent-of-variance or any market-level
-# interpretation. We report them as raw settings ("flips at 0.5") rather
-# than percentages ("flips at 50% confounder strength") to avoid
-# overinterpretation.
-#
-# The sensitivity analysis cannot flip the returns effect - but this does
-# not mean the claim is credible. The OOS drift and same-scale negative
-# control reported below are the binding diagnostics; sensitivity alone
-# gives a false sense of security.
+# The robustness value answers a question the reader can weigh against what they know about
+# crypto markets: an omitted confounder explaining that share of the residual variance of
+# both the treatment and the outcome would move the estimate to zero. The second number is
+# the smaller share that would suffice to make the estimate statistically indistinguishable
+# from zero, and it is reported separately because an estimate can lose its significance
+# long before it loses its sign.
 
 # %% [markdown]
 # ## 7. Analysis B: Premium Reversion as Outcome
@@ -670,60 +697,55 @@ print(
 )
 
 # %%
+np.random.seed(SEED)
 refut_rev = run_refutations(model_rev_train, estd_rev_train, est_rev_train, n_sims)
-for test_name, (passed, detail) in refut_rev.items():
-    print(f"  {test_name}: {'PASS' if passed else 'FAIL'} ({detail})")
+for test_name, ratio in refut_rev.items():
+    print(f"  {test_name}: {ratio:.3f}")
 
 # %%
-np.random.seed(SEED)
-sens_rev, flip_rev = run_sensitivity(model_rev_train, estd_rev_train, est_rev_train)
-max_tested_rev = max(r["strength"] for r in sens_rev) if sens_rev else 0
-
-if flip_rev is not None:
-    sensitivity_rev = f"effect flips at sensitivity setting {flip_rev:.2f}"
-    print(f"Effect FLIPS at sensitivity setting {flip_rev:.2f}")
-else:
-    sensitivity_rev = f"effect survives through sensitivity setting {max_tested_rev:.2f}"
-    print(f"Effect survives through sensitivity setting {max_tested_rev:.2f}")
-print(f"Sensitivity-test result: {sensitivity_rev}")
+sens_rev = run_sensitivity(model_rev_train, estd_rev_train, est_rev_train, CONTROLS)
+rv_rev = float(sens_rev.stats["robustness_value"])
+rv_alpha_rev = float(sens_rev.stats["robustness_value_alpha"])
+print(f"Unadjusted t-statistic: {sens_rev.stats['t_statistic']:.2f}")
+print(f"Robustness value: {rv_rev:.4f}")
+print(f"Robustness value at the 5% level: {rv_alpha_rev:.4f}")
 
 # %% [markdown]
-# The reversion outcome also survives sensitivity analysis, but the
-# placebo-date, same-scale negative-control, and OOS tests below tell
-# the full story. The direct arbitrage mechanism gives the reversion
-# outcome a more credible causal interpretation than the indirect
-# sentiment channel - but only after every diagnostic supports the
-# claim. Liquidity, funding congestion, exchange risk, and market-wide
-# leverage can in principle affect both extreme-premium states and
-# reversion speed, so the reversion claim is *less likely* to be
-# confounded, not immune.
+# A larger robustness value does not make the reversion claim safe. Liquidity, funding
+# congestion, exchange credit risk and market-wide leverage can all move both the
+# extreme-premium state and the speed at which it decays, and none of them is in the
+# adjustment set. What the robustness value bounds is how weak such a confounder could be
+# and still overturn the estimate, which is a floor on the argument rather than a defence
+# of it. The reversion outcome is also mechanically close to the treatment, since both are
+# built from the same premium series, so part of the measured decay is ordinary mean
+# reversion after an extreme reading.
 
 # %% [markdown]
 # ## 8. Side-by-Side Comparison
 
 # %%
-flip_ret_str = f"{flip_ret:.0%}" if flip_ret else "Never"
-flip_rev_str = f"{flip_rev:.0%}" if flip_rev else "Never"
-
 comparison = pd.DataFrame(
     {
         "Metric": [
             "ATE (train)",
             "ATE (test)",
             "OOS drift",
-            "Sensitivity flip",
+            "Robustness value",
+            "Robustness value at the 5% level",
         ],
         "Returns": [
             f"{est_ret_train.value:.6f}",
             f"{est_ret_test.value:.6f}",
             f"{ate_diff_ret:.1%}",
-            flip_ret_str,
+            f"{rv_ret:.4f}",
+            f"{rv_alpha_ret:.4f}",
         ],
         "Reversion": [
             f"{est_rev_train.value:.6f}",
             f"{est_rev_test.value:.6f}",
             f"{ate_diff_rev:.1%}",
-            flip_rev_str,
+            f"{rv_rev:.4f}",
+            f"{rv_alpha_rev:.4f}",
         ],
     }
 ).set_index("Metric")
@@ -731,57 +753,67 @@ comparison = pd.DataFrame(
 display(comparison)
 
 # %% [markdown]
-# ### Sensitivity Curve: ATE vs Confounder Strength
+# ### How Fast Each Estimate Decays Under Omitted Confounding
 #
-# The plot below shows how the estimated ATE changes as we inject
-# progressively stronger unobserved confounders. A credible causal
-# claim keeps the same sign across all confounder strengths.
+# Each curve traces what an omitted confounder of a given strength would leave of the
+# estimate, as a fraction of the estimate the notebook actually reports. Both start at one,
+# because a confounder of zero strength changes nothing, and each crosses zero at its own
+# robustness value. Plotting the fraction rather than the level is what puts the two
+# outcomes on one axis: the ATEs themselves differ by a factor of five and are measured in
+# different units.
 
 # %%
-if sens_ret or sens_rev:
-    fig, ax = plt.subplots(figsize=(8, 5))
+confounder_grid = np.linspace(0.0, 0.35, 71)
 
-    # Baseline points at strength=0
-    ret_strengths = [0.0] + [r["strength"] for r in sens_ret]
-    ret_effects = [est_ret_train.value] + [r["effect"] for r in sens_ret]
-    rev_strengths = [0.0] + [r["strength"] for r in sens_rev]
-    rev_effects = [est_rev_train.value] + [r["effect"] for r in sens_rev]
 
-    # Explicit ML4T palette: the inline backend does not always honor the
-    # repo matplotlibrc color cycle, so set the series colors directly.
-    ax.plot(
-        ret_strengths,
-        ret_effects,
-        marker="o",
-        color=COLORS["blue"],
-        label="Forward Returns (indirect)",
-    )
-    ax.plot(
-        rev_strengths,
-        rev_effects,
-        marker="s",
-        color=COLORS["copper"],
-        linestyle="--",
-        label="Premium Reversion (direct)",
-    )
+def bias_adjusted_fraction(analyzer, unadjusted_estimate):
+    """Bias-adjusted estimate as a fraction of the unadjusted one, along r2tu = r2yu."""
+    adjusted = [
+        float(analyzer.compute_bias_adjusted(strength, strength)["bias_adjusted_estimate"])
+        for strength in confounder_grid
+    ]
+    return np.asarray(adjusted) / unadjusted_estimate
 
-    ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.8)
-    ax.set_xlabel("Unobserved Confounder Strength")
-    ax.set_ylabel("Estimated ATE")
-    ax.set_title("Sensitivity alone fails to separate the returns and reversion claims")
-    ax.legend()
 
-    fig.tight_layout()
-    fig.show()
+ret_fraction = bias_adjusted_fraction(sens_ret, est_ret_train.value)
+rev_fraction = bias_adjusted_fraction(sens_rev, est_rev_train.value)
+
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.plot(confounder_grid, ret_fraction, color=COLORS["blue"], label="Forward returns (indirect)")
+ax.plot(
+    confounder_grid,
+    rev_fraction,
+    color=COLORS["copper"],
+    linestyle="--",
+    label="Premium reversion (direct)",
+)
+ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.8)
+ax.axvline(rv_ret, color=COLORS["blue"], linewidth=0.8, alpha=0.6)
+ax.axvline(rv_rev, color=COLORS["copper"], linewidth=0.8, alpha=0.6)
+ax.set_ylim(-1.0, 1.1)
+ax.set_xlabel("Partial $R^2$ of an omitted confounder with treatment and with outcome")
+ax.set_ylabel("Bias-adjusted ATE / reported ATE")
+ax.set_title("Bias-adjusted effect against omitted-confounder strength")
+ax.legend()
+
+show_with_alt(
+    fig,
+    "Line chart of the bias-adjusted average treatment effect as a fraction of the "
+    "reported estimate, against the partial R-squared an omitted confounder would have "
+    "with both the treatment and the outcome. Both curves start at one on the left. The "
+    "forward-returns curve falls steeply and crosses zero very close to the left edge, "
+    "continuing well below it. The premium-reversion curve declines gradually and crosses "
+    "zero near the right of the range. A vertical line marks each crossing point.",
+)
 
 # %% [markdown]
 # ## 9. Additional Validation: Placebo Date and Negative Control
 #
-# Section 15.2.4 describes two validation tests beyond the sensitivity
-# analysis above. A **placebo-date test** shifts the treatment assignment by
-# several days -- a credible effect should vanish when the treatment timing is
-# wrong. A **negative-control outcome** uses a pre-treatment variable that
-# the treatment cannot cause -- a nonzero effect signals confounding leakage.
+# Section 15.3 describes two validation tests beyond the sensitivity analysis above. A
+# **placebo-date test** shifts the treatment assignment by several days, and a credible
+# effect should vanish once the treatment lands at the wrong time. A **negative-control
+# outcome** is a pre-treatment variable the treatment cannot cause, so any association the
+# adjustment leaves there is confounding or leakage rather than an effect.
 
 # %% [markdown]
 # ### Placebo-Date Test
@@ -823,10 +855,11 @@ placebo_df = pd.DataFrame(
 display(placebo_df)
 
 # %% [markdown]
-# A credible causal effect should shrink substantially under the placebo --
-# ideally to less than 20% of the original magnitude. If the placebo ATE
-# remains large, the association reflects persistent confounding rather
-# than a genuine treatment effect at the specified timing.
+# A credible causal effect shrinks toward zero under the placebo, because a treatment
+# measured a week early has no mechanism by which to reach the outcome. A placebo ATE that
+# stays close to the original says the association follows something persistent in the
+# series rather than the treatment arriving when it did. The ratio is the readable form,
+# since the two outcomes are on different scales.
 
 # %% [markdown]
 # ### Negative-Control Outcomes
@@ -880,44 +913,47 @@ print(f"  Relative to reversion OLS+HAC effect: {neg_ratio_rev:.1%}")
 # the DAG structurally forbids the path.
 
 # %% [markdown]
-# ## 10. Why the Difference? Mechanism Analysis
+# ## 10. What Separates the Two Outcomes
 #
-# The key insight: **mechanism tightness determines causal credibility**.
+# The estimator, the adjustment set and the sample are identical across the two analyses.
+# What differs is how much of the market sits between the treatment and the outcome, and
+# that is what the diagnostics are picking up.
 #
-# ### Returns Outcome (Questionable)
+# ### Forward returns
 # ```
-# market_sentiment -> { premium, returns }  (CONFOUNDING PATH)
-#           premium -> returns              (CAUSAL PATH - indirect)
+# market_sentiment -> { premium, returns }   (backdoor path, unmeasured)
+#           premium -> returns               (causal path, indirect)
 # ```
-# - Market sentiment affects BOTH premium AND returns
-# - The causal path (premium $\rightarrow$ returns) is indirect
-# - OOS drift and the same-scale negative control are the binding tests;
-#   exact magnitudes appear in the run output above
+# Speculative demand, leverage and risk appetite move both the funding premium and
+# subsequent returns. `return_24h` and `volatility_24h` are proxies for some of that and
+# not for all of it, so the backdoor path stays partly open. The residual association the
+# negative control finds on a pre-treatment return is the direct evidence of it.
 #
-# ### Reversion Outcome (More credible)
+# ### Premium reversion
 # ```
-# premium -> arbitrage_pressure -> premium_reversion  (CAUSAL PATH - tight)
+# premium -> funding pressure -> arbitrage -> premium reversion   (causal path, direct)
 # ```
-# - The mechanism is DIRECT: high premium $\rightarrow$ arbs sell perp,
-#   buy spot $\rightarrow$ premium drops
-# - The same-scale negative control (`past_premium_change_48h`) confirms
-#   the pipeline is not manufacturing reversion-scale signal from
-#   pre-treatment data
-# - Placebo-date shift eliminates the effect, confirming the 24h
-#   mechanism window
+# Funding makes the long side of the perpetual expensive while the premium is high, which
+# creates an incentive to sell the perpetual and buy spot, which compresses the premium.
+# The path is short enough that the same unmeasured sentiment has less room to act on the
+# outcome independently of the treatment. It is also short enough to be partly mechanical,
+# since the treatment and the outcome are built from the same premium series.
 
 # %% [markdown]
 # ## 11. Practical Implications
 #
-# - **Outcome design matters more than method sophistication**: A well-chosen
-#   outcome with a tight mechanism (reversion) yields a more credible claim
-#   that passes the negative-control and placebo-date checks; a confounded
-#   outcome (returns) fails them under scrutiny.
-# - **Use multiple validation tests**: Sensitivity analysis alone can miss
-#   problems that the negative control, placebo-date test, or out-of-sample
-#   stability reveal. No single test is sufficient.
-# - **Always validate out-of-sample**: If the ATE differs by more than 50%
-#   between train and test, the identification strategy is suspect.
+# - **Choose the outcome before choosing the estimator.** An outcome whose mechanism the
+#   available controls can block supports a claim that the negative-control and
+#   placebo-date checks can confirm. A broad market outcome exposed to everything the
+#   adjustment set omits does not, and no estimator repairs that.
+# - **Run the checks that fail for different reasons.** The placebo-date shift catches an
+#   effect that does not depend on timing, the negative control catches adjustment that
+#   leaves residual association, out-of-sample drift catches a fit to one period, and the
+#   robustness value says how weak an unseen confounder could be and still erase the
+#   estimate. Each is blind to what the others see.
+# - **Read out-of-sample drift on the estimate's own scale.** A large relative drift on a
+#   small estimate can sit well inside its standard error, so read the drift beside the HAC
+#   standard error rather than against a fixed cutoff.
 
 # %% [markdown]
 # ## 12. Results Summary
@@ -926,42 +962,72 @@ print(f"  Relative to reversion OLS+HAC effect: {neg_ratio_rev:.1%}")
 print(f"Train samples: {len(df_train):,}  |  Test samples: {len(df_test):,}")
 print(f"Treatment: extreme high premium (z > {EXTREME_THRESHOLD})\n")
 print(
-    f"Returns  -- ATE train: {est_ret_train.value:.6f}, "
-    f"test: {est_ret_test.value:.6f}, "
-    f"sensitivity: {sensitivity_ret}"
+    f"Returns   -- ATE train: {est_ret_train.value:.6f}, test: {est_ret_test.value:.6f}, "
+    f"OOS drift: {ate_diff_ret:.1%}, robustness value: {rv_ret:.4f}"
 )
 print(
-    f"Reversion -- ATE train: {est_rev_train.value:.6f}, "
-    f"test: {est_rev_test.value:.6f}, "
-    f"sensitivity: {sensitivity_rev}"
+    f"Reversion -- ATE train: {est_rev_train.value:.6f}, test: {est_rev_test.value:.6f}, "
+    f"OOS drift: {ate_diff_rev:.1%}, robustness value: {rv_rev:.4f}"
 )
 
 # %% [markdown]
-# The same treatment yields different causal credibility depending on the
-# outcome variable. The decisive discriminator is the same-scale negative
-# control: for the reversion outcome the pre-treatment placebo association is
-# a few percent of the headline effect and statistically insignificant, while
-# for the returns outcome it is several times the headline effect and highly
-# significant - proof that the returns backdoor adjustment leaves large
-# residual confounding. The reversion outcome also passes the placebo-date
-# shift at a tighter ratio than returns, and neither estimate flips sign under
-# the sensitivity-analysis setting range tested. Out-of-sample stability
-# separates the two only by degree: both train/test drifts exceed the 50%
-# guideline, so neither outcome is OOS-stable in absolute terms, but the
-# returns drift is far larger than the reversion drift. The returns claim
-# therefore fails the two binding checks (negative control and OOS drift)
-# while surviving sensitivity analysis on confounder strength alone - a
-# reminder that sensitivity alone is not the binding test. Outcome choice,
-# not estimator sophistication, dominates the credibility of the claim.
+# ### Reading the four diagnostics together
+#
+# No single diagnostic settles the comparison, and they are not independent of one another.
+# The cell below reports each of the four side by side, computed from the values above.
+
+# %%
+display(
+    Markdown(
+        "| Diagnostic | Forward returns | Premium reversion | What a smaller number means |\n"
+        "|---|---|---|---|\n"
+        f"| Out-of-sample drift | {ate_diff_ret:.1%} | {ate_diff_rev:.1%} | "
+        "the estimate reproduces on data it was not fitted on |\n"
+        f"| Placebo-date ratio (7d shift) | "
+        f"{abs(est_placebo_ret.value) / max(abs(est_ret_train.value), 1e-8):.1%} | "
+        f"{abs(est_placebo_rev.value) / max(abs(est_rev_train.value), 1e-8):.1%} | "
+        "the effect depends on the treatment landing at the right time |\n"
+        f"| Negative control / headline | {neg_ratio_ret:.1%} | {neg_ratio_rev:.1%} | "
+        "the adjustment leaves little association with a pre-treatment outcome |\n"
+        f"| Robustness value | {rv_ret:.4f} | {rv_rev:.4f} | "
+        "*larger* is better here: a weaker confounder suffices to overturn a small one |\n"
+    )
+)
+
+# %% [markdown]
+# The negative control is the sharpest of the four, because it is the only one the treatment
+# cannot influence by construction: any association it finds is residual confounding or
+# leakage, not a small true effect. The robustness value agrees with it, and the two are
+# measuring related things, since a large residual association with a pre-treatment outcome
+# is evidence that a confounder of exactly the strength the robustness value asks about is
+# present rather than hypothetical.
+#
+# Out-of-sample drift separates the two outcomes by degree rather than in kind. Both
+# estimates move substantially between the training and test periods, so neither is stable
+# in absolute terms, and the reversion claim is the more defensible of two claims that both
+# rest on a short sample of one asset.
+#
+# What none of the four establishes is that the reversion effect is causal. They rule out
+# specific failures: a result that appears at the wrong date, a result that appears on an
+# outcome the treatment precedes, a result that vanishes out of sample, a result an
+# arbitrarily weak confounder would erase. The mechanism argument, that funding makes the
+# long side expensive and creates a real incentive to sell the perpetual and buy spot, is
+# what the diagnostics are testing against, and it is doing the work.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Mechanism tightness matters**: Arbitrage (direct) > sentiment (indirect)
-# 2. **Multiple validation tests are essential**: Sensitivity analysis, placebo-date,
-#    negative control, and OOS stability each catch different failure modes
-# 3. **Outcome choice is a design decision**: Frame questions for credible answers
-# 4. **Honest reporting**: State exactly which validation tests an effect passes
-#    or fails, with the confounder-strength threshold that flips it
-# 5. **Train/test validation**: Always check out-of-sample consistency
-# 6. **Timing discipline**: Ensure confounders precede treatment precede outcome
+# 1. **The outcome is part of the design, not a reporting choice.** Both outcomes here are
+#    defensible questions. Only one of them has a mechanism that the two available controls
+#    can plausibly block, and that is what the diagnostics detect.
+# 2. **A mechanism-near outcome is easier to defend and easier to trivialize.** Premium
+#    reversion is close enough to the treatment that ordinary mean reversion after an
+#    extreme reading explains part of it, which is the cost of the tighter mechanism.
+# 3. **Report which checks an estimate passes and which it fails**, along with the strength
+#    of omitted confounding that would overturn it. A robustness value near zero says the
+#    estimate is not separable from confounding the data cannot see.
+# 4. **Adjust the standard errors to the dependence in the data.** Overlapping forward
+#    outcomes at an 8-hour cadence make the iid standard error too small, which is why every
+#    estimate here is repeated with Newey-West lags at the outcome horizon.
+# 5. **Confounders before treatment, treatment before outcome**, with the training window
+#    purged by the outcome horizon so no training row realizes inside the test period.
