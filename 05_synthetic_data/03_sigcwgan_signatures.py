@@ -1761,11 +1761,18 @@ show_plotly_with_alt(
 # fan out considerably wider by the end of the window than the real ones do, on the
 # same vertical scale.
 #
-# That is worth pausing on, because the marginal standard deviation matched closely
-# in the metrics above. A cumulative sum is not determined by the marginal alone - it
-# also depends on how consecutive returns relate to one another. The stylized-facts
-# table below reports the lag-1 autocorrelation of returns and of squared returns for
-# both series, which is where that difference is measured rather than eyeballed.
+# That is worth pausing on, because the synthetic marginal standard deviation in the
+# stylized-facts table below is no larger than the real one. A wider cumulative fan
+# cannot come from the marginal, then. A cumulative sum also depends on how
+# consecutive returns relate to one another, and the same table reports the lag-1
+# autocorrelation of returns for both series. Compare its two signs: returns that
+# reverse day to day cancel as they accumulate, and returns that persist compound.
+#
+# That also settles an apparent contradiction with the PCA panel earlier, where the
+# real windows had far-flung outliers the synthetic ones never reached. The panel is
+# about single extreme days and this figure about fifteen-day totals, so a generator
+# can miss the rare large move and still accumulate the wider fan. The kurtosis row
+# of the same table is where the first of those is measured rather than eyeballed.
 
 # %% [markdown]
 # ## 12. TSTR Evaluation: Train Synthetic, Test Real
