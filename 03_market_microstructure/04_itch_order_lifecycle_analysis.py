@@ -1234,8 +1234,11 @@ if HAS_MESSAGE_DATA:
 # ### Known limitations
 #
 # - One venue and one session. NASDAQ-routed orders only, on a single day.
-# - An order resting when the sample ends has no termination and no fill, and is counted
-#   as neither rather than assigned an outcome it did not have.
+# - Every outcome here is one observed inside the session. An order still on the book at
+#   the close has not been seen to terminate, which is not the same as not terminating.
+#   And resting is not exclusive of either population: a partially filled order still
+#   rests and contributes its first fill to the execution timing, and a partial cancel
+#   (`X`) counts as a termination here while leaving the remainder on the book.
 # - Time to execution is time to the *first* fill. An order filled in several pieces
 #   contributes the first one, so this is not how long an order took to complete.
 # - Hidden orders never appear as adds, so nothing here describes their lifecycle.

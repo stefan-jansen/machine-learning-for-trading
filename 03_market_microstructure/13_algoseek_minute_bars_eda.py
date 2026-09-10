@@ -736,9 +736,9 @@ if all(c in df.columns for c in tick_cols):
 #
 # The **relative** version divides by the spread, which is what makes it comparable
 # across stocks: a penny away from the midpoint is aggressive on a two-cent spread and
-# unremarkable on a twenty-cent one. On that scale, zero is the midpoint and one is the
-# far touch, so a value halfway between them says the average trade printed halfway from
-# the midpoint to the ask.
+# unremarkable on a twenty-cent one. The distance being divided is at most half a spread,
+# so on that scale the midpoint is zero, the ask is one half and the bid is minus one
+# half. A quarter says the average trade printed halfway from the midpoint to the ask.
 #
 # Unlike OFI which counts shares by bucket, pressure measures the **magnitude** of
 # price impact - how aggressively traders are pushing prices away from fair value.

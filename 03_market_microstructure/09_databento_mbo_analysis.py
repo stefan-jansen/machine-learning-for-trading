@@ -668,9 +668,12 @@ if multi_day is not None and len(multi_day) > 0:
 # relationship; whether one exists, and in which direction, is left open.
 #
 # That is why the question worth asking of a microstructure signal is economic rather
-# than statistical: whether any implied magnitude is larger than the cost of trading it.
-# A relationship too small to distinguish from zero on thousands of bars is also too
-# small to pay for a round trip, and the next panels put that comparison directly.
+# than statistical: how many basis points the conditional return is worth, against what
+# a round trip costs. The two questions come apart in both directions. A correlation
+# indistinguishable from zero on this sample can still carry a conditional return large
+# enough to pay for itself, and a correlation measured precisely can be worth a fraction
+# of a basis point. The next panels put the forward return in basis points on the axis,
+# which is the quantity a cost can be compared against.
 
 # %%
 if multi_day is not None and len(multi_day) > 0:

@@ -708,7 +708,7 @@ if not snapshots.is_empty() and top_symbol and not snapshots_plot.is_empty():
 # %%
 if not snapshots.is_empty() and top_symbol and not snapshots_plot.is_empty():
     fig.update_layout(
-        title=f"{top_symbol}: quotes and spread reconstructed from IEX DEEP",
+        title=f"{top_symbol}: midpoint and spread reconstructed from IEX DEEP",
         height=500,
         showlegend=True,
         template="ml4t",
@@ -719,7 +719,7 @@ if not snapshots.is_empty() and top_symbol and not snapshots_plot.is_empty():
 
     show_plotly_with_alt(
         fig,
-        f"Two stacked panels sharing a time axis for {top_symbol}. The upper traces the best bid and best ask through the session as lines. The lower traces the spread between them in dollars as a single line filled down to zero.",
+        f"Two stacked panels sharing a time axis for {top_symbol}. The upper traces the midpoint of the best bid and offer through the session as a single line. The lower traces the bid-ask spread in dollars as a single line filled down to zero.",
     )
 
 # %% [markdown]
