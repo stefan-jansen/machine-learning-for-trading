@@ -769,7 +769,7 @@
   timeout: 900
 15_causal_estimation/10_case_study_insights:
   skip: true
-  skip_reason: "Needs production causal-DML registry data; the loader raises on an empty causal_runs table by design"
+  skip_reason: "Reads nine case-study registries; CI has none of them, and the loader raises on a missing registry file"
   timeout: 300
 15_causal_estimation/11_factor_zoo_validation:
   timeout: 360
