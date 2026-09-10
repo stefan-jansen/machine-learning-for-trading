@@ -775,10 +775,25 @@ fig = plot_fidelity_comparison(
 )
 show_with_alt(
     fig,
-    "Two scatter panels, PCA and t-SNE, each overlaying real and synthetic "
-    "sequence embeddings; the degree to which the two clouds overlap is the "
-    "visual read on how well the generator covers the real distribution.",
+    "Two scatter panels of the same real and synthetic sequences. In the PCA "
+    "projection the real points form a broad cloud around the origin while the "
+    "synthetic points sit in a short horizontal sliver at its centre. In the t-SNE "
+    "projection the two occupy separate regions of the plane, synthetic to the left "
+    "and real to the right, with almost no interleaving.",
 )
+
+# %% [markdown]
+# **Read it.** Neither panel shows the two sets sitting on top of each other. In the
+# PCA projection the synthetic sequences occupy a sliver at the centre of the real
+# cloud, so they vary far less than the real ones along the directions that carry most
+# of the real variance. In the t-SNE projection the two sets fall in separate regions.
+# The discriminative accuracy printed by the evaluation suite below puts a number on
+# what these panels show.
+#
+# Read this against the mean and standard deviation printed by the generation cell
+# above, which are close to the real ones. Those two readings are not in conflict, and
+# the section at the end of the notebook is about why: the pooled moments are a weak
+# requirement, and these panels are a picture of what they leave unconstrained.
 
 # %% [markdown]
 # ### Paper Evaluation Suite (LSTM-based)
@@ -839,9 +854,13 @@ if embedding_losses:
     fig.suptitle("Loss curves for the three training phases", fontsize=14, fontweight="semibold")
     show_with_alt(
         fig,
-        "Three loss curves against training step: the embedding autoencoder "
-        "loss, the supervisor loss, and the generator and discriminator losses "
-        "of the joint adversarial phase plotted together.",
+        "Three panels, each against training step in thousands and each on its own "
+        "vertical scale. The embedding autoencoder loss declines unevenly across the "
+        "whole run; the supervisor loss drops sharply inside the first thousand steps "
+        "and is flat after that; the third panel plots the generator and discriminator "
+        "losses of the joint phase together, the generator falling steeply inside the "
+        "first thousand steps and then running flat, and the discriminator flat across "
+        "the whole run at a level a little below where the generator settles.",
     )
 
 # %% [markdown]
