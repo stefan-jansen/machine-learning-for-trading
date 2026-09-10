@@ -689,21 +689,32 @@ display(
             if same_reach
             else f"{high_shock['assets_reached']} and {low_shock['assets_reached']} assets"
         )
-        + f". Their portfolio sensitivities differ, "
-        f"{high_shock['network_weight_sensitivity']:.1%} against "
-        f"{low_shock['network_weight_sensitivity']:.1%} on the network weights, and "
-        f"that difference comes from the weights rather than from the reach."
+        + f". Their sensitivities still differ, "
+        f"{high_shock['equal_weight_sensitivity']:.1%} against "
+        f"{low_shock['equal_weight_sensitivity']:.1%} under equal weights, so the "
+        f"difference is in how large an impact each asset receives rather than in "
+        f"how many receive one. Holding the scenario fixed and changing the weight "
+        f"vector is the separate comparison: the {high_shock['symbol']} shock moves "
+        f"from {high_shock['equal_weight_sensitivity']:.1%} to "
+        f"{high_shock['network_weight_sensitivity']:.1%} on the network weights."
     )
 )
 
 # %% [markdown]
 # Reach does not separate the two scenarios. The diffusion runs five rounds over
 # the thresholded graph counted above, which is dense enough that a shock starting
-# anywhere inside its connected part covers the same assets: what the starting node
-# changes is the path, not the extent. So the difference in
-# portfolio sensitivity is the weight vector's doing, and treating a difference in
-# reach as evidence that MST centrality identifies systemic assets would be reading
-# the MST's own construction back out of the correlation matrix it came from.
+# anywhere inside its connected part covers the same assets. What the starting node
+# changes is the path, and the path is what sets the size of each impact: an
+# impact is the product of correlations along the route from the source, halved at
+# each hop by the attenuation, so two shocks that touch the same 83 assets deliver
+# very different amounts to them.
+#
+# That makes the scenario difference a statement about impact magnitudes under one
+# fixed weight vector, not about the weights. The weights are the other comparison,
+# and it runs within a scenario: the same shock evaluated on equal weights and on
+# network weights. Reading a reach difference as evidence that MST centrality
+# identifies systemic assets would in any case be reading the tree's construction
+# back out of the correlation matrix it was built from.
 #
 # The table reports portfolio-weighted sensitivities, not a sum of hypothetical
 # asset losses. Synchronous updates make the result independent of loop order.
