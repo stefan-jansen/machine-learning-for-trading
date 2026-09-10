@@ -643,17 +643,22 @@ print(compare_df)
 # | Production | `FixedTickImbalanceBarSampler` | The threshold cannot drift, so bar size is predictable |
 # | Research | `TickImbalanceBarSampler` with a slow decay | Follows the textbook scheme while damping the feedback loop |
 #
-# The table above is how to read that recommendation, and the diagnosis is available
-# before any downstream statistic: compare the average number of trades an adaptive
-# sampler put into a bar against the target it was given. A ratio near one is the scheme
-# working. A ratio far below one means the threshold fell away, and in the limit every
-# trade cuts its own bar; a ratio far above one means it ran up, and the sampler cuts
-# few very long bars. Both are the same feedback loop and neither raises an error.
+# The table above carries two different things and they answer two different questions.
 #
-# That comparison applies to the adaptive samplers only. A fixed sampler is given an
-# imbalance threshold rather than a target trade count, so its bars have no target to be
-# measured against; what to check there is whether the bar count it produces is the one
-# the threshold was calibrated for.
+# The bar count and the average bar size say what the sampler *produced*. Both depend on
+# the trade-sign sequence as well as on the threshold, so a bar shorter than the target
+# is not on its own evidence that the threshold moved - a run of one-sided signs fills
+# any threshold quickly, and the warm-up bars are short before adaptation has begun.
+#
+# `et_drift` is the direct answer: the sampler records its expected bar size as it goes,
+# and this is the last value over the first. One means the threshold ended where it
+# started; well above one means it ran up over the session, well below that it fell
+# away. That is the column to read for stability, and the bar count is what to read for
+# whether the sampler is producing a usable series.
+#
+# Neither applies to the fixed sampler, which has no adapting threshold to drift. What
+# to check there is whether the bar count it produced is the one its threshold was
+# calibrated for.
 
 # %%
 print("\n" + "=" * 70)
