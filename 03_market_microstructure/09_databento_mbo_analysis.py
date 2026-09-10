@@ -64,37 +64,28 @@
 # %%
 """DataBento MBO: Order Flow Predictability — analyzing OFI signals in tick data."""
 
-import warnings
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
-import seaborn as sns
 from tqdm.auto import tqdm
 
 from data import load_mbo_data
 from utils.paths import display_path, get_output_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0  # 0 = all
 SEED = 42
 
 # %%
 set_global_seeds(SEED)
-sns.set_style("whitegrid")
 
-# ML4T Blue Period palette
-COLORS = {
-    "blue": "#1E3A5F",
-    "accent": "#4A90A4",
-    "warm": "#8B4513",
-    "neutral": "#5D5D5D",
-}
+# Two extra shades on top of the repository palette: a lighter blue for a second series
+# on the same axis, and a brown that stays distinguishable from both in greyscale.
+COLORS = {**COLORS, "accent": "#4A90A4", "warm": "#8B4513"}
 
 # %%
 OUTPUT_DIR = get_output_dir(3, "databento")
@@ -175,26 +166,34 @@ if data_files:
         print(f"  {ACTION_MAP.get(row[0], row[0]):8s} {row[1]:>12,} ({pct:5.1f}%)")
 
 # %% [markdown]
-# **What this tells us**: Adds and cancels dominate (~48% each), with trades
-# comprising only ~2% of messages. This ~40:1 ratio of quote changes to trades
-# is typical for liquid stocks—the order book is constantly reshaping itself
-# around each trade.
+# Adds and cancels take almost all of that table between them and trades take a sliver.
+# The ratio of the two is the point: a liquid name's book is re-quoted many times between
+# consecutive trades, so most of what an MBO feed carries is the book rearranging itself
+# rather than anything changing hands. That is what makes MBO data large and what makes
+# it informative - the rearranging is the part a trade-only feed cannot see.
 
 # %% [markdown]
 # ## 2. Book Pressure: Measuring Order Flow Momentum
 #
-# The core idea is simple: when buyers are more aggressive than sellers,
-# prices should rise. We measure this by tracking the net flow of orders:
+# Book pressure sums every message in a window into one signed number, weighting each by
+# how much it should count:
 #
-# **Book Pressure** = Σ (sign × weight × size × decay)
+# $$P = \sum_i s_i \, w_i \, q_i \, e^{-\lambda d_i}$$
 #
-# Where:
-# - **sign**: +1 for bids, -1 for asks
-# - **weight**: +1 for adds, -1 for cancels, +0.5 for fills
-# - **decay**: exp(-λ × distance_from_mid) — orders near the spread matter more
+# where $q_i$ is the size the message moved and:
 #
-# This creates a momentum indicator: positive pressure suggests buying interest,
-# negative suggests selling.
+# - $s_i$ is the side, positive on the bid and negative on the ask.
+# - $w_i$ is the action. An add puts size on the book and counts positively; a cancel takes
+#   it off and counts negatively; a fill counts at half weight, because it both removes
+#   resting size and reveals someone who wanted to trade, and those pull in opposite
+#   directions.
+# - $d_i$ is how far the message was from the midpoint, and $\lambda$ how quickly distance
+#   stops mattering. An order five cents away can be cancelled without anyone noticing; an
+#   order at the touch is what the next trade will hit.
+#
+# A positive sum means the bid side grew relative to the ask, weighted towards what is
+# close enough to matter. Whether that anticipates the next price move is the question the
+# rest of the notebook puts to the data rather than assumes.
 
 
 # %%
@@ -264,9 +263,6 @@ def compute_book_pressure(
 
 
 # %%
-# Single cell: build the two-panel figure (price + book pressure) end-to-end
-# so papermill emits both panels populated. Splitting price and pressure into
-# separate cells leaves the second panel empty in the rendered .ipynb.
 pressure_df = None
 if sample_df is not None and len(sample_df) > 0:
     # One liquid mid-morning hour (10:00-11:00 America/New_York). The stored
@@ -326,8 +322,10 @@ if sample_df is not None and len(sample_df) > 0:
         )
         axes[1].legend(loc="upper right")
 
-        plt.tight_layout()
-        plt.show()
+        show_with_alt(
+            fig,
+            "Two stacked panels sharing a time axis over one hour of trading. The upper plots the mid price as a line. The lower plots book pressure as a line about a zero line, with the area above it shaded for buy pressure and the area below shaded in red for sell pressure.",
+        )
 
         # Statistics
         print("=== Book Pressure Statistics ===")
@@ -375,10 +373,8 @@ def reconstruct_bbo_bars(df: pl.DataFrame, bar_freq: str = "1m") -> pl.DataFrame
     orders: dict[int, tuple[str, float, int]] = {}  # order_id -> (side, price, size)
     bids: dict[float, int] = {}  # price -> resting size
     asks: dict[float, int] = {}  # price -> resting size
-    # Track the inside quote incrementally so we never scan the whole book per
-    # message. Recomputing max(bids)/min(asks) on every one of tens of millions
-    # of MBO messages is the bottleneck on multi-day streams; here the O(levels)
-    # scan only fires when the prevailing best level itself empties.
+    # The inside quote is tracked incrementally; a full scan fires only when the
+    # prevailing best level empties.
     best_bid: float | None = None
     best_ask: float | None = None
 
@@ -475,10 +471,8 @@ def process_day_to_bars(
     # open carry into the session), then restrict bars to regular trading hours.
     bbo_bars = reconstruct_bbo_bars(df, bar_freq=bar_freq)
 
-    # Regular trading hours (09:30-16:00 America/New_York). Convert the naive-UTC
-    # instant to exchange-local time so the window is correct in both EDT and EST;
-    # a fixed UTC window (e.g. 13:30-21:00) admits an hour of pre-market on the
-    # EST sample here (November 2024, post-DST).
+    # Regular trading hours are defined on the exchange's clock, so convert before
+    # filtering: a window fixed in UTC is an hour wrong for half the year.
     _et = pl.col("timestamp").dt.replace_time_zone("UTC").dt.convert_time_zone("America/New_York")
     df = df.filter(
         ((_et.dt.hour() > 9) | ((_et.dt.hour() == 9) & (_et.dt.minute() >= 30)))
@@ -532,10 +526,6 @@ def process_day_to_bars(
         ]
     )
 
-    # Attach the reconstructed quote prevailing at each bar close. ``mid_quote``
-    # is the true (bid+ask)/2 midpoint; the trade-derived ``mid_price`` above is
-    # only a proxy. Keeping both lets us separate the price-response signal
-    # (midpoint markout) from the spread a real order pays (executable markout).
     bars = bars.join(bbo_bars, on="timestamp", how="left")
     bars = bars.with_columns(((pl.col("best_bid") + pl.col("best_ask")) / 2).alias("mid_quote"))
 
@@ -575,10 +565,13 @@ if data_files:
 # But how strong is this relationship, and how long does it last?
 
 
+# %% [markdown]
+# A signal computed at the close of a bar cannot be acted on within that bar. `LATENCY_BARS`
+# is how many bars pass between the two, and it is bound once here because both the markout
+# computation and the plotting cell below read it; two copies of the same assumption would
+# eventually disagree.
+
 # %%
-# Latency in bars between signal time and earliest fillable execution.
-# Defined once so the markout call and the downstream "h == LATENCY_BARS"
-# guard in the plotting cell cannot drift apart.
 LATENCY_BARS = 1
 
 
@@ -635,43 +628,43 @@ if multi_day is not None and len(multi_day) > 0:
         ["ofi", "ofi_lag1", "markout_1", "markout_5", "markout_10"]
     ).to_pandas()
 
-    print("=== OFI Predictive Power ===")
-    print("Correlation of OFI(t-1) with future returns:\n")
-    print(f"{'Horizon':<12} {'Correlation':>12} {'Interpretation':<30}")
-    print("-" * 55)
-
-    interpretations = {
-        1: "Very short-term momentum",
-        5: "Short-term persistence",
-        10: "Medium-term (weak)",
-        30: "Longer-term (negligible)",
-    }
+    # Roughly 1/sqrt(n) for independent draws, and larger here because the windows overlap.
+    n_bars = len(pdf)
+    naive_se = 1 / np.sqrt(n_bars) if n_bars > 1 else float("nan")
+    print("Correlation of OFI(t-1) with the return over the following window\n")
+    print(f"Minute bars in the panel: {n_bars:,}")
+    print(
+        f"A correlation of zero would show a standard error of about {naive_se:.4f} on "
+        f"independent draws, and more than that here because the windows overlap.\n"
+    )
+    print(f"{'Horizon':<12} {'Correlation':>12} {'In naive SEs':>14}")
+    print("-" * 40)
 
     for h in [1, 5, 10, 30]:
         if f"markout_{h}" in pdf.columns:
             corr = pdf["ofi_lag1"].corr(pdf[f"markout_{h}"])
-            interp = interpretations.get(h, "")
-            print(f"{h:>3} min      {corr:>12.4f}   {interp}")
+            print(f"{h:>3} min      {corr:>12.4f}   {corr / naive_se:>13.1f}")
 
 # %% [markdown]
-# Pearson correlation between OFI(t-1) and forward markouts is small and mixed
-# in sign on this slice: about +0.004 at 1 minute, +0.001 at 5 minutes, −0.009
-# at 10 minutes, and −0.010 at 30 minutes. These correlations are computed on
-# the **minute-bar** panel printed above (a few thousand regular-trading-hours
-# bars across the ten days run here), not on the underlying tick stream. At that
-# bar count $1/\sqrt{n}$ is of order $10^{-2}$, and the forward-return windows
-# overlap and are serially correlated within a session, so the effective sample
-# is smaller still — every one of these estimates sits within about one standard
-# error of zero. The sign flips across horizons and should not be
-# over-interpreted: the read is no reliable linear relationship at these
-# horizons, neither momentum nor reversal. The economic question — whether any
-# implied magnitude could survive transaction costs — is the binding one, and
-# the next panel addresses it directly.
+# Read that table against its last column rather than its middle one. A Pearson
+# correlation is a number whatever the data does, and the question is whether it is
+# distinguishable from what noise would produce on this many observations.
+#
+# Three things make the honest standard error larger than the naive one printed above.
+# The correlations are computed on the minute-bar panel, not on the tick stream, so the
+# sample is thousands of bars rather than millions of messages. The forward-return
+# windows overlap - the return over the next ten minutes shares nine minutes with the
+# one starting a minute later - so successive rows carry much of the same information.
+# And returns are serially correlated within a session. Each of those shrinks the
+# effective number of independent observations below the bar count.
+#
+# So a sign that flips between horizons is not a finding about horizons, and a
+# correlation inside a standard error of zero is not a weak signal but an absent one.
+# The question worth asking of a microstructure signal is economic rather than
+# statistical - whether any implied magnitude is larger than the cost of trading it - and
+# the next panels put that to it directly.
 
 # %%
-# Single cell so both panels (raw scatter + binned decile bars) render in
-# one .ipynb output. Split-cell variants left the right panel empty under
-# papermill's auto-display.
 if multi_day is not None and len(multi_day) > 0:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -719,25 +712,28 @@ if multi_day is not None and len(multi_day) > 0:
         ha="center",
     )
 
-    plt.suptitle(f"OFI predictive power — {SYMBOL}", fontsize=12)
-    plt.tight_layout()
-    plt.show()
+    fig.suptitle(f"{SYMBOL}: order-flow imbalance against the following return", fontsize=12)
+    show_with_alt(
+        fig,
+        f"Two panels for {SYMBOL}. The left scatters each bar's order-flow imbalance against the return over the following window, one point per bar. The right sorts the bars into ten equal groups by imbalance and draws the mean return of each group as a bar, with an annotation giving the difference between the top and bottom groups in basis points.",
+    )
 
 # %% [markdown]
-# **The binned analysis shows no usable directional structure**:
+# What to look for in the decile means, in order of how much it would take to convince
+# you:
 #
-# - The decile means alternate sign with no monotone ramp and no clean tail
-#   signal — the interior bins are as large as the extreme ones.
-# - The bottom (heavy-selling) decile mean is slightly positive and the top
-#   (heavy-buying) decile mean is among the most negative — the opposite of a
-#   momentum read.
-# - The top-minus-bottom spread is about −1.9 bps: negative and, like the
-#   near-zero correlations above, within sampling noise of zero.
+# - **A ramp.** If flow carried direction, the means would rise monotonically from the
+#   heaviest-selling decile to the heaviest-buying one. Alternating signs across the
+#   interior bins are what noise looks like when it is sorted into ten buckets.
+# - **Tails larger than the middle.** A signal that lives in extreme flow shows up as
+#   the two end bins standing away from the rest. Interior bins as large as the extreme
+#   ones say the sort found nothing.
+# - **A top-minus-bottom spread larger than it costs to capture.** Round-trip execution
+#   in liquid US equities runs on the order of a basis point or two, so a spread of that
+#   size is not an edge whatever its sign - it is the fee.
 #
-# A decile spread that is within noise and on the order of round-trip execution
-# costs (~1–2 bps for liquid US equities) is the realistic baseline for a raw
-# microstructure signal at this horizon: there is no edge to harvest before costs,
-# let alone after them. The next panel makes the cost frictions explicit and shows
+# That third point is the one that decides it, and it is why the next panel makes the
+# cost frictions explicit and shows
 # why even a marginally non-zero correlation would not convert to tradable P&L.
 
 # %% [markdown]
@@ -761,9 +757,15 @@ if multi_day is not None and len(multi_day) > 0:
 # Reading the three together shows where the edge goes: latency erodes it, and
 # the spread can erase it outright.
 
+# %% [markdown]
+# The three markout definitions differ only in what they subtract. The midpoint markout is
+# the move in the quote midpoint, which is the signal with no frictions at all. The
+# latency-adjusted one starts a bar later, which is the earliest a signal computed at a
+# bar close could have been acted on. The executable one also pays the spread, which is
+# what an order that crosses actually gives up. Comparing the three distributions locates
+# where a return would be lost rather than asserting that it is.
+
 # %%
-# Plot midpoint vs executable markout distributions across horizons, and
-# summarize all three types (midpoint / latency-adjusted / executable).
 if multi_day is not None and len(multi_day) > 0:
     summary_rows = []
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -808,16 +810,18 @@ if multi_day is not None and len(multi_day) > 0:
             fontsize=9,
         )
 
-        # Latency-adjusted markout is identically zero at h == LATENCY_BARS
-        # (p₂ == p₁ by construction), so report its mean only past that horizon.
+        # At h == LATENCY_BARS the latency-adjusted markout compares a price with itself,
+        # so it is zero by construction rather than by measurement; report it past that.
         adj_mean = (
             multi_day.drop_nulls([adj_col])[adj_col].mean() * 10000 if h > LATENCY_BARS else None
         )
         summary_rows.append((h, mid_mean, adj_mean, exec_mean))
 
-    plt.suptitle(f"Midpoint vs Executable Markouts by Horizon - {SYMBOL}", fontsize=12)
-    plt.tight_layout()
-    plt.show()
+    fig.suptitle(f"{SYMBOL}: midpoint and executable markouts at four horizons", fontsize=12)
+    show_with_alt(
+        fig,
+        f"Four panels in a two-by-two grid, one per forward horizon, for {SYMBOL}. Each overlays two distributions of returns in basis points: the markout measured on the quote midpoint, and the markout an order that crossed the spread would have realised. The gap between the two distributions is the spread being paid.",
+    )
 
     print("=== Mean markout by type (bps) ===")
     print(f"{'Horizon':<10}{'Midpoint':>12}{'Latency-adj':>14}{'Executable':>14}")
@@ -857,41 +861,41 @@ if multi_day is not None and len(multi_day) > 0:
 # %% [markdown]
 # ## Key Takeaways
 #
-# ### 1. OFI ↔ Forward-Return Correlation
+# 1. **Read a correlation against its standard error, not against zero.** The table
+#    prints both, and the second column is what says whether the first is a measurement.
+#    Where the estimate sits inside a standard error, the sign carries no information and
+#    a flip between horizons is not a horizon effect.
 #
-# On this ten-day, regular-trading-hours slice the correlation of OFI(t-1) with
-# forward returns is small and mixed in sign (about +0.004 at 1 minute, +0.001
-# at 5 minutes, −0.009 at 10 minutes, −0.010 at 30 minutes). The per-observation
-# magnitudes are tiny relative to the dispersion of returns, and the estimates
-# sit within about one standard error of zero, so the sign is not something to
-# trade on — the reading is no reliable linear relationship, neither momentum
-# nor reversal.
+# 2. **Overlapping forward windows are not independent observations.** A ten-minute return
+#    measured every minute shares nine minutes with its neighbour, so the effective sample
+#    is well below the bar count and the naive standard error understates the real one.
+#    Any test that treats these rows as independent overstates its own confidence.
 #
-# ### 2. Horizon Dependence
+# 3. **Sort into deciles to look for a shape, not for a number.** A directional signal
+#    shows as a monotone ramp across the bins or as tails standing away from the middle.
+#    Alternating signs across the interior is what a sort of noise produces.
 #
-# The correlations flip from marginally positive at 1-5 minutes to marginally
-# negative at 10-30 minutes, but every value is within one standard error of
-# zero. This notebook does not separate any horizon dependence into a permanent
-# vs transient component; it reports the unconditional correlation at each
-# horizon, all within sampling noise here.
+# 4. **Judge a microstructure signal against what trading it costs.** A decile spread on
+#    the order of a round trip is not a small edge; it is the fee. That comparison, not the
+#    statistical one, is what decides whether a signal is worth anything, which is why the
+#    three markout columns exist: the midpoint markout is the signal before frictions, the
+#    latency-adjusted one subtracts the delay, and the executable one subtracts the spread.
+#    On a signal with no edge to begin with they demonstrate the method rather than measure
+#    a loss.
 #
-# ### 3. Three Markout Types, Not Latency Alpha
+# 5. **Order flow is more defensible as a filter than as a forecast.** Declining to trade
+#    against heavy one-sided flow asks much less of the data than predicting direction from
+#    it, and this notebook's evidence supports the first and not the second.
 #
-# The midpoint, latency-adjusted, and executable markouts are a *framework* for
-# locating where a signal's return would leak away — the one-bar delay and the
-# spread — not evidence of alpha on this slice. Here the midpoint markout is
-# already small and negative, so there is no positive edge for latency to erode;
-# the point is methodological, and on a genuine signal these three columns are how
-# you would quantify the loss from delay and from crossing the spread.
+# ### Known limitations
 #
-# ### 4. Practical Alpha Is Limited
-#
-# The top-minus-bottom OFI decile spread is about −1.9 bps on this slice — within
-# noise and on the order of round-trip transaction costs. There is no standalone
-# edge here: the decile means alternate sign with no tail structure, matching the
-# near-zero correlations. OFI is more useful as a **filter** (avoid trading against
-# strong flow) than as a primary alpha source, and any directional use would demand
-# far stronger, cost-aware evidence than this horizon provides.
+# - One symbol over a short slice of days. Nothing here establishes what holds for other
+#   names, other periods, or other venues.
+# - The correlations are unconditional. This notebook does not split a return into
+#   permanent and transient components, nor condition on spread, volatility or time of day,
+#   any of which could carry structure the unconditional estimate averages away.
+# - The cost figures used for comparison are typical magnitudes for liquid US equities,
+#   not measurements of what these trades would have cost.
 #
 # ### DataBento vs ITCH: When to Use Each
 #
