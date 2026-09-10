@@ -128,6 +128,7 @@ MESSAGES_DIR = load_nasdaq_itch(get_base_path=True)
 # directory listing is the inventory: whatever is there is what this notebook can read.
 
 
+# %%
 def discover_available_symbols(base_dir: Path) -> list[str]:
     """Find all symbols with reconstructed LOB data."""
     symbols = []
@@ -1006,7 +1007,7 @@ def plot_ofi_vs_returns(results: list[dict], ax=None):
     ax.set_xscale("log")
     ax.set_xlabel("Add messages received that day (log scale)", fontsize=12)
     ax.set_ylabel("Correlation, imbalance to next-bucket return", fontsize=12)
-    ax.set_title("Imbalance-return correlation by trading activity, fifty NASDAQ stocks")
+    ax.set_title(f"Imbalance-return correlation by trading activity, {len(results)} NASDAQ stocks")
     ax.axhline(0, color="gray", linestyle="-", alpha=0.5, linewidth=1.5)
     ax.grid(True, alpha=0.3)
 
