@@ -57,6 +57,7 @@ from agent_pipeline import (
     neyman_extremize,
     neyman_extremize_weighted,
     platt_scale,
+    reliability_bins,
 )
 
 from utils.reproducibility import set_global_seeds
@@ -75,9 +76,15 @@ from utils.style import (
 # `SEED` fixes the simulated forecast panel used in the calibration section, so the fitted
 # exponent and the held-out scores are the same on every machine. Nothing else in the notebook
 # is random.
+#
+# `RELIABILITY_BANDS` is how many equal-width probability bands the held-out forecasts are
+# grouped into before their outcomes are counted. Four over eighty questions is already coarse:
+# fewer bands hide where the miscalibration sits, and more of them leave counts too small for
+# the observed share to mean anything.
 
 # %% tags=["parameters"]
 SEED = 42
+RELIABILITY_BANDS = 4
 
 # %%
 set_global_seeds(SEED)
@@ -456,12 +463,16 @@ ax.plot(
 )
 ax.set_xlabel("Log-odds of the original probability")
 ax.set_ylabel("Log-odds after the transformation")
+# Equal limits on both axes are what makes the slope readable: the identity is then the
+# diagonal of a square, and a steeper line is an exponent above one.
+ax.set_xlim(logit_p.min(), logit_p.max())
+ax.set_ylim(logit_p.min(), logit_p.max())
 add_message_title(
     ax,
     "The same three transformations, in log-odds space",
     subtitle="Even odds sits at the origin on both axes",
 )
-ax.legend(loc="upper left")
+ax.legend(loc="lower right")
 ax.set_aspect("equal")
 show_with_alt(
     fig,
@@ -533,71 +544,53 @@ print(f"Test Brier after:   {test_brier_after:.4f}")
 print(f"Test improvement:   {test_improvement:.1%}")
 
 # %% [markdown]
-# The two Brier scores say the correction helped and nothing about where. A **reliability
-# diagram** answers that: sort the held-out forecasts into equal-sized groups, and plot each
-# group's average forecast against the share of its questions that actually resolved yes. A
-# forecaster whose probabilities mean what they say lands on the diagonal; a point below it
-# promised more than the outcomes delivered, and a point above it promised less.
+# The two Brier scores say the correction helped and nothing about where. `reliability_bins`
+# answers that: it splits the forecasts into equal-width probability bands and reports, for
+# each, how many questions fell in it, what it forecast on average, and what share of those
+# questions actually resolved yes. A band whose observed share is below what it forecast
+# promised more than the outcomes delivered; a band above it promised less.
 #
 # Everything below is the held-out panel alone. The exponent was chosen on the training
 # observations and applied to these unchanged.
+# [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) plots the same bins as
+# a reliability diagram, on a panel large enough for the picture to be worth drawing.
 
 # %%
-N_RELIABILITY_BINS = 4
-bin_edges = np.quantile(test_forecasts, np.linspace(0, 1, N_RELIABILITY_BINS + 1))
-bin_index = np.digitize(test_forecasts, bin_edges[1:-1])
-reliability = [
-    (
-        label,
-        [float(np.mean(np.array(series)[bin_index == b])) for b in range(N_RELIABILITY_BINS)],
-        [float(np.mean(test_outcomes[bin_index == b])) for b in range(N_RELIABILITY_BINS)],
-    )
-    for label, series in (("Raw", test_forecasts), ("Calibrated", test_calibrated))
-]
-bin_sizes = [int((bin_index == b).sum()) for b in range(N_RELIABILITY_BINS)]
-
-# %%
-fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-for (label, mean_forecast, realized), color, marker in zip(
-    reliability, [COLORS["blue"], COLORS["copper"]], ["o", "s"], strict=True
-):
-    ax.plot(mean_forecast, realized, marker=marker, color=color, label=label)
-ax.plot(
-    [0, 1], [0, 1], color=COLORS["neutral"], linestyle="--", alpha=0.6, label="Perfect calibration"
+reliability = pl.DataFrame(
+    [
+        {
+            "series": label,
+            "band": f"{b['lo']:.2f}-{b['hi']:.2f}",
+            "questions": b["count"],
+            "avg forecast": round(b["avg_predicted"], 3),
+            "share resolved yes": round(b["avg_observed"], 3),
+        }
+        for label, series in (("raw", test_forecasts), ("calibrated", test_calibrated))
+        for b in reliability_bins(series, list(test_outcomes), n_bins=RELIABILITY_BANDS)
+    ]
 )
-ax.set_xlabel("Average forecast within the group")
-ax.set_ylabel("Share of the group that resolved yes")
-ax.set_xlim(0, 1)
-ax.set_ylim(0, 1)
-ax.set_aspect("equal")
-format_pct_axis(ax, axis="both")
-add_message_title(
-    ax,
-    "Reliability of the held-out forecasts, before and after",
-    subtitle=f"{N_RELIABILITY_BINS} equal-sized groups of {bin_sizes[0]} held-out questions each",
-)
-ax.legend(loc="upper left")
-show_with_alt(
-    fig,
-    "Reliability diagram on a square axis with the perfect-calibration diagonal. The raw and "
-    "calibrated series each connect four points, one per group of held-out questions. Both "
-    "sit below the diagonal at the low end and above it at the high end, and calibration "
-    "pulls the outermost groups toward the diagonal while leaving the ordering unchanged.",
-)
+reliability
 
 # %% [markdown]
-# The two outer groups sit on the far side of the diagonal from each other: the lowest group's
-# questions resolved yes less often than it forecast, and the highest group's resolved yes more
-# often. That is under-confidence, and it is what the generating process put there - each true
-# probability was shrunk toward even odds before the forecast was recorded. The fitted exponent
-# is above one, which spreads the forecasts back out, and the two outer points move toward the
-# diagonal.
+# Two bands hold nearly all the questions, and they miss the outcomes in opposite directions:
+# the band below even odds forecast more yes than happened, and the band above it forecast
+# fewer. That is under-confidence, and it is what the generating process put there - each true
+# probability was shrunk toward even odds before the forecast was recorded, so the fitted
+# exponent coming out above one is the direction that undoes the shrinkage. The two outer bands
+# hold a handful of questions each and say nothing; the count column is there so that they are
+# read as noise rather than as evidence.
+#
+# The two halves of the table do not hold the same questions. Calibration moves a forecast
+# across a band boundary as readily as within one, which is why the counts differ, so this is
+# two descriptions of the panel rather than a paired comparison. Read against what each band
+# forecast, they say the miscalibration is still there afterwards: smaller in the upper band,
+# and about the same size in the lower one.
 #
 # The improvement in Brier score is nonetheless small, and on this data it should be. A
-# log-odds exponent does not invert a linear shrinkage: it is a single exponent minimizing
-# Brier score across the whole range, closer at some probabilities than at others, and the
-# noise added on top is not correctable at all. The second group, which resolved yes far less
-# often than either version forecast, is where that shows.
+# log-odds exponent does not invert a linear shrinkage: it is one exponent minimizing Brier
+# score across the whole range, closer at some probabilities than at others, and the noise
+# added on top of the shrinkage is not correctable at all. The band just below even odds,
+# which resolved yes far less often than either version of it forecast, is where that shows.
 #
 # What the comparison establishes is the procedure: fit on one panel, freeze, score on another.
 # Read the same numbers off a fit evaluated on its own training observations and they say
