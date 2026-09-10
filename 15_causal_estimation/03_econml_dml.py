@@ -574,7 +574,8 @@ if len(placebo_t_stats) > 10:
     )
     print(
         f"   Placebo effect spread {np.std(placebo_effects):.6f} against a Driscoll-Kraay "
-        f"standard error of {manual_se_hac:.6f}, which is why the comparison is on t-statistics"
+        f"standard error of {manual_se_hac:.6f}; the comparison above is on t-statistics, "
+        f"which holds whatever the ratio of those two turns out to be"
     )
 else:
     print("   Insufficient successful permutations")
@@ -586,10 +587,17 @@ else:
 # z-score measures how far the observed t-statistic sits from the placebo *mean* in placebo
 # standard deviations, which is a statement about a normal distribution centred where the
 # placebos are. The permutation p-value counts how many placebo draws reach its magnitude.
-# When the placebo distribution is not centred near zero - and a block permutation within
-# entity has no reason to centre it there - the two answer different questions, and only the
-# count is a statement about the null the test actually built. Read the count printed above,
-# and the mean and standard deviation beside it, before reading the z-score.
+# When the placebo distribution is not centred near zero the two answer different questions,
+# and only the count is a statement about the null the test actually built. Read the count
+# printed above, and the mean and standard deviation beside it, before reading the z-score.
+#
+# **And this null is not centred at zero.** Permuting blocks within a symbol reorders when
+# that symbol's momentum was high; it leaves untouched *which* symbols had high momentum on
+# average and which had high average forward returns. The between-symbol part of the
+# association is therefore intact in every draw, and the null the test builds is the narrower
+# one of "no within-symbol timing relation", not "no relation". A placebo mean well away from
+# zero is that between-symbol component showing up, and it is the reason the count and the
+# z-score part company here.
 
 # %% [markdown]
 # The two halves are cut at a decision time rather than at a row, so neither holds a
