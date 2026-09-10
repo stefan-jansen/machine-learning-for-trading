@@ -116,7 +116,14 @@ DEMO_START = "2024-01-01"
 DEMO_END = "2024-12-31"
 DEMO_PROVIDER = "yahoo"
 MAX_WORKERS = 4
-DEMO_SYMBOL = "AAPL"
+STORAGE_SYMBOLS = ["AAPL", "MSFT", "GOOGL"]
+DEMO_SYMBOL = STORAGE_SYMBOLS[0]  # the symbol the partition walkthrough follows
+STORAGE_START = "2023-01-01"
+STORAGE_END = "2024-12-31"
+# The read-back below demonstrates partition pruning, so it asks for a window inside what
+# was stored rather than the whole of it.
+READBACK_START = "2024-01-01"
+READBACK_END = "2024-12-31"
 PIPELINE_UNIVERSE = "etf_momentum"
 REBASE_LEVEL = 100.0
 
@@ -325,10 +332,10 @@ dm_stored = DataManager(storage=storage)
 # and symbol.
 
 # %%
-symbols = ["AAPL", "MSFT", "GOOGL"]
+symbols = STORAGE_SYMBOLS
 stored_keys = {}
 for symbol in symbols:
-    key = dm_stored.load(symbol, "2023-01-01", "2024-12-31", provider="yahoo")
+    key = dm_stored.load(symbol, STORAGE_START, STORAGE_END, provider=DEMO_PROVIDER)
     stored_keys[symbol] = key
     print(f"  Stored {symbol} → key: {key}")
 
@@ -347,10 +354,13 @@ stored_symbols = sorted(storage.list_keys())
 print(f"Symbols in storage: {stored_symbols}")
 aapl_2024 = storage.read(
     stored_keys[DEMO_SYMBOL],
-    start_date=datetime.strptime(DEMO_START, "%Y-%m-%d"),
-    end_date=datetime.strptime(DEMO_END, "%Y-%m-%d"),
+    start_date=datetime.strptime(READBACK_START, "%Y-%m-%d"),
+    end_date=datetime.strptime(READBACK_END, "%Y-%m-%d"),
 ).collect()
-print(f"\n{DEMO_SYMBOL} {DEMO_START} to {DEMO_END}: {len(aapl_2024)} rows (partition-pruned)")
+print(
+    f"\n{DEMO_SYMBOL} {READBACK_START} to {READBACK_END}: "
+    f"{len(aapl_2024)} rows out of {STORAGE_START} to {STORAGE_END} stored (partition-pruned)"
+)
 print(f"Date range: {aapl_2024['timestamp'].min().date()} to {aapl_2024['timestamp'].max().date()}")
 
 # %% [markdown]

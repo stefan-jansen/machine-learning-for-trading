@@ -129,6 +129,12 @@ print(f"Data path: {display_path(DATA_DIR)}")
 #
 # ### The seam needs a rescale, not just a filter
 #
+# Two things have to be reconciled at the boundary, and the first is mechanical. The two
+# providers disagree about time zones - one stamps its timestamps naive and the other stamps
+# them UTC-aware - so concatenating the legs raises rather than silently mixing two clocks.
+# That refusal is right, and it still has to be resolved: both are daily bars in UTC, so
+# converting to UTC and dropping the zone puts them on one clock without moving anything.
+#
 # Both feeds publish adjusted prices, and they are adjusted for different sets of events.
 # WikiPrices back-adjusts only the splits that happened inside its own coverage window,
 # which ends in 2018. Yahoo back-adjusts every split up to today, including ones after that
@@ -136,11 +142,16 @@ print(f"Data path: {display_path(DATA_DIR)}")
 # concatenating them therefore produces a series with a step in it, and the step is a
 # corporate action rather than a price move.
 #
-# The fix is one number. Both legs are already dividend-adjusted, so the only thing left
-# between them is the post-seam split factor, and the ratio of the recent leg's first close
-# to the historical leg's last close is exactly that factor. Volume scales the other way - a
-# four-for-one split quarters the price and quadruples the share count - so the historical
-# volume is divided by the same number.
+# The fix is one number, and where it is measured matters more than it looks. Both legs are
+# already dividend-adjusted, so on any day *both* feeds quote, the ratio of their two closes
+# is the difference in adjustment basis and nothing else. Taking the ratio across the seam
+# instead - the last historical close against the first recent one - divides two different
+# days' prices, so the intervening market move rides along in the factor. That forces the
+# return across the seam to zero and pushes the same move into the rescaled volume.
+#
+# The two feeds overlap, so the factor comes from the last day they share. Volume scales the
+# other way - a four-for-one split quarters the price and quadruples the share count - so the
+# historical volume is divided by the same number.
 #
 # ### Requirements
 #
@@ -187,35 +198,41 @@ def _combine_pipeline_sources(
     if recent is None:
         return _naive_utc(historical).with_columns(pl.lit("wiki").alias("source"))
 
-    # The two providers disagree about time zones: one stamps naive, the other UTC-aware.
-    # Concatenating them raises rather than silently mixing, which is the right behaviour and
-    # still has to be resolved here. Both are daily bars in UTC, so dropping the zone after
-    # converting to it puts them on one clock without moving any observation.
     historical = _naive_utc(historical)
     recent = _naive_utc(recent)
 
-    # Both sources - combine with proper boundary
     wiki_end_dt = datetime.strptime(wiki_end, "%Y-%m-%d").date()
+
+    # The factor comes from a shared date; see the markdown above for why not across the seam.
+    overlap = (
+        historical.select(pl.col("timestamp").dt.date().alias("day"), pl.col("close"))
+        .join(
+            recent.select(pl.col("timestamp").dt.date().alias("day"), pl.col("close")),
+            on="day",
+            suffix="_recent",
+        )
+        .sort("day")
+    )
+    scale = None
+    if overlap.height:
+        wiki_close = overlap["close"][-1]
+        yahoo_close = overlap["close_recent"][-1]
+        if wiki_close and wiki_close > 0 and yahoo_close and yahoo_close > 0:
+            scale = yahoo_close / wiki_close
 
     historical = historical.filter(pl.col("timestamp").dt.date() <= wiki_end_dt)
     recent = recent.filter(pl.col("timestamp").dt.date() > wiki_end_dt)
 
-    # Rescale the historical leg onto the recent leg's adjustment basis. See the markdown
-    # above this cell for why the ratio of the two closes at the seam is the right factor.
-    if len(historical) > 0 and len(recent) > 0:
-        wiki_last_close = historical.sort("timestamp")["close"][-1]
-        yahoo_first_close = recent.sort("timestamp")["close"][0]
-        if wiki_last_close and wiki_last_close > 0 and yahoo_first_close and yahoo_first_close > 0:
-            scale = yahoo_first_close / wiki_last_close
-            historical = historical.with_columns(
-                [
-                    (pl.col("open") * scale).alias("open"),
-                    (pl.col("high") * scale).alias("high"),
-                    (pl.col("low") * scale).alias("low"),
-                    (pl.col("close") * scale).alias("close"),
-                    (pl.col("volume") / scale).alias("volume"),
-                ]
-            )
+    if scale is not None:
+        historical = historical.with_columns(
+            [
+                (pl.col("open") * scale).alias("open"),
+                (pl.col("high") * scale).alias("high"),
+                (pl.col("low") * scale).alias("low"),
+                (pl.col("close") * scale).alias("close"),
+                (pl.col("volume") / scale).alias("volume"),
+            ]
+        )
 
     historical = historical.with_columns(pl.lit("wiki").alias("source"))
     recent = recent.with_columns(pl.lit("yahoo").alias("source"))
@@ -471,8 +488,10 @@ etf_results = etf_pipeline.run()
 
 # %%
 # Visualize the stitched data — one panel per symbol
-fig, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
-for ax, (symbol, result) in zip(axes, etf_results.items(), strict=True):
+fig, axes = plt.subplots(
+    1, len(etf_results), figsize=(6 * len(etf_results), 5), constrained_layout=True, squeeze=False
+)
+for ax, (symbol, result) in zip(axes[0], etf_results.items(), strict=True):
     df = result["data"]
     for source, color in [("wiki", COLORS["blue"]), ("yahoo", COLORS["amber"])]:
         src = df.filter(pl.col("source") == source)

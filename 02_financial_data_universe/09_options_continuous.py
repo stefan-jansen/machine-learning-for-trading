@@ -842,11 +842,22 @@ print(f"  what negating the long cumulative return would say:  {-_held_total:+.1
 
 # %% [markdown]
 # The short figure is constructed here, by negating each day's held-contract return and
-# compounding the result over the same year, which is the P&L of a position whose notional is
-# reset against equity every day. It is one convention among several and it has to be named,
-# because a position sized once and left alone compounds differently again. What no
-# convention produces is the negation of the long cumulative return: both series lose money
-# over this year, so a sign flip gets the direction wrong and not merely the size.
+# compounding the result over the same year. That is the P&L of a position whose notional is
+# reset against equity every day, and it has to be named because the convention decides the
+# answer.
+#
+# Under *this* convention the short return is not the negation of the long one, and the two
+# printed numbers show how far from it: both lose money over the year, so a sign flip gets
+# the direction wrong and not merely the size. Both series reset exposure against their own
+# equity each day, and two paths that rebalance separately do not stay mirror images.
+#
+# A different convention gives a different answer, and one of them gives exactly the
+# negation: holding the opposite quantity of the same contracts every day, never
+# rebalancing, produces the opposite dollar P&L before costs, which on the same initial
+# capital is the long return negated. The lesson is not that the negation is wrong in
+# general. It is that a cumulative short return is undefined until the sizing is stated, and
+# negating a compounded long return silently assumes one particular sizing that the series
+# above does not use.
 #
 # The two roll-convention series part company by tens of percentage points of cumulative
 # return over a single year, from the same contracts, the same days and the same prices. Only the roll-day
