@@ -513,31 +513,37 @@ plot_horizon = horizon_df.filter(pl.col("short_name").is_in(multi_horizon_names)
 n_panels = len(multi_horizon_names)
 n_columns = 2
 n_rows = int(np.ceil(n_panels / n_columns))
-fig, axes = plt.subplots(n_rows, n_columns, figsize=(10, 3.5 * n_rows), squeeze=False)
-for index, short_name in enumerate(multi_horizon_names):
-    ax = axes.flat[index]
-    panel = plot_horizon.filter(pl.col("short_name") == short_name).sort("horizon_days")
-    x = panel["horizon_days"].to_numpy()
-    effect = panel["dml_effect"].to_numpy()
-    lo = panel["ci_lo"].to_numpy()
-    hi = panel["ci_hi"].to_numpy()
-    ax.fill_between(x, lo, hi, color=COLORS["amber"], alpha=0.2)
-    ax.plot(x, effect, marker="o", color=COLORS["blue"], linewidth=1.5)
-    ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
-    ax.set_xscale("log")
-    ax.set_title(short_name)
-    ax.set_xlabel("Horizon (trading days, log scale)")
-    ax.set_ylabel("DML effect (panel units)")
-for index in range(n_panels, n_rows * n_columns):
-    axes.flat[index].set_visible(False)
-fig.suptitle("DML effect against label horizon, for panels with more than one", y=1.01)
-show_with_alt(
-    fig,
-    "A grid of small panels, one per case study that registers more than one label horizon. "
-    "Each plots the DML effect against the horizon in trading days on a logarithmic axis, as "
-    "a line with a marker at every horizon, inside a shaded band for the confidence interval, "
-    "with a dashed horizontal line at zero.",
-)
+if n_panels == 0:
+    # Which case studies load is a property of the registries rather than a constant, so
+    # every loaded one registering a single horizon is a reachable state, and
+    # plt.subplots(0, 2) raises on it.
+    print("No loaded case study registers more than one horizon; nothing to plot here.")
+else:
+    fig, axes = plt.subplots(n_rows, n_columns, figsize=(10, 3.5 * n_rows), squeeze=False)
+    for index, short_name in enumerate(multi_horizon_names):
+        ax = axes.flat[index]
+        panel = plot_horizon.filter(pl.col("short_name") == short_name).sort("horizon_days")
+        x = panel["horizon_days"].to_numpy()
+        effect = panel["dml_effect"].to_numpy()
+        lo = panel["ci_lo"].to_numpy()
+        hi = panel["ci_hi"].to_numpy()
+        ax.fill_between(x, lo, hi, color=COLORS["amber"], alpha=0.2)
+        ax.plot(x, effect, marker="o", color=COLORS["blue"], linewidth=1.5)
+        ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
+        ax.set_xscale("log")
+        ax.set_title(short_name)
+        ax.set_xlabel("Horizon (trading days, log scale)")
+        ax.set_ylabel("DML effect (panel units)")
+    for index in range(n_panels, n_rows * n_columns):
+        axes.flat[index].set_visible(False)
+    fig.suptitle("DML effect against label horizon, for panels with more than one", y=1.01)
+    show_with_alt(
+        fig,
+        "A grid of small panels, one per case study that registers more than one label "
+        "horizon. Each plots the DML effect against the horizon in trading days on a "
+        "logarithmic axis, as a line with a marker at every horizon, inside a shaded band "
+        "for the confidence interval, with a dashed horizontal line at zero.",
+    )
 
 # %%
 horizon_df.sort(["case_order", "horizon_days", "label"]).select(
