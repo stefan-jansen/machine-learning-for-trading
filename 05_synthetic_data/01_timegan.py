@@ -432,6 +432,12 @@ print(f"  Total:         {total_params:,}")
 # instead of loading. Without that check a checkpoint trained on price levels
 # would load silently into this returns-based notebook and every number below
 # would describe a model fitted to a different target.
+#
+# The comparison has to cover everything that moves the weights, not just what
+# describes the data. A seed, a batch size, a learning rate and the discriminator
+# gating threshold all produce different models from the same inputs, so all four
+# are compared too. A checkpoint written before they were is missing them, which
+# reads as a mismatch and retrains - the safe direction.
 
 # %%
 CHECKPOINT_PATH = CHECKPOINT_DIR / "checkpoint.pt"
@@ -444,6 +450,13 @@ RUN_CONFIG = {
     "hidden_dim": HIDDEN_DIM,
     "num_layers": NUM_LAYERS,
     "train_steps": TRAIN_STEPS,
+    # Each of these changes the weights, so a checkpoint fitted under a different
+    # value is not this run's model. SEED is exposed as a papermill parameter, so
+    # without it here, a second seed would load the first seed's weights.
+    "seed": SEED,
+    "batch_size": BATCH_SIZE,
+    "learning_rate": LEARNING_RATE,
+    "d_gating_threshold": D_GATING_THRESHOLD,
 }
 
 if CHECKPOINT_PATH.exists() and not RETRAIN:
