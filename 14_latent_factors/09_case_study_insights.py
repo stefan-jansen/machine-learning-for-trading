@@ -229,15 +229,18 @@ show_with_alt(
 # figure shows the same values with their HAC intervals. No single estimator
 # leads everywhere. Read the intervals before the ordering: where an interval
 # spans zero, that panel's leader is not separated from no ranking skill at
-# all, and which objective works best is a property of the panel and the
+# all, and which estimator ranks best is a property of the panel and the
 # prediction target rather than of the estimator alone.
 
 # %% [markdown]
-# ## 3. Training objectives on one panel
+# ## 3. Estimators on one panel
 #
 # Holding the dataset and the target fixed at the US Firms panel and its
-# primary label, the highest-IC registered checkpoint of each estimator differs
-# from the others only in the objective it was trained against.
+# primary label removes two sources of difference from the comparison. What
+# remains is not the training objective alone: IPCA's exposures are linear in
+# the characteristics, the CAE's are a neural map, and the SDF and SAE differ
+# again in structure and in how each is fitted. The comparison is between
+# estimators, not between objectives holding everything else equal.
 
 # %%
 us_firms_metrics = (
@@ -304,9 +307,9 @@ show_with_alt(
 # %% [markdown]
 # The printed ordering above is the result; the figure adds each estimator's
 # HAC interval to it. Those intervals overlap each other heavily, so the
-# objectives are separated far less than the point estimates suggest. It is a
-# validation comparison in any case: it diagnoses objective alignment on this
-# panel and does not estimate holdout performance.
+# estimators are separated far less than the point estimates suggest. It is a
+# validation comparison in any case, and it cannot attribute a difference to
+# any one of the things that differ between two estimators.
 
 # %% [markdown]
 # ## 4. Latent factors versus supervised models
@@ -648,8 +651,8 @@ show_with_alt(
 )
 
 # %% [markdown]
-# The printed off-diagonal range is well short of one, so the neural objectives
-# do not merely repackage the same ranking. That supports testing them as
+# The printed off-diagonal range is well short of one, so the three neural
+# estimators do not merely repackage the same ranking. That supports testing them as
 # separate ensemble inputs. Chapter 20 makes the portfolio decision, under the
 # holdout protocol defined there.
 
@@ -659,11 +662,12 @@ show_with_alt(
 # - Registry coverage is uneven, so missing cells are not performance results.
 # - No latent estimator leads every panel. Which one leads where is printed in
 #   Section 2 and moves with the registry snapshot.
-# - With the panel and target held fixed, the estimators separate by training
-#   objective, but their intervals overlap heavily (Section 3).
+# - With the panel and target held fixed the estimators still differ in
+#   architecture and fitting, and their intervals overlap heavily, so Section 3
+#   orders them without attributing the ordering to any one difference.
 # - Paired per-date comparisons show that neither latent nor supervised models
 #   dominate everywhere. These are post-selection validation diagnostics.
-# - Neural objectives create distinct monthly firm rankings, making model
+# - The neural estimators produce distinct monthly firm rankings, making model
 #   diversity a testable input to Chapter 20 rather than an assumption.
 #
 # **Next**: Chapter 15 studies causal effects; Chapter 20 evaluates how these
