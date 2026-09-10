@@ -28,7 +28,8 @@
 # The reconstructed books from `02_itch_lob_reconstruction` are the input. This notebook
 # reads them for three things: how the spread moves through a session, how the shares
 # resting at the touch move with it, and whether the imbalance between buying and selling
-# pressure says anything about the next minute's return. The last of those is measured
+# pressure says anything about the return over the bucket that follows. The last of those
+# is measured
 # across a cross-section of stocks rather than one, because a single symbol cannot
 # distinguish a signal from a coincidence.
 #
@@ -57,7 +58,7 @@
 #   say what shape they take.
 # - Build order-flow imbalance - shares added to one side minus shares taken off it -
 #   from raw ITCH messages, and say which messages that construction ignores.
-# - Correlate that imbalance against the following minute's return for one stock, then
+# - Correlate that imbalance against the following bucket's return for one stock, then
 #   for a cross-section of fifty, and read the spread of correlations rather than any
 #   single value.
 #
@@ -98,7 +99,7 @@ from utils.style import COLORS, show_with_alt
 # across. One minute is short enough that order flow and the next price move are plausibly
 # related and long enough that a bucket holds many messages.
 #
-# `MIN_BUCKETS` is how many one-minute buckets a symbol must contribute before its
+# `MIN_BUCKETS` is how many buckets a symbol must contribute before its
 # correlation is reported. A correlation over a handful of points is noise with a value
 # attached, so thinly traded symbols drop out rather than widening the cross-section with
 # estimates nobody should read.
@@ -663,8 +664,16 @@ def _enrich_removals(removals: pl.DataFrame, registry: pl.DataFrame) -> pl.DataF
 
 
 # %%
-def compute_ofi(messages_dir: Path, symbol: str, freq: str = "1m") -> pl.DataFrame:
-    """Compute Order Flow Imbalance from raw ITCH messages."""
+def compute_ofi(messages_dir: Path, symbol: str, freq: str) -> pl.DataFrame:
+    """Compute Order Flow Imbalance from raw ITCH messages.
+
+    Args:
+        messages_dir: Parsed ITCH message store, one directory per message type.
+        symbol: Stock to build the imbalance for.
+        freq: Bucket width, as a polars duration string. The caller passes
+            `BUCKET_FREQ` so the single stock and the cross-section are measured
+            over the same interval.
+    """
     # Build order registry
     registry = load_order_registry(messages_dir, symbol)
     if registry.is_empty():
@@ -708,7 +717,7 @@ def compute_ofi(messages_dir: Path, symbol: str, freq: str = "1m") -> pl.DataFra
 
 
 # %% [markdown]
-# ### Imbalance against the next minute's return
+# ### Imbalance against the next bucket's return
 #
 # Line the buckets up with the mid price at the end of each, take the return over the
 # following bucket, and correlate. The return is shifted backwards by one bucket so that
@@ -728,7 +737,7 @@ corr_log = None
 # Compute OFI and align with price data
 if MESSAGES_DIR.exists() and OFI_SYMBOL:
     print(f"Computing OFI for {OFI_SYMBOL}...")
-    ofi_df = compute_ofi(MESSAGES_DIR, OFI_SYMBOL, freq="1m")
+    ofi_df = compute_ofi(MESSAGES_DIR, OFI_SYMBOL, freq=BUCKET_FREQ)
 
     if not ofi_df.is_empty() and OFI_SYMBOL in lob_data:
         lob_df = lob_data[OFI_SYMBOL]
@@ -736,7 +745,7 @@ if MESSAGES_DIR.exists() and OFI_SYMBOL:
         if "mid_price" in lob_df.columns:
             # Get price buckets
             prices = (
-                lob_df.with_columns(pl.col("timestamp").dt.truncate("1m").alias("bucket"))
+                lob_df.with_columns(pl.col("timestamp").dt.truncate(BUCKET_FREQ).alias("bucket"))
                 .group_by("bucket")
                 .agg(pl.col("mid_price").last())
             )
@@ -784,9 +793,9 @@ if ofi_arr is not None and ret_arr is not None:
     ofi_scaled = ofi_arr / 1000  # Scale to thousands for display
     axes[0].bar(range(len(ofi_arr)), ofi_scaled, color=COLORS["slate"], alpha=0.7)
     axes[0].axhline(0, color="black", lw=0.5)
-    axes[0].set_xlabel("Time bucket (1-min)")
+    axes[0].set_xlabel(f"Time bucket ({BUCKET_FREQ})")
     axes[0].set_ylabel("OFI (thousands of shares)")
-    axes[0].set_title("Imbalance per one-minute bucket")
+    axes[0].set_title(f"Imbalance per {BUCKET_FREQ} bucket")
     axes[0].set_yscale("symlog", linthresh=1)  # Log scale for signed data
     axes[0].grid(True, alpha=0.3)
 
@@ -801,22 +810,29 @@ if ofi_arr is not None and ret_arr is not None:
     axes[1].axhline(0, color="black", lw=0.5)
     axes[1].axvline(0, color="black", lw=0.5)
     axes[1].set_xlabel("OFI (signed log scale)")
-    axes[1].set_ylabel("Next-minute return (bps)")
-    axes[1].set_title("Next-minute return against order-flow imbalance")
+    axes[1].set_ylabel("Next-bucket return (bps)")
+    axes[1].set_title("Next-bucket return against order-flow imbalance")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
-    fig.suptitle(f"Order-flow imbalance and next-minute return, {OFI_SYMBOL}", fontsize=12)
+    fig.suptitle(
+        f"Order-flow imbalance and next-bucket return over {BUCKET_FREQ}, {OFI_SYMBOL}",
+        fontsize=12,
+    )
 
     show_with_alt(
         fig,
-        "Two panels side by side. The left is a bar chart of order-flow imbalance per one-minute bucket against bucket number, on a symmetric logarithmic vertical scale with a line at zero, so bars run both above and below. The right is a scatter of the next minute's return in basis points against the signed log of the same imbalance, with a straight fitted trend line through it and reference lines at zero on both axes.",
+        f"Two panels side by side. The left is a bar chart of order-flow imbalance per {BUCKET_FREQ} bucket "
+        "against bucket number, on a symmetric logarithmic vertical scale with a line at zero, so bars run "
+        "both above and below. The right is a scatter of the next bucket's return in basis points against the "
+        "signed log of the same imbalance, with a straight fitted trend line through it and reference lines "
+        "at zero on both axes.",
     )
 
-    print(f"Order-flow imbalance for {OFI_SYMBOL}, one-minute buckets:")
+    print(f"Order-flow imbalance for {OFI_SYMBOL}, {BUCKET_FREQ} buckets:")
     print(f"  Buckets: {len(ofi_arr)}")
-    print(f"  Correlation with next-minute return, raw imbalance: {corr_raw:.4f}")
-    print(f"  Correlation with next-minute return, signed log:    {corr_log:.4f}")
+    print(f"  Correlation with next-bucket return, raw imbalance: {corr_raw:.4f}")
+    print(f"  Correlation with next-bucket return, signed log:    {corr_log:.4f}")
     print(f"  Imbalance range: {ofi_arr.min():,.0f} to {ofi_arr.max():,.0f} shares")
 
 
@@ -841,7 +857,7 @@ if ofi_arr is not None and ret_arr is not None:
 # %% [markdown]
 # ### One stock's correlation
 #
-# Sum the per-second imbalance into one-minute buckets, take the mid price at the end of
+# Sum the per-second imbalance into `BUCKET_FREQ` buckets, take the mid price at the end of
 # each bucket, and correlate the bucket's imbalance against the return over the following
 # bucket. The imbalance enters as a signed log - the sign kept, the magnitude compressed -
 # because a handful of enormous buckets would otherwise decide a Pearson correlation on
@@ -1001,7 +1017,7 @@ def plot_ofi_vs_returns(results: list[dict], ax=None):
     ax.set_xscale("log")
     ax.set_xlabel("Add messages received that day (log scale)", fontsize=12)
     ax.set_ylabel("Correlation, imbalance to next-bucket return", fontsize=12)
-    ax.set_title(f"Imbalance-return correlation by trading activity, {len(results)} NASDAQ stocks")
+    ax.set_title("Imbalance-return correlation by trading activity")
     ax.axhline(0, color="gray", linestyle="-", alpha=0.5, linewidth=1.5)
     ax.grid(True, alpha=0.3)
 
@@ -1116,6 +1132,7 @@ if len(cross_section_results) >= 3:
     results_df.write_parquet(results_path)
     print(f"Saved cross-section to {display_path(results_path)}")
 
+    print(f"Cross-section: {len(cross_section_results)} NASDAQ stocks")
     fig = plot_ofi_vs_returns(cross_section_results)
     show_with_alt(
         fig,
