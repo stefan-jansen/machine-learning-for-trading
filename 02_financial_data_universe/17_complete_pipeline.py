@@ -84,6 +84,7 @@ from utils.style import COLORS, show_with_alt
 # %% tags=["parameters"]
 AS_OF_DATE = "2025-01-15"
 WIKI_END_DATE = "2018-03-27"  # the last day the WikiPrices feed published
+OVERLAP_START = "2018-03-01"  # the recent leg starts here so the two legs share dates
 
 EQUITY_SYMBOLS = ["AAPL", "MSFT", "JPM"]
 EQUITY_START = "1990-01-01"
@@ -149,9 +150,15 @@ print(f"Data path: {display_path(DATA_DIR)}")
 # days' prices, so the intervening market move rides along in the factor. That forces the
 # return across the seam to zero and pushes the same move into the rescaled volume.
 #
-# The two feeds overlap, so the factor comes from the last day they share. Volume scales the
-# other way - a four-for-one split quarters the price and quadruples the share count - so the
-# historical volume is divided by the same number.
+# So the recent leg is fetched from `OVERLAP_START`, before the seam rather than after it,
+# purely so the two legs share dates to measure on; the factor comes from the last day they
+# both quote, and the overlapping rows are then dropped from the historical side when the
+# legs are joined. Volume scales the other way - a four-for-one split quarters the price and
+# quadruples the share count - so the historical volume is divided by the same number.
+#
+# The combine step asserts that the overlap was non-empty, because a fetch window that does
+# not overlap leaves the factor unset and the rescale silently skipped, which looks exactly
+# like a stitch that needed no rescale.
 #
 # ### Requirements
 #
@@ -213,26 +220,29 @@ def _combine_pipeline_sources(
         )
         .sort("day")
     )
-    scale = None
-    if overlap.height:
-        wiki_close = overlap["close"][-1]
-        yahoo_close = overlap["close_recent"][-1]
-        if wiki_close and wiki_close > 0 and yahoo_close and yahoo_close > 0:
-            scale = yahoo_close / wiki_close
+    if not overlap.height:
+        raise ValueError(
+            f"{symbol}: the two legs share no date, so the adjustment factor cannot be "
+            "measured. Fetch the recent leg from before the seam."
+        )
+    wiki_close = overlap["close"][-1]
+    yahoo_close = overlap["close_recent"][-1]
+    if not (wiki_close and wiki_close > 0 and yahoo_close and yahoo_close > 0):
+        raise ValueError(f"{symbol}: a close of zero or null on the shared date")
+    scale = yahoo_close / wiki_close
 
     historical = historical.filter(pl.col("timestamp").dt.date() <= wiki_end_dt)
     recent = recent.filter(pl.col("timestamp").dt.date() > wiki_end_dt)
 
-    if scale is not None:
-        historical = historical.with_columns(
-            [
-                (pl.col("open") * scale).alias("open"),
-                (pl.col("high") * scale).alias("high"),
-                (pl.col("low") * scale).alias("low"),
-                (pl.col("close") * scale).alias("close"),
-                (pl.col("volume") / scale).alias("volume"),
-            ]
-        )
+    historical = historical.with_columns(
+        [
+            (pl.col("open") * scale).alias("open"),
+            (pl.col("high") * scale).alias("high"),
+            (pl.col("low") * scale).alias("low"),
+            (pl.col("close") * scale).alias("close"),
+            (pl.col("volume") / scale).alias("volume"),
+        ]
+    )
 
     historical = historical.with_columns(pl.lit("wiki").alias("source"))
     recent = recent.with_columns(pl.lit("yahoo").alias("source"))
@@ -358,7 +368,9 @@ def _process_etf_symbol(
 
     # Stage 1: Fetch
     historical = pipeline.fetch_historical(symbol, start_date)
-    recent = pipeline.fetch_recent(symbol, "2018-03-28")
+    # Start the recent leg far enough back to overlap the historical one. The overlap is what
+    # the rescale factor is measured on; without it there is no shared date to measure.
+    recent = pipeline.fetch_recent(symbol, OVERLAP_START)
 
     wiki_rows = len(historical) if historical is not None else 0
     yahoo_rows = len(recent) if recent is not None else 0
