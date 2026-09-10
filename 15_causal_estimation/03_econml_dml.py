@@ -404,6 +404,7 @@ dml_result = manual_dml_timeseries(
 manual_ate = dml_result["theta"]
 manual_se_iid = dml_result["se_iid"]
 manual_se_hac = dml_result["se_hac"]
+manual_t_hac = dml_result["t_stat_hac"]
 manual_ci = (manual_ate - 1.96 * manual_se_hac, manual_ate + 1.96 * manual_se_hac)
 
 print("\n" + "=" * 60)
@@ -414,6 +415,7 @@ print(f"Standard Error (IID): {manual_se_iid:.6f}")
 print(f"Standard Error (HAC): {manual_se_hac:.6f}")
 print(f"SE Inflation (HAC/IID): {manual_se_hac / manual_se_iid:.2f}x")
 print(f"95% CI (HAC): [{manual_ci[0]:.6f}, {manual_ci[1]:.6f}]")
+print(f"t-statistic (Driscoll-Kraay): {manual_t_hac:.2f}")
 
 # %% [markdown]
 # ## 5. Refutation Tests
@@ -488,6 +490,7 @@ else:
 # Test 2: Block Permutation Test (uses shared block_permute)
 print(f"\n2. BLOCK PERMUTATION TEST ({N_PLACEBO_PERMUTATIONS} permutations)")
 placebo_effects = []
+placebo_t_stats = []
 permutation_failures = 0
 T_original = df[treatment_col].values
 rng = np.random.default_rng(SEED)
@@ -513,7 +516,8 @@ for i in range(N_PLACEBO_PERMUTATIONS):
             groups=decision_times,
             horizon=FORWARD_HORIZON,
         )
-        if not np.isnan(perm_result["theta"]):
+        if np.isfinite(perm_result["t_stat_hac"]):
+            placebo_t_stats.append(perm_result["t_stat_hac"])
             placebo_effects.append(perm_result["theta"])
         else:
             permutation_failures += 1
@@ -530,32 +534,47 @@ if len(placebo_effects) < PERMUTATION_MIN_SUCCESS:
     )
 
 # %% [markdown]
-# The permutation p-value is the fraction of the placebo distribution at least as extreme as
-# the observed effect, and it carries a plus-one correction because the observed statistic is
-# itself one draw that distribution could produce. Without the correction, a run in which no
-# placebo reaches the effect reports zero, which no finite number of permutations can
-# establish. With n draws the smallest reportable value is 1 / (n + 1), printed beside it as
-# the floor. It is not a false discovery rate, which is what this quantity used to be called.
+# ### Compared on t-Statistics, Not on Effect Sizes
+#
+# Permuting the treatment also frees it from the controls. The second stage regresses the
+# residualized outcome on the residualized treatment, so whatever the controls explain leaves
+# the denominator; a permuted treatment is no longer explained by them, its residual variance
+# is larger, and a placebo effect is mechanically smaller than the observed one whether or not
+# there is anything to find. Comparing raw effects against that distribution reports
+# significance the standard error does not support. Each permutation's t-statistic divides by
+# its own standard error, so the scale cancels and only the alignment between treatment and
+# outcome is left.
+#
+# The p-value is the fraction of the placebo distribution at least as extreme as the observed
+# statistic, and it carries a plus-one correction because the observed statistic is itself one
+# draw that distribution could produce. Without the correction, a run in which no placebo
+# reaches it reports zero, which no finite number of permutations can establish. With n draws
+# the smallest reportable value is 1 / (n + 1), printed beside it as the floor. It is not a
+# false discovery rate, which is what this quantity used to be called.
 
 # %%
-if len(placebo_effects) > 10:
-    placebo_mean = np.mean(placebo_effects)
-    placebo_std = np.std(placebo_effects)
-    z_score = (manual_ate - placebo_mean) / placebo_std if placebo_std > 0 else np.inf
+if len(placebo_t_stats) > 10:
+    placebo_mean = np.mean(placebo_t_stats)
+    placebo_std = np.std(placebo_t_stats)
+    z_score = (manual_t_hac - placebo_mean) / placebo_std if placebo_std > 0 else np.inf
     # The plus-one correction is why the floor below is 1 / (n + 1); see the markdown above.
-    permutation_p = empirical_permutation_p(np.asarray(placebo_effects), manual_ate)
+    permutation_p = empirical_permutation_p(np.asarray(placebo_t_stats), manual_t_hac)
 
-    print(f"   Placebo mean: {placebo_mean:.6f}")
-    print(f"   Placebo std:  {placebo_std:.6f}")
-    print(f"   Original effect: {manual_ate:.6f}")
+    print(f"   Placebo t mean: {placebo_mean:.4f}")
+    print(f"   Placebo t std:  {placebo_std:.4f}")
+    print(f"   Observed t (Driscoll-Kraay): {manual_t_hac:.4f}")
     print(f"   Z-score vs placebo: {z_score:.2f}")
     print(
-        f"   Permutation p-value: {permutation_p:.4f} (floor {1 / (len(placebo_effects) + 1):.4f})"
+        f"   Permutation p-value: {permutation_p:.4f} (floor {1 / (len(placebo_t_stats) + 1):.4f})"
     )
 
     print(
         f"   Placebo draws at least as extreme: "
-        f"{int(round(permutation_p * (len(placebo_effects) + 1))) - 1} of {len(placebo_effects)}"
+        f"{int(round(permutation_p * (len(placebo_t_stats) + 1))) - 1} of {len(placebo_t_stats)}"
+    )
+    print(
+        f"   Placebo effect spread {np.std(placebo_effects):.6f} against a Driscoll-Kraay "
+        f"standard error of {manual_se_hac:.6f}, which is why the comparison is on t-statistics"
     )
 else:
     print("   Insufficient successful permutations")
@@ -564,9 +583,9 @@ else:
 
 # %% [markdown]
 # **The z-score and the p-value can disagree, and the count is the one that holds.** The
-# z-score measures how far the estimate sits from the placebo *mean* in placebo standard
-# deviations, which is a statement about a normal distribution centred where the placebos
-# are. The permutation p-value counts how many placebo draws reach the estimate's magnitude.
+# z-score measures how far the observed t-statistic sits from the placebo *mean* in placebo
+# standard deviations, which is a statement about a normal distribution centred where the
+# placebos are. The permutation p-value counts how many placebo draws reach its magnitude.
 # When the placebo distribution is not centred near zero - and a block permutation within
 # entity has no reason to centre it there - the two answer different questions, and only the
 # count is a statement about the null the test actually built. Read the count printed above,
@@ -750,7 +769,7 @@ print(
     f"Naive OLS:   {naive_estimate:.6f}, Driscoll-Kraay 95% CI [{naive_ci[0]:.6f}, {naive_ci[1]:.6f}]"
 )
 if z_score is not None:
-    print(f"Placebo z-score: {z_score:.2f}")
+    print(f"Placebo z-score (on t-statistics): {z_score:.2f}")
 if permutation_p is not None:
     print(f"Permutation p-value: {permutation_p:.4f}")
 
