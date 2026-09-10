@@ -724,8 +724,8 @@ show_plotly_with_alt(
     "Three panels against epoch. Generator loss swings up and down across zero for the "
     "whole run without settling. Discriminator loss drops from its starting value "
     "within the first epoch and stays flat near zero after that. The spent privacy "
-    "budget rises from zero and keeps climbing, steeply at first and then more gently, "
-    "reaching its target by the last epoch.",
+    "budget climbs across the whole run, steeply at first and then more gently, "
+    "reaching its target at the last epoch.",
 )
 
 # %% [markdown]
@@ -784,8 +784,9 @@ show_plotly_with_alt(
     fig,
     "Six overlaid histogram panels, one per feature. In each, the real distribution is "
     "a tall concentrated peak and the DP-synthetic distribution is much lower and "
-    "flatter over the same range. On volatility the synthetic mass sits away from the "
-    "real peak, and on momentum the two overlap most closely.",
+    "flatter; on several features it also spreads over a wider range than the real "
+    "one. On volatility the synthetic mass sits away from the real peak, and on "
+    "momentum the two follow each other most closely.",
 )
 
 # %%
@@ -985,8 +986,9 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Two line panels against the privacy budget on a logarithmic axis. Mean difference "
-    "starts high at the tightest budget, falls sharply to the next one, and is then "
-    "nearly flat across the looser budgets. Correlation distance moves within a narrow "
+    "starts high at the tightest budget, falls sharply to the next one, and then moves "
+    "up and down within a much smaller range across the looser budgets, without "
+    "returning near its starting height. Correlation distance moves within a narrow "
     "range and is not monotonic: it rises, drops to its lowest point, then rises again.",
 )
 
