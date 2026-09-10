@@ -105,6 +105,38 @@ def main() -> int:
         )
         return 1
 
+    # A file with no fold column at all is the maximal case of the replacement this script
+    # refuses below, not a different kind of input. Checking the schema before digesting is
+    # what routes it to that refusal: `fold_digests` raises KeyError, which reached an author
+    # following the documented path as a traceback rather than as the answer. Read from the
+    # schema rather than the frame so the check costs nothing on a 1.3 GB artifact.
+    old_columns = pl.scan_parquet(old_path).collect_schema().names()
+    new_columns = pl.scan_parquet(new_path).collect_schema().names()
+    if args.fold_column not in old_columns:
+        print(
+            f"error: {old_path.name} has no {args.fold_column!r} column, so it holds no "
+            "per-fold values for a replacement to carry across. There is nothing for this "
+            "record to say. Nothing was written.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.fold_column not in new_columns:
+        print(
+            f"error: {new_path.name} has no {args.fold_column!r} column, so every fold in "
+            f"{old_path.name} is missing from it.",
+        )
+        print(
+            "This file replaces the pinned artifact rather than extending it, so no lock "
+            "fitted on the old one may be reconstructed against it. Nothing was written.",
+            file=sys.stderr,
+        )
+        print(
+            "A new training run may still be admitted onto the new vintage, which is the "
+            "separate question declare_artifact_supersession answers - call it directly.",
+            file=sys.stderr,
+        )
+        return 1
+
     old_folds = fold_digests(pl.read_parquet(old_path), fold_column=args.fold_column)
     new_folds = fold_digests(pl.read_parquet(new_path), fold_column=args.fold_column)
 
