@@ -1293,10 +1293,18 @@ def test_the_wasserstein_distance_between_a_sample_and_its_shift_is_the_shift() 
 
 
 def test_the_barycenter_is_taken_rank_by_rank() -> None:
-    """The barycenter's smallest atom is the members' smallest atoms combined, not a mean."""
-    members = np.array([[0.0, 1.0, 2.0], [10.0, 11.0, 12.0], [20.0, 21.0, 22.0]])
+    """Rank by rank, and the median at ``p=1`` against the mean at ``p=2``.
+
+    The members are spaced asymmetrically so the two disagree: rank 0 draws from 0, 10 and
+    50, whose median is 10 and whose mean is 20. Evenly spaced members would let an
+    implementation that always took the mean pass both assertions.
+    """
+    members = np.array([[0.0, 1.0, 2.0], [10.0, 11.0, 12.0], [50.0, 51.0, 52.0]])
     assert np.array_equal(wasserstein_barycenter_1d(members, p=1.0), [10.0, 11.0, 12.0])
-    assert np.array_equal(wasserstein_barycenter_1d(members, p=2.0), [10.0, 11.0, 12.0])
+    assert np.array_equal(wasserstein_barycenter_1d(members, p=2.0), [20.0, 21.0, 22.0])
+    # Each output atom is built from one rank of the members, so the result is a
+    # distribution and not a pooled average of the nine numbers, which is 21.0.
+    assert wasserstein_barycenter_1d(members, p=2.0)[0] != pytest.approx(members.mean())
 
 
 def test_a_restart_is_scored_against_the_centroids_it_returns() -> None:
