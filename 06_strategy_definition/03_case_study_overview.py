@@ -542,9 +542,10 @@ def plot_coverage(coverage_data):
     show_with_alt(
         fig,
         "One horizontal bar per case study on a shared year axis, each bar split into "
-        "a slate training span, an amber validation span and a muted holdout span in "
-        "that order. The bars start and end in different years, so the left and right "
-        "edges are ragged, and the holdout spans line up more closely than the rest.",
+        "a slate training span, an amber validation span and a pale holdout span in "
+        "that order. Both edges are ragged: the bars begin anywhere from 1990 to 2020 "
+        "and end anywhere from 2017 to 2026, with four of them reaching the same right "
+        "edge while the shortest, NASDAQ-100 microstructure, is a sliver beside them.",
     )
 
 
