@@ -557,6 +557,16 @@ if len(placebo_effects) > 10:
         f"   Placebo draws at least as extreme: "
         f"{int(round(permutation_p * (len(placebo_effects) + 1))) - 1} of {len(placebo_effects)}"
     )
+
+# %% [markdown]
+# **The z-score and the p-value can disagree, and the count is the one that holds.** The
+# z-score measures how far the estimate sits from the placebo *mean* in placebo standard
+# deviations, which is a statement about a normal distribution centred where the placebos
+# are. The permutation p-value counts how many placebo draws reach the estimate's magnitude.
+# When the placebo distribution is not centred near zero - and a block permutation within
+# entity has no reason to centre it there - the two answer different questions, and only the
+# count is a statement about the null the test actually built. Read the count printed above,
+# and the mean and standard deviation beside it, before reading the z-score.
 else:
     print("   Insufficient successful permutations")
     z_score = None
@@ -700,36 +710,47 @@ for key, value in results_summary.items():
 # 4. **A nuisance-model sweep**, because the point estimate depends on the first stage and
 #    the spread across specifications is the honest width of the finding.
 
+# %% [markdown]
+# ### Three Intervals on One Effect
+#
+# The notebook produces three statements of uncertainty about the same quantity, and they do
+# not agree. EconML's `ate_interval` treats the residualized observations as independent
+# draws. The manual DML path reports a Driscoll-Kraay standard error, which aggregates by
+# decision time and absorbs whatever the ETFs share on a day. The permutation test compares
+# the estimate against a null built by shuffling the treatment within each ETF.
+#
+# The spread between them is not a defect in any one of them. It is the price of the panel:
+# an interval is only as good as its account of what is independent, and 52,000 ETF-days are
+# not 52,000 independent observations.
+
 # %%
-# Quantitative findings (computed, not hardcoded)
 se_inflation = se_hac / se_iid
 
 print("Quantitative Findings")
 print("-" * 40)
-print(
-    f"SE Inflation (HAC/IID): {se_inflation:.1%} - HAC standard errors are {se_inflation:.2f}x larger than IID"
-)
+print(f"SE inflation, Driscoll-Kraay over iid: {se_inflation:.2f}x")
 if dml_estimate is not None:
-    direction = "overstates" if abs(naive_estimate) > abs(dml_estimate) else "understates"
-    print(f"Confounding Bias: {abs(bias_pct):.1f}% - naive estimate {direction} the DML effect")
+    direction = "smaller" if abs(naive_estimate) > abs(dml_estimate) else "larger"
+    print(
+        f"Adjustment moves the slope by {abs(bias_pct):.1f}% - the unadjusted estimate is "
+        f"{direction} in magnitude"
+    )
     if not np.isnan(dml_ci_lower):
         print(
-            f"DML Effect Size: {dml_estimate:.6f} (95% CI: [{dml_ci_lower:.6f}, {dml_ci_upper:.6f}])"
-        )
-        ci_width = dml_ci_upper - dml_ci_lower
-        ci_includes_zero = dml_ci_lower <= 0 <= dml_ci_upper
-        print(
-            f"CI Width: {ci_width:.6f} - {'includes zero (not significant at 5%)' if ci_includes_zero else 'excludes zero (significant at 5%)'}"
+            f"EconML DML: {dml_estimate:.6f}, iid 95% CI "
+            f"[{dml_ci_lower:.6f}, {dml_ci_upper:.6f}], width {dml_ci_upper - dml_ci_lower:.6f}"
         )
     else:
-        print(
-            f"DML Effect Size: {dml_estimate:.6f} (CI unavailable - EconML inference failed with custom CV)"
-        )
-print(f"Manual DML Effect: {manual_ate:.6f} (HAC SE: {manual_se_hac:.6f})")
+        print(f"EconML DML: {dml_estimate:.6f} (interval unavailable)")
+print(
+    f"Manual DML:  {manual_ate:.6f}, Driscoll-Kraay 95% CI "
+    f"[{manual_ci[0]:.6f}, {manual_ci[1]:.6f}], width {manual_ci[1] - manual_ci[0]:.6f}"
+)
+print(
+    f"Naive OLS:   {naive_estimate:.6f}, Driscoll-Kraay 95% CI [{naive_ci[0]:.6f}, {naive_ci[1]:.6f}]"
+)
 if z_score is not None:
-    print(
-        f"Placebo Z-Score: {z_score:.2f} - {'distinguishable from noise' if abs(z_score) > 2 else 'not distinguishable from noise'}"
-    )
+    print(f"Placebo z-score: {z_score:.2f}")
 if permutation_p is not None:
     print(f"Permutation p-value: {permutation_p:.4f}")
 
