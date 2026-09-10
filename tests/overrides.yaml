@@ -1214,12 +1214,27 @@
 26_mlops_governance/01_drift_monitoring:
   timeout: 300
 26_mlops_governance/02_online_drift_detection:
+  # RIDGE_CONFIG is overridden because the fixture registry carries a different slice
+  # of the linear grid than production does. Both notebooks in this chapter pin a
+  # configuration NAME rather than a prediction hash, so they survive a refit - but the
+  # fixture is sampled from production by tests/sample_registry_for_tests.py and has not
+  # been regenerated since PINNED_PREDICTION_CONFIGS changed, so the names it holds are
+  # ols, ridge_a100000.0 and ridge_a10000000.0.
+  #
+  # ridge_a10000000.0 is the right substitute rather than an arbitrary one: this notebook
+  # needs a stream that genuinely differs from the incumbent's, and the assertion in
+  # section 1 fails the run if it does not. Measured on production over the monitored
+  # year, its bad-day rate differs from ols on 250 of 251 sessions at correlation 0.683,
+  # against 240 and 0.889 for the shipped default. Raise this alongside the fixture.
+  parameters:
+    RIDGE_CONFIG: ridge_a10000000.0
   timeout: 300
 26_mlops_governance/03_safe_model_rollout:
   # Was skipped for a cause that no longer exists: the reason described an A/B and
   # staged-capital slicing the notebook has since dropped, and it now stops after
-  # the 63-session shadow decision. With the prediction artifacts it pins present
-  # in the fixture it runs, so it is a real test again.
+  # the 63-session shadow decision. The prediction sets it needs reach the fixture
+  # through PINNED_PREDICTION_CONFIGS in tests/sample_registry_for_tests.py, so it
+  # is a real test again.
   #
   # TOP_K is reduced because the book is dollar-neutral over the top and bottom
   # TOP_K predictions and the fixture carries well under 200 symbols on any
@@ -1227,8 +1242,18 @@
   # a silent failure any more: build_portfolio_stream raises when a date ranks
   # fewer than 2 * TOP_K distinct symbols. Raise this only alongside the fixture
   # universe.
+  #
+  # CANDIDATE_CONFIG is overridden for the reason given under 02: the fixture holds a
+  # different slice of the linear grid. The shipped default, ridge_a100.0, demonstrates
+  # the case the gate exists for - an improvement that is positive and below the
+  # threshold, +0.185 against a required 0.20 on production. The fixture cannot supply
+  # it, and of what it does hold, ridge_a100000.0 is the one that clears the hurdle
+  # (+0.730) while ridge_a10000000.0 misses it by so much that the minimum-effect
+  # threshold does no work. CI therefore exercises the promotion path and production
+  # demonstrates the near miss. Raise this alongside the fixture.
   parameters:
     TOP_K: 10
+    CANDIDATE_CONFIG: ridge_a100000.0
   timeout: 300
 26_mlops_governance/04_circuit_breakers:
   timeout: 300
