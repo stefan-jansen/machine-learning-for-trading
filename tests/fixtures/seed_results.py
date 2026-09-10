@@ -1931,62 +1931,6 @@ def _seed_demo_predictions(cs_dir: Path, cs_id: str, primary_label: str) -> None
         df.write_parquet(str(pred_file))
 
 
-def _seed_news_features(output_dir: Path) -> None:
-    """Seed a minimal news_features.parquet for Ch10/08_text_feature_evaluation.
-
-    The panel is produced by 10/07_news_return_signals, which declares `gpu: true` and so
-    skips on a CI runner. 08 is the only chapter-10 notebook that runs there, so without this
-    seed it fails on a missing input rather than exercising anything. The notebook is right to
-    raise on the missing file - a notebook that tolerates absent input reports success for a
-    run that computed nothing - which is why the fixture supplies it instead.
-
-    The notebook loads from get_output_dir(10, "fnspid") / "news_features.parquet"; in test
-    mode that is {ML4T_OUTPUT_DIR}/ch10_fnspid/news_features.parquet. This directory name is
-    the notebook's chapter number, so it moves whenever the notebook's does - it read
-    get_output_dir(8, ...) until #902 corrected chapter 10's artifacts out of chapter 8's
-    output tree, and this seed did not move with it.
-
-    Required columns: symbol, timestamp, fwd_ret_1d, fwd_ret_5d, fwd_ret_20d,
-    weighted_surprise, sentiment_mean, sentiment_momentum, coverage_count.
-    """
-    try:
-        import numpy as np
-        import polars as _pl
-    except ImportError:
-        return
-
-    out_dir = output_dir / "ch10_fnspid"
-    path = out_dir / "news_features.parquet"
-    if path.exists():
-        return
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    rng = np.random.default_rng(42)
-    symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"]
-    from datetime import date, timedelta
-
-    start = date(2023, 1, 3)
-    dates = [
-        start + timedelta(days=i) for i in range(60) if (start + timedelta(days=i)).weekday() < 5
-    ]
-    n = len(symbols) * len(dates)
-
-    df = _pl.DataFrame(
-        {
-            "symbol": [s for _ in dates for s in symbols],
-            "timestamp": _pl.Series([d for d in dates for _ in symbols]).cast(_pl.Date),
-            "fwd_ret_1d": rng.normal(0, 0.01, n).tolist(),
-            "fwd_ret_5d": rng.normal(0, 0.02, n).tolist(),
-            "fwd_ret_20d": rng.normal(0, 0.04, n).tolist(),
-            "weighted_surprise": rng.normal(0, 0.5, n).tolist(),
-            "sentiment_mean": rng.normal(0, 0.3, n).tolist(),
-            "sentiment_momentum": rng.normal(0, 0.2, n).tolist(),
-            "coverage_count": rng.poisson(3, n).tolist(),
-        }
-    )
-    df.write_parquet(str(path))
-
-
 def _write_if_missing(path: Path, data: dict) -> None:
     """Write JSON file only if it doesn't already exist."""
     if path.exists():
@@ -2072,6 +2016,3 @@ def seed_results(output_dir: Path, case_study_ids: list[str]) -> None:
 
         # Ch25 live-simulation demo predictions
         _seed_demo_predictions(cs_dir, cs_id, primary_label)
-
-    # --- Non-case-study chapter fixtures ---
-    _seed_news_features(output_dir)

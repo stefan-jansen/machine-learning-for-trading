@@ -162,7 +162,6 @@
   gpu: true
   timeout: 600
 05_synthetic_data/02_tailgan_tail_risk:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     LATENT_DIM: 32
@@ -182,7 +181,6 @@
   requires_import: signatory
   timeout: 900
 05_synthetic_data/04_gtgan_irregular:
-  gpu: true
   parameters:
     BATCH_SIZE: 4
     HIDDEN_DIM: 4
@@ -194,7 +192,6 @@
     SEQ_LENGTH: 4
   timeout: 120
 05_synthetic_data/05_diffusion_ts:
-  gpu: true
   parameters:
     BATCH_SIZE: 8
     CLASSIFIER_EPOCHS: 1
@@ -211,7 +208,6 @@
     WARMUP_STEPS: 1
   timeout: 180
 05_synthetic_data/06_llm_tabular_great:
-  gpu: true
   parameters:
     BATCH_SIZE: 8
     EPOCHS: 1
@@ -361,30 +357,69 @@
   requires_import: gensim
   timeout: 300
 10_text_feature_engineering/04_bert_finetuning:
+  # No CUDA requirement in the source - the flag is a cost decision, not a hardware one. The cell
+  # that fine-tunes all three checkpoints takes 637s against the 600s per-cell limit on CPU (645s
+  # under load 16.8, so contention is not what fails it). MAX_TRAIN_STEPS already applies; what
+  # remains is the model count, and no parameter bounds it. Adding one would be clean - the figure
+  # cells derive `model_names` from `results.keys()`, so nothing downstream names a checkpoint -
+  # but it is a parameters-cell edit, which invalidates the committed .ipynb and costs a
+  # production GPU run to regenerate. ml4t/agent-workspace#1097 carries that decision.
   gpu: true
   parameters:
     MAX_TRAIN_STEPS: 20
   timeout: 600
 10_text_feature_engineering/05_financial_ner_finetuning:
-  gpu: true
   parameters:
     N_EPOCHS: 1
     N_SAMPLES: 100
   timeout: 600
 10_text_feature_engineering/06_finbert_cross_dataset:
-  gpu: true
+  # FinBERT inference over the whole split - the SAMPLE_SIZE default of 10,000 exceeds its 8,142
+  # rows, so it never binds - overruns the 300s per-cell limit on CPU: measured 334s idle, 353s
+  # under load 9.5. The notebook picks its device with a plain `0 if torch.cuda.is_available()
+  # else -1` fallback and has no CUDA guard, so what it needed was a reduction, not a card. At
+  # 1,500 it passes in 160s and the majority-class rate it benchmarks against moves
+  # 43.1% -> 42.9%. ml4t/agent-workspace#1097.
+  parameters:
+    SAMPLE_SIZE: 1500
   timeout: 300
 10_text_feature_engineering/07_news_return_signals:
-  gpu: true
+  # Runs on CPU: the embedding pass is the cost, not the card. ml4t/agent-workspace#1116 was a
+  # fixture with no builder - hand-placed synthetic headlines for tickers and years the price
+  # panel does not carry, so every feature row dropped at the join and the notebook wrote an
+  # empty panel that 08 then failed on. `tests/create_test_data.py`'s `fnspid_news` dataset now
+  # generates it from production, and `test_the_news_fixture_lands_inside_the_price_panel` is
+  # what keeps the two in the same window.
+  #
+  # MAX_ARTICLES is the cost knob, and it is set from a measurement rather than a guess:
+  # `tests/pm_helpers.py`'s KERNEL_THREAD_CAP pins the kernel to one thread, and the notebook
+  # makes two transformer passes over every headline, so the uncapped 5,599-headline fixture
+  # takes ~15 minutes. The floor is not the article count. `MAX_ARTICLES` caps per ticker, and
+  # the cross-sectional IC loop needs days carrying at least ten tickers: at 1200 there are none
+  # even with 254 merged observations, at 3000 there are 20. 3000 keeps 2,304 articles and 955
+  # merged observations, well clear of the `len(factor_with_returns) > 100` branch and of the
+  # `lookback_days + 1` news dates each ticker needs for a surprise row. Measured at 3000:
+  # 420s and 1.7 GB, taken under load, so idle is faster. That is cheaper than the two
+  # chapter-10 notebooks that still overrun 600s, 04_bert_finetuning and 09_filing_text_signals.
+  #
+  # MAX_TICKERS is left at its default: the fixture carries 28 and the notebook's 50 does not
+  # bind, and lowering it is what would take the IC loop's days below ten tickers.
   parameters:
-    MAX_ARTICLES: 500
-    MAX_TICKERS: 5
+    MAX_ARTICLES: 3000
   timeout: 600
 10_text_feature_engineering/08_text_feature_evaluation:
   parameters:
     MIN_ASSETS_PER_DAY: 3
   timeout: 300
 10_text_feature_engineering/09_filing_text_signals:
+  # No CUDA requirement in the source - the flag is a cost decision. FinBERT chunks each ~6,500
+  # word MD&A section into ~16 windows of 512 tokens and costs over 15s per filing on CPU, so its
+  # FinBERT scoring cell overran the 600s per-cell limit at both sizes measured: 639s idle with
+  # MAX_SYMBOLS 5 (75 filings), and again with MAX_FILINGS 40. Reducing further is blocked,
+  # not merely slow: the IC loop skips any signal-horizon pair with `valid.height < 20`, at 12
+  # filings that is every pair, and the figure cell's `len(ic_summary)` then raises NameError
+  # because the `if ic_results:` else branch never binds it. ml4t/agent-workspace#1115; a usable
+  # reduction here needs it fixed first. ml4t/agent-workspace#1097.
   gpu: true
   parameters:
     MAX_SYMBOLS: 5
@@ -444,7 +479,6 @@
     MAX_SYMBOLS: 3
   timeout: 900
 12_gradient_boosting/03_dl_vs_gbm:
-  gpu: true
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 15
@@ -520,7 +554,6 @@
 12_gradient_boosting/12_case_study_insights:
   timeout: 300
 13_dl_time_series/01_core_architectures:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     EPOCHS: 2
@@ -528,7 +561,6 @@
     LOOKBACK: 10
   timeout: 300
 13_dl_time_series/02_nbeats_interpretable:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     EPOCHS: 2
@@ -538,7 +570,6 @@
     N_LAYERS: 2
   timeout: 300
 13_dl_time_series/03_great_debate:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     D_MODEL: 16
@@ -548,7 +579,6 @@
     N_LAYERS: 1
   timeout: 300
 13_dl_time_series/04_transformers:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     D_MODEL: 16
@@ -559,7 +589,6 @@
     PATCH_SIZE: 6
   timeout: 300
 13_dl_time_series/05_tcn:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     EPOCHS: 2
@@ -567,7 +596,6 @@
     N_CHANNELS: 16
   timeout: 300
 13_dl_time_series/06_tsmixer:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     D_MODEL: 16
@@ -576,7 +604,6 @@
     N_LAYERS: 1
   timeout: 300
 13_dl_time_series/07_mamba_ssm:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     D_MODEL: 16
@@ -589,7 +616,6 @@
     N_LAYERS: 1
   timeout: 300
 13_dl_time_series/08_cnn_image_encoding:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     EPOCHS: 2
@@ -600,7 +626,6 @@
     MAX_VAL_SAMPLES: 2000
   timeout: 300
 13_dl_time_series/09_foundation_models:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     CHRONOS_NUM_SAMPLES: 3
@@ -612,7 +637,6 @@
     PREDICTION_LENGTH: 5
   timeout: 300
 13_dl_time_series/10_uncertainty:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     EPOCHS: 2
@@ -623,7 +647,6 @@
     N_ENSEMBLE: 2
   timeout: 300
 13_dl_time_series/11_library_landscape:
-  gpu: true
   parameters:
     BATCH_SIZE: 64
     EPOCHS: 2
@@ -666,7 +689,6 @@
     TOP_N_STOCKS: 50
   timeout: 900
 14_latent_factors/07_stochastic_discount_factor:
-  gpu: true
   parameters:
     ADVERSARIAL_ROUNDS: 1
     BETA_EPOCHS: 8
@@ -679,7 +701,6 @@
     UNCONDITIONAL_EPOCHS: 8
   timeout: 360
 14_latent_factors/08_supervised_autoencoder:
-  gpu: true
   parameters:
     N_EPOCHS: 5
     N_SPLITS: 2
@@ -823,18 +844,15 @@
 17_portfolio_construction/09_allocator_comparison:
   timeout: 600
 17_portfolio_construction/11_dl_portfolio_allocation:
-  gpu: true
   parameters:
     N_EPOCHS: 2
   timeout: 600
 17_portfolio_construction/12_vlstm_portfolio:
-  gpu: true
   parameters:
     MAX_SYMBOLS: 10
     N_EPOCHS: 2
   timeout: 600
 17_portfolio_construction/13_deepm_regime_robust:
-  gpu: true
   parameters:
     MAX_ITERS: 40
     MAX_SYMBOLS: 10
@@ -974,7 +992,6 @@
     TOTAL_TIMESTEPS: 1000
   timeout: 600
 21_rl_execution_hedging/03_market_making_ppo:
-  gpu: true
   parameters:
     EVAL_EPISODES: 2
     TOTAL_TIMESTEPS: 1000
@@ -1040,6 +1057,10 @@
   tier: weekly
   timeout: 300
 22_rag_financial_research/06_esg_rag_vs_finetune:
+  # `REQUIRE_GPU = True` is a module constant, not a papermill parameter, and the guard on
+  # `torch.cuda.is_available()` raises. The later `parameter_device.type != "cuda"` check raises
+  # again if the loaded FinBERT weights are not on the card. There is no CPU path. Measured: fails
+  # in 28s with the card hidden. ml4t/agent-workspace#1097.
   gpu: true
   parameters:
     MAX_HEADLINES: 50
@@ -1075,6 +1096,9 @@
   tier: on_demand
   timeout: 600
 23_knowledge_graphs/06_gnn_feature_engineering:
+  # It raises unless `torch.cuda.is_available()`, then pins `DEVICE = torch.device("cuda")` for
+  # every tensor the fold loop builds. There is no CPU path. Measured: fails in 28s with the card
+  # hidden. ml4t/agent-workspace#1097.
   gpu: true
   timeout: 600
 23_knowledge_graphs/03_graph_rag_qa:

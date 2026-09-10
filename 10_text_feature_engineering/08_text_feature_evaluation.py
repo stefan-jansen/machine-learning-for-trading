@@ -131,7 +131,7 @@ if not text_features_path.exists():
     raise FileNotFoundError(
         f"Missing input: {text_features_path}\n\n"
         "Run notebook 07 first to generate this dataset:\n"
-        "  python 08_text_feature_engineering/code/07_news_return_signals.py"
+        "  uv run python 10_text_feature_engineering/07_news_return_signals.py"
     )
 
 text_features = pl.read_parquet(text_features_path)
@@ -493,7 +493,7 @@ if KEY_SIGNAL in AVAILABLE_SIGNALS:
 # top fifths of the signal, and comparing them compares groups of different size and
 # composition.
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Both causes turn out to be present, and the cross-section size is the more serious of the
 # two. A typical date carries single-digit names, which cannot be divided into five parts at
 # all, and most dates also carry at least one tie. Neither is a defect in this code: they are

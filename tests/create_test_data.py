@@ -11,11 +11,18 @@ subsample budgets are the ones recorded in ``data/manifest.json`` in the test-da
 repo, which is rewritten from DATASETS on every run so the manifest cannot drift
 from what was actually generated.
 
-DATASETS covers every fixture the test-data repo carries, so
-``tests/test_fixture_manifest_matches_builders.py`` can check each entry of the
-manifest against a declaration and against the data on disk. It is still not a
-from-empty rebuild of the fixture repo: it operates on a checkout of
-ml4t/third-edition-test-data and replaces the datasets it is asked for.
+``tests/test_fixture_manifest_matches_builders.py`` checks each entry of the
+manifest against a declaration and against the data on disk. What it cannot check
+is a file no declaration mentions: DATASETS reaches 150 of the 327 files the
+test-data repo carries, and 149 are named neither by a ``Dataset.owns`` nor by
+``manifest.json``. An undeclared fixture has no builder, no recorded budget and
+nothing comparing it to the datasets it has to join against - which is how the
+FNSPID news fixture came to sit entirely past the end of its own price panel
+(ml4t/agent-workspace#1116). Adding a declaration is how a fixture stops being one
+of those 149; ml4t/agent-workspace#1117 tracks the rest.
+
+It is also not a from-empty rebuild of the fixture repo: it operates on a checkout
+of ml4t/third-edition-test-data and replaces the datasets it is asked for.
 
 ``--reconcile-manifest`` rewrites the manifest from those declarations and the
 files that are there, building nothing. Use it when a declaration moves without
@@ -1043,6 +1050,113 @@ def build_us_equities(source: Path, output: Path) -> list[Path]:
     return [output / US_EQUITIES]
 
 
+# --- FNSPID news --------------------------------------------------------------
+#
+# The one notebook that reads this dataset, `10_text_feature_engineering/
+# 07_news_return_signals`, joins headlines to us_equities forward returns, so the
+# sample has to sit inside the price panel's window or the join returns nothing.
+# The upper bound is read off the panel `build_us_equities` writes rather than
+# hardcoded, because the WIKI/Quandl wall it ends at is a property of that dataset.
+#
+# The fixture this replaced was 209 synthetic headlines over 2020-2023, entirely
+# past that wall: 07 joined 109 feature rows against zero overlapping trading
+# dates, wrote an empty `news_features.parquet` and exited 0 - ml4t/agent-workspace#1116.
+#
+# Production's column names are kept verbatim. The notebook detects its text, date
+# and ticker columns by name and its priority order exists to skip
+# `Textrank_summary`, so a fixture with tidied column names would not exercise the
+# detection CI is there to run. `Author`, `Article` and the four summary columns
+# are null in production and stay null here for the same reason.
+
+FNSPID_NEWS = Path("alternative") / "news" / "fnspid" / "fnspid_test.parquet"
+FNSPID_SOURCE = Path("alternative") / "news" / "fnspid" / "fnspid_1000k.parquet"
+
+# The lower bound is a cross-section decision, not a calendar one. 07 computes a
+# daily rank IC and skips any date carrying fewer than ten names, and bounded only
+# above these 28 tickers reach ten on 228 of the 2,581 days they span, over 30,649
+# headlines - concentrated in the last two years, as coverage widens. Cutting at
+# 2017-01-01 keeps 93 of those 228 dates for 5,599 headlines: 41% of the usable
+# cross-sections at 18% of the text. The notebook runs two transformer passes over
+# every headline on one kernel thread, so the text volume is what is being bought.
+FNSPID_START = date(2017, 1, 1)
+
+# The 28 of US_EQUITIES_TICKERS the production download carries news for inside
+# that window. Three separate reasons account for the other 28, and none of them
+# is a defect here. The production file is a 1,000,000-row prefix of the
+# HuggingFace dataset, physically ordered by ticker and ending mid-P at PG, so the
+# 12 that sort past it (PYPL, QCOM, RDNT, S, SIRI, T, TWTR, TWX, TYC, WFC, YHOO,
+# ZNGA) were never downloaded. Five more sort before PG and still carry no rows at
+# all - DELL, EMC, GE, HPE, MSFT - so the prefix is not the whole story and FNSPID
+# simply does not cover them here. The remaining 11 have news outside 2017-01-01
+# to the price panel's end: AAPL, AMD, CAR, F, FB, GM, GOOGL, INTC, JDSU, JPM, LVS.
+#
+# Declared rather than derived so a changed download is a build failure naming the
+# tickers it lost, not a quietly smaller fixture.
+FNSPID_TICKERS = (
+    "AAL",
+    "AIG",
+    "AMAT",
+    "BAC",
+    "BRCD",
+    "BRCM",
+    "C",
+    "CHK",
+    "CSCO",
+    "DAL",
+    "EBAY",
+    "ETFC",
+    "FCX",
+    "FOXA",
+    "GRPN",
+    "JNPR",
+    "KMI",
+    "LBAI",
+    "LVLT",
+    "MNTX",
+    "MS",
+    "MSI",
+    "MU",
+    "NVDA",
+    "OCFC",
+    "ORCL",
+    "PEBO",
+    "PFE",
+)
+
+
+def build_fnspid(source: Path, output: Path) -> list[Path]:
+    """Write the FNSPID headlines that fall inside the fixture price panel."""
+    keep = list(FNSPID_TICKERS)
+    price_end = (
+        pl.scan_parquet(source / US_EQUITIES)
+        .filter(pl.col("ticker").is_in(list(US_EQUITIES_TICKERS)))
+        .select(pl.col("date").max())
+        .collect()
+        .item()
+    )
+    (output / FNSPID_NEWS.parent).mkdir(parents=True, exist_ok=True)
+    # FNSPID stores the timestamp as "YYYY-MM-DD HH:MM:SS UTC"; only the day is ever
+    # read, and slicing avoids parsing a million rows to discard the time.
+    day = pl.col("Date").str.slice(0, 10).str.to_date()
+    news = (
+        pl.scan_parquet(source / FNSPID_SOURCE)
+        .filter(pl.col("Stock_symbol").is_in(keep))
+        .filter(day.is_between(pl.lit(FNSPID_START), pl.lit(price_end)))
+        .sort("Date", "Stock_symbol")
+        .collect()
+    )
+    missing = sorted(set(keep) - set(news["Stock_symbol"].unique().to_list()))
+    if missing:
+        raise ValueError(f"{FNSPID_SOURCE}: production carries no in-window news for {missing}")
+    news.write_parquet(output / FNSPID_NEWS)
+    days = news["Date"].str.slice(0, 10)
+    print(
+        f"    fnspid: {news.height:,} headlines, {news['Stock_symbol'].n_unique()} tickers, "
+        f"{days.min()} to {days.max()} (price panel ends {price_end.date()})"
+    )
+    return [output / FNSPID_NEWS]
+
+
 # --- CME futures --------------------------------------------------------------
 #
 # Two halves reduced differently, and deliberately. The daily panel is production's
@@ -1146,6 +1260,22 @@ DATASETS: tuple[Dataset, ...] = (
         owns=(US_EQUITIES,),
         budget={"tickers": list(US_EQUITIES_TICKERS)},
         entities={US_EQUITIES.as_posix(): ("ticker", len(US_EQUITIES_TICKERS))},
+    ),
+    Dataset(
+        name="fnspid_news",
+        description=(
+            f"the production headlines for {len(FNSPID_TICKERS)} of the "
+            f"{len(US_EQUITIES_TICKERS)} us_equities tickers, from {FNSPID_START.isoformat()} to "
+            "that panel's last date, so the price join has dates to land on"
+        ),
+        build=build_fnspid,
+        owns=(FNSPID_NEWS,),
+        budget={
+            "tickers": list(FNSPID_TICKERS),
+            "news_from": FNSPID_START.isoformat(),
+            "news_through": "the last date in equities/market/us_equities/us_equities.parquet",
+        },
+        entities={FNSPID_NEWS.as_posix(): ("Stock_symbol", len(FNSPID_TICKERS))},
     ),
     Dataset(
         name="cme_futures",

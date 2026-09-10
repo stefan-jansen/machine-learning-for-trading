@@ -42,7 +42,6 @@
 # %%
 """Cross-validation foundations for Chapter 6."""
 
-import warnings
 from math import comb
 
 import exchange_calendars as xcals
@@ -59,13 +58,13 @@ from sklearn.model_selection import KFold
 
 from utils.modeling import get_cv_config
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
-warnings.filterwarnings("ignore")
+# %% [markdown]
+# The CV schematics use three palette roles throughout: training is the main series,
+# the validation fold is the amber highlight, and a buffer is a light neutral.
 
 # %%
-# ML4T palette roles for the CV schematics: training is the main series, the
-# validation fold is the amber highlight, and buffers are a light neutral.
 TRAIN_C, TRAIN_EDGE = COLORS["slate"], COLORS["blue"]
 VAL_C, VAL_EDGE = COLORS["amber"], COLORS["copper"]
 BUFFER_C, BUFFER_EDGE = COLORS["silver_muted"], COLORS["neutral"]
@@ -144,7 +143,6 @@ def plot_splits(splits, dates, *, title="", figsize=(12, 3.5)):
             1, Patch(facecolor=BUFFER_C, edgecolor=BUFFER_EDGE, hatch="//", label="Label buffer")
         )
     ax.legend(handles=handles, loc="upper right")
-    fig.tight_layout()
     return fig
 
 
@@ -186,8 +184,8 @@ def plot_splits(splits, dates, *, title="", figsize=(12, 3.5)):
 # | **Validation** | Select hyperparameters, compare models | During development |
 # | **Holdout Test** | Final unbiased performance estimate | Once, at the end |
 #
-# The **holdout test set is sealed** from the start. Using it for any
-# development decision contaminates the final estimate.
+# The **holdout test set is set aside** at the start and not opened again. Using it
+# for any development decision contaminates the final estimate.
 
 # %%
 # Partition: Train 5Y | Validation 5Y | Holdout 2Y
@@ -261,8 +259,15 @@ axes[0].legend(
     framealpha=0.9,
     edgecolor=COLORS["silver_muted"],
 )
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Five stacked strip panels, one per k-fold, each running left to right over the "
+    "sample index in time order. Every sample is a thin bar coloured slate for "
+    "training or amber for validation. In no panel do the amber bars form one "
+    "contiguous block: four of the five scatter them from one edge of the panel to "
+    "the other, and the fourth panel puts none in its first third and scatters the "
+    "rest across the remainder.",
+)
 
 # %% [markdown]
 # In Fold 1, the model trains on samples from the future (indices 80–100) to
@@ -289,7 +294,13 @@ cv_exp = WalkForwardCV(n_splits=5, test_size=252, expanding=True)
 splits_exp = list(cv_exp.split(df_dates))
 
 fig = plot_splits(splits_exp, dates, title="Expanding Window Walk-Forward CV")
-fig.show()
+show_with_alt(
+    fig,
+    "Five horizontal bars, one per fold, on a calendar axis from 2014 to 2025. Each "
+    "fold shows a slate training bar starting at the same left edge and ending where "
+    "an amber validation bar of one year begins, and the training bar is longer in "
+    "each successive fold.",
+)
 
 # %% [markdown]
 # **Advantage**: Uses all available data. **Disadvantage**: Training set size
@@ -305,12 +316,25 @@ cv_roll = WalkForwardCV(n_splits=5, test_size=252, train_size=1260, expanding=Fa
 splits_roll = list(cv_roll.split(df_dates))
 
 fig = plot_splits(splits_roll, dates, title="Rolling Window Walk-Forward CV")
-fig.show()
+show_with_alt(
+    fig,
+    "Five horizontal bars, one per fold, on a calendar axis from 2014 to 2025. Each "
+    "fold shows a slate training bar followed by an amber validation bar of one year. "
+    "The first two training bars start at the left edge of the axis and grow, and the "
+    "last three are the same length and slide to the right with their validation bars.",
+)
 
 # %% [markdown]
 # **Advantage**: Consistent training size; stale data doesn't influence the model.
 # **Disadvantage**: Discards data. Choose expanding if older data is still
 # relevant, rolling if you believe regimes change.
+#
+# The chart shows where that consistency starts. `train_size` asks for five years of
+# sessions, and the first two folds cannot reach back that far, so their training
+# windows are clipped at the beginning of the sample and match the expanding chart
+# exactly. Only folds 3 to 5 hold the requested window. A rolling scheme guarantees a
+# fixed training size from the first fold whose window fits inside the data, not from
+# the first fold.
 
 # %% [markdown]
 # ---
@@ -356,19 +380,25 @@ fig.add_vrect(x0=53, x1=57, fillcolor=COLORS["negative"], opacity=0.25, line_wid
 fig.add_annotation(
     x=55,
     y=0.25,
-    text="LEAKAGE!",
+    text="Overlap",
     showarrow=False,
-    font=dict(color=COLORS["negative"], size=16, family="Arial Black"),
+    font=dict(color=COLORS["negative"], size=14),
 )
 
 fig.update_layout(
-    title="Label Overlap Creates Information Leakage",
+    title="A training label's horizon reaching into the validation window",
     xaxis_title="Day",
     yaxis_visible=False,
     height=300,
     showlegend=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A single day axis. One training sample sits at day 52 with a five-day label "
+    "horizon drawn as a short line to day 57. An amber band marks the validation set "
+    "from day 53 onward, and the days where the label horizon and the validation band "
+    "cover the same range are shaded red and labelled Overlap.",
+)
 
 # %% [markdown]
 # ### The Solution: Label Buffer (Purge Gap)
@@ -424,13 +454,20 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title="Label Buffer Prevents Leakage",
+    title="Training, label buffer and validation on one day axis",
     xaxis_title="Day",
     yaxis_visible=False,
     height=300,
     showlegend=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A single day axis carrying three shaded bands in order: a slate training band, a "
+    "grey label buffer band of five days, and an amber validation band. The last "
+    "training sample is marked at the right edge of the training band and its "
+    "five-day label horizon is drawn as a dotted line that ends inside the buffer, "
+    "short of the validation band.",
+)
 
 # %% [markdown]
 # ### Walk-Forward CV with Label Buffer
@@ -452,7 +489,11 @@ splits_purge_exp = list(cv_purge_exp.split(df_dates))
 fig = plot_splits(
     splits_purge_exp, dates, title="Expanding Window with Label Buffer (21 trading days)"
 )
-fig.show()
+show_with_alt(
+    fig,
+    "The expanding-window fold chart again, with a hatched grey band inserted between "
+    "the end of each slate training bar and the start of its amber validation bar.",
+)
 
 # %%
 # Rolling with 21-day label buffer
@@ -469,7 +510,11 @@ splits_purge_roll = list(cv_purge_roll.split(df_dates))
 fig = plot_splits(
     splits_purge_roll, dates, title="Rolling Window with Label Buffer (21 trading days)"
 )
-fig.show()
+show_with_alt(
+    fig,
+    "The rolling-window fold chart again, with a hatched grey band inserted between "
+    "the end of each slate training bar and the start of its amber validation bar.",
+)
 
 # %% [markdown]
 # The hatched regions are **label buffer gaps**: 21 NYSE trading days where
@@ -562,8 +607,14 @@ ax.legend(
     loc="upper right",
 )
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two single-bar schematics side by side. Panel (a) runs slate training, then a "
+    "forward-hatched buffer, then amber validation, with an arrow pointing right from "
+    "the training block labelled label horizon. Panel (b) reverses the order: amber "
+    "validation, a back-hatched buffer, then slate training, with an arrow pointing "
+    "left from the training block labelled feature lookback.",
+)
 
 # %% [markdown]
 # **(a)** In walk-forward, training precedes validation. The label buffer
@@ -637,12 +688,12 @@ for i in range(1, 10):
 ax.text(
     15.5,
     1.4,
-    "Naive: 21 calendar days (only 14 trading days!)",
+    "Naive: 21 calendar days is only 14 trading days",
     ha="center",
     fontsize=9,
     fontweight="bold",
 )
-ax.text(5, -1.2, "Correct: extend purge to get\n21 TRADING days", ha="center", fontsize=8)
+ax.text(5, -1.2, "Correct: extend the purge to\n21 trading days", ha="center", fontsize=8)
 
 ax.set_xlim(-0.5, 31.5)
 ax.set_ylim(-1.6, 1.9)
@@ -662,7 +713,15 @@ ax.legend(
     fontsize=7,
     ncol=3,
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A single row of 31 numbered squares for the days of January 2024. The squares a "
+    "naive calendar-day purge would remove are filled amber and run from the 11th to "
+    "the end of the month; the earlier squares it would miss are filled slate and run "
+    "from the 2nd to the 10th. The 1st is left pale because it is a holiday, and "
+    "weekends and holidays inside a filled group show as a darker shade of that "
+    "group's colour. The two groups are annotated above and below the row.",
+)
 
 # %% [markdown]
 # **Rule**: Always count purge gaps in **trading days**, not calendar days.
@@ -836,19 +895,30 @@ ax.legend(
         Patch(facecolor=VAL_C, label="Validation (inner)"),
         Patch(facecolor=COLORS["neutral"], alpha=0.3, label="Test (outer)"),
     ],
-    loc="upper left",
+    loc="lower left",
+    bbox_to_anchor=(0.0, -0.22),
+    ncol=3,
     frameon=True,
     facecolor="white",
     framealpha=0.9,
     edgecolor=COLORS["silver_muted"],
 )
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Ten horizontal bars on a calendar axis running from 2014 to 2026, in two groups "
+    "of five separated by a dashed divider and labelled Outer fold 1 and Outer fold 2. "
+    "Each bar is a slate training span starting at the left edge, followed by a "
+    "one-year amber validation span that steps back a year with each bar down the "
+    "group, so the top bar in each group is the longest. To the right of each group, "
+    "past the end of its longest bar, a translucent grey block one year wide and as "
+    "tall as three of the five bars marks that outer fold's test year.",
+)
 
 # %% [markdown]
 # Each outer fold produces test predictions with freshly selected $\lambda^*$.
-# If $\lambda^*_1 \neq \lambda^*_2$, that signals hyperparameter instability —
-# a red flag for production deployment.
+# If $\lambda^*_1 \neq \lambda^*_2$, the selected hyperparameter is not stable across
+# the two tuning periods, and a single tuned value should not be carried into
+# production on the strength of one of them.
 
 # %% [markdown]
 # ---
@@ -875,10 +945,13 @@ n_paths = (K * n_splits) // N  # = 5
 
 print(f"N={N} blocks, k={K} held out → {n_splits} splits, {n_paths} backtest paths")
 
+# %% [markdown]
+# The figure below shows block occupancy for every split: the y axis is the split and
+# the x axis is the sample index. Nothing is plotted against a value, because a split
+# has no value. It is a partition, and the only information in it is which block each
+# sample falls in.
+
 # %%
-# Block occupancy for every split. The y axis is the split; the x axis is the
-# sample index. Nothing is plotted against a value, because a split has no value -
-# it is a partition, and the only information in it is which block each sample is in.
 set_global_seeds(SEED)
 X_viz = np.random.randn(N_VIZ, 5)
 
@@ -911,13 +984,22 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="Every CPCV split validates a different pair of blocks",
+    title="Training, validation and buffer samples in each CPCV split",
     xaxis_title="Sample index",
     height=460,
     width=900,
     yaxis=dict(autorange="reversed"),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap with fifteen rows, one per CPCV split, and the sample index across the "
+    "columns. Each cell is slate for training, amber for validation, or grey for a "
+    "purged or embargoed sample; the grey cells are a few columns wide at each block "
+    "boundary and are not separable from their neighbours at this size. Each row holds "
+    "out two of the six blocks, which read as two amber bands where the two blocks are "
+    "apart and as one wide band where they are adjacent, and no two rows hold out the "
+    "same pair.",
+)
 
 # %% [markdown]
 # Amber is validation and slate is training. Purged and embargoed samples are grey,
@@ -1037,7 +1119,7 @@ for k, v in etf_config.model_dump().items():
 # This protocol specifies 8 walk-forward splits with 10-year rolling
 # training windows, 1-year test windows, and a 21-trading-day label buffer
 # (matching the 1-month forward return labels). The holdout period
-# (2024–2025) is sealed for final confirmation.
+# (2024–2025) is set aside for final confirmation.
 
 # %% [markdown]
 # ---
