@@ -1086,7 +1086,12 @@
 23_knowledge_graphs/07_dynamic_kg_temporal:
   docker_env: ml4t+neo4j
   skip: true
-  skip_reason: Requires 08_8k_event_extraction with GPU to generate temporal edges
+  # It reads the 8k_events GraphSnapshot and the timestamped edges 08 writes, and
+  # raises when they are absent. 08 asserts torch.cuda.is_available() before loading
+  # Qwen, so on a GPU-less runner 08 skips and this notebook has nothing to read.
+  # The test-neo4j job still runs 08 ahead of it, so on a machine with a card the
+  # order is right and only the skip has to come off.
+  skip_reason: Requires 08_8k_event_extraction, which needs a CUDA device
   tier: on_demand
   timeout: 600
 23_knowledge_graphs/06_gnn_feature_engineering:
