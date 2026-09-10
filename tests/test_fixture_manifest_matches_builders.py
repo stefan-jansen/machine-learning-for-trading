@@ -292,6 +292,10 @@ DATE_RANGE_CONTRACT = [
         "2025-12-29 23:00:00+00:00",
     ),
     ("equities/market/us_equities/us_equities.parquet", "date", "1962-01-02", "2018-03-27"),
+    # Bounded at both ends rather than whole-history: the news sample starts at
+    # FNSPID_START and is cut at the price panel's last date. `Date` is the
+    # production string column, and it sorts in date order.
+    ("alternative/news/fnspid/fnspid_test.parquet", "Date", "2017-01-02", "2018-03-27"),
     (
         "futures/market/continuous/daily/continuous_daily.parquet",
         "session_date",
@@ -314,4 +318,54 @@ def test_a_built_fixture_spans_the_dates_its_builder_promises(
     assert (observed_first[: len(first)], observed_last[: len(last)]) == (first, last), (
         f"{rel} spans {observed_first} to {observed_last}, and its builder writes "
         f"{first} to {last}. A truncated panel keeps its entity count and its dtype."
+    )
+
+
+def test_the_news_fixture_lands_inside_the_price_panel(fixture_root: Path) -> None:
+    """The range contract above cannot see the relation this one is about.
+
+    `10_text_feature_engineering/07_news_return_signals` is the only reader of the
+    FNSPID fixture and it joins each headline to a us_equities forward return, so
+    a news sample outside the price panel's window produces no rows at all. Both
+    files can pass every count, dtype and range check here and still not intersect:
+    ml4t/agent-workspace#1116 was 209 synthetic headlines over 2020-2023 against a
+    panel ending 2018-03-27, and the notebook wrote an empty panel and exited 0.
+
+    The ticker axis is half of it. Two of that fixture's five news tickers had no
+    price rows under any date, so even a corrected window would have joined
+    against three.
+    """
+    news_path = fixture_root / "alternative" / "news" / "fnspid" / "fnspid_test.parquet"
+    price_path = fixture_root / "equities" / "market" / "us_equities" / "us_equities.parquet"
+    for path in (news_path, price_path):
+        if not path.exists():
+            pytest.skip(f"{path.name} is not in this checkout")
+
+    news = pl.scan_parquet(news_path).select(
+        pl.col("Date").str.slice(0, 10).str.to_date().alias("day"),
+        pl.col("Stock_symbol").alias("ticker"),
+    )
+    prices = pl.scan_parquet(price_path).select(
+        pl.col("date").dt.date().alias("day"), pl.col("ticker")
+    )
+
+    shared_tickers = (
+        news.select("ticker").unique().join(prices.select("ticker").unique(), on="ticker").collect()
+    )
+    orphans = (
+        news.select("ticker")
+        .unique()
+        .join(prices.select("ticker").unique(), on="ticker", how="anti")
+        .collect()["ticker"]
+        .to_list()
+    )
+    assert not orphans, (
+        f"the news fixture carries tickers the price panel has no rows for: {orphans}"
+    )
+
+    shared_days = news.join(prices, on=["day", "ticker"]).select(pl.len()).collect().item()
+    assert shared_days > 0, (
+        f"no (ticker, day) pair in the news fixture exists in the price panel, over "
+        f"{shared_tickers.height} shared tickers. 07_news_return_signals joins on exactly "
+        "that pair and will write an empty panel."
     )

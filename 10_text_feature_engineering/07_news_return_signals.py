@@ -1069,6 +1069,20 @@ print(f"  News trade dates: {len(news_dates):,}")
 print(f"  Price dates: {len(price_dates):,}")
 print(f"  Overlapping dates: {len(overlap_dates):,}")
 
+if not overlap_dates:
+    # Every row the factor evaluation could use is now gone, and the cells below
+    # write an empty news_features.parquet and finish without an error. Refusing
+    # here names the two ranges instead, which is what a disjoint news sample and
+    # price panel look like from the notebook's side.
+    news_span = f"{min(news_dates)} to {max(news_dates)}" if news_dates else "empty"
+    price_span = f"{min(price_dates)} to {max(price_dates)}" if price_dates else "empty"
+    raise ValueError(
+        "No trading date carries both news and prices: the lagged news dates span "
+        f"{news_span} and the price panel spans {price_span}. The factor cannot be "
+        "evaluated against a disjoint price panel, and a downstream notebook reading "
+        "the feature file would see an empty one."
+    )
+
 if len(overlap_dates) < 100:
     print(f"  WARNING: Small date overlap ({len(overlap_dates)} days)")
     print("     Factor evaluation may have limited statistical power")
