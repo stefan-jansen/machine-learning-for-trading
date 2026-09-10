@@ -52,7 +52,7 @@ three-timestamp model for temporal integrity and the engineering choices that ke
 | [`01_sp100_sec_download`](01_sp100_sec_download.ipynb)                           | Loads and inspects 10-K and 8-K filings for S&P 100 companies from SEC EDGAR, verifies coverage and text quality before graph extraction. |
 | [`02_supply_chain_kg_construction`](02_supply_chain_kg_construction.ipynb)       | Extracts supplier, customer, and competitor relationships from 10-K filings using Qwen2.5-7B, resolves entities, loads triples to Neo4j, and visualizes the resulting supply-chain graph. |
 | [`05_institutional_holdings_kg`](05_institutional_holdings_kg.ipynb)             | Builds an institutional-holdings property graph from EDGAR 13F filings, demonstrates shared-holding and crowding queries, and computes Jaccard co-ownership similarity. |
-| [`08_8k_event_extraction`](08_8k_event_extraction.ipynb)                         | Extracts structured event quadruples from SEC 8-K filings with the FinReflectKG critic-corrector reflection loop, then loads the event graph to Neo4j. |
+| [`08_8k_event_extraction`](08_8k_event_extraction.ipynb)                         | Extracts structured event quadruples from SEC 8-K filings with FinReflectKG CheckRules validation, normalizes entity formatting, holds back what still fails the schema, and loads the event graph to Neo4j under a replayable run identity. |
 
 ### Retrieval and Evaluation
 

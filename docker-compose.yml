@@ -37,6 +37,13 @@ x-common: &common
     # can populate /data. ML4T_DATA_PATH=/data below points every downloader
     # here; a read-only mount makes each write fail with "Read-only file system".
     - ${ML4T_DATA_PATH:-./data}:/data:rw
+    # Every notebook that pins a HuggingFace checkpoint loads it with
+    # local_files_only=True, so a container run has to see the host's cache or the
+    # load raises LocalEntryNotFoundError. Read-only: a notebook run must not
+    # populate the cache, which is what the pin exists to prevent. An absent cache
+    # resolves to an empty directory and the pinned load fails saying so, the same
+    # shape as the kdb+ licence mount below.
+    - ${HF_HOME:-${HOME}/.cache/huggingface}:/home/ml4t/.cache/huggingface:ro
   environment:
     - ML4T_DATA_PATH=/data
     - ML4T_PATH=/app

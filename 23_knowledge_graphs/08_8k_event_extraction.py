@@ -56,17 +56,16 @@ import os
 import re
 import textwrap
 import time
-import warnings
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import polars as pl
 import torch
 
+from data import load_sec_filings
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill overrides for testing.
@@ -174,9 +173,6 @@ EVENT_TYPES = {
     "8.01": "Other Events",
 }
 
-# Node types in event graph
-NODE_TYPES = ["Company", "Person", "Event", "Amount"]
-
 RELATIONSHIP_TYPES = ["ANNOUNCED", "APPOINTED", "ACQUIRED", "VALUED_AT"]
 META_TYPES = [
     "EXECUTIVE_CHANGE",
@@ -195,38 +191,66 @@ VALID_RELATIONS = set(RELATIONSHIP_TYPES)
 # Load the immutable staged 8-K corpus. Missing input stops the run.
 
 
+# %% [markdown]
+# ### Which Items a Filing Reports
+#
+# An 8-K names the items it reports, and the prompt passes them to the model as
+# context. A filing can report several at once, and a filing whose stored text
+# does not name one at all is a real case: the staged text is an excerpt, and the
+# item header may sit outside it.
+#
+# Returning a list rather than the first match, and saying "not identified"
+# rather than falling back to the Other Events item, is what keeps the prompt from
+# telling the model that a filing it cannot classify is an Other Events
+# disclosure. The counts below say how often each case occurs. Neither is rare: a
+# large minority of the staged filings name no item in their stored text, and
+# dozens name two, where the earlier code returned whichever appeared first in the
+# schema.
+
+
 # %%
-def detect_item_number(text: str) -> str:
-    """Infer the primary 8-K item number from the filing text."""
-    for item_num in EVENT_TYPES:
-        if f"Item {item_num}" in text:
-            return item_num
-    return "8.01"
+def detect_item_numbers(text: str) -> list[str]:
+    """Every 8-K item number named in the filing text, in schema order."""
+    return [item_num for item_num in EVENT_TYPES if f"Item {item_num}" in text]
+
+
+def describe_items(items: list[str]) -> str:
+    """Render the detected items for the extraction prompt."""
+    if not items:
+        return "not identified in the stored text"
+    return "; ".join(f"{item} ({EVENT_TYPES[item]})" for item in items)
 
 
 # %% [markdown]
 # ### Immutable Input Identity
 #
-# Hash the staged corpus before selecting the fixed 50-filing extraction cohort.
+# Hash the corpus the notebook actually read, rather than the file a loader
+# happened to open. `load_sec_filings` owns where the staged 8-K parquet lives,
+# so re-deriving that path here would pin this notebook to a storage layout it
+# does not control; hashing the returned frame pins it to the content instead.
 
 
 # %%
-def sha256_file(path: Path) -> str:
-    """Return the SHA-256 digest of a local file."""
+def frame_sha256(frame: pl.DataFrame) -> str:
+    """Content hash over the fields that identify a filing, independent of row order."""
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    for row in (
+        frame.select("accession_no", "cik", "filing_date", "symbol", "text")
+        .sort("accession_no")
+        .iter_rows(named=True)
+    ):
+        digest.update(
+            f"{row['accession_no']}\t{row['cik']}\t{row['filing_date']}\t{row['symbol']}\t".encode()
+        )
+        digest.update(hashlib.sha256(row["text"].encode()).digest())
     return digest.hexdigest()
 
 
 # %%
-data_root = Path(os.getenv("ML4T_DATA_PATH", "data"))
-source_path = data_root / "equities/fundamentals/8k/sp100/reference/all_8k_filings.parquet"
-if not source_path.is_file():
-    raise FileNotFoundError(f"Staged 8-K corpus not found: {source_path}")
-SOURCE_SHA256 = sha256_file(source_path)
-filings_df = pl.read_parquet(source_path).sort(["filing_date", "symbol", "accession_no"])
+filings_df = load_sec_filings("8-K", universe="sp100").sort(
+    ["filing_date", "symbol", "accession_no"]
+)
+SOURCE_SHA256 = frame_sha256(filings_df)
 SOURCE_ROWS = filings_df.height
 required_columns = {"accession_no", "cik", "filing_date", "symbol", "text"}
 missing_columns = required_columns - set(filings_df.columns)
@@ -253,7 +277,16 @@ UNIQUE_SOURCE_FILINGS = filings_df.height
 
 # %%
 filings_df = filings_df.with_columns(
-    pl.col("text").map_elements(detect_item_number, return_dtype=pl.Utf8).alias("item")
+    pl.col("text").map_elements(detect_item_numbers, return_dtype=pl.List(pl.Utf8)).alias("items")
+)
+_item_counts = filings_df.get_column("items").list.len().value_counts().sort("items")
+print("Items named per filing (count of filings by number of items named):")
+print(_item_counts)
+_no_item = filings_df.filter(pl.col("items").list.len() == 0).height
+_multi_item = filings_df.filter(pl.col("items").list.len() > 1).height
+print(
+    f"{_no_item} of {filings_df.height} filings name no item in their stored text, "
+    f"and {_multi_item} name more than one"
 )
 if MAX_FILINGS > 0 and UNIQUE_SOURCE_FILINGS > MAX_FILINGS:
     stride = max(1, math.ceil(UNIQUE_SOURCE_FILINGS / MAX_FILINGS))
@@ -274,7 +307,7 @@ run_identity = {
     "max_new_tokens": MAX_NEW_TOKENS,
 }
 RUN_ID = hashlib.sha256(json.dumps(run_identity, sort_keys=True).encode()).hexdigest()[:24]
-print(f"Staged source: {SOURCE_ROWS:,} filings; SHA-256 {SOURCE_SHA256[:12]}...")
+print(f"Staged source: {SOURCE_ROWS:,} filings; content SHA-256 {SOURCE_SHA256[:12]}...")
 print(f"Unique SEC accessions: {UNIQUE_SOURCE_FILINGS:,}")
 print(f"Deterministic extraction cohort: {len(filing_data)} filings")
 print(f"Selected accessions SHA-256: {SELECTED_ACCESSIONS_SHA256}")
@@ -428,7 +461,7 @@ def build_event_prompt(filing: dict, max_chars: int | None = None) -> str:
             "role": "user",
             "content": f"""Company: {filing["company_name"]} ({filing["symbol"]})
 Filing Date: {filing["filing_date"]}
-Item: {filing.get("item", "8.01")} ({EVENT_TYPES.get(filing.get("item", "8.01"), "Other Events")})
+Item: {describe_items(filing.get("items") or [])}
 
 Text:
 {filing_text}
@@ -840,7 +873,7 @@ if event_types:
     counts = list(event_types.values())
     axes[0].bar(types, counts, color=COLORS["blue"])
     axes[0].set_ylabel("Count")
-    axes[0].set_title("(a) Extracted Event Types")
+    axes[0].set_title("Events by category", loc="left")
     axes[0].tick_params(axis="x", rotation=30)
     for i, (t, c) in enumerate(zip(types, counts)):
         axes[0].text(i, c + 0.2, str(c), ha="center", fontweight="bold")
@@ -857,19 +890,24 @@ if companies:
     axes[1].set_yticks(range(len(names)))
     axes[1].set_yticklabels(names, fontsize=8)
     axes[1].set_xlabel("Events Extracted")
-    axes[1].set_title("(b) Events per Company")
+    axes[1].set_title("Events per company", loc="left")
     axes[1].invert_yaxis()
 
 dominant_type, dominant_count = max(event_types.items(), key=lambda item: (item[1], item[0]))
 dominant_label = dominant_type.replace("_", " ").title()
-dominant_share = dominant_count / len(accepted_events)
-fig.suptitle(
-    f"{dominant_label} Leads This Fixed 8-K Cohort ({dominant_share:.0%})",
-    fontsize=13,
+add_message_title(
+    axes[0],
+    "Extracted event categories, and who they name",
+    subtitle=f"{MODEL_NAME} over the fixed staged 8-K cohort; schema-valid events only",
 )
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
-    fig.show()
+show_with_alt(
+    fig,
+    f"Two panels. The left bar chart counts {len(accepted_events)} schema-valid events "
+    f"across {len(event_types)} categories, the tallest being {dominant_label} at "
+    f"{dominant_count}. The right horizontal bar chart shows the "
+    f"{len(names)} companies named in the most events, the longest being "
+    f"{sorted_cos[0][0]} at {sorted_cos[0][1]} events.",
+)
 
 # %% [markdown]
 # **Finding**: The chart describes this fixed filing sample, not the population
@@ -1033,6 +1071,9 @@ def load_events_to_neo4j(events: list[EventQuadruple], batch_size: int = 500) ->
         counts = graph_counts(session)
         snapshot = {
             "run_id": RUN_ID,
+            # 05 writes a GraphSnapshot too, for the 13F graph. A consumer that
+            # wants this one has to say so rather than take whichever sorts first.
+            "snapshot_kind": "8k_events",
             "source_sha256": SOURCE_SHA256,
             "source_rows": SOURCE_ROWS,
             "unique_source_filings": UNIQUE_SOURCE_FILINGS,
@@ -1167,7 +1208,7 @@ print("\n" + "=" * 50)
 print("NOTEBOOK EXECUTION COMPLETE")
 print("=" * 50)
 print(f"Mode: Preloaded 8-K data ({len(filing_data)} filings)")
-print(f"Data source: {source_path}")
+print("Data source: load_sec_filings('8-K', universe='sp100')")
 print(f"LLM: {MODEL_NAME} (GPU)")
 print("Neo4j: Connected")
 print(f"Filings: {len(filing_data)}")
