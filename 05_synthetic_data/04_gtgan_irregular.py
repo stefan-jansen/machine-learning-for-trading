@@ -179,7 +179,7 @@ HIDDEN_DIM = 24
 ODE_HIDDEN = 24
 MAX_STEPS = 2000
 BATCH_SIZE = 128
-ODE_METHOD = "rk4"
+ODE_METHOD = "rk4"  # "euler" or "rk4"; both step each sample by its own dt
 N_BARS = 2000  # Fallback synthetic bar count (when Ch3 data unavailable)
 RETRAIN = False  # Set True to retrain even if checkpoint exists
 SEED = 42
@@ -210,7 +210,18 @@ CONFIG = {
     "learning_rate": 1e-3,
     "ode_method": ODE_METHOD,
     "holdout_fraction": 0.2,
+    # Bump when the architecture changes: nothing else in a checkpoint says what the
+    # weights were fitted into, so older ones load whenever the shapes line up.
+    # 2.1.0: the decoder integrates each sequence along its own timestamps.
+    "weights_version": "2.1.0",
 }
+
+if CONFIG["ode_method"] not in {"euler", "rk4"}:
+    raise ValueError(
+        f"ode_method must be 'euler' or 'rk4', got {CONFIG['ode_method']!r}. An "
+        "adaptive solver would pick its step sizes from one grid for the whole "
+        "batch, which is what the irregular timestamps here are meant to avoid."
+    )
 
 print(f"GT-GAN: Steps={CONFIG['max_steps']}, ODE={CONFIG['ode_method']}")
 
@@ -527,6 +538,44 @@ class TorchODEFunc(nn.Module):
 
 
 # %% [markdown]
+# ### Advancing a batch by its own inter-arrival times
+#
+# `torchdiffeq.odeint` integrates one time grid for the whole batch, so a batch of
+# sequences observed at different times has to be reduced to a single grid before it
+# can be passed. That reduction is what the irregular timestamps are supposed to
+# carry, so the step below takes a `dt` per row instead. Both drift networks ignore
+# $t$, which is what makes a per-row step size well defined: over an interval the
+# state change depends on the width of the interval and not on where it sits.
+
+
+# %%
+def ode_evolve(func: nn.Module, h: torch.Tensor, dt: torch.Tensor, method: str) -> torch.Tensor:
+    """
+    Advance each row of ``h`` by its own ``dt``.
+
+    Args:
+        func: Drift network with the ``(t, y)`` signature; must ignore ``t``
+        h: State, shape (batch, hidden_dim)
+        dt: Step width per row, shape (batch,)
+        method: "euler" (one derivative evaluation) or "rk4" (four)
+
+    Returns:
+        State after the step, same shape as ``h``
+    """
+    dt = dt.unsqueeze(-1)
+    zero = torch.zeros((), device=h.device)
+
+    if method == "euler":
+        return h + dt * func(zero, h)
+
+    k1 = func(zero, h)
+    k2 = func(zero, h + 0.5 * dt * k1)
+    k3 = func(zero, h + 0.5 * dt * k2)
+    k4 = func(zero, h + dt * k3)
+    return h + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+
+# %% [markdown]
 # ### GRU-ODE Cell: Continuous-Time GRU
 #
 # Combines discrete GRU updates (at observation times) with continuous ODE evolution
@@ -540,11 +589,8 @@ class GRUODECell(nn.Module):
     GRU-ODE: A continuous-time version of GRU with per-sample dt handling.
 
     When an observation arrives, update the hidden state using GRU gates.
-    Between observations, evolve the state using the ODE.
-
-    For efficiency:
-    - Euler method: Direct vectorized computation (no solver overhead)
-    - Dopri5: Uses torchode for adaptive stepping with per-sample times
+    Between observations, evolve the state using ``ode_evolve``, so each sample
+    steps by its own inter-arrival time.
 
     Reference: De Brouwer et al. (2019) "GRU-ODE-Bayes"
     """
@@ -579,21 +625,9 @@ class GRUODECell(nn.Module):
         Returns:
             Updated hidden state
         """
-        device = h.device
-
-        # Evolve hidden state via ODE with per-sample dt
-        dt_mask = dt_per_sample > 1e-6
-        if dt_mask.any():
-            if self.ode_method == "euler":
-                # Fast vectorized Euler: h_new = h + dt * f(t, h)
-                dt_expanded = dt_per_sample.unsqueeze(-1)  # (batch, 1)
-                dh_dt = self.ode_func(torch.tensor(0.0, device=device), h)
-                h = h + dt_expanded * dh_dt
-            else:
-                # Adaptive Dopri5 via torchdiffeq with batch-averaged time span.
-                dt_mean = dt_per_sample.mean().item()
-                t_span = torch.tensor([0.0, max(dt_mean, 1e-5)], device=device)
-                h = odeint(self.ode_func, h, t_span, method="dopri5")[-1]
+        # A row whose dt is zero is left where it is: every term of the step
+        # carries a dt factor.
+        h = ode_evolve(self.ode_func, h, dt_per_sample, self.ode_method)
 
         # GRU update at observation time
         combined = torch.cat([x, h], dim=1)
@@ -694,21 +728,21 @@ class ODEDecoder(nn.Module):
         Returns:
             Observations, shape (batch, n_times, output_dim)
         """
-        device = z.device
+        h = torch.tanh(self.fc_init(z))
 
-        h0 = torch.tanh(self.fc_init(z))
-        t_unique = times[0]
+        # Each row is integrated along its own query times. Integration starts just
+        # before the first one so that the first output is a state the ODE produced
+        # rather than the initial state itself.
+        prev = times[:, 0] - 1e-5
 
-        eps = 1e-5
-        t_start = torch.tensor([t_unique[0].item() - eps], device=device)
-        t_span = torch.cat([t_start, t_unique])
+        states = []
+        for k in range(times.shape[1]):
+            dt = torch.clamp(times[:, k] - prev, min=0.0)
+            h = ode_evolve(self.ode_func, h, dt, self.ode_method)
+            states.append(h)
+            prev = times[:, k]
 
-        h_trajectory = odeint(self.ode_func, h0, t_span, method=self.ode_method)
-        h_at_times = h_trajectory[1:].permute(1, 0, 2)
-
-        output = self.fc_out(h_at_times)
-
-        return output
+        return self.fc_out(torch.stack(states, dim=1))
 
 
 # %% [markdown]
@@ -858,6 +892,36 @@ if _saved is not None and "history" not in _saved:
         "the training-progress section has its figure."
     )
     _saved = None
+
+# Every entry here changes the weights, so a checkpoint fitted under a different value
+# is not this run's model. Several are papermill parameters, so without this check a
+# second setting would load the first one's weights whenever the shapes still matched.
+CHECKPOINT_IDENTITY = (
+    "seq_length",
+    "features",
+    "latent_dim",
+    "hidden_dim",
+    "ode_hidden",
+    "max_steps",
+    "batch_size",
+    "learning_rate",
+    "ode_method",
+    "holdout_fraction",
+    "weights_version",
+)
+if _saved is not None:
+    saved_config = _saved.get("config", {})
+    mismatched = {
+        key: (saved_config.get(key), CONFIG[key])
+        for key in CHECKPOINT_IDENTITY
+        if saved_config.get(key) != CONFIG[key]
+    }
+    if mismatched:
+        print(f"\nCheckpoint at {CHECKPOINT_PATH} was fitted under different settings:")
+        for key, (was, now) in mismatched.items():
+            print(f"  {key}: checkpoint {was!r}, this run {now!r}")
+        print("Retraining.")
+        _saved = None
 if _saved is not None:
     print(f"\nLoading checkpoint from: {CHECKPOINT_PATH}")
     checkpoint = _saved
@@ -1640,7 +1704,7 @@ metadata = {
     "version": "2.0",
     "generator": {
         "name": "gtgan",
-        "version": "2.0.0",
+        "version": CONFIG["weights_version"],
         "paper": "Jeon et al., GT-GAN: General Purpose Time Series Synthesis, NeurIPS 2022",
         "data_type": "naturally_irregular",
     },
