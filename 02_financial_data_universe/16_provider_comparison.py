@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -56,22 +57,38 @@ import polars as pl
 from ml4t.data.providers import WikiPricesProvider, YahooFinanceProvider
 from ml4t.data.providers.fred import FREDProvider
 
-from utils.style import COLORS
+from utils.paths import display_path
+from utils.style import COLORS, show_plotly_with_alt
 
-HAS_FRED = bool(os.getenv("FRED_API_KEY"))
-if not HAS_FRED:
-    raise RuntimeError(
-        "FRED_API_KEY not set. Get a free key at "
-        "https://fred.stlouisfed.org/docs/api/api_key.html and export it."
-    )
-
-# Reproducibility: a fixed as-of date keeps outputs stable between book
-# editions. Bump when the book is revised.
-AS_OF_DATE = "2025-01-15"
-
+# %% [markdown]
+# ### Declared parameters
+#
+# `AS_OF_DATE` fixes the right-hand end of every window so the outputs are stable between
+# book editions rather than moving with the wall clock. Bump it when the book is revised.
+#
+# `RISK_FREE_RATE` is subtracted in the Sharpe ratio in Section 7. It is a parameter rather
+# than a constant in the arithmetic because it is a choice, and a wrong one changes the
+# ordering of the table it feeds.
+#
+# The FRED key is required only by Section 8, which is the last section, so the rest of the
+# notebook runs without it.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+AS_OF_DATE = "2025-01-15"
+HISTORY_YEARS = 5
+
+COMPARE_SYMBOL = "AAPL"
+COMPARE_START = "2017-01-01"
+COMPARE_END = "2017-12-31"
+DISCREPANCY_PCT = 0.1  # a close difference above this is a discrepancy, not rounding
+EXACT_MATCH_PCT = 0.01  # below this the two closes are the same number
+
+RISK_FREE_RATE = 2.0  # percent per year, subtracted in the Sharpe ratio
+TRADING_DAYS_PER_YEAR = 252
+
+FRED_SERIES = ["VIXCLS", "DGS10"]
+FRED_START = "2023-01-01"
+FRED_END = "2024-01-01"
 
 # %% [markdown]
 # ---
@@ -83,14 +100,16 @@ AS_OF_DATE = "2025-01-15"
 # ### Key Benefits:
 # 1. **Consistency**: Same API regardless of data source
 # 2. **Validation**: Automatic OHLC invariant checks
-# 3. **Polars Output**: 10-100x faster than pandas alternatives
+# 3. **Polars Output**: `22_pandas_polars_benchmark` measures what that is worth here
 # 4. **Rate Limiting**: Built-in throttling to avoid API bans
 # 5. **Circuit Breaker**: Automatic failure detection and recovery
 
+# %% [markdown]
+# The table below lists the provider landscape. This notebook exercises Yahoo, WikiPrices and
+# FRED; the rest need API keys of their own and appear in the asset-class notebooks that use
+# them.
+
 # %%
-# The ml4t-data provider landscape
-# Note: This notebook demonstrates Yahoo, WikiPrices, and FRED. Other providers
-# are available but require API keys and are covered in asset-class-specific notebooks.
 providers_info = pl.DataFrame(
     {
         "provider": [
@@ -137,11 +156,10 @@ providers_info
 # Define our ETF universe for the rotation strategy
 ETF_UNIVERSE = ["SPY", "QQQ", "IWM", "EFA", "EEM", "TLT", "GLD"]
 
-# Date range: 5 years of daily data (relative to AS_OF_DATE for reproducibility)
 end_date = AS_OF_DATE
-start_date = (datetime.strptime(AS_OF_DATE, "%Y-%m-%d") - timedelta(days=5 * 365)).strftime(
-    "%Y-%m-%d"
-)
+start_date = (
+    datetime.strptime(AS_OF_DATE, "%Y-%m-%d") - timedelta(days=HISTORY_YEARS * 365)
+).strftime("%Y-%m-%d")
 
 print(f"Fetching data from {start_date} to {end_date}")
 print(f"ETF Universe: {ETF_UNIVERSE}")
@@ -285,7 +303,7 @@ class CanonicalWikiPricesAdapter:
 # %%
 for wiki_path in WIKI_PATHS:
     if wiki_path.exists():
-        print(f"  Found: {wiki_path}")
+        print(f"  Found: {display_path(wiki_path)}")
         try:
             wiki = WikiPricesProvider(parquet_path=wiki_path)
             wiki_path_used = wiki_path
@@ -293,7 +311,7 @@ for wiki_path in WIKI_PATHS:
         except Exception as e:
             # File exists but failed to load - this is a real error, not silent skip
             wiki_load_errors.append((wiki_path, str(e)))
-            print(f"  ERROR loading {wiki_path}: {e}")
+            print(f"  ERROR loading {display_path(wiki_path)}: {e}")
 
 # If we found files but couldn't load any of them, that's a bug - fail loudly
 if wiki is None and wiki_load_errors:
@@ -309,7 +327,7 @@ if wiki is None:
         "Materialise it via WikiPricesProvider.download(api_key=<nasdaq>) first."
     )
 
-print(f"WikiPrices loaded from: {wiki_path_used}")
+print(f"WikiPrices loaded from: {display_path(wiki_path_used)}")
 
 # Fetch long-term AAPL history; the canonical local schema may need the
 # adapter wrapper if the file uses asset/date instead of symbol/timestamp.
@@ -443,7 +461,8 @@ print(
 # 1. **WikiPrices** (1962-2018) - includes delisted names
 # 2. **Yahoo Finance** (2018-present) - current data
 #
-# This gives us the best of both worlds.
+# One covers a span the other does not, in both directions, so a panel that reaches from the
+# 1960s to today has to come from both and the seam has to be somewhere.
 
 
 # %%
@@ -584,8 +603,7 @@ def compare_providers_detailed(
         ]
     )
 
-    # Identify significant discrepancies (>0.1% price difference)
-    discrepancies = aligned.filter(pl.col("close_diff_pct").abs() > 0.1)
+    discrepancies = aligned.filter(pl.col("close_diff_pct").abs() > DISCREPANCY_PCT)
 
     # Summary statistics
     summary = {
@@ -599,7 +617,7 @@ def compare_providers_detailed(
         "mean_close_diff_pct": aligned["close_diff_pct"].mean() if len(aligned) > 0 else None,
         "max_close_diff_pct": aligned["close_diff_pct"].abs().max() if len(aligned) > 0 else None,
         "discrepancy_days": len(discrepancies),
-        "exact_matches": len(aligned.filter(pl.col("close_diff_pct").abs() < 0.01)),
+        "exact_matches": len(aligned.filter(pl.col("close_diff_pct").abs() < EXACT_MATCH_PCT)),
     }
 
     return {"summary": summary, "aligned": aligned, "discrepancies": discrepancies}
@@ -607,7 +625,13 @@ def compare_providers_detailed(
 
 # %%
 comparison_result = compare_providers_detailed(
-    "AAPL", "2017-01-01", "2017-12-31", yahoo, wiki, "Yahoo", "WikiPrices"
+    COMPARE_SYMBOL,
+    COMPARE_START,
+    COMPARE_END,
+    yahoo,
+    wiki,
+    "Yahoo",
+    "WikiPrices",
 )
 if comparison_result.get("error"):
     raise RuntimeError(f"Comparison failed: {comparison_result['error']}")
@@ -617,32 +641,31 @@ summary_df = pl.DataFrame([summary])
 summary_df
 
 # %%
-# Show top discrepancies (if any)
 disc = comparison_result["discrepancies"]
-if len(disc) > 0:
-    disc.select(["timestamp", "close", "close_b", "close_diff_pct"]).head(5)
-else:
-    print("No significant Yahoo↔WikiPrices price discrepancies for AAPL 2017.")
+print(
+    f"Days where the two closes differ by more than {DISCREPANCY_PCT}%: "
+    f"{len(disc):,} of {len(comparison_result['aligned']):,} overlapping"
+)
+disc.select(["timestamp", "close", "close_b", "close_diff_pct"]).head(5)
 
 
 # %% [markdown]
-# ### What Real Provider Discrepancies Look Like
+# ### Reading the comparison
 #
-# When comparing Yahoo Finance to WikiPrices on historical data, common findings include:
+# The two providers quote the same exchange, so their raw prints agree. What they do not
+# share is an adjustment basis, and the printed statistics above show that difference
+# dominating everything else: the exact-match count is zero and every overlapping day
+# differs by roughly the same large percentage.
 #
-# | Pattern | Typical Magnitude | Cause |
-# |---------|-------------------|-------|
-# | **Exact match** | <0.01% | Same underlying source |
-# | **Small drift** | 0.01-0.1% | Rounding, adjustment timing |
-# | **Step change** | 1-10% | Different split adjustment date |
-# | **Systematic offset** | Consistent % | Different dividend treatment |
+# A constant offset across a whole year is the signature to recognise. A rounding difference
+# would be tiny and vary day to day; a mis-dated split would be a step, agreeing before the
+# date and disagreeing after. A uniform ratio means the two series are the same prices under
+# different retroactive adjustments, and here the reason is datable: Yahoo's adjusted close
+# reflects Apple's 2020 split, and the WikiPrices feed stopped in 2018 and could not.
 #
-# **Key insight**: Raw quotes share the same exchange source, but *adjustments*
-# diverge — and that divergence can dominate the comparison. The AAPL 2017 run
-# above is a case in point: all 249 overlapping days differ by ~77% (zero exact
-# matches) because Yahoo's close retroactively reflects Apple's 2020 4:1 split,
-# while WikiPrices ends in 2018 and never applied it. Always align the adjustment
-# basis (and watch the coverage window) before diffing two providers.
+# So the number to check first in any provider diff is not the mean difference but the
+# *shape* of the difference over time. Align the adjustment basis before comparing, or the
+# comparison measures the adjustment rather than the data.
 
 # %% [markdown]
 # ---
@@ -700,10 +723,16 @@ fig.update_layout(
     margin=dict(r=70),
 )
 
-# Add horizontal line at 100
 fig.add_hline(y=100, line_dash="dash", line_color=COLORS["neutral"], opacity=0.5)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Seven price series rebased to a hundred at their own first observation and plotted "
+    "over five years, each labelled at its right-hand end, with a dashed reference line at "
+    "a hundred. All seven drop sharply in the first weeks, recover together, and separate "
+    "from 2022 onward. Five finish well above the reference line, one finishes on it, and "
+    "one runs below it for most of the window and ends furthest down.",
+)
 
 # %%
 # Calculate performance statistics
@@ -713,9 +742,9 @@ for symbol, df in etf_data.items():
     returns = df["close"].pct_change().drop_nulls()
 
     total_return = (df["close"][-1] / df["close"][0] - 1) * 100
-    annual_return = ((1 + total_return / 100) ** (252 / len(df)) - 1) * 100
-    volatility = returns.std() * np.sqrt(252) * 100
-    sharpe = (annual_return - 2) / volatility if volatility > 0 else 0  # Assume 2% risk-free
+    annual_return = ((1 + total_return / 100) ** (TRADING_DAYS_PER_YEAR / len(df)) - 1) * 100
+    volatility = returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
+    sharpe = (annual_return - RISK_FREE_RATE) / volatility if volatility > 0 else 0
 
     performance_stats.append(
         {
@@ -750,58 +779,52 @@ performance_df
 # **Get free API key**: https://fred.stlouisfed.org/docs/api/api_key.html
 
 # %%
-# Pull VIX and 10Y Treasury from FRED for the same window
+if not os.getenv("FRED_API_KEY"):
+    raise RuntimeError(
+        "FRED_API_KEY not set. Get a free key at "
+        "https://fred.stlouisfed.org/docs/api/api_key.html and export it. Only this "
+        "section needs it."
+    )
+
 fred = FREDProvider()
-vix = fred.fetch_ohlcv("VIXCLS", "2023-01-01", "2024-01-01")
-treasury_10y = fred.fetch_ohlcv("DGS10", "2023-01-01", "2024-01-01")
+vix = fred.fetch_ohlcv(FRED_SERIES[0], FRED_START, FRED_END)
+treasury_10y = fred.fetch_ohlcv(FRED_SERIES[1], FRED_START, FRED_END)
 fred.close()
 
 vix_mean = float(vix["close"].mean())
 vix_max = float(vix["close"].max())
 last_yield = float(treasury_10y.filter(pl.col("close").is_not_null())["close"][-1])
 print(
-    f"VIX 2023: {len(vix):,} obs · mean {vix_mean:.1f}, max {vix_max:.1f} · "
-    f"DGS10 last yield {last_yield:.2f}%"
+    f"{FRED_SERIES[0]}: {len(vix):,} obs, mean {vix_mean:.1f}, max {vix_max:.1f}. "
+    f"{FRED_SERIES[1]} last value {last_yield:.2f}%"
 )
 vix.head()
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# Multi-source data acquisition profile for the 7-ETF rotation universe.
+# 1. **One signature, several sources.** The same `fetch_ohlcv()` call reaches an equity
+#    provider, a historical archive and a macro archive. Treat the provider as configuration
+#    rather than as bespoke per-source code, and a swap costs a line.
 #
-# ### Quantitative Findings
-# - **ETF universe** (5 years, 1,256 trading days/symbol): QQQ
-#   +138.5 % total return / +19.1 % annualised / Sharpe 0.66 leads;
-#   TLT −28.6 % / −6.5 % / Sharpe −0.47 trails. EEM essentially flat
-#   (+0.85 % total, Sharpe −0.08). The 5-year window covers a
-#   bond-bear / equity-bull regime — useful for the rotation case study
-#   to learn that "diversification" requires non-equity diversifiers
-#   beyond duration alone.
-# - **WikiPrices coverage**: ~3,200 historical symbols (1962-2018)
-#   including delisted names — required for any backtest that wants to
-#   avoid survivorship bias on legacy data.
-# - **Yahoo↔WikiPrices comparison (AAPL 2017)**: zero exact matches — all
-#   249 overlapping days differ by ~77% because Yahoo's auto-adjusted close
-#   reflects Apple's 2020 4:1 split while WikiPrices ends in 2018 and predates
-#   it. The helper surfaces these price-difference statistics so adjustment-basis
-#   mismatches are caught row-by-row rather than glossed.
-# - **AAPL stitched history**: WikiPrices + Yahoo joins to ~8,800 daily
-#   rows (1990-now) without duplication after the 2018-03-27 cutoff.
-# - **FRED**: VIXCLS and DGS10 fetched in the same call signature as
-#   the equity providers — the unified API generalises cleanly to
-#   macro overlays.
+# 2. **Prefer fallback to fail-fast for acquisition, but keep a source column.** Preferring
+#    the next provider over a missing day is right; doing it without recording which provider
+#    answered leaves a panel nobody can audit afterwards.
 #
-# ### Implications for Practitioners
-# - **One signature, many sources**: The unified `fetch_ohlcv()` makes
-#   provider swaps cheap. Treat the provider as configuration, not as
-#   bespoke per-source code.
-# - **Fallback over fail-fast** for production data acquisition: prefer
-#   the next provider over a missing day, but log the source used so
-#   the audit trail is intact.
-# - **Comparison is the contract**: never trust two providers blindly —
-#   run a row-by-row diff on overlapping windows and treat any
-#   adjustment-method mismatch as a bug, not a feature.
+# 3. **Comparing two providers usually measures their adjustment conventions, not their data.**
+#    In the run above the two feeds agree on every raw print and disagree on every adjusted
+#    close by roughly the same ratio, because one of them applied a split the other's coverage
+#    window ends before. The exact-match count is zero and the mean difference is large, and
+#    neither number means the data is wrong.
+#
+# 4. **Read the shape of a difference, not its average.** Rounding is small and varies daily; a
+#    mis-dated corporate action is a step; a uniform ratio across a whole window is a different
+#    adjustment basis. The three call for different fixes and the mean difference cannot tell
+#    them apart.
+#
+# 5. **A stitched history needs an explicit seam.** The historical feed ends on a known date, so
+#    the join is a filter on that date rather than a deduplication after the fact, and the row
+#    count printed above is what confirms nothing was double-counted.
 #
 # **Next**: `17_complete_pipeline` consumes this universe end-to-end
 # (ingestion → quality gate → storage → query); `18_data_management`

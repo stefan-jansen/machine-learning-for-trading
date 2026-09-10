@@ -43,15 +43,17 @@ def load_crypto_premium(
     """Load crypto premium index for funding rate arbitrage case study.
 
     Args:
-        frequency: Data frequency. "8h" aligns with Binance funding settlement times
-            (00:00, 08:00, 16:00 UTC). Default is "8h".
+        frequency: Data frequency. "8h" gives one bar per funding interval. Default is "8h".
         symbols: Optional list of symbols to filter (e.g., ["BTCUSDT", "ETHUSDT"])
         start_date: Optional start date (YYYY-MM-DD format)
         end_date: Optional end date (YYYY-MM-DD format)
         max_symbols: Limit to N random symbols (0 = all). Seed-deterministic.
 
     Returns:
-        DataFrame with columns: timestamp, symbol, premium_index_open/high/low/close
+        DataFrame with columns: timestamp, symbol, premium_index_open/high/low/close.
+        `timestamp` is the bar's opening time, as Binance stamps klines, so an 8h bar
+        stamped 00:00 spans 00:00-08:00 and its close is the premium entering the 08:00
+        funding settlement. Pair a bar with the settlement one interval later.
     """
     filename = f"premium_index_{frequency}.parquet"
     path = ML4T_DATA_PATH / "crypto" / "market" / filename
@@ -150,7 +152,8 @@ def load_crypto_perps(
             .sort(["symbol", "timestamp"])
         )
 
-        # Join premium index data (8H aligned, same schedule as funding settlements)
+        # Join premium index data. Both sides are Binance klines stamped at the bar's
+        # opening time, so the timestamps line up directly.
         premium_path = ML4T_DATA_PATH / "crypto" / "market" / "premium_index_8h.parquet"
         if premium_path.exists():
             premium = pl.read_parquet(premium_path)

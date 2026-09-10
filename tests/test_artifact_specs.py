@@ -64,7 +64,16 @@ def test_crypto_modeling_splits_use_label_clock_before_feature_join(
     assert captured["minimum"] == datetime(2020, 1, 1)
 
 
-def test_us_equities_pilot_helpers_preserve_current_outputs() -> None:
+def test_us_equities_pilot_helpers_preserve_current_outputs(seeded_output_dir) -> None:
+    """The pilot helpers still return what the case study declares.
+
+    ``seeded_output_dir`` is required, not incidental. It is the fixture that copies
+    ml4t/third-edition-test-data's ``intermediates/<case study>/`` into the directory
+    ``get_case_study_dir`` resolves to. Without it the loaders look in the source tree,
+    find no ``features/`` or ``labels/`` there, and raise - which is what kept both of
+    these deselected in the ``test-unit-data`` job until 2026-09-10 under the mistaken
+    reading that they were waiting on a workstation rebuild.
+    """
     bt = get_backtest_config("us_equities_panel")
     prices = load_backtest_prices("us_equities_panel", max_symbols=2)
     mds = load_modeling_dataset("us_equities_panel", "fwd_ret_1d", max_symbols=2)
@@ -89,7 +98,16 @@ def test_us_equities_pilot_helpers_preserve_current_outputs() -> None:
     assert mds.task_type == "regression"
 
 
-def test_microstructure_pilot_helpers_preserve_current_outputs() -> None:
+def test_microstructure_pilot_helpers_preserve_current_outputs(seeded_output_dir) -> None:
+    """The pilot helpers still return what the case study declares.
+
+    ``seeded_output_dir`` is required, not incidental. It is the fixture that copies
+    ml4t/third-edition-test-data's ``intermediates/<case study>/`` into the directory
+    ``get_case_study_dir`` resolves to. Without it the loaders look in the source tree,
+    find no ``features/`` or ``labels/`` there, and raise - which is what kept both of
+    these deselected in the ``test-unit-data`` job until 2026-09-10 under the mistaken
+    reading that they were waiting on a workstation rebuild.
+    """
     bt = get_backtest_config("nasdaq100_microstructure")
     prices = load_backtest_prices("nasdaq100_microstructure", max_symbols=2)
     mds = load_modeling_dataset("nasdaq100_microstructure", "fwd_ret_15m", max_symbols=2)
@@ -100,10 +118,11 @@ def test_microstructure_pilot_helpers_preserve_current_outputs() -> None:
     # last bar of every training window inside the first validation label's window. #737 made
     # that the declared value and this assertion was not moved with it.
     #
-    # It went unreported because `test-unit-data` deselects this test by node id - it is one of
-    # the "6 deselected" that job reports - on the grounds that it needs stage 01-05 artifacts
-    # the nasdaq rebuild has not produced. That reason is true of the two lines below and was
-    # never true of this one, which reads the repo config and no data.
+    # It went unreported because `test-unit-data` deselected this test by node id, on the
+    # grounds that it needed stage 01-05 artifacts the nasdaq rebuild had not produced. That
+    # was never true of this line, which reads the repo config and no data, and the deselect
+    # itself is gone as of 2026-09-10: the fixture had the artifacts all along and the test
+    # was not asking for them. See the docstring above.
     assert bt.label_buffer == "16min"
     assert bt.calendar == "NYSE"
     assert bt.cadence == "15_minute"

@@ -20,29 +20,41 @@
 #
 # **Book Reference**: Chapter 22, Section 22.8 (Applications and Strategic Choices)
 #
-# This notebook compares two approaches to ESG (Environmental, Social, Governance)
-# analysis:
+# Two ways to do ESG analysis, and only one of them is implemented here.
 #
-# 1. **Implemented screening**: keyword ESG categories plus pretrained FinBERT sentiment
-# 2. **RAG interface contract**: evidence requirements for qualitative due diligence
+# 1. **Keyword screening plus a pretrained sentiment model.** Built and run:
+#    headlines are selected by an ESG keyword list, labelled E, S or G by a
+#    second keyword list, and scored by FinBERT. It produces a row per headline
+#    that a factor model can consume.
+# 2. **A RAG assistant.** Not built here. What is recorded instead is the
+#    contract such an assistant would have to satisfy - narrative answers,
+#    cited spans, abstention - so that the comparison stays a comparison of
+#    output types rather than an invented benchmark.
 #
-# **Learning Objectives**:
-# - Contrast fixed-taxonomy classification with cited narrative analysis.
-# - Map ESG workflows to the architecture that fits their output requirements.
-# - Use latency, flexibility, and verifiability as selection criteria.
+# The screening path turns out to demonstrate its own principal limitation
+# without being asked to. Section 2 measures it: over the Bloomberg archive,
+# the keyword screen that selects "ESG-relevant" headlines selects almost
+# nothing but environmental ones, and two properties of the screen itself
+# account for a good deal of that - its selection terms and the order its
+# categoriser tests them in.
 #
-# **Prerequisites**: Bloomberg financial news dataset
-# (`data/alternative/news/bloomberg/`). No RAG answers are generated in this notebook.
+# **Learning objectives**
 #
-# ## Key Insight
-# The choice isn't about which technology is "better" - it's about which is
-# appropriate for the task at hand.
+# After working through this notebook you will be able to:
+#
+# - Say what a fixed taxonomy costs, from a measurement rather than an
+#   assertion.
+# - Measure what a keyword screen actually selected, and name the properties of
+#   the screen that account for the composition it returned.
+# - Separate a model's inference cost from the one-off cost of loading it.
+# - State the evidence contract a RAG producer has to meet before its output
+#   can be compared with a classifier's.
+#
+# **Prerequisites**: the Bloomberg financial news archive
+# (`data/alternative/news/bloomberg/`). No RAG answers are generated here.
 
 # %% [markdown]
-# ## 1. Setup and Imports
-#
-# The setup fixes the headline and question budgets so the comparison isolates
-# architectural trade-offs instead of dataset-size or runtime noise.
+# ## 1. Setup
 
 # %%
 """ESG Analysis: RAG vs Fine-Tuning - Comparing classification and retrieval approaches."""
@@ -50,9 +62,6 @@
 import hashlib
 import json
 import time
-import warnings
-
-warnings.filterwarnings("ignore")
 
 import plotly.graph_objects as go
 
@@ -66,13 +75,14 @@ from transformers.utils import logging as transformers_logging
 # ML4T configuration
 from data import load_bloomberg_news
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 transformers_logging.set_verbosity_error()
 
 # %% tags=["parameters"]
-MAX_HEADLINES = 0
+MAX_HEADLINES = 0  # total headlines to classify; 0 means 3 * PER_CATEGORY
 MAX_QUESTIONS = 0
+PER_CATEGORY = 7  # per-category default when MAX_HEADLINES is 0
 SEED = 42
 REQUIRE_GPU = True
 FINBERT_MODEL = "ProsusAI/finbert"
@@ -86,48 +96,169 @@ INFERENCE_DEVICE = 0 if torch.cuda.is_available() else -1
 print(f"FinBERT device: {'cuda:0' if INFERENCE_DEVICE == 0 else 'cpu'}")
 
 # %% [markdown]
-# ## Approach A: Implemented ESG Screening
+# ## 2. What the keyword screen actually selects
 #
-# The implemented path combines a keyword taxonomy with pretrained FinBERT
-# sentiment. It does not fine-tune an ESG classifier in this notebook.
-#
-# **Strengths**: Scalable, fast, produces numeric time series
-# **Limitations**: Fixed taxonomy, no explanations
-#
-# **Interpretation**: The output path and budget settings frame this notebook as
-# a workflow comparison. The result matters less as a benchmark than as a guide
-# to which architecture fits a research team's operating model.
+# The screen is two keyword lists. The first decides which headlines are
+# ESG-relevant at all; the second sorts those into Environmental, Social and
+# Governance. Both are below, and the second is applied to the whole selected
+# pool before any sampling, because what the pool contains decides what a
+# sample can show.
 
 # %%
-print("Transformers available")
-
-# %% [markdown]
-# **Interpretation**: The transformer availability check is a practical branch
-# in the experiment. Production fails closed if the pinned classifier is not
-# available, so later outputs cannot silently describe a substituted model.
-#
-# %%
-# Load real financial news headlines from the Bloomberg archive
 news_df = load_bloomberg_news()
 required_columns = {"timestamp", "headline"}
 missing_columns = required_columns - set(news_df.columns)
 if missing_columns:
     raise ValueError(f"Bloomberg news loader violates canonical schema: missing {missing_columns}.")
 
-# Filter for ESG-related headlines using keyword matching
-esg_keywords = r"(?i)(climate|carbon|emission|sustain|ESG|renewable|diversity|governance|environmental|green.bond|pollution|social.responsibility|net.zero|solar|wind.energy|deforestation|water.scarcity|labor.rights|board.independence|executive.compensation)"
+ESG_SELECTION_PATTERN = (
+    r"(?i)(climate|carbon|emission|sustain|ESG|renewable|diversity|governance|environmental"
+    r"|green.bond|pollution|social.responsibility|net.zero|solar|wind.energy|deforestation"
+    r"|water.scarcity|labor.rights|board.independence|executive.compensation)"
+)
 esg_news = (
-    news_df.filter(pl.col("headline").str.contains(esg_keywords))
+    news_df.filter(pl.col("headline").str.contains(ESG_SELECTION_PATTERN))
     .filter(pl.col("headline").str.len_chars() > 30)
     .sort(["timestamp", "headline"], descending=[True, False])
 )
-print(f"ESG-relevant headlines in Bloomberg corpus: {len(esg_news):,}")
-
-# Sample a diverse set across E, S, G categories
-N_HEADLINES = MAX_HEADLINES if MAX_HEADLINES > 0 else 20
-selected_headlines = esg_news.sample(N_HEADLINES, seed=SEED).sort(
-    ["timestamp", "headline"], descending=[True, False]
+print(
+    f"Archive spans {news_df['timestamp'].min():%Y-%m-%d} to {news_df['timestamp'].max():%Y-%m-%d}"
 )
+print(f"Headlines in archive: {news_df.height:,}")
+print(f"Headlines the ESG screen selects: {esg_news.height:,}")
+
+
+# %% [markdown]
+# ### The E, S and G taxonomy
+#
+# A second keyword list sorts a selected headline into one category. The terms
+# are the ones an analyst would reach for first, and the order matters:
+# environmental is tested before social and social before governance, so a
+# headline about a board's climate policy counts as environmental.
+
+
+# %%
+ESG_CATEGORY_TERMS = {
+    "Environmental": [
+        "carbon",
+        "emission",
+        "environmental",
+        "environment",
+        "solar",
+        "sustainab",
+        "net-zero",
+        "net zero",
+        "climate",
+        "renewable",
+        "wind",
+        "pollution",
+        "deforestation",
+        "water scarcity",
+        "green bond",
+        "clean energy",
+    ],
+    "Social": [
+        "worker",
+        "safety",
+        "labor",
+        "labour",
+        "diversity",
+        "data breach",
+        "customer",
+        "human rights",
+        "community",
+        "social responsibility",
+    ],
+    "Governance": [
+        "board",
+        "ceo",
+        "chief executive",
+        "compensation",
+        "shareholder",
+        "governance",
+        "audit",
+        "disclosure",
+    ],
+}
+
+
+def categorize_esg(text: str) -> str:
+    """Assign one ESG category by keyword, or Other when no term matches."""
+    lowered = text.lower()
+    for category, terms in ESG_CATEGORY_TERMS.items():
+        if any(term in lowered for term in terms):
+            return category
+    return "Other"
+
+
+# %% [markdown]
+# ### What the pool contains
+#
+# Apply the taxonomy to every selected headline before sampling any of them.
+
+
+# %%
+esg_news = esg_news.with_columns(
+    pl.col("headline").map_elements(categorize_esg, return_dtype=pl.String).alias("category")
+)
+pool_counts = esg_news.group_by("category").len().sort("len", descending=True)
+pool_counts
+
+# %% [markdown]
+# This screen is called an ESG screen and what it returns is environmental
+# news. The counts are not close: social and governance headlines together are
+# a rounding error against the environmental ones.
+#
+# Two properties of the screen itself account for a good deal of that, and both
+# are visible in the code above rather than inferred.
+#
+# **The selection list is lopsided.** Its environmental terms are common single
+# words - *climate*, *carbon*, *solar*, *renewable*, *emission* - and a
+# headline needs only one of them. Its social and governance terms are mostly
+# compound phrases that a headline has to contain intact: *social
+# responsibility*, *labor rights*, *board independence*, *executive
+# compensation*. The ordinary words those topics are actually written in -
+# *board*, *pay*, *workers*, *safety* - appear in the categoriser's lists and
+# not in the selection pattern, so a headline about a workforce dispute is
+# never selected to be categorised in the first place.
+#
+# **The categoriser resolves ties towards environmental.** It tests
+# environmental terms first, so a headline about a board's climate policy is
+# environmental and not governance.
+#
+# What that does *not* establish is that keyword screening is intrinsically
+# environmental. Deciding that would need alternative selection lists and a set
+# of headlines labelled by someone other than this notebook, and neither is
+# here. What it does establish is the thing worth carrying: a keyword screen's
+# output composition is a property of the list, the imbalance can be large
+# enough to make the label wrong, and it costs one group-by to check.
+#
+# `MAX_HEADLINES` is a budget for the whole sample, split evenly across the
+# three categories, so a cap set for a fast test caps what a fast test runs.
+#
+# It also decides how to sample. On these proportions a uniform draw of twenty
+# would be overwhelmingly environmental and would more likely than not contain
+# no social or governance headline at all. The sample below is stratified
+# instead, taking the same number from each category so all three are present -
+# which is itself the admission that the screen could not supply them.
+
+# %%
+esg_categories = ("Environmental", "Social", "Governance")
+if MAX_HEADLINES > 0:
+    # Quotient and remainder, so a cap below the category count yields that many
+    # headlines rather than one per category.
+    quota, extra = divmod(MAX_HEADLINES, len(esg_categories))
+    quotas = [quota + (1 if index < extra else 0) for index in range(len(esg_categories))]
+else:
+    quotas = [PER_CATEGORY] * len(esg_categories)
+
+selected_headlines = pl.concat(
+    [
+        group.sample(min(quota, group.height), seed=SEED)
+        for category, quota in zip(esg_categories, quotas, strict=True)
+        if quota and (group := esg_news.filter(pl.col("category") == category)).height
+    ]
+).sort(["timestamp", "headline"], descending=[True, False])
 ESG_HEADLINES = selected_headlines["headline"].to_list()
 selection_sha256 = hashlib.sha256(
     "\n".join(
@@ -135,38 +266,9 @@ selection_sha256 = hashlib.sha256(
         for row in selected_headlines.iter_rows(named=True)
     ).encode()
 ).hexdigest()
-print(f"Sampled {len(ESG_HEADLINES)} headlines for classification")
+print(f"Stratified sample: {len(ESG_HEADLINES)} headlines")
+print(dict(selected_headlines.group_by("category").len().sort("category").iter_rows()))
 print(f"Selected-row SHA-256: {selection_sha256}")
-
-
-# %% [markdown]
-# ### Keyword-based ESG categorization
-#
-# Simple rule-based classifier that assigns E, S, or G labels using
-# keyword matching. Used as a proxy when a fine-tuned ESG taxonomy
-# model is not available.
-
-
-# %%
-def categorize_esg(text: str) -> str:
-    """Simple keyword-based ESG categorization."""
-    text_lower = text.lower()
-    if any(
-        kw in text_lower
-        for kw in ["carbon", "emission", "environmental", "solar", "sustainability", "net-zero"]
-    ):
-        return "Environmental"
-    elif any(
-        kw in text_lower
-        for kw in ["worker", "safety", "labor", "diversity", "data breach", "customer"]
-    ):
-        return "Social"
-    elif any(
-        kw in text_lower for kw in ["board", "ceo", "compensation", "shareholder", "governance"]
-    ):
-        return "Governance"
-    else:
-        return "Other"
 
 
 # %% [markdown]
@@ -208,32 +310,31 @@ def load_finbert_pipeline():
 
 
 # %% [markdown]
-# ### Classify the ESG headlines
+# ### Classify the sample
 #
-# Apply the sentiment model, add a coarse E/S/G label, and record latency so the
-# architecture comparison includes both output type and throughput.
-#
-# **Interpretation**: The model-loading branch determines whether we are testing
-# a finance-tuned sentiment backbone or a generic fallback. That result shapes
-# how much weight to put on the classification outputs below.
-#
+# Apply FinBERT, attach the E/S/G label, and time the load separately from the
+# inference. A throughput figure that includes the one-off cost of loading the
+# weights is a statement about the batch size it happened to be measured at,
+# not about the model - at twenty headlines the load dominates, and a reader
+# sizing a nightly job off it would be out by an order of magnitude.
 
 
 # %%
 def classify_esg_headlines(headlines: list) -> pl.DataFrame:
-    """Classify ESG headlines using FinBERT sentiment as proxy."""
-    print("Classifying headlines with sentiment model...")
-    start_time = time.time()
+    """Classify headlines with FinBERT, timing the load and the inference apart."""
+    load_start = time.time()
     classifier, model_used = load_finbert_pipeline()
-    print(f"Sentiment model in use: {model_used}")
+    load_seconds = time.time() - load_start
+
     parameter_device = next(classifier.model.parameters()).device
     if REQUIRE_GPU and parameter_device.type != "cuda":
         raise RuntimeError(f"FinBERT parameters are on {parameter_device}, not CUDA.")
-    print(f"FinBERT parameters: {parameter_device}")
+    print(f"Sentiment model in use: {model_used} on {parameter_device}")
 
+    inference_start = time.time()
     results = []
     for headline in headlines:
-        result = classifier(headline[:512])[0]  # Truncate to model max
+        result = classifier(headline[:512])[0]  # truncate to the model's maximum
         results.append(
             {
                 "headline": headline,
@@ -243,21 +344,29 @@ def classify_esg_headlines(headlines: list) -> pl.DataFrame:
                 "confidence": result["score"],
             }
         )
+    inference_seconds = time.time() - inference_start
 
-    elapsed = time.time() - start_time
-    print(f"Classified {len(headlines)} headlines in {elapsed:.2f}s")
-    print(f"Throughput: {len(headlines) / elapsed:.1f} docs/sec")
+    per_headline_ms = 1_000 * inference_seconds / max(len(headlines), 1)
+    print(f"Model load:  {load_seconds:.2f}s, paid once per process")
+    print(f"Inference:   {inference_seconds:.2f}s for {len(headlines)} headlines")
+    print(
+        f"             {per_headline_ms:.1f} ms each, {len(headlines) / inference_seconds:.0f} per second"
+    )
+    print(
+        f"Load is {load_seconds / (load_seconds + inference_seconds):.0%} of the wall clock at "
+        f"this batch size, and a smaller share of it at every larger one."
+    )
 
     return pl.DataFrame(results).with_columns(
-        pl.lit(1_000 * elapsed / max(len(headlines), 1)).alias("latency_ms_per_headline")
+        pl.lit(per_headline_ms).alias("inference_ms_per_headline"),
+        pl.lit(load_seconds).alias("model_load_seconds"),
     )
 
 
 # %% [markdown]
-# **Interpretation**: The classification helper turns ESG inputs into compact
-# numeric outputs suitable for screening and backtests. That is the structural
-# advantage classification keeps over more flexible RAG systems.
-#
+# One row per headline, with a category, a label and a confidence. That shape
+# is what a factor pipeline can consume, and it is the structural advantage
+# classification holds over a narrative answer however good the narrative is.
 # %%
 # Run classification
 print("=== Approach A: Pretrained FinBERT Inference ===\n")
@@ -267,9 +376,10 @@ print("\nClassification Results:")
 classification_results
 
 # %% [markdown]
-# **Interpretation**: The classification path yields compact, portfolio-ready
-# outputs. That makes it ideal for screening large universes, but the result is
-# still a label rather than an explanation tied to source evidence.
+# The `confidence` column is FinBERT's softmax over three sentiment classes. It
+# is not a probability that the label is right, and it says nothing at all
+# about the ESG category beside it, which came from a keyword match with no
+# uncertainty attached.
 
 # %% [markdown]
 # ## Approach B: RAG Interface Contract
@@ -312,10 +422,10 @@ def build_rag_contract(questions: list[str]) -> pl.DataFrame:
 
 
 # %% [markdown]
-# **Interpretation**: This is a specification, not a RAG result. Notebook 05
-# implements retrieval; a live generation run would still need citation and
-# abstention evaluation before the approaches could be compared empirically.
-#
+# This is a specification and not a result. `05_10k_rag_assistant` implements
+# the retrieval half; a live generation run would still have to be scored for
+# citation support and abstention before either could be set against the
+# classifier above.
 # %%
 # Run RAG analysis
 print("\n=== Approach B: RAG Interface Contract ===\n")
@@ -325,9 +435,8 @@ print("\nRequired RAG evidence:")
 rag_contract
 
 # %% [markdown]
-# **Interpretation**: No answers or latency are reported because this notebook
-# does not execute a RAG producer. That boundary prevents interface requirements
-# from being mistaken for measured performance.
+# `measured_here` is false in every row, and that column exists so the table
+# cannot be read as a result.
 
 # %% [markdown]
 # ## Comparison: Classification vs RAG
@@ -354,7 +463,7 @@ comparison = pl.DataFrame(
             "Low (fixed taxonomy)",
             "Indirect (confidence)",
             "Update rules or replace model",
-            "Measured here (classification throughput)",
+            "Measured here, load and inference apart",
             "Systematic factor construction",
         ],
         "RAG Contract": [
@@ -373,10 +482,10 @@ print("\n=== Approach Comparison ===\n")
 comparison
 
 # %% [markdown]
-# **Interpretation**: The comparison highlights a fundamental architectural
-# trade-off. The screening path produces fixed-schema outputs and measured
-# throughput. RAG quality and latency are not measured here, so the notebook
-# makes no empirical performance comparison between them.
+# The Flexibility row is the one this run puts a number behind. A fixed
+# taxonomy is low-flexibility in the sense measured in section 2: the screen
+# could not supply social or governance headlines in proportion, and no
+# reordering of the keyword list would have made it.
 
 # %% [markdown]
 # ## Decision Framework
@@ -412,19 +521,35 @@ print("  Answers generated: 0")
 print("  Latency measured: No")
 
 # %% [markdown]
-# **Interpretation**: The classifier provides a measured screening path. The RAG
-# side remains a validation contract until a cited producer is executed.
+# Two of the three ESG categories are present in the sample only because the
+# sample was stratified to include them.
+
+# %% [markdown]
+# ## 4. The screen, in two pictures
+#
+# The sample's own category counts are equal by construction, so charting them
+# would draw the stratification rather than anything about the data. The left
+# panel shows the pool those categories were drawn from, on a log axis because
+# the counts span three orders of magnitude. The right panel is FinBERT's
+# sentiment over the stratified sample.
 
 # %%
 category_counts = classification_results.group_by("category").len().sort("len", descending=True)
 sentiment_counts = classification_results.group_by("sentiment").len().sort("len", descending=True)
 
-fig = make_subplots(rows=1, cols=2, subplot_titles=("ESG keyword categories", "FinBERT sentiment"))
+fig = make_subplots(
+    rows=1,
+    cols=2,
+    subplot_titles=("Selected pool by category", "Sentiment in the stratified sample"),
+    horizontal_spacing=0.16,
+)
 fig.add_trace(
     go.Bar(
-        x=category_counts["category"],
-        y=category_counts["len"],
+        x=pool_counts["category"],
+        y=pool_counts["len"],
         marker_color=COLORS["blue"],
+        text=pool_counts["len"],
+        textposition="outside",
     ),
     row=1,
     col=1,
@@ -434,17 +559,28 @@ fig.add_trace(
         x=sentiment_counts["sentiment"],
         y=sentiment_counts["len"],
         marker_color=COLORS["amber"],
+        text=sentiment_counts["len"],
+        textposition="outside",
     ),
     row=1,
     col=2,
 )
 fig.update_layout(
-    title=f"The implemented screen labels {classification_results.height} Bloomberg headlines",
-    height=420,
+    title="What the ESG keyword screen selects, and how FinBERT scores a sample",
+    height=430,
     showlegend=False,
+    margin=dict(t=90),
 )
-fig.update_yaxes(title_text="Headlines (count)")
-fig.show()
+fig.update_yaxes(title_text="Headlines (count, log scale)", type="log", row=1, col=1)
+fig.update_yaxes(title_text="Headlines (count)", row=1, col=2)
+show_plotly_with_alt(
+    fig,
+    "Two bar panels. Left, the selected pool by ESG category on a logarithmic count axis: "
+    "the environmental bar runs off the top of the others by more than an order of "
+    "magnitude, with uncategorised, governance and social following far below it in that "
+    "order. Right, sentiment over the stratified sample on a linear axis: neutral is the "
+    "tallest bar, positive next, negative slightly below it.",
+)
 
 # %%
 print("\n=== ESG Analysis Comparison Summary ===")
@@ -466,32 +602,42 @@ completion_record = {
 print(f"COMPLETION_RECORD={json.dumps(completion_record, sort_keys=True)}")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# **Interpretation**: The final recommendation is architectural, not
-# ideological. The result suggests using classification for breadth and RAG for
-# depth when the workflow needs explanations tied to source evidence.
+# 1. **Check what a keyword screen actually selected before naming it.**
+#    Section 2 applies the categoriser to the whole selected pool, and this
+#    screen returns environmental news by a margin that makes the label "ESG"
+#    misleading. Two causes are visible in the screen itself: its environmental
+#    terms are common single words while its social and governance terms are
+#    compound phrases a headline must contain intact, and its categoriser
+#    breaks ties towards environmental. Whether that generalises to keyword
+#    screening as such is a question this notebook does not answer - it would
+#    need other lists and independent labels. The check that catches it is one
+#    group-by.
 #
-# 1. **The choice depends on the output contract**: Screening produces compact
-#    labels, while due diligence requires supported narrative evidence.
+# 2. **A sample cannot show what its pool does not contain.** A uniform draw
+#    of twenty from this pool would be overwhelmingly environmental and would
+#    more likely than not contain no social or governance headline at all. The
+#    stratified draw is what puts all three categories in front of the
+#    classifier, and stratifying is an intervention that has to be declared,
+#    because the resulting category counts are then a property of the sampling
+#    rather than of the news.
 #
-# 2. **Classification produces portfolio-ready outputs**: Numeric scores
-#    and labels feed directly into factor models and systematic strategies
-#    (see Chapter 10 for text feature engineering).
+# 3. **Time the load separately from the inference.** At this batch size the
+#    one-off cost of loading the weights is a large share of the wall clock, so
+#    a throughput figure computed over both describes the batch size rather
+#    than the model.
 #
-# 3. **RAG is not audit-ready by definition**: A candidate must prove that every
-#    claim is supported by a cited source span and that unsupported questions
-#    trigger abstention.
+# 4. **Classification produces portfolio-ready outputs**, which is the reason
+#    to keep it: a row per document with a label and a score feeds a factor
+#    model directly, and a narrative answer does not, however well cited.
 #
-# 4. **Many firms use both**: Classification identifies *which* companies
-#    warrant attention; RAG enables *understanding* what they are doing.
-#    The two approaches are complementary, not competing.
+# 5. **The RAG side of this notebook is a contract, not a result.** No answers
+#    were generated, so no latency, no quality and no comparison is reported
+#    for it. `05_10k_rag_assistant` implements the retrieval half;
+#    `04_ragas_evaluation` is where the citation and abstention checks live.
 #
-# 5. **Measure before comparing**: Classification throughput is measured here;
-#    RAG latency and answer quality are deliberately left unreported.
+# **Next**: [`07_institutional_holdings_graph`](07_institutional_holdings_graph.ipynb)
+# builds graph-structured features from 13F filings.
 #
-# **Next**: `07_institutional_holdings_graph` extends the RAG approach
-# with graph-structured features from 13F filings.
-#
-# **Book reference**: Section 22.8 discusses when to use RAG vs.
-# fine-tuning, including the decision framework shown above.
+# **Book reference**: Section 22.8, on choosing between RAG and fine-tuning.

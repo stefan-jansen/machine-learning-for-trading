@@ -1,92 +1,139 @@
 # Chapter 14: Latent Factor Models
 
-The chapter motivates the chapter by reframing the factor zoo debate as a practical modeling problem: rather than choosing from hundreds of named factors, the reader learns how to let the data extract lower-dimensional risk structure directly. It also introduces the chapter's key organizing distinction between covariance-explaining "attribution" factors and genuinely priced factors, which becomes the thread tying the statistical and economic sides of the chapter together.
+Hundreds of return predictors have been published, and the chapter does not ask which
+of them to pick. It asks the prior question: given a panel of returns and
+characteristics, what common structure can be recovered from the data itself, and what
+can that structure be trusted to say?
+
+Four of the six estimators share the chapter's three-stage arrangement and differ
+inside Stage 1, though not all in the same way. PCA maximizes explained covariance and
+RP-PCA changes that objective by adding a pricing-error penalty; IPCA instead changes
+the parameterization, making loadings linear functions of characteristics, and the
+conditional autoencoder makes that map nonlinear. The SDF and the supervised
+autoencoder leave the arrangement altogether, one by learning the pricing object
+directly and one by predicting returns end to end. Where the notebooks compare these
+estimators, no single difference is available to explain the result.
+
+The distinction the chapter keeps returning to is between explaining covariance and
+pricing returns. A component can carry most of a panel's variance and none of its
+expected return; a low-variance direction can be priced. Several notebooks here end
+with intervals that span zero, and they say so rather than reporting the ordering of
+the point estimates.
 
 ## Learning Objectives
 
-- Distinguish covariance-explaining attribution factors from priced factors, and explain why that distinction matters for prediction, risk decomposition, and trading applications
-- Implement PCA on asset returns, interpret principal components as latent risk dimensions or eigenportfolios, and diagnose key practical issues including covariance noise, component selection, and loading instability
-- Explain how IPCA and RP-PCA extend PCA by introducing time-varying characteristic-based betas and pricing-error penalties, and evaluate when these extensions are preferable to plain variance maximization
-- Implement and evaluate Conditional Autoencoders using walk-forward validation, ensemble averaging, and interpretability diagnostics such as SHAP, while recognizing their main failure modes
-- Explain how adversarial SDF estimation enforces no-arbitrage restrictions, how its objective differs from CAE reconstruction, and when direct pricing-error minimization is likely to add value
-- Compare latent factor methods across datasets and modeling objectives, and choose among PCA, IPCA, RP-PCA, CAE, and SDF approaches based on dimensionality, economic goal, and evaluation design
+* Distinguish covariance-explaining factors from priced factors, and explain why the difference matters for prediction, risk decomposition, and trading
+* Implement PCA on a returns panel, read principal components as risk dimensions or as eigenportfolios, and diagnose covariance noise, component selection, and loading instability
+* Explain how IPCA and RP-PCA extend PCA through characteristic-conditioned betas and a pricing-error penalty, and judge when either is preferable to plain variance maximization
+* Implement a conditional autoencoder with validation-selected checkpoints and ensemble averaging, and separate its reconstruction quality from its forward ranking skill
+* Explain how adversarial SDF estimation enforces no-arbitrage restrictions, and how that objective differs from reconstruction
+* Compare latent estimators across panels and objectives, and read a comparison whose intervals overlap for what it is
 
 ## Sections
 
-### 14.1 Making the Case for Latent Factors
+### 14.1 Making the case for latent factors
 
-This section motivates the chapter by reframing the factor zoo debate as a practical modeling problem: rather than choosing from hundreds of named factors, the reader learns how to let the data extract lower-dimensional risk structure directly. It also introduces the chapter's key organizing distinction between covariance-explaining "attribution" factors and genuinely priced factors, which becomes the thread tying the statistical and economic sides of the chapter together.
+Reframes the factor zoo as a modeling problem rather than a selection problem, and
+introduces the distinction between factors that explain covariance and factors that are
+priced. That distinction organizes the rest of the chapter.
 
-### 14.2 Principal Component Analysis: The Mathematical Foundation
+### 14.2 Extracting latent factors with PCA
 
-This section gives the linear algebra core of latent factor modeling and shows why PCA remains the baseline method for extracting common variation from returns. Its value is not just in explaining eigenvalues and eigenvectors, but in showing where PCA breaks in real financial settings: noisy covariance estimation, high-dimensional panels, variance-pricing disconnects, and unstable components.
+The linear-algebra core, and the places it breaks on financial panels: noisy covariance
+estimation in high dimensions, the gap between variance and pricing, and components
+that move between samples.
 
-- [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb) — This notebook applies PCA to sector ETFs to extract latent risk factors and quantifies loading stability using bootstrap resampling. We demonstrate how PCA captures market and rotation factors, and how to assess whether factor loadings are statistically reliable.
+- [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb) - PCA on sector ETF returns, with bootstrap confidence intervals on the loadings and a rolling decomposition of the factor structure. Reads the components as a market factor and a rotation factor, and asks of each loading whether it is distinguishable from zero before interpreting it.
 
-### 14.3 Eigenportfolios for Equity Strategies
+### 14.3 Eigenportfolios for equity strategies
 
-Here the chapter turns PCA from an abstract decomposition into something financially usable by interpreting eigenvectors as portfolio weights. The section matters because it connects latent factors to portfolio construction, risk decomposition, and stat-arb style applications, while also treating the key practical issues a practitioner actually faces: interpretability, instability, and production-grade stabilization.
+Reads eigenvectors as portfolio weights, which turns a decomposition into something a
+risk model or a stat-arb book can use.
 
-- [`02_eigenportfolios`](02_eigenportfolios.ipynb) — This notebook applies PCA to the US Equities dataset (3,199 stocks) to extract latent equity risk factors and construct eigenportfolios. We demonstrate standard PCA, sector loading analysis, hierarchical PCA (HPCA), and applications to statistical arbitrage and risk decomposition.
+- [`02_eigenportfolios`](02_eigenportfolios.ipynb) - PCA on the 500 most liquid US equities, producing gross-normalized eigenportfolios, sector loading analysis, hierarchical PCA, residual persistence diagnostics and a two-speed covariance estimate. Separates sign ambiguity from genuine subspace drift in the rolling decomposition, which is the difference between a component that flipped and a component that changed, and presents the risk decomposition without a trading claim attached.
 
-### 14.4 The Yield Curve Decoded
+### 14.4 Decoding the yield curve
 
-This section provides the chapter's clearest example of latent factor success in practice. By showing that level, slope, and curvature explain most yield-curve variation, it gives readers an intuitive case where variance extraction and economic structure align unusually well, which helps clarify why latent factor methods are so much cleaner in fixed income than in equities.
+PCA's cleanest empirical success. Level, slope and curvature account for nearly all
+yield-curve variation, which is why fixed income is where latent factors are least
+contested.
 
-- [`03_yield_curve_decomposition`](03_yield_curve_decomposition.ipynb) — This notebook demonstrates one of PCA's most celebrated applications: decomposing the Treasury yield curve into its three primary factors. Uses macro data.
+- [`03_yield_curve_decomposition`](03_yield_curve_decomposition.ipynb) - Decomposes Treasury yield changes into three components and uses them for factor hedging. Descriptive throughout: no target, no model selection, no performance claim, and the notebook says why a train/test split does not apply to it.
 
-### 14.5 Advanced Statistical Models: Bridging Economics and Data
+### 14.5 Bridging economics and statistics with advanced models
 
-This section introduces IPCA and RP-PCA as the chapter's first moves beyond plain variance extraction. Its real contribution is to show how latent factor estimation can be made more economically meaningful, either by allowing characteristics to determine time-varying betas or by pushing the estimation objective toward pricing relevance rather than raw covariance fit alone.
+IPCA and RP-PCA, the chapter's first two moves past plain variance extraction. One lets
+characteristics determine time-varying betas; the other tilts the estimation objective
+toward priced directions.
 
-- [`04_ipca`](04_ipca.ipynb) — This notebook implements Instrumented PCA from Kelly, Pruitt, and Su (2019) "Characteristics are Covariances: A Unified Model of Risk and Return". Uses synthetic data.
-- [`05_rp_pca`](05_rp_pca.ipynb) — This notebook implements Risk-Premium PCA from Lettau & Pelger (2020) "Estimating Latent Asset-Pricing Factors". Uses synthetic data.
+- [`04_ipca`](04_ipca.ipynb) - Alternating least squares on a synthetic panel with a known loading matrix, so subspace recovery can be checked against ground truth rather than asserted. Then passes the estimated factors through the chapter's three-stage forecasting adapter without assuming the factors are predictable.
+- [`05_rp_pca`](05_rp_pca.ipynb) - Builds the modified covariance matrix and sweeps the pricing-error weight. Reports training mean fit and evaluation reconstruction separately and prints the range of each across the sweep, because the two move by very different amounts and an auto-scaled axis hides that.
 
-### 14.6 Conditional Autoencoders and Deep Learning for Asset Pricing
+### 14.6 The conditional autoencoder
 
-This section is the chapter's conceptual high point, showing how deep learning extends the latent factor framework without collapsing into generic prediction. It carefully distinguishes two different goals that are often blurred in the literature: learning nonlinear factor exposures for return prediction versus directly estimating a no-arbitrage SDF. That distinction makes the deep learning material much more usable and much less buzzword-driven.
+The nonlinear member of the same family: the conditional-factor structure is kept and
+only the linear loading map is replaced by a network.
 
-- [`06_conditional_autoencoder`](06_conditional_autoencoder.ipynb) — This notebook implements the Conditional Autoencoder (CAE) model of Gu, Kelly, and Xiu (2019) on US equities, walking through universe construction, walk-forward training, ensemble averaging, and SHAP-based interpretation. GPU-trained.
-- [`07_stochastic_discount_factor`](07_stochastic_discount_factor.ipynb) — This notebook implements the adversarial moment-based Stochastic Discount Factor estimator of Chen, Pelger, and Zhu (2021), threading macro instruments into a no-arbitrage GMM-style objective on US equities. GPU-trained.
+- [`06_conditional_autoencoder`](06_conditional_autoencoder.ipynb) - A beta network over characteristics and a factor network over jointly estimated managed portfolios, trained as a contemporaneous reconstruction model, with a separate walk-forward adapter forecasting the next factor realization. Ensemble members are averaged at the asset-prediction surface, never at the loadings, because each member carries its own rotation.
 
-### 14.7 Building the Conditional Autoencoder
+### 14.7 The stochastic discount factor and the supervised autoencoder models
 
-This section gives the reader an implementation path rather than just theory. It matters because it translates the CAE into an actual research workflow, covering universe definition, characteristic scaling, walk-forward validation, hyperparameter search, robustness checks, and common failure modes. That keeps the deep learning content grounded in ML4T's broader experimental discipline.
+Two models that break the three-stage arrangement for opposite reasons: the SDF prices
+directly and leaves no factor history to forecast; the supervised autoencoder predicts
+directly and has no factor intermediate.
 
-- [`06_conditional_autoencoder`](06_conditional_autoencoder.ipynb) — This notebook implements the Conditional Autoencoder (CAE) model of Gu, Kelly, and Xiu (2019) on US equities, walking through universe construction, walk-forward training, ensemble averaging, and SHAP-based interpretation. GPU-trained.
-- [`08_supervised_autoencoder`](08_supervised_autoencoder.ipynb) — This notebook implements the Supervised Autoencoder architecture popularized by a winning entry in the [Jane Street Market Prediction Kaggle competition](https://www.kaggle.com/competitions/jane-street-market-prediction) (2020-2021); the [reference implementation](https://www.kaggle.com/code/gogo827jz/jane-street-supervised-autoencoder-mlp) and [competition write-up](https://www.kaggle.com/competitions/jane-street-market-prediction/discussion/224348) document the original architecture. Applied here to US equities to study how a shared encoder responds to a combined reconstruction + auxiliary + main-prediction loss. GPU-trained. _Runtime ~20 minutes; ~8.5 GB GPU memory — close other GPU processes first._
+- [`07_stochastic_discount_factor`](07_stochastic_discount_factor.ipynb) - A portfolio-weight network trained against an adversarial moment network, with a separate beta network for the asset-level predictive head. Keeps factor Sharpe and pricing error, which assess the kernel, apart from rank IC, which assesses the ordering.
+- [`08_supervised_autoencoder`](08_supervised_autoencoder.ipynb) - Reconstruction and two classification heads share one bottleneck. Every validation fold is purged by the longest label horizon and the test window sits behind a second embargo of the same length. Reports AUC per horizon with block-bootstrap intervals, because overlapping labels make a naive interval too narrow.
 
-### 14.8 Case Study Results
+### 14.8 Case study insights
 
-This section earns the chapter's methodological range by forcing the models to compete across several datasets and label horizons. Its strongest message is that latent factor methods are conditional tools rather than universal winners: PCA works where structure is genuinely low-rank, IPCA shines in large equity panels, CAE benefits from rich cross-sectional signals, and SDF methods help most when unconstrained prediction becomes ill-conditioned.
+What the registered case-study evidence says when the latent estimators are put beside
+the supervised families of Chapters 11 through 13.
 
-- [`09_case_study_insights`](09_case_study_insights.ipynb) — Most datasets lack the cross-sectional breadth for reliable latent factor extraction. This notebook opens with that negative finding -- a Marchenko-Pastur dimensionality diagnostic for all 9 case studies -- then deep-dives on the case studies where latent factor models were trained.
+- [`09_case_study_insights`](09_case_study_insights.ipynb) - Reads the case-study registries and trains nothing. Every ordering it reports is printed by the notebook rather than written into the prose, so a registry rebuild moves the numbers without leaving a stale sentence behind. Latent-versus-supervised differences are computed on inner-joined timestamp-entity keys, so each difference uses the same assets on the same dates.
+
+### 14.9 Summary
+
+The four adapter-based methods share Stages 2 and 3, and the chapter's comparisons
+are validation diagnostics made after selection, not holdout tests.
 
 ## Running the Notebooks
-
-Notebooks `06_conditional_autoencoder`, `07_stochastic_discount_factor`, and
-`08_supervised_autoencoder` are GPU-trained (use the `ml4t-gpu` image or a local
-CUDA install); the other six are CPU-only.
 
 ```bash
 # From the repository root
 uv run python 14_latent_factors/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "14_latent_factors"
+uv run pytest tests/test_chapter_notebooks.py -v -k "14_latent_factors"
 ```
 
-| Notebook | Runtime | Peak memory | Hardware |
-|---|---:|---:|---|
-| `01_pca_equity_sectors` | ~25 s | ~0.9 GB | CPU |
-| `02_eigenportfolios` | ~6 min | ~3.6 GB | CPU |
-| `03_yield_curve_decomposition` | ~15 s | ~1.0 GB | CPU |
-| `04_ipca` | ~15 s | ~0.9 GB | CPU |
-| `05_rp_pca` | ~15 s | ~1.2 GB | CPU |
-| `06_conditional_autoencoder` | ~3 min | ~5.2 GB | GPU |
-| `07_stochastic_discount_factor` | ~10 min | ~7.8 GB | GPU |
-| `08_supervised_autoencoder` | ~20 min | ~8.5 GB (close other GPU processes) | GPU |
-| `09_case_study_insights` | ~20 s | ~1.5 GB | CPU |
+> `06_conditional_autoencoder`, `07_stochastic_discount_factor` and
+> `08_supervised_autoencoder` train on the GPU. `06_conditional_autoencoder` runs in
+> the `ml4t-py312` image, the other two in `ml4t-gpu`; the remaining six are CPU-only
+> and run under `ml4t`.
+>
+> Wall time and peak process memory, measured on this machine (NVIDIA RTX 3090). The
+> memory figure is host RSS for the largest process, not GPU memory.
+>
+> | Notebook | Wall time | Peak RSS |
+> |---|---|---|
+> | `01_pca_equity_sectors` | 15 s | 1.0 GB |
+> | `02_eigenportfolios` | 19 s | 2.9 GB |
+> | `03_yield_curve_decomposition` | 8 s | 1.0 GB |
+> | `04_ipca` | 27 s | 1.0 GB |
+> | `05_rp_pca` | 12 s | 1.1 GB |
+> | `06_conditional_autoencoder` | 2 min 2 s | 3.7 GB |
+> | `07_stochastic_discount_factor` | 50 s | 3.7 GB |
+> | `08_supervised_autoencoder` | 6 min 45 s | 4.6 GB |
+> | `09_case_study_insights` | 13 s | 1.1 GB |
+>
+> No API keys are required. `04_ipca` generates its own panel and reads no dataset.
+>
+> `09_case_study_insights` reads each case study's
+> `case_studies/<cs>/run_log/registry.db` together with the prediction artifacts those
+> runs wrote, and expects the latent-factor pipelines to have populated them. A case
+> study with no registered latent-factor row is absent from the coverage map rather
+> than a failure.
 
 ## References
 

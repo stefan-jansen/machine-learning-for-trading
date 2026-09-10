@@ -46,7 +46,7 @@
 #
 # ## Book reference
 #
-# §2.2 ("The Asset-Class Market Data Landscape" — Equities).
+# §2.2, "The asset-class market data landscape" - the equities part of it.
 #
 # ## Prerequisites
 #
@@ -63,7 +63,7 @@ from IPython.display import Markdown, display
 
 from data import load_us_equities
 from utils.data_quality import check_ohlc_invariants
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -150,8 +150,9 @@ lifespans.select(["days", "avg_price"]).describe()
 # ## 3. Coverage through time
 #
 # The cross-section above says how many symbols the panel holds *in total*. It says nothing
-# about **when**. A panel of 3,199 symbols could mean 3,199 symbols quoted every year, or a
-# universe that grows and shrinks as firms list and delist.
+# about **when**. The same total is consistent with every symbol being quoted in every year,
+# and with a universe that grows and shrinks as firms list and delist. Those are different
+# datasets and only one of them can carry a backtest.
 #
 # Two views answer this:
 #
@@ -194,12 +195,17 @@ fig.add_annotation(
     font=dict(color=COLORS["copper"]),
 )
 fig.update_layout(
-    title="Universe size: symbols quoted per calendar year",
+    title="Distinct symbols quoted per year",
     xaxis_title="Year",
     yaxis_title="Distinct symbols",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A line of the number of distinct symbols quoted each year. It rises steadily from the "
+    "early 1960s, reaches its highest point a few years before the panel ends, and falls "
+    "away sharply after that.",
+)
 
 # %% [markdown] tags=[]
 # The universe grows for fifty years, peaks, and then declines. A market does not do that.
@@ -257,13 +263,20 @@ fig.add_annotation(
 )
 fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
 fig.update_layout(
-    title="Entries and exits per year (negative = symbols leaving the panel)",
+    title="First and last observations per year",
     xaxis_title="Year",
     yaxis_title="Symbols",
     barmode="relative",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars above the axis count symbols recording their first observation in each year and "
+    "bars below it count those recording their last. The upper bars run through the whole "
+    "span, sparse and intermittent in the earliest years and growing steadily after that; "
+    "the lower bars are absent entirely until a dashed rule near the right edge, after "
+    "which they appear in every remaining year.",
+)
 
 # %% [markdown] tags=[]
 # ## 4. What the exit record actually shows
@@ -306,13 +319,16 @@ n_left = lifespans.filter(pl.col("leaves_early")).height
 n_still = n_total - n_left
 first_year, last_year = lifespans["entry_year"].min(), flows["year"].max()
 
+longest_run = lifespans["days"].max()
 display(
     Markdown(
         f"**Coverage summary.** The panel holds **{n_total:,} symbols** over "
-        f"**{first_year}–{last_year}**. **{n_still:,}** ({n_still / n_total:.1%}) are still quoted on "
-        f"the final date ({dataset_end}); **{n_left:,}** ({n_left / n_total:.1%}) leave earlier. "
-        f"Every one of those {n_left:,} exits falls in **{first_exit_year} or later** — "
-        f"the panel records no exit before {first_exit_year}."
+        f"**{first_year}-{last_year}**, and its longest single-symbol history runs "
+        f"**{longest_run:,} trading days**. **{n_still:,}** ({n_still / n_total:.1%}) are "
+        f"still quoted on the final date ({dataset_end}); **{n_left:,}** "
+        f"({n_left / n_total:.1%}) leave earlier. Every one of those exits falls in "
+        f"**{first_exit_year} or later**, so the panel records no exit across its first "
+        f"**{first_exit_year - first_year} years**."
     )
 )
 
@@ -370,30 +386,30 @@ aapl.select(["timestamp", "adj_open", "adj_high", "adj_low", "adj_close", "adj_v
 # %% [markdown] tags=[]
 # ## Key takeaways
 #
-# **What it does.** Profiles the US equities panel — schema, price conventions, coverage
-# through time, and row-level data quality.
+# - **Profile the coverage before profiling the rows.** Nulls and OHLC invariants ask whether
+#   each observation is internally consistent. Survivorship is a property of which rows exist
+#   at all, and no within-row check can raise a symbol that was never written to the file.
+# - **Plot both flows, not the total.** A count of symbols per year and a count of first and
+#   last observations per year answer different questions, and it is the second that showed
+#   the exit record switching on partway through the sample. The total is consistent with
+#   either dataset.
+# - **A discontinuity in a data-collection record is not a market event.** Firms were acquired
+#   and did fail throughout this history; the panel simply did not record it until collection
+#   went live. Read a break in coverage as a fact about the file first, and look for the
+#   collection mechanism that produced it.
+# - **Absence of exits is absence of evidence.** For the years before the record starts, this
+#   panel cannot say which symbols left, so it cannot say how wrong a backtest run on it would
+#   be. That is a stronger statement than "the bias is small", and a weaker one than any number.
+# - **Say which price convention a number came from.** Raw prices are what a trade would have
+#   printed at; the adjusted columns are what a return should be computed on. The panel carries
+#   both, and the two disagree across every split and dividend.
 #
-# **What it finds.**
+# **Known limitations.** The panel is the discontinued Quandl WIKI file, so it stops in 2018
+# and nothing here extends past it. Symbols are identified by ticker, which is reused after a
+# delisting, so a long history under one ticker is not proof of one continuous company. And the
+# adjustment columns are taken on trust in this notebook: `02_corporate_actions` checks them on
+# a worked example, and `15_survivorship_bias_detection` finds where the check fails.
 #
-# 1. **Long history, broad cross-section.** 3,199 symbols, 1962–2018, 15.4M rows; the longest
-#    single-symbol history runs 14,155 trading days (~56 years).
-# 2. **Two price conventions.** Raw `open/high/low/close/volume` alongside split- and
-#    dividend-adjusted `adj_*`. Returns come from `adj_*`; traded levels come from the raw columns.
-# 3. **Clean rows.** Null rate is 0.0006% of values; all six adjusted-price OHLC invariants
-#    hold on 100% of rows.
-# 4. **A coverage record that does not describe a market.** 777 symbols (24.3%) stop before the
-#    panel's final date — and *every one of them stops in 2014 or later*. The universe grows
-#    monotonically to a 3,163-symbol peak in 2014, then decays.
-#
-# **What it means.** Finding 4 dominates findings 1–3. The panel is not a survivorship-bias-free
-# record of the US equity market; it is a **2014 snapshot backfilled to each symbol's IPO**, run
-# forward until the feed stopped. Exits were only captured once the collection was live. So the
-# panel can support survivorship-aware work from 2014, and cannot before it — and for the
-# pre-2014 era it cannot even tell us what we are missing.
-#
-# Findings 1–3 are the checks a validation pipeline runs. Finding 4 is the one that would have
-# broken the backtest, and no row-level check would have raised it.
-#
-# **Next**: `02_corporate_actions` validates the adjustment factors behind the `adj_*` columns on
-# a worked example. `15_survivorship_bias_detection` takes finding 4 and quantifies the damage —
-# and finds that the adjustment does not hold panel-wide. **Book reference**: §2.2 (Equities).
+# **Next**: `02_corporate_actions` validates the adjustment factors behind the `adj_*` columns
+# on a worked example. `15_survivorship_bias_detection` takes the coverage finding and asks how
+# much a backtest that ignores the leavers gets wrong. **Book reference**: §2.2.
