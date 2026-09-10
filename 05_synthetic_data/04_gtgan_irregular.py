@@ -145,7 +145,6 @@ import torch.optim as optim
 from IPython.display import Image, display
 from plotly.subplots import make_subplots
 from scipy import stats
-from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import accuracy_score, roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
@@ -1117,9 +1116,11 @@ if training_losses["recon"]:  # Only plot if we have training losses
     show_plotly_with_alt(
         fig,
         "Two panels of GT-GAN training curves against step. The left panel shows the "
-        "reconstruction loss falling from its starting value and flattening. The right "
-        "panel shows the discriminator's losses on real and on fake sequences together "
-        "with the generator loss, oscillating against one another.",
+        "reconstruction loss dropping steeply over the first few hundred steps and "
+        "then running flat near zero. The right panel shows the discriminator's losses "
+        "on real and on fake sequences together with the generator loss; all three "
+        "spike against one another in bursts through the first three quarters of "
+        "training and then settle onto a common flat level that holds to the end.",
     )
 
 # %% [markdown]
@@ -1133,6 +1134,17 @@ if training_losses["recon"]:  # Only plot if we have training losses
 
 # %% [markdown]
 # ## Generate Synthetic Irregular Sequences
+#
+# Training draws random numbers and loading a checkpoint draws none, so the two paths
+# reach this point with different torch RNG states. The latent noise the generator is
+# fed, and the initializations inside the evaluation protocol, would then differ between
+# the run that fitted the weights and a later run that loaded the same weights back:
+# same model, same data, same seed, different reported scores. That was measured, not
+# assumed: before this reseed the training path and the loading path returned different
+# TSTR ratios from one set of weights. Reseeding here is what makes them agree.
+
+# %%
+set_global_seeds(SEED)
 
 
 # %%
@@ -1186,15 +1198,23 @@ fig = plot_fidelity_comparison(
 )
 show_with_alt(
     fig,
-    "Two scatter panels comparing real and synthetic sequences after flattening. Each "
-    "panel overlays the two sets of points, the PCA projection on the left and the "
-    "t-SNE projection on the right.",
+    "Two scatter panels of the same flattened sequences, PCA on the left and t-SNE on "
+    "the right, each overlaying real points and synthetic ones. In both panels the "
+    "synthetic points lie along a narrow band while the real points scatter widely "
+    "around it: in the PCA panel the band is horizontal, at one height and covering "
+    "part of the first component's range, and in the t-SNE panel it is a shallow arc "
+    "through the middle with the real points spread above, below and to either side.",
 )
 
 # %% [markdown]
-# **Interpretation**: Overlapping point clouds confirm that synthetic sequences occupy
-# similar regions of feature space as real data. GT-GAN's key strength is handling
-# irregular time sampling -- the interpolation metrics below test this capability.
+# **Interpretation**: the two point clouds do not cover the same region. The synthetic
+# sequences project onto a narrow band in both panels while the real ones spread around
+# it, which is what a generator producing a family of similar sequences looks like under
+# a projection. Neither panel is a measurement: a projection into two dimensions can
+# separate sets a model cannot, and can hide a difference a model finds easily. The
+# discriminative score reported later in the notebook is the measured version of the
+# same question, and the interpolation section immediately below asks a different one -
+# whether the decoder returns sensible values at times it was not given.
 
 # %% [markdown]
 # ### Interpolation at Arbitrary Timestamps
@@ -1385,6 +1405,9 @@ def plot_irregular_sequences(
         yaxis=dict(range=shared_range),
         yaxis2=dict(range=shared_range),
     )
+    # The x zeroline is the template's navy, the same color as the real series, and it
+    # renders inside the plotting area as a vertical rule that reads as data.
+    fig.update_xaxes(zeroline=False)
 
     return fig
 
@@ -1399,64 +1422,29 @@ fig = plot_irregular_sequences(
 )
 show_plotly_with_alt(
     fig,
-    "One real and one synthetic irregular sequence drawn on the same axes, with "
-    "markers at the observation times so the uneven spacing is visible in both.",
+    "Two stacked panels sharing a time axis and a vertical scale, both plotted at the "
+    "same irregular observation times so their markers line up column for column. The "
+    "upper panel is one real window of the close feature, a walk that reverses "
+    "direction repeatedly. The lower panel is the synthetic sequence decoded on that "
+    "same grid, a smooth line declining steadily from the first observation to the "
+    "last with none of the reversals above it.",
 )
 
 # %% [markdown]
-# **Interpretation**: The overlay of real vs synthetic irregular sequences reveals
-# whether GT-GAN preserves both the **values** (return magnitudes) and the
-# **timing** (inter-observation gaps) of information-driven bars. Matching the
-# irregular spacing is critical — unlike fixed-frequency generators, GT-GAN must
-# learn that volatile periods produce more bars and quiet periods fewer. Paths
-# that track closely in both dimensions confirm the Neural ODE dynamics
-# capture the continuous-time evolution between observations.
-
-# %% [markdown]
-# ## PCA Visualization
-
-
-# %%
-real_flat = real_eval.reshape(N_SYNTHETIC, -1)
-syn_flat = synthetic_sequences.reshape(len(synthetic_sequences), -1)
-
-pca = PCA(n_components=2)
-combined = pca.fit_transform(np.vstack([real_flat, syn_flat]))
-pca_real = combined[: len(real_flat)]
-pca_syn = combined[len(real_flat) :]
-
-fig = go.Figure()
-fig.add_trace(
-    go.Scatter(
-        x=pca_real[:, 0],
-        y=pca_real[:, 1],
-        mode="markers",
-        name="Real",
-        marker=dict(color=COLORS["blue"], opacity=0.5),
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=pca_syn[:, 0],
-        y=pca_syn[:, 1],
-        mode="markers",
-        name="Synthetic",
-        marker=dict(color=COLORS["copper"], opacity=0.5),
-    )
-)
-
-fig.update_layout(
-    title=f"GT-GAN: PCA Distribution ({CONFIG['bar_type']} bars)",
-    xaxis_title="PC1",
-    yaxis_title="PC2",
-    template="ml4t",
-)
-show_plotly_with_alt(
-    fig,
-    "A PCA scatter of real and synthetic bar sequences projected onto their first two "
-    "principal components, plotted as two overlaid point clouds.",
-)
-
+# **Interpretation**: both panels carry the same observation times, because the time
+# grid is an argument to `generate_synthetic` rather than something the model produces.
+# So nothing in this figure can say whether GT-GAN reproduces the arrival process of
+# information-driven bars: it is handed that process, not asked for it. What the two
+# panels compare is the values the decoder returns when it is given a real window's
+# timestamps, against the values that window actually took, on a shared vertical scale.
+#
+# On this window the two differ in shape rather than in level. The real series reverses
+# direction repeatedly between observations and the synthetic one does not. A decoder
+# whose output is the state of an ODE evolving between query points is smooth wherever
+# the fitted dynamics are smooth, so one window raises that question rather than
+# settling it. The interpolation section earlier in the notebook is the measured
+# version: it decodes at the observed times and again at the midpoints between them,
+# and reports the smoothness of each beside the real series.
 
 # %% [markdown]
 # ## Evaluation: GT-GAN Protocol
@@ -1665,21 +1653,25 @@ print(f"""
 | Discriminative AUC    | {paper_results["discriminative"]["auc"]:.3f}    | ~0.50    | {"[OK]" if abs(paper_results["discriminative"]["auc"] - 0.5) < 0.15 else "WARNING"} |
 | TSTR MAE Ratio        | {paper_results["predictive"]["mae_ratio"]:.2f}x    | ~1.0x    | {"[OK]" if 0.7 < paper_results["predictive"]["mae_ratio"] < 1.5 else "WARNING"} |
 | Interpolation Bounded | {paper_results["interpolation"]["bounded_fraction"]:.1%}   | >70%     | {"[OK]" if paper_results["interpolation"]["bounded_fraction"] > 0.7 else "WARNING"} |
-
-GT-GAN's key advantage: handling naturally irregular timestamps from information bars.
 """)
 
 # %% [markdown]
-# **Interpretation**: GT-GAN's value proposition is not raw distributional fidelity (where
-# Diffusion-TS or Sig-CWGAN excel on regular grids) but its ability to operate on
-# **naturally irregular** data — the interpolation bounded-fraction metric measures this
-# directly. Read the discriminative accuracy and AUC printed above first: when they sit
-# at their maximum, the discriminator separates synthetic from real without error, which
-# under the GT-GAN evaluation protocol means this short training pass has not yet
-# produced sequences it finds confusable with real ones. The TSTR MAE
-# ratio and bounded-fraction printed above are the readable signals on this run; the
-# discriminator metric should not be cited until a longer-running retrain is performed
-# (tracked as a deferred retrain follow-up).
+# **Interpretation**: read the four rows together rather than choosing among them. The
+# discriminative accuracy and AUC sit at their maximum, so the classifier separates
+# synthetic from real without error. The TSTR ratio is several times its target, so a
+# predictor trained on the synthetic sequences transfers poorly to real ones. The
+# bounded fraction clears its threshold, but that is a weak threshold to clear here: a
+# value interpolated between two observations is bounded by them whenever the decoded
+# path is monotone across the gap, and the smoothness ratio in the interpolation section
+# above is far below one, which is what an over-smooth path reads as. The row that
+# passes and the rows that do not are consistent with one another rather than in
+# tension, and discarding the failing rows to keep the passing one would be choosing a
+# metric by its answer.
+#
+# `MAX_STEPS` is set to two thousand, which is a short adversarial run, and the
+# training-progress figure shows the three adversarial losses settling onto a common
+# flat level well before the end. Lengthening that run is the change to make before any
+# of these numbers is quoted as a property of GT-GAN rather than of this pass.
 
 # %% [markdown]
 # ## Save Outputs
