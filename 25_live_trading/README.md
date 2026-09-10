@@ -84,7 +84,7 @@ After completing this chapter, you will be able to:
 uv run python 25_live_trading/01_unified_framework_demo.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "25_live_trading"
+uv run pytest tests/test_chapter_notebooks.py -v -k "25_live_trading"
 
 # Headless (no display)
 MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python 25_live_trading/01_unified_framework_demo.py

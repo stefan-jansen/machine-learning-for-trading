@@ -82,7 +82,7 @@ The cross-case-study cost-survival comparison lives in Chapter 20: see [`20_stra
 uv run python 18_transaction_costs/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "18_transaction_costs"
+uv run pytest tests/test_chapter_notebooks.py -v -k "18_transaction_costs"
 ```
 
 ## References

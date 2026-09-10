@@ -40,7 +40,7 @@ This is the chapter's real practical core. It explains that a strong text model 
 uv run python 10_text_feature_engineering/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "10_text_feature_engineering"
+uv run pytest tests/test_chapter_notebooks.py -v -k "10_text_feature_engineering"
 ```
 
 ### Docker image split (chapter-specific)

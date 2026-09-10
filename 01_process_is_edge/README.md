@@ -42,7 +42,7 @@ This section translates the workflow into real operating contexts. It explains h
 uv run python 01_process_is_edge/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "01_process_is_edge"
+uv run pytest tests/test_chapter_notebooks.py -v -k "01_process_is_edge"
 ```
 
 ## References

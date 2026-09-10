@@ -31,5 +31,5 @@ This section shifts from knowledge to career design, recommending honest skills 
 uv run python 27_systematic_edge/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "27_systematic_edge"
+uv run pytest tests/test_chapter_notebooks.py -v -k "27_systematic_edge"
 ```

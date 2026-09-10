@@ -65,7 +65,7 @@ Every notebook binds its settings in a `parameters` cell with a Settings section
 uv run python 26_mlops_governance/01_drift_monitoring.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "26_mlops_governance"
+uv run pytest tests/test_chapter_notebooks.py -v -k "26_mlops_governance"
 
 # Execute a notebook and keep its outputs
 uv run jupyter nbconvert --to notebook --execute --inplace \

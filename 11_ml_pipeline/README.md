@@ -108,7 +108,7 @@ more model complexity is only justified when the linear benchmark genuinely leav
 uv run python 11_ml_pipeline/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "11_ml_pipeline"
+uv run pytest tests/test_chapter_notebooks.py -v -k "11_ml_pipeline"
 ```
 
 ## References
