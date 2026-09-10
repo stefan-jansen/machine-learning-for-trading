@@ -78,7 +78,6 @@
 """Evaluate the news-derived signals from notebook 07 as alpha factors."""
 
 import json
-import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -90,11 +89,6 @@ from scipy.stats import spearmanr
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, show_with_alt
-
-# `spearmanr` warns when a date's cross-section is constant, which makes its coefficient
-# undefined. That is a real condition and the code below drops those dates explicitly, so the
-# warning is suppressed by name rather than the condition being ignored.
-warnings.filterwarnings("ignore", message=".*input array is constant.*", module="scipy")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -258,6 +252,11 @@ def daily_ic(
     records: list[dict[str, object]] = []
     for g in iter_date_groups(df.select(["timestamp", signal_col, ret_col]).drop_nulls()):
         if len(g) < min_assets:
+            continue
+        # A date whose signal takes one value across the cross-section has no rank
+        # correlation to compute. Checking that before the call is the same as dropping the
+        # NaN afterwards, and does not make scipy warn about a case already handled.
+        if g[signal_col].n_unique() < 2 or g[ret_col].n_unique() < 2:
             continue
         ic, _ = spearmanr(g[signal_col].to_numpy(), g[ret_col].to_numpy())
         if np.isnan(ic):
@@ -474,7 +473,7 @@ if KEY_SIGNAL in AVAILABLE_SIGNALS:
     print(f"Forward return by {KEY_SIGNAL} bucket, {KEY_HORIZON}-day horizon:")
     print(quintile_returns)
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # ### Why the buckets are not the same size
 #
 # Five buckets cut at fixed rank percentiles should hold roughly equal numbers, and these do
@@ -494,7 +493,7 @@ if KEY_SIGNAL in AVAILABLE_SIGNALS:
 # top fifths of the signal, and comparing them compares groups of different size and
 # composition.
 
-# %%
+# %% tags=[]
 if KEY_SIGNAL in AVAILABLE_SIGNALS:
     per_date = (
         d.group_by("timestamp")
