@@ -37,10 +37,10 @@
 # `case_studies/etfs/features/` and modeling artifacts from Chapter 11 setup.
 #
 # ## Models Compared
-# 1. **LightGBM** — Production GBM baseline
-# 2. **MLP** — Sklearn neural network (minimal baseline)
-# 3. **TabM** — Rank-one adapter MLP ensemble (Gorishniy et al., ICLR 2025)
-# 4. **TabPFN** — Foundation model for small tabular data (if installed)
+# 1. **LightGBM**: Production GBM baseline
+# 2. **MLP**: Sklearn neural network (minimal baseline)
+# 3. **TabM**: Rank-one adapter MLP ensemble (Gorishniy et al., ICLR 2025)
+# 4. **TabPFN**: Foundation model for small tabular data (if installed)
 #
 # ## Cross-References
 # - **Section 12.3**: Decision framework and benchmark discussion
@@ -50,7 +50,7 @@
 # ## 1. Setup
 
 # %%
-"""Deep Learning vs GBMs — compare gradient boosting against modern deep learning for tabular financial data."""
+"""Deep Learning vs GBMs, compare gradient boosting against modern deep learning for tabular financial data."""
 
 import os
 import time
@@ -58,18 +58,15 @@ import warnings
 from collections import defaultdict
 from typing import Any
 
-# lightgbm and torch must be imported before scikit-learn. All three ship their
-# own OpenMP runtime and the first one loaded wins for the whole process; on
-# macOS ARM64, loading scikit-learn's libomp first makes LightGBM's first
-# multithreaded fit segfault in __kmp_suspend_initialize_thread. Plain `import`
-# statements sort ahead of `from ... import` ones, so this order is what isort
-# produces and will not drift back. torch also has to precede ml4t.diagnostic,
-# which dlopens an older libcudart and otherwise wins symbol resolution.
+# lightgbm and torch load before scikit-learn and ml4t.diagnostic: the first OpenMP
+# runtime loaded wins the whole process, and an older libcudart otherwise wins symbol
+# resolution.
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import torch
+from IPython.display import Markdown, display
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
@@ -77,9 +74,7 @@ from sklearn.preprocessing import StandardScaler
 
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, show_with_alt
 
 
 def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
@@ -243,8 +238,8 @@ def predict_tabm(model, X_test, device="cpu"):
 # %% [markdown]
 # ### Minimal MLP Baseline (PyTorch, GPU)
 #
-# A 64-32 ReLU MLP with Adam and L1 (MAE) loss — the simplest neural
-# network we could write — implemented in PyTorch so it runs on the same
+# A 64-32 ReLU MLP with Adam and L1 (MAE) loss, the simplest neural
+# network we could write, implemented in PyTorch so it runs on the same
 # GPU as TabM. This is the "minimal neural baseline" the chapter section
 # refers to: fewer parameters than TabM, no ensembling, no architectural
 # tricks. Same val/early-stop framework as TabM.
@@ -332,17 +327,17 @@ def predict_torch_mlp(model, X_test, device="cpu"):
 #
 # We evaluate each model across all walk-forward folds, collecting per-fold IC
 # and training time. This matches the temporal validation protocol emphasized
-# in Section 12.3 — single-split comparisons are unreliable for financial data.
+# in Section 12.3: single-split comparisons are unreliable for financial data.
 #
-# To avoid the "fixed-epoch / fixed-tree-count" anti-pattern that DL chapters
-# warn about, we carve a chronologically-leading **validation slice** (last 20%
-# of each fold's train window) and use it as a real held-out set during fitting:
+# Rather than fix an epoch or tree count in advance, we carve a chronological
+# **validation slice** off the end of each fold's train window - `VAL_FRACTION` of it -
+# and use it as a held-out set during fitting:
 #
-# * **LightGBM** — `eval_set=[(X_val, y_val)]` plus `lgb.early_stopping(30)`;
+# * **LightGBM**: `eval_set=[(X_val, y_val)]` plus `lgb.early_stopping(30)`;
 #   we report the iteration count picked by early stopping (`best_iter`).
-# * **MLP** — minimal 64-32 ReLU MLP in PyTorch (GPU); same val/early-stop
+# * **MLP**: minimal 64-32 ReLU MLP in PyTorch, on whichever device this run has;
 #   loop as TabM, with `patience=20` epochs on val-loss plateau.
-# * **TabM** — track per-epoch train + val L1 (MAE) loss, restore the
+# * **TabM**: track per-epoch train + val L1 (MAE) loss, restore the
 #   best-val checkpoint at predict time, report `best_epoch` per fold.
 #
 # All three trainable models use **L1 (MAE)** loss, not MSE. On the codebase's
@@ -351,14 +346,14 @@ def predict_torch_mlp(model, X_test, device="cpu"):
 # because financial returns are heavy-tailed and squared-error loss chases
 # the few large residuals at the expense of the cross-sectional ranking that
 # IC rewards. A LightGBM regressor trained with MSE (`regression_l2`) on this
-# fold structure still fits normally — dozens of trees, non-degenerate
-# predictions — but its test IC comes out lower, negative on fold 0 where the
+# fold structure still fits normally, dozens of trees, non-degenerate
+# predictions, but its test IC comes out lower, negative on fold 0 where the
 # MAE model is positive, which is why every trainable model here defaults to
 # MAE.
-# * **TabPFN** — zero-shot: no training, no validation needed.
+# * **TabPFN**: zero-shot: no training, no validation needed.
 #
-# The test slice is held strictly out — none of the early-stopping signals
-# touches it — so reported IC remains a fair walk-forward estimate.
+# The test slice is held strictly out, none of the early-stopping signals
+# touches it, so reported IC remains a fair walk-forward estimate.
 
 # %%
 # Preprocessing pipeline for neural models (impute + scale)
@@ -369,13 +364,15 @@ preprocess = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
 # ### TabPFN Evaluation
 
 
+# %% [markdown]
+# TabPFN ships its weights under a gated license, so the first prediction needs a free
+# Prior Labs token: register at https://ux.priorlabs.ai, accept the license, and set
+# `TABPFN_TOKEN` (see `.env.example`). The model is free for research and evaluation
+# like this notebook and not for commercial use. Where the package or the token is
+# missing the notebook says so and carries on without it; the comparison between the
+# other three models is unaffected.
+
 # %%
-# TabPFN ships its weights under a gated license, so the first prediction needs
-# a free Prior Labs token (register at https://ux.priorlabs.ai, accept the
-# license, set TABPFN_TOKEN — see .env.example). The model is free for research
-# and evaluation use like this notebook, but not for commercial/production use.
-# If the package or token is missing we skip TabPFN with a clear message rather
-# than crash; the GBM / MLP / TabM comparison is unaffected.
 try:
     from tabpfn import TabPFNRegressor
     from tabpfn.errors import TabPFNError
@@ -383,7 +380,7 @@ try:
     TABPFN_AVAILABLE = True
 except ImportError:
     TABPFN_AVAILABLE = False
-    print("TabPFN not installed — skipping it. Install with: uv pip install tabpfn")
+    print("TabPFN not installed, skipping it. Install with: uv pip install tabpfn")
 
 
 def _eval_tabpfn(
@@ -404,7 +401,7 @@ LGB_PARAMS: dict[str, Any] = dict(
     n_estimators=500,
     max_depth=4,
     learning_rate=0.05,
-    objective="regression_l1",  # MAE — highest IC on 8/9 GBM case studies (see 12_case_study_insights §3a)
+    objective="regression_l1",  # MAE, highest IC on 8/9 GBM case studies (see 12_case_study_insights §3a)
     random_state=SEED,
     verbose=-1,
 )
@@ -501,7 +498,7 @@ for (
         }
     )
 
-    # MLP — torch implementation on GPU, same val/early-stop framework as TabM
+    # MLP, torch implementation on GPU, same val/early-stop framework as TabM
     start = time.time()
     mlp_model, mlp_history = train_torch_mlp(
         X_inner_scaled,
@@ -541,7 +538,7 @@ for (
     )
     tabm_histories.append(history)
 
-    # TabPFN — zero-shot, no training, no validation
+    # TabPFN, zero-shot, no training, no validation
     if TABPFN_AVAILABLE:
         try:
             tabpfn_name, tabpfn_result = _eval_tabpfn(
@@ -552,7 +549,7 @@ for (
         except TabPFNError as exc:
             TABPFN_AVAILABLE = False
             print(
-                "\nTabPFN skipped — it needs a free Prior Labs token to download "
+                "\nTabPFN skipped, it needs a free Prior Labs token to download "
                 "its model weights:\n"
                 "  1. Register at https://ux.priorlabs.ai and accept the license\n"
                 "  2. Copy your API key from https://ux.priorlabs.ai/account\n"
@@ -614,7 +611,7 @@ bars1 = ax1.bar(range(len(models)), mean_ics, yerr=std_ics, capsize=4, color=COL
 ax1.set_xticks(range(len(models)))
 ax1.set_xticklabels(models, rotation=15, ha="right")
 ax1.set_ylabel("Rank IC (mean ± std)")
-ax1.set_title("LightGBM Leads Test IC Across 8 Walk-Forward Folds")
+ax1.set_title("Mean rank IC by model, one standard deviation shown")
 ax1.axhline(0, color="gray", linewidth=0.5)
 
 # Training time comparison
@@ -623,10 +620,15 @@ bars2 = ax2.bar(range(len(models)), mean_times, color=COLORS["blue_light"])
 ax2.set_xticks(range(len(models)))
 ax2.set_xticklabels(models, rotation=15, ha="right")
 ax2.set_ylabel("Training Time (seconds)")
-ax2.set_title("TabM's Ensemble Costs the Most Training Time Per Fold")
+ax2.set_title("Mean training time per fold")
 
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two bar panels sharing a model axis. Left: mean rank IC across the walk-forward "
+    "folds with an error bar one standard deviation either side, drawn against a line "
+    "at zero; every error bar is several times the height of the bar it sits on. "
+    "Right: mean training time per fold in seconds.",
+)
 
 # %% [markdown]
 # ### Learning Curves: Where the Models Actually Stop
@@ -638,7 +640,7 @@ plt.show()
 # stopping fired), and the TabM `best_epoch` per fold (which checkpoint we
 # actually predicted with). On a high-noise target like 21-day forward returns,
 # val-loss curves typically flatten within tens of epochs / hundreds of trees
-# — the rest of the schedule is wasted compute or active overfitting.
+# , the rest of the schedule is wasted compute or active overfitting.
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
@@ -667,10 +669,10 @@ for fold_idx, history in enumerate(tabm_histories):
 
 ax_lc.set_xlabel("Epoch")
 ax_lc.set_ylabel("L1 (MAE) loss")
-ax_lc.set_title(f"TabM Val Loss Bottoms Early, Then Overfits ({n_folds} Folds)")
+ax_lc.set_title("TabM train and validation loss by epoch, one line per fold")
 ax_lc.legend(fontsize=8, loc="upper right")
 
-# Panel B: LightGBM best_iter and TabM best_epoch per fold
+# The iteration each model actually stopped at, per fold.
 ax_stop = axes[1]
 lgb_best_iters = [r["best_iter"] for r in fold_results["LightGBM"]]
 tabm_best_epochs = [r["best_epoch"] for r in fold_results["TabM (8-member)"]]
@@ -693,83 +695,97 @@ ax_stop.axhline(LGB_PARAMS["n_estimators"], color=COLORS["blue"], linestyle=":",
 ax_stop.axhline(TABM_EPOCHS, color=COLORS["amber"], linestyle=":", alpha=0.4)
 ax_stop.set_xlabel("Walk-forward fold")
 ax_stop.set_ylabel("Stopping point")
-ax_stop.set_title("Early Stopping Fires Far Below the Tree/Epoch Caps")
+ax_stop.set_title("Selected stopping point per fold, against each cap")
 ax_stop.set_xticks(fold_axis)
 ax_stop.legend(fontsize=8, loc="best")
 
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels. Left: TabM's L1 loss against epoch, a grey line per fold for training and "
+    "an amber line per fold for validation, with a faint vertical line at each fold's "
+    "selected epoch; the training lines fall throughout while most validation lines turn "
+    "upward. Right: the stopping point each model reached on each fold, against a dotted "
+    "line at that model's cap.",
+)
 
 # %% [markdown]
-# **Interpretation**: The results illustrate the high-noise regime of monthly
-# return prediction on a small ETF universe. With L1/MAE loss across all
-# trainable models, the summary table above ranks **LightGBM first**, then
-# TabM, then the minimal 64-32 MLP: capacity alone is not enough to extract
-# signal from this feature set. (TabPFN was skipped in this run - its
-# gated-license weights need a free Prior Labs token - so only the three
-# trainable models are scored here.) LightGBM also trains in well under a
-# second per fold, on par with the minimal MLP and several times faster than
-# TabM's ensemble, with early stopping firing after a small fraction of the
-# tree budget. That reinforces the operational case for GBMs even where a DL
-# alternative is within striking distance on accuracy. Wall-clock times are
-# hardware-dependent and swing run to run; only the orders of magnitude and
-# the TabM-is-slowest ranking are stable.
+# The models are scored on the same folds, so the comparison that means something is
+# the paired per-fold difference rather than two error bars that overlap.
+
+# %% tags=["results"]
+_fold_ic = {
+    name: np.array([fold["ic"] for fold in folds]) for name, folds in fold_results.items() if folds
+}
+_baseline = "LightGBM"
+_lines = []
+for _name, _ics in _fold_ic.items():
+    if _name == _baseline or len(_ics) != len(_fold_ic[_baseline]):
+        continue
+    _diff = _fold_ic[_baseline] - _ics
+    _lines.append(
+        f"- {_baseline} minus {_name}, per fold: mean {_diff.mean():+.4f}, "
+        f"standard deviation {_diff.std(ddof=1):.4f}, ahead on "
+        f"{int((_diff > 0).sum())} of {len(_diff)} folds."
+    )
+display(Markdown("\n".join(_lines)))
+
+# %% [markdown]
+# **What to read off it.** The error bars in the figure are each model's spread across
+# folds, and they overlap heavily. That settles nothing either way, because all three
+# models are scored on the same folds: whatever a fold does to one of them it largely
+# does to the others, so the quantity to look at is the difference within each fold.
+# The results cell above takes it, and reports how often the sign holds as well as how
+# large the average difference is. A mean difference smaller than its own spread
+# across folds, or a sign that flips on several folds, is not an ordering of
+# architectures.
 #
-# Read the ordering, not the digits. Per-fold IC swings are larger than the
-# gaps between models - each model's per-fold range in the table above spans
-# both signs - so a single fold's ranking is not evidence of architectural
-# superiority. What carries the argument is that the ordering holds across 8
-# chronologically distinct folds. Tuned GBMs in `04_optuna_tuning` widen the
-# gap further.
+# The timing panel is the part that does not need a test. LightGBM trains in a fraction
+# of TabM's time per fold and stops well short of its tree budget on every fold, and
+# that difference is large enough that hardware and load cannot reverse it. Where two
+# models are within noise of each other on accuracy, the one that is an order of
+# magnitude cheaper to fit is the one you can afford to refit often.
 
 # %% [markdown]
 # ## 7. When to Use Deep Learning
 #
-# See Section 12.3 for the full decision framework. This notebook provides the
-# empirical evidence behind the "Recommended family" column. Key findings:
+# Section 12.3 sets out the decision framework; this notebook supplies the evidence for
+# the row of it that covers noisy cross-sectional return prediction. Four things the run
+# above establishes, in decreasing order of how sure they are:
 #
-# - **LightGBM (with L1/MAE loss + early stopping) leads on this benchmark**,
-#   at under a second per fold. Operational case is simple too: minimal
-#   infrastructure, tight tuning loop, mature ecosystem.
-# - **TabM** is the strongest tabular DL contender, validating its
-#   parameter-efficient-ensembling premise without dethroning the GBM.
-#   Best-val checkpointing fires well before the 200-epoch cap on most folds
-#   and near it on others, so the cap is doing real work for some folds and
-#   wasting compute on the rest.
-# - **TabPFN** — the gated-license foundation model — was skipped in this
-#   production run because its weights need a free Prior Labs token. Install
-#   the token (see the skip note above) to add a zero-shot signal-checking
-#   probe before investing in tuning.
-# - **A minimal 64-32 ReLU MLP** is the simplest neural net you can write and
-#   lands visibly below TabM, confirming the chapter's premise that capacity
-#   alone is not enough on tabular financial data; you need either an ensemble
-#   (TabM), a foundation model (TabPFN), or a real tabular learner (LightGBM).
+# - **The cost difference is not close.** LightGBM fits in a fraction of TabM's time per
+#   fold and stops well short of its tree budget on every fold. That gap is large enough
+#   that hardware and load cannot reverse it, and it decides how often you can afford to
+#   refit.
+# - **The accuracy difference needs the paired test to mean anything.** The results cell
+#   gives the per-fold difference and how often its sign holds. Read that rather than
+#   the bar heights.
+# - **A minimal MLP is a floor, not a contender.** It is here to show what capacity
+#   alone does on tabular financial data, which is the premise Section 12.3 argues from.
+# - **TabPFN is a probe you can afford before tuning anything**, when its gated weights
+#   are available. Where the token is missing this notebook says so and scores the other
+#   three.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **LightGBM with L1/MAE + early stopping leads**, at under a second per
-#    fold. TabM is the strongest tabular DL contender and the minimal 64-32
-#    MLP trails both: capacity alone is not a strategy. (TabPFN was skipped
-#    this run - its gated-license weights need a Prior Labs token.)
-# 2. **The loss function is load-bearing on noisy financial targets.**
-#    Swapping LightGBM's objective from MSE to MAE on this 21-day-return
-#    target turns fold 0's test IC from negative to positive and makes MAE the
-#    benchmark leader: squared error over-weights the heavy-tailed large
-#    residuals and erodes the cross-sectional ranking. The codebase's 9
-#    case-study GBM benchmark independently confirms MAE achieves the
-#    highest IC on most regression-primary case studies (see
-#    `12_case_study_insights` §3a).
-# 3. **Validation curves matter even when accuracy is noisy.** TabM's
-#    train/val L1 trajectory and LightGBM's `best_iter` distribution show
-#    where each model actually converges; the IC table alone hides the
-#    overfitting risk that fixed-epoch / fixed-tree-count schedules
-#    introduce. Always carve a held-out val slice and stop on it.
-# 4. **Walk-forward variance is large** - per-fold IC swings wider than the
-#    gaps between models make single-split comparisons unreliable. Report
-#    mean ± std across folds, not a single number.
-# 5. **Tuning matters more than architecture** — default hyperparameters
-#    leave performance on the table for every family; Section 12.4 (Optuna)
-#    shows how proper hyperparameter tuning closes the remaining gap.
+# 1. **Score the models on the same folds and difference them there.** Every model in
+#    this notebook sees the same walk-forward folds, so the fold-to-fold swing that
+#    dominates each model's error bar is largely shared and cancels in the difference.
+#    Comparing the marginal spreads instead is how a comparison this noisy gets read as
+#    a ranking.
+#
+# 2. **The loss function is doing real work on a heavy-tailed target.** L1 costs a large
+#    error what it costs, where squared error lets a handful of extreme months set the
+#    fit. On a 21-day return that is the difference between fitting the cross-section
+#    and fitting its tails.
+#
+# 3. **Let the data pick the iteration count.** Both families here stop on a held-out
+#    slice carved chronologically from the training window, and the stopping panel shows
+#    how far below their caps they land. A fixed epoch or tree count is a
+#    hyperparameter nobody measured.
+#
+# 4. **When the accuracy difference sits inside the noise, the cost of refitting is
+#    what is left to choose on.** That is an operational argument rather than a
+#    statistical one, and the timing panel is where it is made.
 #
 # **Next**: See `04_optuna_tuning` for Bayesian hyperparameter optimization.
