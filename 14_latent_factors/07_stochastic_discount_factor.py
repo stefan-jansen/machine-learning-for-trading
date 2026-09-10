@@ -873,7 +873,6 @@ zero_line(axes[1])
 axes[1].set_xlabel("Asset pricing-error decile")
 axes[1].set_ylabel("Mean pricing error (basis points)")
 add_message_title(axes[1], "Mean test pricing error by asset decile")
-fig.subplots_adjust(hspace=0.65)
 show_with_alt(
     fig,
     "Two stacked panels. The upper panel is a bar chart of annualized factor Sharpe for "
@@ -913,7 +912,6 @@ axes[1].set_xlabel("Daily cross-sectional rank IC")
 axes[1].set_ylabel("Test dates")
 axes[1].legend()
 add_message_title(axes[1], "Daily cross-sectional rank IC across test dates")
-fig.subplots_adjust(hspace=0.65)
 show_with_alt(
     fig,
     "Two stacked panels. The upper panel plots beta-target MSE on a log axis against "
