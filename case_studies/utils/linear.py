@@ -113,7 +113,7 @@ class _BatchCandidate:
     training: TrainingResult | None = None
     ledger: ExecutionLedger | None = None
     attempt: ExecutionAttempt | None = None
-    frames: list[pl.DataFrame] = field(default_factory=list)
+    shards: list[Path] = field(default_factory=list)
     reused_folds: list[int] = field(default_factory=list)
     fitted_folds: list[int] = field(default_factory=list)
     fit_elapsed_s: float = 0.0
@@ -1026,7 +1026,14 @@ def _fit_or_reuse_fold(
     training: TrainingResult,
     ledger: ExecutionLedger,
     fold: dict[str, Any],
-) -> tuple[pl.DataFrame, bool, float]:
+) -> tuple[Path, bool, float]:
+    """Fit one fold of one configuration, and return the shard it is persisted in.
+
+    Returning the path rather than the frame is what bounds a compatibility group. Fold-major
+    execution fits every configuration in the group against one prepared fold, so a returned
+    frame is retained until that configuration finishes - which is after the last fold, for
+    every configuration at once.
+    """
     fold_id = int(fold["fold"])
     params = spec["computation"]["model"]["effective_params_by_fold"][str(fold_id)]
     model_dir = training.root / "run_log" / "training" / training.hash / "models"
@@ -1043,7 +1050,7 @@ def _fit_or_reuse_fold(
         prediction_shard=shard,
         resolved_settings=params,
     ):
-        return pl.read_parquet(shard), True, 0.0
+        return shard, True, 0.0
     completed = ledger.fold_completion_exists(
         training_hash=training.hash,
         candidate_identity=training.hash,
@@ -1063,6 +1070,7 @@ def _fit_or_reuse_fold(
             )
             if not pl.read_parquet(shard).equals(recovered):
                 raise ValueError("prediction shard changed")
+            del recovered
             ledger.complete_fold(
                 training_hash=training.hash,
                 candidate_identity=training.hash,
@@ -1071,7 +1079,7 @@ def _fit_or_reuse_fold(
                 prediction_shard=shard,
                 resolved_settings=params,
             )
-            return recovered, True, 0.0
+            return shard, True, 0.0
         except Exception as exc:
             raise ValueError(
                 f"locked linear fold {fold_id} has conflicting uncommitted artifacts"
@@ -1125,7 +1133,7 @@ def _fit_or_reuse_fold(
     finally:
         artifact_temp.unlink(missing_ok=True)
         shard_temp.unlink(missing_ok=True)
-    return frame, False, time.perf_counter() - started
+    return shard, False, time.perf_counter() - started
 
 
 def _write_model_manifest(training: TrainingResult, *, immutable: bool = False) -> None:
@@ -1151,20 +1159,20 @@ def _fit_or_reuse_predictions(
     training: TrainingResult,
     ledger: ExecutionLedger,
 ) -> tuple[pl.DataFrame, list[int], list[int]]:
-    prediction_frames = []
+    shards = []
     reused_folds = []
     fitted_folds = []
     for fold in context.folds:
         fold_id = int(fold["fold"])
-        frame, reused, _ = _fit_or_reuse_fold(spec, context, training, ledger, fold)
-        prediction_frames.append(frame)
+        shard, reused, _ = _fit_or_reuse_fold(spec, context, training, ledger, fold)
+        shards.append(shard)
         if reused:
             reused_folds.append(fold_id)
         else:
             fitted_folds.append(fold_id)
 
     _write_model_manifest(training, immutable=context.immutable_recovery)
-    predictions = pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
+    predictions = pl.scan_parquet(shards).sort("symbol", "timestamp", "fold").collect()
     return predictions, reused_folds, fitted_folds
 
 
@@ -1269,7 +1277,7 @@ def _run_batch_candidate_fold(candidate: _BatchCandidate, fold: dict[str, Any]) 
     if fold_id in candidate.reused_folds or fold_id in candidate.fitted_folds:
         return
     try:
-        frame, reused, elapsed = _fit_or_reuse_fold(
+        shard, reused, elapsed = _fit_or_reuse_fold(
             candidate.spec,
             candidate.context,
             candidate.training,
@@ -1279,7 +1287,7 @@ def _run_batch_candidate_fold(candidate: _BatchCandidate, fold: dict[str, Any]) 
     except Exception as exc:
         _fail_batch_candidate(candidate, exc)
         return
-    candidate.frames.append(frame)
+    candidate.shards.append(shard)
     candidate.fit_elapsed_s += elapsed
     _progress(
         f"  fold {fold_id} {'reused' if reused else 'fitted'} for "
@@ -1308,7 +1316,7 @@ def _reuse_batch_candidate_fold(candidate: _BatchCandidate, fold_id: int) -> boo
         resolved_settings=params,
     ):
         return False
-    candidate.frames.append(pl.read_parquet(shard))
+    candidate.shards.append(shard)
     candidate.reused_folds.append(fold_id)
     return True
 
@@ -1321,13 +1329,15 @@ def _finish_batch_candidate(study: Study, candidate: _BatchCandidate) -> None:
     assert candidate.training is not None
     assert candidate.attempt is not None
     try:
-        if len(candidate.frames) != len(candidate.context.fold_ids):
+        if len(candidate.shards) != len(candidate.context.fold_ids):
             raise RuntimeError(
-                f"linear candidate produced {len(candidate.frames)} of "
+                f"linear candidate produced {len(candidate.shards)} of "
                 f"{len(candidate.context.fold_ids)} fold shards"
             )
         _write_model_manifest(candidate.training)
-        predictions = pl.concat(candidate.frames).sort("symbol", "timestamp", "fold")
+        predictions = (
+            pl.scan_parquet(candidate.shards).sort("symbol", "timestamp", "fold").collect()
+        )
         prediction = study.results.publish_predictions(
             candidate.training,
             checkpoint_kind="final",
