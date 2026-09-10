@@ -42,7 +42,6 @@
 
 from __future__ import annotations
 
-import warnings
 from logging import getLogger
 
 import matplotlib.pyplot as plt
@@ -55,18 +54,28 @@ from scipy.sparse.csgraph import minimum_spanning_tree
 
 from data import load_us_equities
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, format_pct_axis, ml4t_palette
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    format_pct_axis,
+    ml4t_palette,
+    show_with_alt,
+)
 
 # %% tags=["parameters"]
 # Production defaults - Papermill overrides for testing
 N_ASSETS = 100
 ESTIMATION_DAYS = 504
 EVALUATION_DAYS = 252
+# Added to degree centrality before inverting, so a zero-degree node gets a finite
+# score. Section 6 measures what it does to the weights.
+CENTRALITY_FLOOR = 0.01
+MAX_WEIGHT = 0.10
 SEED = 42
 
 # %%
 set_global_seeds(SEED)
-warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
 getLogger("matplotlib.font_manager").setLevel("ERROR")
 
 # %% [markdown]
@@ -168,10 +177,20 @@ returns_wide = (
     .sort("timestamp")
 )
 
-# The fixed universe can contain later symbol exits or isolated missing quotes.
-# A zero return holds the marked value constant for that date. The diagnostic
-# below makes this simplifying cash/stale-mark assumption explicit.
-missing_by_window = returns_wide.select(pl.exclude("timestamp").is_null().sum()).sum_horizontal()[0]
+# %% [markdown]
+# The fixed universe can contain later symbol exits or isolated missing quotes, and
+# a zero return holds the marked value constant for that date. The diagnostic below
+# makes that cash and stale-mark assumption explicit, counted over the analysis
+# dates alone. A return is a difference between two closes, so the first row of the
+# whole frame is null for every symbol by construction: counting the frame would
+# report one null per symbol that no exit or missing quote produced, on rows the
+# analysis never reads.
+
+# %%
+analysis_frame = returns_wide.filter(pl.col("timestamp").is_in(analysis_dates.implode()))
+missing_by_window = analysis_frame.select(pl.exclude("timestamp").is_null().sum()).sum_horizontal()[
+    0
+]
 evaluation_missing = (
     returns_wide.filter(pl.col("timestamp").is_in(evaluation_dates.implode()))
     .select(pl.exclude("timestamp").is_null().sum())
@@ -190,7 +209,10 @@ n_assets = len(asset_names)
 
 print(f"Estimation returns: {estimation_returns.shape}")
 print(f"Evaluation returns: {evaluation_returns.shape}")
-print(f"Missing symbol-date returns set to 0: {missing_by_window}")
+print(
+    f"Missing symbol-date returns set to 0 within the analysis window: {missing_by_window} "
+    f"of {analysis_frame.height * N_ASSETS:,}"
+)
 print(f"Missing returns within evaluation: {evaluation_missing}")
 print(f"Sample symbols: {asset_names[:5]}")
 
@@ -392,7 +414,8 @@ def project_capped_weights(raw_weights: np.ndarray, max_weight: float) -> np.nda
 # %%
 def network_diversified_weights(
     centrality: np.ndarray,
-    max_weight: float = 0.10,
+    max_weight: float = MAX_WEIGHT,
+    floor: float = CENTRALITY_FLOOR,
 ) -> np.ndarray:
     """
     Construct portfolio weights using inverse centrality.
@@ -400,7 +423,7 @@ def network_diversified_weights(
     High-centrality assets are estimated MST hubs, so the rule
     underweights them by construction.
     """
-    inverse_cent = 1 / (centrality + 0.01)
+    inverse_cent = 1 / (centrality + floor)
     return project_capped_weights(inverse_cent, max_weight)
 
 
@@ -425,7 +448,7 @@ def equal_weight_portfolio(n: int) -> np.ndarray:
 
 
 # %%
-def inverse_volatility_weights(returns: np.ndarray, max_weight: float = 0.10) -> np.ndarray:
+def inverse_volatility_weights(returns: np.ndarray, max_weight: float = MAX_WEIGHT) -> np.ndarray:
     """Weight assets by inverse estimation-window volatility."""
     cov = np.cov(returns.T)
     vols = np.sqrt(np.diag(cov))
@@ -437,7 +460,7 @@ def inverse_volatility_weights(returns: np.ndarray, max_weight: float = 0.10) ->
 # Construct different portfolios
 w_equal = equal_weight_portfolio(n_assets)
 w_inv_vol = inverse_volatility_weights(estimation_returns)
-w_network_div = network_diversified_weights(degree_centrality, max_weight=0.10)
+w_network_div = network_diversified_weights(degree_centrality)
 
 # Portfolio statistics
 portfolios = {
@@ -472,27 +495,81 @@ print(concentration)
 # %% [markdown]
 # ### Concentration Finding
 #
-# The result is computed from the fixed weights rather than embedded as a
-# number that can drift after the universe changes.
+# Equal weight is not a comparison here, it is the ceiling. The effective-name
+# count is the reciprocal of the Herfindahl index, which any weight vector on N
+# assets maximises by putting 1/N in each, so equal weight scores exactly N and no
+# rule can beat it. Its largest position is 1/N, which for this universe never
+# approaches the cap either. Reporting a network portfolio "versus equal weight"
+# on this measure can only report how far short it falls.
+#
+# The number that carries information is the shortfall, and the rule to compare
+# against is one that also trades off something: inverse volatility, which is
+# already computed above.
 
 # %%
+equal_concentration = concentration.filter(pl.col("portfolio") == "Equal Weight").row(0, named=True)
+concentration = concentration.with_columns(
+    (pl.col("effective_names") / float(n_assets)).alias("share_of_ceiling")
+)
+if not np.isclose(equal_concentration["effective_names"], n_assets):
+    raise RuntimeError(
+        f"equal weight scored {equal_concentration['effective_names']:.4f} effective names "
+        f"rather than the {n_assets} its construction guarantees"
+    )
+print(concentration)
+
 network_concentration = concentration.filter(pl.col("portfolio") == "Network Diversified").row(
     0, named=True
 )
-equal_concentration = concentration.filter(pl.col("portfolio") == "Equal Weight").row(0, named=True)
+inv_vol_concentration = concentration.filter(pl.col("portfolio") == "Inverse Volatility").row(
+    0, named=True
+)
 display(
     Markdown(
-        f"**Finding:** Network diversification produces "
-        f"{network_concentration['effective_names']:.1f} effective names versus "
-        f"{equal_concentration['effective_names']:.1f} for equal weight; its largest position is "
-        f"{network_concentration['max_weight']:.1%}."
+        f"**Finding:** equal weight reaches the ceiling of {n_assets} effective names "
+        f"by construction. Network diversification holds "
+        f"{network_concentration['effective_names']:.1f}, "
+        f"{network_concentration['share_of_ceiling']:.0%} of it, against "
+        f"{inv_vol_concentration['effective_names']:.1f} "
+        f"({inv_vol_concentration['share_of_ceiling']:.0%}) for inverse volatility. "
+        f"The largest network position is {network_concentration['max_weight']:.1%} "
+        f"against a {MAX_WEIGHT:.0%} cap."
     )
 )
 
 # %% [markdown]
 # The concentration table is determined entirely by weights fixed at the
-# estimation boundary. HHI and effective-name count show whether inverse
-# centrality actually disperses capital more evenly than equal weighting.
+# estimation boundary. What it shows is how much dispersion each rule gives up in
+# exchange for the thing it targets, not whether it disperses capital better than
+# a rule that does nothing else.
+
+# %% [markdown]
+# ### What the Centrality Floor Does
+#
+# `CENTRALITY_FLOOR` is added to every centrality before inverting, so it decides
+# how much the rule can separate the least connected assets from each other. A leaf
+# in this tree has centrality 1/(N-1), which is the same order as the floor, so the
+# floor roughly halves a leaf's raw score before the projection. Removing it
+# entirely would divide by zero for any isolated node; shrinking it sharpens the
+# rule until the cap absorbs the difference.
+
+# %%
+floor_rows = []
+for candidate_floor in (CENTRALITY_FLOOR / 10, CENTRALITY_FLOOR, CENTRALITY_FLOOR * 10):
+    candidate_weights = network_diversified_weights(degree_centrality, floor=candidate_floor)
+    floor_rows.append(
+        {
+            "floor": candidate_floor,
+            "effective_names": 1 / np.sum(candidate_weights**2),
+            "max_weight": candidate_weights.max(),
+            "weight_ratio_leaf_to_hub": float(
+                candidate_weights.max() / candidate_weights[int(np.argmax(degree_centrality))]
+            ),
+        }
+    )
+floor_sensitivity = pl.DataFrame(floor_rows)
+print("Sensitivity of the weights to CENTRALITY_FLOOR:")
+print(floor_sensitivity)
 
 # %% [markdown]
 # ## 7. Stylized Shock-Propagation Sensitivity
@@ -538,6 +615,21 @@ def simulate_shock_diffusion(
     }
 
 
+# %% [markdown]
+# The scenarios rank assets by MST degree and the diffusion runs over correlations
+# above a threshold, and the MST is built from those same correlations. So "the
+# high-degree node reaches more assets" restates how the tree was constructed
+# unless the threshold binds somewhere the tree does not. The count below says how
+# many pairs clear it at all.
+
+# %%
+CONTAGION_THRESHOLD = 0.5
+pairs_above_threshold = int((corr_values > CONTAGION_THRESHOLD).sum())
+print(
+    f"Pairs with correlation above {CONTAGION_THRESHOLD}: {pairs_above_threshold:,} of "
+    f"{len(corr_values):,} ({pairs_above_threshold / len(corr_values):.1%})"
+)
+
 # %%
 # Compare shocks from high- and low-degree MST nodes.
 print("STYLIZED SHOCK-DIFFUSION SENSITIVITY")
@@ -548,6 +640,15 @@ high_central_idx = int(np.argmax(degree_centrality))
 positive_degree_idx = np.where(degree_centrality > 0)[0]
 low_central_idx = int(positive_degree_idx[np.argmin(degree_centrality[positive_degree_idx])])
 
+# Every leaf of a spanning tree shares the minimum degree, so the low-centrality
+# pick is one of many tied assets rather than a distinguished one. Say how many.
+min_centrality = degree_centrality[low_central_idx]
+tied_at_minimum = int(np.isclose(degree_centrality, min_centrality).sum())
+print(
+    f"Least connected asset: {asset_names[low_central_idx]}, one of {tied_at_minimum} "
+    f"tied at centrality {min_centrality:.4f}"
+)
+
 scenarios = [
     ("High centrality shock", high_central_idx),
     ("Low centrality shock", low_central_idx),
@@ -555,7 +656,7 @@ scenarios = [
 
 shock_rows = []
 for name, idx in scenarios:
-    result = simulate_shock_diffusion(corr_matrix, idx)
+    result = simulate_shock_diffusion(corr_matrix, idx, contagion_threshold=CONTAGION_THRESHOLD)
     shock_rows.append(
         {
             "scenario": name,
@@ -578,17 +679,32 @@ print(shock_summary)
 
 # %%
 high_shock, low_shock = shock_rows
+same_reach = high_shock["assets_reached"] == low_shock["assets_reached"]
 display(
     Markdown(
-        f"**Finding:** The high-degree {high_shock['symbol']} shock reaches "
-        f"{high_shock['assets_reached']} assets and gives the network-weighted portfolio a "
-        f"{high_shock['network_weight_sensitivity']:.1%} sensitivity. The low-degree "
-        f"{low_shock['symbol']} shock reaches {low_shock['assets_reached']} assets with "
-        f"{low_shock['network_weight_sensitivity']:.1%} sensitivity."
+        f"**Finding:** the high-degree {high_shock['symbol']} shock and the "
+        f"low-degree {low_shock['symbol']} shock reach "
+        + (
+            f"the same {high_shock['assets_reached']} assets"
+            if same_reach
+            else f"{high_shock['assets_reached']} and {low_shock['assets_reached']} assets"
+        )
+        + f". Their portfolio sensitivities differ, "
+        f"{high_shock['network_weight_sensitivity']:.1%} against "
+        f"{low_shock['network_weight_sensitivity']:.1%} on the network weights, and "
+        f"that difference comes from the weights rather than from the reach."
     )
 )
 
 # %% [markdown]
+# Reach does not separate the two scenarios. The diffusion runs five rounds over
+# the thresholded graph counted above, which is dense enough that a shock starting
+# anywhere inside its connected part covers the same assets: what the starting node
+# changes is the path, not the extent. So the difference in
+# portfolio sensitivity is the weight vector's doing, and treating a difference in
+# reach as evidence that MST centrality identifies systemic assets would be reading
+# the MST's own construction back out of the correlation matrix it came from.
+#
 # The table reports portfolio-weighted sensitivities, not a sum of hypothetical
 # asset losses. Synchronous updates make the result independent of loop order.
 
@@ -596,12 +712,15 @@ display(
 # ## 8. Performance Backtest
 #
 # Apply the weights fixed at the estimation boundary to the later evaluation
-# window. Returns are gross of trading costs and financing.
+# window. `returns @ weights` holds the target weights every day, which is daily
+# rebalancing rather than buy and hold: the drift a held portfolio accumulates is
+# traded away each session. Returns are gross of trading costs and financing, and
+# daily rebalancing to a fixed target is exactly where those costs would arise.
 
 
 # %%
 def backtest_portfolio(returns: np.ndarray, weights: np.ndarray) -> dict:
-    """Calculate gross fixed-weight evaluation metrics."""
+    """Gross evaluation metrics for a portfolio rebalanced daily to fixed weights."""
     portfolio_returns = returns @ weights
 
     # Annualized metrics
@@ -696,11 +815,22 @@ format_pct_axis(ax_drawdown)
 ax_growth.legend(loc="upper left")
 add_message_title(
     ax_growth,
-    f"{leader} Has the Highest Sharpe in the Later Evaluation",
-    subtitle=f"{evaluation_start} to {evaluation_end}; gross fixed-weight returns",
+    "Growth of a dollar and drawdown, three weighting rules",
+    subtitle=(
+        f"{evaluation_start} to {evaluation_end}; gross returns, rebalanced daily to "
+        "weights fixed at the estimation boundary"
+    ),
 )
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    f"Two stacked panels sharing a date axis over the evaluation window. The upper "
+    f"panel plots growth of one dollar for {', '.join(portfolios)}, ending at "
+    + ", ".join(f"{results[name]['growth'][-1]:.2f} for {name.lower()}" for name in portfolios)
+    + f". The lower panel plots their drawdown paths below zero, with a maximum "
+    f"drawdown across the three of "
+    f"{abs(min(results[name]['max_drawdown'] for name in portfolios)) * 100:.1f} "
+    "percent, in the final weeks of the window.",
+)
 
 # %% [markdown]
 # ### Centrality vs Portfolio Weight
@@ -740,12 +870,19 @@ ax.set_xlabel("Degree Centrality")
 ax.set_ylabel("Portfolio Weight (%)")
 add_message_title(
     ax,
-    "Inverse Centrality Mechanically Underweights MST Hubs",
-    subtitle=f"Weights estimated through {estimation_end}; cap verified at 10%",
+    "Portfolio weight against MST degree centrality",
+    subtitle=f"weights estimated through {estimation_end}; cap verified at {MAX_WEIGHT:.0%}",
 )
 ax.legend()
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    f"A scatter of portfolio weight in percent against MST degree centrality for "
+    f"{n_assets} assets. The network-diversified points trace a hyperbola: the "
+    f"least connected assets sit at a weight of "
+    f"{w_network_div.max() * 100:.1f} percent and the labelled hub "
+    f"{asset_names[hub_idx]} at {w_network_div[hub_idx] * 100:.1f} percent. The "
+    f"equal-weight crosses sit on a flat line at {100 / n_assets:.1f} percent.",
+)
 
 # %% [markdown]
 # The inverse relationship is a direct consequence of
@@ -812,12 +949,18 @@ ax.annotate(
 fig.colorbar(nodes, ax=ax, shrink=0.75, label="MST degree centrality")
 add_message_title(
     ax,
-    f"The Estimation-Window MST Connects {n_assets} Assets with {len(mst_edges)} Edges",
-    subtitle="Only the highest-degree hub is labeled",
+    "The estimation-window minimum spanning tree",
+    subtitle="node size and colour encode degree centrality; only the top hub is labelled",
 )
 ax.set_axis_off()
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    f"A spring-layout network diagram of the {n_assets}-asset minimum spanning tree "
+    f"with {len(mst_edges)} edges. Node size and colour encode degree centrality, "
+    f"which runs from {degree_centrality.min():.3f} to {degree_centrality.max():.3f}. "
+    f"The largest and darkest node, labelled {asset_names[hub_idx]}, sits among "
+    f"chains of small pale leaf nodes.",
+)
 
 # %% [markdown]
 # Node size and color encode degree centrality in the estimation-window MST.
