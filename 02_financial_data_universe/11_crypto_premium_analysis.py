@@ -533,6 +533,21 @@ extremes
 # flat.
 #
 # **Annualized:** $\text{APY} = F \times 3 \times 365$, three settlements a day.
+#
+# ### Pairing an estimate with its settlement
+#
+# One thing has to be settled before the formula can be checked against anything: what the
+# timestamp on a premium bar means. Binance stamps a kline with the time the bar *opens*
+# (`open_time` in the archive; `data/crypto/market/download.py` carries it straight through to
+# the `timestamp` column). An 8-hour bar stamped 00:00 therefore spans 00:00 to 08:00, and its
+# close is the premium as the interval ends - the interval the exchange averages to settle
+# funding **at 08:00**.
+#
+# So a row stamped `t` estimates the settlement at `t + 8h`, not the one at `t`. The bars and
+# the settlements both sit on the same 00:00 / 08:00 / 16:00 grid, so joining them on the raw
+# timestamp produces a full set of rows and no error at all - it just compares each estimate
+# with the settlement one interval too early. The settlement time is computed as a column
+# below so the join has to name it.
 
 # %%
 premium_col = pl.col("premium_index_close")
@@ -541,6 +556,7 @@ btc_funding = btc_premium.with_columns(
         "est_funding_rate"
     ),
     (premium_col.clip(-FUNDING_CLAMP, FUNDING_CLAMP) + INTEREST_RATE).alias("clamp_on_premium"),
+    (pl.col("timestamp") + pl.duration(hours=FUNDING_INTERVAL_HOURS)).alias("settles_at"),
 ).with_columns(
     (pl.col("est_funding_rate") * PERIODS_PER_DAY * 365 * 100).alias("annualized_pct"),
 )
@@ -572,7 +588,12 @@ realized_funding = (
     .filter(pl.col("symbol") == DEMO_SYMBOL)
 )
 
-check = btc_funding.join(realized_funding, on=["timestamp", "symbol"], how="inner")
+check = btc_funding.join(
+    realized_funding,
+    left_on=["settles_at", "symbol"],
+    right_on=["timestamp", "symbol"],
+    how="inner",
+)
 print(f"Settlements with both an estimate and a realized rate: {len(check):,}")
 for label, col in [
     ("clamp on (interest - premium)", "est_funding_rate"),
@@ -589,10 +610,49 @@ print(
 )
 
 # %% [markdown]
-# The published formula reproduces the exchange's rate several times more closely than the
-# misreading does, and only it produces the point mass that is actually there: better than a
-# third of realized BTC settlements are exactly the interest rate, to the last decimal place.
-# A funding series built by clamping the premium would show that value almost never.
+# ### The alignment is a claim too, and the same data tests it
+#
+# The eight-hour shift above was read off the download path rather than measured, and a wrong
+# shift would fail silently here for the same reason the raw join does: every offset that is a
+# multiple of the settlement interval lands on the grid and returns a nearly full set of rows.
+# What separates them is how well the estimate tracks the rate it is paired with. Sweeping the
+# offset makes the right one visible instead of assumed.
+
+# %%
+for offset in (-FUNDING_INTERVAL_HOURS, 0, FUNDING_INTERVAL_HOURS, 2 * FUNDING_INTERVAL_HOURS):
+    paired = btc_funding.with_columns(
+        (pl.col("timestamp") + pl.duration(hours=offset)).alias("paired_at")
+    ).join(
+        realized_funding,
+        left_on=["paired_at", "symbol"],
+        right_on=["timestamp", "symbol"],
+        how="inner",
+    )
+    err = (pl.col("est_funding_rate") - pl.col("realized")).abs()
+    stats = paired.select(
+        err.mean().alias("mae"),
+        (err < 1e-9).mean().alias("exact"),
+        pl.corr("est_funding_rate", "realized").alias("corr"),
+    )
+    print(
+        f"  bar stamped t paired with settlement t{offset:+3d}h:  rows {len(paired):,}   "
+        f"mean abs error {stats['mae'][0]:.6f}   exact {stats['exact'][0]:.1%}   "
+        f"correlation {stats['corr'][0]:.3f}"
+    )
+
+# %% [markdown]
+# Every offset joins, and the mean absolute errors are close enough that on their own they
+# would not decide anything. The correlation does: it peaks at the one-interval-forward
+# pairing and falls away on both sides, which is the pairing where the estimate and the
+# realized rate are computed from the same eight hours of premium. The wrong pairings still
+# correlate, because funding is persistent from one settlement to the next, so a misalignment
+# of this kind looks entirely reasonable in isolation and only the sweep locates it.
+#
+# With the pairing settled, the formula comparison stands: the published formula reproduces the
+# exchange's rate several times more closely than the misreading does, and only it produces the
+# point mass that is actually there - better than a third of realized BTC settlements are
+# exactly the interest rate, to the last decimal place. A funding series built by clamping the
+# premium would show that value almost never.
 #
 # The agreement is close but not exact, and the reason is worth stating rather than leaving as
 # noise. Binance computes the funding rate from a time-weighted average of the premium index
@@ -668,7 +728,7 @@ fig = go.Figure()
 
 fig.add_trace(
     go.Scatter(
-        x=btc_funding["timestamp"].to_list(),
+        x=btc_funding["settles_at"].to_list(),
         y=btc_funding["annualized_pct"].to_list(),
         mode="lines",
         name="Annualized Funding Return",
