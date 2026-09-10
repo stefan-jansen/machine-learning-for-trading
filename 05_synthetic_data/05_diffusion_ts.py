@@ -1475,13 +1475,19 @@ for key, value in stats_results.items():
 # is well matched. Correlation error tests whether cross-asset dependence survived, and
 # autocorrelation error whether the weak serial dependence of daily returns did.
 #
-# Read each mean against the range printed beside it, not on its own. Every number here
-# except the correlation error is an average over assets, and an average is small either
-# because all the assets are close or because some offset others. The smallest and
-# largest per-asset KS values say which: a largest value near the mean means the fit is
-# even across assets, and one far above it means the mean describes the assets the model
-# handles and conceals the one it does not. The largest per-asset autocorrelation error
-# reads the same way.
+# Read each mean against the range printed beside it, not on its own. Four of the
+# printed numbers are means: the KS statistic, the mean error, the standard-deviation
+# error and the autocorrelation error each average over assets, while the correlation
+# error averages the absolute entries of the two correlation matrices, so it averages
+# over asset pairs. Three are not means. `n_assets` counts the assets, and the extreme
+# KS and autocorrelation values are each one asset's.
+#
+# All of these errors are absolute, so a small mean cannot come from large errors
+# cancelling; it comes from many small ones diluting a few large ones. The extreme
+# per-asset KS values say whether that happened: a maximum near the mean means the fit
+# is even across assets, and one far above it means the mean describes the assets the
+# model handles and conceals the one it does not. The maximum per-asset autocorrelation
+# error reads the same way.
 
 
 # %%

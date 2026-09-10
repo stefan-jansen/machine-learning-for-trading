@@ -637,9 +637,8 @@ def evaluate_quality(real: np.ndarray, synthetic: np.ndarray) -> dict:
             f"{name:<15} {real_mean:>12.4f} {synth_mean:>12.4f} {real_std:>12.4f} {synth_std:>12.4f}"
         )
 
-    # Overall metrics. Both average over features, so the largest single-feature gap
-    # travels with each mean: an average is small either because every feature is close
-    # or because some offset others, and only the range separates those (standard C18).
+    # The gaps are absolute, so a small average comes from many close features, never
+    # from cancellation. Each mean carries its maximum, which separates the two cases.
     mean_gaps = np.abs(real.mean(axis=0) - synthetic.mean(axis=0))
     std_gaps = np.abs(real.std(axis=0) - synthetic.std(axis=0))
     results["mean_diff"] = np.mean(mean_gaps)
@@ -899,12 +898,13 @@ for eps in epsilon_values:
 # %%
 results_df = pl.DataFrame(tradeoff_results)
 
-# The whole sweep in one table, so the two collapse diagnostics sit beside the two
-# distances the figure plots and can be read against the real-data row printed above.
+# The whole sweep in one table, so the collapse diagnostics and the largest single
+# feature gap sit beside the distances the figure plots.
 print(
     results_df.select(
         "epsilon",
         "mean_diff",
+        "worst_feature_mean_diff",
         "corr_diff",
         "mean_abs_offdiag_corr",
         "dims_for_99pct_variance",
