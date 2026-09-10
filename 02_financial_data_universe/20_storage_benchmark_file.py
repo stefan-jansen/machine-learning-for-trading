@@ -477,4 +477,4 @@ show_plotly_with_alt(
 # - **Library-level storage primitives**: `18_data_management`.
 
 # %%
-save_benchmark_results(results, "formats")
+_results_csv = save_benchmark_results(results, "formats")

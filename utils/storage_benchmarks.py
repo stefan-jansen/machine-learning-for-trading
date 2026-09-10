@@ -31,7 +31,7 @@ import yaml
 BENCHMARK_SCALE = os.environ.get("BENCHMARK_SCALE", "").upper()
 
 # Chapter directory paths
-from utils.paths import get_chapter_dir
+from utils.paths import display_path, get_chapter_dir
 
 CHAPTER_DIR = get_chapter_dir(2)
 CODE_DIR = CHAPTER_DIR
@@ -563,7 +563,7 @@ def save_chart(fig: go.Figure, name: str) -> None:
     """Save chart to HTML file instead of opening browser."""
     path = CHARTS_DIR / f"{name}.html"
     fig.write_html(str(path), include_plotlyjs="cdn")
-    print(f"Chart saved: {path}")
+    print(f"Chart saved: {display_path(path)}")
 
 
 # =============================================================================
@@ -942,7 +942,7 @@ def save_benchmark_results(
     csv_path = RESULTS_DIR / f"{filename_prefix}_{scale.lower()}.csv"
     df.write_csv(csv_path)
 
-    print(f"\n📁 Results saved to: {csv_path}")
+    print(f"\n📁 Results saved to: {display_path(csv_path)}")
     return csv_path
 
 

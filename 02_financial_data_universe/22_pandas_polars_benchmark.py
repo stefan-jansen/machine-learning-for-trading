@@ -107,6 +107,7 @@ TOP_OPERATIONS_CHARTED = 15  # how many operations the per-operation panel shows
 # %%
 os.environ["BENCHMARK_SCALE"] = BENCHMARK_SCALE
 
+from utils.paths import display_path  # noqa: E402
 from utils.reproducibility import set_global_seeds  # noqa: E402
 from utils.storage_benchmarks import (  # noqa: E402
     ACTIVE_SCALE,
@@ -1502,7 +1503,7 @@ show_plotly_with_alt(
 # Save detailed results
 csv_path = RESULTS_DIR / f"pandas_polars_{ACTIVE_SCALE.lower()}.csv"
 results_df.write_csv(csv_path)
-print(f"Results saved to: {csv_path}")
+print(f"Results saved to: {display_path(csv_path)}")
 
 # Save summary
 summary_df = pl.DataFrame(
@@ -1535,7 +1536,7 @@ summary_df = pl.DataFrame(
 )
 summary_path = RESULTS_DIR / f"pandas_polars_summary_{ACTIVE_SCALE.lower()}.csv"
 summary_df.write_csv(summary_path)
-print(f"Summary saved to: {summary_path}")
+print(f"Summary saved to: {display_path(summary_path)}")
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1596,4 +1597,4 @@ print("=" * 70)
 print("BENCHMARK COMPLETE")
 print("=" * 70)
 print(f"pandas {PANDAS_VERSION} vs Polars {POLARS_VERSION}, scale {ACTIVE_SCALE}")
-print(f"Results: {csv_path}")
+print(f"Results: {display_path(csv_path)}")

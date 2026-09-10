@@ -57,6 +57,7 @@ import polars as pl
 from ml4t.data.providers import WikiPricesProvider, YahooFinanceProvider
 from ml4t.data.providers.fred import FREDProvider
 
+from utils.paths import display_path
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% [markdown]
@@ -302,7 +303,7 @@ class CanonicalWikiPricesAdapter:
 # %%
 for wiki_path in WIKI_PATHS:
     if wiki_path.exists():
-        print(f"  Found: {wiki_path}")
+        print(f"  Found: {display_path(wiki_path)}")
         try:
             wiki = WikiPricesProvider(parquet_path=wiki_path)
             wiki_path_used = wiki_path
@@ -310,7 +311,7 @@ for wiki_path in WIKI_PATHS:
         except Exception as e:
             # File exists but failed to load - this is a real error, not silent skip
             wiki_load_errors.append((wiki_path, str(e)))
-            print(f"  ERROR loading {wiki_path}: {e}")
+            print(f"  ERROR loading {display_path(wiki_path)}: {e}")
 
 # If we found files but couldn't load any of them, that's a bug - fail loudly
 if wiki is None and wiki_load_errors:
@@ -326,7 +327,7 @@ if wiki is None:
         "Materialise it via WikiPricesProvider.download(api_key=<nasdaq>) first."
     )
 
-print(f"WikiPrices loaded from: {wiki_path_used}")
+print(f"WikiPrices loaded from: {display_path(wiki_path_used)}")
 
 # Fetch long-term AAPL history; the canonical local schema may need the
 # adapter wrapper if the file uses asset/date instead of symbol/timestamp.
