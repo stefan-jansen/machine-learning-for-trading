@@ -997,8 +997,7 @@ if ragas_metrics:
 #    be asked, including ones about companies and years the corpus does not
 #    hold. Retrieval coverage therefore comes out whole in this run, including
 #    for a question about the boiling point of helium. Any check whose failing
-#    case is "the index did not build" is checking ingestion. Any check
-#    whose failing case is "the index did not build" is checking ingestion.
+#    case is "the index did not build" is checking ingestion, not retrieval.
 #
 # 2. **A similarity score ranks; it does not decide.** The five top scores
 #    order the questions correctly, answerable highest and out-of-domain
