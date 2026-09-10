@@ -468,9 +468,9 @@ estimates_df
 # estimator says about its own precision: an estimate whose interval covers the true value is
 # consistent with it, however far the point estimate sits away. Non-coverage is not the
 # mirror image of that. An interval built to cover in nineteen samples out of twenty misses
-# in the twentieth even when the adjustment is exactly right, so a single miss cannot tell
-# sampling variation from residual confounding or from standard errors computed on the wrong
-# dependence structure. Only coverage measured over many samples separates those.
+# in the twentieth even when the adjustment is exactly right, so a single miss establishes
+# nothing on its own. Whether these intervals are calibrated at all is a question about
+# repeated samples, and this notebook draws one.
 #
 # Coverage on one sample is also the most these two rows can support. They are fitted to the
 # same 1,000 observations, so their errors move together, and a single draw ranks nothing.
