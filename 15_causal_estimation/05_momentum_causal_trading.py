@@ -1032,7 +1032,8 @@ show_plotly_with_alt(
     "return from the non-overlapping series; top right plots a rolling six-month Sharpe "
     "ratio; bottom left is a grouped bar chart of the scaling factor each rule applies in "
     "the low, mid and high volatility regimes; bottom right plots drawdown from each rule's "
-    "running peak.",
+    "running peak. In all three line panels the rules track each other closely, and the "
+    "cumulative curves end the holdout below where they started.",
 )
 
 # %% [markdown] tags=[]
