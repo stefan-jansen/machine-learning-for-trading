@@ -175,35 +175,66 @@ def load_complete_metrics(
 # rows would pick one by hash order. A refit that only re-declared an input, on the other
 # hand, leaves the row bit-identical apart from its two hashes. Requiring agreement on
 # every column except those two hashes separates the duplicate from the genuine
-# ambiguity without reading the training spec here, and two configurations that merely
-# tie on `ic_mean_daily` differ somewhere in that vector and still raise.
+# ambiguity without reading the training spec here.
 #
-# The set below is written as "everything except the two identities a refit moves"
+# There is a third case, and it is the one this chapter is about. Ridge at a shrinkage
+# small enough to be numerically inert reproduces OLS, and the registry then holds two
+# or three rows whose every recorded statistic agrees to the last digit and whose only
+# difference is the name of the configuration. `crypto_perps_funding` at `fwd_ret_24h`
+# carries exactly that: `ols`, `ridge_a0.001` and `ridge_a0.01` at one IC, one standard
+# error and one day count. Nothing is ambiguous about the measurement, so the rows
+# collapse to the first name alphabetically and the others are carried in
+# `tied_configs` and printed, rather than the notebook refusing to draw the section. A
+# tie that differs on any measured column is still a real ambiguity and still raises.
+#
+# The excluded set is written as "everything except the two identities a refit moves"
 # rather than as a list of fields to compare, because a list is a second copy of
 # `METRICS_QUERY` to keep in step: the first draft of one omitted `ic_mean` and
 # `ic_std` while claiming to cover every recorded statistic.
 
 # %% tags=[]
 TIE_IDENTITY_EXCLUDED = frozenset({"training_hash", "prediction_hash"})
+TIE_NAME_ONLY = frozenset({"config_name"})
 
 
 def resolve_generation_tie(tied: pl.DataFrame, what: str) -> pl.DataFrame:
-    """Collapse generations of one configuration; raise on anything else."""
+    """Collapse rows recording one measurement; raise when the tie is a real ambiguity.
+
+    Adds `tied_configs`, which names the tied configurations when several of them were
+    collapsed and is null otherwise.
+    """
+    no_tie = pl.lit(None, dtype=pl.Utf8).alias("tied_configs")
     if tied.height == 1:
-        return tied
+        return tied.with_columns(no_tie)
     fields = [column for column in tied.columns if column not in TIE_IDENTITY_EXCLUDED]
-    distinct = tied.select(fields).unique()
-    if distinct.height != 1:
-        differing = [column for column in fields if tied[column].n_unique() > 1]
-        names = (
-            sorted(tied["config_name"].unique().to_list()) if "config_name" in tied.columns else []
+    differing = [column for column in fields if tied[column].n_unique() > 1]
+    names = sorted(tied["config_name"].unique().to_list()) if "config_name" in tied.columns else []
+    if not differing:
+        return tied.sort("prediction_hash").head(1).with_columns(no_tie)
+    if set(differing) <= TIE_NAME_ONLY:
+        return (
+            tied.sort("config_name")
+            .head(1)
+            .with_columns(pl.lit(", ".join(names)).alias("tied_configs"))
         )
-        raise RuntimeError(
-            f"{what}: daily-IC rank one is ambiguous"
-            + (f" between {', '.join(names)}" if names else "")
-            + f"; the tied rows differ on {', '.join(differing)}"
-        )
-    return tied.sort("prediction_hash").head(1)
+    raise RuntimeError(
+        f"{what}: daily-IC rank one is ambiguous"
+        + (f" between {', '.join(names)}" if names else "")
+        + f"; the tied rows differ on {', '.join(differing)}"
+    )
+
+
+def report_name_only_ties(frame: pl.DataFrame, what: str) -> None:
+    """Print the selections that were decided by name order because nothing else differed."""
+    if "tied_configs" not in frame.columns:
+        return
+    ties = frame.filter(pl.col("tied_configs").is_not_null())
+    if ties.is_empty():
+        return
+    print(f"{what}: tied on every recorded statistic, carried under the first name:")
+    for row in ties.iter_rows(named=True):
+        who = row.get("short_name") or row.get("case_study") or ""
+        print(f"  {who} {row.get('label', '')}: {row['tied_configs']}")
 
 
 # %% [markdown] tags=[]
@@ -340,14 +371,14 @@ def replace_with_chronological_hac(
 
 # %% tags=[]
 def select_unique_best(frame: pl.DataFrame, groups: list[str]) -> pl.DataFrame:
-    """Select one unambiguous highest daily-IC row in every requested group.
+    """Select one highest daily-IC row in every requested group.
 
-    Fails closed on a tie between two configurations, because arbitrary row order must never
-    decide the reported winner. A tie between two generations of ONE configuration is a
-    different thing and resolves rather than raising: refitting writes a second prediction set
-    under a new training hash, and where the refit reproduced the scores the two ICs are
-    bit-identical. Every fx_pairs linear configuration carries exactly two such generations in
-    the production registry, so the strict form rejected the case study on a duplicate.
+    Raises on a tie whose rows differ on anything measured, because row order must never
+    decide which configuration a section reports. Two ties resolve instead, and neither is
+    a judgement call: two generations of one configuration, where a refit wrote a second
+    prediction set under a new training hash with bit-identical scores, and two or three
+    configurations whose every recorded statistic agrees and which differ only in name.
+    `resolve_generation_tie` names the second kind in `tied_configs`.
     """
     winners = []
     for group in frame.partition_by(groups, maintain_order=True):
@@ -471,6 +502,7 @@ coverage_df
 
 # %% tags=[]
 rank1 = replace_with_chronological_hac(collect_complete_rank1(CASE_STUDY_IDS))
+report_name_only_ties(rank1, "Primary label")
 print(
     "Highest-IC complete linear configuration per case study "
     "(primary label, mean daily IC ± HAC 95 % CI):"
@@ -894,6 +926,7 @@ def regression_labels(cs: str) -> list[str]:
 horizon_df = replace_with_chronological_hac(
     collect_complete_multi_label(CASE_STUDY_IDS, regression_labels)
 )
+report_name_only_ties(horizon_df, "Regression labels")
 print(
     f"Highest-IC complete linear configuration per (case study, regression label): "
     f"{horizon_df.height} rows"
