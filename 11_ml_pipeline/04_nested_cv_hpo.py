@@ -931,7 +931,7 @@ show_with_alt(
     "Two panels: paired bars of information coefficient per fold for the single-loop "
     "and nested protocols, and the alpha each protocol selected per fold on a log axis.",
 )
-# %% [markdown]
+# %% [markdown] tags=[]
 # The left panel is the cost of selecting and scoring on the same data. Where the two bars
 # differ, the single-loop score is the more favourable of the pair - less negative where the
 # fold is negative, higher where it is positive - and the nested score is what the procedure

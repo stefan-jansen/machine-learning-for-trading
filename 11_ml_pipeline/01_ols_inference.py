@@ -210,6 +210,14 @@ family_counts
 # The history each symbol brings. One row per ETF, drawn only over the sessions
 # it actually appears on, so a break in a row is a stretch of sessions the panel
 # has for other symbols and not for this one.
+#
+# **What to read off it.** The rows form a staircase: symbols enter the panel over
+# the whole sample rather than all at the start, and a few rows break mid-series.
+# The panel is therefore unbalanced, and two things follow for what comes next. A
+# pooled fit weights the later years more heavily, because that is where most of
+# the rows are. And the cross-section a date-clustered standard error averages over
+# is much narrower early in the sample than late, so an estimator that assumes a
+# fixed panel width is assuming something this picture rules out.
 
 # %%
 sessions_per_symbol = (
@@ -644,9 +652,10 @@ ax.grid(axis="x", alpha=0.3)
 show_with_alt(
     fig,
     "Box plots of each estimator's standard error divided by the OLS standard error, one box "
-    "per estimator, against a dashed reference line at one. Every box sits to the right of "
-    "the line, and the boxes shift further right and grow wider as the estimator admits more "
-    "dependence, from the narrowest at the bottom to the widest at the top.",
+    "per estimator, against a dashed reference line at one. The HC3 box straddles that line; "
+    "the other three sit clear of it, shifting further right and growing wider as the "
+    "estimator admits more dependence, from the narrowest at the bottom to the widest at "
+    "the top.",
 )
 
 # %% [markdown]
@@ -716,7 +725,8 @@ show_with_alt(
     fig,
     "The largest coefficient estimates with Driscoll-Kraay confidence intervals, sorted by "
     "value, against a dashed vertical line at zero. Most of the intervals reach across the "
-    "line, and the handful that do not are at the two extremes of the sort.",
+    "line. Those that do not are mostly at the two ends of the sort, with one or two in "
+    "between.",
 )
 
 # %% [markdown]

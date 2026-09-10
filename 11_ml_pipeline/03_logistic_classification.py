@@ -845,7 +845,7 @@ show_with_alt(
     "Two-by-two confusion matrix of actual against predicted direction, each cell "
     "labelled with its count and shaded by size.",
 )
-# %% [markdown]
+# %% [markdown] tags=[]
 # The default threshold of one half is a convention, not a decision. Applied to a model whose
 # probabilities cluster near the base rate, it sends almost everything to the majority class,
 # which is why the matrix is lopsided. A threshold is a choice about the cost of each kind of
@@ -892,7 +892,7 @@ show_with_alt(
     "ROC curve of true positive rate against false positive rate, drawn against "
     "the diagonal that a random ranking would trace.",
 )
-# %% [markdown]
+# %% [markdown] tags=[]
 # The curve sits just above the diagonal along its whole length, and the area under it is
 # barely above a half. On a two-class problem that is a model which orders the validation
 # cases hardly better than a coin, and every metric downstream of it has to be read in that
@@ -996,7 +996,7 @@ show_with_alt(
     "Reliability diagram: observed fraction of up outcomes against mean predicted "
     "probability, in ten bins, against the diagonal of perfect calibration.",
 )
-# %% [markdown]
+# %% [markdown] tags=[]
 # A calibrated model would track the diagonal. This one is close to flat: across the whole
 # range of predicted probabilities the observed frequency stays in a narrow band, so moving
 # the prediction from low to high barely moves what actually happens.

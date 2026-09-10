@@ -620,7 +620,8 @@ show_with_alt(
     "size of its contribution and labeled with that feature's standardized value, each "
     "pointing left or right according to whether it lowers or raises the prediction. The "
     "bars run from the model's base value at the bottom to the predicted return at the top, "
-    "and the features beyond the largest dozen are pooled into one bar.",
+    "and the features below the largest few are pooled into one bar labelled with how many "
+    "they are.",
 )
 
 # %% tags=[]

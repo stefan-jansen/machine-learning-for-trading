@@ -827,7 +827,7 @@ show_with_alt(
     "Bar chart of mean information coefficient for OLS, Ridge, LASSO and Elastic "
     "Net, each with an error bar one standard deviation wide.",
 )
-# %% [markdown]
+# %% [markdown] tags=[]
 # The error bars are wider than the gaps between the bars, which is worth seeing and is less
 # than it looks. Every method is scored on the same folds, so their scores rise and fall
 # together with whatever each fold happens to contain - and a method can be consistently
@@ -916,7 +916,7 @@ show_with_alt(
     "Two series against regularization strength on a log axis: mean information "
     "coefficient on the left scale and the count of non-zero coefficients on the right.",
 )
-# %% [markdown]
+# %% [markdown] tags=[]
 # The two series come apart, and where they do is the point. The feature count falls away
 # over a range where mean validation IC does not, so across that range LASSO produces a
 # sparser model at no observed cost in ranking accuracy.
@@ -955,9 +955,9 @@ ax.set_title("LASSO coefficient paths against penalty")
 ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=9)
 show_with_alt(
     fig,
-    "Coefficient values against regularization strength on a log axis. The ten "
-    "largest are drawn in colour and the rest in grey; each leaves zero at a "
-    "different alpha.",
+    "Coefficient values against the LASSO penalty on a log axis. The ten largest paths "
+    "are drawn in colour and the rest in grey, with a vertical marker at the selected "
+    "alpha. The coloured paths reach zero at different penalties rather than together.",
 )
 
 # %% [markdown] tags=[]
@@ -1070,7 +1070,7 @@ show_with_alt(
     "Coefficient values against regularization strength on a log axis, one line "
     "per feature, all converging towards zero as the penalty rises.",
 )
-# %% [markdown]
+# %% [markdown] tags=[]
 # Compare this against the LASSO paths above. Ridge pulls every coefficient toward zero and
 # leaves all of them non-zero; LASSO sets them to exactly zero one at a time. That difference
 # is the reason to reach for one or the other: LASSO answers which features to keep, Ridge
