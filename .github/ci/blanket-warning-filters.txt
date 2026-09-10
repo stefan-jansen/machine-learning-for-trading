@@ -25,7 +25,6 @@
 # fx_pairs are stamped and wait for a re-execution, and theirs must not regenerate
 # features/model_based.parquet, whose sha256 keys every model fitted against it.
 
-03_market_microstructure/06_itch_intraday_patterns.py
 03_market_microstructure/07_itch_stylized_facts.py
 03_market_microstructure/08_databento_lob_reconstruction.py
 03_market_microstructure/09_databento_mbo_analysis.py
