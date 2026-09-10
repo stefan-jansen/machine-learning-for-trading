@@ -1098,12 +1098,12 @@
   skip: true
   skip_reason: Writes to data volume (read-only in Docker)
 23_knowledge_graphs/02_supply_chain_kg_construction:
-  docker_env: ml4t+neo4j+gpu
-  gpu: true
-  long_running: true
-  parameters:
-    MAX_COMPANIES: 3
-  timeout: 1200
+  # The default path loads the committed extraction cache and touches no GPU:
+  # RERUN_EXTRACTION is False, so Qwen is never loaded. Only cache regeneration
+  # needs CUDA. MAX_COMPANIES subsamples the corpus that feeds the extractor, so
+  # on this path it changes nothing that runs.
+  docker_env: ml4t+neo4j
+  timeout: 300
 24_autonomous_agents/01_react_reasoning:
   parameters:
     LLM_PROVIDER: mock
