@@ -65,6 +65,16 @@ from case_studies.utils.gbm import (
     load_gbm_config,
 )
 
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
+
 
 def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
     pred_df = pl.DataFrame({"timestamp": dates, "symbol": symbols, "prediction": y_pred})
