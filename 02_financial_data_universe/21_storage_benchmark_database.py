@@ -56,16 +56,18 @@
 #   what we time. Repeating it would append duplicate rows on the append-only
 #   engines, or require a teardown that is not part of the write.
 # - **A write bar is what the client pays, and the clients differ.** SQLite,
-#   DuckDB, ClickHouse and kdb+ hand the panel over in one block (`to_sql`, a
-#   Parquet scan, `insert_df`, `set`), so almost all of their write time is the
-#   engine. PostgreSQL and TimescaleDB have to build one Python tuple per row
-#   for `execute_values`, and InfluxDB one `Point` per row for line protocol.
-#   That construction is what using those interfaces costs, so it stays inside
-#   the timed region - but it is not the engine, and a reader comparing bars
-#   should know which bars contain it. Each of the three measures its own row
-#   building separately and prints the share; the summary below collects them.
-#   Read a write bar as "what it costs to get this panel into this engine
-#   through its Python client", not as the engine's raw ingest rate.
+#   DuckDB, ClickHouse and kdb+ take the panel in one block (`to_sql`, a Parquet
+#   scan, `insert_df`, `set`). PostgreSQL and TimescaleDB have to build one
+#   Python tuple per row for `execute_values`, and InfluxDB one `Point` per row
+#   for line protocol. That construction is what using those interfaces costs,
+#   so it stays inside the timed region, and each of the three also measures it
+#   on its own and prints the share; the table above the chart collects them.
+#   Those three numbers are the *explicit* row construction and nothing more.
+#   Every client converts and serializes somewhere - `to_sql` still prepares and
+#   binds each row, `insert_df` still serializes the frame - and none of that is
+#   separable from outside, so a bar without a measured share is not a bar that
+#   is all engine. Read every write bar as "what it costs to get this panel into
+#   this engine through its Python client", never as the engine's ingest rate.
 # - **Durability inside the timed region.** PostgreSQL and TimescaleDB commit
 #   synchronously, so their flush cost is inside the timed call. QuestDB (ILP
 #   + WAL) and InfluxDB acknowledge before the rows are queryable, so they
@@ -108,13 +110,18 @@
 # ## Quick Start
 #
 # ```bash
-# # Embedded engines only (no Docker needed)
-# uv run --extra db-benchmark python 02_financial_data_universe/21_storage_benchmark_database.py
+# # Embedded engines only. DuckDB and SQLite need nothing beyond the base install.
+# uv run python 02_financial_data_universe/21_storage_benchmark_database.py
 #
 # # With the server engines as well, from the host (compose publishes their ports)
 # docker compose --profile databases up -d timescaledb postgres clickhouse questdb influxdb
 # uv run --extra db-benchmark python 02_financial_data_universe/21_storage_benchmark_database.py
 # ```
+#
+# The `db-benchmark` extra also carries ArcticDB, which publishes no Linux ARM64 wheel
+# and no source distribution. On ARM64 the install fails before the notebook can run,
+# so the optional-import guard never gets the chance to skip it: use the Docker path
+# above, whose `benchmark` image ships the server clients without ArcticDB.
 #
 # The scale is the `BENCHMARK_SCALE` parameter below, not an environment variable:
 # the cell after the parameters cell writes the parameter back into the environment
@@ -422,13 +429,34 @@ else:
         print(f"○ PyKX/kdb+: unavailable, skipping ({type(exc).__name__}: {exc})")
 
 # %% [markdown]
-# The embedded count is read off the status table rather than written as a literal,
-# so adding an engine to that table is the only edit adding an engine needs.
+# `expected` marks an engine as one the chapter compares. `available` says it answered
+# the availability check on this machine. They are different questions, and conflating
+# them turns a laptop with no Docker running into a run that reports five failures.
+# The three counts below, and the coverage report at the end, are read off the status
+# table rather than written as literals, so adding an engine to that table is most of
+# what adding an engine takes.
 
 # %%
-n_embedded = sum(v["expected"] for v in benchmark_status.values() if v["category"] == "embedded")
-n_servers = sum([HAS_CLICKHOUSE, HAS_QUESTDB, HAS_TIMESCALEDB, HAS_INFLUXDB, HAS_POSTGRES])
-n_hft = int(HAS_PYKX)
+AVAILABILITY = {
+    "SQLite": True,
+    "DuckDB": True,
+    "ArcticDB": HAS_ARCTICDB,
+    "ClickHouse": HAS_CLICKHOUSE,
+    "QuestDB": HAS_QUESTDB,
+    "TimescaleDB": HAS_TIMESCALEDB,
+    "InfluxDB": HAS_INFLUXDB,
+    "PostgreSQL": HAS_POSTGRES,
+    "kdb+/PyKX": HAS_PYKX,
+}
+assert set(AVAILABILITY) == set(benchmark_status), (
+    "every engine in the status table needs an availability flag"
+)
+for _engine, _is_available in AVAILABILITY.items():
+    benchmark_status[_engine]["available"] = _is_available
+
+n_embedded = sum(v["available"] for v in benchmark_status.values() if v["category"] == "embedded")
+n_servers = sum(v["available"] for v in benchmark_status.values() if v["category"] == "server")
+n_hft = sum(v["available"] for v in benchmark_status.values() if v["category"] == "hft")
 
 print(f"\n[OK] {n_embedded} embedded + {n_servers} server + {n_hft} HFT database(s) available")
 
@@ -470,14 +498,15 @@ quotes_pandas = quotes_df.to_pandas()
 results: list[BenchmarkResult] = []
 
 # %% [markdown]
-# ### Measuring what the client pays
+# ### Measuring the row construction that is written out
 #
 # PostgreSQL, TimescaleDB and InfluxDB reach their servers through interfaces that
 # take one Python object per row, so building those objects is part of what writing
-# through them costs and it stays inside the timed write. It is not, however, part of
-# the database, and the engines that accept the panel as a block pay none of it. The
-# helper below times the construction on its own so each of the three can report how
-# much of its write bar was Python, and the summary near the chart collects them.
+# through them costs and it stays inside the timed write. Because that construction
+# is a separate expression, it can also be timed on its own, which the helper below
+# does. What comes back is a lower bound on each of those three clients' share, not
+# the whole of it: the client still converts and serializes what it is handed, and
+# so does every client whose interface takes a frame. Nothing here measures that.
 
 # %%
 client_side_build: dict[str, float] = {}
@@ -1833,10 +1862,12 @@ if results:
             print(op_data.select(["database", "time_s"]))
 
 # %% [markdown]
-# ### How much of each write bar was the client
+# ### The row construction inside three of the write bars
 #
-# Only the engines whose Python interface takes one object per row appear here. For
-# the rest the panel goes over in a block and the figure below is theirs entirely.
+# Only the engines whose interface takes one Python object per row appear here, and
+# only the construction of those objects is counted. An engine that is absent from
+# this table is not an engine whose write time is all database; it is one whose
+# client conversion happens inside a call this notebook cannot time separately.
 
 # %%
 if client_side_build:
@@ -1858,7 +1889,7 @@ if client_side_build:
 else:
     print(
         "No engine on this run reached its server through a per-row Python interface, "
-        "so every write bar below is the engine."
+        "so there is no separately timed row construction to report."
     )
 
 # %% [markdown]
@@ -1963,17 +1994,18 @@ if results:
 # %%
 print("\n### BENCHMARK COVERAGE")
 tested = [k for k, v in benchmark_status.items() if v["tested"]]
-expected = [k for k, v in benchmark_status.items() if v["expected"]]
-print(f"Tested: {len(tested)}/{len(expected)} databases that were available")
+available = [k for k, v in benchmark_status.items() if v["available"]]
+print(f"Tested: {len(tested)}/{len(available)} databases available on this machine")
+print(f"Absent: {len(benchmark_status) - len(available)} of {len(benchmark_status)}")
 for db in sorted(benchmark_status.keys()):
     entry = benchmark_status[db]
     if entry["tested"]:
-        status = "[OK]   "
-    elif entry["expected"]:
-        status = "[FAIL] "  # present and expected to answer, but did not
+        status = "[OK]"
+    elif entry["available"]:
+        status = "[FAIL]"  # answered the availability check, then did not benchmark
     else:
-        status = "○ skip "  # not available on this machine; nothing was claimed
-    print(f"  {status}{db} ({entry['category']})")
+        status = "absent"  # not reachable here; no result is claimed for it
+    print(f"  {status:<8}{db} ({entry['category']})")
 
 print("\n" + "=" * 70)
 print("[OK] Database benchmark complete!")
@@ -2019,11 +2051,13 @@ if results:
 # 3. **Ingest rate and durability are one number, not two.** Every write time here
 #    ends when the data is queryable, which is why the engines that acknowledge
 #    early - QuestDB over ILP, InfluxDB - do not look free.
-# 4. **Some write bars contain a client, and some do not.** PostgreSQL, TimescaleDB
-#    and InfluxDB are reached through interfaces that want one Python object per
-#    row; the others take the panel in a block. The table above the chart gives the
-#    Python share of each of those three write times. It is a real cost of using
-#    that interface from Python, and it is not a property of the database.
+# 4. **Every write bar contains a client; three of them let you see how much.**
+#    PostgreSQL, TimescaleDB and InfluxDB are reached through interfaces that want
+#    one Python object per row, and building those objects is a separate expression
+#    that can be timed on its own. The table above the chart gives that time. The
+#    engines missing from it are not free of client cost - their conversion happens
+#    inside the call that also does the write, where it cannot be separated - so
+#    read the table as three lower bounds, not as a division of the field.
 # 5. **The comparison is only as good as its policy.** Every number above is one
 #    cold write and a warm mean read, for every engine. Warm reads flatter anything
 #    with a buffer pool; on a cold cache, or across a network, the compressed engines
