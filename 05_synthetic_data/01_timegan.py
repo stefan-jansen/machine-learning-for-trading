@@ -77,6 +77,7 @@
 # %%
 """TimeGAN — Time-series Generative Adversarial Networks."""
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -438,6 +439,12 @@ print(f"  Total:         {total_params:,}")
 # gating threshold all produce different models from the same inputs, so all four
 # are compared too. A checkpoint written before they were is missing them, which
 # reads as a mismatch and retrains - the safe direction.
+#
+# `TICKERS` names the columns but not their contents, and the equity data is refreshed
+# outside this notebook. A refresh moves the training rows, which moves the scaler
+# fitted on them, and the run would then evaluate weights fitted under one
+# normalization on data scaled under another, and overwrite `scaler.pkl` with the
+# second one. A digest of the training rows is what closes that.
 
 # %%
 CHECKPOINT_PATH = CHECKPOINT_DIR / "checkpoint.pt"
@@ -446,6 +453,7 @@ SKIP_TRAINING = False
 RUN_CONFIG = {
     "tickers": TICKERS,
     "representation": "log_returns",
+    "train_data_digest": hashlib.sha256(np.ascontiguousarray(train_data)).hexdigest()[:16],
     "seq_len": SEQ_LEN,
     "hidden_dim": HIDDEN_DIM,
     "num_layers": NUM_LAYERS,
@@ -719,8 +727,16 @@ if not SKIP_TRAINING:
 
 # %% [markdown]
 # ## 8. Generate Synthetic Data
+#
+# Training draws millions of random numbers and loading a checkpoint draws none, so the
+# two paths arrive here with different RNG states. Everything below - the noise the
+# generator is fed, and the initializations inside the evaluation suite - would then
+# differ between a run that trained the weights and a run that loaded the same weights
+# back. Reseeding here makes the two paths produce the same synthetic sequences.
 
 # %%
+set_global_seeds(SEED)
+
 print("\n=== Generating Synthetic Data ===")
 
 generator.eval()
