@@ -531,12 +531,15 @@ print(
 )
 
 # %% [markdown]
-# **Reading it**: the first component's share is a measure of how much the sectors are
-# moving together, so the line is a picture of co-movement over time rather than of
-# performance. Read where it rises and where it falls against what was happening, and
-# note that stress does not have one signature: an episode where everything sells off
-# together and an episode where sectors respond in different directions both count as
-# stress and move this line in opposite directions.
+# **Reading it**: the first component's share is how much of the panel's variance sits
+# in a single linear direction, so the line is a picture of concentration over time rather
+# than of performance. That is not the same as the sectors moving the same way. A window
+# in which one group of sectors rises whenever another falls is still one direction, with
+# opposite-signed loadings, and the share stays high; what pulls the share down is
+# variance spreading across several independent directions. So read the line together
+# with the loadings of section 4 before calling a rise co-movement, and note that stress
+# has no one signature here: a synchronized sell-off and a rotation can produce the same
+# share.
 #
 # Every point is computed from the window ending at that date, so the line describes
 # what had already happened. Nothing here forecasts the next window's value.
@@ -689,10 +692,12 @@ print(
 # 2. **A loading is an estimate, and the bootstrap says how good.** The interval, not
 #    the point, is what a portfolio decision should read. An interval spanning zero is
 #    an exposure the data does not establish.
-# 3. **The first component's share is a measure of co-movement, and it moves.** A single
-#    full-sample number hides that; the rolling window is what shows it, and it rises
-#    both when everything sells off together and falls when sectors respond in different
-#    directions. Neither is "the stress signature".
+# 3. **The first component's share measures concentration in one direction, and it
+#    moves.** A single full-sample number hides the movement, and the rolling window is
+#    what shows it. The share does not say which direction: a synchronized sell-off and a
+#    rotation that sets one group of sectors against another can both leave most of the
+#    variance in one component, and only the loadings separate them. Neither is "the
+#    stress signature".
 # 4. **Orthogonality is a property of the fitting sample, not of every window in it.**
 #    The rolling correlation between the first two components shows how far a short
 #    window departs from zero, which is what anything built on their independence has to
