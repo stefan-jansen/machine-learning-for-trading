@@ -170,8 +170,13 @@ show_plotly_with_alt(
 # is zero whenever the index sits between them. The exact definition and its consequence are in
 # the data-quality section below.
 #
-# - Positive premium: the perpetual is bid above the index, and longs pay shorts
-# - Negative premium: the perpetual is offered below it, and shorts pay longs
+# - Positive premium: the perpetual's executable bid sits above the index
+# - Negative premium: its executable ask sits below the index
+#
+# Which side pays does not follow from that sign. Funding is the premium passed through a
+# clamp against a positive interest rate, and the clamp pins a whole band of premiums -
+# including zero and mildly negative ones - to the interest rate itself, which longs pay.
+# `11_crypto_premium_analysis` derives the formula and measures how often each case occurs.
 #
 # ### Units
 #
@@ -348,14 +353,20 @@ zero_rate_by_symbol
 
 # %% [markdown]
 # The ordering is close to monotone across the whole universe, from the most liquid contract to
-# the thinnest, and it spans a factor of more than fifty. That is the dead-zone prediction and
-# it is not something an outage would produce.
+# the thinnest, and it spans a factor of more than fifty. That is what the dead zone predicts:
+# its width is the impact spread, the spread is wide where liquidity is thin, so the zone is
+# easier to sit inside on a thin contract. An outage has no comparable mechanism - nothing
+# about a publication failure sorts it by liquidity - but the association is evidence for the
+# dead zone rather than proof against an outage. It rules nothing out on its own; what settles
+# the question is that the definition produces exact zeros by construction, so a point mass
+# needs no defect to explain it.
 #
-# The remaining checks all point the same way once the formula is known. The rate declines
-# steadily year on year, which reads as spreads tightening rather than as a fault being
-# repaired. Fewer than one percent of the affected rows have all four premium fields at zero,
-# so it is not a blank record. And the zeros are present in the exchange's own one-minute
-# source, so nothing in the download or the resampling creates them.
+# One further count is worth having and one further reading is worth refusing. Fewer than one
+# percent of the affected rows have all four premium fields at zero, so these are not blank
+# records. The yearly table below shows the rate declining, and that decline is where the
+# temptation to over-read sits: annual frequencies cannot separate tightening spreads from a
+# fault being repaired from a universe whose composition changes as contracts list. It is
+# reported because the shape is worth seeing, not because it identifies a cause.
 
 # %%
 _all_four_zero = premium.filter(
@@ -390,11 +401,11 @@ zero_by_year
 #
 # And the general lesson, which outlives this dataset: **a point mass in a derived quantity is
 # a property of its formula before it is a defect in its data.** Reading the definition costs
-# minutes. Every diagnostic computed above is consistent with both explanations, so no amount
-# of measurement on this file alone would have settled it - the frequency, the non-zero
-# extremes, the yearly decline and the null count are all equally compatible with a dead zone
-# and with a placeholder. The one measurement that discriminates is the one the formula tells
-# you to make.
+# minutes. Every count computed above is compatible with both explanations - the frequency,
+# the non-zero extremes, the yearly decline and the null count would look the same either way -
+# so no amount of counting on this file would have decided it. What decides it is that the
+# published formula emits exact zeros over a range of its inputs, which leaves nothing for a
+# defect to explain.
 
 # ### Gaps in the hourly grid
 #
@@ -476,6 +487,7 @@ PREMIUM_BAR_HOURS = 8
 premium_available = premium.with_columns(
     (pl.col("timestamp") + pl.duration(hours=PREMIUM_BAR_HOURS)).alias("timestamp"),
     pl.col("timestamp").alias("premium_bar_opened"),
+    (pl.col("timestamp") + pl.duration(hours=PREMIUM_BAR_HOURS)).alias("premium_published"),
 ).sort(["symbol", "timestamp"])
 
 combined = ohlcv.sort(["symbol", "timestamp"]).join_asof(
@@ -500,22 +512,27 @@ print(
 # does not report a gap; it silently carries the previous value across it. Zero unmatched rows
 # is therefore consistent with complete data and with a file full of holes.
 #
-# What distinguishes them is staleness. A premium published on an eight-hour grid should never
-# be more than eight hours old at the moment it is read.
+# What distinguishes them is staleness, measured from the moment the value became available
+# rather than from the moment its bar opened - the two differ by a full settlement period,
+# and using the wrong one shifts every age by that much. A value published on an eight-hour
+# grid is replaced eight hours later, so its age at the moment it is read should always be
+# under one period. An age of exactly one period is already a publication that did not
+# arrive, which is why the test is not a strict inequality.
 
 # %%
 staleness = combined.drop_nulls("premium_index_close").with_columns(
-    (pl.col("timestamp") - pl.col("premium_bar_opened")).dt.total_hours().alias("premium_age_hours")
+    (pl.col("timestamp") - pl.col("premium_published")).dt.total_hours().alias("premium_age_hours")
 )
-_stale = staleness.filter(pl.col("premium_age_hours") > 2 * PREMIUM_BAR_HOURS)
+_stale = staleness.filter(pl.col("premium_age_hours") >= PREMIUM_BAR_HOURS)
 
 print(
-    f"Premium age when read: median {staleness['premium_age_hours'].median():.0f}h, "
-    f"max {staleness['premium_age_hours'].max():.0f}h"
+    f"Premium age when read, from publication: median "
+    f"{staleness['premium_age_hours'].median():.0f}h, max "
+    f"{staleness['premium_age_hours'].max():.0f}h"
 )
 print(
-    f"Hourly bars reading a premium more than two settlement periods old: {_stale.height:,} "
-    f"({100 * _stale.height / staleness.height:.2f}%)"
+    f"Hourly bars reading a premium that should already have been replaced: "
+    f"{_stale.height:,} ({100 * _stale.height / staleness.height:.2f}%)"
 )
 if _stale.height:
     print(
@@ -527,9 +544,10 @@ if _stale.height:
 
 # %% [markdown]
 # The staleness check finds what the match count could not. Almost every hourly bar matched
-# something, and a fraction of a percent of them matched a premium that was days or weeks out
-# of date - one symbol reading a value more than two months old, and a shorter outage that
-# most of the universe shares on the same dates.
+# something, and a half of one percent of them matched a value the exchange should already
+# have replaced. The worst are not marginally late: one symbol reads a premium more than two
+# months old, and a shorter outage runs several days across most of the universe on the same
+# dates.
 #
 # Both are interior gaps in the premium file: settlements the index skipped while the contract
 # went on trading. The case study's `02_labels.py` names the same property from the other side,
@@ -545,10 +563,14 @@ if _stale.height:
 # What remains unmatched is a different kind of absence from the one the exact join reported,
 # and the next cell checks which kind. If these are hours before a symbol's first premium
 # publication, the gap is a start-of-history edge and closes on its own. If they are scattered
-# through the middle of a symbol's life, the premium file has holes.
+# through the middle of a symbol's life, the premium file has holes. The comparison has to use
+# the publication clock, the same one the join used: measured against bar openings instead,
+# the first period of every symbol's history would be reported as an interior hole.
 
 # %%
-_first_premium = premium.group_by("symbol").agg(pl.col("timestamp").min().alias("premium_starts"))
+_first_premium = premium_available.group_by("symbol").agg(
+    pl.col("timestamp").min().alias("premium_starts")
+)
 _unmatched = (
     combined.filter(pl.col("premium_index_close").is_null())
     .join(_first_premium, on="symbol", how="left")
