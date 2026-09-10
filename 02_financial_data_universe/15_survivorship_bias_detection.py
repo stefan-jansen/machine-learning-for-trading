@@ -298,8 +298,8 @@ returns.sort("ret", descending=True).head(6).select(
 #   `split_ratio` column never fired.
 # - **EXXI** (Energy XXI) relisted post-bankruptcy on the same ticker.
 #
-# The table above carries the prices; what matters here is that each is a hundred-fold or
-# larger step printed as an ordinary session.
+# The table above carries the prices; what matters here is that each is a step of two orders
+# of magnitude printed as an ordinary session.
 #
 # Two rules follow directly, and both are diagnostic rather than cosmetic — they say
 # *"we cannot compute a return across this event"*, and drop it, rather than shrinking it
@@ -720,6 +720,10 @@ for name, params in SCENARIOS.items():
         "bias_median": float(np.median(bias)),
         "bias_low": float(np.percentile(bias, MC_BAND[0])),
         "bias_high": float(np.percentile(bias, MC_BAND[1])),
+        # The book figure script reads a 10-90 band by name from the artifact below, so
+        # those two percentiles are computed here regardless of what MC_BAND is set to.
+        "bias_p10": float(np.percentile(bias, 10)),
+        "bias_p90": float(np.percentile(bias, 90)),
         # Representative path: every leaver assigned the scenario's expected terminal return.
         "path": universe_path(m, expected_terminal(params)),
         "expected_cause": int(n_leavers * params["cause_share"]),
@@ -888,10 +892,8 @@ payload = {
             "portfolio_timestamps": list(sessions),
             "portfolio_values": r["path"].tolist(),
             "bias_median": r["bias_median"],
-            # The book figure script reads these two key names, so they are part of the
-            # artifact's contract and stay fixed even if MC_BAND moves.
-            "bias_p10": r["bias_low"],
-            "bias_p90": r["bias_high"],
+            "bias_p10": r["bias_p10"],
+            "bias_p90": r["bias_p90"],
         }
         for name, r in scenario_results.items()
     },
@@ -1195,8 +1197,8 @@ for w in completeness["warnings"]:
 #    the collection process did not capture it. Absence of evidence, not evidence of absence,
 #    and no way to recover what is missing.
 # 2. **The adjusted prices carry unadjusted corporate actions.** Reverse splits and
-#    post-bankruptcy reorganisations on reused tickers print single-session steps of a
-#    hundred-fold or more that are not returns at all, and the `split_ratio` column records
+#    post-bankruptcy reorganisations on reused tickers print single-session steps of two
+#    orders of magnitude that are not returns at all, and the `split_ratio` column records
 #    nothing for any of them. They are a small fraction of one percent of the rows; §3 lists
 #    them and counts them.
 # 3. **Those rows decide the sign of the answer.** Uncorrected, the survivors-only portfolio
