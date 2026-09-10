@@ -233,7 +233,7 @@ def extract_sentiment(p_yes: float) -> Sentiment:
 
 # %%
 INLINE_ENUMERATION = re.compile(r"\(\d+\)\s*")
-SENTENCE_END = re.compile(r"(?<![A-Z])(?<=[.!?])\s+(?=[A-Z])")
+SENTENCE_END = re.compile(r"(?<![A-Z]\.)(?<=[.!?])\s+(?=[A-Z])")
 
 
 def extract_key_findings(rationale: str) -> list[str]:
