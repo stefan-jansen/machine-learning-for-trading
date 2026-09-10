@@ -465,9 +465,13 @@ for index, (name, factor_prediction) in enumerate(factor_forecasts.items()):
     )
 
 # %% [markdown]
-# The intervals distinguish a stable cross-sectional ordering from a noisy
-# point estimate. An IC can be statistically nonzero while the squared-error
-# forecast remains economically indistinguishable from zero at a daily horizon.
+# Each interval is around that one forecaster's mean IC, and what it settles is whether
+# that forecaster's mean is distinguishable from zero. It says nothing about the gap
+# between two of them: the three IC series run over the same evaluation dates and the
+# same returns, so the uncertainty in a difference depends on how the two series covary,
+# which needs the paired daily difference and is not computed here. An IC can also be
+# statistically nonzero while the squared-error forecast remains economically
+# indistinguishable from zero at a daily horizon.
 
 # %%
 names = [result["name"] for result in forecast_results]
@@ -493,7 +497,7 @@ show_with_alt(
     fig,
     "Two stacked panels sharing a horizontal axis of Stage 2 forecaster. The upper "
     "marks each forecaster's test MSE as a ratio to the zero-return forecast, against a "
-    "dashed line at one, on an axis spanning roughly two percentage points either side. "
+    "dashed line at one, on an axis spanning a few percentage points around that line. "
     "The lower plots each forecaster's mean rank IC as a point with a HAC interval, "
     "against a dashed line at zero.",
 )
@@ -511,9 +515,11 @@ show_with_alt(
 #    complete training histories removes thousands of pre-inception pseudo-zeros.
 # 4. **Walk-forward timing uses current information once.** Each observed factor
 #    updates history before the following day's premium is forecast.
-# 5. **Which Stage 2 forecaster you pick changes the answer, and the figure above is
-#    where that is read.** The MSE panel is on an axis spanning a couple of percentage
-#    points either side of the benchmark, so a visible gap there is a small effect; the
-#    IC panel's intervals are what say whether an apparent ordering is larger than the
-#    uncertainty around it. Whatever the run shows, this universe is curated and cannot
-#    support a survivorship-free strategy claim.
+# 5. **The figure says which forecasters clear zero, not which one is best.** The MSE
+#    panel is on an axis spanning a couple of percentage points either side of the
+#    benchmark, so a visible gap there is a small effect. The IC panel's intervals each
+#    ask whether that forecaster's mean IC is distinguishable from zero, and reading a
+#    ranking off them is the mistake the panel invites: separating two forecasters needs
+#    the interval on their paired daily difference, and overlapping individual intervals
+#    do not settle it either way. Whatever the run shows, this universe is curated and
+#    cannot support a survivorship-free strategy claim.
