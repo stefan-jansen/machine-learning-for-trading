@@ -601,6 +601,9 @@ def run_sensitivity(model, estimand, estimate, benchmark_covariates):
         benchmark_common_causes=list(benchmark_covariates),
         effect_fraction_on_treatment=[1],
         effect_fraction_on_outcome=[1],
+        # DoWhy draws its own contour plot and calls plt.show() on it unless this is
+        # off. The figure below covers the same ground on one axis for both outcomes.
+        plot_estimate=False,
     )
 
 
