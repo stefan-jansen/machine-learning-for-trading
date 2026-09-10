@@ -32,7 +32,7 @@
 # - Stratify coverage by walk-forward fold and by realized-volatility tercile
 # - Map interval width to position size as a bridge to *Chapter 19*
 #
-# **Book reference**: Section 11.5 — Quantifying Predictive Uncertainty.
+# **Book reference**: Section 11.5 - Quantifying Predictive Uncertainty.
 #
 # **Prerequisites**
 #
@@ -47,11 +47,10 @@
 # ## Setup
 
 # %% tags=[]
-"""Conformal Prediction for Uncertainty-Aware Trading — generate prediction intervals with coverage guarantees."""
+"""Conformal Prediction for Uncertainty-Aware Trading - generate prediction intervals with coverage guarantees."""
 
 import hashlib
 import inspect
-import warnings
 
 import joblib
 import matplotlib.pyplot as plt
@@ -74,8 +73,6 @@ from utils.modeling import (
 from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -168,12 +165,12 @@ print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 # prediction, each fold's training set is further split into model-training
 # and calibration subsets (80/20).
 #
-# ### Subsampled training history (`TRAIN_SUBSAMPLE = 0.25`)
+# ### Subsampled training history (`TRAIN_SUBSAMPLE`)
 #
-# Each fold's training history is subsampled to **25 % of its dates** before
-# fitting any of the three conformal methods (split-conformal, CQR, ACI). The
-# subsample is set by the `TRAIN_SUBSAMPLE` parameter in the parameters cell
-# at the top of the notebook.
+# Each fold's training history is subsampled, at the date level, to the fraction
+# of its dates that the `TRAIN_SUBSAMPLE` parameter declares, before fitting any
+# of the three conformal methods (split-conformal, CQR, ACI). The parameters cell
+# at the top of the notebook holds the value this run used.
 #
 # **Why subsample?** The Conformalized Quantile Regression step solves an LP
 # whose runtime is $O(n^3)$ in the training-set size. Without the date-level
@@ -181,13 +178,13 @@ print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 # fold would dominate runtime; the same fraction is applied to split-conformal
 # and ACI for parity, so all three methods see identically sized training sets.
 #
-# **What changes if you set `TRAIN_SUBSAMPLE = 1.0`?** Marginal coverage is
-# robust to training-sample size by construction — coverage validity follows
+# **What changes if you keep the whole training history?** Marginal coverage is
+# robust to training-sample size by construction: coverage validity follows
 # from the calibration-set exchangeability, not from training-set size. What
 # you would expect to tighten somewhat is **interval width**, and the
 # **tercile-conditional coverage gaps** reported below would likely narrow as
 # the base Ridge and quantile-regression fits become more accurate. Re-run
-# this notebook with `papermill -p TRAIN_SUBSAMPLE 1.0` to compare.
+# this notebook with `papermill -p TRAIN_SUBSAMPLE 1` to compare.
 
 # %% tags=[]
 splits = generate_cv_splits(df, case_study_id="etfs", label_buffer="21D", date_col="timestamp")
@@ -204,10 +201,9 @@ for s in splits:
     test_idx = np.where((dates_np >= te_start) & (dates_np <= te_end))[0]
     dated_splits.append((te_start, train_idx, test_idx))
 
-# `generate_cv_splits` steps backward from the holdout boundary, so it returns folds
-# newest-first. Sort chronologically: ACI below is an online method whose alpha
-# trajectory is a statement about time, and the per-fold subsample is drawn per fold.
-# Both would otherwise inherit whatever order the splitter happens to return.
+# `generate_cv_splits` steps backward from the holdout boundary and returns folds
+# newest-first. ACI's alpha trajectory is a statement about time, so the folds are
+# sorted chronologically here rather than left in the order the splitter returns.
 cv_splits = [(tr, te) for _, tr, te in sorted(dated_splits, key=lambda s: s[0])]
 
 if MAX_CV_FOLDS > 0 and len(cv_splits) > MAX_CV_FOLDS:
@@ -230,12 +226,12 @@ train_sizes = [len(tr) for tr, _ in cv_splits]
 test_sizes = [len(te) for _, te in cv_splits]
 if cv_splits:
     print(
-        f"{len(cv_splits)} walk-forward folds — train size "
+        f"{len(cv_splits)} walk-forward folds, train size "
         f"{min(train_sizes):,}–{max(train_sizes):,}, test size "
         f"{min(test_sizes):,}–{max(test_sizes):,}"
     )
 else:
-    print("0 walk-forward folds — every candidate split failed the train/test size gate")
+    print("0 walk-forward folds: every candidate split failed the train/test size gate")
 
 # %% [markdown] tags=[]
 # ## Split-Conformal Prediction
@@ -257,8 +253,9 @@ else:
 # exactly the finite-sample margin the ceiling was there to provide. The calls
 # below therefore select the rank directly, through
 # `utils.modeling.conformal_quantile`, which also returns an unbounded interval
-# when the rank exceeds the calibration set - a set of 5 scores cannot certify
-# 90% coverage, and saying so is better than quoting its largest score.
+# when the rank exceeds the calibration set: too few calibration scores cannot
+# certify a high coverage level, and saying so is better than quoting the largest
+# score on hand.
 
 
 # %% tags=[]
@@ -363,9 +360,11 @@ def predict_cqr(state, X):
 #
 # $$\hat{\alpha}_{t+1} = \hat{\alpha}_t + \gamma \cdot (\alpha_{\text{target}} - \mathbf{1}\{y_t \notin C_t\})$$
 #
-# where $\gamma \in [0.005, 0.05]$ controls adaptation speed, $\hat{\alpha}_t$
-# is the adaptive miscoverage rate (clipped to $[0.001, 0.999]$), and
-# $\alpha_{\text{target}}$ is the nominal target (e.g., 0.10 for 90% coverage).
+# where $\gamma$ sets the adaptation speed - a larger step tracks a shift sooner and
+# makes coverage noisier between updates - $\hat{\alpha}_t$ is the adaptive
+# miscoverage rate, clipped away from zero and one so the interval stays finite, and
+# $\alpha_{\text{target}}$ is the nominal miscoverage rate, `1 - TARGET_COVERAGE`.
+# `predict_aci_adaptive` below takes $\gamma$ as an argument and declares its default.
 # A miss sets the indicator to 1, so $\hat{\alpha}_t$ **decreases**; a lower
 # miscoverage level raises the residual quantile and widens the next interval.
 # A hit sets the indicator to 0, so $\hat{\alpha}_t$ increases and intervals
@@ -377,8 +376,8 @@ def predict_cqr(state, X):
 # ### What "online" means on a cross-sectional panel
 #
 # The update above is written for a scalar sequence: observe $y_t$, then move
-# on to $t+1$. Our test set is a **panel** — on each decision date we rank all
-# 99 ETFs at once — and our label is a **21-day forward return**. Two rules
+# on to $t+1$. Our test set is a **panel**: on each decision date we rank all
+# 99 ETFs at once, and our label is a **21-day forward return**. Two rules
 # follow, and both constrain what the loop is allowed to see:
 #
 # 1. **All assets on a decision date share one $\hat{\alpha}_t$.** We predict
@@ -394,7 +393,7 @@ def predict_cqr(state, X):
 # $d_{i-21}$, whose outcomes have just resolved. Each date is one online round,
 # and the indicator generalizes to that date's cross-sectional miscoverage
 # rate. The first 21 dates of a fold run at the target alpha because nothing
-# has resolved yet — that warm-up is a real property of the method, not an
+# has resolved yet, and that warm-up is a real property of the method, not an
 # implementation shortcut.
 
 
@@ -462,10 +461,9 @@ def run_conformal_evaluation(features, targets, cv_splits, dates, coverage=TARGE
         "sc": {"covered": [], "widths": [], "fold_coverage": []},
         "cqr": {"covered": [], "widths": [], "fold_coverage": []},
         "aci": {"covered": [], "widths": [], "fold_coverage": [], "alpha_histories": []},
-        # |realized return| per prediction, recorded here so the conditional-coverage
-        # analysis below is aligned with `covered` by construction. Rebuilding it from
-        # cv_splits after the fact silently misaligns whenever the fold order or the
-        # underlying panel changes.
+        # |realized return| per prediction, recorded in the same pass as `covered` so the
+        # conditional-coverage analysis is aligned with it by construction; rebuilding it
+        # from cv_splits afterwards misaligns silently when the fold order changes.
         "vol_proxy": [],
         "fold_stats": [],
     }
@@ -648,7 +646,7 @@ def compute_calibration_metrics(results: dict) -> pl.DataFrame:
 calibration_metrics = compute_calibration_metrics(conformal_results)
 
 # %% [markdown] tags=[]
-# ### Calibration Metrics (90% target coverage)
+# ### Calibration Metrics at the Target Coverage Level
 
 # %% tags=[]
 calibration_metrics
@@ -657,8 +655,8 @@ calibration_metrics
 # **How to read the table.** Four of its columns answer different questions, and
 # the methods do not rank the same way on all four.
 #
-# `coverage_gap` is the distance from the target. All three land below it, which
-# is the direction an exchangeability violation predicts: walk-forward evaluation
+# `coverage_gap` is the distance from the target. Under-coverage is the direction
+# an exchangeability violation predicts: walk-forward evaluation
 # on non-stationary returns is exactly the assumption the marginal guarantee needs
 # and does not get.
 #
@@ -721,8 +719,8 @@ display(Markdown("\n".join(_lines)))
 # %% [markdown] tags=[]
 # ## Calibration and Rolling Coverage Figure
 #
-# We create a two-panel figure: (a) calibration plot comparing SC, CQR, and ACI
-# coverage vs target, and (b) rolling per-fold coverage over time.
+# The figure has two panels: pooled coverage per method against the target level,
+# and the same three methods' coverage fold by fold.
 
 # %% tags=[]
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -734,12 +732,17 @@ colors = [COLORS["blue"], COLORS["amber"], COLORS["copper"]]
 
 ax = axes[0]
 bars = ax.bar(methods, coverages, color=colors, width=0.5, edgecolor="white")
-ax.axhline(y=0.9, color="gray", linestyle="--", linewidth=1, label="Target (90%)")
+ax.axhline(
+    y=TARGET_COVERAGE,
+    color="gray",
+    linestyle="--",
+    linewidth=1,
+    label=f"Target ({TARGET_COVERAGE:.0%})",
+)
 ax.set_ylabel("Actual Coverage")
 ax.set_ylim(0.8, 1.0)
-ax.set_title("(a) Coverage vs Target")
-# upper left: the bars top out below the 0.9 target line, so this corner is the only
-# clear space — a legend over a bar is unreadable at either bottom corner
+ax.set_title("Pooled coverage by method")
+# a legend over a bar is unreadable at either bottom corner
 ax.legend(loc="upper left")
 
 for bar, cov in zip(bars, coverages, strict=True):
@@ -768,27 +771,27 @@ for (method, label, color), ls in zip(
         linestyle=ls,
     )
 
-ax.axhline(y=0.9, color="gray", linestyle="--", linewidth=1)
+ax.axhline(y=TARGET_COVERAGE, color="gray", linestyle="--", linewidth=1)
 ax.set_xlabel("Fold")
 ax.set_ylabel("Coverage")
 ax.set_ylim(0.5, 1.0)
-ax.set_title("(b) Per-Fold Coverage")
+ax.set_title("Coverage by fold")
 ax.legend(loc="lower right", fontsize=8)
 
-fig.suptitle("All three methods land below the 90% target on average")
-fig.tight_layout()
+fig.suptitle("Conformal coverage against the target, pooled and by fold")
 show_with_alt(
     fig,
-    "Two panels. Left: pooled coverage as a bar per method against a dashed line at the "
-    "90% target. Right: coverage per walk-forward fold for the same three methods, "
-    "against the same target line.",
+    "Two panels. Left: pooled coverage as a bar per method, labelled with its value, "
+    "against a dashed line at the target level. Right: coverage per walk-forward fold "
+    "for the same three methods, against the same target line.",
 )
 
 # %% [markdown] tags=[]
 # ## Multi-Level Calibration
 #
-# For target levels $1-\alpha \in \{0.1, 0.2, \ldots, 0.9\}$, we plot claimed
-# versus empirical coverage. A well-calibrated method hugs the 45° diagonal.
+# For the nine target levels in `target_levels`, evenly spaced across the unit
+# interval, we plot the requested level against the empirical one. A well-calibrated
+# method tracks the diagonal.
 
 # %% tags=[]
 target_levels = np.arange(0.1, 1.0, 0.1)
@@ -837,7 +840,6 @@ ax.set_title("Empirical against target coverage, across nine levels")
 ax.legend()
 ax.set_xlim(0, 1)
 ax.set_ylim(0, 1)
-fig.tight_layout()
 show_with_alt(
     fig,
     "Empirical coverage against the requested target level for split conformal, over "
@@ -859,8 +861,8 @@ show_with_alt(
 # date 21 sessions earlier resolve. When those intervals under-covered, $\alpha_t$
 # **falls**, which raises the residual quantile and widens subsequent intervals.
 # When they over-covered, $\alpha_t$ rises and intervals tighten. The trajectory
-# below is therefore a response to coverage 21 sessions stale — the lag is what
-# the method actually has to work with.
+# below is therefore a response to coverage 21 sessions stale, which is what the
+# method actually has to work with.
 
 # %% tags=[]
 # Show ACI alpha history from last fold
@@ -869,20 +871,32 @@ if conformal_results["aci"]["alpha_histories"]:
 
     fig, ax = plt.subplots(figsize=(10, 3))
     ax.plot(last_alpha, linewidth=0.8, color=COLORS["copper"])
-    ax.axhline(y=0.1, color="gray", linestyle="--", label="Target alpha (0.1)")
+    target_alpha = 1 - TARGET_COVERAGE
+    ax.axhline(
+        y=target_alpha,
+        color="gray",
+        linestyle="--",
+        label=f"Target alpha ({target_alpha:.2f})",
+    )
     ax.set_xlabel("Decision date (index within fold)")
     ax.set_ylabel("Alpha (miscoverage rate)")
-    ax.set_title("ACI moves alpha on coverage feedback 21 sessions stale")
+    ax.set_title("Adaptive alpha across one fold's decision dates")
     ax.legend()
-    fig.tight_layout()
     show_with_alt(
         fig,
         "The ACI miscoverage rate alpha over the decision dates of the most recent fold, "
-        "against a dashed line at its 0.1 target.",
+        "against a dashed line at the target miscoverage rate.",
     )
 
     print(f"Alpha range: [{min(last_alpha):.4f}, {max(last_alpha):.4f}]")
-    print(f"Mean alpha: {np.mean(last_alpha):.4f} (target: 0.1)")
+    print(f"Mean alpha: {np.mean(last_alpha):.4f} (target: {target_alpha:.2f})")
+
+# %% [markdown] tags=[]
+# **What to read off it.** The path only rises while the dates whose labels have
+# resolved over-covered, and only falls while they missed too often, so it is a
+# running record of that fold's realized coverage, lagged by the label horizon. A
+# path that leaves the target line and stays away says the delayed feedback kept
+# pointing the same way for longer than the step size could correct.
 
 # %% [markdown] tags=[]
 # ## Interval Width Comparison
@@ -912,13 +926,20 @@ for ax, (method, label, color) in zip(
     ax.set_title(label)
 
 axes[0].set_ylabel("Frequency")
-fig.suptitle("CQR varies interval width the most, split conformal the least")
-fig.tight_layout()
+fig.suptitle("Interval width distribution by method")
 show_with_alt(
     fig,
-    "Three histograms of prediction-interval width on a shared vertical scale, one per "
-    "method, each with a dashed line at its own mean width.",
+    "Three histograms of prediction-interval width, one per method, on a shared "
+    "vertical scale but each on its own width axis, each with a dashed line at its own "
+    "mean width.",
 )
+
+# %% [markdown] tags=[]
+# **What to read off it.** Split conformal fixes one width per fold, so its panel is
+# a small number of spikes and the spread across that panel is fold-to-fold variation
+# alone. CQR and ACI set the width per observation, so theirs spread continuously.
+# The three width axes are not shared: compare the shape of each panel, and read the
+# levels off the width table above.
 
 # %% [markdown] tags=[]
 # ## Figure: Interval Width Dynamics with VIX Overlay
@@ -927,9 +948,7 @@ show_with_alt(
 # interval widths over time and overlay VIX to show widening during stress.
 
 # %% tags=[]
-# Build the width-over-time figure in a single cell so the inline backend
-# does not flush a partial figure before the twin-axis VIX overlay lands
-# (see feedback_split_cell_figure_bug).
+# One cell: the inline backend flushes a partial figure if the twin axis lands later.
 fold_stats = conformal_results.get("fold_stats", [])
 if fold_stats:
     width_df = pl.DataFrame(fold_stats).sort("fold")
@@ -1018,7 +1037,7 @@ if fold_stats:
 # %% [markdown] tags=[]
 # ## Conditional Coverage: Volatility Stratification
 #
-# Marginal coverage (90% overall) can mask conditional failures. If intervals
+# Marginal coverage can mask conditional failures. If intervals
 # are too narrow during volatile periods, the model under-covers precisely
 # when uncertainty matters most. We stratify by realized volatility (|return|)
 # terciles and check coverage within each.
@@ -1055,35 +1074,33 @@ tercile_table
 # **Interpretation**: this is the most important table in the notebook, and it
 # undoes the comfortable reading of the marginal numbers.
 #
-# All three methods land within 2 pp of the 90% target marginally. Conditionally,
-# all three are broken in the same place. Every method covers ~99% in the two
-# low-volatility terciles and collapses to **66-70% in the high-volatility
-# tercile** — a nominal 10% failure rate delivering better than 30%. The marginal
-# 90% is not a compromise between the terciles so much as an average of
-# over-covering where nothing is at stake and under-covering where everything is.
+# Every method's marginal column sits near the target. Split by tercile, all three
+# break in the same place: they cover almost everything in the two quiet terciles
+# and fall far short in the high-volatility one. The marginal number is therefore
+# an average of over-covering where nothing is at stake and under-covering where
+# everything is, rather than a compromise between the terciles.
 #
-# The adaptive methods do not rescue this. CQR's quantile models and ACI's online
-# feedback both buy about 3 pp in the high tercile over split-conformal, and cost
-# width elsewhere. Neither approaches 90% where volatility is high, because
-# neither is conditioning on the thing that matters: all three draw their
-# correction from a calibration set pooled across regimes, so the interval a
-# forecast receives during a volatility spike is set mostly by the quiet days that
-# dominate the calibration sample.
+# The adaptive methods narrow that shortfall rather than removing it. CQR's
+# quantile models and ACI's online feedback each recover something in the high
+# tercile over split conformal, at the cost of width elsewhere, and none of the
+# three comes near the target where volatility is high. The reason is shared: all
+# three draw their correction from a calibration set pooled across regimes, so the
+# interval a forecast receives during a volatility spike is set mostly by the quiet
+# days that dominate the calibration sample.
 #
-# This is precisely the failure Section 11.5 names — *"coverage below 80% during
-# volatility spikes, for a 90% target, indicates that the calibration distribution
-# is stale or poorly stratified"* — and the response it prescribes is not a
-# different conformal variant but **regime-conditional calibration**: partition the
-# calibration scores by an ex-ante market state and compute a separate correction
-# within each.
+# Section 11.5 lists this among its warning signs: coverage far below the target
+# during volatility spikes indicates that the calibration distribution is stale or
+# poorly stratified. The response it prescribes is **regime-conditional
+# calibration**: partition the calibration scores by an ex-ante market state and
+# compute a separate correction within each.
 #
 # For Chapter 19 the consequence is direct and uncomfortable. A strategy that
 # scales positions by interval width is relying on width to be honest exactly when
 # it is least honest. Sizing off these intervals would take the largest positions,
 # relative to true uncertainty, in the highest-volatility regime.
 #
-# **Method note**: `|return|` is a crude regime proxy, and it is contaminated —
-# it is built from the realized outcome the interval is trying to cover, so the
+# **Method note**: `|return|` is a crude regime proxy, and it is contaminated: it
+# is built from the realized outcome the interval is trying to cover, so the
 # high tercile partly selects for large residuals by construction. It is used here
 # because it needs no extra data. A production diagnostic should stratify on an
 # *ex-ante* state (trailing realized volatility, VIX level) known at decision time.
@@ -1115,10 +1132,9 @@ fig, ax = plt.subplots(figsize=(8, 4))
 ax.scatter(cqr_widths * 1e4, position_weight, alpha=0.1, s=5)
 ax.set_xlabel("CQR Interval Width (bps)")
 ax.set_ylabel("Relative Position Weight")
-ax.set_title("Wider intervals map to smaller positions, capped at 3x median")
+ax.set_title("Inverse-width position weight against CQR interval width")
 ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=1, label="Baseline weight")
 ax.legend()
-fig.tight_layout()
 show_with_alt(
     fig,
     "Scatter of relative position weight against CQR interval width in basis points, "
@@ -1126,8 +1142,10 @@ show_with_alt(
 )
 
 # %% [markdown] tags=[]
-# Predictions with narrow intervals (high model confidence) receive larger
-# positions, while wide intervals (high uncertainty) reduce exposure. Chapter 19
+# The weight is the median width divided by the observation's own width, capped so
+# that no forecast can take an unbounded position however narrow its interval: the
+# flat stretch on the left of the chart is where the cap binds. Narrow intervals
+# take larger positions, wide ones reduce exposure. Chapter 19
 # integrates this with volatility forecasts and correlation estimates for
 # full portfolio construction.
 
@@ -1137,27 +1155,28 @@ show_with_alt(
 # 1. **Split-conformal** provides valid coverage with minimal assumptions and is
 #    trivial to implement: fit a model, compute residuals on a held-out calibration
 #    set, take the quantile as interval half-width. It requires only exchangeability
-#    of calibration and test data — a weaker condition than Gaussianity.
+#    of calibration and test data, a weaker condition than Gaussianity.
 #
 # 2. **CQR** produces adaptive intervals that widen during volatile periods, making
 #    it more suitable for uncertainty-aware position sizing (Chapter 19). The
 #    cost is fitting two quantile regressors (computationally heavier) instead of one.
 #
 # 3. **ACI** handles distribution shift by online-updating the miscoverage rate
-#    $\hat{\alpha}_t$ — but "online" has to mean what the trading problem allows.
+#    $\hat{\alpha}_t$, and "online" has to mean what the trading problem allows.
 #    On a panel, one $\hat{\alpha}_t$ serves every asset at a decision timestamp,
-#    and feedback waits for the label to resolve (21 sessions here). Updating per
-#    row instead would let one ETF's realized return set another's interval at the
-#    same timestamp, and would consume outcomes three weeks before they exist. The
-#    resulting coverage would be a report on information the method never had.
+#    and feedback waits for the label to resolve (21 sessions here). Both rules
+#    follow from what is known when the interval is priced: at a timestamp no
+#    asset's outcome has been observed yet, and a 21-session label does not exist
+#    for three weeks. A per-row update prices one ETF's interval from another's
+#    realized return, and its coverage reports on information the method never had.
 #
-# 4. All three methods land near the 90% target and all three under-cover, because
-#    walk-forward evaluation breaks the exchangeability the marginal guarantee
-#    assumes. **But the marginal number is the least interesting one here.**
+# 4. All three methods land near the target marginally and all three under-cover,
+#    because walk-forward evaluation breaks the exchangeability the marginal
+#    guarantee assumes. **The marginal number is the least interesting one here.**
 #    Stratified by volatility tercile, every method covers almost everything on
 #    quiet days and misses badly on volatile ones. A method can hit its marginal
-#    target and still fail, in the same direction, in the only regime where the
-#    interval was load-bearing. Always check stratified coverage; the fix is
+#    target and still fail, in the same direction, in the regime where the width of
+#    the interval decides the position. Always check stratified coverage; the fix is
 #    regime-conditional calibration, not a different conformal variant.
 #
 # 5. **Connection to portfolio construction**: Prediction intervals map directly
