@@ -18,71 +18,73 @@
 #
 # **Chapter 15: Causal Estimation with ML**
 # **Docker image**: `ml4t`
-# **Section Reference**: See Section 15.1 (Table 15.1) for library overview
+# **Section Reference**: See Section 15.1 (Table 15.1) for the method selection guide
 #
 # ## Purpose
-# This notebook helps practitioners choose the right causal inference library
-# for their specific problem. It provides a decision framework and demonstrates
-# basic usage patterns.
+# Chapter 15 uses five Python libraries, and they do not compete with one another.
+# This notebook maps a causal question to the library that answers it, and shows the
+# API each one expects: what it takes as treatment, outcome, controls and graph.
 #
-# ## IMPORTANT: This is NOT a Fair Comparison
+# ## Why the estimates below are not a benchmark
 #
-# **Why direct comparison is problematic:**
-# 1. **Different problem domains**: Effect estimation (EconML, DoWhy, CausalML)
-#    vs. structure discovery (Tigramite, causal-learn) solve different problems
-# 2. **Different treatment types**: EconML/DoWhy handle continuous treatments;
-#    CausalML is optimized for binary treatments
-# 3. **Different estimands**: When we binarize continuous treatment for CausalML,
-#    we change what we're estimating (effect of "high vs low" not marginal effect)
-# 4. **Different assumptions**: Each library makes different assumptions about
-#    data structure, confounding, and causal relationships
+# The same synthetic sample runs through several libraries, which invites a ranking.
+# Four differences prevent one:
 #
-# **What this notebook provides:**
-# - Decision framework for library selection
-# - API usage examples for each library
-# - Discussion of when each tool is appropriate
+# 1. **Different problems.** Effect estimation (EconML, DoWhy, CausalML) starts from a
+#    causal structure and quantifies an effect. Structure discovery (Tigramite,
+#    causal-learn) starts from data and proposes a structure.
+# 2. **Different treatment types.** EconML and DoWhy handle a continuous treatment
+#    directly; CausalML is built for binary and discrete interventions.
+# 3. **Different estimands.** The **estimand** is the quantity the analysis targets.
+#    Binarizing a continuous treatment to suit CausalML changes the estimand from a
+#    marginal effect to a contrast between a high and a low group.
+# 4. **Different assumptions.** Each library asks for a different account of how the
+#    data were generated and what confounding remains.
 #
 # ## Learning Objectives
 # After completing this notebook, you will be able to:
-# - LO1: Select the appropriate causal library for your specific problem
-# - LO2: Apply the decision framework to match methods to questions
-# - LO3: Understand the API patterns for each major library
-# - LO4: Recognize when different libraries solve fundamentally different problems
+# - LO1: Match a causal question to the library that answers it
+# - LO2: Apply the selection guide in Table 15.1 to your own problem
+# - LO3: Read the API each library expects, and which argument carries the controls
+# - LO4: Separate effect estimation from structure discovery
 #
 # ## Cross-References
-# - **Upstream**: None (uses synthetic data for illustration)
-# - **Downstream**: Each library has dedicated notebooks for deeper coverage
+# - **Upstream**: None (synthetic data with a known data-generating process)
+# - **Downstream**: Each library has a notebook of its own
 #   - EconML: [`03_econml_dml`](03_econml_dml.ipynb), [`04_dml_crypto_regime`](04_dml_crypto_regime.ipynb)
 #   - DoWhy: [`02_dowhy_causal_graph`](02_dowhy_causal_graph.ipynb)
 #   - BSTS: [`06_fed_announcement_bsts`](06_fed_announcement_bsts.ipynb)
 #   - Tigramite: [`07_tigramite_time_series`](07_tigramite_time_series.ipynb)
-#   - Discovery: [`08_neural_causal_discovery`](08_neural_causal_discovery.ipynb)
+#   - causal-learn: [`08_neural_causal_discovery`](08_neural_causal_discovery.ipynb)
 #
 # ## Libraries Covered
-# **Effect Estimation** (given causal structure):
-# 1. **EconML** (Microsoft) - DML, metalearners, continuous treatment
-# 2. **DoWhy** (Microsoft/Amazon) - DAG specification, refutation tests
+# **Effect estimation**, given a causal structure:
+# 1. **EconML** (Microsoft) - double machine learning (DML) and metalearners for a
+#    continuous or binary treatment
+# 2. **DoWhy** (Microsoft/Amazon) - explicit graph, identification, refutation tests
 #
-# **Structure Discovery** (learn causal graph):
-# 3. **Tigramite** - Time series causal discovery (PCMCI)
-# 4. **causal-learn** (CMU) - Cross-sectional discovery (PC/FCI/GES)
+# **Structure discovery**, to propose a causal graph:
+# 3. **Tigramite** - PCMCI for time series
+# 4. **causal-learn** (CMU) - PC, FCI, GES, LiNGAM and Granger, for contemporaneous
+#    and lagged structure
 #
-# **Also mentioned**: CausalML (binary treatment, not used in this chapter),
-# tfp-causalimpact (BSTS event studies, demonstrated in `06_fed_announcement_bsts`)
+# **Also referenced**: CausalML (binary treatment, not used in this chapter),
+# tfp-causalimpact (Bayesian structural time series for event studies, used in
+# `06_fed_announcement_bsts`)
 #
-# **Prerequisites**: None (uses synthetic data for illustration)
+# **Prerequisites**: None
 #
 # ## Causal Design Contract
 #
 # | Element                   | This notebook                                                                          |
 # |---------------------------|----------------------------------------------------------------------------------------|
-# | Unit                      | Synthetic observation (1 of 1,000 i.i.d. rows generated from a known DGP)              |
-# | Treatment                 | `momentum` (continuous), partially driven by `volatility` and `regime`                 |
-# | Outcome                   | `returns` (continuous), driven by treatment and confounders with known true ATE = 0.02 |
+# | Unit                      | Synthetic observation (1 of 1,000 i.i.d. rows generated from a known DGP)               |
+# | Treatment                 | `momentum` (continuous), partly driven by `volatility` and `regime`                    |
+# | Outcome                   | `returns` (continuous), driven by treatment and confounders; the true average treatment effect (ATE) is bound to `TRUE_ATE` below |
 # | Controls (W in EconML)    | `volatility`, `regime` - both confound the treatment-outcome path                      |
-# | Effect modifiers (X)      | None (this NB targets a constant ATE; later NBs use X for regime heterogeneity)        |
-# | Identification assumption | The synthetic DGP is fully observed - there is no unobserved confounding by design     |
-# | Main failure mode         | None in identification; this is an API smoke test, not an empirical finding            |
+# | Effect modifiers (X)      | None; the target here is a constant ATE, and `04_dml_crypto_regime` uses X for regime heterogeneity |
+# | Identification assumption | The synthetic DGP is fully observed, so there is no unobserved confounding by design    |
+# | Main failure mode         | None in identification; this is an API smoke test, not an empirical finding             |
 
 # %% [markdown]
 # ## Setup
@@ -91,6 +93,7 @@
 """Causal Inference Library Decision Guide - choose the right causal library for your problem."""
 
 import warnings
+from importlib.metadata import PackageNotFoundError, version
 
 import networkx as nx
 import numpy as np
@@ -98,10 +101,14 @@ import pandas as pd
 
 from utils.reproducibility import set_global_seeds
 
-warnings.filterwarnings("ignore")
+# Two third-party import-time warnings, each silenced by category and module: DoWhy 0.14
+# compiles regexes and docstrings with unescaped backslashes, and pydot calls pyparsing
+# methods pyparsing has renamed. Convergence and numerical warnings stay visible.
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=".*dowhy")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pydot")
 
-# networkx 3.x removed nx.algorithms.d_separated; DoWhy 0.12 still calls it.
-# Monkey-patch with the renamed replacement before importing DoWhy.
+# networkx 3.x removed nx.algorithms.d_separated; DoWhy 0.14 still calls it.
+# Bind the renamed replacement to the old name before importing DoWhy.
 if not hasattr(nx.algorithms, "d_separated"):
     nx.algorithms.d_separated = nx.d_separation.is_d_separator
 
@@ -116,23 +123,31 @@ rng = np.random.default_rng(SEED)
 
 # %% [markdown]
 # ## Check Library Availability
+#
+# A library counts as available when it imports. The version comes from the installed
+# distribution metadata rather than from the package itself, because three of these five
+# packages expose no version attribute.
 
 # %%
-libraries = {}
 lib_checks = [
-    ("EconML", "econml"),
-    ("DoWhy", "dowhy"),
-    ("CausalML", "causalml"),
-    ("Tigramite", "tigramite"),
-    ("causal-learn", "causallearn"),
+    ("EconML", "econml", "econml"),
+    ("DoWhy", "dowhy", "dowhy"),
+    ("CausalML", "causalml", "causalml"),
+    ("Tigramite", "tigramite", "tigramite"),
+    ("causal-learn", "causallearn", "causal-learn"),
 ]
 
-for name, module_name in lib_checks:
+libraries = {}
+for name, module_name, dist_name in lib_checks:
     try:
-        mod = __import__(module_name)
-        libraries[name] = getattr(mod, "__version__", "installed")
+        __import__(module_name)
     except ImportError:
         libraries[name] = None
+        continue
+    try:
+        libraries[name] = version(dist_name)
+    except PackageNotFoundError:
+        libraries[name] = "installed"
 
 status_df = pd.DataFrame(
     [
@@ -145,23 +160,23 @@ status_df
 # %% [markdown]
 # ## Generate Common Demonstration Data
 #
-# We use one synthetic dataset across all libraries to illustrate comparable
-# API patterns. This is not a benchmark - the goal is to show how each library
-# expresses a causal question, not to rank estimator accuracy on this sample.
+# One synthetic dataset runs through every library so the API calls sit side by side.
+# `volatility` and `regime` drive both the treatment and the outcome, which makes them
+# confounders: an unadjusted regression of `returns` on `momentum` picks up their effect
+# as well as the treatment's.
 
 # %%
-# Generate synthetic data with known causal structure
 n = 1000
 
 # Confounders
 volatility = rng.exponential(0.02, n)
 regime = rng.binomial(1, 0.6, n)
 
-# Treatment (momentum) - depends on confounders
+# Treatment (momentum) - depends on the confounders
 momentum = 0.5 * regime - 2 * volatility + rng.normal(0, 0.1, n)
 
-# Outcome (returns) - depends on confounders AND treatment
-TRUE_ATE = 0.02  # Known true effect
+# Outcome (returns) - depends on the confounders and on the treatment
+TRUE_ATE = 0.02  # the coefficient on momentum, which every estimator below targets
 returns = TRUE_ATE * momentum + 0.1 * regime - 3 * volatility + rng.normal(0, 0.02, n)
 
 df = pd.DataFrame(
@@ -177,66 +192,73 @@ print(f"Test data: {df.shape[0]:,} obs, true ATE = {TRUE_ATE}")
 df.head()
 
 # %% [markdown]
+# The treatment carries very little independent variation: once `volatility` and `regime`
+# are partialled out, what is left of `momentum` is its own noise term. That, not the size
+# of the effect, is what sets how precisely any of these estimators can measure the ATE,
+# which is why each estimate below is reported with an interval.
+
+# %% [markdown]
 # ## 1. EconML (Microsoft)
 #
-# **Strengths**:
-# - Best for DML and metalearners
-# - Production-ready, well-documented
-# - Supports heterogeneous treatment effects (CATE)
+# EconML fits **double machine learning** (DML): one model predicts the outcome from the
+# controls, another predicts the treatment from the controls, and the treatment effect is
+# estimated from what is left over in both. It takes a continuous or a binary treatment and
+# can model heterogeneous effects, so it is the tool when the question is how large an
+# effect is and how it varies.
 #
-# **Best for**: Continuous treatment effects with rich confounders
+# Use it when the adjustment set is known but a graph is not written down.
 
 # %%
 if libraries["EconML"]:
     from econml.dml import LinearDML
     from sklearn.ensemble import GradientBoostingRegressor
 
-    Y = df["returns"].values.reshape(-1, 1)
-    T = df["momentum"].values.reshape(-1, 1)
-    W = df[["volatility", "regime"]].values  # Controls used for residualization
+    Y = df["returns"].to_numpy()
+    T = df["momentum"].to_numpy()
+    W = df[["volatility", "regime"]].to_numpy()  # controls used for residualization
 
     dml = LinearDML(
-        model_y=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=42),
-        model_t=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=42),
+        model_y=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=SEED),
+        model_t=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=SEED),
         cv=3,
-        random_state=42,
+        random_state=SEED,
     )
     dml.fit(Y, T, W=W)
 
     econml_ate = float(dml.ate())
-    print(
-        f"EconML ATE: {econml_ate:.6f} (true: {TRUE_ATE}, error: {abs(econml_ate - TRUE_ATE):.6f})"
-    )
+    econml_lo, econml_hi = (float(b) for b in dml.ate_interval(alpha=0.05))
+    print(f"EconML ATE: {econml_ate:.6f}  95% CI [{econml_lo:.6f}, {econml_hi:.6f}]")
 else:
-    econml_ate = None
+    econml_ate = econml_lo = econml_hi = None
     print("EconML not available")
 
 # %% [markdown]
-# Confounders enter EconML's DML interface as `W` (controls used for
-# residualization), not `X` (effect modifiers used to model treatment-effect
-# heterogeneity). For a simple adjusted ATE the distinction is invisible,
-# but it matters as soon as the question is whether the effect varies across
-# regimes - `04_dml_crypto_regime` demonstrates the `X` role.
+# Confounders enter EconML's DML interface as `W`, the controls used for residualization,
+# not as `X`, the effect modifiers that model treatment-effect heterogeneity. For a single
+# adjusted ATE the distinction does not change the answer, but it does as soon as the
+# question is whether the effect differs across regimes; `04_dml_crypto_regime` uses the
+# `X` role.
 #
-# This example uses i.i.d. cross-validation (`cv=3`) on synthetic data. For
-# time-series applications, temporal splitting is required to avoid lookahead
-# bias - see `03_econml_dml` for a walk-forward implementation.
+# `cv=3` splits the sample at random, which is valid here because the rows are i.i.d. by
+# construction. A time series needs splits that respect the ordering, or the outcome model
+# learns from the future; `03_econml_dml` walks forward instead.
 
 # %% [markdown]
 # ## 2. DoWhy (Microsoft/Amazon)
 #
-# **Strengths**:
-# - Forces explicit DAG specification
-# - Built-in refutation tests
-# - Good for communicating assumptions
+# DoWhy asks for the causal graph up front, derives an estimand from it, and only then
+# estimates. Writing the graph down is the point: it makes the adjustment set a consequence
+# of stated assumptions rather than a choice, and it gives the refutation tests something to
+# perturb.
 #
-# **Best for**: When you want explicit causal assumptions and sensitivity analysis
+# Use it when the assumptions have to be visible and testable, which is most of the time in
+# a research setting.
 
 # %%
 if libraries["DoWhy"]:
     from dowhy import CausalModel
 
-    # Specify causal graph
+    # Specify the causal graph
     causal_graph = """
     digraph {
         volatility -> momentum;
@@ -247,7 +269,6 @@ if libraries["DoWhy"]:
     }
     """
 
-    # Create model
     model = CausalModel(
         data=df,
         treatment="momentum",
@@ -255,55 +276,54 @@ if libraries["DoWhy"]:
         graph=causal_graph,
     )
 
-    # Identify and estimate
     identified_estimand = model.identify_effect()
     estimate = model.estimate_effect(
         identified_estimand,
         method_name="backdoor.linear_regression",
     )
 
-    dowhy_ate = estimate.value
-    print(f"DoWhy ATE: {dowhy_ate:.6f} (true: {TRUE_ATE}, error: {abs(dowhy_ate - TRUE_ATE):.6f})")
+    dowhy_ate = float(estimate.value)
+    dowhy_lo, dowhy_hi = (float(b) for b in np.asarray(estimate.get_confidence_intervals()).ravel())
+    print(f"DoWhy ATE: {dowhy_ate:.6f}  95% CI [{dowhy_lo:.6f}, {dowhy_hi:.6f}]")
 else:
-    dowhy_ate = None
+    dowhy_ate = dowhy_lo = dowhy_hi = None
     print("DoWhy not available")
 
 # %% [markdown]
-# ### Estimand vs. Estimator
+# ### Estimand vs. estimator
 #
-# A key lesson: **different libraries can target different estimands**, even
-# on the same data. Comparing estimates is only valid when they answer the
-# same causal question.
+# The **estimand** is the quantity being targeted; the **estimator** is the procedure that
+# produces a number for it. Two libraries can report different numbers because they use
+# different estimators for the same estimand, or because they target different estimands
+# altogether, and only the first of those is a question about accuracy.
 #
 # | Estimand | Description | Libraries |
 # |---|---|---|
-# | $E[Y \mid do(T = t+1)] - E[Y \mid do(T = t)]$ | Marginal effect of continuous treatment | EconML, DoWhy |
-# | $E[Y \mid do(T = 1)] - E[Y \mid do(T = 0)]$ | Binary treatment effect (high vs. low) | CausalML |
+# | $E[Y \mid do(T = t+1)] - E[Y \mid do(T = t)]$ | Marginal effect of a continuous treatment | EconML, DoWhy |
+# | $E[Y \mid do(T = 1)] - E[Y \mid do(T = 0)]$ | Binary treatment effect, high group against low | CausalML |
 #
-# A sophisticated estimator cannot rescue an identification failure, and
-# comparing estimates across different estimands is meaningless.
+# If the estimand is not identified from the data at hand, no estimator recovers it. A
+# flexible model fitted to a confounded comparison returns a precise answer to the wrong
+# question.
 
 # %% [markdown]
-# ## 3. Other Libraries (Not Covered in This Chapter)
+# ## 3. Other Libraries Referenced in the Chapter
 #
-# **CausalML** (Uber) is strongest for uplift-style treatment-effect
-# estimation with S/T/X/R meta-learners, especially binary or discrete
-# interventions common in experiments and marketing applications. Continuous
-# treatments are possible, but the library's strongest support is for the
-# binary case. This chapter's main trading examples use continuous treatments
-# and event-study designs, so CausalML is not in the critical path; see the
-# [CausalML documentation](https://causalml.readthedocs.io/) for uplift and
-# meta-learner applications.
+# **CausalML** (Uber) targets uplift with S-, T-, X- and R-learners, and its support is
+# strongest for the binary or discrete interventions typical of experiments and marketing.
+# Continuous treatments are possible but are not where the library is aimed. Chapter 15
+# works with continuous treatments and event studies, so CausalML appears in the selection
+# guide without a worked example; the
+# [CausalML documentation](https://causalml.readthedocs.io/) covers the uplift setting.
 #
-# **tfp-causalimpact** (BSTS) is omitted here because it requires
-# time-series structure incompatible with this cross-sectional test set.
-# See `06_fed_announcement_bsts` for a full event-study demonstration.
+# **tfp-causalimpact** fits a Bayesian structural time-series model and needs a pre-period
+# of the outcome series to build a counterfactual, which the cross-sectional sample here
+# does not provide. `06_fed_announcement_bsts` runs it on a Fed announcement.
 
 # %% [markdown]
 # ## 4. Library Comparison Summary
 #
-# The table below summarizes all libraries referenced in this chapter, with
-# pointers to the dedicated notebooks where each is demonstrated in depth.
+# The table lists every library the chapter references and where each one is used.
 
 
 # %%
@@ -314,14 +334,14 @@ def build_library_comparison():
             "Library": "EconML",
             "Use": "Effect estimation",
             "Treatment": "Continuous/Binary",
-            "Key Feature": "DML, Metalearners",
-            "Notebook": "03_econml_dml",
+            "Key Feature": "DML, metalearners",
+            "Notebook": "03_econml_dml, 04_dml_crypto_regime",
         },
         {
             "Library": "DoWhy",
             "Use": "Effect estimation",
             "Treatment": "Continuous/Binary",
-            "Key Feature": "Refutation tests",
+            "Key Feature": "Graph, identification, refutation",
             "Notebook": "02_dowhy_causal_graph",
         },
         {
@@ -329,7 +349,7 @@ def build_library_comparison():
             "Use": "Uplift/CATE",
             "Treatment": "Binary/discrete (focus)",
             "Key Feature": "S/T/X/R learners",
-            "Notebook": "(not demonstrated in chapter)",
+            "Notebook": "(not used in this chapter)",
         },
         {
             "Library": "tfp-causalimpact",
@@ -340,14 +360,14 @@ def build_library_comparison():
         },
         {
             "Library": "Tigramite",
-            "Use": "TS discovery",
+            "Use": "Time-series discovery",
             "Treatment": "N/A",
-            "Key Feature": "PCMCI algorithm",
+            "Key Feature": "PCMCI",
             "Notebook": "07_tigramite_time_series",
         },
         {
             "Library": "causal-learn",
-            "Use": "Causal discovery",
+            "Use": "Discovery",
             "Treatment": "N/A",
             "Key Feature": "PC, FCI, GES, LiNGAM, Granger",
             "Notebook": "08_neural_causal_discovery",
@@ -360,103 +380,129 @@ comparison_df = build_library_comparison()
 comparison_df
 
 # %% [markdown]
-# Tigramite and causal-learn solve **discovery** (learning causal graphs),
-# not **estimation** (quantifying effects). These are different problem domains:
-# discovery is often a prerequisite to estimation, not an alternative.
+# Tigramite and causal-learn learn a graph; EconML and DoWhy quantify an effect once a
+# graph or an adjustment set is settled. Discovery therefore comes before estimation rather
+# than replacing it, and its output is a set of hypotheses to test rather than a structure
+# to trust.
+#
+# Two of the chapter's discovery methods are not library calls. NOTEARS, which learns a
+# contemporaneous graph by continuous optimization under a differentiable acyclicity
+# constraint, is implemented directly in `08_neural_causal_discovery` following Zheng et al.
+# (2018); causal-learn does not ship it. Granger causality serves there as a predictive
+# baseline. causal-learn supplies the VAR-LiNGAM fit, which recovers lagged and
+# contemporaneous structure from non-Gaussian residuals.
 
 # %% [markdown]
-# ## 5. Decision Framework
+# ## 5. Selection Guide
 #
-# **Start: What is your causal question?**
+# Section 15.1 arranges the choice as a table, reproduced here. The first question is
+# whether the causal graph is known, because that decides whether the problem is estimation
+# or discovery.
 #
-# 1. **"What is the effect of treatment T on outcome Y?"**
-#    - Do you have a DAG?
-#      - **Yes**: DoWhy (specify graph, get sensitivity analysis)
-#      - **No**: What is your treatment type?
-#        - Continuous (e.g., momentum score): EconML DML
-#        - Binary (e.g., treated/control): CausalML or EconML
+# | Graph known? | Treatment type | Method | Library |
+# |---|---|---|---|
+# | Yes | Binary or continuous | Backdoor adjustment | DoWhy |
+# | Yes | Continuous | DML | EconML |
+# | Yes | Binary, at a point in time | BSTS | tfp-causalimpact |
+# | Yes | Binary or discrete, uplift | Metalearners | CausalML |
+# | No | Not applicable | PCMCI | Tigramite |
+# | No | Not applicable | VAR-LiNGAM | causal-learn |
+# | No | Not applicable | NOTEARS | implemented in `08_neural_causal_discovery` |
 #
-# 2. **"What is the causal structure among variables?"**
-#    - Time series: Tigramite (PCMCI)
-#    - Cross-sectional: causal-learn (PC/FCI)
+# Reading the top half: DoWhy and EconML both need an adjustment set that identifies the
+# effect, and they differ in how it is supplied. DoWhy takes a graph and derives the
+# adjustment set from it; EconML takes the controls directly and fits them with machine
+# learning models. Neither escapes the identification assumption, so "no graph" is a reason to
+# run discovery first, not a reason to prefer one estimator over the other.
 #
-# 3. **"What was the impact of a discrete event?"**
-#    - tfp-causalimpact (BSTS)
-#
-# **Quick Reference:**
-#
-# | Scenario | Recommended Library |
-# |---|---|
-# | Factor causal effect | EconML (LinearDML) |
-# | Event study | tfp-causalimpact |
-# | Explicit DAG needed | DoWhy |
-# | A/B test analysis | CausalML |
-# | Discover TS graph | Tigramite |
-# | Discover CS graph | causal-learn |
+# Reading the bottom half: the split is contemporaneous against lagged structure, not
+# cross-sectional against time series. PCMCI and VAR-LiNGAM both read time-lagged
+# dependence, and `08_neural_causal_discovery` runs them on the same universe; NOTEARS
+# targets structure within a single cross-section.
 
 # %% [markdown]
-# ## 6. Effect Estimates (With Caveats)
+# ## 6. Effect Estimates, and What They Support
 #
-# **Only comparable estimates**: EconML and DoWhy estimate the same quantity
-# (marginal ATE for continuous treatment). CausalML estimates a different
-# quantity (binary treatment effect) and should NOT be compared numerically.
+# EconML and DoWhy target the same estimand here, so their estimates are comparable with
+# each other and with the known true ATE. Each is reported with a confidence interval, and
+# the last column records whether that interval covers the true value.
 
 # %%
-rows = [{"Method": "True ATE", "Estimate": TRUE_ATE, "Error": 0.0}]
+rows = [
+    {
+        "Method": "True ATE",
+        "Estimate": TRUE_ATE,
+        "95% CI": "-",
+        "Abs. error": 0.0,
+        "Covers true ATE": "-",
+    }
+]
 if econml_ate is not None:
     rows.append(
-        {"Method": "EconML (DML)", "Estimate": econml_ate, "Error": abs(econml_ate - TRUE_ATE)}
+        {
+            "Method": "EconML (DML)",
+            "Estimate": econml_ate,
+            "95% CI": f"[{econml_lo:.4f}, {econml_hi:.4f}]",
+            "Abs. error": abs(econml_ate - TRUE_ATE),
+            "Covers true ATE": bool(econml_lo <= TRUE_ATE <= econml_hi),
+        }
     )
 if dowhy_ate is not None:
     rows.append(
-        {"Method": "DoWhy (Backdoor)", "Estimate": dowhy_ate, "Error": abs(dowhy_ate - TRUE_ATE)}
+        {
+            "Method": "DoWhy (Backdoor)",
+            "Estimate": dowhy_ate,
+            "95% CI": f"[{dowhy_lo:.4f}, {dowhy_hi:.4f}]",
+            "Abs. error": abs(dowhy_ate - TRUE_ATE),
+            "Covers true ATE": bool(dowhy_lo <= TRUE_ATE <= dowhy_hi),
+        }
     )
 
 estimates_df = pd.DataFrame(rows).set_index("Method")
 estimates_df
 
 # %% [markdown]
-# Both EconML and DoWhy recover the sign and order of magnitude of the true
-# ATE, but each overestimates the marginal effect on this small synthetic
-# sample - recovering an effect of around 0.030 against a true value of
-# 0.020. The point is that the APIs work as advertised, not that estimator
-# accuracy is comparable across libraries on a single 1,000-row toy sample.
-# CausalML estimates a binary treatment effect and is on a different scale.
+# Read the coverage column before the error column. The absolute error mixes sampling noise
+# with bias and a single estimate cannot separate the two, so a gap between the estimate and
+# the true ATE is not by itself evidence that the adjustment failed. The interval is what the
+# estimator says about its own precision: an estimate whose interval covers the true value is
+# consistent with it, however far the point estimate sits away, and one whose interval
+# excludes it points at something the adjustment did not remove.
+#
+# Coverage on one sample is also the most these two rows can support. They are fitted to the
+# same 1,000 observations, so their errors move together, and a single draw ranks nothing.
+# CausalML would answer a different question on a binarized treatment, so its number is not
+# comparable and the table leaves it out.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# ### Library Selection Principles
+# ### Choosing a library
 #
-# 1. **Match library to question type**:
-#    - Effect estimation (given graph): EconML, DoWhy, CausalML
-#    - Structure discovery (learn graph): Tigramite, causal-learn
+# 1. **The question decides the family.** Effect estimation given a structure: EconML,
+#    DoWhy, CausalML. Structure discovery: Tigramite, causal-learn.
+# 2. **The treatment decides the tool within the family.** Continuous: EconML DML or DoWhy.
+#    Binary or discrete uplift: CausalML, or EconML. A single dated event: BSTS.
+# 3. **The data's shape decides the discovery method.** Lagged dependence across a
+#    multivariate series: PCMCI or VAR-LiNGAM. Contemporaneous structure within a
+#    cross-section: NOTEARS.
 #
-# 2. **Match library to treatment type**:
-#    - Continuous treatment: EconML (DML), DoWhy
-#    - Binary treatment: CausalML (uplift), EconML (also works)
+# ### Methodological notes
 #
-# 3. **Match library to data structure**:
-#    - Time series: Tigramite (PCMCI) for discovery
-#    - Cross-sectional: causal-learn (PC/FCI) for discovery
+# - **Different estimands do not compare.** An ATE from a continuous treatment and an
+#   uplift estimate from a binarized one answer different questions.
+# - **Discovery precedes estimation.** A discovered graph is a hypothesis; the estimator
+#   that follows inherits whatever the discovery step got wrong.
+# - **The two combine.** Specifying the graph in DoWhy and estimating with EconML is a
+#   common pattern, and DoWhy can call EconML estimators directly.
 #
-# ### Important Methodological Notes
+# ### Going deeper
 #
-# - **Different libraries, different estimands**: Don't compare ATE estimates
-#   across libraries that solve different problems
-# - **Discovery vs estimation**: Structure discovery (Tigramite, causal-learn)
-#   is a prerequisite to effect estimation, not an alternative
-# - **Complementary use**: DoWhy refutation + EconML estimation is a common pattern
-#
-# ### For Deeper Coverage
-#
-# This notebook provides API examples only. For methodologically rigorous
-# applications, see the dedicated notebooks:
+# This notebook shows API shape. The notebooks that follow add the parts it skips: temporal
+# splits, standard errors that account for panel structure, refutation tests and sensitivity
+# analysis.
 # - **DML**: [`03_econml_dml`](03_econml_dml.ipynb), [`04_dml_crypto_regime`](04_dml_crypto_regime.ipynb)
 # - **BSTS event studies**: [`06_fed_announcement_bsts`](06_fed_announcement_bsts.ipynb)
 # - **DoWhy refutation**: [`02_dowhy_causal_graph`](02_dowhy_causal_graph.ipynb)
-# - **Time series discovery**: [`07_tigramite_time_series`](07_tigramite_time_series.ipynb)
-# - **Neural discovery**: [`08_neural_causal_discovery`](08_neural_causal_discovery.ipynb)
-#
-# These dedicated notebooks include proper train/test splits, standard errors,
-# refutation tests, and sensitivity analysis that this comparison skips.
+# - **Time-series discovery**: [`07_tigramite_time_series`](07_tigramite_time_series.ipynb)
+# - **NOTEARS and VAR-LiNGAM**: [`08_neural_causal_discovery`](08_neural_causal_discovery.ipynb)
