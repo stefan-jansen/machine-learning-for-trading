@@ -705,9 +705,9 @@ display(
 # the thresholded graph counted above, which is dense enough that a shock starting
 # anywhere inside its connected part covers the same assets. What the starting node
 # changes is the path, and the path is what sets the size of each impact: an
-# impact is the product of correlations along the route from the source, halved at
-# each hop by the attenuation, so two shocks that touch the same 83 assets deliver
-# very different amounts to them.
+# impact is the initial shock multiplied by the correlations along the route that
+# reached the asset and by the attenuation at every hop, so two shocks that touch
+# the same assets deliver very different amounts to them.
 #
 # That makes the scenario difference a statement about impact magnitudes under one
 # fixed weight vector, not about the weights. The weights are the other comparison,
