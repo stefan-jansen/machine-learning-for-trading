@@ -103,10 +103,12 @@ WITH snapshot ORDER BY snapshot.extraction_time DESC LIMIT 1
 MATCH (company:Company)-[r]->(target)
 WHERE r.run_id = snapshot.run_id
   AND type(r) IN ['APPOINTED', 'ACQUIRED', 'ANNOUNCED', 'VALUED_AT']
+  AND r.event_id IS NOT NULL
   AND r.event_time IS NOT NULL
   AND r.public_time IS NOT NULL
   AND r.extraction_time IS NOT NULL
-RETURN company.name AS subject,
+RETURN r.event_id AS event_id,
+       company.name AS subject,
        type(r) AS relation,
        coalesce(target.name, target.description, target.value_text) AS object,
        r.event_time AS event_time,
@@ -219,7 +221,7 @@ events = events.with_columns(
         (pl.col("extraction_time") - pl.col("public_time"))
         .dt.total_days()
         .alias("extraction_lag_days"),
-        (pl.col("subject") + "|" + pl.col("relation") + "|" + pl.col("object")).alias("edge_key"),
+        (pl.col("subject") + "|" + pl.col("relation") + "|" + pl.col("object")).alias("triple"),
     ]
 ).with_columns((pl.col("disclosure_lag_days") < 0).alias("post_disclosure_effective_date"))
 
@@ -237,6 +239,16 @@ lag_summary = events.select(
 )
 print("Lag summary:")
 print(lag_summary)
+
+# An edge's identity is its event_id, which is what 08 merges on, so two filings
+# reporting the same triple are two edges. The gap between the counts is how often
+# that happens here.
+if events["event_id"].n_unique() != events.height:
+    raise RuntimeError("two edges share an event_id, so the graph key is not unique")
+print(
+    f"Edges: {events.height} events over {events['triple'].n_unique()} distinct "
+    f"subject-relation-object triples"
+)
 
 # %% [markdown]
 # ### Temporal Event Distribution
@@ -396,11 +408,14 @@ print(snapshots)
 # Compare what the graph holds at the end of each window with what it held at the
 # end of the previous one.
 #
-# The windows are disjoint and every 8-K disclosure falls in exactly one, so
-# comparing window contents to window contents makes every edge an addition and
-# every previous edge a removal. Their union is their sum, and the ratio is one
-# for every window of every input. An earlier version reported that number as
-# `relationship_churn` and it was a property of the partition, not of the graph.
+# The windows partition the events: each has one disclosure date, so it falls in
+# exactly one window. Comparing window contents to window contents therefore makes
+# every edge an addition and every previous edge a removal, their union is their
+# sum, and the ratio is one for every window of every input. An earlier version
+# reported that number as `relationship_churn`, and it was a property of the
+# partition rather than of the graph. It also keyed on the triple rather than the
+# event, which does not partition, so the constant it produced was not even the
+# constant its own construction implied.
 #
 # The comparison that varies is between cumulative states: what a reader standing
 # at each window end can see. Removals are still zero, because a disclosure is not
@@ -418,7 +433,7 @@ def graph_growth(df: pl.DataFrame, window_days: int) -> pl.DataFrame:
     previous_edges: set[str] = set()
     for row in snapshots.iter_rows(named=True):
         visible_so_far = df.filter(pl.col("public_time") < row["end"])
-        current_edges = set(visible_so_far["edge_key"].to_list())
+        current_edges = set(visible_so_far["event_id"].to_list())
         added = current_edges - previous_edges
         dropped = previous_edges - current_edges
         if dropped:
@@ -432,6 +447,7 @@ def graph_growth(df: pl.DataFrame, window_days: int) -> pl.DataFrame:
                 "start": row["start"],
                 "window_edges": row["n_edges"],
                 "cumulative_edges": len(current_edges),
+                "cumulative_triples": visible_so_far["triple"].n_unique(),
                 "added_edges": len(added),
                 "growth_rate": len(added) / len(previous_edges) if previous_edges else None,
             }
