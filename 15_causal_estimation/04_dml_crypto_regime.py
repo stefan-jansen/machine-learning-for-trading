@@ -348,12 +348,21 @@ dml_t_stat = dml_result["t_stat_hac"]
 Y_res = dml_result.get("Y_res", np.zeros_like(Y))
 T_res = dml_result.get("T_res", np.zeros_like(T))
 
+# What is left of the treatment once the controls have had it. The second stage regresses
+# the residualized outcome on this, so its variance is the estimator's whole denominator.
+cross_fitted = np.isfinite(T_res) & (T_res != 0)
+treatment_residual_share = float(T_res[cross_fitted].var() / T[cross_fitted].var())
+
 print(f"\nDML Results (walk-forward CV with {EMBARGO_PERIODS}-bar embargo):")
 print(f"  DML effect: {dml_effect:.4f}")
 print(f"  SE (IID): {dml_se_iid:.4f}")
 print(f"  SE (Driscoll-Kraay): {dml_se_hac:.4f}")
 print(f"  SE inflation: {dml_se_hac / dml_se_iid:.2f}x")
 print(f"  t-stat (Driscoll-Kraay): {dml_t_stat:.2f}")
+print(
+    f"  Treatment variance surviving the controls: {treatment_residual_share:.1%} "
+    f"({cross_fitted.sum():,} cross-fitted rows)"
+)
 
 # %% [markdown]
 # ## 6. Compare Naive vs DML
@@ -522,28 +531,41 @@ else:
 print(f"  -> |t| on the interaction: {abs(t_diff):.2f}")
 
 # %% [markdown]
-# ## 8. EconML Comparison (if available)
+# ## 8. EconML Comparison
+#
+# `LinearDML` cross-fits on whatever folds it is handed. `WalkForwardCV` counts its
+# `label_horizon` and embargo in the positions it receives, so fed the panel's rows it would
+# purge a fraction of one bar and let a fold boundary cut through a cross-section. The folds
+# below are built over the ordered bars and expanded back to rows by membership, which is
+# what `manual_dml_timeseries` does internally once it is given `groups`.
 
 # %%
 print("\nEconML LinearDML Comparison...")
 
-T_reshaped = T.reshape(-1, 1)
-
-cv = WalkForwardCV(
+n_bars = int(time_codes.max()) + 1
+bar_splitter = WalkForwardCV(
     n_splits=CV_FOLDS,
     label_horizon=EMBARGO_PERIODS,
     embargo_pct=EMBARGO_PCT,
     expanding=True,
 )
+panel_folds = [
+    (
+        np.flatnonzero(np.isin(time_codes, train_bars)),
+        np.flatnonzero(np.isin(time_codes, test_bars)),
+    )
+    for train_bars, test_bars in bar_splitter.split(np.arange(n_bars).reshape(-1, 1))
+]
 
 linear_dml = LinearDML(
-    model_y=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=42),
-    model_t=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=42),
-    cv=cv,
-    random_state=42,
+    model_y=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=SEED),
+    model_t=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=SEED),
+    cv=panel_folds,
+    random_state=SEED,
 )
 # Confounders enter via W; the regime split stays stratified (see the markdown above).
-linear_dml.fit(Y, T_reshaped, W=X)
+# T is passed 1-d: a column vector makes every nuisance fit warn about the shape.
+linear_dml.fit(Y, T, W=X)
 
 econml_effect = float(linear_dml.ate())
 ci_lower, ci_upper = (float(v) for v in linear_dml.ate_interval(alpha=0.05))
@@ -571,6 +593,17 @@ print(f"  Difference: {abs(econml_effect - dml_effect):.6f}")
 #
 # The treatment is a 14-day premium z-score and several controls use multi-day windows, so
 # the fourteen-day block is the one that covers the treatment's whole input window.
+#
+# **The comparison is made on t-statistics, not on effect sizes.** The controls explain most
+# of this treatment's variance - section 5 prints the share left over - and a
+# permuted treatment is no longer explained by them at all. Its residual is therefore far
+# larger, and since that residual is the second stage's denominator, a placebo effect is
+# mechanically smaller than the observed one whether or not there is anything to find. A
+# placebo distribution of raw effects is narrow for that reason alone, and reading the
+# observed effect against it would report significance that the standard error does not
+# support. Each permutation's t-statistic divides by its own standard error, so the scale
+# cancels and what is left is the question the refutation is for: is the alignment between
+# treatment and outcome stronger than the alignment a shuffle produces?
 
 # %%
 block_sweep_rows = []
@@ -580,6 +613,7 @@ for block_size in BLOCK_SIZES:
         f"\n  Block size {block_size} bars "
         f"({block_size * 8 // 24}d): {N_PLACEBO_PERMUTATIONS} permutations..."
     )
+    placebo_t_stats = []
     placebo_effects_block = []
     rng = np.random.default_rng(SEED)
 
@@ -601,25 +635,29 @@ for block_size in BLOCK_SIZES:
             groups=decision_times,
             hac_maxlags=HAC_LAGS,
         )
-        if not np.isnan(perm_result["theta"]):
+        if np.isfinite(perm_result["t_stat_hac"]):
+            placebo_t_stats.append(perm_result["t_stat_hac"])
             placebo_effects_block.append(perm_result["theta"])
 
-    if len(placebo_effects_block) >= 10:
-        p_mean = float(np.mean(placebo_effects_block))
-        p_std = float(np.std(placebo_effects_block))
-        z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
+    if len(placebo_t_stats) >= 10:
+        p_mean = float(np.mean(placebo_t_stats))
+        p_std = float(np.std(placebo_t_stats))
+        z = (dml_t_stat - p_mean) / p_std if p_std > 0 else np.inf
         # Plus-one corrected, so the floor is 1 / (n + 1); it is not a false discovery rate.
-        block_p = empirical_permutation_p(np.asarray(placebo_effects_block), dml_effect)
+        block_p = empirical_permutation_p(np.asarray(placebo_t_stats), dml_t_stat)
     else:
         p_mean = p_std = z = block_p = float("nan")
 
     block_sweep_rows.append(
         {
             "block_size": block_size,
-            "n_successful": len(placebo_effects_block),
-            "placebo_mean": p_mean,
-            "placebo_std": p_std,
+            "n_successful": len(placebo_t_stats),
             "block_days": block_size / BARS_PER_DAY,
+            "placebo_t_mean": p_mean,
+            "placebo_t_std": p_std,
+            "placebo_effect_std": float(np.std(placebo_effects_block))
+            if placebo_effects_block
+            else float("nan"),
             "z_score": z,
             "permutation_p": block_p,
         }
@@ -631,16 +669,23 @@ display(block_sweep_df)
 
 # Pull headline figures from the 7-day-block (21-bar) row
 headline = block_sweep_df.loc[BLOCK_SIZE_HEADLINE]
-placebo_mean = headline["placebo_mean"]
-placebo_std = headline["placebo_std"]
+placebo_t_mean = headline["placebo_t_mean"]
+placebo_t_std = headline["placebo_t_std"]
 z_score = headline["z_score"]
 permutation_p = headline["permutation_p"]
 
 print(
     f"\nHeadline block size: {BLOCK_SIZE_HEADLINE} bars "
     f"({BLOCK_SIZE_HEADLINE / BARS_PER_DAY:.0f}d of one symbol's bars). "
+    f"observed t={dml_t_stat:.2f} against a placebo t distribution centred at "
+    f"{placebo_t_mean:.2f} with spread {placebo_t_std:.2f}: "
     f"z={z_score:.2f}, permutation p={permutation_p:.4f} "
     f"(floor {1 / (N_PLACEBO_PERMUTATIONS + 1):.4f})"
+)
+print(
+    "  Placebo effects are on a different scale from the observed one: their spread is "
+    f"{headline['placebo_effect_std']:.6f} against a Driscoll-Kraay standard error of "
+    f"{dml_se_hac:.6f}, which is why the comparison is made on t-statistics."
 )
 
 # %% [markdown]
@@ -790,6 +835,12 @@ print(f"Regime effect ratio (high/low vol): {regime_ratio:.2f}x")
 #    this panel a bare `block_permute` would shuffle within a bar. The sweep over one, seven
 #    and fourteen days is worth reading precisely because the blocks now differ.
 #
+# 5. **A placebo is only comparable to the estimate on a common scale.** Permuting the
+#    treatment also frees it from the controls, so the placebo estimator has a much larger
+#    denominator than the one being tested. Comparing t-statistics puts both on the scale
+#    their own standard errors define; comparing effect sizes compares two different
+#    estimators and reports the difference as evidence.
+#
 # **Next**: [`05_momentum_causal_trading`](05_momentum_causal_trading.ipynb) turns
 # regime-conditional effects into position sizes.
 
@@ -819,7 +870,8 @@ summary_df
 # %%
 # Refutation and regime difference
 refutation_str = (
-    f"z={z_score:.2f}, permutation p={permutation_p:.4f}"
+    f"observed t={dml_t_stat:.2f}, z={z_score:.2f} on the placebo t distribution, "
+    f"permutation p={permutation_p:.4f}"
     if np.isfinite(z_score)
     else "insufficient successful permutations"
 )
@@ -837,4 +889,8 @@ print(f"Block permutation refutation: {refutation_str}")
 # The block permutation builds the null the estimate is compared against. Permuting within
 # symbol along each symbol's own bars keeps the treatment as persistent as it really is,
 # which widens that null; a shuffle that destroys the persistence would narrow it and make
-# the estimate easier to distinguish from a placebo than the data warrants.
+# the estimate easier to distinguish from a placebo than the data warrants. The null is a
+# null of t-statistics for the reason given in section 9: a permuted treatment is no longer
+# absorbed by the controls, so its residual variance - the second stage's denominator - is
+# an order of magnitude larger than the observed treatment's, and raw placebo effects are
+# smaller than the observed effect for arithmetic that has nothing to do with causality.
