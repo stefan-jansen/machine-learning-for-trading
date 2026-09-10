@@ -951,15 +951,13 @@
     COHORT_SAMPLE: 10
   timeout: 300
 22_rag_financial_research/01_sec_filing_pipeline:
-  # SYMBOLS, not TICKERS: the notebook's parameters cell declares SYMBOLS, so the
-  # old key was dropped by Papermill and the weekly job fetched all five default
-  # symbols across both default years from EDGAR instead of one.
-  parameters:
-    SYMBOLS:
-    - AAPL
-    YEARS:
-    - 2024
-  requires_env: EDGAR_IDENTITY
+  # The notebook no longer contacts EDGAR: it reads the shipped 10-K corpus
+  # through data.load_sec_filings and describes it. SYMBOLS and YEARS narrowed
+  # the download it used to perform and have no counterpart in the parameters
+  # cell, and EDGAR_IDENTITY gated a fetch that is gone. Both are removed.
+  # It stays on the weekly tier only because that is where it has always run;
+  # nothing external is left to wait for, and it reads the same corpus the
+  # per-commit fixture already ships.
   tier: weekly
   timeout: 300
 22_rag_financial_research/02_domain_embeddings_comparison:
