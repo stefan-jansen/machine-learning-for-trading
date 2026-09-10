@@ -229,6 +229,13 @@ def extract_sentiment(p_yes: float) -> Sentiment:
 # A rationale that enumerates nothing yields nothing, and that is the honest outcome rather
 # than a failure: the field records how the model chose to present its reasons, not how many
 # reasons it had.
+#
+# The last inline item is the one that needs care, because the text after the final marker
+# runs on into whatever the model wrote next, so the item has to end at its own sentence
+# boundary. Finding that boundary means telling a full stop from an abbreviation:
+# *U.S. inflation remains elevated* is one sentence, and a rule that cut at every stop would
+# return `U.S`. The item ends only where the letter before the stop is not a capital and the
+# next word begins with one.
 
 
 # %%
@@ -250,12 +257,7 @@ def extract_key_findings(rationale: str) -> list[str]:
     items = [part.strip() for part in INLINE_ENUMERATION.split(rationale)[1:]]
     if len(items) < 2:
         return []
-    # The text after the last marker runs on into whatever the model wrote next, so the last
-    # item ends at its own sentence boundary rather than at the end of the rationale. The
-    # boundary has to survive an abbreviation: "U.S. inflation remains elevated" is one
-    # sentence, so a full stop only ends the item when the letter before it is not a capital
-    # and the next word begins with one.
-    items[-1] = SENTENCE_END.split(items[-1])[0]
+    items[-1] = SENTENCE_END.split(items[-1])[0]  # trim the run-on after the last marker
     return [item.rstrip(";.").strip() for item in items][:10]
 
 
