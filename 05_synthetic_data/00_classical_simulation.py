@@ -588,11 +588,13 @@ print(f"Euler vs exact, same shocks, max price difference: {max_diff:.4f}")
 # %% [markdown]
 # ### Library Usage: Mean-Reversion
 #
-# The provider's `mean_revert` model fixes the reversion speed internally at the
-# same value used above and reverts to its own `base_price`, so neither the speed
-# nor the equilibrium is a parameter you can set. Reversion speed is usually the
-# quantity you want to fit for a spread or a rate, which is why the from-scratch
-# implementation stays useful.
+# The provider's `mean_revert` model reverts the log price to `log(base_price)`, so
+# the equilibrium is a parameter you can set and the call below sets it to the same
+# `MR_EQUILIBRIUM` the from-scratch path uses. The reversion speed is what you cannot
+# set: it is fixed internally at whatever value the package chose, which happens to be
+# the one `MR_KAPPA` carries above, so the two paths line up here by coincidence rather
+# than by construction. Speed is usually the quantity you want to fit for a spread or a
+# rate, which is why the from-scratch implementation stays useful.
 
 # %%
 provider = SyntheticProvider(

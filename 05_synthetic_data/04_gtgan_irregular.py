@@ -203,6 +203,7 @@ set_global_seeds(SEED)
 # Configuration for naturally irregular Chapter 3 bar data
 CONFIG = {
     "bar_type": "dollar",
+    "seed": SEED,
     "seq_length": SEQ_LENGTH,
     "features": ["close", "volume"],
     "latent_dim": LATENT_DIM,
@@ -910,6 +911,7 @@ CHECKPOINT_IDENTITY = (
     "holdout_fraction",
     "weights_version",
     "data_digest",
+    "seed",
 )
 if _saved is not None:
     saved_config = _saved.get("config", {})
