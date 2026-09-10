@@ -416,11 +416,6 @@ HOUSE_FIGURE_WARNINGS = (
 # which the companion test below enforces.
 KNOWN_HOUSE_FIGURE_WARNINGS = frozenset(
     {
-        "05_synthetic_data/00_classical_simulation.ipynb",
-        "05_synthetic_data/01_timegan.ipynb",
-        "05_synthetic_data/03_sigcwgan_signatures.ipynb",
-        "05_synthetic_data/04_gtgan_irregular.ipynb",
-        "05_synthetic_data/07_dp_gan.ipynb",
         "06_strategy_definition/01_where_ideas_come_from.ipynb",
         "23_knowledge_graphs/02_supply_chain_kg_construction_qwen25_rerun.ipynb",
         "23_knowledge_graphs/02_supply_chain_kg_construction_qwen3.ipynb",
