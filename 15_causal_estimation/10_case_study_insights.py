@@ -372,17 +372,25 @@ display(
 # pass or fail.
 #
 # **What the refutation column inherits.** `refutation_p` is read from each registry rather
-# than computed here, so it is only as good as the run that wrote it. One thing to check
-# before quoting it: whether that run compared raw placebo effects against the observed
-# effect. Permuting the treatment also frees it from the controls, so the placebo estimator
-# divides by a larger residual variance and its effects are smaller for reasons that have
-# nothing to do with alignment - `04_dml_crypto_regime` measures a factor of eleven between
-# the two residual variances on its own panel, and moving its own comparison to t-statistics
-# took its permutation p from the floor to the middle of the null. ml4t/agent-workspace#1120
-# tracks that in the shared implementation and the direction of the error is always the same,
-# toward "passed", so a large p is not evidence of a careful run either. The values in this
-# render are whatever each registry held when it was executed; the provenance stamp says
-# when that was.
+# than computed here, so it is only as good as the run that wrote it, and the provenance
+# stamp says when these rows were read.
+#
+# A block permutation that compares raw effects is biased toward "passed" by arithmetic.
+# Permuting the treatment also frees it from the controls, so the placebo estimator divides
+# by a much larger residual variance and its effects come out smaller whether or not there
+# is anything to find. `04_dml_crypto_regime` leaves 9.3% of its treatment's variance after
+# its controls, and moving its own comparison to t-statistics took its permutation p from
+# the 1/101 floor to the middle of the null. ml4t/agent-workspace#1120 carries the same
+# correction into the shared implementation these registries are written by.
+#
+# Comparing t-statistics cancels that one-directional bias and does not make the test
+# calibrated. Measured on twelve synthetic panels with the true effect fixed at exactly
+# zero, AR(1) confounders at rho 0.95 and 40 placebo draws each, the raw-effect comparison
+# rejects at the 5% level on 11 panels and the t-statistic comparison on 5, and eleven of
+# the twelve observed t-statistics are negative against a true effect of zero (the
+# measurement is on ml4t/agent-workspace#1120). An estimate that is itself biased sits far
+# from its own permutation null and the permutation reports that distance correctly, so a
+# "Fails" below is a verdict on the distance and not on the estimate.
 
 # %%
 HAC_SIG = "HAC clears"
