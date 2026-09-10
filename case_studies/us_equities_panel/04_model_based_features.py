@@ -77,6 +77,7 @@
 # %%
 """US Equities Panel: Model-Based Features."""
 
+import gc
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
@@ -316,7 +317,24 @@ print(
 # below is what makes the two files comparable rather than merely both present.
 
 # %%
-raw_df = load_us_equities(start_date=START_DATE, end_date=END_DATE)
+# The six columns this notebook reads, and `lazy=True` so the projection reaches the parquet
+# scan rather than a frame that has already been read. The archive carries fourteen columns
+# over 14.5M rows, and the eight not named here - the unadjusted open, high and low, their
+# adjusted counterparts, the dividend and the split ratio - are read nowhere on this page.
+# Selecting after an eager load still materializes all eight: 1.40 GB against 0.53 GB, at a
+# peak of 2.88 GB against 1.66 GB, measured on 2026-09-10.
+#
+# The digest below is the reason this is safe to assert rather than merely likely.
+# `value_digest` hashes the columns it is given and nothing else, and all five it is given
+# are among the six: loading both ways on 2026-09-10 returned 81db7d7920165013 either way,
+# which is the value `02_labels` recorded against the label file.
+READ_COLS = ["symbol", "timestamp", "close", "volume", "adj_close", "adj_volume"]
+
+raw_df = (
+    load_us_equities(start_date=START_DATE, end_date=END_DATE, lazy=True)
+    .select(READ_COLS)
+    .collect()
+)
 
 if raw_df.schema["timestamp"] == pl.Datetime:
     raw_df = raw_df.with_columns(pl.col("timestamp").dt.date().alias("timestamp"))
@@ -953,13 +971,24 @@ def apply_ffd_per_symbol(
     Returns DataFrame with (symbol, date, ffd_log_price, ffd_log_volume).
     """
     results = []
-    by_symbol = data.sort(["symbol", "timestamp"]).partition_by("symbol", as_dict=True)
+    # Only the two columns the transform reads are partitioned. `partition_by` copies the
+    # frame it is handed into one frame per symbol, so partitioning the caller's panel
+    # would hold a second copy of every column on it - and this is called on the whole
+    # panel, not the eligible subset.
+    by_symbol = (
+        data.select(["symbol", "timestamp", "adj_close", "adj_volume"])
+        .sort(["symbol", "timestamp"])
+        .partition_by("symbol", as_dict=True)
+    )
 
     n_success = 0
     n_fail = 0
 
     for (sym,) in sorted(by_symbol):
-        sym_data = by_symbol[(sym,)]
+        # Popped rather than read: the partition is dead once its result is appended, and
+        # holding all of them to the end of the loop keeps a whole copy of the panel alive
+        # alongside the results being built from it.
+        sym_data = by_symbol.pop((sym,))
 
         if len(sym_data) < 100:
             n_fail += 1
@@ -1043,6 +1072,13 @@ for d in FFD_D_GRID:
     )
 
 ffd_grid = pl.DataFrame(grid_rows)
+# The sweep is over, and `_ffd_dev` is the panel before the holdout - most of the archive,
+# and the largest thing on this page that nothing below reads. A name bound in a notebook
+# stays bound until the kernel exits, so without this it is still live when the volatility
+# fits fork, and every worker inherits it: 0.95 GB of the 3.56 GB the parent held at the
+# fork, measured on the full panel on 2026-09-10.
+del _ffd_dev, _ffd_panel, _ffd_by_symbol
+
 print(
     f"{len(FFD_D_GRID)} differencing orders, each measured on the same "
     f"{ffd_grid['n_symbols'].max()} sampled stocks, on bars before {holdout_start}"
@@ -1301,10 +1337,35 @@ print(f"  {_scheduled_blocks:,} blocks on the schedule", flush=True)
 # core whatever the run was given.
 workers = max(1, min(len(payloads), (os.process_cpu_count() or 2) - 1))
 print(f"  fitting across {workers} processes", flush=True)
-with ProcessPoolExecutor(
-    max_workers=workers, mp_context=multiprocessing.get_context("fork")
-) as pool:
-    walked = list(pool.map(garch_walk, payloads, chunksize=8))
+
+# `payloads` carries the arrays and the session lists the fits read, so the frame they were
+# taken from is dead here. It is deleted before the fork rather than after it, because what
+# the children inherit is whatever is live at the moment the fork happens: 0.32 GB.
+del returns_panel
+
+# A forked child shares the parent's heap copy-on-write, and the pages stay shared until
+# something writes to them. Python's cyclic collector writes to all of them: a collection
+# traverses every tracked object and updates a header field, which faults in a private copy
+# of the page that object sits on - so a child that never reads the parent's data still
+# copies part of it, once per child, for nothing. `freeze` moves what is already allocated
+# into a permanent generation the collector does not traverse.
+#
+# The bound on what this saves is the *Python-object* heap, not the frames: a polars frame's
+# values live in Arrow buffers the collector does not track, so the frames above cost one
+# tracked object each however many rows they hold. `symbol_sessions` is the exception and is
+# what makes it worth doing here - 14.5M `date` objects in per-symbol lists. Measured on a
+# heap of that shape with 23 children on 2026-09-10: 0.66 GB of tree Pss frozen, against
+# 0.77-1.06 GB over three unfrozen runs, which also spread by when the collector happened to
+# fire.
+gc.collect()
+gc.freeze()
+try:
+    with ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("fork")
+    ) as pool:
+        walked = list(pool.map(garch_walk, payloads, chunksize=8))
+finally:
+    gc.unfreeze()
 
 garch_df = (
     pl.concat(
@@ -1332,6 +1393,9 @@ garch_params = pl.DataFrame(garch_fits).with_columns(
         [symbol_sessions[record["symbol"]][record["fit_end"] - 1] for record in garch_fits],
     )
 )
+
+# Both frames above are built, so the per-symbol arrays the pool returned are dead.
+del walked, garch_fits, payloads, symbol_returns, symbol_sessions
 
 print(
     f"Per-stock conditional volatility: {garch_df.height:,} rows on "
@@ -1503,6 +1567,11 @@ temporal = (
 
 temporal_feature_cols = [c for c in temporal.columns if c not in ("symbol", "timestamp")]
 n_temporal_features = len(temporal_feature_cols)
+
+# Every transform is joined onto one frame, so the three that fed the join are dead, and so
+# is the eligible panel the skeleton was taken from. `garch_df` is the exception: Section 6
+# counts the stocks it covered when it records the provenance.
+del skeleton, wass_df, ffd_df, mkt_garch_df, df
 
 # %% [markdown]
 # A missing value has to be a null and not a NaN. `ffdiff` returns a float NaN where the log
