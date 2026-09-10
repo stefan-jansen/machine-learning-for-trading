@@ -1351,7 +1351,7 @@ fig = make_subplots(
     cols=2,
     subplot_titles=[
         "Speedup by category",
-        "Time per operation",
+        "Time per operation, widest gaps first",
         "Distribution of speedups",
         "pandas time against Polars time",
     ],
@@ -1370,6 +1370,7 @@ fig.add_trace(
         marker_color=COLORS["blue"],
         text=[f"{v:.1f}x" for v in cat_data["geometric_mean_speedup"].to_list()],
         textposition="outside",
+        showlegend=False,
     ),
     row=1,
     col=1,
@@ -1406,6 +1407,7 @@ fig.add_trace(
         nbinsx=20,
         marker_color=COLORS["blue"],
         opacity=0.7,
+        showlegend=False,
     ),
     row=2,
     col=1,
@@ -1421,6 +1423,7 @@ fig.add_trace(
         marker=dict(color=COLORS["blue"], size=10),
         text=results_df["operation"].to_list(),
         hovertemplate="%{text}<br>pandas: %{x:.4f}s<br>Polars: %{y:.4f}s<extra></extra>",
+        showlegend=False,
     ),
     row=2,
     col=2,
@@ -1444,7 +1447,7 @@ fig.update_xaxes(title_text="Category", row=1, col=1)
 fig.update_yaxes(title_text="Speedup, geometric mean", row=1, col=1)
 
 fig.update_xaxes(title_text="Operation", tickangle=45, row=1, col=2)
-fig.update_yaxes(title_text="Time (s)", type="log", row=1, col=2)
+fig.update_yaxes(title_text="Time (s)", type="log", dtick=1, row=1, col=2)
 
 fig.update_xaxes(title_text="Speedup (pandas time / Polars time)", row=2, col=1)
 fig.update_yaxes(title_text="Count", row=2, col=1)
@@ -1453,25 +1456,31 @@ fig.update_xaxes(title_text="pandas time (s)", row=2, col=2)
 fig.update_yaxes(title_text="Polars time (s)", row=2, col=2)
 
 fig.update_layout(
-    title_text="pandas and Polars across eight operation categories",
-    height=800,
+    title_text="pandas against Polars, by operation category and by operation",
+    height=850,
+    width=1200,
     showlegend=True,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     barmode="group",
 )
 
 print(
     f"pandas {PANDAS_VERSION} against Polars {POLARS_VERSION}, {ACTIVE_SCALE} scale, "
-    f"{total_rows:,} rows, {results_df.height} operations, {TIMING_RUNS} timed runs each."
+    f"{total_rows:,} rows, {results_df.height} operations, {TIMING_RUNS} timed runs each. "
+    f"The upper-right panel shows the {min(TOP_OPERATIONS_CHARTED, results_df.height)} "
+    f"operations with the widest gap."
 )
 show_plotly_with_alt(
     fig,
-    "Four panels. Top left, a bar per operation category giving the geometric mean "
-    "speedup of Polars over pandas, with a dashed line at parity. Top right, paired "
-    "bars of pandas and Polars time for the individual operations, on a logarithmic "
-    "seconds axis. Bottom left, a histogram of the speedups with a dashed line at "
-    "parity. Bottom right, a scatter of pandas time against Polars time for every "
-    "operation, with a dashed diagonal marking equal times: points below it are "
-    "operations Polars finished sooner.",
+    "Four panels. Top left, one bar per timed operation category giving the geometric "
+    "mean speedup of Polars over pandas, tallest on the left, each labelled with its "
+    "multiple, above a dashed line at parity. Top right, paired bars of pandas time and "
+    "Polars time on a logarithmic seconds axis, for the operations with the widest gaps "
+    "rather than for all of them, the pandas bar taller in every pair. Bottom left, a "
+    "histogram of the speedups, massed at the low end with a thin tail to the right and "
+    "a dashed line at parity. Bottom right, a scatter of pandas time against Polars "
+    "time, one point per operation, with a dashed diagonal marking equal times: every "
+    "point sits below it, so Polars finished each operation sooner.",
 )
 
 # %% [markdown]
