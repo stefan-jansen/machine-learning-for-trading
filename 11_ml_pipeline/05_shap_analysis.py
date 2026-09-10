@@ -58,8 +58,6 @@
 # %% tags=[]
 """SHAP Interpretability for Linear Models - decompose Ridge predictions into per-feature attributions."""
 
-import warnings
-
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -73,8 +71,6 @@ from utils.cv_splits import generate_cv_splits
 from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -231,11 +227,9 @@ if NEED_TRAINING:
 
 # %% tags=[]
 if NEED_TRAINING:
-    # Independent masker assumes feature independence → SHAP = coef * (x - mean).
-    # max_samples defaults to 100, which would make that mean a 100-row subsample and
-    # leave the closed-form check below disagreeing in the second decimal. The whole
-    # point of the section is that linear SHAP is exact given the true background
-    # expectation, so the background is the full training set.
+    # The full training set as background, not the 100-row default: linear SHAP is exact
+    # given the true background expectation, and a subsample would leave the closed-form
+    # check below disagreeing in the second decimal, which is the section's whole point.
     masker = shap.maskers.Independent(X_train, max_samples=len(X_train))
     explainer = shap.LinearExplainer(model, masker)
     explanation = explainer(X_test)
@@ -277,10 +271,9 @@ if NEED_TRAINING:
             "y_pred": y_pred,
             "shap_values": shap_values,
             "expected_value": expected_value,
-            # Which background these attributions were computed against. A cache
-            # written before the full-background change carries values a hundredth
-            # away from the closed form, and neither staleness test below would see
-            # it: they compare fold count and row count only.
+            # Which background these attributions used. The staleness tests below compare
+            # fold and row counts only, so a cache written against a subsampled background
+            # would pass them while carrying values a hundredth off the closed form.
             "background": "full",
             "fold_importance": fold_importance,
         },
@@ -381,10 +374,9 @@ if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale or _cache_backg
             "y_pred": y_pred,
             "shap_values": shap_values,
             "expected_value": expected_value,
-            # Which background these attributions were computed against. A cache
-            # written before the full-background change carries values a hundredth
-            # away from the closed form, and neither staleness test below would see
-            # it: they compare fold count and row count only.
+            # Which background these attributions used. The staleness tests below compare
+            # fold and row counts only, so a cache written against a subsampled background
+            # would pass them while carrying values a hundredth off the closed form.
             "background": "full",
             "fold_importance": fold_importance,
         },
@@ -584,7 +576,7 @@ shap.plots.scatter(
     show=False,
 )
 ax = plt.gca()
-ax.set_title("For a linear model the dependence plot is a straight line")
+ax.set_title("SHAP value against feature value, for one feature")
 show_with_alt(
     plt.gcf(),
     "Scatter of one feature's SHAP value against its own value, coloured by a "
@@ -624,8 +616,11 @@ shap.plots.waterfall(explanation[example_right], max_display=12, show=False)
 plt.title("A confident call the model got right, feature by feature")
 show_with_alt(
     plt.gcf(),
-    "Waterfall of one prediction: bars for each feature's contribution, running "
-    "from the base value to the predicted return.",
+    "A waterfall for a single prediction: one horizontal bar per feature, ordered by the "
+    "size of its contribution and labeled with that feature's standardized value, each "
+    "pointing left or right according to whether it lowers or raises the prediction. The "
+    "bars run from the model's base value at the bottom to the predicted return at the top, "
+    "and the features beyond the largest dozen are pooled into one bar.",
 )
 
 # %% tags=[]
@@ -758,7 +753,7 @@ ax.barh(x - width / 2, wrong_vals, width, label="Wrong (incorrect)", alpha=0.8)
 ax.set_yticks(x)
 ax.set_yticklabels(top_features, fontsize=9)
 ax.set_xlabel("Mean |SHAP value|")
-ax.set_title("Some features drive the mistakes more than the successes")
+ax.set_title("Mean absolute SHAP per feature, correct against incorrect calls")
 ax.legend(loc="lower right")
 ax.invert_yaxis()
 show_with_alt(
@@ -831,18 +826,21 @@ print(f"Mean max-feature fraction: {max_frac.mean():.1%}")
 print(f"95th percentile: {np.percentile(max_frac, 95):.1%}")
 
 # %% [markdown] tags=[]
-# Compare the flagged count with the mean and 95th-percentile shares printed
-# above. A threshold that flags nothing is telling you the threshold is wrong
-# for this model, not that the risk is absent: on this panel this fitted Ridge
-# puts a mean of 19% and a 95th percentile of 31% on its largest single feature,
-# so a cut at 60% could not fire. That is what these coefficients on this data
-# do, not something the penalty guarantees - a single large coefficient can
-# still dominate a row's attribution. Where the counts come back
-# empty, either raise the aggregation to the top three features or compare the
-# distribution against another model rather than against a fixed cut.
-# In a fold dominated by a regime change, the same diagnostic can flip and
-# flag many predictions; checking it per fold is part of the standing
-# pipeline rather than a one-time exercise.
+# Read the flagged count against the mean and 95th-percentile shares printed above. A
+# threshold that flags nothing is telling you the threshold is wrong for this model, not that
+# the risk is absent: if the largest single feature's share never approaches the cut, the cut
+# cannot fire whatever the model does.
+#
+# That is a property of these coefficients on this data rather than something the penalty
+# guarantees. Ridge shrinks every coefficient and leaves all of them non-zero, which spreads
+# attribution, but it does not bound any one feature's share of a row - a single large
+# coefficient can still dominate a prediction.
+#
+# So where the count comes back empty, the useful moves are to raise the aggregation to the
+# top few features rather than the top one, or to compare the distribution against another
+# model rather than against a fixed cut. And check it per fold: in a fold dominated by a
+# regime change the same diagnostic can flip and flag many predictions, which makes this part
+# of a standing pipeline rather than a one-time exercise.
 
 # %% [markdown] tags=[]
 # ### Example Waterfall: Typical Right vs Typical Wrong
@@ -868,10 +866,15 @@ print(f"  Asset: {assets_np[test_idx[median_right]]}")
 
 fig, ax = plt.subplots(figsize=(8, 6))
 shap.plots.waterfall(explanation[median_right], max_display=12, show=False)
-plt.title("The typical correct high-conviction call")
+plt.title("SHAP contributions, median correct high-conviction prediction")
 show_with_alt(
     plt.gcf(),
-    "Waterfall of the median correct high-magnitude prediction, one bar per feature.",
+    "A waterfall running from the model's base value at the bottom axis to this "
+    "prediction at the top. One horizontal bar per feature, ordered by the size of its "
+    "contribution, each labeled with the feature's standardized value and pointing left for "
+    "a contribution that lowers the prediction or right for one that raises it. The largest "
+    "few bars are several times the length of the rest, and the remaining features are "
+    "pooled into a single bar at the bottom.",
 )
 
 # %% tags=[]
@@ -881,10 +884,13 @@ print(f"  Asset: {assets_np[test_idx[median_wrong]]}")
 
 fig, ax = plt.subplots(figsize=(8, 6))
 shap.plots.waterfall(explanation[median_wrong], max_display=12, show=False)
-plt.title("The typical incorrect high-conviction call")
+plt.title("SHAP contributions, median incorrect high-conviction prediction")
 show_with_alt(
     plt.gcf(),
-    "Waterfall of the median incorrect high-magnitude prediction, one bar per feature.",
+    "The same waterfall for the median incorrect prediction: one bar per feature from the "
+    "base value to the prediction, ordered by contribution size, pointing left or right by "
+    "sign, with the remaining features pooled into one bar at the bottom. As in the correct "
+    "case, a handful of features account for most of the distance travelled.",
 )
 
 # %% [markdown] tags=[]
@@ -924,7 +930,7 @@ if fold_importance is not None:
 
     ax.set_xlabel("Fold")
     ax.set_ylabel("Mean |SHAP value| on test fold")
-    ax.set_title("Feature importance is not the same in every period")
+    ax.set_title("Mean absolute SHAP per feature, by fold")
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
     ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
     show_with_alt(
@@ -966,10 +972,9 @@ top_boot = importance["feature"].head(TOP_K_BOOT).to_list()
 top_boot_idx = [FEATURE_COLS.index(f) for f in top_boot]
 n_test = shap_values.shape[0]
 
-# Resample DATES, not rows. Roughly a hundred ETFs quote on each date and adjacent
-# dates share overlapping 21-session feature windows, so drawing rows independently
-# treats one date's cross-section as a hundred independent observations and returns
-# an interval several times too narrow.
+# Resample dates, not rows: a date's whole cross-section moves together and adjacent dates
+# share overlapping feature windows, so drawing rows independently would count one date as
+# many observations and return an interval far too narrow.
 boot_sessions = np.unique(dates_test)
 session_rows = [np.flatnonzero(dates_test == d) for d in boot_sessions]
 n_sessions = len(boot_sessions)
@@ -1015,7 +1020,7 @@ ax.set_yticks(ypos)
 ax.set_yticklabels(top_boot)
 ax.invert_yaxis()
 ax.set_xlabel("Mean |SHAP value| (with 95% bootstrap CI)")
-ax.set_title("Resampling one fold moves the importance ranking")
+ax.set_title("Feature ranking across bootstrap resamples of one fold")
 show_with_alt(
     fig,
     "Mean absolute SHAP per leading feature with a 95 percent bootstrap interval "
