@@ -36,7 +36,7 @@
 #
 # - construct exact global-trading-date forward labels without stale symbol gaps;
 # - purge every validation boundary by the longest 40-day label horizon;
-# - reserve a sealed test window behind a second 40-date embargo;
+# - hold out a test window behind a second 40-date embargo;
 # - train and restore a multi-task SAE checkpoint with no test feedback; and
 # - report horizon AUC with moving-block uncertainty.
 #
@@ -55,7 +55,8 @@
 #
 # **Prerequisite**: [`07_stochastic_discount_factor`](07_stochastic_discount_factor.ipynb)
 #
-# **Book reference**: Section 14.7, supervised autoencoders.
+# **Book reference**: Section 14.7 (The stochastic discount factor and the
+# supervised autoencoder models)
 
 # %% [markdown]
 # ## 1. Setup
@@ -78,7 +79,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from data import load_us_equities
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_palette, zero_line
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 N_STOCKS = 300
@@ -108,7 +109,7 @@ print(f"Device={device}, stocks={N_STOCKS}, folds={N_SPLITS}, epochs={N_EPOCHS}"
 # %% [markdown]
 # ## 2. Point-in-time feature and label panel
 #
-# The sealed test decisions are the final 252 dates whose 40-day labels still
+# The held-out test decisions are the final 252 dates whose 40-day labels still
 # fit inside the source. Universe selection ends before the first validation
 # fold, so neither validation nor test membership can influence it.
 
@@ -261,7 +262,7 @@ print(
 # %% [markdown]
 # ## 3. Purged expanding validation
 #
-# The validation-selection calendar ends 40 dates before sealed test. Within
+# The validation-selection calendar ends 40 dates before the test window. Within
 # that calendar, each fold purges another 40 dates between training and
 # validation, equal to the longest label horizon.
 
@@ -492,17 +493,17 @@ for fold, (train_dates, valid_dates) in enumerate(cv_splits, start=1):
 print(f"Validation completed in {perf_counter() - started:.1f}s")
 
 # %% [markdown]
-# ## 6. Once-only sealed test
+# ## 6. Once-only test evaluation
 #
 # The last expanding fold has the most training history. Its restored validation
-# checkpoint is the fixed model evaluated on the sealed test window.
+# checkpoint is the fixed model evaluated on the held-out test window.
 
 # %%
 final_model = fold_models[-1]
 test_indices = indices_for_dates(test_decision_dates)
 test_loader = make_loader(test_indices, shuffle=False)
 test_loss, test_auc, test_probability, test_label = evaluate(final_model, test_loader, mse, bce)
-print(f"Sealed test observations={len(test_indices):,}, loss={test_loss:.4f}")
+print(f"Test observations={len(test_indices):,}, loss={test_loss:.4f}")
 for horizon, auc in zip(horizons, test_auc, strict=True):
     print(f"{horizon:2d}-day test AUC={auc:.4f}")
 
@@ -546,20 +547,32 @@ for horizon, auc, low, high in zip(horizons, test_auc, auc_low, auc_high, strict
 
 # %%
 latest_history = pl.DataFrame(fold_records[-1]["history"])
-fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+selected_epoch = fold_records[-1]["best_epoch"]
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True, constrained_layout=True)
 axes[0].plot(latest_history["epoch"], latest_history["train_loss"], color=COLORS["blue"])
 axes[0].set_ylabel("Training multi-task loss")
-add_message_title(axes[0], "Multi-task loss declines before checkpoint selection")
+add_message_title(axes[0], "Training multi-task loss by epoch, final fold")
 axes[1].plot(latest_history["epoch"], latest_history["valid_auc"], color=COLORS["amber"])
 axes[1].axhline(0.5, color=COLORS["neutral"], linestyle="--", linewidth=1)
+axes[1].axvline(
+    selected_epoch, color=COLORS["neutral"], linestyle=":", linewidth=1.5, label="Checkpoint"
+)
 axes[1].set_xlabel("Epoch")
 axes[1].set_ylabel("Validation mean AUC")
-add_message_title(axes[1], f"The final fold selects epoch {fold_records[-1]['best_epoch']}")
-fig.show()
+axes[1].legend()
+add_message_title(axes[1], "Validation mean AUC by epoch, final fold")
+show_with_alt(
+    fig,
+    "Two stacked panels sharing an epoch axis for the last validation fold. The upper "
+    "panel plots the training multi-task loss, which drops steeply over the first few "
+    "epochs and then declines slowly. The lower panel plots the validation mean AUC "
+    "against a dashed reference at 0.5; it climbs off that reference in the early epochs "
+    "and then wanders inside a narrow band close to it, well under 0.02 above the "
+    "reference. A dotted vertical line marks the selected checkpoint epoch.",
+)
 
 # %%
 fold_auc = np.array([record["mean_auc"] for record in fold_records])
-colors = ml4t_palette(len(horizons), categorical=True)
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"])
 bars = axes[0].bar(np.arange(len(fold_auc)), fold_auc, color=COLORS["blue"])
 axes[0].bar_label(
@@ -571,20 +584,31 @@ axes[0].bar_label(
 axes[0].tick_params(axis="x", bottom=False, labelbottom=False)
 axes[0].axhline(0.5, color=COLORS["neutral"], linestyle="--", linewidth=1)
 axes[0].set_ylabel("Validation mean AUC")
-add_message_title(axes[0], "Validation AUC remains close to the random baseline")
+add_message_title(axes[0], "Validation mean AUC by fold")
 positions = np.arange(len(horizons))
 axes[1].vlines(positions, auc_low, auc_high, color=COLORS["neutral"], linewidth=2)
-axes[1].scatter(positions, test_auc, color=colors, s=45)
+axes[1].scatter(positions, test_auc, color=COLORS["blue"], s=45, zorder=3)
 axes[1].axhline(0.5, color=COLORS["neutral"], linestyle="--", linewidth=1)
 axes[1].set_xticks(positions, [f"{h}d" for h in horizons])
 axes[1].set_xlabel("Forward-return horizon")
-axes[1].set_ylabel("Sealed test AUC")
-add_message_title(axes[1], "Test intervals quantify overlapping-label uncertainty")
-fig.show()
+axes[1].set_ylabel("Test AUC")
+add_message_title(axes[1], "Test AUC by horizon with 95% block-bootstrap intervals")
+show_with_alt(
+    fig,
+    "Two stacked panels. The upper panel is a bar chart of validation mean AUC for each "
+    "expanding fold, each bar labeled with its fold number and value, against a dashed "
+    "reference at 0.5. The bars start at zero, so the distance from that reference is a "
+    "thin sliver at the top of each bar. The lower panel plots the test AUC for each "
+    "forward-return horizon as a point with a vertical 95% block-bootstrap interval, "
+    "against the same dashed 0.5 reference; every point sits above 0.5 and the intervals "
+    "widen with the horizon.",
+)
 
 # %% [markdown]
 # Reconstruction error diagnoses which ranked inputs the bottleneck preserves;
-# it is not predictive evidence.
+# it is not predictive evidence. Every feature carries the same date-local rank
+# distribution, so the errors are on a common scale and can be compared across
+# characteristics.
 
 # %%
 final_model.eval()
@@ -596,10 +620,23 @@ order = np.argsort(reconstruction_error)
 scaled_error = reconstruction_error * 1e4
 fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
 ax.barh(np.array(feature_names)[order], scaled_error[order], color=COLORS["blue"])
-ax.set_xlabel(r"Sealed test reconstruction MSE ($\times 10^{-4}$)")
+ax.set_xlabel(r"Test reconstruction MSE ($\times 10^{-4}$)")
 ax.set_ylabel("Date-ranked input characteristic")
-add_message_title(ax, "The bottleneck reconstructs some characteristics more faithfully")
-fig.show()
+add_message_title(ax, "Test reconstruction MSE by input characteristic")
+print(
+    f"Reconstruction MSE across {len(feature_names)} characteristics: "
+    f"{scaled_error.min():.2f} to {scaled_error.max():.2f} (x 1e-4), "
+    f"ratio {scaled_error.max() / scaled_error.min():.2f}"
+)
+show_with_alt(
+    fig,
+    "Horizontal bar chart of test reconstruction MSE for each date-ranked input "
+    "characteristic, sorted with the largest error at the top. The bars start at zero "
+    "and span a narrow range: the largest is under twice the smallest, so the chart is a "
+    "block of similar lengths rather than a few outliers. The volatility and z-score "
+    "features sit at the high-error end and the price-to-high and price-to-low ratios at "
+    "the low-error end.",
+)
 
 # %% [markdown]
 # ## 8. Takeaways
@@ -609,11 +646,11 @@ fig.show()
 # 2. **Global-date labels make timing explicit.** A 40-day label uses the exact
 #    fortieth future trading date and drops symbol gaps.
 # 3. **Two embargoes protect test.** Every validation fold is purged, and the
-#    last validation label ends before the sealed test price window begins.
+#    last validation label ends before the test price window begins.
 # 4. **Checkpoint copies are immutable.** Deep copies restore the actual
 #    validation-AUC maximum rather than the final epoch's mutated tensors.
 # 5. **AUC needs dependence-aware uncertainty.** Forty-date block intervals
-#    accompany every sealed-test horizon; reconstruction error remains a model
+#    accompany every test horizon; reconstruction error remains a model
 #    diagnostic, not evidence of predictability.
 #
 # The final chapter notebook,
