@@ -67,10 +67,6 @@
 
 from __future__ import annotations
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -78,7 +74,7 @@ import polars as pl
 
 from data import load_nasdaq100_bars
 from utils.data_quality import check_ohlc_invariants, describe_coverage, null_rate, per_asset_stats
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 # Always limit data to avoid OOM (full NASDAQ-100 is ~50M rows)
@@ -98,9 +94,13 @@ print(f"Tickers: {len(SAMPLE_TICKERS)}")
 # The NASDAQ-100 minute bars are stored in Hive-partitioned Parquet files:
 # `equities/nasdaq100/minute_bars/year={YYYY}/month={MM}.parquet`
 
+# %% [markdown]
+# The load is bounded to one year of a handful of symbols. The full dataset is two years
+# of a hundred names at minute frequency with sixty-one columns, which is tens of
+# millions of rows and more than a laptop holds; the point of this notebook is the
+# schema and the shape of each field, and neither needs the whole panel.
+
 # %%
-# Load data with all microstructure columns
-# Limit to 2020 to avoid OOM (full 2020-2021 x 100 symbols is ~50M rows)
 df = load_nasdaq100_bars(
     symbols=SAMPLE_TICKERS,
     start_date="2020-01-01",
@@ -263,9 +263,13 @@ symbol_stats = per_asset_stats(
 print("\nPer-Symbol Statistics:")
 print(symbol_stats)
 
+# %% [markdown]
+# These bars cover extended hours, not just the regular session: pre-market from 04:00,
+# regular trading from 09:30 to 16:00, and post-market to 20:00, all Eastern. The three
+# behave differently enough that any statistic computed across all of them is a blend of
+# three regimes, so the first thing to look at is how the bars divide between them.
+
 # %%
-# Trading hours breakdown
-# TAQ bars cover extended hours: 04:00-09:30 (pre), 09:30-16:00 (RTH), 16:00-20:00 (post)
 df_hours = df.with_columns(pl.col("timestamp").dt.hour().alias("hour"))
 
 hours_dist = (
@@ -350,10 +354,13 @@ ax.set_xlabel("Trading session")
 ax.set_ylim(0, 100)
 add_message_title(
     ax,
-    "Missing trades concentrate in the pre- and post-market",
+    "Share of minute bars with no trade, by trading session",
     subtitle="Share of minute bars with a null last trade price, by session",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "A bar chart with one bar per trading session - pre-market, regular hours and post-market - giving the percentage of minute bars in that session with no trade price, each bar labelled with its value and the largest highlighted.",
+)
 
 # %% [markdown]
 # ## 4. Data Quality: OHLC Invariants
@@ -437,10 +444,13 @@ ax.set_xlabel("Quoted spread (bps)")
 ax.set_ylabel("Cumulative share of bars")
 add_message_title(
     ax,
-    "Most minute bars quote a tight spread of a few basis points",
+    "Distribution of the quoted spread across minute bars",
     subtitle="Empirical CDF of quoted spread; x-axis clipped at the 99th percentile",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "A cumulative distribution curve of the quoted spread in basis points, rising from zero to one, with the horizontal axis clipped at the ninety-ninth percentile so the bulk of the distribution is legible.",
+)
 
 # %% [markdown]
 # ## 6. Trade OHLC: Actual Executions
@@ -566,10 +576,13 @@ ax.set_ylabel("Execution location vs NBBO")
 ax.invert_yaxis()
 add_message_title(
     ax,
-    "Trade volume splits roughly symmetrically around the midpoint",
+    "Traded volume by where the trade printed relative to the quote",
     subtitle="Aggressor buckets ordered seller-aggressive (bid) to buyer-aggressive (ask)",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "A horizontal bar chart of traded volume by execution location relative to the prevailing quote, ordered from seller-aggressive at the bid through the midpoint to buyer-aggressive at the ask.",
+)
 
 # %% [markdown]
 # ### Order Flow Imbalance
@@ -613,23 +626,25 @@ if all(
     )
 
 # %% [markdown]
-# ### Trading Hypotheses: OFI Momentum and Reversal
+# ### Two readings of the same number
 #
-# **Momentum Hypothesis**: Persistent aggressor imbalance predicts short-term price direction.
+# Sustained one-sided flow is read in opposite directions by two standard arguments, and
+# the distribution above is what either would have to be built on.
 #
-# | Signal | Condition | Expected Outcome |
-# |--------|-----------|------------------|
-# | Strong Buy Pressure | OFI > 0.3 for multiple bars | Price increase |
-# | Strong Sell Pressure | OFI < -0.3 for multiple bars | Price decrease |
+# The **momentum** reading says persistent aggressor imbalance is informed traders
+# working an order, so the price continues in the direction of the flow while the order
+# is being worked.
 #
-# **Reversal Hypothesis**: Extreme OFI leads to short-term mean reversion.
+# The **reversal** reading says the same imbalance is liquidity demand, and that the
+# concession paid to get filled reverses once the demand stops - so extreme flow
+# anticipates a move against it.
 #
-# | Signal | Condition | Expected Outcome |
-# |--------|-----------|------------------|
-# | Extreme Buying | OFI > 0.7 (exhaustion) | Potential reversal down |
-# | Extreme Selling | OFI < -0.7 (capitulation) | Potential reversal up |
-#
-# These form the basis for the **order flow reversal strategy** developed in later chapters.
+# The two are not distinguished by the sign of the imbalance but by its horizon and its
+# extremity, and choosing between them is an empirical question this notebook does not
+# settle. Where a threshold is needed it should come from the observed distribution -
+# a percentile of the imbalance the symbol actually produced - rather than from a round
+# number, since the same nominal value means different things on a heavily traded name
+# and a thin one.
 
 # %% [markdown]
 # ## 8. Tick Direction: Trade-Level Momentum
@@ -646,12 +661,15 @@ if all(
 #
 # ### Why This Matters
 #
-# Tick direction captures **price momentum at the trade level**. Unlike simple returns,
-# this shows the actual trade-by-trade direction of price movement. An uptick ratio
-# persistently above 0.5 indicates buying momentum; below 0.5 indicates selling momentum.
+# Tick direction records where each trade printed relative to the one before it, so it
+# measures the sequence of price changes rather than which side crossed. An uptick ratio
+# above one half means more volume traded on rising prices than on falling ones over the
+# bar.
 #
-# This differs from OFI in that it measures **sequential price changes** rather than
-# **aggressor direction**. Both are useful but capture different aspects of order flow.
+# That is a different quantity from order-flow imbalance, which counts shares by
+# aggressor side. The two usually agree and need not: a large buy that walks up through
+# several price levels produces upticks, and a large buy filled entirely at one resting
+# price produces none. Where they disagree is where the interesting cases are.
 
 # %%
 tick_cols = ["uptick_volume", "downtick_volume", "repeat_uptick_volume", "repeat_downtick_volume"]
@@ -711,9 +729,11 @@ if all(c in df.columns for c in tick_cols):
 # - **Positive pressure**: Trades executing above midpoint → buying pressure
 # - **Negative pressure**: Trades executing below midpoint → selling pressure
 #
-# The **relative** version normalizes by spread, making it comparable across stocks
-# with different price levels and liquidity. A relative pressure of 0.5 means trades
-# are on average executing halfway between the midpoint and the ask (consistent buying).
+# The **relative** version divides by the spread, which is what makes it comparable
+# across stocks: a penny away from the midpoint is aggressive on a two-cent spread and
+# unremarkable on a twenty-cent one. On that scale, zero is the midpoint and one is the
+# far touch, so a value halfway between them says the average trade printed halfway from
+# the midpoint to the ask.
 #
 # Unlike OFI which counts shares by bucket, pressure measures the **magnitude** of
 # price impact - how aggressively traders are pushing prices away from fair value.
@@ -751,12 +771,16 @@ if all(c in df.columns for c in pressure_cols):
 #
 # ### Why This Matters
 #
-# - **High FINRA share (>40%)**: Institutional activity, larger trades seeking anonymity
-# - **Low FINRA share (<20%)**: Retail-dominated, smaller trades
-# - **FINRA spikes**: May indicate large block trades seeking minimal market impact
+# The reporting-facility share is the part of a bar's volume that did not print on a lit
+# exchange. Two quite different flows land there and the share alone cannot separate
+# them: institutional orders routed to a dark pool to avoid showing size, and retail
+# orders internalised by a wholesaler. Both raise the share, for opposite reasons.
 #
-# This can be used for **regime filtering** in trading strategies - some signals
-# work better in institutional vs retail regimes.
+# What the series is good for is noticing when it moves. A bar whose off-exchange share
+# departs sharply from its own recent level is a bar in which the routing changed, and
+# that is worth conditioning on even without knowing which of the two flows caused it.
+# Attaching an institutional or retail label to a level, rather than to a change, asks
+# more of the number than it carries.
 
 # %%
 if "finra_volume" in df.columns:
@@ -947,8 +971,10 @@ if "uptick_ratio" in df_day.columns:
 axes[4].xaxis.set_major_locator(mdates.HourLocator(interval=2))
 axes[4].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Five stacked panels sharing a clock-time axis over one trading day for one symbol: the traded price, the quoted spread in basis points, traded volume per minute, the order-flow imbalance drawn as bars green above zero and red below, and the uptick ratio with a reference line at one half.",
+)
 
 # %% [markdown]
 # ## 14. Intraday Patterns
@@ -1010,63 +1036,54 @@ if "order_flow_imbalance" in df.columns:
     axes[1, 1].set_title("Order-flow imbalance volatility", loc="left", color=COLORS["blue"])
 
 fig.suptitle(
-    "Spread, volume, and off-exchange share each follow their own intraday clock",
+    "Four minute-bar measures by hour of the trading session",
     x=0.01,
     ha="left",
     fontsize=13,
     color=COLORS["blue"],
     fontweight="semibold",
 )
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Four panels in a two-by-two grid, each plotting one measure against hour of the regular trading session with a marker per hour: the average quoted spread, traded volume, the share of volume printed off-exchange, and the standard deviation of order-flow imbalance.",
+)
 
 # %% [markdown]
 # ## 15. Trading Mechanism Menu: Connecting Fields to Strategies
 #
 # The microstructure fields in TAQ minute bars connect to specific trading mechanisms:
 #
-# ### Intraday Momentum / Trend Persistence
+# ### What each family of fields is evidence about
 #
-# **Features**: `order_flow_imbalance`, `uptick_ratio`, `trade_to_mid_vol_weight`
+# The dataset's value is that several independent views of the same minute arrive
+# pre-computed. What follows is what each view can support, and what it cannot.
 #
-# | Signal | Condition | Strategy |
-# |--------|-----------|----------|
-# | OFI > 0.3 for 5+ bars | Persistent buying | Follow momentum |
-# | Uptick ratio > 0.6 | Price trending up | Hold long positions |
-# | Positive pressure consistent | Aggressive buying | Continuation expected |
+# **Aggressor direction** (`trade_at_bid`, `trade_at_ask`, and the imbalance built from
+# them) says which side crossed the spread. It is evidence about who was demanding
+# liquidity, and it is the input both the momentum and the reversal reading start from -
+# which is why it cannot by itself distinguish them.
 #
-# ### Liquidity Shock / Spread Widening
+# **Tick direction** (`uptick_volume`, `downtick_volume`) says how the price moved between
+# consecutive trades. It agrees with aggressor direction most of the time and diverges when
+# a large order is filled at one price rather than walking the book, which makes the
+# divergence more informative than either series alone.
 #
-# **Features**: `spread_bps`, `nbbo_quote_count`, `min_spread`
+# **Pressure** (`trade_to_mid_vol_weight`) says how far from the midpoint the average trade
+# printed, scaled by the spread. Direction and intensity are different questions, and this
+# is the intensity one.
 #
-# | Signal | Condition | Strategy |
-# |--------|-----------|----------|
-# | Spread > 2× rolling mean | Liquidity withdrawal | Reduce position size |
-# | min_spread = 0 | Locked/crossed market | Fast market, pause trading |
-# | Quote count drop | Market makers stepping back | Increase execution urgency |
+# **Spread and quote count** (`spread_bps`, `min_spread`, `nbbo_quote_count`) describe the
+# conditions rather than the flow. A widening spread with a falling quote count is market
+# makers stepping back; `min_spread` at zero is a locked or crossed market, which is a data
+# condition worth knowing about before reading anything else in that bar.
 #
-# ### Hidden Liquidity / Institutional Regime
+# **Off-exchange share** (`finra_volume`) says how much of the bar did not print on a lit
+# venue, which is a routing fact rather than a directional one.
 #
-# **Features**: `finra_share`, `finra_volume`
-#
-# | Signal | Condition | Strategy |
-# |--------|-----------|----------|
-# | FINRA share > 40% | Institutional activity | Larger moves possible |
-# | FINRA spike vs previous bars | Block trade | Watch for continuation |
-# | FINRA share < 20% | Retail-dominated | Mean reversion may work |
-#
-# ### Mean Reversion / Exhaustion
-#
-# **Features**: `order_flow_imbalance` (extreme values)
-#
-# | Signal | Condition | Strategy |
-# |--------|-----------|----------|
-# | OFI > 0.7 | Extreme buying (exhaustion) | Fade the move |
-# | OFI < -0.7 | Extreme selling (capitulation) | Buy the dip |
-#
-# > These mechanisms form the foundation for the **order flow reversal strategy**
-# > developed in Chapters 7-12, which transforms these raw fields into predictive
-# > alpha factors.
+# None of these is a strategy, and turning any of them into one requires the two things
+# this notebook does not do: a forward-looking test with the signal lagged behind the
+# return it is supposed to predict, and a comparison against what trading it would cost.
+# Chapters 7 onwards do both.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -1098,12 +1115,18 @@ plt.show()
 #
 # ### Key Microstructure Insights
 #
-# 1. **Order Flow Imbalance** (OFI): Measures aggressor direction (-1 to +1)
-#    - Persistent OFI predicts short-term momentum
-#    - Extreme OFI (>0.7 or <-0.7) signals potential reversal
-# 2. **FINRA Share**: ~45% of volume is off-exchange (institutional activity)
-# 3. **Spread Dynamics**: Wider at open/close, tightest midday
-# 4. **Locked Markets**: min_spread=0 indicates stress (rare but important)
+# 1. **Aggressor imbalance is bounded and directional**, running from wholly
+#    seller-initiated to wholly buyer-initiated. Two standard readings of a sustained
+#    value point in opposite directions, and nothing in this notebook chooses between
+#    them.
+# 2. **A large share of volume never reaches a lit venue.** The off-exchange series says
+#    how much, and it mixes institutional and internalised retail flow, so its level is
+#    harder to interpret than its changes.
+# 3. **Spread has a shape through the session** and the figures above show it; a
+#    statistic computed per bar is estimated under very different conditions depending
+#    on when the bar falls.
+# 4. **A zero minimum spread is a locked or crossed market**, which is a condition to
+#    detect rather than a value to average over.
 #
 # ### Why AlgoSeek TAQ is Valuable
 #
