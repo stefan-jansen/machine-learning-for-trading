@@ -409,8 +409,7 @@ if len(latest_holdings) > 0:
                 "median_top_holder_share": round(float(np.median(top_share)), 2),
             }
         )
-    floor_table = pl.DataFrame(floor_rows)
-    floor_table
+    display(pl.DataFrame(floor_rows))
 
 # %% [markdown]
 # Requiring more holders thins the saturation sharply - the share of pairs at
@@ -594,12 +593,18 @@ if qoq is not None:
 # when they hold similar amounts and rises towards one when a single manager
 # dominates.
 #
-# The crowding score below divides the first by the second. That makes its
-# scale a function of breadth twice over - a name held by `n` managers in equal
-# size scores about `n` squared - so the ranking is breadth first and weight
-# dispersion as a tie-break. It is a descriptive ordering within this manager
-# universe and its magnitude carries no units and no meaning outside it. This
-# notebook observes no trades, no liquidation and no price impact.
+# The crowding score below divides the first by the second, and the two decide
+# the ranking together rather than one of them leading. Holder count sets the
+# ceiling: `n` managers holding equal amounts give an HHI of one over `n` and a
+# score of `n` squared, the most that many holders can score. Concentration
+# then pulls a name down from its ceiling, and far enough that fewer holders
+# can outrank more - three equal holders score nine, while four holders where
+# one carries almost everything score about four.
+#
+# So it is a descriptive ordering within this manager universe, its magnitude
+# carries no units and no meaning outside it, and reading it needs the two
+# columns beside it. This notebook observes no trades, no liquidation and no
+# price impact.
 
 # %%
 if len(latest_holdings) > 0:
@@ -1098,11 +1103,11 @@ print("           load_13f_stock_features()")
 # tested.
 #
 # **Crowding.** The score is breadth divided by ownership concentration, and
-# Part 5 says what that makes it: a quantity dominated by the number of
-# managers holding the name, with the dispersion of their weights as a
-# tie-break. It describes disclosed structure. It does not observe liquidation
-# or price impact, and it is not on a scale that means anything outside this
-# manager universe.
+# Part 5 says what that makes it: holder count sets a ceiling of its square,
+# and concentration pulls a name below that ceiling by enough that fewer,
+# evenly weighted holders can outrank more uneven ones. It describes disclosed
+# structure. It does not observe liquidation or price impact, and it is not on
+# a scale that means anything outside this manager universe.
 
 # %% [markdown]
 # ## Summary: What We Can Do With 13F Data
@@ -1146,11 +1151,13 @@ if len(positions_df) > 0:
 #    majority of both positions. Part 3 measures both, and the check to carry
 #    away is to report a concentration next to any similarity computed over a
 #    short vector.
-# 3. **The crowding score is breadth twice over.** Dividing holder count by
-#    ownership HHI produces something close to the square of the holder count,
-#    so its ranking is breadth with a dispersion tie-break and its magnitude
-#    means nothing outside this manager universe. Quarter-over-quarter change
-#    and concentration are descriptive candidates whose predictive value
+# 3. **The crowding score mixes two things and neither dominates.** Holder
+#    count over ownership HHI reaches its maximum, the square of the holder
+#    count, only when those holders are equally weighted; concentration pulls a
+#    name below that, far enough that three equal holders can outrank four with
+#    one dominant. It is not a breadth ranking with a tie-break, and its
+#    magnitude means nothing outside this manager universe. Quarter-over-quarter
+#    change and concentration are descriptive candidates whose predictive value
 #    requires a point-in-time return study.
 # 4. **The identity is the CIK and the name comes from the filing.** A
 #    hand-written display name that disagrees with the filer renames a manager
