@@ -1113,10 +1113,22 @@ results.extend(lazy_results)
 # and the two numbers it printed fed nothing further in the notebook.
 #
 # What the two accountings do measure is worth knowing, provided the difference is
-# stated: pandas' `memory_usage(deep=True)` follows each Python string object in an
-# object column and adds its size, while Polars' `estimated_size` reports the Arrow
-# buffers, where the same symbols are one dictionary and a run of small integers. Most
-# of the ratio below is that one column, not the numeric panel.
+# stated. The numeric columns are eight bytes a value on both sides and contribute
+# almost nothing to the ratio. The symbol column is the whole of it, and the two
+# libraries represent it differently: pandas holds an object column as an array of
+# pointers to Python string objects, and each of those objects carries its own header,
+# so a seven-character ticker costs tens of bytes. Polars holds the same column as
+# packed UTF-8 with offsets, where the ticker costs about what its characters cost.
+#
+# Neither side is doing anything clever with the repetition here. The column is
+# `pl.String` and stays that way: there are only a handful of distinct symbols, and
+# casting to a categorical would collapse the column further, but that is a different
+# measurement from this one and the notebook does not make it.
+#
+# Both figures below are read in bytes and divided by the same factor. Polars'
+# `estimated_size("mb")` returns binary megabytes and pandas' `memory_usage` returns
+# bytes, so dividing one by 1e6 and taking the other as-is inflates the ratio by about
+# five percent - small enough to look like a real difference between the libraries.
 
 # %%
 print("\n" + "=" * 70)
@@ -1130,19 +1142,28 @@ memory_results = []
 
 # %%
 gc.collect()
-pd_estimated = ohlcv_pd.memory_usage(deep=True).sum() / 1e6
-pl_estimated = ohlcv_pl.estimated_size("mb")
+BYTES_PER_MB = 1e6
 
-pd_symbol_mb = ohlcv_pd["symbol"].memory_usage(deep=True) / 1e6
-pl_symbol_mb = ohlcv_pl["symbol"].estimated_size("mb")
+pd_estimated = ohlcv_pd.memory_usage(deep=True).sum() / BYTES_PER_MB
+pl_estimated = ohlcv_pl.estimated_size("b") / BYTES_PER_MB
+
+pd_symbol_mb = ohlcv_pd["symbol"].memory_usage(deep=True) / BYTES_PER_MB
+pl_symbol_mb = ohlcv_pl["symbol"].estimated_size("b") / BYTES_PER_MB
 
 print("Panel size, each library's own accounting:")
 print(f"  pandas memory_usage(deep=True): {pd_estimated:.1f} MB")
 print(f"  Polars estimated_size:          {pl_estimated:.1f} MB")
 print(f"  Ratio:                          {pd_estimated / pl_estimated:.2f}x")
 print("\nThe symbol column alone:")
-print(f"  pandas: {pd_symbol_mb:.1f} MB of the {pd_estimated:.1f} MB")
-print(f"  Polars: {pl_symbol_mb:.1f} MB of the {pl_estimated:.1f} MB")
+print(
+    f"  pandas: {pd_symbol_mb:.1f} MB of the {pd_estimated:.1f} MB, "
+    f"{pd_symbol_mb * BYTES_PER_MB / total_rows:.0f} bytes a row"
+)
+print(
+    f"  Polars: {pl_symbol_mb:.1f} MB of the {pl_estimated:.1f} MB, "
+    f"{pl_symbol_mb * BYTES_PER_MB / total_rows:.0f} bytes a row"
+)
+print(f"  The symbols themselves are {len(ohlcv_pl['symbol'][0])} characters.")
 
 memory_results.append(
     {
