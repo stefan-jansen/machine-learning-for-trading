@@ -1666,6 +1666,7 @@ for level in range(1, CONFIG["sig_depth"] + 1):
 def plot_path_comparison_unconditional(
     real_paths: np.ndarray,
     synthetic_paths: np.ndarray,
+    rng: np.random.Generator,
     n_samples: int = 20,
     asset_idx: int = 0,
 ) -> go.Figure:
@@ -1680,15 +1681,15 @@ def plot_path_comparison_unconditional(
     # Convert to cumsum for visualization
     n_lags = real_paths.shape[1]
 
-    real_cumsums = np.stack(
-        [real_paths[i, :, asset_idx].cumsum() for i in range(min(n_samples, len(real_paths)))]
+    # The real windows are overlapping rolling windows, so the first n of them start on
+    # consecutive days: one stretch of history drawn n times rather than n draws from
+    # it. Both sets are sampled at random instead.
+    real_idx = rng.choice(len(real_paths), size=min(n_samples, len(real_paths)), replace=False)
+    synth_idx = rng.choice(
+        len(synthetic_paths), size=min(n_samples, len(synthetic_paths)), replace=False
     )
-    synth_cumsums = np.stack(
-        [
-            synthetic_paths[i, :, asset_idx].cumsum()
-            for i in range(min(n_samples, len(synthetic_paths)))
-        ]
-    )
+    real_cumsums = np.stack([real_paths[i, :, asset_idx].cumsum() for i in real_idx])
+    synth_cumsums = np.stack([synthetic_paths[i, :, asset_idx].cumsum() for i in synth_idx])
 
     # Plot real paths
     for i, cumsum_path in enumerate(real_cumsums):
@@ -1743,36 +1744,43 @@ def plot_path_comparison_unconditional(
 
 
 # %%
-# Plot comparison
+# A generator of its own, so the draw does not move the notebook's randomness.
 fig = plot_path_comparison_unconditional(
-    holdout_windows, synthetic_holdout, n_samples=30, asset_idx=0
+    holdout_windows,
+    synthetic_holdout,
+    rng=np.random.default_rng(SEED),
+    n_samples=30,
+    asset_idx=0,
 )
 show_plotly_with_alt(
     fig,
-    "Two panels of cumulative return paths over fifteen days, drawn on a shared "
-    "vertical scale. Real paths on the left stay in a narrow band around zero. "
-    "Synthetic paths on the right fan out from the origin to roughly twice that "
-    "width by the last day, spread symmetrically above and below zero.",
+    "Two panels of thirty cumulative return paths each over fifteen days, real on "
+    "the left and synthetic on the right, drawn on a shared vertical scale so the "
+    "two spreads can be compared directly. Each path starts at its window's first "
+    "day's return, close enough to zero to be indistinguishable at this scale, and "
+    "the synthetic paths reach further from zero by the last day than the real ones.",
 )
 
 # %% [markdown]
-# **Interpretation**: both sets start at zero and stay symmetric around it, so the
-# generator has the location right. What differs is the spread: the synthetic paths
-# fan out considerably wider by the end of the window than the real ones do, on the
-# same vertical scale.
+# **Interpretation**: both sets stay symmetric about zero, so the generator has the
+# location right. What differs is the spread, on a shared vertical scale.
 #
-# That is worth pausing on, because the synthetic marginal standard deviation in the
-# stylized-facts table below is no larger than the real one. A wider cumulative fan
-# cannot come from the marginal, then. A cumulative sum also depends on how
-# consecutive returns relate to one another, and the same table reports the lag-1
-# autocorrelation of returns for both series. Compare its two signs: returns that
-# reverse day to day cancel as they accumulate, and returns that persist compound.
+# Read that as a property of these sixty windows rather than of the two
+# distributions. Thirty each is a thin sample, and the real windows overlap one
+# another, so they carry less independent information than thirty separate paths
+# would. The stylized-facts table below is the population comparison.
 #
-# That also settles an apparent contradiction with the PCA panel earlier, where the
-# real windows had far-flung outliers the synthetic ones never reached. The panel is
-# about single extreme days and this figure about fifteen-day totals, so a generator
-# can miss the rare large move and still accumulate the wider fan. The kurtosis row
-# of the same table is where the first of those is measured rather than eyeballed.
+# Serial dependence is the candidate explanation for a difference in cumulative
+# spread, because a sum over fifteen days depends on the covariance between returns
+# at every lag inside the window and not on the marginal alone. The table reports the
+# lag-1 autocorrelation of returns for both series: compare its two signs, keeping in
+# mind that lag one is one term of that sum rather than all of it.
+#
+# The PCA panel earlier is a different projection of these same windows, not a
+# different quantity. It projects each flattened fifteen-day window, so a far-flung
+# point there is a window unusual in some combination of its days, which need not be
+# one extreme day. The kurtosis row of the table is the separate evidence about how
+# heavy the daily tails are.
 
 # %% [markdown]
 # ## 12. TSTR Evaluation: Train Synthetic, Test Real
