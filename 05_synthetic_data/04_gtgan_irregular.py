@@ -1083,8 +1083,21 @@ def generate_synthetic(
     return synthetic.cpu().numpy()
 
 
+# %% [markdown]
+# ### Choosing the sequences to evaluate against
+#
+# The sequences are rolling windows at stride one, so the first N of them start on N
+# consecutive bars: one stretch of the tape repeated, not N samples of it, and a quiet
+# or a violent week would stand in for the whole period. Everything below compares
+# against `real_eval`, drawn at random, and the synthetic sequences are generated on
+# that same draw's time grids so the two stay paired.
+
+# %%
 N_SYNTHETIC = min(200, len(sequences_norm))
-sample_times = torch.FloatTensor(seq_times[:N_SYNTHETIC]).to(device)
+eval_rng = np.random.default_rng(SEED)
+eval_idx = eval_rng.choice(len(sequences_norm), size=N_SYNTHETIC, replace=False)
+real_eval = sequences_norm[eval_idx]
+sample_times = torch.FloatTensor(seq_times[eval_idx]).to(device)
 synthetic_sequences = generate_synthetic(model, N_SYNTHETIC, sample_times, device)
 
 print(f"\nGenerated {len(synthetic_sequences)} synthetic sequences")
@@ -1101,7 +1114,7 @@ print(f"Shape: {synthetic_sequences.shape}")
 
 # %%
 fig = plot_fidelity_comparison(
-    sequences_norm[:N_SYNTHETIC],
+    real_eval,
     synthetic_sequences,
     title="GT-GAN: Real vs Synthetic Distribution",
     n_samples=min(200, N_SYNTHETIC),
@@ -1131,6 +1144,7 @@ def evaluate_interpolation(
     sequences: np.ndarray,
     times: np.ndarray,
     device: torch.device,
+    rng: np.random.Generator,
 ) -> dict:
     """
     Evaluate model's ability to interpolate at arbitrary timestamps.
@@ -1142,8 +1156,9 @@ def evaluate_interpolation(
     model.eval()
 
     n_test = min(50, len(sequences))
-    test_seq = torch.FloatTensor(sequences[:n_test]).to(device)
-    test_time = torch.FloatTensor(times[:n_test]).to(device)
+    test_idx = rng.choice(len(sequences), size=n_test, replace=False)
+    test_seq = torch.FloatTensor(sequences[test_idx]).to(device)
+    test_time = torch.FloatTensor(times[test_idx]).to(device)
 
     with torch.no_grad():
         mu, logvar = model.encode(test_seq, test_time)
@@ -1175,7 +1190,7 @@ def evaluate_interpolation(
     }
 
 
-interp_results = evaluate_interpolation(model, sequences_norm, seq_times, device)
+interp_results = evaluate_interpolation(model, sequences_norm, seq_times, device, eval_rng)
 
 print("\n=== Interpolation Evaluation ===")
 recon = interp_results["reconstruction_mse"]
@@ -1227,7 +1242,7 @@ def evaluate_statistics(real: np.ndarray, synthetic: np.ndarray) -> dict:
     }
 
 
-stats_results = evaluate_statistics(sequences_norm[:N_SYNTHETIC], synthetic_sequences)
+stats_results = evaluate_statistics(real_eval, synthetic_sequences)
 
 print("\n=== Statistical Evaluation ===")
 print(f"Mean KS statistic: {stats_results['mean_ks']:.4f}")
@@ -1336,7 +1351,7 @@ show_plotly_with_alt(
 
 
 # %%
-real_flat = sequences_norm[:N_SYNTHETIC].reshape(N_SYNTHETIC, -1)
+real_flat = real_eval.reshape(N_SYNTHETIC, -1)
 syn_flat = synthetic_sequences.reshape(len(synthetic_sequences), -1)
 
 pca = PCA(n_components=2)
@@ -1401,6 +1416,7 @@ def gtgan_paper_evaluation(
     norm_params: dict,
     config: dict,
     device: torch.device,
+    rng: np.random.Generator,
 ) -> dict:
     """
     Evaluation for GT-GAN following Jeon et al. (2022).
@@ -1428,16 +1444,20 @@ def gtgan_paper_evaluation(
     )
 
     # Generate synthetic sequences
+    # Drawn at random for the same reason as above: consecutive rolling windows are
+    # one stretch of the tape, and both arms of every score below read these slices.
     n_eval = min(len(holdout_seq_norm), len(train_sequences), 100)
-    sample_times_tensor = torch.FloatTensor(train_times[:n_eval]).to(device)
+    train_idx = rng.choice(len(train_sequences), size=n_eval, replace=False)
+    holdout_idx = rng.choice(len(holdout_seq_norm), size=n_eval, replace=False)
+    sample_times_tensor = torch.FloatTensor(train_times[train_idx]).to(device)
 
     with torch.no_grad():
         synthetic_eval = model.generate(n_eval, sample_times_tensor, device).cpu().numpy()
 
     # Flatten for sklearn
-    real_flat = train_sequences[:n_eval].reshape(n_eval, -1)
+    real_flat = train_sequences[train_idx].reshape(n_eval, -1)
     syn_flat = synthetic_eval.reshape(n_eval, -1)
-    holdout_flat = holdout_seq_norm[:n_eval].reshape(min(n_eval, len(holdout_seq_norm)), -1)
+    holdout_flat = holdout_seq_norm[holdout_idx].reshape(n_eval, -1)
 
     # --- 1. Discriminative Score ---
     # Train classifier to distinguish real vs synthetic
@@ -1472,11 +1492,9 @@ def gtgan_paper_evaluation(
         y = sequences[:, -1, 0]  # Predict first feature at last timestep
         return X, y
 
-    X_real_train, y_real_train = create_prediction_data(train_sequences[:n_eval])
+    X_real_train, y_real_train = create_prediction_data(train_sequences[train_idx])
     X_syn, y_syn = create_prediction_data(synthetic_eval)
-    X_holdout, y_holdout = create_prediction_data(
-        holdout_seq_norm[: min(n_eval, len(holdout_seq_norm))]
-    )
+    X_holdout, y_holdout = create_prediction_data(holdout_seq_norm[holdout_idx])
 
     # TRTR: Train Real, Test Real (baseline)
     reg_trtr = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
@@ -1506,8 +1524,8 @@ def gtgan_paper_evaluation(
 
     # --- 3. Interpolation Quality (GT-GAN specific) ---
     # Encode real, decode at same times - measure reconstruction
-    test_seq = torch.FloatTensor(train_sequences[:n_eval]).to(device)
-    test_times = torch.FloatTensor(train_times[:n_eval]).to(device)
+    test_seq = torch.FloatTensor(train_sequences[train_idx]).to(device)
+    test_times = torch.FloatTensor(train_times[train_idx]).to(device)
 
     with torch.no_grad():
         mu, logvar = model.encode(test_seq, test_times)
@@ -1567,6 +1585,7 @@ paper_results = gtgan_paper_evaluation(
     norm_params=norm_params,
     config=CONFIG,
     device=device,
+    rng=eval_rng,
 )
 
 # Summary
@@ -1673,7 +1692,7 @@ samples_denorm = (
     synthetic_sequences * (norm_params["max"] - norm_params["min"]) + norm_params["min"]
 )
 np.save(checkpoint_dir / "samples.npy", samples_denorm.astype(np.float32))
-np.save(checkpoint_dir / "sample_times.npy", seq_times[:N_SYNTHETIC].astype(np.float32))
+np.save(checkpoint_dir / "sample_times.npy", seq_times[eval_idx].astype(np.float32))
 
 print(f"\nSaved outputs to: {checkpoint_dir}/")
 print("  - checkpoint.pt (model weights)")
