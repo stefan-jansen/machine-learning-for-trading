@@ -626,10 +626,13 @@ tuning_comparison
 # **Interpretation**: the two objectives and the two holdout numbers do not tell the
 # same story, and why they differ is worth more than either number. A fold whose
 # cross-sectional IC is undefined carries no information about the hyperparameters that
-# produced it: a near-constant prediction has no ranking to correlate. This notebook
-# drops such a fold from the average and prunes a trial when every fold is undefined,
-# rather than scoring it at minus one, which would be a perfect inverse ranking and
-# would move a four-fold mean by a quarter on its own.
+# produced it: a near-constant prediction has no ranking to correlate. Two different
+# things follow, and the notebook keeps them apart. A fold too narrow for any
+# configuration to rank is a property of the data, so it is removed before the search
+# and every trial then faces the same folds. A fold that this particular configuration
+# could not rank is a property of the trial, so the trial has no value and is pruned.
+# Scoring either case at minus one would enter a perfect inverse ranking into the
+# average, which on four folds moves the mean by a quarter.
 #
 # What is left is the shape Section 12.4 warns about. The margins between tuned and
 # untuned on the holdout are small, and the walk-forward search costs many times the
