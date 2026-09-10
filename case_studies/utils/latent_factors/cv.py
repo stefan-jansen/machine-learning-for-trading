@@ -694,6 +694,7 @@ def run_latent_factor_cv(
         state[model_name] = {
             "fold_ics": [],
             "pred_frames": [],
+            "pred_files": [],
             "fold_extras": [],
         }
         log(f"  {model_name} (K={n_factors}):")
@@ -781,6 +782,7 @@ def run_latent_factor_cv(
             if not checkpoint_preds:
                 raise ValueError(f"{model_name} produced no physical checkpoints")
         checkpoint_ics: dict[int, float] = {}
+        fold_frames: list[pl.DataFrame] = []
         for epoch, predictions in checkpoint_preds.items():
             frame = _build_prediction_frame(
                 predictions=predictions,
@@ -811,7 +813,7 @@ def run_latent_factor_cv(
                 }
             )
             if frame is not None:
-                state[model_name]["pred_frames"].append(frame)
+                fold_frames.append(frame)
         best_epoch, reported_ic = _select_epoch_from_values(
             checkpoint_ics,
             checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
@@ -821,13 +823,20 @@ def run_latent_factor_cv(
             f"      fold {split['fold']}: reported_epoch={best_epoch}, "
             f"IC={reported_ic:+.4f}, {fold_elapsed:.1f}s"
         )
-        _write_incremental_fold(
+        # This fold's predictions leave memory here. They used to be kept for the whole run
+        # in `pred_frames` and, separately, rebuilt from `checkpoint_preds` to be written -
+        # every fold of every model resident while the later folds were still fitting, and
+        # every prediction frame built twice.
+        fold_path = _write_incremental_fold(
             model_dir=model_dirs[model_name],
             fold_id=split["fold"],
-            predictions=checkpoint_preds,
-            model_input=model_input,
-            model_name=model_name,
+            frames=fold_frames,
         )
+        if fold_path is None:
+            state[model_name]["pred_frames"].extend(fold_frames)
+        else:
+            state[model_name]["pred_files"].append(fold_path)
+        fold_frames.clear()
 
     if fold_workers > 1 and active_models:
         prepared_folds: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -947,11 +956,15 @@ def run_latent_factor_cv(
 
     for model_name in active_models:
         fold_ics_df = pl.DataFrame(state[model_name]["fold_ics"])
-        preds_df = (
-            pl.concat(state[model_name]["pred_frames"])
-            if state[model_name]["pred_frames"]
-            else pl.DataFrame()
-        )
+        # Read back in the order the folds were fitted, which is the order the accumulating
+        # list produced. A registered prediction set is content-addressed, so that is a
+        # result and not a presentation detail.
+        if state[model_name]["pred_files"]:
+            preds_df = pl.read_parquet(state[model_name]["pred_files"])
+        elif state[model_name]["pred_frames"]:
+            preds_df = pl.concat(state[model_name]["pred_frames"])
+        else:
+            preds_df = pl.DataFrame()
         best_epoch, mean_ic = _select_reporting_epoch(
             fold_ics_df,
             checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
@@ -1575,30 +1588,21 @@ def _write_incremental_fold(
     *,
     model_dir: Path | None,
     fold_id: int,
-    predictions: dict[int, np.ndarray],
-    model_input: dict[str, Any],
-    model_name: str,
-) -> None:
-    if model_dir is None:
-        return
+    frames: list[pl.DataFrame],
+) -> Path | None:
+    """Persist one fold's checkpoint predictions and return where they went.
+
+    Takes the frames the caller already scored rather than rebuilding them from the raw
+    predictions, which is what it used to do: every fold's predictions were constructed
+    twice, once to score and once to write.
+    """
+    if model_dir is None or not frames:
+        return None
     incremental_dir = model_dir / "_incremental"
     incremental_dir.mkdir(parents=True, exist_ok=True)
-    frames: list[pl.DataFrame] = []
-    for epoch, preds in predictions.items():
-        frame = _build_prediction_frame(
-            predictions=preds,
-            returns_val=model_input["returns_val"],
-            eval_returns_val=model_input.get("eval_returns_val"),
-            val_dates=model_input["val_dates"],
-            val_entities=model_input["val_entities"],
-            fold_id=fold_id,
-            model_name=model_name,
-            epoch=epoch,
-        )
-        if frame is not None:
-            frames.append(frame)
-    if frames:
-        pl.concat(frames).write_parquet(incremental_dir / f"fold{fold_id}.parquet")
+    path = incremental_dir / f"fold{fold_id}.parquet"
+    pl.concat(frames).write_parquet(path)
+    return path
 
 
 def _select_epoch_from_values(

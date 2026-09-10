@@ -225,7 +225,12 @@ def _metric_to_float(value: Any) -> float | None:
     return float(value)
 
 
-from case_studies.utils.registry.store import _save_parquet, flush_fold_training_log
+from case_studies.utils.registry.store import (
+    _save_parquet,
+    clear_fold_predictions,
+    flush_fold_training_log,
+    incremental_shard_path,
+)
 
 
 def _flush_darts_fold_training_log(
@@ -241,12 +246,19 @@ def _flush_darts_fold_preds(
     incr_dir: Path,
     config_name: str,
     fold: int,
-    prediction_frames: list[pl.DataFrame],
+    epoch: int,
+    frame: pl.DataFrame,
 ) -> None:
-    """Flush pre-assembled prediction DataFrames (darts builds these during training)."""
-    if not prediction_frames:
+    """Write one checkpoint's predictions to its own shard.
+
+    This used to take every checkpoint the fold had reached and rewrite one file per fold
+    from all of them, so the work and the bytes written grew with the square of the
+    checkpoint schedule and the last checkpoint of a fold concatenated the whole fold to
+    write a file it had already written once per checkpoint.
+    """
+    if frame.is_empty():
         return
-    _save_parquet(incr_dir / f"{config_name}_fold{fold}.parquet", pl.concat(prediction_frames))
+    _save_parquet(incremental_shard_path(incr_dir, config_name, fold, epoch), frame)
 
 
 class _DartsEpochProgressCallback(pl_lightning.callbacks.Callback):
@@ -1221,7 +1233,6 @@ def run_darts_cv(
             train_series = [state.train_target for state in training_states]
             train_covariates = [state.train_covariates for state in training_states]
             epoch_rows: list[dict[str, Any]] = []
-            checkpoint_frames: list[pl.DataFrame] = []
             checkpoint_ics: dict[int, float] = {}
             checkpoint_n_days: dict[int, int] = {}
             n_val_points = 0
@@ -1229,6 +1240,7 @@ def run_darts_cv(
             log_dir = save_dir / "_incremental_logs" if save_dir is not None else None
             if incr_dir is not None:
                 incr_dir.mkdir(parents=True, exist_ok=True)
+                clear_fold_predictions(incr_dir, config_name, split["fold"])
             if log_dir is not None:
                 log_dir.mkdir(parents=True, exist_ok=True)
             t0 = time.perf_counter()
@@ -1307,11 +1319,12 @@ def run_darts_cv(
                     pl.lit(config_name).alias("config"),
                     pl.lit(epochs_trained).alias("epoch"),
                 )
-                checkpoint_frames.append(checkpoint_preds)
                 cfg_prediction_frames.append(checkpoint_preds)
                 prediction_frames.append(checkpoint_preds)
                 if incr_dir is not None:
-                    _flush_darts_fold_preds(incr_dir, config_name, split["fold"], checkpoint_frames)
+                    _flush_darts_fold_preds(
+                        incr_dir, config_name, split["fold"], epochs_trained, checkpoint_preds
+                    )
 
                 _entity = entity_col if entity_col in checkpoint_preds.columns else None
                 ic_result = cross_sectional_ic(

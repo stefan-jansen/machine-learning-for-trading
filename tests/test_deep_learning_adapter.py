@@ -840,3 +840,150 @@ def test_run_dl_cv_assembles_predictions_in_config_then_epoch_order(tmp_path) ->
     assert len(parts) == len(config_names) * 4
 
     assert result["all_predictions"].equals(pl.concat(parts, how="diagonal_relaxed"))
+
+
+def test_flush_writes_one_shard_per_checkpoint_and_never_rewrites_one(tmp_path) -> None:
+    """A checkpoint's predictions are written once, to a file of their own.
+
+    The sequence runner reaches a checkpoint and hands the writer every checkpoint fitted
+    so far, so a writer that keeps one file per fold rebuilds and rewrites the whole fold
+    at every checkpoint: quadratic in the schedule, and on a nasdaq fold - four million
+    validation rows over twenty checkpoints - about ten gigabytes resident to write a file
+    it had already written nineteen times.
+    """
+    import numpy as np
+
+    from case_studies.utils.registry.store import (
+        flush_fold_predictions,
+        incremental_prediction_shards,
+    )
+
+    incr_dir = tmp_path / "_incremental"
+    incr_dir.mkdir()
+    n = 8
+    dates = np.array(["2024-01-02"] * n, dtype="datetime64[us]")
+    entities = np.array(list("ABCDEFGH"))
+    y_val = np.arange(n, dtype=np.float64)
+
+    reached: dict[int, np.ndarray] = {}
+    written_at: dict[int, int] = {}
+    for epoch in (1, 2, 3):
+        reached[epoch] = np.full(n, float(epoch))
+        flush_fold_predictions(
+            incr_dir, "nlinear", 2, reached, dates, entities, y_val, "timestamp", "symbol"
+        )
+        written_at[epoch] = (incr_dir / f"nlinear_fold2_ep{epoch}.parquet").stat().st_mtime_ns
+
+    shards = incremental_prediction_shards(incr_dir, "nlinear")
+    assert [(stem, epoch) for stem, epoch, _path in shards] == [
+        ("nlinear_fold2", 1),
+        ("nlinear_fold2", 2),
+        ("nlinear_fold2", 3),
+    ]
+    for _stem, epoch, path in shards:
+        frame = pl.read_parquet(path)
+        assert frame["epoch"].unique().to_list() == [epoch]
+        assert path.stat().st_mtime_ns == written_at[epoch], (
+            f"checkpoint {epoch}'s shard was rewritten by a later checkpoint"
+        )
+
+
+def test_run_dl_cv_holds_one_checkpoint_slice_at_a_time(tmp_path, monkeypatch) -> None:
+    """Post-processing reads a checkpoint back, scores it, and drops it.
+
+    It used to reassemble every incremental save into one frame and cut slices out of
+    that, so the whole prediction set stayed resident with a per-config copy and a
+    per-epoch copy beside it.
+    """
+    import weakref
+
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(1)
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    symbols = ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
+    frames = []
+    for symbol in symbols:
+        first = rng.normal(size=len(dates))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "symbol": symbol,
+                    "timestamp": dates,
+                    "f1": first,
+                    "f2": rng.normal(size=len(dates)),
+                    "target": 0.1 * first + 0.01 * rng.normal(size=len(dates)),
+                }
+            )
+        )
+    dataset = pd.concat(frames, ignore_index=True)
+    splits = [
+        {
+            "fold": 0,
+            "train_start": dates[0],
+            "train_end": dates[59],
+            "val_start": dates[60],
+            "val_end": dates[79],
+        },
+        {
+            "fold": 1,
+            "train_start": dates[0],
+            "train_end": dates[79],
+            "val_start": dates[80],
+            "val_end": dates[119],
+        },
+    ]
+    configs = [
+        {
+            "family": "deep_learning",
+            "config_name": name,
+            "n_epochs": 4,
+            "checkpoint_interval": 1,
+            "batch_size": 16,
+            "params": {"architecture": architecture, "lookback": 5},
+        }
+        for name, architecture in (("nlinear", "nlinear"), ("lstm_h64", "lstm"))
+    ]
+
+    slices: list[weakref.ReferenceType] = []
+    read_shards = deep_learning._read_prediction_shards
+
+    def tracking_read(paths):
+        frame = read_shards(paths)
+        if frame.height:
+            slices.append(weakref.ref(frame))
+        return frame
+
+    monkeypatch.setattr(deep_learning, "_read_prediction_shards", tracking_read)
+
+    alive_at_each_scoring: list[int] = []
+    score = deep_learning._decision_time_checkpoint_metrics
+
+    def tracking_score(frame, **kwargs):
+        alive_at_each_scoring.append(sum(ref() is not None for ref in slices))
+        return score(frame, **kwargs)
+
+    monkeypatch.setattr(deep_learning, "_decision_time_checkpoint_metrics", tracking_score)
+
+    result = deep_learning.run_dl_cv(
+        dataset,
+        splits,
+        configs=configs,
+        n_features=2,
+        feature_names=["f1", "f2"],
+        label_col="target",
+        date_col="timestamp",
+        entity_col="symbol",
+        device="cpu",
+        register=False,
+        save_dir=tmp_path,
+        seed=0,
+    )
+
+    assert result["all_predictions"].height > 0
+    assert len(alive_at_each_scoring) == len(configs) * 4
+    assert alive_at_each_scoring == [1] * len(alive_at_each_scoring), (
+        f"a scored checkpoint found {max(alive_at_each_scoring)} prediction frames alive; "
+        f"post-processing is holding slices across checkpoints"
+    )

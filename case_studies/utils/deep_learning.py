@@ -30,7 +30,7 @@ import subprocess
 import time
 import uuid
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,8 +56,10 @@ from case_studies.utils.cv_results import (
 from case_studies.utils.folds import fold_seed
 from case_studies.utils.registry.store import (
     _save_parquet,
+    clear_fold_predictions,
     flush_fold_predictions,
     flush_fold_training_log,
+    incremental_prediction_shards,
 )
 from case_studies.utils.runtime import cpu_seconds
 from case_studies.utils.sequence_dataset import (
@@ -1778,6 +1780,31 @@ def mc_dropout_predict(
 # ---------------------------------------------------------------------------
 
 
+def _read_prediction_shards(paths: Sequence[Path]) -> pl.DataFrame:
+    """Read incremental prediction shards as one frame, in the order given.
+
+    One read across the whole set, which is both faster than a read per file and leaves a
+    single chunk for the filters downstream. Shards from different folds can disagree on
+    timestamp precision, which a multi-file read rejects; that case falls back to the
+    per-file read the precision cast needs. Both paths cast, because the precision is
+    part of what a registered prediction set hashes.
+    """
+    paths = list(paths)
+    if not paths:
+        return pl.DataFrame()
+    try:
+        frame = pl.read_parquet(paths)
+    except pl.exceptions.PolarsError:
+        return pl.concat(
+            [
+                pl.read_parquet(path).cast({"timestamp": pl.Datetime("us")}, strict=False)
+                for path in paths
+            ],
+            how="diagonal_relaxed",
+        )
+    return frame.cast({"timestamp": pl.Datetime("us")}, strict=False)
+
+
 def _train_one_config(
     model: nn.Module,
     train_loader: DataLoader,
@@ -1789,16 +1816,20 @@ def _train_one_config(
     | None = None,
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
     state_callback: Callable[[int, nn.Module], None] | None = None,
-) -> tuple[dict[int, float], dict[int, np.ndarray], dict[int, float]]:
-    """Train a single model config, storing predictions at ALL checkpoints.
+) -> tuple[dict[int, float], dict[int, float]]:
+    """Train a single model config, handing each checkpoint's predictions to the caller.
 
-    Trains to completion (no early stopping). Stores predictions at every
-    checkpoint so the caller can select the best epoch after all folds finish.
+    Trains to completion (no early stopping). ``checkpoint_callback`` receives one
+    checkpoint at a time, as it is reached, and owns everything that happens to it.
+    This used to also accumulate every checkpoint's validation predictions and return
+    them, which nothing read: the one caller persists each checkpoint through the
+    callback and deleted the returned dict on the next line. On a nasdaq fold - four
+    million validation rows over a twenty-checkpoint schedule - that dict was 640 MB
+    held to the end of the fold for nothing.
 
     Returns
     -------
     checkpoint_ics : dict[epoch, ic]
-    checkpoint_preds : dict[epoch, np.ndarray]
     epoch_losses : dict[epoch, avg_loss]
     """
     model = model.to(device)
@@ -1807,7 +1838,6 @@ def _train_one_config(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
 
     checkpoint_ics: dict[int, float] = {}
-    checkpoint_preds: dict[int, np.ndarray] = {}
     epoch_losses: dict[int, float] = {}
 
     for epoch in range(1, n_epochs + 1):
@@ -1880,11 +1910,10 @@ def _train_one_config(
                 min_obs=5,
             )["ic_mean"]
             checkpoint_ics[epoch] = ic
-            checkpoint_preds[epoch] = val_preds.copy()
             if state_callback is not None:
                 state_callback(epoch, model)
             if checkpoint_callback is not None:
-                checkpoint_callback(checkpoint_preds, y_val, val_dates, val_entities)
+                checkpoint_callback({epoch: val_preds}, y_val, val_dates, val_entities)
             if epoch_callback is not None:
                 epoch_callback(
                     {
@@ -1914,7 +1943,7 @@ def _train_one_config(
                 )
             print(f"      epoch {epoch:3d}/{n_epochs}: train_loss={avg_loss:.6f}", flush=True)
 
-    return checkpoint_ics, checkpoint_preds, epoch_losses
+    return checkpoint_ics, epoch_losses
 
 
 # ---------------------------------------------------------------------------
@@ -2516,6 +2545,7 @@ def run_dl_cv(
             y_val_store = val_dates_store = val_entities_store = None
             if incr_dir is not None:
                 incr_dir.mkdir(parents=True, exist_ok=True)
+                clear_fold_predictions(incr_dir, config_name, split["fold"])
                 y_val_store, val_dates_store, val_entities_store = materialize_store_metadata(
                     val_store
                 )
@@ -2615,7 +2645,7 @@ def run_dl_cv(
 
                 train_kwargs["state_callback"] = persist_state
 
-            checkpoint_ics, checkpoint_preds, epoch_losses = _train_one_config(
+            checkpoint_ics, epoch_losses = _train_one_config(
                 model=model,
                 train_loader=train_loader,
                 val_loader=val_loader,
@@ -2642,7 +2672,7 @@ def run_dl_cv(
                 row["best_ic"] = float(checkpoint_ics[best_ep])
             acc.setdefault("training_log", []).extend(epoch_rows)
 
-            del model, checkpoint_preds, train_loader, val_loader
+            del model, train_loader, val_loader
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -2659,34 +2689,30 @@ def run_dl_cv(
     if n_valid_folds == 0:
         raise ValueError("No valid folds created. Check data size vs lookback.")
 
-    # Reassemble all predictions from incremental saves
+    # Post-processing reads one (config, checkpoint) slice back at a time and drops it
+    # again. It used to reassemble every incremental save into one frame first and then cut
+    # slices out of it, so the whole prediction set was resident while a per-config copy and
+    # a per-epoch copy stood beside it, and the assembled result made a fourth. One sequence
+    # configuration is every checkpoint on every fold - twenty checkpoints over two folds
+    # where gradient boosting has ten - and a nasdaq fold is four million validation rows, so
+    # none of those copies is small.
     incr_dir = save_dir / "_incremental" if save_dir is not None else None
+    shards_by_config: dict[str, dict[int, list[Path]]] = {}
     if incr_dir is not None and incr_dir.exists():
-        parquet_files = sorted(incr_dir.glob("*.parquet"))
-        all_predictions = (
-            pl.concat(
-                [
-                    pl.read_parquet(f).cast({"timestamp": pl.Datetime("us")}, strict=False)
-                    for f in parquet_files
-                ],
-                how="diagonal_relaxed",
-            )
-            if parquet_files
-            else pl.DataFrame()
-        )
-    else:
-        all_predictions = pl.DataFrame()
+        for shard_cfg in configs:
+            by_epoch: dict[int, list[Path]] = {}
+            for _stem, shard_epoch, shard_path in incremental_prediction_shards(
+                incr_dir, shard_cfg["config_name"]
+            ):
+                by_epoch.setdefault(shard_epoch, []).append(shard_path)
+            shards_by_config[shard_cfg["config_name"]] = by_epoch
 
     # --- Aggregate results per config (post-processing) ---
     config_results: list[dict[str, Any]] = []
     all_curves: list[dict] = []
     training_log: list[dict] = []
     # (config, epoch) of every checkpoint that covers all folds, in the order the loop finds
-    # them. Recording the pair rather than the frame is what keeps post-processing from holding
-    # the same rows three times over: every slice appended here was cut from `all_predictions`,
-    # which stays resident, and concatenating the slices at the end made a third copy. One
-    # sequence configuration is every checkpoint epoch on every fold - twenty epochs over two
-    # folds where gradient boosting has ten checkpoints - so the copies are not small.
+    # them. The assembled result is read back from the shards in this order.
     complete_slices: list[tuple[str, int]] = []
     log_dir = save_dir / "_incremental_logs" if save_dir is not None else None
     incremental_logs = pl.DataFrame()
@@ -2700,38 +2726,35 @@ def run_dl_cv(
     for cfg in configs:
         config_name = cfg["config_name"]
         acc = config_acc[config_name]
-        cfg_preds = (
-            all_predictions.filter(pl.col("config") == config_name)
-            if all_predictions.height > 0
-            else pl.DataFrame()
-        )
+        cfg_shards = shards_by_config.get(config_name, {})
 
         epoch_scores: list[tuple[int, float, float, int]] = []
-        if cfg_preds.height > 0:
-            for epoch in sorted(cfg_preds["epoch"].unique().to_list()):
-                ep_df = cfg_preds.filter(pl.col("epoch") == epoch)
-                fold_ids = sorted(ep_df["fold_id"].unique().to_list())
-                if fold_ids != expected_fold_ids:
-                    continue
-                metrics = _decision_time_checkpoint_metrics(
-                    ep_df,
-                    date_col=date_col,
-                    entity_col=entity_col,
-                )
-                ic_mean = float(metrics["ic_mean"])
-                ic_std = float(metrics["ic_std"])
-                ic_n_days = int(metrics["ic_n_days"])
-                all_curves.append(
-                    {
-                        "config": config_name,
-                        "epoch": epoch,
-                        "ic_mean": ic_mean,
-                        "ic_std": ic_std,
-                        "ic_n_days": ic_n_days,
-                    }
-                )
-                complete_slices.append((config_name, int(epoch)))
-                epoch_scores.append((epoch, ic_mean, ic_std, ic_n_days))
+        for epoch in sorted(cfg_shards):
+            ep_df = _read_prediction_shards(cfg_shards[epoch])
+            fold_ids = sorted(ep_df["fold_id"].unique().to_list())
+            if fold_ids != expected_fold_ids:
+                del ep_df
+                continue
+            metrics = _decision_time_checkpoint_metrics(
+                ep_df,
+                date_col=date_col,
+                entity_col=entity_col,
+            )
+            del ep_df
+            ic_mean = float(metrics["ic_mean"])
+            ic_std = float(metrics["ic_std"])
+            ic_n_days = int(metrics["ic_n_days"])
+            all_curves.append(
+                {
+                    "config": config_name,
+                    "epoch": epoch,
+                    "ic_mean": ic_mean,
+                    "ic_std": ic_std,
+                    "ic_n_days": ic_n_days,
+                }
+            )
+            complete_slices.append((config_name, int(epoch)))
+            epoch_scores.append((epoch, ic_mean, ic_std, ic_n_days))
 
         if epoch_scores:
             full_coverage = max(item[3] for item in epoch_scores)
@@ -2788,16 +2811,16 @@ def run_dl_cv(
         # aggregation finishes. Registering only the raw-IC peak would prevent a
         # reader from applying the checkpoint-level coverage guard when that peak
         # has undefined daily IC on part of the validation surface.
-        if register and case_study and epoch_scores and cfg_preds.height > 0:
+        if register and case_study and epoch_scores:
             try:
                 from case_studies.utils.registry import register_prediction_set
 
                 arch = resolve_arch_name(config_name)
                 cfg_curves_df = pl.DataFrame([c for c in all_curves if c["config"] == config_name])
                 epoch_ic = {epoch: ic for epoch, ic, _std, _days in epoch_scores}
-                epochs = sorted(cfg_preds["epoch"].unique().to_list())
+                epochs = sorted(cfg_shards)
                 first_ep = best_cp if best_cp in epochs else epochs[0]
-                first_slice = cfg_preds.filter(pl.col("epoch") == first_ep).drop("config", "epoch")
+                first_slice = _read_prediction_shards(cfg_shards[first_ep]).drop("config", "epoch")
                 t_hash = _register_dl_config(
                     case_study=case_study,
                     label=label_col,
@@ -2816,10 +2839,11 @@ def run_dl_cv(
                     prediction_split=prediction_split,
                     identity_params=_config_identity_params(cfg),
                 )
+                del first_slice
                 for epoch, _ic, _epoch_std, _days in epoch_scores:
                     if epoch == first_ep:
                         continue
-                    epoch_preds = cfg_preds.filter(pl.col("epoch") == epoch).drop("config", "epoch")
+                    epoch_preds = _read_prediction_shards(cfg_shards[epoch]).drop("config", "epoch")
                     register_prediction_set(
                         case_study,
                         training_hash=t_hash,
@@ -2829,6 +2853,7 @@ def run_dl_cv(
                         predictions=epoch_preds,
                         metrics={"ic_mean": epoch_ic[epoch]},
                     )
+                    del epoch_preds
                 print(
                     f"    registered {config_name} incrementally "
                     f"({len(epoch_scores)} per-epoch slices)"
@@ -2841,25 +2866,16 @@ def run_dl_cv(
     del config_acc
     gc.collect()
 
-    # Cut in the order the loop recorded them, so the row order is the one the accumulating list
-    # produced. The cuts are lazy and collected once, so the slices are never all materialised
-    # alongside the frame they came from and the result they go into. `all_predictions` is not
-    # read after this and is the largest thing alive.
-    complete_predictions = (
-        pl.concat(
-            [
-                all_predictions.lazy().filter(
-                    (pl.col("config") == slice_config)
-                    & (pl.col("epoch").cast(pl.Int64) == slice_epoch)
-                )
-                for slice_config, slice_epoch in complete_slices
-            ],
-            how="diagonal_relaxed",
-        ).collect()
-        if complete_slices
-        else pl.DataFrame()
+    # Read in the order the loop recorded, which is the order a single frame cut by
+    # (config, checkpoint) produced: configuration, then checkpoint, then fold. A prediction
+    # set is registered content-addressed, so the row order is a result.
+    complete_predictions = _read_prediction_shards(
+        [
+            shard
+            for slice_config, slice_epoch in complete_slices
+            for shard in shards_by_config[slice_config][slice_epoch]
+        ]
     )
-    del all_predictions
     gc.collect()
 
     learning_curves = pl.DataFrame(all_curves) if all_curves else pl.DataFrame()
