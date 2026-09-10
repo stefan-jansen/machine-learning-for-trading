@@ -515,7 +515,10 @@ print(
 # %% [markdown]
 # ### AnomalyManager: running all three across the universe
 #
-# `AnomalyManager` orchestrates the three detectors and reports per symbol.
+# `AnomalyManager` orchestrates the three detectors and reports per symbol. It concatenates
+# what each detector returns without reconciling them, so a day that is both a return outlier
+# and a volume spike appears twice. The per-row column below is therefore events per row and
+# not the share of rows that carry an event, and it can exceed one.
 
 # %%
 anomaly_config = AnomalyConfig(
@@ -538,7 +541,7 @@ batch_summary = pl.DataFrame(
         }
         for sym, rep in reports.items()
     ]
-).with_columns((pl.col("total_anomalies") / pl.col("rows")).alias("share_of_rows"))
+).with_columns((pl.col("total_anomalies") / pl.col("rows")).alias("anomalies_per_row"))
 batch_summary
 
 # %% [markdown]
@@ -693,17 +696,39 @@ print(
 
 # %% [markdown]
 # The zero-return tie group is large in the first half and nearly gone in the second, and the
-# bin next to it supplies the majority of the whole statistic. Both facts have the same cause,
-# and it is not a change in how far the stock moves: US equities quoted in fractions until
-# 2001, so a small move often rounded to no move at all, and after decimalization it did not.
+# bin beside it supplies the majority of the whole statistic. The natural next move is to
+# explain the tie group away, and the natural explanation is the tick size: US equities quoted
+# in fractions until decimalization in 2001, so a small move could round to no move. That
+# explanation is testable from this file, because it predicts *when* the tie group should
+# disappear.
+
+# %%
+zeros_by_year = (
+    df.drop_nulls("return_pct")
+    .group_by(pl.col("timestamp").dt.year().alias("year"))
+    .agg((pl.col("return_pct") == 0).mean().alias("zero_share"), pl.len().alias("days"))
+    .sort("year")
+)
+print(f"Share of {DEMO_SYMBOL} days with a return of exactly zero, by year:")
+with pl.Config(tbl_rows=-1):
+    print(zeros_by_year)
+
+# %% [markdown]
+# The prediction fails. The tie group does not thin out at decimalization; it thins out in the
+# late 1990s, several years earlier, and is already down to a couple of percent before 2001.
+# Whatever ended it - the earlier move from eighths to sixteenths, this stock's price level
+# and turnover rising through that period, or something else - one tick-size event on a known
+# date does not fit the timing, and nothing computed here separates the candidates.
 #
-# PSI is not wrong here. The distribution genuinely changed. What is wrong is the obvious
-# reading of the number, which is that returns grew calmer or wilder. The outer bins do lose
-# mass, which is that reading's evidence, and they contribute a small part of the total. The
-# statistic is dominated by a tick-size change, and nothing in the headline value says so.
+# So the section ends where the evidence does. The distribution genuinely changed. Most of the
+# statistic comes from one bin, that bin's baseline share is distorted by a tie group, and the
+# tie group thinned out over the late 1990s for reasons this file cannot settle. The reading
+# the headline number invites - that returns grew calmer - rests on the outer bins, which do
+# lose mass and which contribute a small part of the total.
 #
 # The general form: **a drift score locates a change and cannot attribute one.** Reading the
-# per-bin contributions is what turns it into a question worth asking.
+# per-bin contributions turns it into a question worth asking, and answering that question
+# takes evidence from outside the series.
 
 # %%
 fig = go.Figure()
@@ -1044,20 +1069,27 @@ pipeline_summary
 #    correspondingly narrow. The intuitive explanation runs the other way and gets the
 #    mechanism backwards.
 #
-# 4. **PSI's binning discards the observations PSI exists to find.** Bin edges taken from
+# 4. **Most of a PSI can come from one bin that is not a decile.** Quantile edges cannot split
+#    a point mass, and daily returns have one at zero, so two neighbouring bins come out
+#    lopsided and the larger deviation sits beside the tie group rather than in the tails.
+#    Reading the per-bin contributions is what shows this; the headline value does not. What
+#    caused the tie group to thin is a further question, and the yearly counts above rule out
+#    the obvious answer without supplying another.
+#
+# 5. **PSI's binning also discards the observations PSI exists to find.** Bin edges taken from
 #    baseline quantiles end at the baseline's own extremes, so a current observation more
 #    extreme than anything seen before falls in no bin and is dropped by the histogram. The
 #    count dropped is printed above. Opening the outer bins costs nothing and removes a blind
 #    spot aimed squarely at the strongest evidence of drift.
 #
-# 5. **An anomaly detector produces a work queue, and cannot resolve one.** The overnight-return
+# 6. **An anomaly detector produces a work queue, and cannot resolve one.** The overnight-return
 #    threshold misses none of this universe's recorded splits, and better than a third of its
 #    flags match no split at all: one corporate action recorded in a different column of the
 #    same file, and several ordinary large moves. Scoring it was possible only because this file carries
 #    the split and dividend columns; on a feed that does not, the same list arrives with no way
 #    to grade it.
 #
-# 6. **An unadjusted panel makes correct detectors fire on real events.** Either adjust
+# 7. **An unadjusted panel makes correct detectors fire on real events.** Either adjust
 #    upstream or give the pipeline a corporate-action source to consult before it quarantines
 #    anything, because the alternative is quarantining the days the market actually moved.
 #
