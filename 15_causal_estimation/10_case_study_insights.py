@@ -537,7 +537,9 @@ else:
         ax.set_ylabel("DML effect (panel units)")
     for index in range(n_panels, n_rows * n_columns):
         axes.flat[index].set_visible(False)
-    fig.suptitle("DML effect against label horizon, for panels with more than one", y=1.01)
+    # No explicit y: constrained layout places the suptitle, and y=1.01 pushed it into the
+    # per-panel titles, which the render showed running through "CME Futures".
+    fig.suptitle("DML effect against label horizon, for panels with more than one")
     show_with_alt(
         fig,
         "A grid of small panels, one per case study that registers more than one label "
