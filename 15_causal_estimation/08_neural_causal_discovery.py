@@ -103,11 +103,12 @@ print(f"Bootstrap iterations: {N_BOOTSTRAP}")
 # %% [markdown]
 # ## 2. The NOTEARS Algorithm
 #
-# The implementation below is the notebook's own. `causal-learn` supplies the other three
-# methods used here - VAR-LiNGAM, PC-family constraint search and the independence tests -
-# but it ships no NOTEARS, so a continuous-optimization baseline has to be written out. That
-# is convenient for teaching: the augmented-Lagrangian loop is short enough to read, and the
-# acyclicity constraint is the whole idea.
+# The implementation below is the notebook's own. Every other method here is imported:
+# VAR-LiNGAM from `causal-learn`, PCMCI and its partial-correlation test from `tigramite`,
+# the Granger tests from `statsmodels`. `causal-learn` is the library a reader would expect
+# NOTEARS to live in, and it ships no NOTEARS, so a continuous-optimization baseline has to
+# be written out. That suits the teaching: the augmented-Lagrangian loop is short enough to
+# read, and the acyclicity constraint is the whole idea.
 #
 # **NOTEARS** (Zheng et al., 2018) reformulates DAG learning as:
 #
