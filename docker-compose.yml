@@ -45,6 +45,12 @@ x-common: &common
     # that download into a failure. What a pinned load must not do is silently
     # substitute a different checkpoint, and `revision=` with local_files_only is
     # what prevents that, not the mount mode.
+    #
+    # The host directory has to exist before the first `docker compose` command.
+    # Docker creates a missing bind source as root, and the container runs as the
+    # invoking user, so an uncached download then fails on permissions despite the
+    # :rw. `mkdir -p ~/.cache/huggingface` once is the whole fix; any host that has
+    # run a HuggingFace library already has it.
     - ${HF_HOME:-${HOME}/.cache/huggingface}:/home/ml4t/.cache/huggingface:rw
   environment:
     - ML4T_DATA_PATH=/data

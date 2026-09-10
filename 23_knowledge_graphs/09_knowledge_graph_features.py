@@ -715,20 +715,27 @@ def build_holdings_snapshots(
 # Aggregate the latest and prior period snapshots independently. This produces
 # cutoff-safe holder breadth, concentration, and value-change fields.
 #
-# `inst_coverage_pct` divides by the number of institutions in the panel, which is
-# ten, so the feature takes eleven possible values and is the holder count on a
-# different scale. `crowding_score` divides the same count by its median across
-# securities, so it is the same count again. Both are printed with their
+# `inst_coverage_pct` divides by the number of institutions in the panel, so the
+# feature takes as many values as the panel has members plus one, and is the holder
+# count on a different scale. `crowding_score` divides the same count by its median
+# across securities, so it is the same count again. Both are printed with their
 # denominators rather than left to look like continuous measures.
+#
+# The denominator is the panel, counted over every filing. A count taken over the
+# long-equity rows shrinks whenever a manager reports only puts and calls for a
+# period, and a stock the rest of the panel holds then reads as fully covered.
 
 
 # %%
 def compute_stock_ownership_stats(
-    latest_positions: pl.DataFrame, prior_positions: pl.DataFrame
+    latest_positions: pl.DataFrame, prior_positions: pl.DataFrame, panel_size: int
 ) -> pl.DataFrame:
     """Aggregate point-in-time stock ownership statistics."""
-    institution_count = latest_positions.get_column("cik").n_unique()
-    print(f"Institutions in the latest public report period: {institution_count}")
+    long_equity_filers = latest_positions.get_column("cik").n_unique()
+    print(
+        f"Institution panel: {panel_size}; reporting long equity in the latest "
+        f"public period: {long_equity_filers}"
+    )
     latest_stats = latest_positions.group_by("cusip").agg(
         pl.col("cik").n_unique().alias("n_holders"),
         pl.col("value_thousands").sum().alias("total_value_thousands"),
@@ -741,7 +748,7 @@ def compute_stock_ownership_stats(
         pl.col("value_thousands").sum().alias("prior_value_thousands")
     )
     return latest_stats.join(prior_values, on="cusip", how="left").with_columns(
-        (pl.col("n_holders") / institution_count).alias("inst_coverage_pct"),
+        (pl.col("n_holders") / panel_size).alias("inst_coverage_pct"),
         (pl.col("total_value_thousands") - pl.col("prior_value_thousands")).alias(
             "inst_value_change"
         ),
@@ -766,6 +773,7 @@ def compute_crowding_features(
     holdings: pl.DataFrame,
     mapping: pl.DataFrame,
     public_periods: list[date],
+    panel_size: int,
 ) -> pl.DataFrame:
     """Compute point-in-time ownership concentration and candidate crowding proxies."""
     matched = mapping.filter(pl.col("cusip").is_not_null())
@@ -773,7 +781,7 @@ def compute_crowding_features(
         return pl.DataFrame({"entity": []})
 
     latest_positions, prior_positions = build_holdings_snapshots(holdings, public_periods)
-    stock_stats = compute_stock_ownership_stats(latest_positions, prior_positions)
+    stock_stats = compute_stock_ownership_stats(latest_positions, prior_positions, panel_size)
     median_holders = stock_stats.get_column("n_holders").median() or 1.0
     print(f"Median holders across held securities: {median_holders}")
 
@@ -804,9 +812,40 @@ def compute_crowding_features(
 
 
 # %%
-crowding_df = compute_crowding_features(holdings_df, company_mapping, PUBLIC_PERIODS)
+crowding_df = compute_crowding_features(holdings_df, company_mapping, PUBLIC_PERIODS, PANEL_SIZE)
 print("Crowding features:")
 crowding_df
+
+
+# %% [markdown]
+# ### The Coverage Denominator, Exercised
+#
+# Every manager in this artifact reports long equity in every period, so the
+# distinction between the panel and the long-equity filers is invisible on the data
+# as it stands. Withholding one manager's long rows reproduces a period in which it
+# reported only derivatives, and the check requires two things: that coverage still
+# divides by the panel, and that the filer count would have given a different answer.
+
+# %%
+_probe_latest, _probe_prior = build_holdings_snapshots(holdings_df, PUBLIC_PERIODS)
+_derivatives_only = _probe_latest.get_column("cik").unique().sort().first()
+_thin_latest = _probe_latest.filter(pl.col("cik") != _derivatives_only)
+_thin_filers = _thin_latest.get_column("cik").n_unique()
+_thin_stats = compute_stock_ownership_stats(_thin_latest, _probe_prior, PANEL_SIZE)
+_row = _thin_stats.sort(["n_holders", "cusip"], descending=[True, False]).row(0, named=True)
+if _row["inst_coverage_pct"] != _row["n_holders"] / PANEL_SIZE:
+    raise RuntimeError("inst_coverage_pct is not dividing by the institution panel")
+if _row["n_holders"] / _thin_filers == _row["inst_coverage_pct"]:
+    raise RuntimeError(
+        "withholding one manager did not change the long-equity filer count, so this "
+        "check cannot tell the two denominators apart"
+    )
+print(
+    f"With {_derivatives_only} reporting no long equity, {_thin_filers} of {PANEL_SIZE} "
+    f"managers appear in the slice; the most widely held security reads "
+    f"{_row['inst_coverage_pct']:.1%} against the panel and "
+    f"{_row['n_holders'] / _thin_filers:.1%} against the filers"
+)
 
 
 # %% [markdown]
@@ -1544,9 +1583,11 @@ print(f"Output target: {OUTPUT_DIR.name}")
 #    attributes miss.
 # 2. Point-in-time long-equity 13F features summarize holder breadth,
 #    concentration, and co-ownership; they are candidate crowding proxies, not
-#    measured price impact. Holder breadth is bounded by the ten institutions in
-#    the panel, so `n_holders`, `crowding_score` and `inst_coverage_pct` are one
-#    small integer on three scales rather than three measurements.
+#    measured price impact. Holder breadth is bounded by the institution panel, so
+#    `n_holders`, `crowding_score` and `inst_coverage_pct` are one small integer on
+#    three scales rather than three measurements. The panel is counted over every
+#    filing, not over the long-equity rows the features use, so a manager reporting
+#    only derivatives for a period does not shrink the denominator.
 # 3. Cross-graph features combining supply-chain and ownership signals
 #    create transparent interaction terms for downstream testing.
 # 4. The feature matrix is output in both wide format (ready for gradient

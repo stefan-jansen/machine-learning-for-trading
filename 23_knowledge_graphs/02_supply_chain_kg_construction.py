@@ -540,6 +540,18 @@ if not RERUN_EXTRACTION:
     CACHE_CONTENT_HASH = CACHE_META["content_hash"]
     print(f"Loaded and validated {len(all_triples)} cached triples from {CACHE_PATH.name}")
     print(f"Cache producer: {EXTRACTOR_NAME}, {CACHE_META['row_count']} rows")
+    # Narrow to the cohort the producer recorded. A cache regenerated with
+    # MAX_COMPANIES set covers part of the corpus, and the roster and figures
+    # below have to describe the filings the triples came from.
+    CACHE_SCOPE = int(CACHE_META.get("max_companies", 0) or 0)
+    if CACHE_SCOPE:
+        cached_symbols = sorted(filings_df["symbol"].unique().to_list())[:CACHE_SCOPE]
+        filings_df = filings_df.filter(pl.col("symbol").is_in(cached_symbols))
+        years = filings_df["year"].unique().sort().to_list()
+        print(
+            f"Cache covers MAX_COMPANIES={CACHE_SCOPE}: narrowed to {len(filings_df)} "
+            f"filings across {filings_df['symbol'].n_unique()} companies"
+        )
 else:
     all_triples, extraction_elapsed = run_full_extraction(filings_df.to_dicts())
     cache_df = pl.DataFrame([triple.to_dict() for triple in all_triples])
