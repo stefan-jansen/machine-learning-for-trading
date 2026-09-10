@@ -636,8 +636,8 @@ show_with_alt(
     fig,
     "Two bar panels sharing a model axis. Left: mean rank IC across the walk-forward "
     "folds with an error bar one standard deviation either side, drawn against a line "
-    "at zero; every error bar is several times the height of the bar it sits on. "
-    "Right: mean training time per fold in seconds.",
+    "at zero; the bars are short enough and the error bars long enough that all three "
+    "intervals overlap one another. Right: mean training time per fold in seconds.",
 )
 
 # %% [markdown]

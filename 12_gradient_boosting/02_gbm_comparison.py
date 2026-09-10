@@ -638,14 +638,13 @@ axes[2].set_ylabel("Memory Delta (MB, RSS)")
 axes[2].set_title("Resident memory added by preset")
 
 handles, labels = axes[0].get_legend_handles_labels()
-fig.legend(handles, labels, loc="lower center", ncol=4, fontsize=9, frameon=False)
-fig.suptitle("Accuracy, training time and memory by library and preset", fontsize=12, y=1.02)
+fig.legend(handles, labels, loc="outside lower center", ncol=4, fontsize=9, frameon=False)
+fig.suptitle("Accuracy, training time and memory by library and preset", fontsize=12)
 show_with_alt(
     fig,
     "Three panels of grouped bars sharing a preset axis, one bar per library. Left: "
-    "test rank IC, drawn downward because every bar is negative. Middle: training time "
-    "in seconds on a log scale, rising with preset weight. Right: the resident memory "
-    "each fit added, which is zero for most bars.",
+    "test rank IC against a line at zero. Middle: training time in seconds on a log "
+    "scale. Right: the resident memory each fit added, in megabytes.",
 )
 
 # %%
@@ -717,7 +716,6 @@ else:
     fig.suptitle(
         f"Training time and GPU speedup by preset ({gpu_caps.get('gpu_name', 'GPU')})",
         fontsize=12,
-        y=1.02,
     )
     show_with_alt(
         fig,
