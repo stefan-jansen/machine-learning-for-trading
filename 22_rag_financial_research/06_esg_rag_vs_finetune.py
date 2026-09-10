@@ -79,9 +79,9 @@ from utils.style import COLORS, show_plotly_with_alt
 transformers_logging.set_verbosity_error()
 
 # %% tags=["parameters"]
-MAX_HEADLINES = 0  # 0 means PER_CATEGORY from each of E, S and G
+MAX_HEADLINES = 0  # total headlines to classify; 0 means 3 * PER_CATEGORY
 MAX_QUESTIONS = 0
-PER_CATEGORY = 7  # headlines drawn from each ESG category, subject to supply
+PER_CATEGORY = 7  # per-category default when MAX_HEADLINES is 0
 SEED = 42
 REQUIRE_GPU = True
 FINBERT_MODEL = "ProsusAI/finbert"
@@ -204,33 +204,50 @@ pool_counts = esg_news.group_by("category").len().sort("len", descending=True)
 pool_counts
 
 # %% [markdown]
-# The screen is called an ESG screen and it is an environmental screen. The
-# counts above are not close: the environmental category takes the
-# overwhelming majority of what the first keyword list selects, and social and
-# governance headlines together are a rounding error against it.
+# This screen is called an ESG screen and what it returns is environmental
+# news. The counts are not close: social and governance headlines together are
+# a rounding error against the environmental ones.
 #
-# The cause is in the vocabulary rather than in the list. Environmental
-# reporting has words of its own - *solar*, *carbon*, *emissions*,
-# *renewables* - that appear almost nowhere else, so a keyword screen catches
-# it cleanly. Social and governance topics are written in ordinary business
-# English: *board*, *pay*, *workers*, *safety*. A list broad enough to catch
-# those would select most of a financial news archive, and a list narrow
-# enough to be precise catches almost none of them. No amount of care with the
-# keywords escapes that, which is what "fixed taxonomy" costs in practice.
+# Two properties of the screen itself account for a good deal of that, and both
+# are visible in the code above rather than inferred.
 #
-# It also decides how to sample. Drawing twenty headlines uniformly from this
-# pool would, on these proportions, produce twenty environmental headlines and
-# demonstrate a one-letter taxonomy. The sample below is stratified instead,
-# taking the same number from each category so that all three are present -
-# which is itself the admission that the screen could not supply them by
-# itself.
+# **The selection list is lopsided.** Its environmental terms are common single
+# words - *climate*, *carbon*, *solar*, *renewable*, *emission* - and a
+# headline needs only one of them. Its social and governance terms are mostly
+# compound phrases that a headline has to contain intact: *social
+# responsibility*, *labor rights*, *board independence*, *executive
+# compensation*. The ordinary words those topics are actually written in -
+# *board*, *pay*, *workers*, *safety* - appear in the categoriser's lists and
+# not in the selection pattern, so a headline about a workforce dispute is
+# never selected to be categorised in the first place.
+#
+# **The categoriser resolves ties towards environmental.** It tests
+# environmental terms first, so a headline about a board's climate policy is
+# environmental and not governance.
+#
+# What that does *not* establish is that keyword screening is intrinsically
+# environmental. Deciding that would need alternative selection lists and a set
+# of headlines labelled by someone other than this notebook, and neither is
+# here. What it does establish is the thing worth carrying: a keyword screen's
+# output composition is a property of the list, the imbalance can be large
+# enough to make the label wrong, and it costs one group-by to check.
+#
+# `MAX_HEADLINES` is a budget for the whole sample, split evenly across the
+# three categories, so a cap set for a fast test caps what a fast test runs.
+#
+# It also decides how to sample. On these proportions a uniform draw of twenty
+# would be overwhelmingly environmental and would more likely than not contain
+# no social or governance headline at all. The sample below is stratified
+# instead, taking the same number from each category so all three are present -
+# which is itself the admission that the screen could not supply them.
 
 # %%
-per_category = MAX_HEADLINES if MAX_HEADLINES > 0 else PER_CATEGORY
+esg_categories = ("Environmental", "Social", "Governance")
+per_category = max(1, MAX_HEADLINES // len(esg_categories)) if MAX_HEADLINES > 0 else PER_CATEGORY
 selected_headlines = pl.concat(
     [
         group.sample(min(per_category, group.height), seed=SEED)
-        for category in ("Environmental", "Social", "Governance")
+        for category in esg_categories
         if (group := esg_news.filter(pl.col("category") == category)).height
     ]
 ).sort(["timestamp", "headline"], descending=[True, False])
@@ -579,20 +596,23 @@ print(f"COMPLETION_RECORD={json.dumps(completion_record, sort_keys=True)}")
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **An ESG keyword screen is an environmental screen.** Section 2 measures
-#    it over the whole selected pool, and the imbalance is not marginal. The
-#    reason is linguistic and not fixable by a longer list: environmental
-#    reporting has a vocabulary of its own, and social and governance topics
-#    are written in words that a precise list cannot catch and a broad one
-#    cannot separate from everything else. Any keyword taxonomy over news
-#    inherits this, and reporting an "ESG signal" built on one without checking
-#    its composition reports an environmental signal.
+# 1. **Check what a keyword screen actually selected before naming it.**
+#    Section 2 applies the categoriser to the whole selected pool, and this
+#    screen returns environmental news by a margin that makes the label "ESG"
+#    misleading. Two causes are visible in the screen itself: its environmental
+#    terms are common single words while its social and governance terms are
+#    compound phrases a headline must contain intact, and its categoriser
+#    breaks ties towards environmental. Whether that generalises to keyword
+#    screening as such is a question this notebook does not answer - it would
+#    need other lists and independent labels. The check that catches it is one
+#    group-by.
 #
-# 2. **A sample cannot show what its pool does not contain.** Twenty headlines
-#    drawn uniformly from this pool would be twenty environmental headlines.
-#    The stratified draw is what puts all three categories in front of the
+# 2. **A sample cannot show what its pool does not contain.** A uniform draw
+#    of twenty from this pool would be overwhelmingly environmental and would
+#    more likely than not contain no social or governance headline at all. The
+#    stratified draw is what puts all three categories in front of the
 #    classifier, and stratifying is an intervention that has to be declared,
-#    because the resulting category counts are a property of the sampling
+#    because the resulting category counts are then a property of the sampling
 #    rather than of the news.
 #
 # 3. **Time the load separately from the inference.** At this batch size the
