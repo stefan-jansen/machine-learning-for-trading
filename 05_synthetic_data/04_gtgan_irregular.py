@@ -1660,13 +1660,16 @@ print(f"""
 # discriminative accuracy and AUC sit at their maximum, so the classifier separates
 # synthetic from real without error. The TSTR ratio is several times its target, so a
 # predictor trained on the synthetic sequences transfers poorly to real ones. The
-# bounded fraction clears its threshold, but that is a weak threshold to clear here: a
-# value interpolated between two observations is bounded by them whenever the decoded
-# path is monotone across the gap, and the smoothness ratio in the interpolation section
-# above is far below one, which is what an over-smooth path reads as. The row that
-# passes and the rows that do not are consistent with one another rather than in
-# tension, and discarding the failing rows to keep the passing one would be choosing a
-# metric by its answer.
+# bounded fraction clears its threshold, but it checks something narrower than its name
+# suggests. It encodes a real window, decodes at the midpoint between each pair of
+# observation times, and asks whether that value lands between the two neighbouring real
+# values with a fixed tolerance added on either side. That tolerance is wider than the
+# mean gap between adjacent observations printed in the interpolation section above, so
+# most of the band being cleared is tolerance rather than data. And the latent it decodes
+# comes from encoding a real window, which makes it the one row here that never runs the
+# generator. The passing row and the failing rows are therefore not in tension: they ask
+# different questions, and discarding the failing ones to keep the passing one would be
+# choosing a metric by its answer.
 #
 # `MAX_STEPS` is set to two thousand, which is a short adversarial run, and the
 # training-progress figure shows the three adversarial losses settling onto a common
