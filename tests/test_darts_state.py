@@ -651,3 +651,149 @@ def test_the_reconstruction_asks_for_the_terminal_step_on_a_lagged_label(
     )
 
     assert seen == ["terminal"]
+
+
+def _tiny_darts_cv_inputs(n_dates: int = 40, n_symbols: int = 6):
+    dates = mcal.get_calendar("NYSE").valid_days("2024-01-02", "2024-04-15")[:n_dates]
+    dates = dates.tz_localize(None)
+    dataset = pd.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "symbol": f"S{symbol}",
+                "feature": symbol + day / 10,
+                "fwd_ret_1d": np.sin(day / 3) + symbol / 100,
+            }
+            for symbol in range(n_symbols)
+            for day, timestamp in enumerate(dates)
+        ]
+    )
+    config = {
+        "family": "deep_learning",
+        "library": "darts",
+        "config_name": "tsmixer_probe",
+        "params": {
+            "architecture": "tsmixer",
+            "lookback": 4,
+            "hidden_dim": 4,
+            "n_blocks": 1,
+            "dropout": 0.0,
+            "darts_target": "lagged_label",
+            "darts_output_chunk_length": 2,
+        },
+        "n_epochs": 3,
+        "batch_size": 32,
+        "checkpoint_interval": 1,
+        "seed": 7,
+    }
+    splits = [
+        {
+            "fold": 0,
+            "train_start": dates[0],
+            "train_end": dates[14],
+            "val_start": dates[15],
+            "val_end": dates[26],
+        },
+        {
+            "fold": 1,
+            "train_start": dates[0],
+            "train_end": dates[26],
+            "val_start": dates[27],
+            "val_end": dates[-1],
+        },
+    ]
+    return dataset, config, splits
+
+
+def test_darts_runner_does_not_keep_a_checkpoint_it_has_written(tmp_path, monkeypatch) -> None:
+    """A checkpoint's frame is written and dropped, not held to the end of the run.
+
+    Every checkpoint used to be appended to a per-config list and a per-run list right
+    after being flushed, so a run held one copy of every checkpoint of every fold of every
+    config until it finished, of something already on disk. At the nasdaq schedule that is
+    twenty 172 MB frames per fold.
+    """
+    import weakref
+
+    from case_studies.utils import darts_forecasting
+
+    dataset, config, splits = _tiny_darts_cv_inputs()
+
+    written: list[weakref.ReferenceType] = []
+    flush = darts_forecasting._flush_darts_fold_preds
+
+    def tracking_flush(incr_dir, config_name, fold, epoch, frame):
+        path = flush(incr_dir, config_name, fold, epoch, frame)
+        written.append(weakref.ref(frame))
+        return path
+
+    monkeypatch.setattr(darts_forecasting, "_flush_darts_fold_preds", tracking_flush)
+
+    alive_at_each_scoring: list[int] = []
+    score = darts_forecasting.cross_sectional_ic
+
+    def tracking_score(*args, **kwargs):
+        alive_at_each_scoring.append(sum(ref() is not None for ref in written))
+        return score(*args, **kwargs)
+
+    monkeypatch.setattr(darts_forecasting, "cross_sectional_ic", tracking_score)
+
+    result = darts_forecasting.run_darts_cv(
+        dataset,
+        splits,
+        configs=[config],
+        feature_names=["feature"],
+        label_col="fwd_ret_1d",
+        date_col="timestamp",
+        entity_col="symbol",
+        device="cpu",
+        save_dir=tmp_path / "run",
+        max_train_sequences=0,
+        register=False,
+        case_study="etfs",
+        notebook=None,
+    )
+
+    assert result["all_predictions"].height > 0
+    assert len(written) == len(splits) * config["n_epochs"]
+    assert max(alive_at_each_scoring) <= 1, (
+        f"a scoring call found {max(alive_at_each_scoring)} flushed checkpoint frames "
+        "alive; the runner is holding checkpoints it has already written"
+    )
+
+
+def test_darts_all_predictions_is_its_shards_in_order(tmp_path) -> None:
+    """The assembled frame is the shards concatenated in the order they were written.
+
+    It used to be a concatenation of the in-memory copies, which is what made holding them
+    look necessary. Reading them back has to give the same frame, rows and order alike, or
+    a registered prediction set moves.
+    """
+    dataset, config, splits = _tiny_darts_cv_inputs()
+    save_dir = tmp_path / "run"
+
+    result = run_darts_cv(
+        dataset,
+        splits,
+        configs=[config],
+        feature_names=["feature"],
+        label_col="fwd_ret_1d",
+        date_col="timestamp",
+        entity_col="symbol",
+        device="cpu",
+        save_dir=save_dir,
+        max_train_sequences=0,
+        register=False,
+        case_study="etfs",
+        notebook=None,
+    )
+
+    shards = sorted(
+        (save_dir / "_incremental").glob("*.parquet"),
+        key=lambda path: (
+            int(path.stem.split("_fold")[1].split("_ep")[0]),
+            int(path.stem.split("_ep")[1]),
+        ),
+    )
+    assert len(shards) == len(splits) * config["n_epochs"]
+    assert result["all_predictions"].equals(pl.read_parquet(shards))
