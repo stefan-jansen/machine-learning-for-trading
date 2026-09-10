@@ -54,8 +54,7 @@
 # **Prerequisites**: [`04_ipca`](04_ipca.ipynb) and
 # [`05_rp_pca`](05_rp_pca.ipynb)
 #
-# **Book sections**: Sections 14.6-14.7, conditional autoencoders and the
-# implementation workshop
+# **Book section**: Section 14.6 (The conditional autoencoder)
 #
 # **Next**: [`07_stochastic_discount_factor`](07_stochastic_discount_factor.ipynb)
 # learns the pricing object directly instead of using the three-stage adapter.
@@ -89,6 +88,7 @@ from utils.style import (
     add_message_title,
     ml4t_diverging,
     ml4t_palette,
+    show_with_alt,
     zero_line,
 )
 
@@ -228,7 +228,8 @@ splits = {
 for name, frame in splits.items():
     print(
         f"{name}: observations={frame.height:,}, dates={frame['timestamp'].n_unique()}, "
-        f"symbols={frame['symbol'].n_unique()}"
+        f"symbols={frame['symbol'].n_unique()}, "
+        f"return standard deviation={frame['return'].std():.5f}"
     )
 print(f"Training return clip: [{clip_lower:.4f}, {clip_upper:.4f}]")
 
@@ -343,7 +344,7 @@ class ConditionalAutoencoder(nn.Module):
 #
 # L1 regularization is normalized by the number of beta-network weights so its
 # magnitude does not grow mechanically with architecture size. Early stopping
-# stores a deep copy of the best parameters.
+# stores a deep copy of the lowest-validation-error parameters.
 
 
 # %%
@@ -476,9 +477,8 @@ for member in range(1, ENSEMBLE_SIZE + 1):
     histories.append(history)
 
 # %% [markdown]
-# The first member illustrates optimization without turning wall-clock time
-# into a stable claim. The selected epoch comes from validation reconstruction,
-# not test IC.
+# The first member's optimization path. The checkpoint comes from validation
+# reconstruction error, never from test IC.
 
 # %%
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
@@ -487,8 +487,20 @@ ax.plot(histories[0]["valid_mse"], color=COLORS["amber"], label="Validation MSE"
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Return squared error")
 ax.legend()
-add_message_title(ax, "Validation selects the reconstruction checkpoint before test evaluation")
-fig.show()
+add_message_title(ax, "First member's training objective and validation MSE by epoch")
+show_with_alt(
+    fig,
+    "Line chart of two curves against epoch on a shared return squared error axis. "
+    "Both fall steeply over the first several epochs and are close to flat afterwards. "
+    "The validation MSE curve lies below the training objective at every epoch and the "
+    "two never cross.",
+)
+
+# %% [markdown]
+# Validation error below training error is not evidence of better
+# generalization here. The two windows are different samples with different
+# return dispersion, printed per split in Section 2, and the training objective
+# carries the L1 penalty that the validation MSE omits.
 
 # %% [markdown]
 # ## 6. Construct the next-day evaluation panel
@@ -634,7 +646,6 @@ ensemble_predictions = {
 # zero-return forecast as its benchmark. HAC intervals reflect serial
 # dependence in the daily IC sequence.
 
-# %%
 # %% [markdown]
 # The evaluator derives a daily cross-sectional IC series before computing HAC
 # uncertainty, rather than treating all stock-day rows as independent.
@@ -697,15 +708,14 @@ ci_low = np.array([result["ci_low"] for result in forecast_results])
 ci_high = np.array([result["ci_high"] for result in forecast_results])
 colors = ml4t_palette(len(names), categorical=True)
 
-fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+maximum_mse_deviation = 100 * np.max(np.abs(mse_ratios - 1))
+print(f"Largest MSE-ratio deviation from the zero-return forecast: {maximum_mse_deviation:.2f}%")
+
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True, constrained_layout=True)
 axes[0].scatter(names, mse_ratios, color=colors, s=55)
 zero_line(axes[0], at=1.0)
-axes[0].set_ylabel("MSE ratio vs zero")
-maximum_mse_deviation = 100 * np.max(np.abs(mse_ratios - 1))
-add_message_title(
-    axes[0],
-    f"All MSE ratios remain within {maximum_mse_deviation:.1f}% of zero",
-)
+axes[0].set_ylabel("MSE ratio vs zero forecast")
+add_message_title(axes[0], "Forward MSE ratio against the zero-return forecast")
 axes[1].errorbar(
     names,
     mean_ics,
@@ -717,16 +727,23 @@ axes[1].errorbar(
 zero_line(axes[1])
 axes[1].set_ylabel("Mean next-day rank IC")
 axes[1].set_xlabel("Walk-forward Stage 2 forecaster")
-add_message_title(axes[1], "Every next-day rank-IC interval includes zero")
-fig.show()
+add_message_title(axes[1], "Mean next-day rank IC with 95% HAC intervals")
+show_with_alt(
+    fig,
+    "Two stacked panels sharing an x-axis of three Stage 2 forecasters: expanding mean, "
+    "AR(1) and EWMA. The upper panel marks each forecaster's forward MSE ratio against "
+    "the zero-return forecast as a single point, with a dashed reference line at 1.0; "
+    "all three sit within a few thousandths of that line, which the auto-scaled axis "
+    "magnifies to fill the panel. The lower panel marks each mean next-day rank IC with "
+    "a 95% HAC error bar against a dashed zero line; every interval spans zero.",
+)
 
 # %% [markdown]
-# The forward test does not support a predictive claim. The expanding mean's
-# 0.99968 error ratio is effectively tied with predicting zero. EWMA has the
-# largest mean rank IC at 0.0116, but its 95% HAC interval of
-# $[-0.0130, 0.0362]$ includes zero. The CAE can reconstruct the panel while
-# its simple factor-premium adapters do not deliver statistically resolved
-# next-day cross-sectional forecasts.
+# The forward test does not support a predictive claim. Read the MSE ratios
+# and HAC intervals printed above: each error ratio sits a fraction of a
+# percent from the zero-return forecast, and every rank-IC interval spans zero.
+# The CAE reconstructs the panel while its simple factor-premium adapters do
+# not resolve a next-day cross-sectional signal.
 
 # %% [markdown]
 # ## 9. Ensemble and loading diagnostics
@@ -774,6 +791,7 @@ for characteristic in range(len(characteristic_names)):
 
 loading_min = loading_correlations.min()
 loading_max = loading_correlations.max()
+print(f"Representative member's loading correlations span {loading_min:.2f} to {loading_max:.2f}")
 
 # %%
 correlation_cmap = LinearSegmentedColormap.from_list("ml4t_diverging", ml4t_diverging())
@@ -787,11 +805,15 @@ for row in range(loading_correlations.shape[0]):
     for column in range(loading_correlations.shape[1]):
         ax.text(column, row, f"{loading_correlations[row, column]:.2f}", ha="center", va="center")
 fig.colorbar(image, ax=ax, label="Spearman correlation")
-add_message_title(
-    ax,
-    f"Within-member loading correlations span {loading_min:.2f} to {loading_max:.2f}",
+add_message_title(ax, "Characteristic ranks against one member's factor loadings")
+show_with_alt(
+    fig,
+    "Heatmap of Spearman correlations between five characteristic ranks in rows (LME, "
+    "Variance, ST_REV, r12_2, AvgRet21) and one ensemble member's five factor loadings "
+    "in columns (F1 to F5), on a red-to-green diverging scale from -1 to 1 with every "
+    "cell labeled. The ST_REV and AvgRet21 rows carry nearly the same value in every "
+    "column, because both characteristics measure the same 21-day return window.",
 )
-fig.show()
 
 # %% [markdown]
 # ## 10. Takeaways
@@ -809,6 +831,6 @@ fig.show()
 #    rescale across members, so the notebook averages asset predictions and
 #    keeps loading diagnostics inside one representative coordinate system.
 #
-# See Sections 14.6-14.7 for the model derivation. The next notebook,
+# See Section 14.6 for the model derivation. The next notebook,
 # [`07_stochastic_discount_factor`](07_stochastic_discount_factor.ipynb),
 # learns a pricing kernel instead of forecasting latent factor premia.
