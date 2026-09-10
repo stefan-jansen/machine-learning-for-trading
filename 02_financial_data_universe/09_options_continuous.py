@@ -836,14 +836,20 @@ print(f"Cumulative return of holding the straddle long over {DEMO_YEAR}:")
 print(f"  zeroing roll-day returns:         {_zeroed_total:+.1%}")
 print(f"  using the held contract's return: {_held_total:+.1%}")
 print(f"  the two series differ by:         {_held_total - _zeroed_total:+.1%}")
-print(
-    f"Short the same straddle, notional reset against equity daily: "
-    f"{_short_held_total:+.1%}, not the {-_held_total:+.1%} negation would give"
-)
+print(f"Same contracts, same days, held over {DEMO_YEAR}, sold rather than bought:")
+print(f"  short series, notional reset against equity each day: {_short_held_total:+.1%}")
+print(f"  what negating the long cumulative return would say:  {-_held_total:+.1%}")
 
 # %% [markdown]
-# The two series part company by tens of percentage points of cumulative return over a single
-# year, from the same contracts, the same days and the same prices. Only the roll-day
+# The short figure is constructed here, by negating each day's held-contract return and
+# compounding the result over the same year, which is the P&L of a position whose notional is
+# reset against equity every day. It is one convention among several and it has to be named,
+# because a position sized once and left alone compounds differently again. What no
+# convention produces is the negation of the long cumulative return: both series lose money
+# over this year, so a sign flip gets the direction wrong and not merely the size.
+#
+# The two roll-convention series part company by tens of percentage points of cumulative
+# return over a single year, from the same contracts, the same days and the same prices. Only the roll-day
 # convention separates them. On a series whose stated purpose is to be backtested, that is the
 # difference between two materially different answers about the same strategy.
 #
