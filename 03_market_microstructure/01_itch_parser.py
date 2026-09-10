@@ -478,21 +478,33 @@ if not SKIP_PARSING and (gz_files or bin_files):
 # The parse has written one Parquet directory per message type, so the store can now be
 # read back. The cell below asserts on trade messages (`P`) because that is the type it
 # goes on to load. A full session always contains them, so an empty `P` directory means
-# the parse did not finish rather than that this day happened to have no trades.
+# the parse did not finish rather than that this day happened to have no trades. That
+# reasoning holds only for a full parse: a run with `MAX_MESSAGES` set can stop before
+# the first trade prints, so there the absence is reported and the remaining cells work
+# with whichever types the trial did write.
 
 # %%
 trade_dir = MESSAGE_DIR / "P"
-assert trade_dir.exists() and list(trade_dir.glob("*.parquet")), (
-    f"No parsed trade messages at {trade_dir}.\n"
-    "Section 4 writes them from the raw binary. If SKIP_PARSING is True, it was skipped\n"
-    "and the store has to have been written by an earlier run or by the Rust parser of\n"
-    "Section 6. If the raw binary is missing, fetch it first:\n"
-    "  uv run python data/equities/market/microstructure/nasdaq_itch_download.py"
-)
+trade_files = sorted(trade_dir.glob("*.parquet")) if trade_dir.exists() else []
 
-trades = pl.read_parquet(trade_dir / "*.parquet")
-print(f"Loaded {len(trades):,} trade messages")
-print(f"Columns: {trades.columns}")
+if not trade_files and MAX_MESSAGES is not None:
+    print(
+        f"No trade messages under {display_path(trade_dir)}: the parse stopped after "
+        f"{MAX_MESSAGES:,} messages and a `P` need not appear that early. "
+        "Set MAX_MESSAGES to None to read the whole session."
+    )
+else:
+    assert trade_files, (
+        f"No parsed trade messages at {trade_dir}.\n"
+        "Section 4 writes them from the raw binary. If SKIP_PARSING is True, it was skipped\n"
+        "and the store has to have been written by an earlier run or by the Rust parser of\n"
+        "Section 6. If the raw binary is missing, fetch it first:\n"
+        "  uv run python data/equities/market/microstructure/nasdaq_itch_download.py"
+    )
+
+    trades = pl.read_parquet(trade_dir / "*.parquet")
+    print(f"Loaded {len(trades):,} trade messages")
+    print(f"Columns: {trades.columns}")
 
 # %%
 # Message type distribution — use lazy scan to count without loading all data
