@@ -424,7 +424,7 @@ show_with_alt(
     fig,
     "A heatmap with sector on the vertical axis and component on the horizontal, each cell the "
     "mean loading of that sector's stocks on that component, printed in the cell as well as "
-    "shaded on a diverging red-to-blue scale centred at zero. A colour bar gives the scale.",
+    "shaded on a diverging scale centred at zero. A colour bar gives the scale.",
 )
 
 # %% [markdown]
