@@ -734,10 +734,14 @@ display(Markdown("\n".join(_lines)))
 # folds, and they overlap heavily. That settles nothing either way, because all three
 # models are scored on the same folds: whatever a fold does to one of them it largely
 # does to the others, so the quantity to look at is the difference within each fold.
-# The results cell above takes it, and reports how often the sign holds as well as how
-# large the average difference is. A mean difference smaller than its own spread
-# across folds, or a sign that flips on several folds, is not an ordering of
-# architectures.
+#
+# The results cell above reports those differences: their mean, their spread across
+# folds, and how often the sign holds. Read them as a description of eight paired
+# numbers and not as a test. The spread across folds is not the uncertainty in their
+# mean, and an interval that would be is not available here for free, because these
+# folds come from overlapping, adjacent training windows rather than independent
+# draws. What the description is good for is seeing whether a difference keeps its
+# sign and how its size compares with how much it moves fold to fold.
 #
 # The timing panel is the part that does not need a test. LightGBM trains in a fraction
 # of TabM's time per fold and stops well short of its tree budget on every fold, and
@@ -756,9 +760,9 @@ display(Markdown("\n".join(_lines)))
 #   fold and stops well short of its tree budget on every fold. That gap is large enough
 #   that hardware and load cannot reverse it, and it decides how often you can afford to
 #   refit.
-# - **The accuracy difference needs the paired test to mean anything.** The results cell
-#   gives the per-fold difference and how often its sign holds. Read that rather than
-#   the bar heights.
+# - **The accuracy difference is only readable paired.** The results cell gives the
+#   per-fold difference and how often its sign holds. Read that rather than the bar
+#   heights, and read it as a description rather than as a decision.
 # - **A minimal MLP is a floor, not a contender.** It is here to show what capacity
 #   alone does on tabular financial data, which is the premise Section 12.3 argues from.
 # - **TabPFN is a probe you can afford before tuning anything**, when its gated weights
@@ -772,7 +776,8 @@ display(Markdown("\n".join(_lines)))
 #    this notebook sees the same walk-forward folds, so the fold-to-fold swing that
 #    dominates each model's error bar is largely shared and cancels in the difference.
 #    Comparing the marginal spreads instead is how a comparison this noisy gets read as
-#    a ranking.
+#    a ranking. Going further and putting an interval on the paired difference means
+#    handling folds that overlap in time, which this notebook does not attempt.
 #
 # 2. **The loss function is doing real work on a heavy-tailed target.** L1 costs a large
 #    error what it costs, where squared error lets a handful of extreme months set the
