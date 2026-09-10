@@ -53,9 +53,9 @@
 # 1. **Quote test**: If trade price > midpoint → buyer initiated; < midpoint → seller
 # 2. **Tick test**: If at midpoint, use price change: uptick → buy, downtick → sell
 #
-# Validated to ~94-95% accuracy on modern markets in
-# [`15_itch_lee_ready`](15_itch_lee_ready.ipynb) using DataBento's
-# ground-truth aggressor labels.
+# `15_itch_lee_ready` measures how often that rule agrees with DataBento's own aggressor
+# labels, which are the venue's record of which side crossed. This notebook applies the
+# rule; that one says how well it does.
 
 # %%
 """TAQ LOB Reconstruction — measuring trade aggression with Lee-Ready classification."""
@@ -69,14 +69,17 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_nasdaq100_taq
+from utils.style import COLORS, show_plotly_with_alt
 
+# Four shades on top of the repository palette: two for a second and third series on one
+# axis, and green and red for buyer- and seller-initiated trades, which is the convention
+# the rest of the chapter uses.
 COLORS = {
-    "blue": "#1E3A5F",
+    **COLORS,
     "accent": "#4A90A4",
     "warm": "#8B4513",
     "buy": "#228B22",
     "sell": "#B22222",
-    "neutral": "#5D5D5D",
 }
 
 
@@ -217,29 +220,36 @@ fig.add_vline(
 )
 
 fig.update_layout(
-    title=f"Spread Distribution at Trade Time - {SYMBOL} (March 16, 2020)",
+    title=f"{SYMBOL}: spread prevailing at each trade, March 16, 2020",
     xaxis_title="Spread (bps)",
     yaxis_title="Count",
     height=400,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A histogram of the bid-ask spread in basis points at the moment each trade printed, with the horizontal axis capped so the bulk of the distribution is legible and a vertical annotation marking the median.",
+)
 
 # %% [markdown]
-# **Interpretation**: Most trades execute in a tight spread environment (median
-# ~5 bps), but March 16, 2020 was a circuit-breaker day and the tail is heavy:
-# the 95th percentile reaches ~530 bps and the mean (98.7 bps) sits ~19x above
-# the median, dragged up by dislocated quotes that widen to several hundred and,
-# at the extreme, ~20,000 bps (200% of the midpoint) around the halts. The
-# histogram below caps the x-axis at 50 bps so the bulk is legible; the tail
-# runs far past its right edge. These are expensive prints - the aggressor pays
-# a significant premium for immediacy.
+# Read the mean against the median in the statistics above. Most trades on this day still
+# executed against a tight quote, but the distribution has a tail heavy enough that the
+# mean sits an order of magnitude above the middle of it, and around the trading halts
+# the quote dislocates far enough that the spread runs into the thousands of basis
+# points - a substantial fraction of the price itself.
+#
+# That gap is the reason a mean spread is a poor summary of what trading costs. The
+# histogram below caps its horizontal axis so the bulk of the distribution is legible,
+# and the tail continues past the right edge; the printed percentiles are where to read
+# the tail, not the chart.
 
 # %% [markdown]
 # ## 4. Lee-Ready Classification
 #
-# Now we apply Lee-Ready to classify each trade. The quote test handles ~90%
-# of trades; the tick test fills in when prices land exactly at midpoint.
+# The quote test settles every trade that printed away from the midpoint, which is most
+# of them; the tick test exists for the rest, where the price landed exactly on the
+# midpoint and the quote says nothing about who crossed. The counts below say how the
+# work divided between them on this day.
 
 # %%
 # Apply Lee-Ready
@@ -330,12 +340,15 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title=f"Trade Direction (Lee-Ready) - {SYMBOL} (March 16, 2020)",
+    title=f"{SYMBOL}: trades classified by the Lee-Ready rule, March 16, 2020",
     height=400,
     showlegend=False,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A bar chart of trades classified by the Lee-Ready rule into buyer-initiated, seller-initiated and unclassified, green for buys and red for sells, showing how the day's trades and volume divided between the sides.",
+)
 
 # %% [markdown]
 # **What we see**: On this crash day, seller-initiated trades slightly dominate
@@ -381,15 +394,22 @@ corr = minute_stats.select(pl.corr("imbalance", "return"))
 print(f"\nImbalance ↔ Return correlation: {corr[0, 0]:.3f}")
 
 # %% [markdown]
-# The Pearson correlation between minute-level imbalance and minute returns is
-# ~0.08 on this single AAPL day. The relationship is contemporaneous;
-# converting it into a tradeable signal requires predicting future imbalance
-# rather than reading the realized contemporaneous value.
+# That correlation is contemporaneous: it pairs a minute's imbalance with that same
+# minute's return. A positive value says buying pressure and rising prices happen
+# together, which is close to a definition - the trades that pushed the price up are the
+# ones counted as buys.
+#
+# It is not a signal. Acting on it would require knowing the minute's imbalance before
+# the minute ends, which is knowing the answer. A tradeable version has to predict the
+# next minute's imbalance from information available now, and that is a different and
+# much harder measurement - `09_databento_mbo_analysis` makes it, with the lag in place.
+
+# %% [markdown]
+# The three series go on one figure with a shared time axis because the question is how
+# they move relative to each other: whether the minutes of heaviest one-sided flow are
+# the minutes the price moved, and whether either coincides with the widest spreads.
 
 # %%
-# Build three-panel figure: Price, Imbalance, Spread (single cell so the
-# figure is emitted once, fully populated — split-cell variants trigger
-# papermill's intermediate auto-display and leave the third panel empty).
 fig = make_subplots(
     rows=3,
     cols=1,
@@ -438,7 +458,7 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title=f"Price, Imbalance, and Spread - {SYMBOL} (March 16, 2020)",
+    title=f"{SYMBOL}: price, order imbalance and spread through the session",
     height=600,
     showlegend=False,
 )
@@ -447,7 +467,10 @@ fig.update_yaxes(title_text="Imbalance", row=2, col=1)
 fig.update_yaxes(title_text="Spread (bps)", row=3, col=1)
 fig.update_xaxes(title_text="Time (ET)", row=3, col=1)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three stacked panels sharing a clock-time axis over one session: the traded price in dollars, the order imbalance per minute about a zero line, and the prevailing spread in basis points.",
+)
 
 # %% [markdown]
 # **Reading the panel**:
@@ -490,7 +513,7 @@ if mask.sum() > 2:
     )
 
 fig.update_layout(
-    title="Imbalance-return relationship, colored by prevailing spread",
+    title="Minute return against order imbalance, coloured by the prevailing spread",
     xaxis_title="Order Imbalance",
     yaxis_title="Minute Return",
     yaxis=dict(tickformat=".1%"),
@@ -498,14 +521,21 @@ fig.update_layout(
     height=450,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A scatter of each minute's return against its order imbalance, one point per minute, with the points coloured by the spread prevailing in that minute so the widest-spread minutes can be located within the cloud.",
+)
 
 # %% [markdown]
-# **The scatter shows a weak positive tilt**: consistent with the ~0.08
-# correlation, the cloud is diffuse rather than tight, but buy-dominated minutes
-# (imbalance > 0) lean toward positive returns and sell-dominated minutes toward
-# negative ones. The color shows that high-spread moments (yellow/red) are often
-# extreme imbalance/return events.
+# Two things to read off that scatter. The tilt is the contemporaneous relationship just
+# printed, and how diffuse the cloud is around it says how much of a minute's return the
+# imbalance accounts for - a tilt in a wide cloud is a weak association, not a strong
+# one seen through noise.
+#
+# The colour is the third variable: where the widest-spread minutes sit in that cloud.
+# If they cluster at the extremes of both axes, then the minutes with the largest moves
+# and the most one-sided flow are also the minutes when trading them cost the most, which
+# is the practical objection to reading this relationship as an opportunity.
 
 # %% [markdown]
 # ## 6. Intraday Imbalance Pattern
@@ -556,7 +586,7 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title=f"Hourly Imbalance and Spread - {SYMBOL} (March 16, 2020)",
+    title=f"{SYMBOL}: average imbalance and spread by hour of the session",
     xaxis_title="Hour (ET)",
     height=400,
     legend=dict(orientation="h", yanchor="bottom", y=1.02),
@@ -565,38 +595,50 @@ fig.update_layout(
 fig.update_yaxes(title_text="Avg Order Imbalance", secondary_y=False)
 fig.update_yaxes(title_text="Avg Spread (bps)", secondary_y=True)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A chart with one point per hour of the session, plotting the average order imbalance on the left vertical axis and the average spread in basis points on the right, so the hour at which each reaches its extreme can be compared.",
+)
 
 # %% [markdown]
-# **Selling pressure deepens into the afternoon**: the open (Hour 9) already
-# carries negative imbalance (-0.12) and wide spreads (~132 bps), but the
-# imbalance becomes *most* negative midday-to-afternoon, reaching -0.16 by
-# Hour 14, while the widest spread sits at Hour 12 (~137 bps). Spreads are
-# tightest mid-morning and late afternoon (~75 bps in Hours 10 and 14), so the
-# pattern is a worsening midday imbalance rather than a clean open-to-close
-# moderation.
+# The two series on that chart do not peak in the same hour, and that is the point of
+# plotting them together. A story in which stress arrives at the open and eases through
+# the day would show both worst in the first hour and improving after it. Read where each
+# series actually reaches its extreme, and whether the hour of the widest spread is the
+# hour of the most one-sided flow.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# **1. NBBO reconstruction is straightforward**: Forward-fill bid/ask to each
-# trade timestamp. This is the foundation for all trade classification.
+# **1. A trade needs the quote that prevailed when it printed.** Forward-filling the
+# consolidated bid and ask onto each trade timestamp is what makes every classification
+# below possible, and the join has to be as-of: each trade takes the most recent quote
+# at or before its own timestamp, which is the only quote its sender could have seen.
 #
-# **2. Lee-Ready classification**: The quote test handles trades away from the
-# midpoint; the tick test fills the gap at the midpoint. On March 16, sellers
-# accounted for ~58% of classified volume.
+# **2. Lee-Ready is two rules, and the second one is the interesting one.** The quote
+# test settles anything that printed away from the midpoint. The tick test handles the
+# rest by looking at the direction of the last price change, which is a weaker piece of
+# evidence - and how much of the day falls to it is worth knowing before trusting the
+# classified totals.
 #
-# **3. Order imbalance co-moves with returns**: contemporaneous correlation of
-# ~0.08 at minute frequency for this single-day AAPL sample.
+# **3. A contemporaneous correlation is not a signal.** Pairing a minute's imbalance with
+# that minute's return measures co-movement, and acting on it would require knowing the
+# minute before it ended. The lagged version is a different measurement.
 #
-# **4. Stress deepens into the afternoon**: Sell imbalance is present at the
-# open (-0.12) but troughs midday-to-afternoon (-0.16 by Hour 14), while the
-# widest spreads sit midday (~137 bps at Hour 12); both ease only in the final
-# hour. The intraday path is a worsening midday dislocation, not a clean
-# open-to-close moderation.
+# **4. Plot stress measures together and check whether they peak together.** Spread and
+# imbalance are both read as stress; if their extremes fall in different hours, they are
+# measuring different things and a single 'stress' narrative papers over that.
 #
-# **5. The three metrics are connected**: Price, imbalance, and spread move
-# together - understanding one requires understanding all three.
+# **5. A mean spread on a dislocated day says very little.** With a tail this heavy the
+# mean sits far above the median, and neither one describes what a typical trade paid.
+#
+# ### Known limitations
+#
+# - One symbol on one exceptional session, chosen because it is not typical.
+# - Lee-Ready is inferred, not observed. `15_itch_lee_ready` compares it against a
+#   venue's own aggressor labels; nothing here is validated against ground truth.
+# - Every relationship reported is contemporaneous. This notebook makes no forecast and
+#   its correlations should not be read as predictive.
 #
 # ## Next Steps
 #
