@@ -512,6 +512,8 @@ control_cypher, control_params, _ = route_question(control_question)
 control_cypher = enforce_query_limits(control_cypher)
 
 rows_asof = execute_read_only(control_cypher, control_params)
+
+
 # Read the earlier cutoff out of the graph rather than pinning a date. The
 # previous version named four vintage labels in a comment and set the control to
 # a date between two of them; the artifact has since rolled forward and both the
@@ -522,32 +524,50 @@ rows_asof = execute_read_only(control_cypher, control_params)
 # so stepping back one day only hides the managers who filed last - the newest
 # quarter would still be in the answer, and the control would pass while
 # demonstrating nothing about the period boundary.
-with NEO4J_DRIVER.session(default_access_mode="READ") as session:
-    period_windows = [
-        record.data()
-        for record in session.run(
-            """
+#
+# The periods are read as of CUTOFF_DATE, not from the whole graph. An override
+# of CUTOFF_DATE is a supported input, and computing the control against periods
+# the answer cannot see would compare the as-of answer with itself.
+def periods_public_at(cutoff: str) -> list[dict[str, Any]]:
+    """Report periods with at least one filing public on or before `cutoff`."""
+    with NEO4J_DRIVER.session(default_access_mode="READ") as session:
+        return [
+            record.data()
+            for record in session.run(
+                """
         MATCH (:Institution)-[h:HOLDS]->(:Stock)
+        WHERE h.available_from <= $cutoff_date
         RETURN h.report_date AS report_date,
                min(h.available_from) AS first_available,
                max(h.available_from) AS last_available
         ORDER BY report_date
-        """
-        )
-    ]
-assert len(period_windows) >= 2, "need at least two report periods for a negative control"
+        """,
+                cutoff_date=cutoff,
+            )
+        ]
+
+
+period_windows = periods_public_at(CUTOFF_DATE)
+assert len(period_windows) >= 2, (
+    f"only {len(period_windows)} report period(s) are public at {CUTOFF_DATE}; a "
+    "point-in-time control needs two, so choose a later cutoff"
+)
 LATEST_PERIOD = period_windows[-1]
 EARLIER_CUTOFF = period_windows[-2]["last_available"]
 assert LATEST_PERIOD["first_available"] > EARLIER_CUTOFF, (
     "the previous period's filings overlap the newest period's; pick a different control"
 )
-print("Report periods in the graph and their filing windows:")
+assert EARLIER_CUTOFF < CUTOFF_DATE, (
+    f"the control cutoff {EARLIER_CUTOFF} is not earlier than {CUTOFF_DATE}"
+)
+print(f"Report periods public at {CUTOFF_DATE} and their filing windows:")
 for window in period_windows:
     print(
         f"  {window['report_date']}  filed {window['first_available']}"
         f" to {window['last_available']}"
     )
 print(
+    f"Newest period public at {CUTOFF_DATE}: {LATEST_PERIOD['report_date']}. "
     f"Earlier cutoff {EARLIER_CUTOFF}: the day the {period_windows[-2]['report_date']} "
     f"period was complete and before any {LATEST_PERIOD['report_date']} filing existed."
 )
@@ -590,6 +610,19 @@ assert all(row["report_date"] < LATEST_PERIOD["report_date"] for row in rows_ear
 assert any(row["report_date"] == LATEST_PERIOD["report_date"] for row in rows_asof), (
     "the as-of answer contains nothing from the newest report period"
 )
+# The period selection above must itself track the cutoff, not the graph. Asked
+# as of EARLIER_CUTOFF it has to stop one period short, which is what makes a
+# CUTOFF_DATE override answerable rather than silently compared against itself.
+earlier_windows = periods_public_at(EARLIER_CUTOFF)
+assert [w["report_date"] for w in earlier_windows] == [
+    w["report_date"] for w in period_windows[:-1]
+], "period selection does not track the cutoff it is given"
+print(
+    f"Period selection as of {EARLIER_CUTOFF} stops at "
+    f"{earlier_windows[-1]['report_date']}, one period short of "
+    f"{LATEST_PERIOD['report_date']}."
+)
+
 print(
     f"Point-in-time check passed: at {CUTOFF_DATE} the answer draws on the "
     f"{LATEST_PERIOD['report_date']} period; at {EARLIER_CUTOFF} no row from that period "
