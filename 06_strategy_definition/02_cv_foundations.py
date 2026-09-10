@@ -263,8 +263,10 @@ show_with_alt(
     fig,
     "Five stacked strip panels, one per k-fold, each running left to right over the "
     "sample index in time order. Every sample is a thin bar coloured slate for "
-    "training or amber for validation, and the amber bars are scattered across the "
-    "whole width of every panel rather than falling in one contiguous block.",
+    "training or amber for validation. In no panel do the amber bars form one "
+    "contiguous block: four of the five scatter them from one edge of the panel to "
+    "the other, and the fourth panel puts none in its first third and scatters the "
+    "rest across the remainder.",
 )
 
 # %% [markdown]
@@ -317,14 +319,22 @@ fig = plot_splits(splits_roll, dates, title="Rolling Window Walk-Forward CV")
 show_with_alt(
     fig,
     "Five horizontal bars, one per fold, on a calendar axis from 2014 to 2025. Each "
-    "fold shows a slate training bar of the same length followed by an amber "
-    "validation bar of one year, and both slide to the right in each successive fold.",
+    "fold shows a slate training bar followed by an amber validation bar of one year. "
+    "The first two training bars start at the left edge of the axis and grow, and the "
+    "last three are the same length and slide to the right with their validation bars.",
 )
 
 # %% [markdown]
 # **Advantage**: Consistent training size; stale data doesn't influence the model.
 # **Disadvantage**: Discards data. Choose expanding if older data is still
 # relevant, rolling if you believe regimes change.
+#
+# The chart shows where that consistency starts. `train_size` asks for five years of
+# sessions, and the first two folds cannot reach back that far, so their training
+# windows are clipped at the beginning of the sample and match the expanding chart
+# exactly. Only folds 3 to 5 hold the requested window. A rolling scheme guarantees a
+# fixed training size from the first fold whose window fits inside the data, not from
+# the first fold.
 
 # %% [markdown]
 # ---
@@ -503,8 +513,7 @@ fig = plot_splits(
 show_with_alt(
     fig,
     "The rolling-window fold chart again, with a hatched grey band inserted between "
-    "the end of each fixed-length slate training bar and the start of its amber "
-    "validation bar.",
+    "the end of each slate training bar and the start of its amber validation bar.",
 )
 
 # %% [markdown]
@@ -679,12 +688,12 @@ for i in range(1, 10):
 ax.text(
     15.5,
     1.4,
-    "Naive: 21 calendar days (only 14 trading days!)",
+    "Naive: 21 calendar days is only 14 trading days",
     ha="center",
     fontsize=9,
     fontweight="bold",
 )
-ax.text(5, -1.2, "Correct: extend purge to get\n21 TRADING days", ha="center", fontsize=8)
+ax.text(5, -1.2, "Correct: extend the purge to\n21 trading days", ha="center", fontsize=8)
 
 ax.set_xlim(-0.5, 31.5)
 ax.set_ylim(-1.6, 1.9)
@@ -706,10 +715,12 @@ ax.legend(
 )
 show_with_alt(
     fig,
-    "A single row of 31 numbered squares for the days of January 2024. Non-trading "
-    "days are shaded grey. The squares a naive calendar-day purge would remove are "
-    "outlined in amber and the earlier squares it would miss are outlined in slate, "
-    "with the two groups annotated above and below the row.",
+    "A single row of 31 numbered squares for the days of January 2024. The squares a "
+    "naive calendar-day purge would remove are filled amber and run from the 11th to "
+    "the end of the month; the earlier squares it would miss are filled slate and run "
+    "from the 2nd to the 10th. The 1st is left pale because it is a holiday, and "
+    "weekends and holidays inside a filled group show as a darker shade of that "
+    "group's colour. The two groups are annotated above and below the row.",
 )
 
 # %% [markdown]
@@ -884,7 +895,9 @@ ax.legend(
         Patch(facecolor=VAL_C, label="Validation (inner)"),
         Patch(facecolor=COLORS["neutral"], alpha=0.3, label="Test (outer)"),
     ],
-    loc="upper left",
+    loc="lower left",
+    bbox_to_anchor=(0.0, -0.22),
+    ncol=3,
     frameon=True,
     facecolor="white",
     framealpha=0.9,
@@ -892,16 +905,20 @@ ax.legend(
 )
 show_with_alt(
     fig,
-    "Ten horizontal bars on a calendar axis from 2014 to 2025, in two groups of five "
-    "separated by a dashed divider and labelled Outer fold 1 and Outer fold 2. Each "
-    "bar is a slate training span followed by a one-year amber validation span, and a "
-    "wide translucent block spanning each group marks that outer fold's test year.",
+    "Ten horizontal bars on a calendar axis running from 2014 to 2026, in two groups "
+    "of five separated by a dashed divider and labelled Outer fold 1 and Outer fold 2. "
+    "Each bar is a slate training span starting at the left edge, followed by a "
+    "one-year amber validation span that steps back a year with each bar down the "
+    "group, so the top bar in each group is the longest. To the right of each group, "
+    "past the end of its longest bar, a translucent grey block one year wide and as "
+    "tall as three of the five bars marks that outer fold's test year.",
 )
 
 # %% [markdown]
 # Each outer fold produces test predictions with freshly selected $\lambda^*$.
-# If $\lambda^*_1 \neq \lambda^*_2$, that signals hyperparameter instability —
-# a red flag for production deployment.
+# If $\lambda^*_1 \neq \lambda^*_2$, the selected hyperparameter is not stable across
+# the two tuning periods, and a single tuned value should not be carried into
+# production on the strength of one of them.
 
 # %% [markdown]
 # ---
@@ -975,10 +992,13 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "A heatmap with one row per CPCV split and the sample index across the columns. "
-    "Each cell is slate for training, amber for validation, or grey for a purged or "
-    "embargoed sample. Every row carries two amber blocks and no two rows put their "
-    "amber blocks in the same pair of positions.",
+    "A heatmap with fifteen rows, one per CPCV split, and the sample index across the "
+    "columns. Each cell is slate for training, amber for validation, or grey for a "
+    "purged or embargoed sample; the grey cells are a few columns wide at each block "
+    "boundary and are not separable from their neighbours at this size. Each row holds "
+    "out two of the six blocks, which read as two amber bands where the two blocks are "
+    "apart and as one wide band where they are adjacent, and no two rows hold out the "
+    "same pair.",
 )
 
 # %% [markdown]
