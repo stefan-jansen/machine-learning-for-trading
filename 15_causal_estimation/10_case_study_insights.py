@@ -264,11 +264,11 @@ add_message_title(ax, "HAC t-statistic of each case study's primary effect")
 ax.legend(frameon=False, loc="best")
 show_with_alt(
     fig,
-    "Forest plot with one row per case study, ordered by the statistic itself, plotting the "
-    "Driscoll-Kraay t-statistic of that panel's primary DML effect. A dashed vertical line "
-    "marks zero and two dotted lines mark the plus and minus significance threshold; markers "
-    "are filled or open according to whether the t-statistic clears it, and a legend says "
-    "which is which.",
+    "Forest plot with one row per case study, largest t-statistic at the top, plotting the "
+    "Driscoll-Kraay t-statistic of that panel's primary DML effect as a stem running from "
+    "zero to a marker. A dashed vertical line marks zero and two dotted lines mark the plus "
+    "and minus significance threshold; a marker is filled or open according to whether the "
+    "t-statistic clears it, and a legend says which is which.",
 )
 
 # %%
