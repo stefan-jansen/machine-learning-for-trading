@@ -1157,8 +1157,8 @@ show_plotly_with_alt(
     fig,
     "Four growth-of-one-dollar paths from the walk-forward backtest, one per allocation "
     "method. They track each other until about 2018 and then separate into two pairs, equal "
-    "weight and inverse volatility above, shrinkage minimum variance and HRP below, with all "
-    "four falling sharply in early 2020.",
+    "weight and inverse volatility above, shrinkage minimum variance and HRP below, each "
+    "falling sharply in early 2020.",
 )
 
 # %% [markdown]
@@ -1193,7 +1193,7 @@ for dashboard_figure in hrp_tear_sheet.figures.values():
 
 rolling_beta_figure = hrp_tear_sheet.figures["Rolling Beta"]
 rolling_beta_figure.update_layout(margin=dict(l=60, r=90, t=40, b=40))
-rolling_beta_figure.update_annotations(x=0.995, xanchor="right")
+_ = rolling_beta_figure.update_annotations(x=0.995, xanchor="right")
 
 # %% [markdown]
 # `hrp_tear_sheet.show()` would render the metrics block and then loop `fig.show()` over the
@@ -1204,12 +1204,12 @@ rolling_beta_figure.update_annotations(x=0.995, xanchor="right")
 # %%
 DASHBOARD_ALT = {
     "Cumulative Returns": (
-        "Cumulative return of the HRP portfolio and of the SPY benchmark against date, both "
-        "compounding from the start of the invested window."
+        "Cumulative return of the HRP portfolio and of the SPY benchmark against date, the "
+        "benchmark drawn dashed and finishing well above the portfolio."
     ),
     "Drawdown": (
         "The HRP portfolio's underwater curve against date, filled to zero, showing the "
-        "percentage below its own running peak."
+        "percentage below its own running peak, with the deepest point marked in March 2020."
     ),
     "Rolling Sharpe Ratio": (
         "Two lines of rolling Sharpe ratio against date, over sixty-three and two hundred and "
@@ -1220,24 +1220,25 @@ DASHBOARD_ALT = {
         "sixty-three and two hundred and fifty-two sessions."
     ),
     "Rolling Beta": (
-        "Rolling beta of the HRP portfolio against SPY, plotted against date and filled to "
-        "zero, with horizontal reference lines at zero and at one."
+        "Rolling beta of the HRP portfolio against SPY, plotted against date and shaded down "
+        "to zero, with a dashed reference line at the market's own beta."
     ),
     "Annual Returns": (
         "Bars of the HRP portfolio's annual return by calendar year, with the benchmark's "
         "annual return marked as points and a line at zero."
     ),
     "Monthly Returns Heatmap": (
-        "Heatmap of monthly return, years down the vertical axis and calendar months across, "
-        "coloured from losses to gains."
+        "Heatmap of monthly return, years down the vertical axis and calendar months across "
+        "with a compounded annual column at the right, each cell labelled with its return and "
+        "coloured from red for losses to green for gains."
     ),
     "Returns Distribution": (
         "Histogram of the HRP portfolio's daily returns with a fitted normal density drawn "
         "over it and vertical reference lines in the left tail."
     ),
     "Top Drawdowns": (
-        "Horizontal bars of the depth of the five deepest drawdown episodes, one bar per "
-        "episode, labelled by the dates the episode spans."
+        "Horizontal bars of drawdown depth for the five deepest episodes, one bar per episode, "
+        "ordered deepest at the top and annotated with the depth reached."
     ),
 }
 
