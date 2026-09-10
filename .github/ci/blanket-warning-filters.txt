@@ -25,7 +25,6 @@
 # fx_pairs are stamped and wait for a re-execution, and theirs must not regenerate
 # features/model_based.parquet, whose sha256 keys every model fitted against it.
 
-03_market_microstructure/01_itch_parser.py
 03_market_microstructure/02_itch_lob_reconstruction.py
 03_market_microstructure/03_itch_lob_analysis.py
 03_market_microstructure/04_itch_order_lifecycle_analysis.py

@@ -28,10 +28,20 @@
 # ## Learning Objectives
 #
 # After completing this notebook, you will be able to:
-# - Understand the ITCH 5.0 binary message format
-# - Parse ITCH messages using Python's `struct` module
-# - Load pre-parsed ITCH data for analysis
-# - Choose between Python (educational) and Rust (production) parsers
+# - Read one ITCH v5.0 message out of a binary file: find where it starts, how long it is,
+#   and which of the twenty-odd message types it is.
+# - Unpack a message's fields with Python's `struct` module, and convert the two encodings
+#   ITCH uses - a nanosecond offset from midnight, and a price held as an integer with four
+#   implied decimal places.
+# - Run the parse over a full trading day, writing each message type to its own Parquet
+#   partition so that a day that does not fit in memory still lands on disk.
+# - Load an already-parsed day and check that every message type reads back.
+# - Say when the Python parser is the right tool and when the Rust one is.
+#
+# ## Book reference
+#
+# Section §3.3, *From raw messages to the limit order book* - the binary-parsing-at-scale
+# subsection and Table 3.1. §3.2 places ITCH among the other feeds.
 #
 # ## Cross-References
 #
@@ -85,13 +95,10 @@ import gzip
 import os
 import shutil
 import struct
-import warnings
 from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from time import time
-
-warnings.filterwarnings("ignore")
 
 import polars as pl
 from itch_message_specs import (
@@ -106,25 +113,32 @@ from itch_message_specs import (
 from tqdm.auto import tqdm
 
 from data import load_nasdaq_itch
+from utils.paths import display_path
 
 # %% tags=["parameters"]
 SKIP_PARSING = False
 
+# %% [markdown]
+# The parse reads one directory and writes another. `load_nasdaq_itch(get_base_path=True)`
+# resolves the parsed-message root from the repository's data configuration rather than a
+# path typed here, so the same notebook runs against a local checkout and inside the Docker
+# image. The raw binary sits in a `raw/` directory beside it, which is where the download
+# script puts it.
+
 # %%
-# Data paths
-# Canonical parsed messages location (both read and write target)
 MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
 MESSAGE_DIR.mkdir(parents=True, exist_ok=True)
-
-# Raw ITCH binary input (from download script)
 ITCH_RAW_DIR = MESSAGE_DIR.parent / "raw"
 
-print(f"Raw ITCH data (input): {ITCH_RAW_DIR}")
-print(f"Parsed messages (output): {MESSAGE_DIR}")
-_raw_present = ITCH_RAW_DIR.exists() and next(ITCH_RAW_DIR.iterdir(), None) is not None
-print(f"Raw data exists: {_raw_present}")
-if not _raw_present:
-    print("  (run NB00_itch_download.py first to fetch the ITCH binary)")
+print(f"Raw ITCH binary (input):  {display_path(ITCH_RAW_DIR)}")
+print(f"Parsed messages (output): {display_path(MESSAGE_DIR)}")
+raw_present = ITCH_RAW_DIR.exists() and next(ITCH_RAW_DIR.iterdir(), None) is not None
+print(f"Raw binary present: {raw_present}")
+if not raw_present:
+    print(
+        "  Fetch it first: "
+        "uv run python data/equities/market/microstructure/nasdaq_itch_download.py"
+    )
 
 # %% [markdown]
 # ## 1. Message Specifications
@@ -146,10 +160,13 @@ print_message_formats()
 #
 # Let's demonstrate how binary parsing works by creating and parsing a sample Add Order message.
 
-# %%
-# Create a sample Add Order message to demonstrate parsing
-# Format: >HH6sQsI8sI (big-endian)
+# %% [markdown]
+# Packing a message by hand is the quickest way to see the layout. An Add Order carries the
+# format `>HH6sQsI8sI`: big-endian, two unsigned shorts, a six-byte timestamp, an eight-byte
+# order reference, a one-character side, the share count, an eight-character padded ticker
+# and the price. Unpacking it below returns exactly these fields.
 
+# %%
 sample_add_order = struct.pack(
     ">HH6sQsI8sI",
     1234,  # stock_locate
@@ -159,7 +176,7 @@ sample_add_order = struct.pack(
     b"B",  # buy_sell_indicator
     100,  # shares
     b"AAPL    ",  # stock (padded to 8 chars)
-    1500000,  # price (150.0000 in price4 format)
+    1500000,  # price: four implied decimals, so this is $150
 )
 
 print(f"Raw Add Order message ({len(sample_add_order)} bytes):")
@@ -239,20 +256,23 @@ print(f"Columns: {trades.columns}")
 # %% [markdown]
 # ## 4. Full Parser Implementation
 #
-# This Python parser is for **educational purposes**. For production use with large files,
-# use the Rust parser (see Section 6) which provides order-of-magnitude speedups.
+# The parser below is written to be read. It processes one message at a time in Python, which
+# is what makes each step visible and also what makes a full trading day take about twenty
+# minutes. Section 6 covers the Rust parser, which emits the same Parquet schema and is what
+# you would run over many days.
 
 
 # %% [markdown]
 # ### Parser Helpers
 #
-# We split the parser into three functions: `_read_frame` reads one binary message
-# frame, `_decode_message` unpacks and converts it, and `parse_itch_file` orchestrates
-# the loop with buffered Parquet writes.
+# The parse splits into three functions. `read_frame` takes the next message off the file
+# and hands back its type and its raw bytes; `decode_message` turns those bytes into a
+# dictionary of Python values; and `parse_itch_file` runs the loop, buffering decoded
+# messages and writing them out in batches.
 
 
 # %%
-def _read_frame(f, pbar) -> tuple[str, bytes] | None:
+def read_frame(f, pbar) -> tuple[str, bytes] | None:
     """Read one ITCH message frame: 2-byte length + 1-byte type + payload.
 
     Returns (msg_type, payload) on success, or None on EOF/truncation.
@@ -290,7 +310,7 @@ def _read_frame(f, pbar) -> tuple[str, bytes] | None:
 
 
 # %%
-def _decode_message(msg_type: str, payload: bytes) -> dict | None:
+def decode_message(msg_type: str, payload: bytes) -> dict | None:
     """Unpack binary payload into a dict, converting timestamps and strings.
 
     Returns parsed message dict, or None on struct error.
@@ -318,7 +338,7 @@ def _decode_message(msg_type: str, payload: bytes) -> dict | None:
 # and flushing to Parquet periodically to bound memory usage.
 
 
-# %% — single function body, helpers already extracted
+# %%
 def parse_itch_file(
     itch_file: Path,
     trading_day: date,
@@ -356,7 +376,7 @@ def parse_itch_file(
                 print(f"\nLimit reached: {max_messages:,} messages")
                 break
 
-            frame = _read_frame(f, pbar)
+            frame = read_frame(f, pbar)
             if frame is None:
                 break
             msg_type, payload = frame
@@ -365,7 +385,7 @@ def parse_itch_file(
             if msg_type not in FMT_DICT:
                 continue
 
-            msg = _decode_message(msg_type, payload)
+            msg = decode_message(msg_type, payload)
             if msg is None:
                 continue
 
@@ -503,21 +523,20 @@ for msg_dir in sorted(MESSAGE_DIR.iterdir()):
 # %% [markdown]
 # ## 6. Production Parsing with Rust
 #
-# The Python parser above is educational but slow for full-day files.
-# For production use, we provide a **Rust parser** that is an order of magnitude faster.
+# The Python parser above decodes one message per loop iteration, and a trading day holds a
+# few hundred million of them. The same protocol parsed in Rust reads the file through a
+# memory map and unpacks each message without copying it first, so it neither pays the
+# per-message interpreter overhead nor holds the decoded messages in memory.
 #
 # **Repository**: [github.com/ml4t/itch-parser](https://github.com/ml4t/itch-parser)
 #
-# ### Performance Characteristics
-#
-# | Aspect | Python | Rust |
-# |--------|--------|------|
-# | Speed | Baseline | **10-20× faster** |
-# | Memory | High (buffers in RAM) | Low (streaming) |
-# | Use case | Learning, debugging | Production pipelines |
-#
-# Actual speedups depend on disk I/O and CPU. The Rust parser uses memory-mapped
-# I/O and zero-copy parsing, which provides substantial gains on modern hardware.
+# The figures in the book's Table 3.1, for the same 13 GB file on one machine, are about
+# twenty-three minutes and roughly 8 GB of memory in Python against under five minutes and
+# under 500 MB in Rust. Wall-clock timings move with disk and CPU, so read them as an order
+# of magnitude rather than a ratio: the gap is large enough that it decides which parser you
+# reach for, and not stable enough to quote to a decimal place. The throughput this notebook
+# printed above is the Python side of the same comparison, measured on the machine that ran
+# it.
 #
 # ### Installation
 #
@@ -552,14 +571,33 @@ for msg_dir in sorted(MESSAGE_DIR.iterdir()):
 # | Processing a single day | Either |
 # | Multi-day backtesting | **Rust** |
 # | Production pipeline | **Rust** |
+#
+# Both parsers write the same Parquet schema, so a day parsed either way feeds every
+# notebook that follows without change.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **ITCH Protocol**: Binary message-by-order format with nanosecond precision
-# 2. **Message Types**: A/F (add), E/C (execute), X (cancel), D (delete), U (replace)
-# 3. **Price Format**: Integers with 4 implied decimals (150.0000 → 1500000)
-# 4. **Parser Choice**: Python for learning, Rust for production (20× faster)
+# 1. **The protocol is message-by-order.** Every event names the individual order it acts
+#    on, stamped to the nanosecond, which is what makes book reconstruction possible at all.
+# 2. **Six message types carry the book.** `A` and `F` add an order, `E` and `C` execute
+#    against one, `X` cancels part of one, `D` deletes one, `U` replaces one. The rest
+#    describe the session around them.
+# 3. **Numbers arrive encoded.** Prices are integers with four implied decimal places, and
+#    timestamps are nanoseconds since midnight, so both need converting before use.
+# 4. **Parse in batches, not in one pass.** Buffering by message type and flushing to
+#    Parquet is what keeps a day that does not fit in memory from having to.
+# 5. **Which parser depends on how many days you need.** Python reads clearly and takes
+#    about twenty minutes per day; Rust emits the same schema in a fraction of that.
+#
+# ### Known limitations
+#
+# - The parse covers one venue. NASDAQ ITCH sees NASDAQ-routed activity, not the
+#   consolidated tape, so counts here are a venue's share of a symbol's trading rather than
+#   all of it.
+# - Message types outside `FMT_DICT` are counted and skipped rather than decoded.
+# - The Rust timings quoted above were measured elsewhere, on one machine; this notebook
+#   times only its own Python parse.
 #
 # ### Next Steps
 #
