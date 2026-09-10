@@ -18,7 +18,7 @@
 # # Diffusion-TS: Interpretable Diffusion with Conditional Generation
 #
 # **Chapter 5: Synthetic Data Generation**
-# **Section Reference**: Section 5.5 (Diffusion Models for Financial Time Series)
+# **Section Reference**: Section 5.6 (Diffusion models for financial time series)
 #
 # **Docker image**: `ml4t-gpu`
 #
@@ -55,7 +55,7 @@
 #
 # - **Upstream**: ETF Universe loader (`data`)
 # - **Downstream**: Regime-conditioned synthetic data for stress testing (Ch 20)
-# - **Book**: Section 5.5 discusses diffusion + conditional generation
+# - **Book**: Section 5.6 discusses diffusion and conditional generation
 # - **Related**: [`02_tailgan_tail_risk`](02_tailgan_tail_risk.ipynb) (GAN), [`03_sigcwgan_signatures`](03_sigcwgan_signatures.ipynb) (GAN)
 #
 # ---
@@ -104,7 +104,10 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
+# Scoped by category and module so a warning raised by this notebook's own code
+# still reaches the reader.
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -124,7 +127,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from data import load_etfs
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, plot_fidelity_comparison
+from utils.style import COLORS, plot_fidelity_comparison, show_with_alt
 
 # %% [markdown]
 # ## Diffusion Process Overview
@@ -171,6 +174,14 @@ N_SYNTHETIC = 500  # Number of unconditional synthetic sequences
 N_COND = 100  # Number of conditional samples per regime
 SEED = 42
 
+# %% [markdown]
+# Guidance is set per regime rather than globally. The minority high-volatility regime
+# needs *gentler* steering than the majority one, which is the opposite of the intuition
+# that a rarer target needs a harder push: classifier gradients toward a rare class are
+# strong enough to drive every sample to extreme volatility, collapsing the mode the
+# guidance was meant to reach. Its lower scale is paired with a higher temperature, which
+# buys back diversity, and a larger eta, which leaves more noise in each sampling step.
+
 # %%
 set_global_seeds(SEED)
 
@@ -205,10 +216,8 @@ CONFIG = {
     # Classifier guidance for regime-conditional generation
     "classifier_epochs": CLASSIFIER_EPOCHS,
     "classifier_lr": 5e-4,
-    # Regime-specific guidance: minority class (high-vol) needs gentler steering
-    # to prevent mode collapse (all samples pushed to extreme volatility).
-    # Low-Vol (majority): standard guidance, temperature=1, eta=0.5
-    # High-Vol (minority): lower scale, higher temperature for diversity, eta=0.7
+    # Per-regime guidance; see the markdown above for why the minority class is
+    # steered less hard than the majority one.
     "guidance_settings": {
         0: {"scale": 0.75, "temperature": 1.0, "eta": 0.5},  # Low-Vol
         1: {"scale": 0.3, "temperature": 2.0, "eta": 0.7},  # High-Vol: gentler
@@ -716,9 +725,11 @@ class Decoder(nn.Module):
 # ### Full Transformer
 #
 # The Transformer wraps encoder and decoder with input/output projections.
-# The final output combines: (1) accumulated trend across decoder layers,
-# (2) seasonal component projected back to feature space, and (3) a residual
-# from the decoder output. This produces $\hat{x}_0 = \text{trend} + \text{season\_error}$.
+# The forward pass returns two tensors whose sum is $\hat{x}_0$: `trend`, which is the
+# trend accumulated across decoder layers plus the residual's mean, and `season_error`,
+# which is the seasonal component projected back to feature space plus the residual with
+# that mean removed. Splitting the residual this way keeps the trend term carrying the
+# level and the seasonal term carrying the variation around it.
 
 
 # %%
@@ -805,7 +816,8 @@ class DiffusionTransformer(nn.Module):
 # - `q_sample`: Forward process -- add noise to clean data
 # - `model_predictions`: Get model's $\hat{x}_0$ and derived noise
 # - `p_mean_variance`: Compute posterior $p(x_{t-1}|x_t)$ -- **no clamp**
-# - `_train_loss`: L1 + Fourier loss (time + frequency domain)
+# - the training loss, internally: L1 in the time domain plus a Fourier term in the
+#   frequency domain
 # - `fast_sample`: DDIM-style accelerated sampling
 #
 # **Critical adaptation**: We remove `clamp(-1, 1)` from `p_mean_variance`
@@ -1324,14 +1336,18 @@ if not SKIP_TRAINING:
 
 # %%
 if training_losses:
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
     ax.plot(training_losses, linewidth=1)
     ax.set_yscale("log")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss (L1 + Fourier)")
-    ax.set_title("Diffusion-TS Training Progress")
-    plt.tight_layout()
-    plt.show()
+    ax.set_title("Diffusion-TS training loss by epoch")
+    show_with_alt(
+        fig,
+        "Training loss against epoch on a logarithmic vertical axis. The curve falls "
+        "very steeply over the first few hundred epochs, then flattens into a narrow "
+        "noisy band that drifts down slightly and stays there to the last epoch.",
+    )
 else:
     print("No training losses available (loaded from checkpoint)")
 
@@ -1387,8 +1403,8 @@ print(f"  Real:      mean={sequences.mean():.6f}, std={sequences.std():.6f}")
 # ### Statistical Tests
 #
 # - **Kolmogorov-Smirnov (KS) test**: Measures the maximum distance between
-#   two empirical CDFs. Values range from 0 (identical distributions) to 1
-#   (completely different). For returns, KS < 0.1 indicates good marginal fit.
+#   two empirical CDFs. Values range from 0 for identical distributions to 1 for
+#   completely separated ones, so a small value indicates a close marginal fit.
 #
 # - **Correlation error**: Mean absolute difference between real and synthetic
 #   cross-asset correlation matrices. Captures whether the model learned
@@ -1433,12 +1449,18 @@ def evaluate_statistics(real_data: np.ndarray, synthetic_data: np.ndarray) -> di
     syn_ac = [autocorr(syn_flat[:, i]) for i in range(n_assets)]
     ac_error = np.mean(np.abs(np.array(real_ac) - np.array(syn_ac)))
 
+    # Every figure below averages over assets. Carry the spread as well, so a mean
+    # that hides one badly-fitted asset is visible as one (standard C18).
     return {
+        "n_assets": n_assets,
         "mean_ks_statistic": np.mean(ks_stats),
+        "worst_ks_statistic": np.max(ks_stats),
+        "best_ks_statistic": np.min(ks_stats),
         "mean_error": np.mean(np.abs(real_flat.mean(0) - syn_flat.mean(0))),
         "std_error": np.mean(np.abs(real_flat.std(0) - syn_flat.std(0))),
         "correlation_error": corr_error,
         "autocorrelation_error": ac_error,
+        "worst_autocorrelation_error": np.max(np.abs(np.array(real_ac) - np.array(syn_ac))),
     }
 
 
@@ -1446,13 +1468,27 @@ stats_results = evaluate_statistics(sequences, synthetic_sequences)
 
 print("\n=== Statistical Evaluation ===")
 for key, value in stats_results.items():
-    print(f"  {key}: {value:.4f}")
+    print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
 
 # %% [markdown]
-# **Interpretation**: Low KS statistics indicate that marginal distributions
-# per asset are well-matched. Correlation error tests cross-asset dependence
-# preservation. Autocorrelation error verifies that the model reproduces
-# the weak serial dependence and volatility clustering of daily returns.
+# **Interpretation**: a low KS statistic means the marginal distribution for an asset
+# is well matched. Correlation error tests whether cross-asset dependence survived, and
+# autocorrelation error whether the weak serial dependence of daily returns did.
+#
+# Read each mean against the range printed beside it, not on its own. Five of the nine
+# printed numbers are means. Four of those - the KS statistic, the mean error, the
+# standard-deviation error and the autocorrelation error - average over assets, while
+# the correlation error averages the absolute difference between corresponding entries
+# of the real and synthetic correlation matrices, so it averages over asset pairs. The
+# other four are not means: `n_assets` counts the assets, and the two extreme KS values
+# and the largest autocorrelation error are each one asset's.
+#
+# All of these errors are absolute, so a small mean cannot come from large errors
+# cancelling; it comes from many small ones diluting a few large ones. The extreme
+# per-asset KS values say whether that happened: a maximum near the mean means the fit
+# is even across assets, and one far above it means the mean describes the assets the
+# model handles and conceals the one it does not. The maximum per-asset autocorrelation
+# error reads the same way.
 
 
 # %%
@@ -1463,7 +1499,14 @@ fig = plot_fidelity_comparison(
     n_samples=500,
     flatten_method="flatten",  # Flatten all timesteps for full sequence comparison
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two scatter panels comparing real and synthetic sequences. In the PCA projection "
+    "both sets sit in one dense cluster at the origin, with scattered real outliers far "
+    "from it in several directions and a few synthetic ones closer in. In the t-SNE "
+    "projection the two sets are interleaved across the whole area with no region "
+    "belonging to only one of them.",
+)
 
 # %% [markdown]
 # **Interpretation**: Overlapping PCA/t-SNE point clouds confirm that synthetic
@@ -1476,12 +1519,12 @@ plt.show()
 # We evaluate downstream utility via **extreme-move classification**: predict
 # whether the next-day absolute return exceeds the 90th percentile.
 #
-# **Important context**: This is a highly imbalanced task. The threshold is the
-# 90th percentile of absolute *training* returns, so 10% of the training window
-# is positive by construction. Applied out-of-sample to the calmer 2024-25
-# holdout, only ~4% of test days clear that bar, so the naive "always predict
-# normal" baseline is ~96%. The meaningful metric is the **TSTR Ratio**
-# (synthetic/real), not raw accuracy.
+# **Important context**: this is a heavily imbalanced task. The threshold is a high
+# percentile of absolute *training* returns, so only that tail fraction of the training
+# window is positive by construction. Applied out-of-sample to a calmer holdout period,
+# fewer test days still clear the bar, which pushes the accuracy of a classifier that
+# never predicts the positive class very high. Both rates are printed below. Read the
+# **TSTR ratio** (synthetic over real), not raw accuracy.
 
 
 # %%
@@ -1571,14 +1614,24 @@ print()
 print(f"  TSTR Ratio: {tstr_results['tstr_ratio']:.3f}")
 
 # %% [markdown]
-# **Interpretation**: Raw accuracy is misleading here (90% baseline). The **TSTR
-# Ratio** is the key metric: a ratio near 1.0 means synthetic-trained models
-# perform comparably to real-trained ones. Precision/recall for the extreme-move
-# class reveal how well each model identifies rare large moves.
+# **Interpretation**: the TSTR ratio is one accuracy divided by another, so it says
+# how the two models compare and nothing about whether either one works. Two models
+# that both fall short put it at one just as readily as two that both succeed, and
+# neither of the accuracies printed above reaches the naive baseline printed beside
+# them. Precision and recall are
+# where a model that finds the rare large moves separates from one that predicts the
+# negative class throughout, and the accuracy column cannot make that distinction
+# because the positive class is a few percent of the test rows.
 #
-# **Trading context**: Extreme-move prediction exploits volatility clustering.
-# High recall means we catch most extreme moves; high precision means fewer
-# false alarms. TSTR ≥ 0.9 indicates synthetic data preserves this structure.
+# **Trading context**: extreme-move prediction leans on volatility clustering, so this
+# section was meant to ask whether the synthetic paths carry it. A ratio near one
+# answers that only once both models clear the naive baseline on the metric the ratio
+# is built from. Where neither does, the ratio establishes nothing either way about
+# volatility clustering, and the precision and recall columns are the ones to read
+# instead: they are computed on the positive class, so they separate a model that finds
+# some extreme moves from one that never predicts them, which accuracy at this
+# prevalence cannot. The lag-1 autocorrelation reported earlier does not settle the
+# question either, being computed on returns rather than on squared returns.
 
 # %% [markdown]
 # ### Sample Sequences and Decomposition
@@ -1587,15 +1640,28 @@ print(f"  TSTR Ratio: {tstr_results['tstr_ratio']:.3f}")
 # decomposition. The decomposition shows what the model attributes to slow
 # drift versus periodic patterns at a given noise level.
 
+# %% [markdown]
+# Daily returns on the left show moment-to-moment behaviour; the cumulative series on
+# the right makes drift visible, which a returns plot hides.
+#
+# The windows to plot are drawn at random rather than taken from the front of the array.
+# The sequences are overlapping rolling windows, so the first ten start on consecutive
+# days: they are one short stretch of history repeated with a nine-day shift, not ten
+# samples of it, and a quiet fortnight would make the real panel look calmer than the
+# data it came from.
+
 # %%
-# Sample paths: Daily returns (left) and Cumulative returns (right)
-# Daily returns show moment-to-moment behavior; cumulative reveals drift patterns
 n_sample_paths = 10
 
-fig, axes = plt.subplots(2, 2, figsize=(12, 6))
+# A separate generator, so this draw does not move the rest of the notebook's randomness.
+path_rng = np.random.default_rng(SEED)
+real_idx = path_rng.choice(len(sequences), size=n_sample_paths, replace=False)
+synth_idx = path_rng.choice(len(synthetic_sequences), size=n_sample_paths, replace=False)
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 6), constrained_layout=True)
 
 # Top row: Real data
-for i in range(n_sample_paths):
+for i in real_idx:
     axes[0, 0].plot(sequences[i, :, 0], color=COLORS["blue"], alpha=0.4, linewidth=0.8)
     axes[0, 1].plot(sequences[i, :, 0].cumsum(), color=COLORS["blue"], alpha=0.4, linewidth=0.8)
 axes[0, 0].set_ylabel("Daily Return")
@@ -1606,7 +1672,7 @@ for ax in axes[0]:
     ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5, alpha=0.5)
 
 # Bottom row: Synthetic data
-for i in range(n_sample_paths):
+for i in synth_idx:
     axes[1, 0].plot(synthetic_sequences[i, :, 0], color=COLORS["copper"], alpha=0.4, linewidth=0.8)
     axes[1, 1].plot(
         synthetic_sequences[i, :, 0].cumsum(), color=COLORS["copper"], alpha=0.4, linewidth=0.8
@@ -1627,9 +1693,30 @@ for col in range(2):
     axes[0, col].set_ylim(ymin, ymax)
     axes[1, col].set_ylim(ymin, ymax)
 
-fig.suptitle("Real vs Synthetic Sample Paths (Asset 0)", fontsize=12, y=1.02)
-plt.tight_layout()
-plt.show()
+fig.suptitle("Real vs synthetic sample paths (asset 0)", fontsize=12)
+show_with_alt(
+    fig,
+    "Four panels of ten overlaid paths each, sharing a vertical scale by column so the "
+    "two rows can be compared directly: real daily returns on the top left with their "
+    "cumulative sum on the top right, and the synthetic equivalents below them. Each "
+    "panel has a dashed line at zero, and the right-hand panels plot the running sum "
+    "of each window's returns across the window rather than the returns themselves.",
+)
+
+# %% [markdown]
+# **Interpretation**: ten windows drawn at random from each, on a shared scale per
+# column. Compare how far the two rows spread, in the daily returns and in what those
+# returns accumulate to, rather than tracking any individual line.
+#
+# Do not read a population claim off ten paths, in either direction: ten windows are a
+# thin sample, and the real ones overlap each other, so they carry less independent
+# information than ten separate lines suggest. The statistical tests above - the KS
+# statistics and the correlation error - are the population comparison for these
+# unconditional samples.
+#
+# Not the regime histograms further down: those plot `regime_samples`, generated
+# separately under classifier guidance and without the variance rescaling applied here,
+# so they measure conditional generation and say nothing about `synthetic_sequences`.
 
 # %%
 # Trend + Seasonal decomposition visualization (Matplotlib, vertically stacked)
@@ -1646,28 +1733,36 @@ components = [
     (residual[0, :, asset_idx].cpu().numpy(), "Residual", COLORS["copper"]),
 ]
 
-fig, axes = plt.subplots(3, 1, figsize=(8, 6), sharex=True)
+fig, axes = plt.subplots(3, 1, figsize=(8, 6), sharex=True, constrained_layout=True)
 for ax, (data, label, color) in zip(axes, components, strict=False):
     ax.plot(data, color=color, linewidth=1)
     ax.set_ylabel(label)
     ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5, alpha=0.5)
 
 axes[-1].set_xlabel("Time Step")
-fig.suptitle(
-    "Diffusion-TS separates trend from season under intermediate noise",
-    fontsize=12,
-    y=1.02,
+fig.suptitle("Trend, seasonal and residual components at one noise level", fontsize=12)
+show_with_alt(
+    fig,
+    "Three stacked panels sharing a time axis, each on its own vertical scale. The "
+    "trend panel is one smooth curve, almost flat before bending downward in the last "
+    "third. The seasonal panel oscillates rapidly around zero. The residual panel also "
+    "oscillates around zero but on a scale more than an order of magnitude larger than "
+    "either of the other two.",
 )
-plt.tight_layout()
-plt.show()
 
 # %% [markdown]
-# **Interpretation**: The trend component captures slow drift (market direction),
-# the seasonal component captures periodic oscillations (day-of-week effects,
-# monthly cycles), and the residual captures high-frequency noise. This
-# decomposition is analogous to classical STL but learned end-to-end within
-# the diffusion framework. At higher noise levels (larger $t$), the
-# decomposition becomes noisier as the model has less signal to work with.
+# **Interpretation**: the trend component carries slow drift, the seasonal component
+# carries periodic oscillation, and the residual carries what neither explains. The
+# decomposition is analogous to classical STL, but learned end-to-end inside the
+# diffusion framework rather than imposed.
+#
+# Read the vertical scales before reading the shapes. At this noise level the residual
+# is far larger than the trend and seasonal components put together, so most of what
+# the model is reconstructing here is not being explained by the interpretable parts.
+# That is what the chosen noise level buys: the sample is drawn a quarter of the way
+# through the diffusion schedule, where a lot of noise is still present and there is
+# correspondingly less structure to attribute. The decomposition gets noisier still at
+# larger $t$.
 
 
 # %% [markdown]
@@ -2062,33 +2157,43 @@ for regime_id in range(n_active_regimes):
         )
 
 # %% [markdown]
-# **Interpretation**: Classifier guidance produces regime separation. Key observations:
+# **Interpretation**: classifier guidance separates the regimes. Read the table above
+# against three things it is doing.
 #
-# 1. **Variance scaling**: The model generates ~67% of real variance in normalized space.
-#    This is a known issue with diffusion models using trend+seasonal decomposition --
-#    the smooth components underestimate high-frequency variation. We apply post-hoc
-#    variance scaling to match training distribution.
+# 1. **Variance scaling**: the model generates less variance than the real series in
+#    normalized space. That is expected of a diffusion model built on a trend and
+#    seasonal decomposition, whose smooth components cannot carry high-frequency
+#    variation, so the notebook applies a post-hoc variance rescaling to the training
+#    distribution. The ratio it needed is printed above.
 #
-# 2. **Low-Vol (majority, 88%)**: Unconditional samples are already Low-Vol-like, so
-#    gentle guidance suffices. Generated volatility is close to historical
-#    (~0.94x ratio).
+# 2. **The majority regime**: unconditional samples already resemble the low-volatility
+#    regime, so gentle guidance is enough and the generated volatility lands near the
+#    historical level.
 #
-# 3. **High-Vol (minority, 12%)**: Classifier gradients must push harder to shift
-#    samples toward this regime, which can add variance. Here the generated
-#    volatility tracks the historical level closely (~1.08x), with mild inflation
-#    expected for the minority regime.
+# 3. **The minority regime**: classifier gradients have to push harder to move samples
+#    into the high-volatility regime, and pushing adds variance of its own. Whether the
+#    result overshoots is exactly what the volatility ratio in the table measures.
 #
-# **Scale tuning**: Higher scale = more regime separation but more variance. Scale 0.75
-# balances accuracy for the majority class with reasonable minority-class separation.
+# **Scale tuning**: a higher guidance scale buys more regime separation and costs more
+# variance. The per-regime settings are declared in `guidance_settings` in the config
+# cell, where the minority class is deliberately steered less hard than the majority
+# one, to keep it from collapsing onto extreme volatility.
+
+# %% [markdown]
+# Historical and generated sequences side by side, one row per regime. Every panel
+# shares a y-axis, so the volatility difference between regimes and between real and
+# generated is a difference in the picture rather than in the axis.
 
 # %%
-# Regime comparison: Historical vs Generated side-by-side
-# Shared y-axis across ALL panels for fair volatility comparison
-
 sns.set_style("whitegrid")
 
 fig, axes = plt.subplots(
-    n_active_regimes, 2, figsize=(10, 3 * n_active_regimes), sharex=True, sharey=True
+    n_active_regimes,
+    2,
+    figsize=(10, 3 * n_active_regimes),
+    sharex=True,
+    sharey=True,
+    constrained_layout=True,
 )
 if n_active_regimes == 1:
     axes = axes.reshape(1, 2)
@@ -2116,18 +2221,37 @@ for regime_id in range(n_active_regimes):
     ax_gen.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.5, alpha=0.5)
     sns.despine(ax=ax_gen)
 
-# Column titles
-# The per-regime volatilities are not in the column titles: two four-decimal numbers there
-# are a result the reader has to check against the panels, and they move on every re-run.
-# The cell after next plots their full distribution per regime, which is the comparison
-# those two numbers were standing in for.
+# Column titles carry no volatility numbers: the cell after next plots the full
+# per-regime distribution, which is what those two figures stood in for.
 axes[0, 0].set_title("Historical")
 axes[0, 1].set_title("Generated")
 axes[-1, 0].set_xlabel("Time Step")
 axes[-1, 1].set_xlabel("Time Step")
-fig.suptitle("Conditional Generation Separates Volatility Regimes", fontsize=12, y=1.02)
-plt.tight_layout()
-plt.show()
+fig.suptitle("Historical and generated daily returns by regime", fontsize=12)
+show_with_alt(
+    fig,
+    "A two-by-two grid of daily return paths sharing one vertical scale: historical on "
+    "the left, generated on the right, the low-volatility regime on the top row and the "
+    "high-volatility regime on the bottom. The historical low-volatility panel stays in "
+    "a much narrower band than the historical high-volatility one. Both generated "
+    "panels swing wider than either historical panel, and they widen toward the right "
+    "of the time axis.",
+)
+
+# %% [markdown]
+# **Interpretation**: the two historical panels differ the way the regime labels say
+# they should, the low-volatility one visibly calmer than the high-volatility one. The
+# two generated panels are harder to tell apart by eye, and both range wider than their
+# historical counterparts.
+#
+# Ten paths per panel is too thin a sample to conclude from, which is what the next
+# figure is for: it compares the full volatility distributions of these same
+# regime-conditional samples, where the separation the guidance is meant to produce
+# either shows up or does not. Read that one before deciding what this one means.
+#
+# One thing this figure does show that a distribution cannot: the generated paths widen
+# from left to right, and the historical ones do not. Volatility that grows with
+# position in the window is an artifact of the sampler, not a property of the regime.
 
 # %%
 # Collect all volatilities to set shared bins
@@ -2144,7 +2268,12 @@ bins = np.linspace(all_vols.min(), all_vols.max(), 31)
 # %%
 # Volatility distribution comparison - shared x-axis across regimes
 fig, axes = plt.subplots(
-    1, n_active_regimes, figsize=(5 * n_active_regimes, 4), sharex=True, sharey=True
+    1,
+    n_active_regimes,
+    figsize=(5 * n_active_regimes, 4),
+    sharex=True,
+    sharey=True,
+    constrained_layout=True,
 )
 if n_active_regimes == 1:
     axes = [axes]
@@ -2179,11 +2308,15 @@ for regime_id, ax in enumerate(axes):
     sns.despine(ax=ax)
 
 axes[0].set_ylabel("Density")
-fig.suptitle(
-    "Generated Volatilities Track the Historical Distribution per Regime", fontsize=12, y=1.02
+fig.suptitle("Sequence volatility distributions, historical and generated", fontsize=12)
+show_with_alt(
+    fig,
+    "Two overlaid histograms of per-sequence volatility, one panel per regime, with "
+    "each panel's legend giving the two means. In both panels the generated "
+    "distribution covers the same range as the historical one and overlaps it "
+    "substantially, while sitting further right, with more weight in the upper tail "
+    "and a higher mean.",
 )
-plt.tight_layout()
-plt.show()
 
 
 # %% [markdown]
@@ -2248,5 +2381,5 @@ print(f"Saved samples to: {samples_dir}/")
 # - High-dimensional generation (here 20 assets) is computationally intensive;
 #   scaling to broader universes raises cost further
 #
-# **Next**: Section 5.5 discusses the Fidelity-Utility-Privacy framework for
+# **Next**: Section 5.8 applies the Fidelity-Utility-Privacy framework to
 # systematic evaluation of any synthetic generator.

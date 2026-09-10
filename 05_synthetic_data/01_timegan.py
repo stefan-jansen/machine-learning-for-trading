@@ -19,7 +19,7 @@
 #
 # **Docker image**: `ml4t-gpu`
 #
-# **Book Reference**: Chapter 5, Section 5.4 (GANs for Financial Time Series)
+# **Book Reference**: Chapter 5, Section 5.5 (GANs for financial time series)
 #
 # > **GPU recommended**: This notebook trains models with PyTorch/CUDA. It will run on CPU
 # > but training may be very slow. For GPU acceleration:
@@ -48,13 +48,25 @@
 # 2. **Learned Embedding Space**: Instead of operating directly on raw data, TimeGAN
 #    learns a latent representation where adversarial training is more stable.
 #
-# With 1,800+ citations, TimeGAN remains the baseline against which newer methods are compared.
+# TimeGAN remains a common baseline against which newer methods are compared.
 #
 # ## Data Format
 #
-# We use 6 stocks (BA, CAT, DIS, GE, IBM, KO) with adjusted close prices, matching
-# the 2nd edition benchmark format. The multi-stock panel exposes the model to a
-# wider distribution of volatility and trend regimes than single-stock OHLCV.
+# We use six stocks (BA, CAT, DIS, GE, IBM, KO) and model their **daily log
+# returns**. The multi-stock panel exposes the model to a wider distribution of
+# volatility and trend regimes than single-stock OHLCV.
+#
+# The choice of returns over price levels is forced by the evaluation, not a
+# stylistic preference. Every module here ends in a sigmoid, so the generator can
+# only emit values in $[0, 1]$, and the inputs are min-max scaled to that range
+# using statistics fitted on the training period. Price levels trend, so a later
+# holdout period leaves the range the scaler was fitted on. A TSTR score computed
+# against such a holdout is then measuring predictive utility across a severe
+# shift in support — the synthetic training data cannot go above one, most of the
+# holdout targets do — which confounds any reading of it as a statement about
+# temporal fidelity. Log returns are stationary enough that the holdout stays
+# inside the fitted range, removing the confound. Both halves of that are
+# measured below rather than asserted.
 #
 # ## References
 #
@@ -65,6 +77,7 @@
 # %%
 """TimeGAN — Time-series Generative Adversarial Networks."""
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,16 +93,15 @@ from IPython.display import Image, display
 from sklearn.preprocessing import MinMaxScaler
 from timegan_metrics import run_timegan_evaluation
 from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
 
 from data import load_us_equities
 from utils.paths import get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, plot_fidelity_comparison
+from utils.style import COLORS, plot_fidelity_comparison, show_with_alt
 
 # %% tags=["parameters"]
 TRAIN_STEPS = 10000  # Steps per training phase (matching official repo)
-RETRAIN = True  # Set True to force re-training even if checkpoint exists
+RETRAIN = False  # True re-trains even when a checkpoint exists
 SEED = 42
 
 # %%
@@ -112,6 +124,7 @@ HIDDEN_DIM = 24
 NUM_LAYERS = 3
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-3
+D_GATING_THRESHOLD = 0.15  # Skip a discriminator step while its loss is below this
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -136,17 +149,14 @@ if (ASSETS_DIR / "timegan_architecture.jpeg").exists():
 # %% [markdown]
 # ## 1. Load Data
 #
-# We use 6 diverse stocks with adjusted close prices. This provides:
-# - **Diverse dynamics**: Each stock has different volatility and trends
-# - **Consistent scale**: All normalized to [0, 1]
-# - **Learnable patterns**: Cross-asset relationships are meaningful
+# Six stocks with different volatility and trend regimes, converted to daily log
+# returns. The returned array is one row shorter than the price panel, and its
+# timestamps are those of the *later* day of each return.
 
 
 # %%
-def load_multi_stock_data(
-    tickers: list[str], start_year: str = "2000"
-) -> tuple[np.ndarray, np.ndarray]:
-    """Load adjusted close prices for multiple stocks."""
+def load_price_panel(tickers: list[str], start_year: str = "2000"):
+    """Adjusted close for *tickers* as a wide, gap-free panel."""
     df_pl = load_us_equities()
     df_pl = df_pl.filter(pl.col("symbol").is_in(tickers))
 
@@ -169,15 +179,49 @@ def load_multi_stock_data(
         .dropna()
     )
 
-    timestamps = df.index.to_numpy()
-    data = df.values.astype(np.float32)
+    return df
 
-    print(f"Loaded {len(df)} rows, {len(tickers)} stocks")
-    print(f"Date range: {timestamps[0]} to {timestamps[-1]}")
+
+def load_multi_stock_data(
+    tickers: list[str], start_year: str = "2000"
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load daily log returns of adjusted close for multiple stocks."""
+    df = load_price_panel(tickers, start_year)
+    prices = df.values.astype(np.float32)
+    assert (prices > 0).all(), "adjusted close must be positive to take logs"
+
+    # A return is dated by the later of the two days it spans, so the first
+    # price date has no return and is dropped from both arrays together.
+    data = np.diff(np.log(prices), axis=0).astype(np.float32)
+    timestamps = df.index.to_numpy()[1:]
+
+    print(f"Loaded {len(df)} price rows -> {len(data)} return rows, {len(tickers)} stocks")
+    print(f"Return date range: {timestamps[0]} to {timestamps[-1]}")
     print(f"Stocks: {', '.join(tickers)}")
 
     return data, timestamps
 
+
+# %% [markdown]
+# ### Why Not Price Levels
+#
+# Before loading returns, measure what levels would have cost. Fit the same
+# min-max scaler on the same training fraction of the price panel, transform the
+# holdout, and count the cells the generator could never reach.
+
+# %%
+_levels = load_price_panel(TICKERS).values.astype(np.float32)
+_split = int(len(_levels) * 0.8)
+_level_holdout = MinMaxScaler().fit(_levels[:_split]).transform(_levels[_split:])
+_level_seqs = np.array(
+    [_level_holdout[i : i + SEQ_LEN] for i in range(len(_level_holdout) - SEQ_LEN)]
+)
+_usable = ((_level_seqs >= 0) & (_level_seqs <= 1)).all(axis=(1, 2))
+
+print("If the model were trained on price levels:")
+print(f"  holdout scaled range: [{_level_holdout.min():.2f}, {_level_holdout.max():.2f}]")
+print(f"  holdout cells outside [0, 1]: {((_level_holdout < 0) | (_level_holdout > 1)).mean():.1%}")
+print(f"  holdout sequences fully inside [0, 1]: {_usable.sum()} of {len(_level_seqs)}")
 
 # %%
 all_data, all_timestamps = load_multi_stock_data(TICKERS)
@@ -206,13 +250,31 @@ print(
 # %% [markdown]
 # ## 2. Normalize and Create Sequences
 
+# %% [markdown]
+# The scaler is fitted on the training period only, so nothing about the holdout
+# reaches the model. That makes the holdout's scaled range a property of the
+# data rather than something the code can arrange, and it is the quantity the
+# choice of returns over levels turns on: every module ends in a sigmoid, so a
+# holdout cell outside $[0, 1]$ names a value the generator cannot emit and the
+# TSTR comparison cannot fairly ask for.
+
 # %%
-# Normalize to [0, 1] using MinMaxScaler (matching 2nd edition)
 scaler = MinMaxScaler()
 train_scaled = scaler.fit_transform(train_data).astype(np.float32)
 holdout_scaled = scaler.transform(holdout_data).astype(np.float32)
 
-print(f"Scaled data range: [{train_scaled.min():.4f}, {train_scaled.max():.4f}]")
+out_of_range = float(((holdout_scaled < 0) | (holdout_scaled > 1)).mean())
+print(f"Train scaled range:   [{train_scaled.min():.4f}, {train_scaled.max():.4f}]")
+print(f"Holdout scaled range: [{holdout_scaled.min():.4f}, {holdout_scaled.max():.4f}]")
+print(f"Holdout cells outside the generator's [0, 1] range: {out_of_range:.2%}")
+
+# A holdout that leaves the range is the failure this representation exists to
+# avoid, so it stops the notebook rather than flowing into a TSTR score that
+# would read as a statement about the generator.
+assert out_of_range < 0.01, (
+    f"{out_of_range:.1%} of holdout cells fall outside [0, 1]; a sigmoid-bounded "
+    "generator cannot reach them and the TSTR comparison would measure the scaling"
+)
 
 
 # %%
@@ -362,21 +424,80 @@ total_params = sum(
 )
 print(f"  Total:         {total_params:,}")
 
+# %% [markdown]
+# ### Reusing a Checkpoint
+#
+# A checkpoint is only interchangeable with a fresh run if it was trained on the
+# same thing. The weights alone cannot say what they were fitted to, so the
+# config saved beside them is compared field by field and a mismatch retrains
+# instead of loading. Without that check a checkpoint trained on price levels
+# would load silently into this returns-based notebook and every number below
+# would describe a model fitted to a different target.
+#
+# The comparison has to cover everything that moves the weights, not just what
+# describes the data. A seed, a batch size, a learning rate and the discriminator
+# gating threshold all produce different models from the same inputs, so all four
+# are compared too. A checkpoint written before they were is missing them, which
+# reads as a mismatch and retrains - the safe direction.
+#
+# `TICKERS` names the columns but not their contents, and the equity data is refreshed
+# outside this notebook. A refresh moves the training rows, which moves the scaler
+# fitted on them, and the run would then evaluate weights fitted under one
+# normalization on data scaled under another, and overwrite `scaler.pkl` with the
+# second one. A digest of the training rows is what closes that.
+
 # %%
-# Check for existing checkpoint
 CHECKPOINT_PATH = CHECKPOINT_DIR / "checkpoint.pt"
 SKIP_TRAINING = False
 
+RUN_CONFIG = {
+    "tickers": TICKERS,
+    "representation": "log_returns",
+    "train_data_digest": hashlib.sha256(np.ascontiguousarray(train_data)).hexdigest()[:16],
+    "seq_len": SEQ_LEN,
+    "hidden_dim": HIDDEN_DIM,
+    "num_layers": NUM_LAYERS,
+    "train_steps": TRAIN_STEPS,
+    # Each of these changes the weights, so a checkpoint fitted under a different
+    # value is not this run's model. SEED is exposed as a papermill parameter, so
+    # without it here, a second seed would load the first seed's weights.
+    "seed": SEED,
+    "batch_size": BATCH_SIZE,
+    "learning_rate": LEARNING_RATE,
+    "d_gating_threshold": D_GATING_THRESHOLD,
+}
+
 if CHECKPOINT_PATH.exists() and not RETRAIN:
-    print(f"Loading checkpoint from {CHECKPOINT_PATH}")
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
-    embedder.load_state_dict(checkpoint["embedder"])
-    recovery.load_state_dict(checkpoint["recovery"])
-    supervisor.load_state_dict(checkpoint["supervisor"])
-    generator.load_state_dict(checkpoint["generator"])
-    discriminator.load_state_dict(checkpoint["discriminator"])
-    print("Checkpoint loaded - skipping training")
-    SKIP_TRAINING = True
+    saved_config = checkpoint.get("config", {})
+    mismatched = {
+        key: (saved_config.get(key), value)
+        for key, value in RUN_CONFIG.items()
+        if saved_config.get(key) != value
+    }
+    if "history" not in checkpoint:
+        print(
+            f"Checkpoint at {CHECKPOINT_PATH} predates loss-history saving; retraining so "
+            "the training section has its figure."
+        )
+    elif mismatched:
+        print(f"Checkpoint at {CHECKPOINT_PATH} does not match this run; retraining.")
+        for key, (was, now) in mismatched.items():
+            print(f"  {key}: checkpoint has {was!r}, this run needs {now!r}")
+    else:
+        print(f"Loading checkpoint from {CHECKPOINT_PATH}")
+        embedder.load_state_dict(checkpoint["embedder"])
+        recovery.load_state_dict(checkpoint["recovery"])
+        supervisor.load_state_dict(checkpoint["supervisor"])
+        generator.load_state_dict(checkpoint["generator"])
+        discriminator.load_state_dict(checkpoint["discriminator"])
+        history = checkpoint["history"]
+        embedding_losses = history["embedding"]
+        supervisor_losses = history["supervisor"]
+        g_losses = history["generator"]
+        d_losses = history["discriminator"]
+        print("Checkpoint loaded - skipping training")
+        SKIP_TRAINING = True
 
 # %% [markdown]
 # ## Three-Phase Training
@@ -417,7 +538,7 @@ if not SKIP_TRAINING:
     data_iter = infinite_dataloader()
     embedding_losses = []
 
-    for step in tqdm(range(TRAIN_STEPS), desc="Phase 1"):
+    for step in range(TRAIN_STEPS):
         (batch,) = next(data_iter)
         batch = batch.to(device)
 
@@ -452,7 +573,7 @@ if not SKIP_TRAINING:
     opt_supervisor = optim.Adam(supervisor.parameters(), lr=LEARNING_RATE)
     supervisor_losses = []
 
-    for step in tqdm(range(TRAIN_STEPS), desc="Phase 2"):
+    for step in range(TRAIN_STEPS):
         (batch,) = next(data_iter)
         batch = batch.to(device)
 
@@ -478,7 +599,9 @@ if not SKIP_TRAINING:
 # Train Generator and Discriminator adversarially while maintaining reconstruction
 # and supervised losses. Key details:
 # - 2 generator+embedder updates per discriminator update
-# - Discriminator gating: only train if loss > 0.15
+# - Discriminator gating: a step is taken only when the discriminator loss
+#   exceeds `D_GATING_THRESHOLD`, which keeps an already-winning
+#   discriminator from overwhelming the generator
 
 
 # %%
@@ -586,8 +709,7 @@ if not SKIP_TRAINING:
 
         d_loss = d_loss_real + d_loss_fake + gamma * d_loss_fake_e
 
-        # Gating: only train if loss > 0.15
-        if d_loss.item() > 0.15:
+        if d_loss.item() > D_GATING_THRESHOLD:
             opt_discriminator.zero_grad()
             d_loss.backward()
             opt_discriminator.step()
@@ -605,8 +727,16 @@ if not SKIP_TRAINING:
 
 # %% [markdown]
 # ## 8. Generate Synthetic Data
+#
+# Training draws millions of random numbers and loading a checkpoint draws none, so the
+# two paths arrive here with different RNG states. Everything below - the noise the
+# generator is fed, and the initializations inside the evaluation suite - would then
+# differ between a run that trained the weights and a run that loaded the same weights
+# back. Reseeding here makes the two paths produce the same synthetic sequences.
 
 # %%
+set_global_seeds(SEED)
+
 print("\n=== Generating Synthetic Data ===")
 
 generator.eval()
@@ -637,16 +767,36 @@ print(f"Synthetic std:  {synthetic.std():.4f} (real: {sequences.std():.4f})")
 # evaluation matching the original paper.
 
 # %% [markdown]
-# ### 9.1 Diversity: PCA and t-SNE Visualization
+# ### Diversity: PCA and t-SNE Projections
 
 # %%
 fig = plot_fidelity_comparison(
-    sequences, synthetic, title="TimeGAN: Real vs Synthetic Distribution", n_samples=1000
+    sequences, synthetic, title="Real and synthetic sequences in two projections", n_samples=1000
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two scatter panels of the same real and synthetic sequences. In the PCA "
+    "projection the real points form a broad cloud around the origin while the "
+    "synthetic points sit in a short horizontal sliver at its centre. In the t-SNE "
+    "projection the two occupy separate regions of the plane, synthetic to the left "
+    "and real to the right, with almost no interleaving.",
+)
 
 # %% [markdown]
-# ### 9.2 Paper Evaluation Suite (LSTM-based)
+# **Read it.** Neither panel shows the two sets sitting on top of each other. In the
+# PCA projection the synthetic sequences occupy a sliver at the centre of the real
+# cloud, so they vary far less than the real ones along the directions that carry most
+# of the real variance. In the t-SNE projection the two sets fall in separate regions.
+# The discriminative accuracy printed by the evaluation suite below puts a number on
+# what these panels show.
+#
+# Read this against the mean and standard deviation printed by the generation cell
+# above, which are close to the real ones. Those two readings are not in conflict, and
+# the section at the end of the notebook is about why: the pooled moments are a weak
+# requirement, and these panels are a picture of what they leave unconstrained.
+
+# %% [markdown]
+# ### Paper Evaluation Suite (LSTM-based)
 #
 # Run the full evaluation following Yoon et al. (2019) using LSTM predictors
 # and discriminators, not tree-based models.
@@ -680,10 +830,10 @@ print(f"Discriminative Accuracy: {disc_accuracy:.1%} (target: ~50%)")
 print(f"TSTR Ratio: {tstr_ratio:.3f} (target: ~1.0)")
 
 # %% [markdown]
-# ### 9.3 Training Curves
+# ### Training Curves
 
 # %%
-if not SKIP_TRAINING and embedding_losses:
+if embedding_losses:
     fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
     axes[0].plot(embedding_losses, color=COLORS["blue"], linewidth=1.5)
@@ -701,9 +851,17 @@ if not SKIP_TRAINING and embedding_losses:
     axes[2].set_xlabel("Step (×1000)")
     axes[2].legend()
 
-    fig.suptitle("TimeGAN Training Progress", fontsize=14, fontweight="semibold")
-    plt.tight_layout()
-    plt.show()
+    fig.suptitle("Loss curves for the three training phases", fontsize=14, fontweight="semibold")
+    show_with_alt(
+        fig,
+        "Three panels, each against training step in thousands and each on its own "
+        "vertical scale. The embedding autoencoder loss declines unevenly across the "
+        "whole run; the supervisor loss drops sharply inside the first thousand steps "
+        "and is flat after that; the third panel plots the generator and discriminator "
+        "losses of the joint phase together, the generator falling steeply inside the "
+        "first thousand steps and then running flat, and the discriminator flat across "
+        "the whole run at a level a little below where the generator settles.",
+    )
 
 # %% [markdown]
 # ## 10. Save Outputs
@@ -718,12 +876,14 @@ checkpoint = {
     "supervisor": supervisor.state_dict(),
     "generator": generator.state_dict(),
     "discriminator": discriminator.state_dict(),
-    "config": {
-        "tickers": TICKERS,
-        "seq_len": SEQ_LEN,
-        "hidden_dim": HIDDEN_DIM,
-        "num_layers": NUM_LAYERS,
-        "train_steps": TRAIN_STEPS,
+    "config": RUN_CONFIG,
+    # The training section plots these. Without them a checkpoint-loading run renders
+    # that section with no figure, so they travel with the weights they describe.
+    "history": {
+        "embedding": embedding_losses,
+        "supervisor": supervisor_losses,
+        "generator": g_losses,
+        "discriminator": d_losses,
     },
 }
 torch.save(checkpoint, CHECKPOINT_PATH)
@@ -737,14 +897,9 @@ metadata = {
     "generator": "timegan",
     "paper": "Yoon et al., NeurIPS 2019",
     "created_at": datetime.now(UTC).isoformat(),
-    "data_format": "multi_stock_adj_close",
+    "data_format": "multi_stock_adj_close_log_returns",
     "tickers": TICKERS,
-    "config": {
-        "seq_len": SEQ_LEN,
-        "hidden_dim": HIDDEN_DIM,
-        "num_layers": NUM_LAYERS,
-        "train_steps": TRAIN_STEPS,
-    },
+    "config": RUN_CONFIG,
     "evaluation": {
         "discriminative_accuracy": float(disc_accuracy),
         "tstr_ratio": float(tstr_ratio),
@@ -758,15 +913,22 @@ np.save(CHECKPOINT_DIR / "synthetic.npy", synthetic)
 np.save(CHECKPOINT_DIR / "real_train.npy", sequences)
 np.save(CHECKPOINT_DIR / "real_holdout.npy", holdout_sequences)
 
+# %% [markdown]
+# ### Persisting the Projection Coordinates
+#
+# The book-repo Hard Rule 15 script
+# `05_synthetic_data/figures/scripts/generate_figure_5_04_timegan_fidelity.py`
+# re-renders the publication figure without retraining. It reads vendored copies
+# under `05_synthetic_data/figures/data/timegan_fidelity/`, so it does not track
+# these arrays until someone re-vendors them.
+#
+# The projections are computed with the parameters `plot_fidelity_comparison()`
+# uses internally, so the inline render and the persisted arrays describe the
+# same projection. That includes the legacy global-RNG seeding, `np.random.seed`
+# followed by `np.random.choice`, so the subsample indices follow the helper's
+# MT19937 sequence rather than the PCG64 sequence `np.random.default_rng` emits.
+
 # %%
-# Persist PCA + t-SNE 2D coordinates so the book-repo Hard Rule 15 script
-# (figures/scripts/generate_figure_5_04_timegan_fidelity.py) can re-render
-# the publication figure without retraining. Computed here with the same
-# parameters plot_fidelity_comparison() uses internally so the inline render
-# and the persisted arrays describe the same projection — including the
-# legacy global-RNG seeding (np.random.seed + np.random.choice) so the
-# subsample indices match the helper's MT19937 sequence rather than the
-# PCG64 sequence np.random.default_rng would emit.
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
@@ -810,14 +972,58 @@ print(f"\nSaved to {CHECKPOINT_DIR}/")
 # 3. **Training**: Three-phase, step-based approach (10,000 steps per phase)
 # 4. **Evaluation**: LSTM-based discriminative and predictive scores
 #
-# ### Key Finding
+# ### Reading the Two Scores
 #
-# On the six-stock close-price panel used here, the post-training discriminative
-# accuracy is 67.9% (Yoon et al.'s target is ~50%, where the discriminator cannot
-# tell real from synthetic) and the TSTR/TRTR MAE ratio is 1.76 (target ~1.0).
-# Synthetic sequences match the real distribution moments closely (mean 0.376 vs
-# 0.366, std 0.253 vs 0.250) but the discriminator and TSTR diagnostics show
-# that temporal structure is only partially preserved on this run.
+# Both diagnostics are printed above rather than quoted here, because both move
+# from run to run and a number typed into prose stops tracking the code that
+# produced it. What is fixed is how to read them.
+#
+# **Discriminative accuracy** trains a classifier to tell real sequences from
+# synthetic ones and reports its held-out accuracy. The benchmark is chance, one
+# half, not zero: a value near one half means the classifier cannot separate the
+# two, and higher means it can. Held-out accuracy is not bounded below by chance,
+# so a value well under one half is possible and is not a better result — it
+# points at sampling variation, a classifier that failed to generalize, or a
+# shift between the two sets. A substantial departure in either direction is
+# something to investigate rather than to report.
+#
+# **The TSTR/TRTR ratio** divides the error of a predictor trained on synthetic
+# data by the error of the same predictor trained on real data, both scored on
+# the real holdout. Its target is one, meaning synthetic data substitutes for
+# real without loss; above one means it is worse.
+#
+# The predictor's output layer is linear and unbounded, so it can predict outside
+# the generator's range and the ratio does not become meaningless when the
+# holdout leaves it. What it becomes is confounded. On price levels the synthetic
+# training data is confined to $[0, 1]$ while most holdout targets sit above one,
+# as the cell before the data load shows, and a ratio measured across that gap
+# cannot separate a generator that missed the temporal structure from targets
+# that left the support the synthetic data covers. Working in returns keeps the
+# holdout inside the fitted range, which the assertion in the normalization
+# section enforces, so the ratio is answering one question rather than two.
+#
+# ### When the Moments Agree and the Discriminator Does Not
+#
+# The generation cell prints the synthetic and real mean and standard deviation,
+# and on this run they agree to about two decimal places. The discriminative
+# accuracy printed just above is nonetheless far from chance. Those two facts are
+# not in conflict, and holding them together is the point of the section the
+# chapter devotes to evaluation.
+#
+# Matching the first two moments of a pooled distribution is a weak requirement.
+# It says nothing about the order of values within a sequence, about how
+# volatility clusters, or about the dependence between the six stocks on the same
+# day. A classifier that reads whole sequences can use any of that, and a high
+# accuracy says it found something it could use. Which of those the generator
+# missed is not something the accuracy alone can say — it is a single number, and
+# diagnosing it needs the stylized-fact and dependence checks the chapter
+# introduces alongside this score.
+#
+# This is also why the two diagnostics are reported together rather than one
+# being chosen. A ratio near one says a downstream predictor trained on synthetic
+# data transfers to real data for this particular task, which is a claim about
+# utility. It does not say the synthetic sequences are indistinguishable from
+# real ones, which is what the discriminator tests.
 #
 # ### Limitations
 #

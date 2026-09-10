@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import sys
 import types
+from importlib.metadata import PackageNotFoundError
 
 import pytest
 
+import utils
 from utils import _default_plotly_renderer
 
 WITH_PNG = "plotly_mimetype+png"
@@ -45,6 +47,51 @@ def fake_choreographer(monkeypatch):
             monkeypatch.setitem(sys.modules, name, module)
 
     return install
+
+
+@pytest.fixture
+def fake_kaleido(monkeypatch):
+    """Report a kaleido version regardless of what the runner has installed.
+
+    The version decides whether the Chrome probe runs at all, so a test about the
+    probe has to pin it: test-unit installs no kaleido, and without this the lookup
+    would short-circuit before reaching the fake browser.
+    """
+
+    def install(version):
+        def _version(name):
+            if name == "kaleido":
+                if version is None:
+                    raise PackageNotFoundError(name)
+                return version
+            raise AssertionError(f"unexpected metadata lookup: {name}")
+
+        monkeypatch.setattr("importlib.metadata.version", _version)
+
+    return install
+
+
+@pytest.fixture(autouse=True)
+def _kaleido_v1(fake_kaleido):
+    """Default every test to kaleido 1.x, the version whose probe these tests cover."""
+    fake_kaleido("1.3.0")
+
+
+def test_png_requested_without_a_browser_on_kaleido_0x(fake_kaleido, fake_choreographer):
+    """kaleido 0.x bundles its own Chromium, so a missing system Chrome is irrelevant.
+
+    The py312 container: the probe found no Chrome and PNG was dropped, while
+    `fig.to_image()` worked there the whole time.
+    """
+    fake_kaleido("0.2.1")
+    fake_choreographer(lambda **_: None)
+    assert _default_plotly_renderer() == WITH_PNG
+
+
+def test_png_dropped_when_kaleido_is_absent(fake_kaleido):
+    """No kaleido at all means no PNG to ask for, whatever browsers exist."""
+    fake_kaleido(None)
+    assert _default_plotly_renderer() == WITHOUT_PNG
 
 
 def test_png_requested_when_chrome_is_found(fake_choreographer):
