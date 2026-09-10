@@ -1,6 +1,6 @@
 """Guards on what committed notebooks expose to readers.
 
-Four hygiene defects have reached readers from committed ``.ipynb`` files:
+Five hygiene defects have reached readers from committed ``.ipynb`` files:
 
 * machine-specific absolute paths baked into cell outputs and papermill
   metadata - ``/home/<user>/...``, and a scratch root under ``/tmp``,
@@ -13,7 +13,11 @@ Four hygiene defects have reached readers from committed ``.ipynb`` files:
   This happens when a notebook is executed with ``PLOTLY_RENDERER=json`` (the
   headless/CI recipe) instead of the default ``plotly_mimetype+png`` renderer, and
 * a figure destroyed by the sanitizer above, which deleted a chance ``/app/`` out
-  of a base64 PNG payload and left an encoding that no longer decodes.
+  of a base64 PNG payload and left an encoding that no longer decodes, and
+* a stderr block under a figure saying the notebook overrode the repository's own
+  figure setup - the layout engine ``matplotlibrc`` sets, or the display path
+  ``utils.style`` provides. The reader sees a warning about the repository's
+  plumbing where the figure's caption should be.
 
 Each test scans every tracked ``.ipynb`` and names the script that fixes it.
 """
@@ -381,6 +385,103 @@ def test_known_unrenderable_list_has_no_stale_entries() -> None:
     assert not stale, (
         "These notebooks are listed in KNOWN_UNRENDERABLE but their plotly figures now "
         "render. Remove them from the list in this file so it cannot silently mask a "
+        "regression:\n  " + "\n  ".join(stale)
+    )
+
+
+# The three things matplotlib says when a notebook fights the repository's own
+# figure setup and loses. Each is house-keeping, not science: none of them tells
+# the reader anything about the data, and each renders as a stderr block under the
+# figure where the caption should be.
+#
+# Deliberately not "no stderr in a render". A ConvergenceWarning, a RuntimeWarning
+# for divide-by-zero, an ARCH interpolation notice - those are the one channel a
+# fitted model has to say it did not converge, and 34 of the 48 notebooks that
+# carry a stderr block carry one of those. A guard that swept them up would push
+# authors back to `warnings.filterwarnings("ignore")`, which is the defect the
+# preamble standard was narrowed to remove.
+HOUSE_FIGURE_WARNINGS = (
+    # `fig.tight_layout()` over the global `figure.constrained_layout.use: True`.
+    "The figure layout has changed to tight",
+    # `fig.subplots_adjust()` under the same setting - warns AND discards the spacing.
+    "incompatible with subplots_adjust",
+    # A bare `fig.show()` instead of `show_with_alt(fig, alt)`.
+    "FigureCanvasAgg is non-interactive",
+)
+
+# Notebooks whose committed outputs already carry one. Each leaves this list when
+# the notebook is next re-executed with the offending call removed - the removal is
+# a code-cell edit, so it costs a run, and it is folded into a run the notebook is
+# already owed rather than scheduled on its own. The list must only ever shrink,
+# which the companion test below enforces.
+KNOWN_HOUSE_FIGURE_WARNINGS = frozenset(
+    {
+        "05_synthetic_data/00_classical_simulation.ipynb",
+        "05_synthetic_data/01_timegan.ipynb",
+        "05_synthetic_data/03_sigcwgan_signatures.ipynb",
+        "05_synthetic_data/04_gtgan_irregular.ipynb",
+        "05_synthetic_data/07_dp_gan.ipynb",
+        "06_strategy_definition/01_where_ideas_come_from.ipynb",
+        "14_latent_factors/09_case_study_insights.ipynb",
+        "23_knowledge_graphs/02_supply_chain_kg_construction_qwen25_rerun.ipynb",
+        "23_knowledge_graphs/02_supply_chain_kg_construction_qwen3.ipynb",
+        "23_knowledge_graphs/08_8k_event_extraction_qwen3.ipynb",
+        "26_mlops_governance/03_safe_model_rollout.ipynb",
+        "case_studies/fx_pairs/19_strategy_analysis.ipynb",
+        "case_studies/us_firm_characteristics/09_causal_dml.ipynb",
+    }
+)
+
+
+def _house_figure_warning_offenders() -> dict[str, int]:
+    """{relative path: occurrence count} for renders carrying a house figure warning."""
+    out: dict[str, int] = {}
+    for nb_path in iter_committed_notebooks():
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        count = 0
+        for cell in nb.get("cells", []):
+            if cell.get("cell_type") != "code":
+                continue
+            for output in cell.get("outputs", []):
+                if output.get("output_type") != "stream" or output.get("name") != "stderr":
+                    continue
+                text = "".join(output.get("text", []))
+                count += sum(text.count(sign) for sign in HOUSE_FIGURE_WARNINGS)
+        if count:
+            out[str(nb_path.relative_to(REPO_ROOT))] = count
+    return out
+
+
+def test_no_house_figure_warnings_in_committed_notebooks() -> None:
+    """A render must not tell the reader the notebook overrode the house figure setup."""
+    offenders = [
+        f"{p} ({n})"
+        for p, n in _house_figure_warning_offenders().items()
+        if p not in KNOWN_HOUSE_FIGURE_WARNINGS
+    ]
+    assert not offenders, (
+        "These committed renders carry a stderr block from a notebook overriding the "
+        "repository's figure setup. `matplotlibrc` sets the layout engine for every "
+        "figure, so drop the second layout pass (`fig.tight_layout()`, "
+        "`fig.subplots_adjust()`) rather than re-laying the figure out; and display "
+        "with `show_with_alt(fig, alt)` from `utils.style` rather than a bare "
+        "`fig.show()`. Then re-execute:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_known_house_figure_warning_list_has_no_stale_entries() -> None:
+    """The debt list must only shrink: a re-executed notebook has to leave it.
+
+    Entries whose notebook is absent are ignored, not stale: this file is mirrored
+    to the public repo, which ships only a subset of the case studies.
+    """
+    offenders = _house_figure_warning_offenders()
+    stale = sorted(
+        e for e in KNOWN_HOUSE_FIGURE_WARNINGS - set(offenders) if (REPO_ROOT / e).exists()
+    )
+    assert not stale, (
+        "These notebooks are listed in KNOWN_HOUSE_FIGURE_WARNINGS but their renders are "
+        "now clean. Remove them from the list in this file so it cannot silently mask a "
         "regression:\n  " + "\n  ".join(stale)
     )
 
