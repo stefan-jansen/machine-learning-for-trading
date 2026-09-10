@@ -85,11 +85,15 @@ print(f"Columns: {fx_4h.columns}")
 print(f"Date range: {fx_4h['timestamp'].min()} to {fx_4h['timestamp'].max()}")
 
 # %% [markdown]
-# ### Volume is an OANDA estimate
+# ### The volume column is not traded volume
 #
-# FX is an OTC market. There is no consolidated tape, so the volume column is what one retail
-# venue saw, not what the currency traded. It is comparable across pairs within this file and
-# not comparable to an equity volume, and Section 2 shows how far that goes.
+# FX is an OTC market with no consolidated tape, so nothing in this file can report what a
+# currency traded. What the column does report is narrower than that and worth naming
+# exactly: `data/fx/README.md` records it as **tick volume**, a count of how many times the
+# venue updated its quote inside the bar. It is a count of updates, not a sum of sizes.
+#
+# That makes it useless for anything sized in currency and still informative about activity,
+# because a venue reprices when something moves. Section 2 shows how far the two come apart.
 
 # %%
 fx_4h.head()
@@ -121,14 +125,18 @@ pair_stats = per_asset_stats(
 pair_stats.sort("avg_volume", descending=True)
 
 # %% [markdown]
-# ### Liquidity here is venue liquidity
+# ### The ranking is a ranking of quote updates
 #
-# Ranking pairs by average indicative volume puts the global majors well down the table. That
-# is not an error in the file and it is worth stating precisely what it is: this is OANDA's
-# retail flow. Interbank EURUSD is the largest spot market in the world and almost none of it
-# reaches a single retail venue, while a cross like GBPAUD is a retail speculation instrument
-# and a larger share of its total activity does. The ranking measures the venue, and the next
-# cell prints where the majors actually land so the claim is checkable rather than asserted.
+# Ranking pairs by average tick volume puts the global majors well down the table, and the
+# next cell prints exactly where they land rather than leaving that as an impression.
+#
+# It is tempting to read this as a liquidity ranking and it is not one. The column counts one
+# venue's quote updates, so the ordering reflects how often that venue repriced each pair,
+# and a pair can be repriced often for reasons that have nothing to do with how much of it
+# trades anywhere. What this file supports is the negative claim, which is the useful one: a
+# ranking built from this column is not a ranking of market size, and the majors sitting mid
+# table is the proof. Explaining *why* the ordering comes out as it does would need trade
+# data this file does not carry.
 
 # %%
 vol_rank = (
@@ -473,10 +481,10 @@ session_daily.filter(pl.col("symbol") == DEMO_PAIR).tail(5)
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Volume here is one venue's flow.** The ranking by indicative volume puts crosses above
-#    the global majors, and that ordering is a fact about OANDA's retail book rather than about
-#    the currencies. It is usable as a relative liquidity indicator within this file and is not
-#    an interbank tape.
+# 1. **The volume column counts quote updates, not traded size.** The repository's own schema
+#    calls it tick volume, and the ranking it produces puts the global majors mid table. That
+#    is enough to establish what the column is not - a measure of market size - and not
+#    enough to explain the ordering, which would take trade data this file does not carry.
 #
 # 2. **The dollar's direction depends on where the dollar sits in the symbol.** Direct pairs
 #    quote dollars per unit and have to be inverted before entering a dollar-strength

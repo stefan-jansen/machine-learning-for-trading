@@ -389,9 +389,16 @@ zero_by_year
 # %% [markdown]
 # ### What to carry forward
 #
-# The zeros are measurements, so nothing should be filtered on them. Treating them as unknown
-# would discard one observation in seven, and a third of the thinnest contracts' history, on
-# the strength of a hypothesis the definition refutes.
+# Do not filter on the value zero. The definition produces exact zeros from ordinary market
+# conditions, so a zero is not evidence of anything wrong, and discarding every one of them
+# costs one observation in seven and a third of the thinnest contracts' history.
+#
+# That is a statement about the rule, not about any individual row. Whether a particular zero
+# is a dead-zone reading or a publication that failed and was written as zero cannot be
+# settled from this file: both produce the same value, and nothing here distinguishes them.
+# Settling it would take the exchange's own record of what it published. What the definition
+# does settle is that the point mass needs no defect to explain it, which is what removes the
+# reason to filter.
 #
 # What does follow is that `premium_index_close` carries a large tie group at exactly zero,
 # reaching a third of the observations for the least liquid contracts. Any feature built by
@@ -402,10 +409,9 @@ zero_by_year
 # And the general lesson, which outlives this dataset: **a point mass in a derived quantity is
 # a property of its formula before it is a defect in its data.** Reading the definition costs
 # minutes. Every count computed above is compatible with both explanations - the frequency,
-# the non-zero extremes, the yearly decline and the null count would look the same either way -
-# so no amount of counting on this file would have decided it. What decides it is that the
-# published formula emits exact zeros over a range of its inputs, which leaves nothing for a
-# defect to explain.
+# the non-zero extremes, the yearly decline and the null count would look the same either
+# way - so no amount of counting on this file would have decided which one to act on. The
+# definition decides it, by removing the need for a defect to be present at all.
 
 # ### Gaps in the hourly grid
 #
