@@ -501,7 +501,7 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Six overlaid histogram panels, one per feature, each showing the real and "
-    "synthetic distributions together. In the three return panels the synthetic "
+    "synthetic distributions together. In the four return panels the synthetic "
     "distribution is a tall narrow spike at zero against a much wider real "
     "distribution. In the volatility panel the synthetic mass peaks at a lower value "
     "than the real one rather than on top of it, and in the volume ratio panel it is "
