@@ -25,7 +25,11 @@ from case_studies.utils.causal import (
     run_dml_analysis,
 )
 
-N_PLACEBO = 12
+# 40, not 12. classify_refutation returns "Underpowered" whenever 1/(n+1) >= 0.05, so at 19
+# successful draws or fewer the verdict is fixed before any data is read and a test asserting
+# 'not Passes' cannot fail. 40 puts the smallest reportable p-value at 1/41 = 0.024, which
+# leaves rejection reachable and the assertions below able to fail.
+N_PLACEBO = 40
 THETA_TRUE = 0.0
 
 
@@ -62,6 +66,11 @@ def analysis() -> dict:
         confounder_cols=["x0", "x1", "x2"],
         n_folds=3,
         embargo=5,
+        # Stated rather than inherited: without it the second stage falls back to the
+        # horizon-blind cube-root rule, which under-lags a panel this persistent and overstates
+        # the observed t. The bandwidth is the permutation block, the scale of the dependence
+        # the placebo has to preserve.
+        hac_maxlags=30,
         n_placebo=N_PLACEBO,
         block_size=30,
         seed=7,
@@ -121,13 +130,29 @@ def test_the_placebo_thetas_are_narrower_than_the_estimators_own_standard_error(
     assert 0.4 < t_spread < 2.5
 
 
-def test_a_true_null_is_not_reported_as_a_refutation_that_passed(analysis):
-    """With no effect present, the verdict must not be "Passes".
+def test_the_effect_scale_puts_the_observed_estimate_further_into_the_tail(analysis):
+    """Scored on identical draws, the effect scale always reaches further toward "Passes".
 
-    This is the whole point of the change. On the raw-effect scale the same draws put the
-    observed estimate outside almost the entire placebo distribution and the notebook
-    printed a refutation that passed; on the t scale it sits inside it.
+    This is the direction of the defect, asserted where it can fail: one set of permutations,
+    two statistics, and the raw-effect p-value strictly below the t-statistic one. Measured
+    across twelve panels with theta fixed at zero and 40 draws each, the effect scale rejected
+    11 times at the 5 % level and the t scale 5; on identical draws the effect-scale p was never
+    the larger of the two.
+
+    The rate is not asserted here and neither statistic is calibrated on this fixture: the DML
+    point estimate is itself biased negative on a panel this persistent, which is a separate
+    problem from the denominator that ml4t/agent-workspace#1120 is about. What this change
+    fixes is the shrinkage, and the test above measures that directly.
     """
     ref = analysis["refutation"]
-    assert ref["refutation_class"] != "Passes"
-    assert ref["empirical_p"] > 0.05
+    dml = analysis["dml_result"]
+
+    p_on_effects = empirical_permutation_p(
+        np.asarray(ref["placebo_effects"], dtype=float), dml["theta"]
+    )
+    p_on_t_stats = empirical_permutation_p(
+        np.asarray(ref["placebo_t_stats"], dtype=float), dml["t_stat_hac"]
+    )
+
+    assert p_on_effects < p_on_t_stats
+    assert ref["empirical_p"] == pytest.approx(p_on_t_stats)
