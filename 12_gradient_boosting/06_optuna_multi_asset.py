@@ -554,9 +554,11 @@ transfer_summary
 if len(transfer_rows) < 2:
     display(
         Markdown(
-            "**No transfer chart**: it compares the tuned asset class against at least one "
-            "other, and this run loaded fewer than two. The load table above says which "
-            "case studies were available."
+            "**No transfer chart**: it needs at least two asset classes that finished "
+            "both the transfer evaluation and their own search, and this run produced "
+            "fewer than two. The load table says which case studies were available, and "
+            "the skip lines in the two sections above say which of those were dropped "
+            "for too few shared features or too few training rows."
         )
     )
 else:

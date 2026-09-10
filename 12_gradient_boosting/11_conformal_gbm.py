@@ -858,9 +858,9 @@ if processed_datasets:
     )
     show_with_alt(
         fig,
-        "One panel per method, each showing the realized forward return against date with "
-        "the method's prediction interval drawn as a band around it, over the final "
-        "validation dates.",
+        "A two-by-two grid of panels sharing both axes, one per interval method. Each "
+        "panel shades the method's prediction interval as a band across the final "
+        "validation dates, with the realized forward returns overlaid as points.",
     )
 
 # %% tags=[]

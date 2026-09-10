@@ -35,7 +35,7 @@
 #   treating fold summaries as an uncertainty estimator, faceted across labels
 # - Extend the comparison across labels (horizon view) and across the
 #   classification ↔ regression metric symmetry
-# - Inspect feature-importance rank shift versus Ridge, per-fold rank
+# - Inspect feature-importance rank shift versus the linear baseline, per-fold rank
 #   stability, and the TabM-vs-GBM-vs-linear three-way picture
 #
 # **Book reference**: Section 12.6 - Gradient Boosting Across Nine Case Studies.
@@ -54,6 +54,7 @@ same number of days.
 import sqlite3
 import warnings
 
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -65,6 +66,7 @@ from IPython.display import Markdown, display
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from scipy.stats import rankdata
+from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.metrics import roc_auc_score
 
 from case_studies.utils.analytics import (
@@ -1348,8 +1350,8 @@ display(
 # %% [markdown]
 # ## 7. Interpretability
 #
-# Three diagnostics use saved booster + Ridge coefficient artifacts: feature-
-# importance rank shift versus Ridge (7a), per-fold rank stability of GBM
+# Three diagnostics read the fold models each selected run saved: feature-importance
+# rank shift against the linear baseline (7a), per-fold rank stability of GBM
 # importances (7b), and the TabM-vs-GBM-vs-Linear three-way picture (7c).
 
 
@@ -1357,23 +1359,48 @@ display(
 NON_FEATURE_COLS = {"timestamp", "symbol", "stock_id", "product", "position", "instrument_id"}
 IMPORTANCE_CASES = ["etfs", "sp500_options", "us_firm_characteristics", "us_equities_panel"]
 
+# A penalized fit drives coefficients to exactly zero, and a feature the model does not
+# use has no rank. Ranking those alongside the rest would fill the comparison with ties
+# broken by feature name, so they come out and the surviving count is reported.
+ZERO_TOL = 1e-12
 
-def _load_ridge_importance(cs: str, training_hash: str, config_name: str) -> dict[str, float]:
-    """Mean absolute coefficients from one selected linear training identity."""
-    coef_path = (
-        get_case_study_dir(cs) / "run_log" / "training" / training_hash / "coefficients.parquet"
-    )
-    if not coef_path.exists():
-        return {}
-    coefficients = pl.read_parquet(coef_path)
-    if "config_name" in coefficients.columns:
-        coefficients = coefficients.filter(pl.col("config_name") == config_name)
-    ridge_only = coefficients.filter(pl.col("feature") != "_intercept_")
-    if ridge_only.is_empty():
+
+def _load_linear_importance(cs: str, training_hash: str) -> dict[str, float]:
+    """Mean absolute coefficient per feature, over the folds of one linear training run.
+
+    The pipeline stores each fold's fitted estimator under the run's `models`
+    directory; the coefficients live on the estimator rather than in a table of
+    their own. Features the model zeroed in every fold are dropped.
+    """
+    models_dir = get_case_study_dir(cs) / "run_log" / "training" / training_hash / "models"
+    fold_paths = sorted(models_dir.glob("fold_*.joblib")) if models_dir.exists() else []
+    rows = []
+    for fold_path in fold_paths:
+        with warnings.catch_warnings():
+            # Read for `coef_` only, never to predict, so an estimator pickled by a
+            # different scikit-learn is safe to unpickle here.
+            warnings.filterwarnings(
+                "ignore", category=InconsistentVersionWarning, module="sklearn.base"
+            )
+            payload = joblib.load(fold_path)
+        names = list(payload["feature_names"])
+        coef = np.asarray(payload["model"].coef_, dtype=float).ravel()
+        if coef.size != len(names):
+            raise RuntimeError(
+                f"{cs} {training_hash}: {fold_path.name} carries {coef.size} coefficients "
+                f"against {len(names)} feature names, so the two cannot be paired."
+            )
+        rows.extend(
+            {"feature": name, "abs_coef": abs(float(value))}
+            for name, value in zip(names, coef, strict=True)
+        )
+    if not rows:
         return {}
     return dict(
-        ridge_only.group_by("feature")
-        .agg(pl.col("coefficient").abs().mean().alias("abs_coef"))
+        pl.DataFrame(rows)
+        .group_by("feature")
+        .agg(pl.col("abs_coef").mean())
+        .filter(pl.col("abs_coef") > ZERO_TOL)
         .sort("abs_coef", descending=True)
         .iter_rows()
     )
@@ -1386,7 +1413,7 @@ def _load_ridge_importance(cs: str, training_hash: str, config_name: str) -> dic
 # %%
 def _feature_ranks(
     gbm_imp_df: pl.DataFrame,
-    ridge_imp: dict[str, float],
+    linear_imp: dict[str, float],
 ) -> tuple[dict[str, int], dict[str, int]]:
     gbm_imp = dict(
         gbm_imp_df.group_by("feature").agg(pl.col("importance").mean().alias("imp")).iter_rows()
@@ -1394,24 +1421,26 @@ def _feature_ranks(
     # Ties break by feature name rather than by set iteration order: gain importances tie
     # readily, and with per-process string hashing the same registries produced different
     # ranks from one run to the next.
-    common = sorted(set(gbm_imp) & set(ridge_imp))
+    common = sorted(set(gbm_imp) & set(linear_imp))
     gbm_order = sorted(common, key=lambda feature: (-gbm_imp[feature], feature))
-    ridge_order = sorted(common, key=lambda feature: (-ridge_imp[feature], feature))
+    linear_order = sorted(common, key=lambda feature: (-linear_imp[feature], feature))
     return (
         {feature: rank for rank, feature in enumerate(gbm_order, 1)},
-        {feature: rank for rank, feature in enumerate(ridge_order, 1)},
+        {feature: rank for rank, feature in enumerate(linear_order, 1)},
     )
 
 
 # %% [markdown]
-# ### 7a. Feature importance - GBM versus Ridge rank shift
+# ### 7a. Feature importance - GBM versus the linear baseline
 #
-# For each case study with both saved boosters and Ridge coefficient
-# parquets, features are ranked by GBM gain importance (mean across folds)
-# and by Ridge mean |coefficient|. The rank shift `lin_rank − gbm_rank` is
-# positive for features GBM promotes over Ridge (typically interaction or
-# regime features) and negative for features Ridge promotes over GBM
-# (typically monotonic predictors).
+# For each case study that saved both boosters and linear fold models, features are
+# ranked by GBM gain importance and by the linear model's mean |coefficient|, both
+# averaged across folds. The rank shift `linear_rank − gbm_rank` is positive for
+# features the GBM promotes over the linear model (typically interaction or regime
+# features) and negative for features the linear model promotes (typically monotonic
+# predictors). The baseline is whichever linear configuration validation selected, so
+# a sparse fit such as a lasso contributes only the features it kept; `n_common_features`
+# says how many that leaves.
 
 
 # %%
@@ -1430,8 +1459,8 @@ def feature_rank_shift(cs: str) -> dict | None:
     )
     if gbm_imp_df.is_empty():
         return None
-    ridge_imp = _load_ridge_importance(cs, linear_row["training_hash"], linear_row["config_name"])
-    gbm_ranks, ridge_ranks = _feature_ranks(gbm_imp_df, ridge_imp)
+    linear_imp = _load_linear_importance(cs, linear_row["training_hash"])
+    gbm_ranks, linear_ranks = _feature_ranks(gbm_imp_df, linear_imp)
     if not gbm_ranks:
         return None
     shifts = pl.DataFrame(
@@ -1439,8 +1468,8 @@ def feature_rank_shift(cs: str) -> dict | None:
             {
                 "feature": f,
                 "gbm_rank": gbm_ranks[f],
-                "ridge_rank": ridge_ranks[f],
-                "rank_shift": ridge_ranks[f] - gbm_ranks[f],
+                "linear_rank": linear_ranks[f],
+                "rank_shift": linear_ranks[f] - gbm_ranks[f],
             }
             for f in gbm_ranks
         ]
@@ -1451,7 +1480,7 @@ def feature_rank_shift(cs: str) -> dict | None:
         "n_common_features": shifts.height,
         "median_abs_shift": float(shifts["rank_shift"].abs().median()),
         "max_gbm_promotion": int(shifts["rank_shift"].max() or 0),
-        "max_ridge_promotion": int(-min_shift if min_shift else 0),
+        "max_linear_promotion": int(-min_shift if min_shift else 0),
         "_shifts": shifts,
     }
 
@@ -1464,7 +1493,7 @@ rank_shift_summary = [
     entry for cs in IMPORTANCE_CASES if (entry := feature_rank_shift(cs)) is not None
 ]
 
-print(f"Computed GBM-vs-Ridge rank shifts for {len(rank_shift_summary)} case studies.")
+print(f"Computed GBM-vs-linear rank shifts for {len(rank_shift_summary)} case studies.")
 shift_summary_df = (
     pl.DataFrame(
         [{k: v for k, v in r.items() if not k.startswith("_")} for r in rank_shift_summary]
@@ -1479,15 +1508,17 @@ if not rank_shift_summary:
     display(
         Markdown(
             "**No promotion chart**: no case study has both a GBM importance artifact and "
-            "Ridge coefficients, so there is no pair of rankings to difference."
+            "linear fold models, so there is no pair of rankings to difference."
         )
     )
 else:
+    # Each panel ranks its own case study's features, so the y axes carry different
+    # categories and cannot be shared: one shared axis would draw the last panel's
+    # feature names beside every panel's bars.
     fig, axes = plt.subplots(
         1,
         len(rank_shift_summary),
         figsize=(4.5 * len(rank_shift_summary), 4.5),
-        sharey=True,
     )
     if len(rank_shift_summary) == 1:
         axes = [axes]
@@ -1505,14 +1536,15 @@ else:
         ax.set_yticks(y)
         ax.set_yticklabels(plot_set["feature"].to_list(), fontsize=7)
         ax.axvline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
-        ax.set_xlabel("Ridge rank − GBM rank (positive = GBM promotion)")
+        ax.set_xlabel("Linear rank − GBM rank (positive = GBM promotion)")
         ax.set_title(entry["short_name"])
-    fig.suptitle("Feature rank difference between Ridge and the GBM, per case study")
+    fig.suptitle("Feature rank difference between the linear baseline and the GBM")
     show_with_alt(
         fig,
-        "One panel per case study of horizontal bars, each bar a feature and its length "
-        "the difference between its Ridge rank and its GBM rank, against a line at zero; "
-        "bars to the right are features the GBM ranks higher.",
+        "One panel per case study of horizontal bars, each panel labelled with its own "
+        "features and each bar's length the difference between that feature's "
+        "linear-baseline rank and its GBM rank, against a line at zero; bars to the right "
+        "are features the GBM ranks higher.",
     )
 
 # %% [markdown]
@@ -1607,7 +1639,13 @@ stability_rows = [
 ]
 
 stability_df = pl.DataFrame(stability_rows)
-print("Per-fold feature-rank stability for the top-10 GBM features per case study:")
+if stability_rows:
+    print("Per-fold feature-rank stability for the top-10 GBM features per case study:")
+else:
+    print(
+        "No case study cleared the bar for this diagnostic: it needs saved boosters, at "
+        "least two complete folds and at least three features ranked in all of them."
+    )
 stability_df
 
 # %%
@@ -1620,6 +1658,13 @@ if not stability_df.is_empty():
             f"{least_stable['mean_pairwise_rank_corr']:+.2f} ({least_stable['short_name']}) to "
             f"{most_stable['mean_pairwise_rank_corr']:+.2f} ({most_stable['short_name']}). "
             "Treat this as a regime-stability diagnostic, not as model-performance inference."
+        )
+    )
+else:
+    display(
+        Markdown(
+            "**No stability figures**: the table above is empty, so there is no rank "
+            "correlation to report."
         )
     )
 

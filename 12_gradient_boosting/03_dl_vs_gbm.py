@@ -635,9 +635,8 @@ ax2.set_title("Mean training time per fold")
 show_with_alt(
     fig,
     "Two bar panels sharing a model axis. Left: mean rank IC across the walk-forward "
-    "folds with an error bar one standard deviation either side, drawn against a line "
-    "at zero; the bars are short enough and the error bars long enough that all three "
-    "intervals overlap one another. Right: mean training time per fold in seconds.",
+    "folds, one bar per model evaluated, with an error bar one standard deviation either "
+    "side and a line at zero. Right: mean training time per fold in seconds.",
 )
 
 # %% [markdown]

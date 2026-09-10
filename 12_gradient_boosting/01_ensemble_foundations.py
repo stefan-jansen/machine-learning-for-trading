@@ -329,8 +329,7 @@ show_with_alt(
     fig,
     "Two panels of grouped bars, one bar pair per model. Left: Spearman rank IC on the "
     "validation split beside the test split. Right: out-of-sample $R^2$ for the same "
-    "splits. The models are ordered by test IC, and the validation bar is taller than "
-    "the test bar for every model in both panels.",
+    "splits. The models are ordered by test IC.",
 )
 
 # %% tags=["results"]

@@ -556,10 +556,15 @@ def load_gbm_feature_importance(
     import lightgbm as lgb
 
     case_dir = get_case_study_dir(case_study)
-    booster_dir = case_dir / "run_log" / "training" / training_hash / "boosters"
-    if not booster_dir.exists():
-        booster_dir = case_dir / "run_log" / "models" / training_hash / "boosters"
-    if not booster_dir.exists():
+    # The training stage writes boosters under the run's own models directory. The two
+    # older layouts are kept because run logs predating that move still carry them.
+    candidates = [
+        case_dir / "run_log" / "training" / training_hash / "models" / "boosters",
+        case_dir / "run_log" / "training" / training_hash / "boosters",
+        case_dir / "run_log" / "models" / training_hash / "boosters",
+    ]
+    booster_dir = next((path for path in candidates if path.exists()), None)
+    if booster_dir is None:
         return pl.DataFrame()
 
     rows = []
