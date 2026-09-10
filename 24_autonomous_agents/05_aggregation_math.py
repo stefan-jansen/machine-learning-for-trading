@@ -553,7 +553,8 @@ print(f"Test improvement:   {test_improvement:.1%}")
 # Everything below is the held-out panel alone. The exponent was chosen on the training
 # observations and applied to these unchanged.
 # [`09_evaluation_and_governance`](09_evaluation_and_governance.ipynb) plots the same bins as
-# a reliability diagram, on a panel large enough for the picture to be worth drawing.
+# a reliability diagram, and carries each bin's count on the chart for the reason the count
+# column is here: with a small panel, the count is the thing a reader most needs to see.
 
 # %%
 reliability = pl.DataFrame(
