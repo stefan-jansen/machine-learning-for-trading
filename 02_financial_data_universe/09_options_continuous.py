@@ -271,16 +271,25 @@ roll_summary
 # carry a large positive mean. Days when only the strike moved and days when nothing changed
 # are close to each other and both negative, which is ordinary time decay showing through.
 #
-# That is what the mechanism predicts. Moving to a later expiration buys back the time value
-# decay had removed, and the series records the difference as a return no position earned.
-# Moving to a neighbouring strike at the same expiration exchanges one contract for a very
-# similar one, with essentially no time value to reset - so those days behave like days on
-# which nothing happened, because in the relevant sense nothing did.
+# The expiration result is what the mechanism predicts. Moving to a later expiration buys back
+# the time value decay had removed, and the series records the difference as a return no
+# position earned.
+#
+# The strike result invites a conclusion it does not support. Moving to a neighbouring strike
+# at the same expiration exchanges one contract for a similar one with no time value to reset,
+# and the group mean duly lands beside the group mean for days when nothing changed. That is a
+# statement about two averages. It is not a statement about the individual days, which is
+# where a return series is used, and Section 5 measures those directly once the held contract's
+# own price is available. The answer there is not the one this table suggests.
 #
 # Lumping all the changes into a single "roll day" average blends one large positive effect
 # with two indistinguishable negative ones and reports a figure describing none of the three.
-# It would also imply that two thirds of the changes were contaminating the series, when the
-# measurement says they are not.
+#
+# What this table does not establish is that strike changes are harmless. Two group means can
+# agree while the individual days behind them are wrong in both directions, and the quantity
+# that matters is per-day: the gap between the return the series records and the return the
+# contract actually held would have earned. That gap needs the held contract's own price,
+# which Section 5 recovers; the comparison is made there, on the days themselves.
 #
 # The futures analogue is roll yield, and the difference is one of degree that becomes a
 # difference in kind. A quarterly futures roll contributes a small adjustment four times a
@@ -293,10 +302,15 @@ roll_summary
 #
 # That is the long convention, and it is used here for every series without exception, because
 # a price series and its returns should mean the same thing in every section. The case study
-# this feeds sells straddles rather than buying them, and a seller's P&L before costs is the
-# negation of what is printed below. Keeping the negation in one place, applied by the reader
-# who needs it, is safer than flipping the sign in some sections and not others - which is
-# exactly the error this notebook previously contained.
+# this feeds sells straddles rather than buying them. A seller's P&L over a *single* period,
+# before costs and for a fixed quantity, is the negation of the long return printed below.
+#
+# That does not extend to a cumulative return, and the difference is not small. Negating each
+# period's return and compounding is a different series from negating the compounded result:
+# a long series of $+10\%$ then $-10\%$ compounds to $-1\%$, and so does its per-period
+# negation. A cumulative short return is only defined once the position's sizing is - whether
+# the quantity is fixed for the whole period or reset against equity each day - so this
+# notebook prints the long series and states the convention where a short figure is needed.
 
 # %% [markdown]
 # ### The sawtooth
@@ -771,15 +785,56 @@ print(f"  return the held contract actually earned:          {adj_roll['held_ret
 # The held contract is recoverable on every roll day, so there is no data reason to discard the
 # day. And the return being discarded is not noise around zero: on average the position held
 # into a roll made money, so zeroing those days does not remove a bias, it introduces one.
+#
+# This is also where the question Section 2 left open can be answered. Splitting the roll days
+# by what changed showed strike-only days averaging close to the days where nothing changed,
+# which says the two groups have similar means and nothing more. The construction error is a
+# per-day quantity - what the series recorded minus what the contract held would have earned -
+# and it can be large on individual days while averaging to little.
+
+# %%
+_error_by_kind = (
+    adjusted.filter(pl.col("is_roll"))
+    .drop_nulls("held_ret")
+    .with_columns((pl.col("raw_daily_ret") - pl.col("held_ret")).alias("construction_error"))
+    .group_by("change_kind")
+    .agg(
+        pl.len().alias("days"),
+        pl.col("construction_error").mean().alias("mean_error"),
+        pl.col("construction_error").abs().mean().alias("mean_abs_error"),
+        pl.col("construction_error").abs().max().alias("worst_abs_error"),
+    )
+    .sort("mean_abs_error", descending=True)
+)
+print("Per-day construction error, raw series minus the contract actually held:")
+print(_error_by_kind)
+
+# %% [markdown]
+# Strike-only days are not clean. Their mean error is several percentage points and it does not
+# average away - it is one-sided, in the opposite direction from the expiration days, so the
+# raw series understates what the held straddle earned on every kind of roll day but not by
+# the same amount or with the same sign of correction. The mean absolute error is larger still
+# and the worst single day is tens of percentage points.
+#
+# So the two group means in Section 2 agreed for a reason that has nothing to do with the
+# series being right on those days. A day on which the strike moved records a return that
+# belongs partly to a contract nobody held, and the resemblance between that group's average
+# and the do-nothing group's average is a coincidence of aggregation. Comparing averages of a
+# quantity cannot establish that the quantity is correct case by case; only the case-by-case
+# comparison can, and here it fails.
 
 # %%
 _zeroed_total = (1 + adjusted["zeroed_daily_ret"].fill_null(0.0)).product() - 1
 _held_total = (1 + adjusted["held_daily_ret"].fill_null(0.0)).product() - 1
+_short_held_total = (1 - adjusted["held_daily_ret"].fill_null(0.0)).product() - 1
 print(f"Cumulative return of holding the straddle long over {DEMO_YEAR}:")
 print(f"  zeroing roll-day returns:         {_zeroed_total:+.1%}")
 print(f"  using the held contract's return: {_held_total:+.1%}")
 print(f"  the two series differ by:         {_held_total - _zeroed_total:+.1%}")
-print("A seller of the straddle earns the negation of these, before any costs.")
+print(
+    f"Short the same straddle, notional reset against equity daily: "
+    f"{_short_held_total:+.1%}, not the {-_held_total:+.1%} negation would give"
+)
 
 # %% [markdown]
 # The two series part company by tens of percentage points of cumulative return over a single
@@ -950,13 +1005,27 @@ three_way
 #    means of opposite sign, and both are printed above rather than quoted here. The futures
 #    analogue is roll yield, but a quarterly roll contributes four such days a year and this
 #    series contributes most of them, which turns a correction into the bulk of the signal.
+#    Splitting the roll days by what changed is worth doing, and it is worth not over-reading:
+#    the strike-only group's mean sits beside the do-nothing group's, yet its per-day
+#    construction error against the held contract is several percentage points and one-sided.
+#    Agreement between two averages says nothing about whether the individual values are right.
 #
-# 3. **Same-contract returns are the correct label.** Pricing the entry contract in the raw
+# 3. **A short position's cumulative return is not the long's negation.** Per period and for a
+#    fixed quantity it is, which is why the notebook prints one convention and states the other.
+#    Compounding breaks the symmetry: over the demo year the long series and the daily-reset
+#    short series are both negative, so reading the seller's result off a sign flip gets the
+#    direction wrong, not merely the magnitude.
+#
+# 4. **The construction error is a per-day quantity.** What the series records minus what the
+#    contract actually held earned is the thing that reaches a label or a backtest, and it is
+#    measured day by day in Section 5 rather than inferred from group averages.
+#
+# 5. **Same-contract returns are the correct label.** Pricing the entry contract in the raw
 #    chain h days later gives the P&L of a trade someone could have placed. The correlation
 #    between that and the naive chained return is low enough that a label built from the naive
 #    series is mostly a record of the selection rule.
 #
-# 4. **Zeroing roll-day returns deletes real P&L.** On a roll day you held yesterday's
+# 6. **Zeroing roll-day returns deletes real P&L.** On a roll day you held yesterday's
 #    contract, and it moved; that move is a return, not a transaction. The held contract is
 #    recoverable from the raw chain on every roll day here, and over a single year the two
 #    reconstructions differ by tens of percentage points of cumulative return from identical
@@ -964,7 +1033,7 @@ three_way
 #    compounds over the majority of the sample. The continuous series should take the held
 #    contract's return.
 #
-# 5. **Roll costs are transaction costs, not returns.** The bid-ask actually crossed to switch
+# 7. **Roll costs are transaction costs, not returns.** The bid-ask actually crossed to switch
 #    contracts is execution cost, accounted in Chapter 18 rather than inside the price series.
 #    That is what a roll-day adjustment is for; it is not a licence to delete the day.
 #
