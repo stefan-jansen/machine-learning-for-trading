@@ -34,7 +34,8 @@
 # After completing this notebook, you will be able to:
 # - LO1: Specify a DAG in DoWhy and read the adjustment set it identifies
 # - LO2: Explain how the tightness of the treatment-outcome mechanism bounds credibility
-# - LO3: Choose an outcome whose mechanism the available controls can plausibly block
+# - LO3: Judge whether the available controls can plausibly block the backdoor paths a
+#   given treatment-outcome pair opens
 # - LO4: Read a partial-R2 sensitivity analysis and the robustness value it reports
 #
 # ## Cross-References
@@ -651,18 +652,22 @@ for test_name, ratio in refut_ret.items():
 # %%
 sens_ret = run_sensitivity(model_ret_train, estd_ret_train, est_ret_train, CONTROLS)
 rv_ret = float(sens_ret.stats["robustness_value"])
-rv_alpha_ret = float(sens_ret.stats["robustness_value_alpha"])
-print(f"Unadjusted t-statistic: {sens_ret.stats['t_statistic']:.2f}")
+print(f"Unadjusted t-statistic (iid): {sens_ret.stats['t_statistic']:.2f}")
 print(f"Robustness value: {rv_ret:.4f}")
-print(f"Robustness value at the 5% level: {rv_alpha_ret:.4f}")
 
 # %% [markdown]
 # The robustness value answers a question the reader can weigh against what they know about
 # crypto markets: an omitted confounder explaining that share of the residual variance of
-# both the treatment and the outcome would move the estimate to zero. The second number is
-# the smaller share that would suffice to make the estimate statistically indistinguishable
-# from zero, and it is reported separately because an estimate can lose its significance
-# long before it loses its sign.
+# both the treatment and the outcome would move the estimate to zero.
+#
+# It inherits one assumption from the estimator underneath it. DoWhy derives it from the
+# t-statistic of the linear backdoor fit, which uses iid standard errors, and the OLS+HAC
+# regression above reports a smaller t-statistic for the same estimate because consecutive
+# 24-hour outcomes overlap. A smaller t-statistic means a smaller robustness value, so the
+# number printed here is the optimistic end of the range. DoWhy also reports a robustness
+# value at a chosen significance level; it is omitted because it depends on the iid standard
+# error far more heavily than the point-estimate version does, and this notebook has already
+# established that the iid standard error is the wrong one.
 
 # %% [markdown]
 # ## 7. Analysis B: Premium Reversion as Outcome
@@ -705,10 +710,8 @@ for test_name, ratio in refut_rev.items():
 # %%
 sens_rev = run_sensitivity(model_rev_train, estd_rev_train, est_rev_train, CONTROLS)
 rv_rev = float(sens_rev.stats["robustness_value"])
-rv_alpha_rev = float(sens_rev.stats["robustness_value_alpha"])
-print(f"Unadjusted t-statistic: {sens_rev.stats['t_statistic']:.2f}")
+print(f"Unadjusted t-statistic (iid): {sens_rev.stats['t_statistic']:.2f}")
 print(f"Robustness value: {rv_rev:.4f}")
-print(f"Robustness value at the 5% level: {rv_alpha_rev:.4f}")
 
 # %% [markdown]
 # A larger robustness value does not make the reversion claim safe. Liquidity, funding
@@ -730,22 +733,19 @@ comparison = pd.DataFrame(
             "ATE (train)",
             "ATE (test)",
             "OOS drift",
-            "Robustness value",
-            "Robustness value at the 5% level",
+            "Robustness value (iid)",
         ],
         "Returns": [
             f"{est_ret_train.value:.6f}",
             f"{est_ret_test.value:.6f}",
             f"{ate_diff_ret:.1%}",
             f"{rv_ret:.4f}",
-            f"{rv_alpha_ret:.4f}",
         ],
         "Reversion": [
             f"{est_rev_train.value:.6f}",
             f"{est_rev_test.value:.6f}",
             f"{ate_diff_rev:.1%}",
             f"{rv_rev:.4f}",
-            f"{rv_alpha_rev:.4f}",
         ],
     }
 ).set_index("Metric")
@@ -925,9 +925,10 @@ print(f"  Relative to reversion OLS+HAC effect: {neg_ratio_rev:.1%}")
 #           premium -> returns               (causal path, indirect)
 # ```
 # Speculative demand, leverage and risk appetite move both the funding premium and
-# subsequent returns. `return_24h` and `volatility_24h` are proxies for some of that and
-# not for all of it, so the backdoor path stays partly open. The residual association the
-# negative control finds on a pre-treatment return is the direct evidence of it.
+# subsequent returns, which is a backdoor path the adjustment set has to block.
+# `return_24h` and `volatility_24h` proxy for part of it and not for the rest, so the path
+# stays partly open. The residual association the negative control finds on a pre-treatment
+# return is the direct evidence of it.
 #
 # ### Premium reversion
 # ```
@@ -942,10 +943,10 @@ print(f"  Relative to reversion OLS+HAC effect: {neg_ratio_rev:.1%}")
 # %% [markdown]
 # ## 11. Practical Implications
 #
-# - **Choose the outcome before choosing the estimator.** An outcome whose mechanism the
-#   available controls can block supports a claim that the negative-control and
-#   placebo-date checks can confirm. A broad market outcome exposed to everything the
-#   adjustment set omits does not, and no estimator repairs that.
+# - **Choose the outcome before choosing the estimator.** The outcome decides which
+#   backdoor paths exist, and therefore whether the available controls can block them while
+#   leaving the treatment's own mechanism intact. A broad market outcome opens paths through
+#   everything the adjustment set omits, and no estimator repairs that.
 # - **Run the checks that fail for different reasons.** The placebo-date shift catches an
 #   effect that does not depend on timing, the negative control catches adjustment that
 #   leaves residual association, out-of-sample drift catches a fit to one period, and the
@@ -997,10 +998,12 @@ display(
 # %% [markdown]
 # The negative control is the sharpest of the four, because it is the only one the treatment
 # cannot influence by construction: any association it finds is residual confounding or
-# leakage, not a small true effect. The robustness value agrees with it, and the two are
-# measuring related things, since a large residual association with a pre-treatment outcome
-# is evidence that a confounder of exactly the strength the robustness value asks about is
-# present rather than hypothetical.
+# leakage, not a small true effect. The robustness value points the same way, but the two
+# are not measuring the same thing. The robustness value is conditional on the adjustment
+# being right and asks how strong a further confounder would have to be; the negative
+# control is evidence that the adjustment is not right. It says nothing about the partial
+# $R^2$ any such confounder has with the treatment or with the outcome, so it cannot be read
+# as a measurement of the quantity the robustness value is expressed in.
 #
 # Out-of-sample drift separates the two outcomes by degree rather than in kind. Both
 # estimates move substantially between the training and test periods, so neither is stable
@@ -1018,14 +1021,15 @@ display(
 # ## Key Takeaways
 #
 # 1. **The outcome is part of the design, not a reporting choice.** Both outcomes here are
-#    defensible questions. Only one of them has a mechanism that the two available controls
-#    can plausibly block, and that is what the diagnostics detect.
+#    defensible questions. They differ in how many backdoor paths they open, and therefore
+#    in whether two controls are enough to block them, which is what the diagnostics detect.
 # 2. **A mechanism-near outcome is easier to defend and easier to trivialize.** Premium
 #    reversion is close enough to the treatment that ordinary mean reversion after an
 #    extreme reading explains part of it, which is the cost of the tighter mechanism.
 # 3. **Report which checks an estimate passes and which it fails**, along with the strength
 #    of omitted confounding that would overturn it. A robustness value near zero says the
-#    estimate is not separable from confounding the data cannot see.
+#    estimate is not separable from confounding the data cannot see - and it is an upper
+#    bound, because it is computed from iid standard errors.
 # 4. **Adjust the standard errors to the dependence in the data.** Overlapping forward
 #    outcomes at an 8-hour cadence make the iid standard error too small, which is why every
 #    estimate here is repeated with Newey-West lags at the outcome horizon.
