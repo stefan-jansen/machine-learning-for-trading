@@ -485,7 +485,7 @@ for pair in comparison.sort("delta", descending=True).iter_rows(named=True):
     )
 
 # %% [markdown]
-# The left panel compares paired-sample mean IC. The right panel isolates the
+# The upper panel compares paired-sample mean IC. The lower panel isolates the
 # latent-minus-supervised difference with its HAC interval. Point estimates
 # left of zero favor the selected supervised model.
 
