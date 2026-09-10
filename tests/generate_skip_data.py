@@ -7,14 +7,19 @@ Usage:
     uv run python tests/generate_skip_data.py --output ~/ml4t/test-data
 
 This generates data for:
-1. FNSPID news dataset (Ch10/07, Ch10/08)
-2. SEC 10-Q MD&A text (Ch10/09)
-3. ADV columns for Kyle lambda (Ch18/03)
-4. Engine divergence predictions (Ch16/07)
-5. Signal quality synthesis data (Ch20/02)
-6. MLOps drift detection features (Ch26/02)
-7. MLOps safe model rollout (Ch26/03)
-8. MLOps MLflow registry (Ch26/06)
+1. SEC 10-Q MD&A text (Ch10/09)
+2. ADV columns for Kyle lambda (Ch18/03)
+3. Engine divergence predictions (Ch16/07)
+4. Signal quality synthesis data (Ch20/02)
+5. MLOps drift detection features (Ch26/02)
+6. MLOps safe model rollout (Ch26/03)
+7. MLOps MLflow registry (Ch26/06)
+
+The FNSPID news fixture is not here. It is subsampled from production by
+``tests/create_test_data.py``, whose ``fnspid_news`` dataset bounds it by the
+us_equities panel's date range so 07_news_return_signals' price join has dates to
+land on; the synthetic generator that used to live here wrote 2022-2024, which is
+past the end of that panel - ml4t/agent-workspace#1116.
 """
 
 import argparse
@@ -30,46 +35,6 @@ np.random.seed(42)
 
 SYMBOLS_ETF = ["SPY", "QQQ", "IWM", "TLT", "GLD", "XLF", "XLK", "XLE", "EFA", "VWO"]
 SYMBOLS_EQ = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "JNJ"]
-
-
-def generate_fnspid_news(data_dir: Path):
-    """Generate synthetic FNSPID financial news data."""
-    out = data_dir / "alternative" / "news" / "fnspid"
-    out.mkdir(parents=True, exist_ok=True)
-
-    headlines = [
-        "{sym} reports strong quarterly earnings, beats estimates",
-        "{sym} shares drop on weaker-than-expected revenue guidance",
-        "{sym} announces major acquisition worth $2.5B",
-        "Analysts upgrade {sym} citing improving margins",
-        "{sym} CEO discusses expansion plans in earnings call",
-        "Market volatility hits {sym} as sector rotates",
-        "{sym} launches new product line targeting enterprise customers",
-        "Institutional investors increase {sym} holdings in Q3",
-        "{sym} faces regulatory scrutiny over data practices",
-        "{sym} dividend increase signals management confidence",
-    ]
-
-    rows = []
-    dates = pl.date_range(date(2022, 1, 3), date(2024, 12, 31), "1d", eager=True)
-    for d in dates:
-        # 2-5 news items per day
-        n_items = np.random.randint(2, 6)
-        for _ in range(n_items):
-            sym = np.random.choice(SYMBOLS_EQ)
-            headline = np.random.choice(headlines).format(sym=sym)
-            rows.append(
-                {
-                    "ticker": sym,
-                    "timestamp": d,
-                    "title": headline,
-                    "source": np.random.choice(["Reuters", "Bloomberg", "CNBC", "WSJ"]),
-                }
-            )
-
-    df = pl.DataFrame(rows)
-    df.write_parquet(out / "fnspid_sample.parquet")
-    print(f"  FNSPID: {len(df)} news items -> {out / 'fnspid_sample.parquet'}")
 
 
 def generate_sec_10q_mda(data_dir: Path):
@@ -366,22 +331,19 @@ def main():
     print("Generating synthetic test data for skipped notebooks...")
     print()
 
-    print("[1/6] FNSPID news data (Ch10/07, Ch10/08)...")
-    generate_fnspid_news(data_dir)
-
-    print("[2/6] SEC 10-Q MD&A text (Ch10/09)...")
+    print("[1/5] SEC 10-Q MD&A text (Ch10/09)...")
     generate_sec_10q_mda(data_dir)
 
-    print("[3/6] ADV columns for Kyle lambda (Ch18/03)...")
+    print("[2/5] ADV columns for Kyle lambda (Ch18/03)...")
     enrich_adv_columns(data_dir)
 
-    print("[4/6] Engine divergence predictions (Ch16/07)...")
+    print("[3/5] Engine divergence predictions (Ch16/07)...")
     generate_engine_divergence_predictions(intermediates_dir)
 
-    print("[5/6] Signal quality synthesis data (Ch20/02)...")
+    print("[4/5] Signal quality synthesis data (Ch20/02)...")
     generate_signal_quality_data(intermediates_dir)
 
-    print("[6/6] MLOps registry and predictions (Ch26/02-06)...")
+    print("[5/5] MLOps registry and predictions (Ch26/02-06)...")
     generate_mlops_data(intermediates_dir, data_dir)
 
     print()
