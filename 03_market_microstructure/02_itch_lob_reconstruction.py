@@ -210,6 +210,10 @@ trades = load_itch_messages(ITCH_DIR, "P", symbol=symbol, max_messages=MESSAGE_L
 # So the reconstruction keeps its own pool of live orders and adds `U` results to it as
 # it goes, rather than resolving references against the adds up front. The cell below
 # measures what the up-front approach would have missed on this symbol-day.
+#
+# The measurement only means that on a complete day. `MESSAGE_LIMIT` truncates each
+# message type independently, so under a cap a reference can be missing simply because
+# its add was past the cut; the cell says which case it is reporting.
 
 
 # %%
@@ -226,14 +230,23 @@ def share_not_in_adds(frame: pl.DataFrame, ref_col: str) -> tuple[int, int]:
 
 
 add_refs = add_orders.select("order_reference_number").unique()
+complete_day = MESSAGE_LIMIT is None
+u_reason = (
+    "came from another U rather than an add"
+    if complete_day
+    else "is absent from the loaded add sample"
+)
+dxe_reason = "no add ever created" if complete_day else "absent from the loaded add sample"
+if not complete_day:
+    print(
+        f"MESSAGE_LIMIT={MESSAGE_LIMIT:,} truncates each message type separately, so the "
+        f"counts below describe this sample, not the day."
+    )
 
 missing_u, total_u = share_not_in_adds(replaces, "original_order_reference_number")
 if total_u:
-    print(f"Replace (U) messages: {total_u:,}")
-    print(
-        f"  ...replacing an order that came from another U rather than an add: "
-        f"{missing_u:,} ({missing_u / total_u * 100:.1f}%)"
-    )
+    print(f"\nReplace (U) messages: {total_u:,}")
+    print(f"  ...whose replaced order {u_reason}: {missing_u:,} ({missing_u / total_u * 100:.1f}%)")
 
 missing_dxe, total_dxe = 0, 0
 for frame in (deletes, cancels, executions):
@@ -243,8 +256,7 @@ for frame in (deletes, cancels, executions):
 if total_dxe:
     print(f"\nD/X/E messages: {total_dxe:,}")
     print(
-        f"  ...naming an order no add ever created: "
-        f"{missing_dxe:,} ({missing_dxe / total_dxe * 100:.1f}%)"
+        f"  ...naming an order {dxe_reason}: {missing_dxe:,} ({missing_dxe / total_dxe * 100:.1f}%)"
     )
 
 # %%
@@ -307,7 +319,8 @@ print(
 # | `A`/`F` add | record the new order | add its shares at its price |
 # | `D` delete | drop the order | subtract whatever remained of it |
 # | `X` cancel | reduce remaining shares | subtract the cancelled shares |
-# | `E`/`C` execute | reduce remaining shares | subtract the executed shares |
+# | `E` execute | reduce remaining shares | subtract the executed shares |
+# | `C` execute with price | reduce remaining shares | subtract them at the resting price |
 # | `U` replace | retire the old reference, record the new one | subtract at the old price, add at the new |
 #
 # The remaining-shares bookkeeping is what makes `D` correct. An order added for 500
@@ -490,8 +503,11 @@ print(f"Rows: {lob.height:,}  Columns: {lob.width}")
 #    day that is for this symbol.
 # 3. **Read from the start of the day, snapshot from the open.** The two windows are
 #    different: the pool has to see the pre-market adds that later messages will name.
-# 4. **`C` executes at the order's own price**, and `P` trades are non-displayed, so they
-#    never touched the visible book and do not change it.
+# 4. **`C` reports a price the book never showed.** It carries its own `execution_price`,
+#    which is where the trade printed; the shares it removes still come off the order's
+#    resting price, because that is where they were displayed. `P` trades are
+#    non-displayed throughout, so they never entered the visible book and do not change
+#    it.
 # 5. **Crossed quotes are the reconstruction's error rate.** They cannot occur in a real
 #    book, so their share is a direct check rather than a market observation.
 #

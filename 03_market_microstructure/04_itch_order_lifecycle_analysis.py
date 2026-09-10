@@ -31,42 +31,44 @@
 # After completing this notebook, you will be able to:
 # - Reconstruct order lifecycles from add (`A`/`F`), delete (`D`), partial cancel
 #   (`X`), replace (`U`), and execute (`E`/`C`) ITCH messages.
-# - Compute cancellation and execution rates (cancellation dominates in modern
-#   equity markets at ~96%, with execution near 4%), along with the time
-#   distributions that characterize HFT-driven order flow.
-# - Separate "still resting at end-of-sample" orders from "executed-then-deleted"
-#   orders so cancellation and execution are not double-counted.
+# - Measure how often an order ends in a cancellation and how often in a fill, and say
+#   why those two rates do not sum to one.
+# - Measure how long an order lives before each outcome, on a scale that can show
+#   microseconds and hours in the same picture.
+# - Separate an order still resting when the sample ends from one that filled and was
+#   then deleted, so that neither outcome is counted twice.
 #
 # ## Book reference
 #
-# Section §3.3, *From Raw Messages to the Limit Order Book* — empirical-findings
-# subsection on cancellation rates and time-to-cancel/execute distributions.
+# Section §3.3, *From raw messages to the limit order book* - the empirical findings on
+# cancellation rates and on time to cancel and to execute.
 #
 # ## Prerequisites
 #
 # - Parsed ITCH message parquets at `data/equities/market/microstructure/nasdaq_itch/messages/`
 #   (output of `01_itch_parser` or the Rust parser).
-# - Symbol-level analysis defaults to AAPL; market-wide aggregates use all
-#   available days.
+# - The last section reads the enriched `E` and `C` parquets that
+#   `05_itch_trading_activity` writes, so run that notebook before this one if you want
+#   it populated. Everything before it needs only the parsed messages.
 #
 # ---
 
 # %% [markdown]
-# ## Why Order Lifecycle Matters
+# ## What an order's life story is good for
 #
-# Understanding order lifecycle is crucial for:
+# The book shows how much is resting at each price. It does not show how long any of it
+# stays there, and that is what decides whether you can trade against it. An order that
+# is quoted and withdrawn within a millisecond appears in the book and is not liquidity
+# any slower participant can reach.
 #
-# | Application | Insight |
-# |-------------|---------|
-# | **Execution algorithms** | Estimate fill probability at different price levels |
-# | **Market making** | Calibrate quote update frequency |
-# | **Signal development** | Detect informed trading via order persistence |
-# | **Transaction costs** | Model slippage and market impact |
+# Four things read directly off the lifecycle:
 #
-# The ~96% cancellation rate has profound implications:
-# - Most "visible" liquidity is **phantom** - it disappears before you can trade against it
-# - Market makers continuously update quotes based on new information
-# - Aggressive strategies must account for rapidly changing order book state
+# | Question | What the lifecycle answers |
+# |---|---|
+# | Will my passive order fill? | The share of orders that ever execute, by size and side |
+# | How often must a quote be refreshed? | The distribution of how long orders survive |
+# | Is the flow informed? | Whether orders that fill were resting longer or shorter |
+# | What will crossing the spread cost? | How much displayed size is still there on arrival |
 
 # %% [markdown]
 # ## Setup
@@ -74,53 +76,49 @@
 # %%
 """Order Lifecycle Analysis — track limit orders from submission to cancellation or execution."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
+from time import perf_counter
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import polars as pl
 import pyarrow.dataset as ds
-import seaborn as sns
+from itch_message_specs import MESSAGE_SPECS
 from matplotlib.ticker import FuncFormatter
 
 from data import load_nasdaq_itch
 from utils.paths import display_path, get_output_dir
+from utils.style import COLORS, show_with_alt
 
-sns.set_style("whitegrid")
-
+# %% [markdown]
+# ### Declared parameters
+#
+# `SYMBOL` picks the one stock whose orders are followed individually. A trading day holds
+# a few hundred million messages across the venue and a few million for one active name,
+# so the per-order work is done on one symbol; the last section widens back out to the
+# whole day with only two columns per message.
+#
+# `MAX_ORDERS` caps how many rows are read after the symbol filter. `None` reads them all;
+# CI sets a small number so the notebook runs the same code in seconds.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
+SYMBOL = "AAPL"
+MAX_ORDERS = None
 
 # %%
-# Configuration - Unified output directory structure
-# All ITCH-related outputs under a single chapter directory
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
-
-# Input: Parsed messages from canonical loader path
 MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
-
-# Output: This notebook's analysis outputs
 OUTPUT_DIR = NASDAQ_ITCH_OUTPUT / "order_lifecycle"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Configuration for analysis
-# SYMBOL: Which stock to analyze (required - we filter to single stock for memory efficiency)
-SYMBOL = "AAPL"
-
-# MAX_ORDERS: Optional row limit for testing (None = no limit after symbol filter)
-MAX_ORDERS = None
-
-print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
+print(f"Input directory (messages):  {display_path(MESSAGE_DIR)}")
 print(f"Output directory (analysis): {display_path(OUTPUT_DIR)}")
-print(f"Analyzing symbol: {SYMBOL}")
+print(f"Symbol under analysis: {SYMBOL}")
 
 # %%
 if not MESSAGE_DIR.exists():
-    print(f"\nWARNING: Message directory not found: {display_path(MESSAGE_DIR)}")
-    print("   Run 01_itch_parser first to parse ITCH data.")
+    print(f"Message directory not found: {display_path(MESSAGE_DIR)}")
+    print("Run 01_itch_parser first to parse ITCH data.")
     available = []
 else:
     available = sorted([d.name for d in MESSAGE_DIR.iterdir() if d.is_dir()])
@@ -136,7 +134,8 @@ if not HAS_MESSAGE_DATA:
         f"Expected directory: {MESSAGE_DIR}"
     )
 
-# Get stock_locate for our symbol (needed to filter D/E/X/U messages which lack 'stock' column)
+# D, X, E, C and U messages carry no ticker, only the numeric stock_locate the R (stock
+# directory) messages assign, so the symbol has to be resolved to that number first.
 r_dir = MESSAGE_DIR / "R"
 if r_dir.exists():
     stock_directory = pl.scan_parquet(r_dir).collect()
@@ -151,7 +150,7 @@ else:
 
 
 # %% [markdown]
-# ## Helper Functions
+# ## Loading one symbol's messages
 #
 # Functions to load different message types from Parquet files.
 
@@ -162,7 +161,8 @@ def _load_filtered_df(msg_dir, symbol, stock_locate, columns, limit):
     lf = pl.scan_parquet(msg_dir / "*.parquet")
     schema = lf.collect_schema()
 
-    # CRITICAL: Filter by symbol/stock_locate BEFORE collecting (predicate pushdown)
+    # Filter before collecting so the predicate is pushed into the Parquet scan and only
+    # the matching row groups are read.
     if "stock" in schema and symbol:
         lf = lf.filter(pl.col("stock") == symbol)
     elif "stock_locate" in schema and stock_locate is not None:
@@ -278,22 +278,31 @@ def load_message_type(
 
 # %%
 def count_messages() -> dict[str, int]:
-    """Count messages by type."""
+    """Count rows per ITCH message type.
+
+    The parser writes one directory per message type, and other notebooks write derived
+    directories beside them, so only the single-letter names the ITCH specification
+    defines are counted.
+    """
     counts = {}
-    for sub in MESSAGE_DIR.iterdir():
-        if sub.is_dir():
-            try:
-                dset = ds.dataset(sub.as_posix(), format="parquet")
-                counts[sub.name] = sum(f.metadata.num_rows for f in dset.get_fragments())
-            except Exception:
-                pass
+    for path in MESSAGE_DIR.iterdir():
+        if not path.is_dir() or path.name not in MESSAGE_SPECS:
+            continue
+        try:
+            dset = ds.dataset(path.as_posix(), format="parquet")
+            counts[path.name] = sum(f.metadata.num_rows for f in dset.get_fragments())
+        except (OSError, ValueError):
+            continue
     return counts
 
 
 # %% [markdown]
-# ## 1. Trading Day Summary
+# ## 1. What the day is made of
 #
-# First, let's see the distribution of message types to understand market activity.
+# Before following a single order, it is worth seeing what the day's traffic consists of.
+# The counts span many orders of magnitude - adds and deletes against a handful of
+# session events - so the axis is logarithmic; a linear one would show two bars and
+# seventeen invisible ones.
 
 # %%
 if HAS_MESSAGE_DATA:
@@ -301,30 +310,31 @@ if HAS_MESSAGE_DATA:
     # Sort by count descending
     message_counts = dict(sorted(message_counts.items(), key=lambda x: -x[1]))
 
-    # Convert to pandas for matplotlib (simple dict plotting)
-    import pandas as pd
+    labelled = {f"{code}  {MESSAGE_SPECS[code]['name']}": n for code, n in message_counts.items()}
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    pd.Series(message_counts).sort_values().plot.barh(ax=ax, color="steelblue")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    pd.Series(labelled).sort_values().plot.barh(ax=ax, color=COLORS["blue"])
     ax.set_xscale("log")
-    ax.set_title("Trading Message Frequency (Log Scale)")
-    ax.set_xlabel("Number of Messages")
-    sns.despine()
-    plt.tight_layout()
-    plt.show()
+    ax.set_title("Messages published per ITCH message type, one trading day")
+    ax.set_xlabel("Messages (log scale)")
+    ax.set_ylabel("")
+    show_with_alt(
+        fig,
+        "A horizontal bar chart with one bar per ITCH message type, each labelled with its letter code and name, sorted from fewest messages at the top to most at the bottom. The horizontal axis counts messages on a logarithmic scale spanning roughly one to several hundred million, so the shortest bars are single-digit counts and the longest run the full width.",
+    )
 
     print("Message counts:")
     for msg_type, count in message_counts.items():
-        print(f"  {msg_type}: {count:>12,}")
+        print(f"  {msg_type} {MESSAGE_SPECS[msg_type]['name']:<28}: {count:>12,}")
 
 # %% [markdown]
-# **Key Observations**:
-# - Add orders (A, F) and cancellations (D, X) dominate the message flow
-# - Actual executions (E, C) are much less frequent
-# - This asymmetry is the first hint of high cancellation rates
+# Read the two ends of that chart against each other. Orders arriving (`A`, `F`) and
+# orders leaving without trading (`D`, `X`) sit at one end; executions (`E`, `C`) sit
+# well below them. A venue publishes far more quoting than trading, and the sections
+# below put a number on how much.
 
 # %% [markdown]
-# ## 2. Order Characteristics
+# ## 2. What the orders look like
 #
 # Load limit order submissions (Add Order messages) to understand order characteristics.
 
@@ -394,7 +404,7 @@ if HAS_MESSAGE_DATA and len(limit_orders) > 0 and "price" in limit_orders.column
         print("  Check that the ITCH parser normalizes prices correctly.")
 
 # %% [markdown]
-# ### 2.1 Order Size Distribution
+# ### How large a typical order is
 
 # %%
 if HAS_MESSAGE_DATA and len(limit_orders) > 0 and "shares" in limit_orders.columns:
@@ -420,21 +430,31 @@ if HAS_MESSAGE_DATA and len(limit_orders) > 0 and "shares" in limit_orders.colum
     ).rename(columns={1: "Buy", -1: "Sell"})
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    size_by_side.nlargest(15, "Buy").sort_values("Buy").plot.barh(ax=ax)
-    ax.set_title("Most Frequent Order Sizes")
-    ax.set_xlabel("Fraction of Orders")
+    size_by_side.nlargest(15, "Buy").sort_values("Buy").plot.barh(
+        ax=ax, color={"Buy": COLORS["bid"], "Sell": COLORS["ask"]}
+    )
+    ax.set_title(f"{SYMBOL}: the fifteen most common order sizes, by side")
+    ax.set_xlabel("Share of orders")
+    ax.set_ylabel("Order size (shares)")
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.1%}"))
-    plt.tight_layout()
-    plt.show()
+    ax.legend(title="Side")
+    show_with_alt(
+        fig,
+        "A horizontal bar chart with one pair of bars per order size, green for buys and red for sells, sorted so the most common size is at the top. The horizontal axis is the share of that side's orders, formatted as a percentage; the vertical axis lists the order sizes in shares.",
+    )
 
 # %% [markdown]
-# **Observations**:
-# - Round lots (multiples of 100) dominate order sizes
-# - 100-share orders are often the most common (retail and algorithmic)
-# - Buy and sell distributions are typically symmetric
+# Two things are worth reading off that chart. One size usually takes a large share on
+# its own: a hundred shares is the round lot, the unit US equity trading was built
+# around, and it is still what an order defaults to. Below it the sizes are a mixture of
+# round lots and odd numbers, and odd lots are ordinary rather than exceptional - a
+# reminder that the visible book is not made of neat blocks.
+#
+# Compare the green and red bars at each size rather than reading either alone. Where the
+# two sides use the same sizes, order size is a convention rather than a signal.
 
 # %% [markdown]
-# ### 2.2 Order Value Distribution
+# ### Where the dollars are
 
 # %%
 if (
@@ -465,15 +485,21 @@ if (
     ).rename(columns={1: "Buy", -1: "Sell"})
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    value_pivot.nlargest(10, "Buy").sort_values("Buy").plot.barh(ax=ax)
-    ax.set_title("Order Value Contribution by Size")
-    ax.set_xlabel("Share of Total Dollar Value")
+    value_pivot.nlargest(10, "Buy").sort_values("Buy").plot.barh(
+        ax=ax, color={"Buy": COLORS["bid"], "Sell": COLORS["ask"]}
+    )
+    ax.set_title(f"{SYMBOL}: share of submitted dollar value by order size")
+    ax.set_xlabel("Share of total dollar value")
+    ax.set_ylabel("Order size (shares)")
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.1%}"))
-    plt.tight_layout()
-    plt.show()
+    ax.legend(title="Side")
+    show_with_alt(
+        fig,
+        "A horizontal bar chart with one pair of bars per order size, green for buys and red for sells, showing each size's share of the total dollar value submitted rather than its share of the order count. Sizes run down the vertical axis and the horizontal axis is a percentage.",
+    )
 
 # %% [markdown]
-# ## 3. Cancellations
+# ## 3. Orders that leave without trading
 #
 # Modern markets feature extremely high cancellation rates. Let's quantify this.
 #
@@ -530,8 +556,8 @@ if HAS_MESSAGE_DATA and len(limit_orders) > 0 and termination_events:
     all_terminations = pl.concat(termination_events)
     print(f"Total termination events: {len(all_terminations):,}")
 
-    # CRITICAL: Deduplicate to FIRST termination event per order
-    # This prevents orders with multiple events from biasing statistics
+    # An order can be named by several termination messages; keep the earliest.
+    # Counting every event would weight an order by how often it was touched.
     first_termination = (
         all_terminations.sort("terminated")
         .group_by("order")
@@ -560,7 +586,7 @@ if HAS_MESSAGE_DATA and len(limit_orders) > 0 and termination_events:
     print(f"\nOrders with termination data: {len(orders_with_cancel):,}")
 
 # %% [markdown]
-# ### 3.1 Cancellation Rate
+# ### How often an order is terminated
 
 # %%
 if HAS_MESSAGE_DATA and orders_with_cancel is not None and len(orders_with_cancel) > 0:
@@ -585,52 +611,38 @@ if HAS_MESSAGE_DATA and orders_with_cancel is not None and len(orders_with_cance
     print(f"Termination rate:        {termination_rate:>12.1%}")
     print("=" * 50)
 
-    # Visualize with accurate labels
-    # Note: "Still Live/Unknown" includes orders that:
-    # - May still be open at end of sample
-    # - Were executed (handled separately below)
-    # - Had no termination event in our sample
-    fig, ax = plt.subplots(figsize=(6, 6))
-    sizes = [termination_rate, 1 - termination_rate]
-    labels = [
-        f"Terminated\n({termination_rate:.1%})",
-        f"Still Live/Unknown\n({1 - termination_rate:.1%})",
-    ]
-    colors = ["#e74c3c", "#95a5a6"]  # Red for terminated, gray for unknown
-    ax.pie(sizes, labels=labels, colors=colors, autopct="", startangle=90)
-    ax.set_title("Order Termination Rate\n(Delete, Cancel, or Replace)")
-    plt.tight_layout()
-    plt.show()
-
-    # Also show breakdown by termination type if available
-    if termination_by_type is not None and len(termination_by_type) > 0:
-        print("\nNote: 'Terminated' includes Delete, Cancel, and Replace events.")
-        print("Replace creates a new order - market makers updating quotes.")
-        print("'Still Live/Unknown' may include executed orders (see below).")
+    print("'Terminated' counts the first Delete, Cancel or Replace to name the order.")
+    print(
+        "'Still live or unknown' holds orders with no termination message in the sample, "
+        "including ones that executed; Section 5 separates those."
+    )
 
 # %% [markdown]
-# **Key Finding**: High termination rates in modern markets!
+# Read that rate carefully, because it counts three different events as one outcome:
+# `D` withdraws the order entirely, `X` reduces its size, and `U` moves it to another
+# price or size by retiring it and issuing a new reference. Only the first is a
+# cancellation in the everyday sense.
 #
-# **Important clarification**: The termination rate above includes:
-# - Delete (D): Full order cancellation
-# - Cancel (X): Partial size reduction
-# - Replace (U): Order modification (creates new order)
+# It is also not the same quantity as "never traded". An order can fill part of its size
+# and then be deleted, and it appears in both this rate and the execution rate below.
+# Section 5 puts each order in exactly one category.
 #
-# This is **not** the same as "cancelled without execution" - some orders are
-# partially executed then terminated. See Section 5 below for the unified
-# outcome breakdown that separates these cases.
-#
-# The high termination rate reflects:
-# - Market makers continuously updating quotes (Replace)
-# - Algorithmic traders managing inventory risk
-# - Traders cancelling orders when market conditions change
-# - Fleeting liquidity that disappears before it can be traded against
+# What a high termination rate describes is a market where quoting is cheap and
+# continuous: a resting order is a standing offer that its sender re-prices whenever
+# anything it depends on moves, and re-pricing on this feed means retiring one order and
+# sending another.
 
 # %% [markdown]
-# ### 3.2 Time to First Termination Event
+# ### How long an order lives before it is terminated
 #
-# "Termination" here means the first Delete (D), Cancel (X), or Replace (U) event.
-# Note: This includes orders that may have been partially executed first.
+# Termination here is the first `D`, `X` or `U` to name the order, and an order that was
+# partly filled before that still counts.
+#
+# The lifetime is computed from the nanosecond difference rather than from a seconds
+# helper, because a large share of these orders live for less than one second and a
+# whole-second duration would record all of them as zero. That matters for what follows:
+# the median, the quantile table and both histograms are about the sub-second end of the
+# distribution, and a truncated duration erases exactly that end.
 
 
 # %%
@@ -640,7 +652,9 @@ if HAS_MESSAGE_DATA and orders_with_cancel is not None:
 
     if len(cancelled_orders_df) > 0:
         cancelled_orders_df = cancelled_orders_df.with_columns(
-            ((pl.col("cancelled") - pl.col("submitted")).dt.total_seconds()).alias("cancel_time")
+            ((pl.col("cancelled") - pl.col("submitted")).dt.total_nanoseconds() / 1e9).alias(
+                "cancel_time"
+            )
         )
 
         cancel_time_stats = cancelled_orders_df.select(
@@ -665,55 +679,58 @@ if HAS_MESSAGE_DATA and orders_with_cancel is not None:
         for stat, value in cancel_time_stats.items():
             print(f"{stat:>10}: {value:>12.4f}")
 
+# %% [markdown]
+# Order lifetimes span from microseconds to the length of a session, so the histogram is
+# built on a logarithmic time axis. On a linear one every bar but the first would be
+# empty, and the first would hide the entire shape.
+
 # %%
-# Cancellation time distribution histogram
 if HAS_MESSAGE_DATA and cancelled_orders_df is not None and len(cancelled_orders_df) > 0:
-    cancel_times_pd = (
-        cancelled_orders_df.filter(pl.col("cancel_time") <= 60).select("cancel_time").to_pandas()
-    )
-
+    positive = cancelled_orders_df.filter(pl.col("cancel_time") > 0)["cancel_time"].to_numpy()
     fig, ax = plt.subplots(figsize=(10, 5))
-    _ct = cancel_times_pd["cancel_time"]
-    ax.hist(_ct, bins=np.linspace(_ct.min(), _ct.max(), 31), edgecolor="none", alpha=0.7)
-    ax.axvline(
-        cancel_time_stats["50%"],
-        color="red",
-        linestyle="--",
-        label=f"Median: {cancel_time_stats['50%']:.2f}s",
+    if len(positive):
+        edges = np.logspace(np.log10(positive.min()), np.log10(positive.max()), 41)
+        ax.hist(positive, bins=edges, edgecolor="none", alpha=0.8, color=COLORS["slate"])
+        ax.set_xscale("log")
+        median_life = float(np.median(positive))
+        ax.axvline(
+            median_life,
+            color="red",
+            linestyle="--",
+            label=f"Median of the plotted orders: {median_life:.4g} s",
+        )
+        ax.legend()
+    ax.set_title(f"{SYMBOL}: time from submission to first termination")
+    ax.set_xlabel("Seconds (log scale)")
+    ax.set_ylabel("Number of orders")
+    show_with_alt(
+        fig,
+        "A histogram of order lifetimes on a logarithmic horizontal axis running from well under a millisecond to the length of a trading session. A dashed vertical line marks the median of the plotted orders and is labelled with its value in seconds. The vertical axis counts orders.",
     )
-    ax.set_title("Distribution of Time to Cancellation (Orders < 60 seconds)")
-    ax.set_xlabel("Seconds from Submission to Cancellation")
-    ax.set_ylabel("Number of Orders")
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
 
-    # Key insight
-    sub_second = cancelled_orders_df.filter(pl.col("cancel_time") < 1).shape[0] / len(
-        cancelled_orders_df
+    n_cancelled = len(cancelled_orders_df)
+    for label, cutoff in (("1 millisecond", 0.001), ("1 second", 1.0), ("10 seconds", 10.0)):
+        share = cancelled_orders_df.filter(pl.col("cancel_time") < cutoff).height / n_cancelled
+        print(f"Terminated within {label}: {share:.1%}")
+    zero_length = cancelled_orders_df.filter(pl.col("cancel_time") <= 0).height
+    print(
+        f"Orders with a non-positive lifetime (excluded from the log-scaled figure): "
+        f"{zero_length:,} of {n_cancelled:,}"
     )
-    sub_10_sec = cancelled_orders_df.filter(pl.col("cancel_time") < 10).shape[0] / len(
-        cancelled_orders_df
-    )
-    print(f"\n{sub_second:.1%} of cancellations happen within 1 second")
-    print(f"{sub_10_sec:.1%} of cancellations happen within 10 seconds")
 
 # %% [markdown]
-# **Key Insight**: Most cancellations happen within milliseconds to seconds.
-# This "fleeting liquidity" is a hallmark of modern electronic markets.
-
-# %% [markdown]
-# ## 4. Executions
+# ## 4. The orders that trade
 #
-# Now let's examine the orders that actually trade.
+# Two message types report a fill. `E` executes shares at the order's displayed price;
+# `C` executes at a different one, which is how a hidden or price-improved fill is
+# reported. Both name an order, and one order can be named several times as it fills in
+# pieces, so the two streams are combined and reduced to the first fill per order.
+#
+# Taking the first fill is what makes 'time to execution' a well-defined quantity here.
+# It is the wait before an order started trading, not the time it took to complete.
 
 # %%
 if HAS_MESSAGE_DATA and len(limit_orders) > 0:
-    # Load execution messages
-    # E = Order Executed
-    # C = Order Executed with Price (different from submitted price)
-    # Note: An order can have multiple partial executions
-
     exec_e = load_message_type("E", columns=["order_reference_number", "timestamp"])
     exec_c = load_message_type("C", columns=["order_reference_number", "timestamp"])
 
@@ -731,8 +748,7 @@ if HAS_MESSAGE_DATA and len(limit_orders) > 0:
 
         print(f"Total execution events: {len(all_executions):,}")
 
-        # CRITICAL FIX: Deduplicate to FIRST execution event per order
-        # Orders can have multiple partial fills - we use first fill time
+        # One order can fill in several pieces; keep the earliest.
         first_execution = (
             all_executions.sort("executed")
             .group_by("order")
@@ -745,7 +761,7 @@ if HAS_MESSAGE_DATA and len(limit_orders) > 0:
         orders_with_exec = limit_orders.join(first_execution, on="order", how="left")
 
 # %% [markdown]
-# ### 4.1 Execution Rate
+# ### How often an order fills
 
 # %%
 if HAS_MESSAGE_DATA and orders_with_exec is not None and len(orders_with_exec) > 0:
@@ -768,7 +784,7 @@ if HAS_MESSAGE_DATA and orders_with_exec is not None and len(orders_with_exec) >
     print("=" * 50)
 
 # %% [markdown]
-# ### 4.2 Time to Execution
+# ### How long a fill takes to arrive
 
 # %%
 if HAS_MESSAGE_DATA and orders_with_exec is not None:
@@ -777,7 +793,9 @@ if HAS_MESSAGE_DATA and orders_with_exec is not None:
 
     if len(executed_orders_df) > 0:
         executed_orders_df = executed_orders_df.with_columns(
-            ((pl.col("executed") - pl.col("submitted")).dt.total_seconds()).alias("exec_time")
+            ((pl.col("executed") - pl.col("submitted")).dt.total_nanoseconds() / 1e9).alias(
+                "exec_time"
+            )
         )
 
         # Summary statistics
@@ -804,7 +822,7 @@ if HAS_MESSAGE_DATA and orders_with_exec is not None:
             print(f"{stat:>10}: {value:>12.4f}")
 
 # %% [markdown]
-# ## 5. Unified Order Outcome Classification
+# ## 5. One outcome per order
 #
 # **Important**: Execution and termination are not mutually exclusive!
 # An order can be partially executed and then cancelled.
@@ -874,7 +892,7 @@ if unified is not None:
     print("This reconciles execution and termination rates into exclusive categories.")
 
 # %% [markdown]
-# ## 6. Comparing Termination vs. Execution Timing
+# ## 6. Which happens sooner, a withdrawal or a fill
 
 # %%
 if (
@@ -902,117 +920,50 @@ if (
     and executed_orders_df is not None
     and len(executed_orders_df) > 0
 ):
-    # Dual histogram
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
 
-    # Cancellation times (log scale)
-    ax1 = axes[0]
-    cancel_times = (
-        cancelled_orders_df.filter(pl.col("cancel_time") > 0)
-        .select("cancel_time")
-        .to_numpy()
-        .flatten()
+    for ax, frame, column, colour, label in (
+        (
+            axes[0],
+            cancelled_orders_df,
+            "cancel_time",
+            COLORS["ask"],
+            "termination",
+        ),
+        (
+            axes[1],
+            executed_orders_df,
+            "exec_time",
+            COLORS["bid"],
+            "execution",
+        ),
+    ):
+        values = frame.filter(pl.col(column) > 0)[column].to_numpy()
+        if len(values):
+            edges = np.logspace(np.log10(values.min()), np.log10(values.max()), 41)
+            ax.hist(values, bins=edges, alpha=0.8, color=colour, edgecolor="none")
+            ax.set_xscale("log")
+        ax.set_title(f"Time from submission to {label}")
+        ax.set_xlabel("Seconds (log scale)")
+        ax.set_ylabel("Number of orders")
+
+    show_with_alt(
+        fig,
+        "Two histograms side by side, each on a logarithmic seconds axis running from well under a millisecond to the length of a session. The left panel, in red, counts orders by how long they lived before being terminated; the right, in green, counts orders by how long they lived before their first execution. The two panels have independent vertical scales.",
     )
-    _lc = np.log10(cancel_times + 0.001)
-    ax1.hist(_lc, bins=np.linspace(_lc.min(), _lc.max(), 31), alpha=0.7, color="red")
-    ax1.set_title("Time to Cancellation (log10 seconds)")
-    ax1.set_xlabel("log10(seconds)")
-    ax1.set_ylabel("Count")
-
-    # Execution times (log scale)
-    ax2 = axes[1]
-    exec_times = (
-        executed_orders_df.filter(pl.col("exec_time") > 0).select("exec_time").to_numpy().flatten()
-    )
-    _le = np.log10(exec_times + 0.001)
-    ax2.hist(_le, bins=np.linspace(_le.min(), _le.max(), 31), alpha=0.7, color="green")
-    ax2.set_title("Time to Execution (log10 seconds)")
-    ax2.set_xlabel("log10(seconds)")
-    ax2.set_ylabel("Count")
-
-    plt.tight_layout()
-    plt.show()
 
 # %% [markdown]
-# ## 7. Top Traded Symbols
+# ## 7. What the fills looked like
 #
-# Which symbols have the highest execution activity?
+# An `E` or `C` message names an order and a quantity, not a side or a limit price. To
+# say which way a fill went, or how its price compared with what the sender asked for,
+# the execution has to be joined back to the add that created the order.
+# `05_itch_trading_activity` does that join once and writes the result, so this section
+# reads its output rather than repeating the work. Without it the section prints nothing
+# and the rest of the notebook is unaffected.
 
 # %%
-if HAS_MESSAGE_DATA and orders_with_exec is not None:
-    # Get executed orders with ticker info
-    executed_with_ticker = orders_with_exec.filter(
-        pl.col("executed").is_not_null() & pl.col("ticker").is_not_null()
-    )
-
-    if len(executed_with_ticker) > 0 and "value" in executed_with_ticker.columns:
-        # Aggregate by ticker
-        ticker_summary = (
-            executed_with_ticker.group_by("ticker")
-            .agg(
-                [
-                    pl.col("value").sum().alias("value"),
-                    pl.col("shares").sum().alias("shares"),
-                    pl.len().alias("trade_count"),
-                ]
-            )
-            .sort("value", descending=True)
-        )
-
-        total_value = ticker_summary.select(pl.col("value").sum()).item()
-        ticker_summary = ticker_summary.with_columns(
-            (pl.col("value") / total_value).alias("value_share")
-        )
-
-        # Top 25 (or fewer if the drilldown was scoped to a single symbol). The
-        # loader filters to a single stock via the SYMBOL parameter for tractable
-        # memory, so ticker_summary will typically have one row when SYMBOL is set.
-        # Branch on whether a symbol filter is active rather than on row count, so
-        # the chart label stays honest if SYMBOL is later widened to a list.
-        top_25 = ticker_summary.head(25)
-        n_symbols = len(top_25)
-        total_share = top_25.select(pl.col("value_share").sum()).item()
-        symbol_filtered = SYMBOL is not None
-
-        # Convert to pandas for plotting
-        top_25_pd = top_25.to_pandas()
-
-        fig, ax = plt.subplots(figsize=(14, 5))
-        ax.bar(range(len(top_25_pd)), top_25_pd["value_share"], color="darkblue")
-        ax.set_xticks(range(len(top_25_pd)))
-        ax.set_xticklabels(top_25_pd["ticker"], rotation=45, ha="right")
-        if symbol_filtered:
-            ax.set_title(f"Traded value, filtered to SYMBOL={SYMBOL}")
-        else:
-            ax.set_title("Traded value concentrates in a few symbols")
-        ax.set_xlabel("Symbol")
-        ax.set_ylabel("Share of Dollar Volume")
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:.1%}"))
-        plt.tight_layout()
-        plt.show()
-
-        if symbol_filtered:
-            print(
-                f"\nSingle-symbol drilldown: SYMBOL={SYMBOL} accounts "
-                f"for {total_share:.1%} of traded dollar volume within the filtered slice."
-            )
-        else:
-            print(
-                f"\nTop {n_symbols} symbols account for {total_share:.1%} of traded dollar volume"
-            )
-
-# %% [markdown]
-# ## 8. Execution Characteristics (Enriched Data)
-#
-# Using the enriched E/C messages (written by `05_itch_trading_activity`, which
-# joins executions back to their submitting orders), we can analyze execution
-# characteristics at the order level: fill side, execution prices, and price
-# improvement. Run that notebook first; this section degrades gracefully if the
-# enriched parquets are absent.
-
-# %%
-# Load enriched execution data if available
-# IMPORTANT: Filter by stock_locate to avoid loading full-day data (memory issue)
+# Filter on stock_locate inside the scan: the enriched files cover the whole venue.
 ENRICHED_DIR = MESSAGE_DIR / "enriched"
 
 if ENRICHED_DIR.exists():
@@ -1118,53 +1069,53 @@ if enriched_c is not None and "price_improvement_raw" in enriched_c.columns:
             print(f"  Worse than limit:  {worse:>8,} ({worse / len(side_data):.1%})")
 
 # %% [markdown]
-# ### Execution Characteristics Summary
+# ### How to read those two tables
 #
-# The enriched execution data reveals:
+# The side counts say whether the day's fills were one-directional. Counts and share
+# volume can disagree: a balanced count with lopsided volume means the two sides were
+# trading in different sizes, which is what directional flow looks like when it is
+# worked in pieces.
 #
-# 1. **Side Balance**: Buy and sell executions are roughly balanced in count
-#    but may differ in volume (informed traders tend to be directional)
-#
-# 2. **Price Improvement (C messages)**: In this AAPL sample the C-message fills
-#    land a uniform one tick ($0.01) away from the order's limit - a small,
-#    consistent disimprovement rather than a mix of better- and worse-than-limit fills
-#
-# 3. **Order Attribution**: By joining executions back to their original orders,
-#    we can track the full order lifecycle and analyze execution quality
+# The price-improvement table compares each `C` fill against the limit its order carried.
+# `C` exists precisely for fills that print away from the displayed price, so the
+# interesting question is not whether the difference is non-zero but whether it favours
+# the sender: better than the limit for a buy means paying less, for a sell receiving
+# more. The table splits the fills three ways - better, at, and worse - so a mixture and
+# a uniform offset can be told apart, which a mean alone cannot do.
 
 # %% [markdown]
-# ## 9. Market-Wide Lifecycle Statistics
+# ## 8. The same timings across the whole venue
 #
-# The single-stock analysis above characterizes AAPL order dynamics.
-# This section computes the same timing metrics across **all** ~186.6M orders
-# (A+F messages) to produce the market-wide statistics cited in Chapter 3.
+# Everything so far followed one symbol. The same two durations can be computed for every
+# order the venue saw that day, because only three columns are needed - the order
+# reference and two timestamps - and a scan that reads nothing else fits in memory.
+#
+# One symbol can be unrepresentative in either direction: a heavily quoted name is
+# re-priced more often than the average, a thin one hardly at all. The venue-wide figures
+# below are what the chapter quotes.
 
 # %%
-# Market-wide time-to-cancellation and time-to-execution
-# Load just (order_ref, timestamp) for memory efficiency — no symbol filter
 if HAS_MESSAGE_DATA:
-    import time as _time
-
-    print("Loading market-wide order data (A+F, D, E messages)...")
-    _t0 = _time.time()
+    print("Loading venue-wide order data (A+F, D, E messages)...")
+    started = perf_counter()
 
     # All Add orders (A + F) — no symbol filter
-    _adds_a = pl.scan_parquet(MESSAGE_DIR / "A" / "*.parquet").select(
+    venue_adds_a = pl.scan_parquet(MESSAGE_DIR / "A" / "*.parquet").select(
         pl.col("order_reference_number").alias("order"),
         pl.col("timestamp").alias("submitted"),
     )
-    _adds_f = pl.scan_parquet(MESSAGE_DIR / "F" / "*.parquet").select(
+    venue_adds_f = pl.scan_parquet(MESSAGE_DIR / "F" / "*.parquet").select(
         pl.col("order_reference_number").alias("order"),
         pl.col("timestamp").alias("submitted"),
     )
-    _all_adds = pl.concat([_adds_a, _adds_f])
-    _n_total = _all_adds.select(pl.len()).collect().item()
-    print(f"Total Add orders (A+F): {_n_total:,} ({_time.time() - _t0:.1f}s)")
+    venue_adds = pl.concat([venue_adds_a, venue_adds_f])
+    venue_add_count = venue_adds.select(pl.len()).collect().item()
+    print(f"Total Add orders (A+F): {venue_add_count:,} ({perf_counter() - started:.1f}s)")
 
     # --- Time to Cancellation ---
     print("\nComputing time-to-cancellation...")
-    _t1 = _time.time()
-    _all_deletes = (
+    cancel_started = perf_counter()
+    venue_deletes = (
         pl.scan_parquet(MESSAGE_DIR / "D" / "*.parquet")
         .select(
             pl.col("order_reference_number").alias("order"),
@@ -1173,34 +1124,36 @@ if HAS_MESSAGE_DATA:
         .group_by("order")
         .agg(pl.col("deleted").min())
     )
-    _cancel_times = (
-        _all_adds.join(_all_deletes, on="order", how="inner")
+    venue_cancel_times = (
+        venue_adds.join(venue_deletes, on="order", how="inner")
         .with_columns(
             (pl.col("deleted") - pl.col("submitted")).dt.total_nanoseconds().alias("cancel_ns")
         )
         .select("cancel_ns")
         .collect()
     )
-    _ct = _cancel_times["cancel_ns"].cast(pl.Float64) / 1e9
-    _n_cancelled = len(_cancel_times)
-    print(f"Orders with delete events: {_n_cancelled:,} ({_time.time() - _t1:.1f}s)")
+    cancel_seconds = venue_cancel_times["cancel_ns"].cast(pl.Float64) / 1e9
+    venue_cancelled = len(venue_cancel_times)
+    print(
+        f"Orders with delete events: {venue_cancelled:,} ({perf_counter() - cancel_started:.1f}s)"
+    )
 
-    _within_500ms = (_ct < 0.5).mean()
-    _within_1s = (_ct < 1.0).mean()
-    _within_10s = (_ct < 10.0).mean()
-    _median_cancel = _ct.median()
+    cancel_within_500ms = (cancel_seconds < 0.5).mean()
+    cancel_within_1s = (cancel_seconds < 1.0).mean()
+    cancel_within_10s = (cancel_seconds < 10.0).mean()
+    cancel_median = cancel_seconds.median()
 
-    print(f"\nTime to Cancellation (market-wide, {_n_cancelled:,} orders):")
-    print(f"  Within 500ms:    {_within_500ms:.1%}")
-    print(f"  Within 1 second: {_within_1s:.1%}")
-    print(f"  Within 10 seconds: {_within_10s:.1%}")
-    print(f"  Median: {_median_cancel:.2f}s")
-    del _cancel_times, _ct
+    print(f"\nTime to termination, venue-wide ({venue_cancelled:,} orders):")
+    print(f"  Within 500 ms:     {cancel_within_500ms:.1%}")
+    print(f"  Within 1 second:   {cancel_within_1s:.1%}")
+    print(f"  Within 10 seconds: {cancel_within_10s:.1%}")
+    print(f"  Median:            {cancel_median:.3f} s")
+    del venue_cancel_times, cancel_seconds
 
     # --- Time to Execution ---
     print("\nComputing time-to-execution...")
-    _t2 = _time.time()
-    _all_execs = (
+    exec_started = perf_counter()
+    venue_execs = (
         pl.scan_parquet(MESSAGE_DIR / "E" / "*.parquet")
         .select(
             pl.col("order_reference_number").alias("order"),
@@ -1209,60 +1162,69 @@ if HAS_MESSAGE_DATA:
         .group_by("order")
         .agg(pl.col("executed").min())
     )
-    _exec_times = (
-        _all_adds.join(_all_execs, on="order", how="inner")
+    venue_exec_times = (
+        venue_adds.join(venue_execs, on="order", how="inner")
         .with_columns(
             (pl.col("executed") - pl.col("submitted")).dt.total_nanoseconds().alias("exec_ns")
         )
         .select("exec_ns")
         .collect()
     )
-    _et = _exec_times["exec_ns"].cast(pl.Float64) / 1e9
-    _n_executed = len(_exec_times)
-    print(f"Orders with execution events: {_n_executed:,} ({_time.time() - _t2:.1f}s)")
+    exec_seconds = venue_exec_times["exec_ns"].cast(pl.Float64) / 1e9
+    venue_executed = len(venue_exec_times)
+    print(
+        f"Orders with execution events: {venue_executed:,} ({perf_counter() - exec_started:.1f}s)"
+    )
 
-    _within_1ms = (_et < 0.001).mean()
-    _median_exec = _et.median()
-    _over_40min = (_et > 2400).mean()
+    exec_within_1ms = (exec_seconds < 0.001).mean()
+    exec_median = exec_seconds.median()
+    exec_over_40min = (exec_seconds > 2400).mean()
 
-    print(f"\nTime to Execution (market-wide, {_n_executed:,} orders):")
-    print(f"  Within 1ms: {_within_1ms:.1%}")
-    print(f"  Median: {_median_exec:.1f}s")
-    print(f"  Over 40 minutes: {_over_40min:.1%}")
-    del _exec_times, _et
+    print(f"\nTime to first execution, venue-wide ({venue_executed:,} orders):")
+    print(f"  Within 1 millisecond: {exec_within_1ms:.1%}")
+    print(f"  Median:               {exec_median:.3f} s")
+    print(f"  Over 40 minutes:      {exec_over_40min:.1%}")
+    del venue_exec_times, exec_seconds
 
-    print(f"\nTotal runtime: {_time.time() - _t0:.1f}s")
+    print(f"\nTotal runtime: {perf_counter() - started:.1f}s")
 
 # %% [markdown]
-# **Market-wide findings** confirm the values cited in the chapter:
-# - 41% of cancellations within 500ms, 50% within 1 second, 80% within 10 seconds
-# - Median cancellation time: ~1 second
-# - 10% of executions within 1ms, median 6 seconds, 1% wait over 40 minutes
+# Compare the two lists above against each other rather than reading either alone. Orders
+# that end without trading do so quickly; orders that trade take longer, and a tail of
+# them waits for most of the session. That ordering is the mechanism at work: an order
+# is withdrawn as soon as the price it was written against moves, and it fills only when
+# someone chooses to cross to it, which is not something its sender controls.
 #
-# These patterns reflect algorithmic market making: rapid quoting and cancellation
-# (sub-second) with relatively slower execution for resting orders that do fill.
+# The two populations also overlap, because an order can fill part of its size and be
+# withdrawn afterwards, so these are two views of one day rather than two disjoint sets.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# ### Order Lifecycle Statistics (AAPL sample)
+# 1. **Termination and execution are not complements.** An order can fill part of its
+#    size and then be withdrawn, so the two rates overlap and do not sum to one. Any
+#    statement about how many orders 'never traded' has to come from the unified
+#    classification, not from one minus the other.
+# 2. **A replace is not a cancellation.** `U` retires a reference and issues a new one,
+#    which is what re-pricing a quote looks like on this feed. Counting it as a
+#    withdrawal overstates how much liquidity actually left the book.
+# 3. **Compute durations from nanoseconds.** A large share of these orders live for less
+#    than a second, so a whole-second duration records them as zero and erases the part
+#    of the distribution the analysis is about.
+# 4. **Plot lifetimes on a log axis.** They span microseconds to hours; on a linear axis
+#    the entire distribution lands in the first bin.
+# 5. **One symbol is not the venue.** The per-order work runs on one name because it has
+#    to; the venue-wide pass reads three columns and covers every order, and the two are
+#    reported separately rather than blended.
 #
-# | Metric | Value | Implication |
-# |--------|-------|-------------|
-# | **Termination rate** | ~96% | Most visible liquidity is withdrawn before it trades |
-# | **Median time to cancel** | <1 second | Quotes update continuously |
-# | **Execution rate** | ~4% | Only a small fraction of orders ever fill |
-# | **Cancellation speed (market-wide)** | 50% <1s, 80% <10s | Fleeting liquidity is the norm |
+# ### Known limitations
 #
-# ### Implications for Trading
-#
-# 1. **Don't trust displayed liquidity**: Most of it will disappear before you can trade against it
-#
-# 2. **Speed matters**: Orders that execute do so quickly; stale orders are cancelled
-#
-# 3. **Market making is dynamic**: The ~96% termination rate reflects continuous quote updating
-#
-# 4. **Adverse selection**: Orders that *do* get filled may be picked off by informed traders
+# - One venue and one session. NASDAQ-routed orders only, on a single day.
+# - An order resting when the sample ends has no termination and no fill, and is counted
+#   as neither rather than assigned an outcome it did not have.
+# - Time to execution is time to the *first* fill. An order filled in several pieces
+#   contributes the first one, so this is not how long an order took to complete.
+# - Hidden orders never appear as adds, so nothing here describes their lifecycle.
 #
 # ### Next Steps
 #
