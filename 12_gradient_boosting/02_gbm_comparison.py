@@ -739,27 +739,47 @@ else:
 # > image and the GPU numbers are wrong: do not record them.
 
 # %%
+scale_data_ready = False
 if HAS_GPU:
     from utils.modeling import load_modeling_dataset
 
-    scale_mds = load_modeling_dataset("us_equities_panel", "fwd_ret_1d", max_symbols=0)
-    scale_split = scale_mds.splits[0]
-    scale_df = scale_mds.dataset.to_pandas()
-    scale_date = scale_mds.date_col
+    try:
+        scale_mds = load_modeling_dataset("us_equities_panel", "fwd_ret_1d", max_symbols=0)
+    except (FileNotFoundError, ValueError) as exc:
+        display(
+            Markdown(
+                "**Scale benchmark skipped**: it re-runs the medium preset on the "
+                "`us_equities_panel` case study, whose artifacts this environment cannot "
+                f"use. `{type(exc).__name__}: {str(exc).splitlines()[0][:200]}`. The ETF "
+                "benchmark above is unaffected."
+            )
+        )
+    else:
+        scale_data_ready = True
+        scale_split = scale_mds.splits[0]
+        scale_df = scale_mds.dataset.to_pandas()
+        scale_date = scale_mds.date_col
 
-    scale_train = (scale_df[scale_date] >= scale_split["train_start"]) & (
-        scale_df[scale_date] <= scale_split["train_end"]
-    )
-    X_scale = scale_df.loc[scale_train, scale_mds.feature_names].values
-    y_scale = scale_df.loc[scale_train, scale_mds.label_col].values
-    valid_scale = np.isfinite(y_scale)
-    X_scale, y_scale = X_scale[valid_scale], y_scale[valid_scale]
+        scale_train = (scale_df[scale_date] >= scale_split["train_start"]) & (
+            scale_df[scale_date] <= scale_split["train_end"]
+        )
+        X_scale = scale_df.loc[scale_train, scale_mds.feature_names].values
+        y_scale = scale_df.loc[scale_train, scale_mds.label_col].values
+        valid_scale = np.isfinite(y_scale)
+        X_scale, y_scale = X_scale[valid_scale], y_scale[valid_scale]
 
-    print(f"Scale benchmark: {X_scale.shape[0]:,} rows × {X_scale.shape[1]} features")
+        print(f"Scale benchmark: {X_scale.shape[0]:,} rows and {X_scale.shape[1]} features")
 
 # %%
 if not HAS_GPU:
     report_no_gpu("GPU speedup at scale")
+elif not scale_data_ready:
+    display(
+        Markdown(
+            "**No timings**: the scale dataset did not load, so there is nothing here to "
+            "benchmark. The cell above says why."
+        )
+    )
 else:
     scale_results = []
     scale_config = load_gbm_config("medium")
@@ -796,7 +816,8 @@ else:
     scale_speedup
 
 # %% [markdown]
-# **Interpretation**: the speedup table above is this machine on this run. What
+# **Interpretation**: where this run produced the table above, it is this machine on
+# this run and nothing more. What
 # carries beyond it is the reason the three libraries differ, which is
 # architectural rather than incidental: LightGBM's CUDA backend computes in double
 # precision only, and a consumer GPU runs FP64 at a small fraction of its FP32
