@@ -155,8 +155,8 @@ show_with_alt(
     "Grid with one row per case study and one column per latent-factor estimator (PCA, "
     "IPCA, CAE, SDF, SAE). Each cell is shaded dark where a validation result is "
     "registered and pale where it is not, and carries the word 'available' or 'not run'. "
-    "The broader panels are filled across most or all of the row; the narrowest panel has "
-    "only two filled cells.",
+    "Some rows are filled across every column and at least one has only two filled "
+    "cells.",
 )
 
 # %% [markdown]
@@ -505,6 +505,9 @@ axes[0].scatter(comparison["latent_ic"], y, color=COLORS["blue"], label="Latent"
 axes[0].set_yticks(y, comparison["short_name"].to_list())
 axes[0].set_xlabel("Mean daily Spearman IC")
 axes[0].set_ylabel("Case study")
+# The legend's own markers are the same shapes as the data, so it needs empty axes
+# rather than the bottom row to sit on.
+axes[0].set_ylim(-1.3, comparison.height - 1 + 0.5)
 axes[0].legend(loc="lower right", ncol=2)
 zero_line(axes[0], axis="x")
 add_message_title(axes[0], "Selected latent and supervised validation IC by panel")
@@ -534,11 +537,11 @@ show_with_alt(
     "Two stacked panels, one row per case study in both. The upper panel places two "
     "points on a shared mean-daily-IC axis for each case study, amber for the selected "
     "supervised model and navy for the selected latent model, joined by a light line, "
-    "against a dashed zero line; the two sit close together on most panels and far apart "
-    "on one. The lower panel plots the latent-minus-supervised difference for each case "
-    "study with its HAC 95% interval and a value label, against a dashed zero line. Most "
-    "differences are small with intervals spanning zero; one is a large negative value "
-    "whose whole interval lies to the left of zero.",
+    "against a dashed zero line; on some case studies the two sit close together and on "
+    "others they are clearly apart. The lower panel plots the latent-minus-supervised "
+    "difference for each case study with its HAC 95% interval and a value label, against "
+    "a dashed zero line. Some intervals span zero and some lie wholly to one side of it, "
+    "and each point carries its value as a label.",
 )
 
 # %% [markdown]
