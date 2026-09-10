@@ -19,8 +19,9 @@
 # **Docker image**: `ml4t`
 #
 # This notebook benchmarks bagging (Random Forests) against boosting (XGBoost, LightGBM,
-# CatBoost) on the Chen-Pelger-Zhu (2020) firm characteristics dataset — 1.2M
-# stock-month observations with 46 characteristics and predefined temporal splits.
+# CatBoost) on the Chen-Pelger-Zhu (2020) firm characteristics dataset: a panel of
+# stock-month observations with anonymized characteristics and predefined temporal
+# splits. The load below prints how many rows and characteristics each split carries.
 #
 # ## Learning Objectives
 # - Compare Random Forest (bagging) against XGBoost, LightGBM, and CatBoost (boosting)
@@ -38,9 +39,7 @@
 # synthesis) for method comparison on the same benchmark.
 
 # %%
-"""Ensemble Foundations — benchmark bagging vs boosting on financial return prediction."""
-
-import warnings
+"""Ensemble Foundations - benchmark bagging against boosting on financial return prediction."""
 
 import catboost as cb
 import lightgbm as lgb
@@ -48,6 +47,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import xgboost as xgb
+from IPython.display import Markdown, display
 from scipy import stats
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
@@ -55,12 +55,10 @@ from sklearn.metrics import mean_squared_error, r2_score
 from data import load_firm_characteristics
 from utils.paths import display_path, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLOR_CYCLER, COLORS
-
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+from utils.style import COLOR_CYCLER, COLORS, show_with_alt
 
 OUTPUT_DIR = get_output_dir(12, "us_firm_characteristics")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% tags=["parameters"]
 SEED = 42
@@ -71,8 +69,9 @@ set_global_seeds(SEED)
 # %% [markdown]
 # ## 1. Load Firm Characteristics Dataset
 #
-# The Chen-Pelger-Zhu dataset provides a clean benchmark: 46 anonymized firm
-# characteristics with predefined temporal splits that avoid any lookahead.
+# The Chen-Pelger-Zhu dataset provides a clean benchmark: anonymized firm
+# characteristics with predefined temporal splits, so the split boundaries are the
+# dataset's own rather than a choice made here.
 
 # %%
 train_df = load_firm_characteristics(split="train")
@@ -88,9 +87,18 @@ y_valid = valid_df["ret"].to_numpy()
 X_test = test_df.select(feature_cols).to_numpy()
 y_test = test_df["ret"].to_numpy()
 
-print(
-    f"Train: {len(X_train):,} obs (1967-1989) | Valid: {len(X_valid):,} (1990-1999) | Test: {len(X_test):,} (2000-2016)"
-)
+
+def _span(frame: pl.DataFrame) -> str:
+    """Report a split's first and last year, so the boundaries come from the data."""
+    return f"{frame['timestamp'].min():%Y}-{frame['timestamp'].max():%Y}"
+
+
+for _name, _frame, _X in [
+    ("Train", train_df, X_train),
+    ("Valid", valid_df, X_valid),
+    ("Test", test_df, X_test),
+]:
+    print(f"{_name}: {len(_X):,} observations, {_span(_frame)}")
 print(f"Features: {len(feature_cols)} characteristics")
 
 # %% [markdown]
@@ -124,10 +132,10 @@ results = []
 predictions = {}
 
 # %% [markdown]
-# ### 3.1 Random Forest (Bagging Baseline)
+# ### Random Forest, the bagging baseline
 #
-# Random Forests average independent trees — effective for variance reduction
-# but unable to correct systematic bias (§12.1).
+# Random Forests average independent trees, which reduces variance and leaves
+# systematic bias where it is (§12.1).
 
 # %%
 rf_model = RandomForestRegressor(
@@ -136,7 +144,7 @@ rf_model = RandomForestRegressor(
     min_samples_leaf=100,
     max_features=0.3,
     n_jobs=-1,
-    random_state=42,
+    random_state=SEED,
     verbose=0,
 )
 rf_model.fit(X_train, y_train)
@@ -154,19 +162,19 @@ results.append(
 )
 
 print(
-    f"Random Forest — Valid IC: {rf_metrics['valid']['ic']:.4f}, Test IC: {rf_metrics['test']['ic']:.4f}"
+    f"Random Forest, valid IC: {rf_metrics['valid']['ic']:.4f}, test IC: {rf_metrics['test']['ic']:.4f}"
 )
 
 # %% [markdown]
-# ### 3.2 XGBoost
+# ### XGBoost
 #
 # XGBoost adds L1/L2 regularization on leaf weights and uses second-order
-# gradient approximations. We enable early stopping to demonstrate automatic
-# iteration selection — the model stops when validation loss plateaus.
+# gradient approximations. Early stopping selects the iteration count: the model
+# stops when validation loss plateaus.
 
 # %%
 xgb_model = xgb.XGBRegressor(
-    n_estimators=1000,  # high ceiling — early stopping selects actual count
+    n_estimators=1000,  # a ceiling; early stopping picks the count that runs
     max_depth=4,
     learning_rate=0.05,
     subsample=0.8,
@@ -176,7 +184,7 @@ xgb_model = xgb.XGBRegressor(
     reg_lambda=1.0,
     tree_method="hist",
     early_stopping_rounds=50,
-    random_state=42,
+    random_state=SEED,
     verbosity=0,
 )
 xgb_model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], verbose=False)
@@ -191,12 +199,12 @@ results.append(
 )
 
 print(
-    f"XGBoost — Valid IC: {xgb_metrics['valid']['ic']:.4f}, Test IC: {xgb_metrics['test']['ic']:.4f}"
+    f"XGBoost, valid IC: {xgb_metrics['valid']['ic']:.4f}, test IC: {xgb_metrics['test']['ic']:.4f}"
 )
 print(f"  Early stopping at {xgb_model.best_iteration} / 1000 rounds")
 
 # %% [markdown]
-# ### 3.3 LightGBM
+# ### LightGBM
 #
 # LightGBM's leaf-wise growth and histogram binning make it the fastest library
 # on large datasets. The `num_leaves` parameter (not `max_depth`) is the primary
@@ -213,7 +221,7 @@ lgb_model = lgb.LGBMRegressor(
     min_child_samples=100,
     reg_alpha=0.1,
     reg_lambda=1.0,
-    random_state=42,
+    random_state=SEED,
     verbose=-1,
 )
 lgb_model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)])
@@ -228,14 +236,15 @@ results.append(
 )
 
 print(
-    f"LightGBM — Valid IC: {lgb_metrics['valid']['ic']:.4f}, Test IC: {lgb_metrics['test']['ic']:.4f}"
+    f"LightGBM, valid IC: {lgb_metrics['valid']['ic']:.4f}, test IC: {lgb_metrics['test']['ic']:.4f}"
 )
 
 # %% [markdown]
-# ### 3.4 CatBoost
+# ### CatBoost
 #
 # CatBoost uses symmetric (oblivious) trees where all nodes at a given depth share
-# the same split — enabling fast bitwise inference. Note the API differences:
+# the same split, which is what lets inference be a bitwise operation. Note the API
+# differences:
 # `iterations` (not `n_estimators`), `depth` (not `max_depth`), `l2_leaf_reg`
 # (not `reg_lambda`), and `colsample_bylevel` (per-level sampling, vs per-tree
 # in XGBoost/LightGBM).
@@ -249,9 +258,9 @@ cb_model = cb.CatBoostRegressor(
     subsample=0.8,
     colsample_bylevel=0.8,
     min_data_in_leaf=100,
-    random_seed=42,
+    random_seed=SEED,
     verbose=False,
-    train_dir="/tmp/catboost_info",
+    train_dir=str(OUTPUT_DIR / "catboost_info"),
 )
 cb_model.fit(X_train, y_train, eval_set=(X_valid, y_valid), verbose=False)
 
@@ -265,7 +274,7 @@ results.append(
 )
 
 print(
-    f"CatBoost — Valid IC: {cb_metrics['valid']['ic']:.4f}, Test IC: {cb_metrics['test']['ic']:.4f}"
+    f"CatBoost, valid IC: {cb_metrics['valid']['ic']:.4f}, test IC: {cb_metrics['test']['ic']:.4f}"
 )
 
 # %% [markdown]
@@ -281,7 +290,8 @@ fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 models = results_df["model"].to_list()
 x = np.arange(len(models))
 
-# Validation is the selection set (neutral); test is the sealed holdout (emphasis).
+# Validation is where the models were selected, so it is drawn in the neutral colour
+# and the untouched test split takes the emphasis.
 valid_color, test_color = COLORS["neutral"], COLORS["blue"]
 
 # IC comparison
@@ -302,21 +312,53 @@ axes[1].set_ylabel("Out-of-sample $R^2$")
 axes[1].set_title("Out-of-sample $R^2$")
 axes[1].legend()
 
-fig.suptitle("All three GBMs edge out the Random Forest baseline on test IC")
-plt.show()
+fig.suptitle("Rank IC and out-of-sample $R^2$ by model, validation and test")
+show_with_alt(
+    fig,
+    "Two panels of grouped bars, one bar pair per model. Left: Spearman rank IC on the "
+    "validation split beside the test split. Right: out-of-sample $R^2$ for the same "
+    "splits. The models are ordered by test IC, and the validation bar is taller than "
+    "the test bar for every model in both panels.",
+)
+
+# %% tags=["results"]
+_rf_ic = results_df.filter(pl.col("model") == "Random Forest")["test_ic"].item()
+_gbm = results_df.filter(pl.col("model") != "Random Forest")
+_drop = (results_df["valid_ic"] - results_df["test_ic"]).max()
+display(
+    Markdown(
+        "- Test IC, high to low: "
+        + ", ".join(
+            f"{row['model']} {row['test_ic']:.4f}"
+            for row in results_df.sort("test_ic", descending=True).iter_rows(named=True)
+        )
+        + "\n- Test $R^2$, high to low: "
+        + ", ".join(
+            f"{row['model']} {row['test_r2']:.4f}"
+            for row in results_df.sort("test_r2", descending=True).iter_rows(named=True)
+        )
+        + f"\n- Widest test-IC gap between a boosted model and the Random Forest: "
+        f"{_gbm['test_ic'].max() - _rf_ic:+.4f}. Spread across the three boosted "
+        f"models: {_gbm['test_ic'].max() - _gbm['test_ic'].min():.4f}. Largest "
+        f"validation-to-test drop within one model: {_drop:.4f}."
+    )
+)
 
 # %% [markdown]
-# **Interpretation**: All three GBM libraries outperform the Random Forest baseline
-# (test IC 0.058-0.060 vs 0.056), confirming that sequential error correction adds
-# value beyond variance reduction alone. The 0.004 IC gap between the best GBM and
-# RF is modest but consistent across validation and test. The gap between GBM
-# variants (0.002) is even smaller — consistent with §12.2's observation that
-# hyperparameter quality matters more than library choice.
+# **What to read off it.** These bars are one split with no interval attached, so the
+# ordering is what this run produced rather than a measurement of which method is
+# better on data of this kind. Two things keep that in proportion. The drop from
+# validation to test inside any single model is far larger than the spread between
+# models on test, and that drop is the scale a between-model gap has to be read
+# against. And the two panels need not order the models the same way: rank IC scores
+# how well a model orders the cross-section, $R^2$ scores how close its predictions
+# are in level, and a model can do better on one and worse on the other. A conclusion
+# that holds in one panel and not the other is a conclusion about the panel.
 
 # %% [markdown]
 # ## 5. Feature Importance
 #
-# Each library reports importance on its own native scale — sklearn RF and XGBoost
+# Each library reports importance on its own native scale: sklearn RF and XGBoost
 # return normalized gain (summing to 1), CatBoost returns prediction-value change
 # (summing to 100), and LightGBM defaults to raw split counts (summing to the total
 # number of splits). Averaging those raw vectors would let LightGBM's counts dominate,
@@ -361,31 +403,55 @@ ax.set_yticks(y_pos + 1.5 * width)
 ax.set_yticklabels(features)
 ax.set_xlabel("Share of total importance (each library rescaled to sum to 1)")
 ax.set_ylabel("Firm characteristic")
-ax.set_title("Importance rankings diverge across ensemble methods")
+ax.set_title("Top firm characteristics by importance share, four libraries")
 ax.legend(loc="lower right")
-plt.show()
+show_with_alt(
+    fig,
+    "Grouped horizontal bars, one group per firm characteristic and one bar per "
+    "library, showing each library's share of its own total importance. The "
+    "characteristics are ordered by the average share across the four libraries.",
+)
+
+# %% tags=["results"]
+_shares = {
+    label: importances.select(pl.col(lib).sort(descending=True))[lib]
+    for lib, label in [("rf", "RF"), ("xgb", "XGB"), ("lgb", "LGB"), ("cb", "Cat")]
+}
+_largest = {label: float(share[0]) for label, share in _shares.items()}
+_top_five = {label: float(share.head(5).sum()) for label, share in _shares.items()}
+display(
+    Markdown(
+        "- Share of a library's own importance carried by its single largest "
+        "characteristic: "
+        + ", ".join(f"{label} {value:.0%}" for label, value in _largest.items())
+        + "\n- Share carried by its top five: "
+        + ", ".join(f"{label} {value:.0%}" for label, value in _top_five.items())
+    )
+)
 
 # %% [markdown]
-# **Interpretation**: The four methods disagree on which characteristics matter and how
-# sharply. Random Forest and CatBoost concentrate importance in a handful of features —
-# short-term reversal (`ST_REV`) alone carries a fifth to a quarter of each model's total,
-# and their top five characteristics account for more than half — while XGBoost and
-# LightGBM spread importance far more evenly across the cross-section. Part of this gap is
-# an artifact: each library measures importance on a different native scale (impurity
-# reduction, gain, split frequency, prediction-value change), so a feature that tops one
-# ranking can sit mid-table in another. Only characteristics that rank highly across all
-# four are robust signals; the disagreement is exactly why §12.5 turns to SHAP for
-# model-agnostic attribution.
+# **What to read off it.** Two questions live in this chart and only one of them is
+# answerable here. How concentrated each library's importance is, and which
+# characteristics it concentrates on, are both visible. Whether a disagreement between
+# two libraries is about the data or about the metric is not: each library measures
+# importance on its own native scale (impurity reduction, gain, split frequency,
+# prediction-value change), and the rescaling above makes the shares comparable in size
+# without making the definitions the same. So a characteristic that tops one ranking and
+# sits mid-table in another has told you nothing yet about its predictive role.
+#
+# §12.2 sets out why these native rankings are unstable in the first place: gain is
+# biased toward features with more candidate splits, split counts toward continuous
+# features, and a different seed can reorder correlated features that substitute for one
+# another. That is the argument for the SHAP attributions in §12.5, which are defined the
+# same way for every model.
 
 # %% [markdown]
 # ## 6. Save Outputs
 
 # %%
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
 test_dates = test_df["timestamp"].to_list()
 
-# Vectorized construction — one DataFrame per model, then concat
+# One frame per model, then concat.
 pred_frames = []
 for model_name, preds in predictions.items():
     pred_frames.append(
@@ -412,26 +478,25 @@ print(
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **GBMs achieve higher test IC than Random Forest on this benchmark**: all
-#    three GBM libraries land at test IC 0.058–0.060 versus 0.056 for Random
-#    Forest — a 0.004 gap that is small but consistent across validation and
-#    test. The gap is the empirical anchor for §12.1's argument that sequential
-#    error correction adds signal beyond variance reduction.
+# 1. **The boosted models and the bagged baseline are separated by less than the
+#    validation-to-test drop.** The results cell above prints both numbers. A gap that
+#    small, measured on one split with no interval, is a fact about this run; it is the
+#    kind of evidence §12.1's argument predicts, not a test of it.
 #
-# 2. **Library differences are small**: XGBoost, LightGBM, and CatBoost achieve
-#    similar IC on this dataset. Hyperparameter configuration matters more than
-#    library choice (explored in §12.4).
+# 2. **Rank IC and $R^2$ can order the same models differently.** One scores the
+#    ordering of predictions across the cross-section, the other their distance from
+#    the realized return. Deciding which matters is a decision about the strategy the
+#    predictions feed, and it has to be made before the comparison, not after seeing it.
 #
-# 3. **Early stopping selects complexity automatically**: XGBoost stopped well below
-#    the 1,000-round ceiling, showing that validation-based stopping is an effective
-#    regularizer for noisy financial targets.
+# 3. **Early stopping selects complexity from data rather than from a guess.** XGBoost
+#    stopped well below its ceiling; the printed round count says where. On a target
+#    with this little signal, that is the difference between a regularizer and a
+#    hyperparameter someone had to pick.
 #
-# 4. **Feature importance varies across libraries**: The top-ranked characteristics
-#    shift between methods, and so does concentration — Random Forest and CatBoost
-#    load heavily on a few features (their top five carry more than half the total)
-#    while XGBoost and LightGBM spread importance more evenly. Because each library
-#    uses a different native importance metric, these rankings are unstable — a known
-#    limitation discussed in §12.2 that motivates SHAP-based attribution in §12.5.
+# 4. **Native importance rankings are not comparable across libraries, even rescaled.**
+#    The shares above are on one axis because each was divided by its own total, not
+#    because the four libraries measure the same thing. §12.5's SHAP attributions are
+#    the version of this question that has one definition for every model.
 #
-# **Next**: See Ch14 for latent factor models (IPCA, RP-PCA, CAE, SDF-GAN)
-# on this same benchmark dataset.
+# **Next**: Ch14 fits latent factor models (IPCA, RP-PCA, CAE, SDF-GAN) on this same
+# benchmark, which is what makes the comparison across chapters a comparison.
