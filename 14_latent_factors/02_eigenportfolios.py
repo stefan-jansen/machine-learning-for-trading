@@ -64,6 +64,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+from matplotlib.colors import LinearSegmentedColormap
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
@@ -74,6 +75,7 @@ from utils.style import (
     COLORS,
     FIGSIZE,
     add_message_title,
+    ml4t_diverging,
     show_with_alt,
     zero_line,
 )
@@ -391,9 +393,12 @@ sector_loadings = sector_loadings.sort_values("PC1", ascending=False)
 
 # %%
 # Figure 14.3: Sector loading heatmap
+loading_cmap = LinearSegmentedColormap.from_list("ml4t_diverging", ml4t_diverging())
 fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], constrained_layout=True)
 limit = float(np.abs(sector_loadings.to_numpy()).max())
-image = ax.imshow(sector_loadings.to_numpy(), cmap="RdBu_r", vmin=-limit, vmax=limit, aspect="auto")
+image = ax.imshow(
+    sector_loadings.to_numpy(), cmap=loading_cmap, vmin=-limit, vmax=limit, aspect="auto"
+)
 ax.set_xticks(range(sector_loadings.shape[1]), sector_loadings.columns)
 ax.set_yticks(range(sector_loadings.shape[0]), sector_loadings.index)
 for row in range(sector_loadings.shape[0]):
@@ -606,7 +611,7 @@ hpca_loadings = pd.DataFrame(
 fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], constrained_layout=True)
 hpca_limit = float(np.abs(hpca_loadings.to_numpy()).max())
 image = ax.imshow(
-    hpca_loadings.to_numpy(), cmap="RdBu_r", vmin=-hpca_limit, vmax=hpca_limit, aspect="auto"
+    hpca_loadings.to_numpy(), cmap=loading_cmap, vmin=-hpca_limit, vmax=hpca_limit, aspect="auto"
 )
 ax.set_xticks(range(n_cross), hpca_loadings.columns)
 ax.set_yticks(range(len(hpca_loadings)), hpca_loadings.index)
@@ -618,22 +623,23 @@ for row in range(hpca_loadings.shape[0]):
 fig.colorbar(image, ax=ax, label="Cross-sector loading")
 add_message_title(
     ax,
-    "First-stage HPCA loadings by sector",
-    subtitle="First-stage factors from the ETF-proxy sectors listed on the vertical axis",
+    "Cross-sector HPCA loadings by sector",
+    subtitle="Step 2 components over the Step 1 sector factors on the vertical axis",
 )
 show_with_alt(
     fig,
-    "A heatmap with sector on the vertical axis and first-stage HPCA component on the horizontal, "
-    "each cell the cross-sector loading printed in the cell and shaded on a diverging red-to-blue "
-    "scale centred at zero, with a colour bar.",
+    "A heatmap with sector on the vertical axis and cross-sector HPCA component on the horizontal. "
+    "Each cell is the loading of that sector's first-stage factor on that component, printed in the "
+    "cell and shaded on a diverging scale centred at zero, with a colour bar.",
 )
 
 # %% [markdown]
-# **Finding**: HPCA produces cross-sector factors with clear economic interpretation.
-# HPCA1 typically captures the broad market (positive loadings across all sectors, mirroring
-# standard PC1). HPCA2 and beyond reveal sector-vs-sector dynamics that are easier to
-# label than standard PCA higher-order components, because each row corresponds to a named
-# sector rather than an anonymous stock.
+# **Reading it**: a row is one sector's first-stage factor and a column is one Step 2
+# component, so read down the columns. A column whose loadings all carry the same sign is
+# a direction the sectors move along together; a column carrying both signs sets one group
+# of sectors against another, and the cell values say which. What HPCA buys over plain PCA
+# here is the naming: the rows are named sectors rather than anonymous stocks, so an
+# opposition can be read off the chart instead of inferred from the constituents.
 
 # %% [markdown]
 # ## 13. Statistical Arbitrage: Residual Analysis
