@@ -513,33 +513,6 @@ class ODEFunc(nn.Module):
 
 
 # %% [markdown]
-# ### TorchODEFunc: Adaptive Solver Drift Network
-#
-# `torchdiffeq.odeint` calls the drift network as `f(t, y)`, so the same module
-# can serve as the Euler function (state-only `f(y)` via the wrapper above) or
-# as the adaptive Dopri5 drift via this `(t, y)` signature.
-
-
-# %%
-class TorchODEFunc(nn.Module):
-    """Drift network with the (t, y) signature expected by ``torchdiffeq.odeint``."""
-
-    def __init__(self, hidden_dim: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.Tanh(),
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
-            nn.Tanh(),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-        )
-
-    def forward(self, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute derivative dy/dt for the adaptive ODE solver."""
-        return self.net(y)
-
-
-# %% [markdown]
 # ### Advancing a batch by its own inter-arrival times
 #
 # `torchdiffeq.odeint` integrates one time grid for the whole batch, so a batch of
@@ -608,7 +581,7 @@ class GRUODECell(nn.Module):
         self.W_h = nn.Linear(input_dim + hidden_dim, hidden_dim)
 
         # ODE function for continuous evolution
-        self.ode_func = TorchODEFunc(hidden_dim)
+        self.ode_func = ODEFunc(hidden_dim)
 
     def forward(
         self,
