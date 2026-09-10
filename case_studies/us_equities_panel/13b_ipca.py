@@ -69,24 +69,32 @@
 # %%
 """Generate IPCA validation predictions through the shared research interface."""
 
-import os
-from pathlib import Path
-
+import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
-from case_studies.research import open_study, plan_models
+from case_studies.research import (
+    candidate_set_supersedes,
+    open_study,
+    plan_models,
+    run_model_population,
+    supersedes_for_run,
+)
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
+from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 LABELS = []
 OVERRIDES = {}
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 EXECUTION_TIER = "canonical"
-WORKSPACE = "experiments"
-MAX_SYMBOLS = 0
-FOLD_IDS = []
+WORKSPACE = ""
+PREVIEW_MAX_SYMBOLS = 0
+PREVIEW_FOLD_IDS = []
 PREVIEW_N_FACTORS = 0
 PREVIEW_MAX_ITER = 0
 
@@ -108,7 +116,7 @@ PREVIEW_MAX_ITER = 0
 # - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
 #   fold. A preview run declares its reductions and carries them in the identity, so its results
 #   can never be compared against canonical ones or reach a holdout decision.
-# - **`FOLD_IDS`** and **`MAX_SYMBOLS`** are the reductions a preview declares.
+# - **`PREVIEW_FOLD_IDS`** and **`PREVIEW_MAX_SYMBOLS`** are the reductions a preview declares.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -145,34 +153,41 @@ label_menu = pl.DataFrame(
 )
 label_menu
 
+# %% [markdown]
+# A run that narrows the labels or overrides a parameter produces a different set of predictions
+# from the one the canonical name stands for. Publishing it under that name would leave the name
+# meaning two different member sets at two different times, so the guard below requires such a run
+# to say what to call its own population, and the frozen set names in Section 6 are withheld from
+# it for the same reason.
+
+# %%
+is_published_population = (
+    EXECUTION_TIER == "canonical" and selected_labels == published_labels and not OVERRIDES
+)
+if EXECUTION_TIER == "canonical" and not is_published_population and not POPULATION_NAME:
+    raise ValueError(
+        "this run narrows the declared labels or overrides a parameter, so it cannot publish the "
+        "canonical population; pass POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place
+# and redirects only writes, so a preview run scores the same inputs a canonical one does and
+# cannot publish over it. A preview must be given a workspace to write into; a canonical run
+# leaves `WORKSPACE` empty and regenerates the case study's own artifacts in place.
+
 # %%
 preview_reductions = {}
-if MAX_SYMBOLS:
-    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
-if FOLD_IDS:
-    preview_reductions["folds"] = [int(fold) for fold in FOLD_IDS]
+if PREVIEW_MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(PREVIEW_MAX_SYMBOLS)
+if PREVIEW_FOLD_IDS:
+    preview_reductions["folds"] = [int(fold) for fold in PREVIEW_FOLD_IDS]
 if PREVIEW_N_FACTORS:
     preview_reductions["n_factors"] = int(PREVIEW_N_FACTORS)
 if PREVIEW_MAX_ITER:
     preview_reductions["max_iter"] = int(PREVIEW_MAX_ITER)
 
-# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
-# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
-# publish over it.
-if EXECUTION_TIER == "canonical":
-    if preview_reductions:
-        raise ValueError("Canonical execution cannot declare preview reductions")
-    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
-elif EXECUTION_TIER == "preview":
-    if not preview_reductions:
-        raise ValueError("Preview execution requires at least one declared reduction")
-    study = open_study(
-        CASE_STUDY_ID,
-        execution_tier=EXECUTION_TIER,
-        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
-    )
-else:
-    raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -232,11 +247,6 @@ request_table
 
 # %%
 plan = plan_models(study, requests=requests)
-official_population = None
-if EXECUTION_TIER == "canonical":
-    official_population = plan.create_population(
-        name="us-equities-ipca-checkpoints-v1",
-    )
 
 planned_population = pl.DataFrame(
     {
@@ -250,8 +260,35 @@ planned_population = pl.DataFrame(
 )
 planned_population
 
+# %% [markdown]
+# `run_model_population` takes the plan, writes the population down, fits every member and then
+# checks that what came out is what was declared. The same call serves both tiers: a canonical run
+# registers an immutable population that the later notebooks bind to, and a preview run gets a
+# declaration that is verified and then discarded with its workspace, so no notebook here has to
+# branch on the tier to decide what to publish.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is a set of
+# prediction identities, so anything that moves a training identity - a changed preset as much as a
+# changed menu - produces a different population under the same name, and the registry refuses to
+# write it without being told which snapshot it supersedes. Leaving it empty is right for a first
+# run and for a reader's clean clone, and `supersedes_for_run` withholds a declared hash wherever
+# offering it would be refused.
+
 # %%
-execution = plan.run()
+population_name = POPULATION_NAME or "us-equities-ipca-checkpoints-v1"
+execution, official_population = run_model_population(
+    study,
+    plan,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION,
+        execution_tier=EXECUTION_TIER,
+    ),
+)
+
+print(f"population {official_population.name}: {len(official_population.members)} prediction sets")
 
 # %% [markdown]
 # ## 4. What was actually fitted
@@ -337,13 +374,73 @@ for run in execution.runs:
         )
 
 coverage_table = pl.DataFrame(coverage_rows).sort("label", "prediction_hash")
-if official_population is not None:
-    official_population.require_complete()
 coverage_table
 
 # %%
 execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
+
+# %% [markdown]
+# ### How the ranking held across the walk-forward folds
+#
+# The headline information coefficient above is an average over the folds, and an average says
+# nothing about whether the folds agreed. Each fold is a different year of the market with a
+# different set of names quoting in it, so a factor model can rank the cross-section well in a few
+# of them and not at all in the rest and still show a respectable mean.
+#
+# The per-fold values come from the registry rather than from the raw predictions: each fold's
+# information coefficient is registered alongside the prediction set, so reading it back costs a
+# query rather than a seven-million-row load. Loadings here are a function of a stock's own
+# characteristics rather than fitted per name, so a fold whose cross-section is unlike the
+# training window's is the one to look at first.
+
+# %%
+fold_rows = []
+for run in execution.runs:
+    run_label = run.training.spec()["label"]
+    for prediction in run.predictions:
+        fold_rows.append(prediction.folds().with_columns(label=pl.lit(run_label)))
+folds_frame = pl.concat(fold_rows, how="vertical_relaxed").sort("label", "fold_id")
+
+fold_labels = folds_frame.get_column("label").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(fold_labels), categorical=True)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for index, fold_label in enumerate(fold_labels):
+    series = folds_frame.filter(pl.col("label") == fold_label)
+    ax.plot(
+        series.get_column("fold_id"),
+        series.get_column("ic"),
+        marker="o",
+        markersize=4,
+        lw=1.4,
+        color=palette[index],
+        label=fold_label,
+    )
+zero_line(ax)
+ax.set_xlabel("Walk-forward fold")
+ax.set_ylabel("Mean validation IC")
+ax.legend(fontsize=8, frameon=False)
+add_message_title(
+    ax,
+    "Mean validation IC by walk-forward fold",
+    subtitle="One line per declared label, over the folds the evaluation stage established",
+)
+# The alt text counts rather than asserts: how many folds land above zero is a fact about the
+# frame, and a line described as steady when it is not is a claim the data refutes.
+_signs = (
+    folds_frame.group_by("label").agg(above=(pl.col("ic") > 0).sum(), total=pl.len()).sort("label")
+)
+_sign_text = " and ".join(
+    f"{row['above']} of {row['total']} for {row['label']}" for row in _signs.iter_rows(named=True)
+)
+show_with_alt(
+    fig,
+    "A line chart of mean validation information coefficient against walk-forward fold, one line "
+    "per declared label, with a dashed line at zero. Counted from the underlying frame, the folds "
+    f"whose information coefficient is above zero are {_sign_text}.",
+)
 
 # %% [markdown]
 # ## 6. Naming the sets the later notebooks open
@@ -353,28 +450,51 @@ execution_diagnostics
 # times, so a run that overrode a parameter, narrowed the labels or ran under the preview tier
 # keeps its rows and publishes no name.
 #
-# These sets are small enough to be compared prediction by prediction, which is why
-# [`15_model_analysis`](15_model_analysis.ipynb) does not need a separate bounded subset for
-# them the way it does for the larger grids.
+# Each label gets two names, the same pair every other model notebook publishes: a **full set**
+# that [`16_backtest`](16_backtest.ipynb) backtests member by member, and a **bounded diagnostic
+# set** that [`15_model_analysis`](15_model_analysis.ipynb) loads raw predictions for. Here the
+# two hold the same single member, because this family declares one configuration and fits it
+# once rather than checkpointing it, so there is nothing to bound away. The two names still exist
+# so that every family is opened the same way downstream; the registry stores one set and binds
+# both names to it.
 
 # %% tags=["results"]
 set_rows = []
-is_published_population = (
-    EXECUTION_TIER == "canonical" and selected_labels == published_labels and not OVERRIDES
-)
 if is_published_population:
     for selected_label in selected_labels:
         label_name = selected_label.replace("_", "-")
-        result_set = study.predictions.freeze(
-            execution.catalog_rows.filter(pl.col("label") == selected_label),
-            name=f"us-equities-{label_name}-ipca-v1",
+        label_rows = execution.catalog_rows.filter(pl.col("label") == selected_label)
+        full_set_name = f"us-equities-{label_name}-ipca-v1"
+        full_set = study.predictions.freeze(
+            label_rows,
+            name=full_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=full_set_name, declared=SUPERSEDES_SETS.get(full_set_name, "")
+            ),
         )
-        set_rows.append(
-            {
-                "role": "backtest and diagnostic population",
-                "set_name": result_set.name,
-                "members": len(result_set.members),
-            }
+        diagnostic_set_name = f"us-equities-{label_name}-ipca-diagnostics-v1"
+        diagnostic_set = study.predictions.freeze(
+            label_rows,
+            name=diagnostic_set_name,
+            supersedes=candidate_set_supersedes(
+                study,
+                name=diagnostic_set_name,
+                declared=SUPERSEDES_SETS.get(diagnostic_set_name, ""),
+            ),
+        )
+        set_rows.extend(
+            [
+                {
+                    "role": "backtest population",
+                    "set_name": full_set.name,
+                    "members": len(full_set.members),
+                },
+                {
+                    "role": "bounded diagnostics",
+                    "set_name": diagnostic_set.name,
+                    "members": len(diagnostic_set.members),
+                },
+            ]
         )
 compatible_sets = pl.DataFrame(
     set_rows,
@@ -383,9 +503,11 @@ compatible_sets = pl.DataFrame(
 compatible_sets
 
 # %% [markdown]
-# `15_model_analysis.py` reopens the named label sets for descriptive analysis. `16_backtest.py`
-# passes every catalog row directly to the shared backtest runner. Predictive metrics do not choose
-# a configuration or checkpoint.
+# `15_model_analysis` reopens both names per label: the full set to confirm the run filled every
+# member it promised, and the diagnostic set to read raw predictions. `16_backtest` passes every
+# full-set catalog row to the shared backtest runner. Neither the metrics here nor the ones there
+# choose a configuration or a checkpoint; selection is on validation backtest Sharpe in
+# `16_backtest`.
 
 # %% [markdown]
 # ## What to notice

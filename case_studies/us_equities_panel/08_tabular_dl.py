@@ -86,15 +86,20 @@
 # %%
 """Generate TabM validation predictions through the shared research interface."""
 
-import os
-from pathlib import Path
-
+import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
-from case_studies.research import open_study, plan_models
+from case_studies.research import (
+    candidate_set_supersedes,
+    open_study,
+    plan_models,
+    run_model_population,
+    supersedes_for_run,
+)
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
+from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -103,11 +108,14 @@ CONFIG_NAMES = []
 COMMON_OVERRIDES = {}
 CONFIG_OVERRIDES = {}
 DIAGNOSTIC_CONFIG_NAMES = ["tabm_s"]
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 DEVICE = "cuda"
 EXECUTION_TIER = "canonical"
-WORKSPACE = "experiments"
-MAX_SYMBOLS = 0
-MAX_FOLDS = 0
+WORKSPACE = ""
+PREVIEW_MAX_SYMBOLS = 0
+PREVIEW_MAX_FOLDS = 0
 PREVIEW_N_EPOCHS = 0
 PREVIEW_CHECKPOINT_INTERVAL = 0
 
@@ -127,10 +135,11 @@ PREVIEW_CHECKPOINT_INTERVAL = 0
 #   **`CONFIG_OVERRIDES`** changes one named configuration, taking precedence. An override moves a
 #   training identity, so an overridden run registers beside the published one rather than
 #   replacing it.
-# - **`DIAGNOSTIC_CONFIG_NAMES`** names the small subset [`15_model_analysis`](15_model_analysis.ipynb)
-#   compares predictions across. It is bounded on purpose: that comparison holds every member's
-#   prediction frame in memory at once and correlates them pairwise, so its cost grows with the
-#   square of the membership.
+# - **`DIAGNOSTIC_CONFIG_NAMES`** names the configuration [`15_model_analysis`](15_model_analysis.ipynb)
+#   reads raw predictions for. It is bounded hard: that comparison loads every diagnostic member's
+#   prediction frame and holds them all while it joins them pairwise, and one frame on this panel
+#   is over seven million rows and about 225 MB in memory. The frozen set below is the named
+#   configuration at its last epoch checkpoint - one member for this label and family.
 # - **`EXECUTION_TIER`** is `canonical` or `preview`. A canonical run fits the whole panel on every
 #   fold at the published epoch schedule. A preview run has to declare at least one reduction, and
 #   its results carry that reduction in their identity so they can never be compared against
@@ -168,34 +177,45 @@ menu = pl.DataFrame(
 )
 menu
 
+# %% [markdown]
+# A run that narrows the selection, overrides a parameter or fits on another device produces a
+# different set of predictions from the one the canonical name stands for. Publishing it under
+# that name would leave the name meaning two different member sets at two different times, so the
+# guard below requires such a run to say what to call its own population, and the frozen set names
+# in Section 6 are withheld from it for the same reason.
+
+# %%
+is_published_population = (
+    EXECUTION_TIER == "canonical"
+    and selected_names == published_names
+    and not COMMON_OVERRIDES
+    and not CONFIG_OVERRIDES
+    and DEVICE == "cuda"
+)
+if EXECUTION_TIER == "canonical" and not is_published_population and not POPULATION_NAME:
+    raise ValueError(
+        "this run narrows or overrides what the menu declares, so it cannot publish the canonical "
+        "population; pass POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place
+# and redirects only writes, so a preview run scores the same inputs a canonical one does and
+# cannot publish over it. A preview must be given a workspace to write into; a canonical run
+# leaves `WORKSPACE` empty and regenerates the case study's own artifacts in place.
+
 # %%
 preview_reductions = {}
-if MAX_SYMBOLS:
-    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
-if MAX_FOLDS:
-    preview_reductions["folds"] = list(range(int(MAX_FOLDS)))
+if PREVIEW_MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(PREVIEW_MAX_SYMBOLS)
+if PREVIEW_MAX_FOLDS:
+    preview_reductions["folds"] = list(range(int(PREVIEW_MAX_FOLDS)))
 if PREVIEW_N_EPOCHS:
     preview_reductions["n_epochs"] = int(PREVIEW_N_EPOCHS)
 if PREVIEW_CHECKPOINT_INTERVAL:
     preview_reductions["checkpoint_interval"] = int(PREVIEW_CHECKPOINT_INTERVAL)
 
-# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
-# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
-# publish over it.
-if EXECUTION_TIER == "canonical":
-    if preview_reductions:
-        raise ValueError("Canonical execution cannot declare preview reductions")
-    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
-elif EXECUTION_TIER == "preview":
-    if not preview_reductions:
-        raise ValueError("Preview execution requires at least one declared reduction")
-    study = open_study(
-        CASE_STUDY_ID,
-        execution_tier=EXECUTION_TIER,
-        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
-    )
-else:
-    raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -256,11 +276,6 @@ request_table
 
 # %%
 plan = plan_models(study, requests=requests)
-official_population = None
-if EXECUTION_TIER == "canonical":
-    official_population = plan.create_population(
-        name="us-equities-tabular-dl-checkpoints-v1",
-    )
 
 planned_population = pl.DataFrame(
     {
@@ -274,8 +289,35 @@ planned_population = pl.DataFrame(
 )
 planned_population
 
+# %% [markdown]
+# `run_model_population` takes the plan, writes the population down, fits every member and then
+# checks that what came out is what was declared. The same call serves both tiers: a canonical run
+# registers an immutable population that the later notebooks bind to, and a preview run gets a
+# declaration that is verified and then discarded with its workspace, so no notebook here has to
+# branch on the tier to decide what to publish.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is a set of
+# prediction identities, so anything that moves a training identity - a changed preset as much as a
+# changed menu - produces a different population under the same name, and the registry refuses to
+# write it without being told which snapshot it supersedes. Leaving it empty is right for a first
+# run and for a reader's clean clone, and `supersedes_for_run` withholds a declared hash wherever
+# offering it would be refused.
+
 # %%
-execution = plan.run()
+population_name = POPULATION_NAME or "us-equities-tabular-dl-checkpoints-v1"
+execution, official_population = run_model_population(
+    study,
+    plan,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION,
+        execution_tier=EXECUTION_TIER,
+    ),
+)
+
+print(f"population {official_population.name}: {len(official_population.members)} prediction sets")
 
 # %% [markdown]
 # ## 4. What was actually fitted
@@ -353,6 +395,75 @@ if not unscored.is_empty():
     raise RuntimeError(f"prediction sets scored no dates: {unscored.to_dicts()}")
 scored
 
+# %% [markdown]
+# ### Where more training stopped helping
+#
+# Each line traces one configuration's validation information coefficient as epochs are added to
+# it. This is the figure the checkpoint dimension exists to produce, and it separates two things a
+# single end-of-training number cannot.
+#
+# A line that rises and then falls has an interior optimum: the model was still learning, then
+# began fitting the training windows at the expense of the validation folds. That is the evidence about whether the capacity
+# ladder outruns what this panel supports, and it is the only place the three rungs can be
+# compared at equal training length.
+# A line that wanders around zero without trend never had anything to learn, and its highest point
+# is wherever the noise happened to peak. Both produce a respectable-looking maximum, which is why
+# the curve rather than the maximum is what to read.
+#
+# Nothing here selects a checkpoint. Every one of them is registered as its own candidate, and
+# which one a strategy would use is decided by validation backtest Sharpe in
+# [`16_backtest`](16_backtest.ipynb).
+
+# %%
+curves = scored.sort("config_name", "checkpoint_value")
+config_names = curves.get_column("config_name").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(config_names), categorical=True)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for index, config_name in enumerate(config_names):
+    series = curves.filter(pl.col("config_name") == config_name)
+    ax.plot(
+        series.get_column("checkpoint_value"),
+        series.get_column("ic_mean"),
+        marker="o",
+        markersize=4,
+        lw=1.4,
+        color=palette[index],
+        label=config_name,
+    )
+zero_line(ax)
+ax.set_xlabel("Training epochs")
+ax.set_ylabel("Mean validation IC")
+ax.legend(fontsize=8, frameon=False)
+add_message_title(
+    ax,
+    "Mean validation IC against training epoch",
+    subtitle="One line per configuration, over the epochs the schedule checkpoints at",
+)
+# The alt text counts rather than asserts: whether a curve turns over is the question the figure
+# exists to answer, and a line described as peaking when it does not is a claim the data refutes.
+_peaks = (
+    curves.group_by("config_name")
+    .agg(
+        peak=pl.col("checkpoint_value").sort_by("ic_mean", descending=True).first(),
+        first=pl.col("checkpoint_value").min(),
+        last=pl.col("checkpoint_value").max(),
+    )
+    .with_columns(
+        interior=pl.col("peak").is_between(pl.col("first"), pl.col("last"), closed="none")
+    )
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+show_with_alt(
+    fig,
+    "A line chart of mean validation information coefficient against training epoch, one line per "
+    "configuration, with a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} configurations reach their highest information coefficient "
+    "at an epoch that is neither the first nor the last, which is what an interior optimum looks "
+    "like on this chart.",
+)
+
 # %%
 coverage_rows = []
 for run in execution.runs:
@@ -378,8 +489,6 @@ for run in execution.runs:
         )
 
 coverage_table = pl.DataFrame(coverage_rows).sort("config_name", "checkpoint")
-if official_population is not None:
-    official_population.require_complete()
 coverage_table
 
 # %%
@@ -401,22 +510,31 @@ execution_diagnostics
 
 # %% tags=["results"]
 set_rows = []
-is_published_population = (
-    EXECUTION_TIER == "canonical"
-    and selected_names == published_names
-    and not COMMON_OVERRIDES
-    and not CONFIG_OVERRIDES
-    and DEVICE == "cuda"
-)
 if is_published_population:
     label_name = label.replace("_", "-")
+    full_set_name = f"us-equities-{label_name}-tabular-dl-v1"
     full_set = study.predictions.freeze(
         execution.catalog_rows,
-        name=f"us-equities-{label_name}-tabular-dl-v1",
+        name=full_set_name,
+        supersedes=candidate_set_supersedes(
+            study, name=full_set_name, declared=SUPERSEDES_SETS.get(full_set_name, "")
+        ),
     )
+    diagnostic_rows = execution.catalog_rows.filter(
+        pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)
+        # `.fill_null(True)` covers a family that publishes no checkpoint value at all, where the
+        # comparison is null rather than false and would otherwise empty the frame.
+        & (
+            pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("config_name")
+        ).fill_null(True)
+    )
+    diagnostic_set_name = f"us-equities-{label_name}-tabular-dl-diagnostics-v1"
     diagnostic_set = study.predictions.freeze(
-        execution.catalog_rows.filter(pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)),
-        name=f"us-equities-{label_name}-tabular-dl-diagnostics-v1",
+        diagnostic_rows,
+        name=diagnostic_set_name,
+        supersedes=candidate_set_supersedes(
+            study, name=diagnostic_set_name, declared=SUPERSEDES_SETS.get(diagnostic_set_name, "")
+        ),
     )
     set_rows = [
         {

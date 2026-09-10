@@ -74,8 +74,10 @@ import polars as pl
 from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
+    candidate_set_supersedes,
     open_study,
     plan_backtests,
+    population_supersedes,
     run_backtests,
 )
 from case_studies.research.strategy import strategy_warmup_periods
@@ -107,6 +109,9 @@ RISK_SET_NAMES = [
     "us-equities-fwd-ret-21d-risk-overlay-v1",
 ]
 EXECUTION_TIER = "canonical"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 WORKSPACE = "experiments"
 PREVIEW_LABELS = []
 PREVIEW_MAX_SOURCE_ROWS = 0
@@ -123,23 +128,22 @@ MAX_SYMBOLS = 0
 #
 # `STAGE_SEQUENCE` is the order the backtest stages run in: signal, allocation, risk overlay, then
 # cost sensitivity. Everything before the last one is a stage a strategy can come from, so the pool
-# is the sequence minus the terminal stage. Naming the stages by hand instead is how
-# `risk_overlay` came to be missing from this notebook while four of the seven completed case
-# studies carry a risk overlay as their leading validation strategy - and a risk overlay shares its
-# allocation parent's prediction hash, so the omission does not raise. It silently joins the
-# un-overlaid cost curve to a strategy that has an overlay, and Chapter 20 then describes a
-# different strategy from the one it names.
-
-# %%
-# Every stage a strategy can be carried forward from: the backtest sequence without its
-# terminal stage. Derived from `STAGE_SEQUENCE` so a stage added there reaches this pool
-# without anyone remembering to come here.
-PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
-
-declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES, *RISK_SET_NAMES]
+# is the sequence minus the terminal stage.
+#
+# **A stage left out of that pool does not raise.** A risk overlay shares its allocation parent's
+# prediction hash, so a pool missing `risk_overlay` still resolves a source for every label - the
+# un-overlaid one - and the cost curve it draws is then a curve for a different strategy from the
+# one it is named after. Deriving the pool is what makes a stage added later reach it without
+# anyone remembering to come here.
+#
 # Both tiers resolve the study through `open_study`. It reads the labels, features and earlier
 # results in place and redirects only writes, so a preview run sweeps the same inputs a canonical
 # one does and cannot publish over it.
+
+# %%
+PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
+
+declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES, *RISK_SET_NAMES]
 if EXECUTION_TIER == "canonical":
     if PREVIEW_LABELS or PREVIEW_MAX_SOURCE_ROWS or PREVIEW_MAX_COST_VALUES or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
@@ -227,15 +231,17 @@ if eligible.is_empty() or not ineligible.is_empty():
 # **Because one configuration is kept per label, some summaries have no width.** A median, a range
 # or a confidence band across configurations is computed over a single row, so all three coincide.
 # That is a property of the shortlist size rather than a finding about stability.
+#
+#
+# **Prices are cached per label and per warmup, not once per label.** A strategy records the digest
+# of exactly the price frame it was handed, and allocators need different amounts of history before
+# their first decision: none for the simple weighting methods, a volatility window for
+# inverse-volatility and risk parity, a longer lookback for the mean-variance ones. A single frame
+# long enough for the greediest of them would record a digest that nothing recomputing at a
+# member's own warmup can reproduce, and the later notebooks and the holdout evaluation both check
+# exactly that.
 
 # %% tags=["results"]
-# Prices are cached per label AND per warmup, not once per label. A strategy records the digest of
-# exactly the price frame it was handed, and allocators need different amounts of history before
-# their first decision: none for the simple weighting methods, a volatility window for
-# inverse-volatility and risk parity, a longer lookback for the mean-variance ones. Handing every
-# member of a label one frame long enough for the greediest of them would record a digest that
-# nothing recomputing at a member's own warmup can reproduce, and the later notebooks and the
-# holdout evaluation both check exactly that.
 _price_cache: dict[tuple[str, int], object] = {}
 
 
@@ -290,6 +296,12 @@ selected_sources.select(
 # Every identity is written down before the first backtest runs, for the same reason the model
 # populations were: a sweep that came out short would otherwise look like a smaller sweep rather
 # than a failed one.
+#
+# `SUPERSEDES_POPULATION` and `SUPERSEDES_SETS` name the generation this run replaces. A population
+# and a candidate set are both immutable, so a re-run that admits different members has to say
+# which snapshot it supersedes or the registry refuses the write. Both default to empty, which is
+# right for a first run and for a reader's clean clone; `population_supersedes` and
+# `candidate_set_supersedes` withhold a declared hash wherever offering it would be refused.
 
 # %%
 bps_values = get_cost_grid_bps(CASE_STUDY_ID)
@@ -374,12 +386,8 @@ def plan_cost_member(label, prices, cost_request, source_row):
     source_spec = json.loads(source_row["spec_json"])
     signal = dict(source_spec["strategy"]["signal"])
     allocation = source_spec["strategy"].get("allocation")
-    # Every block the source strategy carries has to be carried into the re-priced one, and the
-    # risk block is the one that is easy to lose: it is absent from a signal-stage or an
-    # allocation-stage source, `plan_backtests` and `run_backtests` both default it to None, and
-    # a strategy re-priced without its overlay produces a cost curve for a different strategy
-    # under the overlaid one's name. That is the same defect as excluding risk_overlay from the
-    # pool, arriving from the other side, so it is asserted rather than assumed below.
+    # A risk block is absent from a signal- or allocation-stage source and defaults to None in
+    # both planners, so a re-priced overlay could silently lose it. Asserted below.
     risk = source_spec["strategy"].get("risk")
     if source_row["stage"] == "risk_overlay" and not risk:
         raise ValueError(
@@ -434,9 +442,13 @@ if planned_population.get_column("backtest_hash").n_unique() != planned_populati
 
 official_population = None
 if EXECUTION_TIER == "canonical":
+    population_name = POPULATION_NAME or "us-equities-cost-sensitivity-v1"
     official_population = OfficialPopulation.create(
         study,
-        name="us-equities-cost-sensitivity-v1",
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
         member_kind="backtest",
         members=tuple(planned_population.get_column("backtest_hash")),
     )
@@ -539,6 +551,11 @@ execution_diagnostics
 # [`20_strategy_analysis`](20_strategy_analysis.ipynb) opens. These rows describe a strategy that
 # was already chosen, so they stay out of the pool anything selects from - a cost row winning a
 # selection would mean the cost assumption picked the strategy.
+#
+# **The freeze is also the comparability check.** No comparison contract is declared, which makes
+# every field of the protocol required-constant: two members that disagree on their
+# cross-validation design measured their Sharpe on different folds, so ranking them is not a
+# comparison, and this is the only thing that checks it.
 
 # %% tags=["results"]
 set_rows = []
@@ -556,13 +573,13 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # No comparison contract is declared, which makes every protocol field
-        # required-constant. That is the guard rather than an omission: two members that disagree
-        # on their cross-validation design measured their Sharpe on different folds, so ranking
-        # them is not a comparison, and this is the only thing that checks it.
+        result_set_name = f"us-equities-{label_name}-cost-sensitivity-v1"
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
-            name=f"us-equities-{label_name}-cost-sensitivity-v1",
+            name=result_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=result_set_name, declared=SUPERSEDES_SETS.get(result_set_name, "")
+            ),
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}
@@ -622,10 +639,9 @@ axes[0].set_ylabel("Validation Sharpe")
 axes[1].legend(fontsize=8, frameon=False)
 add_message_title(
     axes[0],
-    "Where each fixed strategy stops paying for itself",
+    "Validation Sharpe against trading cost, by cost regime",
     subtitle="Validation Sharpe against cost, under a proportional and a per-share schedule",
 )
-fig.tight_layout()
 # The alt text reads the crossing from the frame rather than asserting one: a curve described as
 # crossing zero when it never does is a claim the data refutes, and where it crosses is the whole
 # question this notebook asks.
@@ -671,7 +687,8 @@ show_with_alt(
 # panel, which is where a broad long-short book holds a large share of its names, so an ordering
 # that holds under one is not thereby established under the other.
 #
-# **Where a curve crosses zero is a break-even, not a verdict on tradability.** It says what
+# **Where a curve crosses zero is a break-even, and it does not say the strategy is tradable.**
+# It says what
 # uniform friction this strategy could absorb before the validation Sharpe went negative. Real
 # friction is not uniform: it varies by name, by size, by time of day, and it grows with the
 # position relative to what the stock trades. A strategy whose break-even sits far above any
