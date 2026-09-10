@@ -215,6 +215,33 @@ class Result:
                         backtest["identity_version"],
                         origin,
                     )
+        # A causal hash is a real row in the same registry file, and saying "unknown" about
+        # it sends the reader looking for a run that is sitting right there. `Result` models
+        # training, prediction and backtest; causal runs are registered by
+        # `register_causal_run` into `causal_runs` and read through
+        # `case_studies.research.causal.CausalResult`, which is a separate model because a
+        # causal identity has no training hash to hang off. Checked only on the way out, so
+        # the found path pays nothing for it.
+        for root, _namespace, _origin in roots:
+            db_path = root / "run_log" / "registry.db"
+            if not db_path.exists():
+                continue
+            with closing(sqlite3.connect(db_path)) as db:
+                has_table = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'causal_runs'"
+                ).fetchone()
+                if has_table is None:
+                    continue
+                row = db.execute(
+                    "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (result_hash,)
+                ).fetchone()
+            if row is not None:
+                raise KeyError(
+                    f"{result_hash!r} is a causal run in {db_path}, which Result does not "
+                    "model. Read it with case_studies.research.causal.CausalResult.open("
+                    "study, causal_hash), and note that migrate_equivalent_training_identity "
+                    "does not reach causal rows - a causal re-run refits rather than migrates."
+                )
         raise KeyError(f"Unknown result hash {result_hash!r}")
 
     @property

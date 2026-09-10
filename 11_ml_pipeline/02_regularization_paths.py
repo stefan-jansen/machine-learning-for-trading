@@ -56,8 +56,6 @@
 # %% tags=[]
 """Regularized Regression for Return Prediction - compare Ridge, LASSO, and Elastic Net via walk-forward CV."""
 
-import warnings
-
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -80,8 +78,6 @@ from utils.modeling import cross_sectional_ic_mean
 from utils.paths import get_case_study_dir, get_chapter_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -435,10 +431,9 @@ if NEED_TRAINING:
     # Kish, not weights.sum(): the rescaling below multiplies every weight by a
     # constant, which leaves this unchanged and would send a plain sum to n_train.
     n_eff_sw = float(weights.sum() ** 2 / (weights**2).sum())
-    # Normalize to mean one before fitting. sklearn scales rows by sqrt(w) and does
-    # not renormalize, so the weighted objective is sum(w_i * resid_i^2) + alpha*||b||^2:
-    # with a mean weight near 0.19 the same alpha is roughly five times the penalty
-    # relative to the data term, and the IC gap below would be that, not the recency bet.
+    # Normalized to mean one before fitting. sklearn scales rows by sqrt(w) without
+    # renormalizing, so weights averaging well below one would raise alpha's weight against
+    # the data term and the IC gap below would measure that rather than the recency bet.
     weights = weights * (n_train_sw / weights.sum())
 
     dates_te_sw = dates_np[te_last]
@@ -462,10 +457,9 @@ if NEED_TRAINING:
         "n_eff": n_eff_sw,
         "ic_uw": ic_uw,
         "ic_w": ic_w,
-        # Stamps which formula n_eff came from. A cache written before the Kish
-        # change carries all the other keys with a plain sum-of-weights n_eff, so
-        # key presence alone cannot tell the two apart and the reader would be
-        # shown 19% of the fold where this notebook computes 37%.
+        # Stamps which formula produced n_eff. A cache written before the Kish change
+        # carries every other key with a plain sum-of-weights value, so key presence alone
+        # cannot tell the two apart and a stale cache would be read as this notebook's.
         "n_eff_kind": "kish",
     }
 
@@ -601,15 +595,13 @@ ax.set_xticks(range(mask_subset.shape[0]))
 ax.set_xticklabels([f"Fold {i + 1}" for i in range(mask_subset.shape[0])])
 ax.set_yticks(range(len(names_subset)))
 ax.set_yticklabels(names_subset, fontsize=9)
-ax.set_title("Which features LASSO keeps depends on the training window")
+ax.set_title("Features LASSO retains, by fold")
 
 # Add grid lines between cells
 for i in range(mask_subset.shape[1] + 1):
     ax.axhline(i - 0.5, color="lightgray", lw=0.5)
 for j in range(mask_subset.shape[0] + 1):
     ax.axvline(j - 0.5, color="lightgray", lw=0.5)
-
-fig.tight_layout()
 show_with_alt(
     fig,
     "Grid with one row per feature and one column per fold, filled where LASSO "
@@ -829,13 +821,22 @@ ax.axhline(0, color="gray", lw=0.8)
 ax.set_xticks(np.arange(len(selected)))
 ax.set_xticklabels(list(selected))
 ax.set_ylabel("Mean IC across folds, ±1 standard deviation")
-ax.set_title("Fold-to-fold spread is wider than the gaps between the methods")
+ax.set_title("Mean IC across folds by method, with one standard deviation")
 show_with_alt(
     fig,
     "Bar chart of mean information coefficient for OLS, Ridge, LASSO and Elastic "
     "Net, each with an error bar one standard deviation wide.",
 )
-
+# %% [markdown] tags=[]
+# The error bars are wider than the gaps between the bars, which is worth seeing and is less
+# than it looks. Every method is scored on the same folds, so their scores rise and fall
+# together with whatever each fold happens to contain - and a method can be consistently
+# ahead of another while both have wide marginal spreads. Overlapping error bars across
+# methods do not settle whether one is ahead of another.
+#
+# What settles it is the paired difference: subtract the two methods' IC fold by fold and
+# look at the spread of that series, which cancels the fold effect these bars are dominated
+# by. This chart shows the spread; it does not compare the methods.
 # %% [markdown] tags=[]
 # ### Prediction Rank Stability
 #
@@ -909,14 +910,20 @@ ax_nz.tick_params(axis="y", labelcolor=COLORS["amber"])
 lines, labels = ax.get_legend_handles_labels()
 lines_nz, labels_nz = ax_nz.get_legend_handles_labels()
 ax.legend(lines + lines_nz, labels + labels_nz, loc="lower left", frameon=False)
-ax.set_title("LASSO drops features long before ranking accuracy responds")
-fig.tight_layout()
+ax.set_title("Mean IC and surviving feature count against LASSO penalty")
 show_with_alt(
     fig,
     "Two series against regularization strength on a log axis: mean information "
     "coefficient on the left scale and the count of non-zero coefficients on the right.",
 )
-
+# %% [markdown] tags=[]
+# The two series come apart, and where they do is the point. The feature count falls away
+# over a range where mean validation IC does not, so across that range LASSO produces a
+# sparser model at no observed cost in ranking accuracy.
+#
+# That is not the same as saying the dropped features carried nothing. Their coefficients
+# were non-zero and did contribute; what happens on refitting is that correlated features
+# take up the contribution. The chart shows the trade is available, not that it is free.
 # %% [markdown] tags=[]
 # ### LASSO Coefficient Path (Top 10 Features)
 #
@@ -944,14 +951,13 @@ ax.axvline(
 )
 ax.set_xlabel("α (LASSO regularization)")
 ax.set_ylabel("Coefficient value (standardized)")
-ax.set_title("Features enter the LASSO model one at a time as the penalty falls")
+ax.set_title("LASSO coefficient paths against penalty")
 ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=9)
-fig.tight_layout()
 show_with_alt(
     fig,
-    "Coefficient values against regularization strength on a log axis. The ten "
-    "largest are drawn in colour and the rest in grey; each leaves zero at a "
-    "different alpha.",
+    "Coefficient values against the LASSO penalty on a log axis. The ten largest paths "
+    "are drawn in colour and the rest in grey, with a vertical marker at the selected "
+    "alpha. The coloured paths reach zero at different penalties rather than together.",
 )
 
 # %% [markdown] tags=[]
@@ -1005,8 +1011,7 @@ lines1, labels1 = ax1.get_legend_handles_labels()
 lines2, labels2 = ax2.get_legend_handles_labels()
 ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=9)
 
-ax1.set_title("Ridge tolerates a wide band of penalties before it degrades")
-fig.tight_layout()
+ax1.set_title("Mean IC and ICIR against Ridge penalty")
 show_with_alt(
     fig,
     "Mean information coefficient with a one-standard-deviation band and the "
@@ -1058,15 +1063,18 @@ for j, feat in enumerate(FEATURE_COLS):
 ax.axhline(0, color="gray", lw=0.5)
 ax.set_xlabel("α (Ridge regularization strength)")
 ax.set_ylabel("Coefficient value (standardized feature)")
-ax.set_title("Ridge shrinks every coefficient rather than removing any")
+ax.set_title("Ridge coefficient paths against penalty")
 ax.legend(fontsize=7, loc="lower left", ncol=2, frameon=False)
-fig.tight_layout()
 show_with_alt(
     fig,
     "Coefficient values against regularization strength on a log axis, one line "
     "per feature, all converging towards zero as the penalty rises.",
 )
-
+# %% [markdown] tags=[]
+# Compare this against the LASSO paths above. Ridge pulls every coefficient toward zero and
+# leaves all of them non-zero; LASSO sets them to exactly zero one at a time. That difference
+# is the reason to reach for one or the other: LASSO answers which features to keep, Ridge
+# answers how much to believe all of them.
 # %% [markdown] tags=[]
 # The two coefficient paths are the whole difference between the penalties in
 # one picture. Ridge attenuates every weight and keeps every feature; LASSO

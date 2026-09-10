@@ -85,11 +85,49 @@ def _frozen_names(path: Path) -> set[str]:
     `label_name` is a label with underscores replaced by dashes. Expanding that against
     the three declared labels is the point: a producer that fits one label while the
     consumer names three is exactly the defect, and it has to be visible here.
+
+    A producer may bind that f-string to a local first and pass the local, which is what
+    happens where the same name is also handed to `candidate_set_supersedes` - repeating
+    the literal at both call sites is how the two drift apart. So a bare `ast.Name` is
+    resolved against the module's assignments before it is given up on.
+
+    **Anything still unresolved fails the test rather than contributing nothing.** Returning
+    an empty set for a form the parser does not recognise makes every consumer name look
+    unfrozen, which reads as sixteen missing producers rather than as one unparsed call -
+    and that is exactly what a `name=<local>` call produced before this branch.
     """
     labels = ["fwd-ret-1d", "fwd-ret-5d", "fwd-ret-21d"]
     source = path.read_text()
     names: set[str] = set()
     tree = ast.parse(source)
+
+    bindings: dict[str, ast.expr] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bindings[target.id] = node.value
+
+    def resolve(value: ast.expr, origin: str) -> None:
+        if isinstance(value, ast.Name):
+            bound = bindings.get(value.id)
+            if bound is None:
+                pytest.fail(f"{path.name}: freeze name {value.id!r} is never assigned")
+            resolve(bound, f"{origin} via {value.id}")
+            return
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            names.add(value.value)
+            return
+        if isinstance(value, ast.JoinedStr):
+            template = "".join(
+                part.value if isinstance(part, ast.Constant) else "{}" for part in value.values
+            )
+            if template.count("{}") != 1:
+                pytest.fail(f"{path.name}: cannot resolve freeze name {template!r}")
+            names.update(template.format(label) for label in labels)
+            return
+        pytest.fail(f"{path.name}: cannot resolve the freeze name at {origin}")
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -97,19 +135,8 @@ def _frozen_names(path: Path) -> set[str]:
         if not (isinstance(func, ast.Attribute) and func.attr == "freeze"):
             continue
         for keyword in node.keywords:
-            if keyword.arg != "name":
-                continue
-            value = keyword.value
-            if isinstance(value, ast.Constant):
-                names.add(value.value)
-            elif isinstance(value, ast.JoinedStr):
-                template = "".join(
-                    part.value if isinstance(part, ast.Constant) else "{}" for part in value.values
-                )
-                if template.count("{}") == 1:
-                    names.update(template.format(label) for label in labels)
-                else:
-                    pytest.fail(f"{path.name}: cannot resolve freeze name {template!r}")
+            if keyword.arg == "name":
+                resolve(keyword.value, f"line {keyword.value.lineno}")
     return names
 
 

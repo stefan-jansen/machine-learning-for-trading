@@ -1148,8 +1148,8 @@ conformal_df
 # plain conformal already does. A $\hat\sigma$ that varies without tracking error
 # still redistributes width - some test points get a narrower interval and some a wider
 # one - but it allocates that width by something unrelated to where the model is
-# actually wrong. Marginal coverage survives, because the quantile is chosen to make it
-# survive; what degrades is coverage *per point*, which is the property a position
+# actually wrong. Marginal coverage still holds, because the quantile is chosen to make
+# it hold; what degrades is coverage *per point*, which is the property a position
 # sizer built on these intervals would rely on. The widths and coverage in the table
 # are the evidence, not the size of $\hat\sigma$.
 #

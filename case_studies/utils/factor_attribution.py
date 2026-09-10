@@ -355,6 +355,18 @@ def run_placebo_benchmark(
     # Align
     common_dates = daily_returns_wide.index.intersection(factors.index)
     rets = daily_returns_wide.loc[common_dates].dropna(axis=1, how="all")
+    # `rng.choice(n_symbols, ...)` draws COLUMN POSITIONS, so which symbols a placebo book
+    # holds is decided by the order of the frame it was handed - and a caller building that
+    # frame with `pivot` gets first-appearance order, which is a property of the parquet it
+    # read rather than of any code. Sorting here makes the draw a function of the universe
+    # instead, so the placebo distribution the strategy is compared against does not move
+    # when an upstream artifact is regenerated in a different row order.
+    #
+    # Both current callers already pass sorted columns, one via a `.sort("symbol", "date")`
+    # three lines above its pivot and the other by an accident of how `prices.parquet` is
+    # written, so this moves no reported number today - verified against both universes.
+    # That is the point: the dependence was real and undeclared, and only satisfied by luck.
+    rets = rets.reindex(sorted(rets.columns), axis=1)
     f = factors.loc[common_dates]
     ppy = periods_per_year or _detect_periods_per_year(rets.index)
     symbols = rets.columns.tolist()

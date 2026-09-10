@@ -54,8 +54,17 @@ import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from IPython.display import Markdown, display
 
-warnings.filterwarnings("ignore")
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
 
 import optuna
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
@@ -63,7 +72,7 @@ from optuna.samplers import NSGAIISampler, TPESampler
 
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 
 def cross_sectional_ic_mean(
@@ -90,7 +99,6 @@ def cross_sectional_ic_mean(
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# %%
 # %% tags=["parameters"]
 N_TRIALS = 50
 SEED = 42
@@ -314,10 +322,14 @@ ax.scatter(
 
 ax.set_xlabel("Turnover (normalized mean |Δ prediction|, lower is better)")
 ax.set_ylabel("Validation IC (Spearman, higher is better)")
-ax.set_title("Higher IC demands higher turnover along the Pareto frontier")
+ax.set_title("Validation IC against turnover, with the Pareto frontier")
 ax.legend(loc="lower right")
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Scatter of validation IC against turnover, one point per trial, with the "
+    "non-dominated points joined into a frontier and the single-objective best marked "
+    "by a star.",
+)
 
 # %% [markdown]
 # **Interpretation**: The Pareto frontier quantifies the IC–turnover trade-off.
@@ -353,8 +365,9 @@ extremes_df
 # %% [markdown]
 # ## 9. Cross-Asset Hyperparameter Transfer
 #
-# Do ETF-tuned hyperparameters generalize to other asset classes? We test
-# the best ETF parameters on crypto and futures datasets using shared features.
+# Do ETF-tuned hyperparameters generalize to other asset classes? We take the
+# highest-scoring ETF configuration and score it on crypto and futures data, using the
+# features the three share.
 
 # %%
 best_params = {**single_study.best_params, "random_state": SEED, "verbose": -1}
@@ -520,22 +533,35 @@ transfer_summary = pl.DataFrame(transfer_rows)
 transfer_summary
 
 # %% [markdown]
-# **Interpretation**: The table above quantifies the transfer gap. On CME
-# futures the ETF-tuned configuration collapses to an essentially zero
-# (slightly negative) validation IC, so its transfer efficiency - the
-# transferred IC as a percentage of the asset-specific IC - falls far below
-# the 100% break-even and even turns negative. Transfer would be useful only
-# if that efficiency were close to 100%; below roughly 80%, asset-specific
-# tuning is clearly worth the compute. The gap reflects the different feature
-# distributions and signal-to-noise ratios across asset classes, and is the
-# reason production trading systems retune per asset rather than rely on a
-# single ETF-tuned configuration.
+# **Interpretation**: the table above is the transfer gap. Two things about how to
+# read it. The ETF row is a tautology: applying the ETF-tuned configuration to ETFs is
+# the asset-specific case, so its efficiency is one hundred percent by construction and
+# carries no information. And efficiency is a ratio of two small numbers, so it
+# magnifies whatever the denominator does; where the transferred IC crosses zero the
+# ratio changes sign, which is a fact about the ratio rather than about the
+# configuration.
+#
+# What the row that is not a tautology says is that a configuration tuned on one asset
+# class does not carry its validation IC to another. Feature distributions and
+# signal-to-noise differ across classes, and the hyperparameters that suit one are
+# fitted to that. Where the transfer costs more than it saves is a compute question
+# with a different answer per desk, and this table is not the place it gets settled.
 
 # %% [markdown]
 # ## 12. Transfer Visualization
 
 # %%
-if len(transfer_rows) >= 2:
+if len(transfer_rows) < 2:
+    display(
+        Markdown(
+            "**No transfer chart**: it needs at least two asset classes that finished "
+            "both the transfer evaluation and their own search, and this run produced "
+            "fewer than two. The load table says which case studies were available, and "
+            "the skip lines in the two sections above say which of those were dropped "
+            "for too few shared features or too few training rows."
+        )
+    )
+else:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     asset_names = [r["symbol"] for r in transfer_rows]
@@ -555,7 +581,7 @@ if len(transfer_rows) >= 2:
     ax1.set_xticks(x)
     ax1.set_xticklabels(asset_names, rotation=15, ha="right")
     ax1.set_ylabel("Validation IC (Spearman)")
-    ax1.set_title("ETF params transfer well only back to ETFs")
+    ax1.set_title("Validation IC with transferred and asset-specific parameters")
     ax1.legend(fontsize=9)
 
     # Right: transfer efficiency
@@ -565,10 +591,15 @@ if len(transfer_rows) >= 2:
     ax2.set_xticks(x)
     ax2.set_xticklabels(asset_names, rotation=15, ha="right")
     ax2.set_ylabel("Transfer IC as % of asset-specific IC")
-    ax2.set_title("Transfer efficiency collapses off the tuned asset")
+    ax2.set_title("Transferred IC as a share of the asset-specific IC")
 
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Two panels sharing an asset-class axis. Left: paired bars of validation IC, one "
+        "for the ETF-tuned parameters and one for parameters tuned on that asset class. "
+        "Right: the first as a percentage of the second, against a dashed line at one "
+        "hundred percent, where the ETF bar sits by construction.",
+    )
 
 # %% [markdown]
 # ## Key Takeaways

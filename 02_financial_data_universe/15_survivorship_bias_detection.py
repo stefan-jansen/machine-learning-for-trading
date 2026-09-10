@@ -71,32 +71,36 @@ from plotly.subplots import make_subplots
 from data import load_us_equities
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt, show_with_alt
+
+# %% [markdown]
+# ### Declared parameters
+#
+# The Monte Carlo bias estimates the chapter cites are anchored to this seed; overriding it
+# moves the reported numbers.
+#
+# `ANALYSIS_START` is the one parameter that carries an argument. §1 shows the panel records no
+# exit before 2014, so a window opening earlier spends its first years measuring a delisting
+# rate that is zero by construction. From 2014 to the panel's final date is the only span over
+# which the panel behaves like a live universe.
+#
+# `MAX_TRUSTED_RETURN` is one-sided because of what it encodes: a long position cannot lose
+# more than everything, so an implausible daily return can only be a gain.
+# `MIN_SESSION_COVERAGE` is the share of the universe a session has to quote before it counts
+# as a session at all. §3 uses both.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI. The Monte Carlo bias
-# estimates cited in chapter §2.3 are anchored to SEED=42; overriding the seed
-# will shift the reported numbers.
 SEED = 42
 N_SIMS = 1000  # Monte Carlo draws per scenario
-
-# Analysis window. The panel records no exit before 2014 (see §1), so a window that
-# opens earlier spends its first years measuring a delisting rate that is zero by
-# construction. 2014-01-01 to the panel's final date is the only span over which the
-# panel behaves like a live universe.
+MC_BAND = (10, 90)  # percentile band reported around each scenario's bias
 ANALYSIS_START = "2014-01-01"
-
-# A daily return is not trusted when it exceeds +100% (a long position cannot lose more
-# than 100%, so the rule is one-sided) or when it is computed off a prior session that
-# printed zero volume (a stale quote). See §3.
 MAX_TRUSTED_RETURN = 1.0
-MIN_SESSION_COVERAGE = 0.2  # a session must quote this share of the universe to count
+MIN_SESSION_COVERAGE = 0.2
 
 # %% tags=[]
 set_global_seeds(SEED)
 
-# Colors used by every chart below, so no plotting cell defines its own.
-PALETTE = {
+PALETTE = {  # every chart below draws from this, so no plotting cell defines its own
     "survivors": COLORS["copper"],  # the biased portfolio — the wrong answer
     "universe": COLORS["blue"],  # the full universe — the reference
     "bull": COLORS["slate"],
@@ -166,14 +170,20 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title="Recorded exits appear only at the very end of the panel",
+    title="Symbols leaving the panel, by year of last observation",
     xaxis_title="Year of last observation",
     yaxis_title="Symbols",
     xaxis=dict(range=[lifespans["first_date"].min().year - 1, dataset_end.year + 1]),
     height=420,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A bar chart of how many symbols were last observed in each year, over an axis "
+    "spanning more than five decades. The axis is empty for almost its whole length. Bars "
+    "appear only in the final handful of years, rising to their tallest at the right-hand "
+    "edge where the panel ends.",
+)
 
 # %% [markdown] tags=[]
 # ### Reading the chart
@@ -234,8 +244,9 @@ fig.show()
 # series, so a single bad daily return propagates into the headline. Look for returns the
 # market cannot produce.
 #
-# A long position cannot lose more than 100% in a day, so the test is one-sided: a daily gain
-# above +100% is either a genuinely extraordinary event or an unadjusted corporate action.
+# A long position cannot lose more than everything, so the test is one-sided: only a gain can
+# be implausibly large, and a daily gain past `MAX_TRUSTED_RETURN` is either a genuinely
+# extraordinary event or an unadjusted corporate action.
 
 # %% tags=[]
 window_start = date.fromisoformat(ANALYSIS_START)
@@ -276,28 +287,32 @@ returns.sort("ret", descending=True).head(6).select(
 )
 
 # %% [markdown] tags=[]
-# Every one of these is a corporate action the adjustment missed, and `split_ratio` reports
-# `1.0` for all of them:
+# Every one of these is a corporate action the adjustment missed, and the `split_ratio` column
+# records no split for any of them:
 #
 # - **HERO** (Hercules Offshore) emerged from Chapter 11 on 2015-11-06. The old equity was
-#   cancelled and new shares were issued on the same ticker. `$0.05 → $14.20` is not a return;
-#   it is two different securities. Note the zero volume on the days before — those `$0.05`
-#   quotes are stale.
-# - **PCO** (Pendrell) ran a 1-for-100 reverse split on 2017-12-05. `$6.97 → $660.00`, and the
+#   cancelled and new shares were issued on the same ticker. The two prices either side of the
+#   jump are quotes for two different securities, so their ratio is not a return. Note the
+#   zero volume on the days before: those pre-emergence quotes are stale.
+# - **PCO** (Pendrell) ran a one-for-a-hundred reverse split on 2017-12-05, and the
 #   `split_ratio` column never fired.
 # - **EXXI** (Energy XXI) relisted post-bankruptcy on the same ticker.
+#
+# The table above carries the prices; what matters here is that each is a step of two orders
+# of magnitude printed as an ordinary session.
 #
 # Two rules follow directly, and both are diagnostic rather than cosmetic — they say
 # *"we cannot compute a return across this event"*, and drop it, rather than shrinking it
 # toward something plausible:
 #
-# 1. A daily return above **+100%** is not trusted.
+# 1. A daily return above `MAX_TRUSTED_RETURN` is not trusted.
 # 2. A daily return computed off a prior session that printed **zero volume** is not trusted
 #    — the denominator is a stale quote.
 #
 # Both fire on observable evidence, and neither touches genuine crashes. GT Advanced
-# Technologies fell 92.8% on 2014-10-06 when it filed for Chapter 11, on 7.2M shares of real
-# volume. That is a return, and it survives both rules.
+# Technologies lost most of its value on 2014-10-06 when it filed for Chapter 11, on millions
+# of shares of real volume. That is a return: the loss is one-sided in the direction the
+# first rule does not test, and the volume clears the second.
 
 # %% tags=[]
 returns = returns.with_columns(
@@ -362,13 +377,16 @@ returns = returns.filter(pl.col("timestamp").is_in(real_sessions["timestamp"].to
 # - Doidge, Karolyi & Stulz (2017), *Are There Too Few Publicly Listed Firms?*
 # - Shumway (1997) and Beaver, McNichols & Price (2007) on delisting returns.
 #
-# **The load-bearing fact**: M&A dominates US delistings (~65%); outright bankruptcy is under
-# 1%. "Cause" delistings are mostly compliance failures — low price, late filings.
+# **The load-bearing fact**: M&A dominates US delistings, and outright bankruptcy is rare
+# enough that it does not earn a row of its own here. A cause delisting is usually a
+# compliance failure - a low price, a late filing - rather than a firm going under. The
+# shares and returns are in `SCENARIOS` below and printed in the table that follows it.
 #
 # **A caveat we carry forward.** These terminal returns are applied *on the delisting date*.
 # For acquisitions that is generous: deal premiums accrue as rumours circulate and the price
-# converges toward the offer, so by the last quote most of the +25% is already in the observed
-# path. Applying it again at exit double-counts. §6 measures how much this assumption is worth.
+# converges toward the offer, so by the last quote most of the premium is already in the
+# observed path. Applying it again at exit double-counts. §6 measures what this assumption is
+# worth.
 
 # %% tags=[]
 SCENARIOS = {
@@ -501,10 +519,18 @@ fig.update_xaxes(tickangle=-20)
 fig.update_layout(
     barmode="group",
     height=470,
-    title="Delisting outcome scenarios: who leaves how, and what a holder earns",
+    title="Delisting outcome shares and terminal returns, by scenario",
     legend=dict(orientation="h", yanchor="bottom", y=-0.42, xanchor="center", x=0.5),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels side by side, each with three scenarios along the horizontal axis and "
+    "grouped bars for the three exit types. The left panel shows the share of exits of "
+    "each type: acquisitions are the tallest bar in every scenario, cause delistings the "
+    "second, and other exits the smallest. The right panel shows the terminal return of "
+    "each type: acquisition bars sit above zero, cause bars well below it, and a diamond "
+    "marks the share-weighted average for each scenario with its value labelled beside it.",
+)
 
 # %% [markdown] tags=[]
 # ## 5. The two portfolios
@@ -639,9 +665,10 @@ repair_table
 # %% [markdown] tags=[]
 # The sign flips. On the raw series the survivors-only portfolio appears to *underperform* the
 # full universe; on the repaired series it overstates, which is the direction the literature
-# reports. Roughly 0.03% of the rows decide which way the answer points, because a
-# daily-rebalanced equal-weight portfolio compounds every one of them and a `$0.05 → $14.20`
-# reorganisation moves the whole 2,400-name portfolio by double digits in a session.
+# reports. The share of rows deciding that is printed above and is a small fraction of one
+# percent, because a daily-rebalanced equal-weight portfolio compounds every row it is given
+# and one reorganisation printed as a two-hundred-fold gain moves a two-thousand-name
+# portfolio by double digits in a single session.
 #
 # This is Chapter 2's own lesson turned on Chapter 2's own analysis: the survivorship check
 # cannot run ahead of the corporate-action check. Everything below uses the repaired series.
@@ -691,6 +718,10 @@ for name, params in SCENARIOS.items():
     bias = run_monte_carlo(params, N_SIMS)
     scenario_results[name] = {
         "bias_median": float(np.median(bias)),
+        "bias_low": float(np.percentile(bias, MC_BAND[0])),
+        "bias_high": float(np.percentile(bias, MC_BAND[1])),
+        # The book figure script reads a 10-90 band by name from the artifact below, so
+        # those two percentiles are computed here regardless of what MC_BAND is set to.
         "bias_p10": float(np.percentile(bias, 10)),
         "bias_p90": float(np.percentile(bias, 90)),
         # Representative path: every leaver assigned the scenario's expected terminal return.
@@ -708,8 +739,8 @@ bias_summary = pl.DataFrame(
             "expected_acquisition": r["expected_acquisition"],
             "expected_other": r["expected_other"],
             "bias_median_pp": round(r["bias_median"], 2),
-            "bias_p10_pp": round(r["bias_p10"], 2),
-            "bias_p90_pp": round(r["bias_p90"], 2),
+            f"bias_p{MC_BAND[0]}_pp": round(r["bias_low"], 2),
+            f"bias_p{MC_BAND[1]}_pp": round(r["bias_high"], 2),
         }
         for name, r in scenario_results.items()
     ]
@@ -717,12 +748,12 @@ bias_summary = pl.DataFrame(
 bias_summary
 
 # %% [markdown] tags=[]
-# ### 6.1 Where the uncertainty actually lives
+# ### Where the uncertainty actually lives
 #
 # Two ways to be wrong about the bias. The Monte Carlo prices one of them.
 
 # %% tags=[]
-mc_width = np.mean([r["bias_p90"] - r["bias_p10"] for r in scenario_results.values()])
+mc_width = np.mean([r["bias_high"] - r["bias_low"] for r in scenario_results.values()])
 scenario_spread = max(r["bias_median"] for r in scenario_results.values()) - min(
     r["bias_median"] for r in scenario_results.values()
 )
@@ -750,7 +781,7 @@ display(
 # ## 7. Summary figure
 #
 # Left: the two portfolio paths, with the gap between them shaded. Right: the bias under each
-# scenario, with 10–90% Monte Carlo bands.
+# scenario, with the Monte Carlo band declared as `MC_BAND`.
 
 # %% tags=[]
 sessions = m["sessions"]
@@ -791,11 +822,11 @@ def plot_paths(ax: plt.Axes) -> None:
 
 
 def plot_bias(ax: plt.Axes) -> None:
-    """Right panel: median bias per scenario with 10-90% whiskers."""
+    """Right panel: median bias per scenario, with the declared percentile band."""
     names = list(scenario_results)
     medians = [scenario_results[s]["bias_median"] for s in names]
-    lower = [medians[i] - scenario_results[s]["bias_p10"] for i, s in enumerate(names)]
-    upper = [scenario_results[s]["bias_p90"] - medians[i] for i, s in enumerate(names)]
+    lower = [medians[i] - scenario_results[s]["bias_low"] for i, s in enumerate(names)]
+    upper = [scenario_results[s]["bias_high"] - medians[i] for i, s in enumerate(names)]
     x = np.arange(len(names))
 
     ax.bar(
@@ -813,7 +844,7 @@ def plot_bias(ax: plt.Axes) -> None:
         r = scenario_results[name]
         ax.annotate(
             f"{r['bias_median']:+.1f} pp",
-            xy=(i, r["bias_p90"]),
+            xy=(i, r["bias_high"]),
             xytext=(0, 6),
             textcoords="offset points",
             ha="center",
@@ -825,18 +856,27 @@ def plot_bias(ax: plt.Axes) -> None:
     ax.set_xticklabels(names, fontsize=9)
     ax.set_xlabel("Delisting outcome scenario")
     ax.set_ylabel("Survivorship bias (percentage points)")
-    ax.set_title("Every scenario puts the bias above zero")
+    ax.set_title("Bias by scenario, with Monte Carlo band")
 
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
 plot_paths(axes[0])
 plot_bias(axes[1])
 fig.suptitle(
-    "Survivors overstate the full universe over 2014–2018",
+    "Survivors-only and full-universe portfolios, and the gap between them",
     fontsize=13,
     fontweight="bold",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels. The left plots equal-weight portfolio value from a hundred dollars over "
+    "four years: a thick line for survivors only and three thinner dashed and dotted lines "
+    "for the full universe under each scenario, all rising together, with the survivors "
+    "line finishing above the others and the region between it and the empirical scenario "
+    "shaded. The right plots the bias for each of the three scenarios as a bar with a "
+    "whisker for the Monte Carlo band; all three bars stand above the zero line, the "
+    "stress scenario tallest.",
+)
 
 # %% tags=[]
 # Persist the figure artifact consumed by the book's figure script (Hard Rule 15).
@@ -948,14 +988,21 @@ for stats, label, color in [
     fig.add_vline(x=stats["total_return"].median(), line_dash="dash", line_color=color)
 fig.add_vline(x=0, line_color=PALETTE["rule"], line_width=1)
 fig.update_layout(
-    title="Observed total return while quoted (leavers hold a shorter window)",
+    title="Total return while quoted, leavers against survivors",
     xaxis_title="Total return (%), binned",
     yaxis_title="Share of group (%)",
     xaxis=dict(range=[-100, 300]),
     barmode="overlay",
     height=440,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two overlapping histograms of total return while quoted, one for symbols that left "
+    "the panel and one for those still quoted at the end, each as a share of its own "
+    "group. Both are right-skewed with a long tail of large gains. The leavers carry more "
+    "of their mass below zero and their dashed median line sits to the left of the "
+    "survivors. A solid vertical line marks zero return.",
+)
 
 # %% [markdown] tags=[]
 # Leavers hold their shorter window and, over it, underperform the survivors. That is the
@@ -1010,9 +1057,10 @@ bias_check = check_survivorship_bias(wiki, "symbol", "timestamp")
 bias_check
 
 # %% [markdown] tags=[]
-# The panel passes the first two tests — 24% of symbols leave, on many distinct dates — and
-# fails the third. A delisting rate alone is not evidence of a survivorship-aware panel. **Ask
-# when the delistings happened.**
+# The panel passes the first two tests, on the delisting rate and on the number of distinct
+# exit dates, and fails the third. A delisting rate on its own is not evidence of a
+# survivorship-aware panel, because a panel that recorded exits for only the last few years
+# of its history produces the same rate. **Ask when the delistings happened.**
 
 # %% [markdown] tags=[]
 # ## 10. Universe completeness
@@ -1144,13 +1192,15 @@ for w in completeness["warnings"]:
 #
 # **What it finds.**
 #
-# 1. **The panel records exits only from 2014.** All 777 exits in a 1962–2018 panel fall in
-#    2014–2018. Firms exited before then; the collection process did not capture it. Absence of
-#    evidence, not evidence of absence — and no way to recover what is missing.
+# 1. **The panel records exits only from its final few years.** Every exit in a panel that
+#    starts in the 1960s falls after 2014, as the chart in §1 shows. Firms exited before then;
+#    the collection process did not capture it. Absence of evidence, not evidence of absence,
+#    and no way to recover what is missing.
 # 2. **The adjusted prices carry unadjusted corporate actions.** Reverse splits and
-#    post-bankruptcy reorganisations on reused tickers produce single-session price jumps that
-#    are not returns — HERO `$0.05 → $14.20`, PCO `$6.97 → $660.00` (a 1-for-100 reverse split),
-#    EXXI `$0.13 → $32.50` — every one of them with `split_ratio = 1.0`. They are ~0.03% of rows.
+#    post-bankruptcy reorganisations on reused tickers print single-session steps of two
+#    orders of magnitude that are not returns at all, and the `split_ratio` column records
+#    nothing for any of them. They are a small fraction of one percent of the rows; §3 lists
+#    them and counts them.
 # 3. **Those rows decide the sign of the answer.** Uncorrected, the survivors-only portfolio
 #    appears to *underperform* the full universe. Repaired, it overstates — the direction the
 #    literature reports. The survivorship check cannot run ahead of the corporate-action check.
@@ -1159,14 +1209,15 @@ for w in completeness["warnings"]:
 #    bias comes from the *observed* returns of the symbols that left, not from what they paid
 #    out afterwards. Assumption risk (which scenario) exceeds sampling risk (the Monte Carlo
 #    band) by an order of magnitude.
-# 5. **Bias-free is not complete.** The panel adds almost no new listings after 2014 and covers
-#    ~71% of the US market. A dataset can record every delisting and still miss every IPO.
+# 5. **Bias-free is not complete.** The panel adds almost no new listings after 2014, and §10
+#    measures how much of the market it holds. A dataset can record every delisting and still
+#    miss every IPO.
 #
 # **What it means.** Survivorship bias is not a fact you look up; it is an estimate you build,
 # and it inherits every defect of the data underneath it. The direction of the bias depends on
 # the delisting mix, its magnitude on the leavers' observed returns, and its *sign*, here, on
-# whether anyone checked the corporate actions first. Applying a 0% terminal value to delisted
-# symbols is not bias-free; it is merely unrealistic.
+# whether anyone checked the corporate actions first. Applying a zero terminal value to
+# delisted symbols is not bias-free; it is merely unrealistic.
 #
 # **Next**: `16_provider_comparison` moves from one panel's internal bias to stitching several
 # providers together, where universe and coverage definitions diverge. **Book reference**: §2.3.

@@ -36,36 +36,39 @@
 # ## 1. Setup
 
 # %%
-"""XAI Limitations — demonstrate explanation instability across seeds and model families."""
+"""XAI Limitations - explanation instability across seeds and model families."""
 
 import warnings
 
-# lightgbm must be imported before anything that pulls in scikit-learn, which
-# ml4t.diagnostic does transitively: the first OpenMP runtime loaded wins the
-# process, and getting this order wrong segfaults on macOS ARM64. Keeping it in
-# this block is what makes the order stable - isort sorts plain `import x` above
-# `from x import y`, so lightgbm cannot drift back below the ml4t import.
+# lightgbm loads before anything that pulls in scikit-learn, ml4t.diagnostic included:
+# the first OpenMP runtime loaded wins the process, and the wrong order segfaults on
+# macOS ARM64.
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
-warnings.filterwarnings("ignore")
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
 
 import shap
 from sklearn.ensemble import RandomForestRegressor
 
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
-from utils.style import COLOR_CYCLER
+from utils.style import COLOR_CYCLER, show_with_alt
 
 # %% tags=["parameters"]
-# 0 is the full universe, which is what a production run uses. A test override reduces it
-# for a fast run. The note sits above the assignment and not after it: papermill parses a
-# parameters cell line by line and gives up on a line whose trailing comment contains an
-# `=`, so a declared override for a name annotated that way is silently never injected.
-MAX_SYMBOLS = 0
+# Above the assignment: papermill drops a parameters line whose comment contains an `=`.
+MAX_SYMBOLS = 0  # the full universe
 SEED = 42
 
 
@@ -124,7 +127,7 @@ print(f"ETFs: {len(X_train):,} train / {len(X_test):,} test ({len(FEATURE_COLS)}
 # ## 3. Demonstration 1: Similar Predictions, Different Explanations
 #
 # Two samples with nearly identical predictions can have entirely
-# different SHAP profiles — the model arrived at the same answer
+# different SHAP profiles: the model arrived at the same answer
 # through different reasoning paths.
 
 # %%
@@ -178,13 +181,13 @@ else:
             "abs_diff": float,
         }
     )
-    print("\nNo pairs met both thresholds — predictions and SHAP are tightly coupled")
+    print("\nNo pairs met both thresholds; predictions and SHAP are tightly coupled")
     print("in this dataset. This is informative: it means the model's explanation")
     print("space is relatively stable for the ETF feature set.")
 instability_df.head(10)
 
 # %% [markdown]
-# **Interpretation**: SHAP explanations are not unique — the same prediction
+# **Interpretation**: SHAP explanations are not unique. The same prediction
 # can be reached through different feature contribution paths. When instability
 # pairs are found, the top-three SHAP contributors can differ completely even
 # when predictions agree to within fractions of a percent. For production
@@ -199,8 +202,7 @@ instability_df.head(10)
 # Random Forest to demonstrate cross-architecture disagreement.
 
 # %%
-# Enable stochastic training (subsample < 1) so different seeds produce
-# different models — without this, LightGBM is fully deterministic.
+# Stochastic training, so different seeds give different models.
 _lgb_kw = dict(
     n_estimators=200,
     max_depth=6,
@@ -272,10 +274,13 @@ for i, (name, _) in enumerate(model_configs):
 ax.set_xticks(x + width * 1.5)
 ax.set_xticklabels(feat_names, rotation=45, ha="right", fontsize=9)
 ax.set_ylabel("Mean |SHAP|")
-ax.set_title("Feature-importance magnitudes shift across seeds and model family (Rashomon effect)")
+ax.set_title("Mean absolute SHAP by feature, across seeds and model families")
 ax.legend(fontsize=8)
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Grouped bars of mean absolute SHAP value, one group per feature and one bar per "
+    "model, comparing three LightGBM seeds against a Random Forest.",
+)
 
 # %% [markdown]
 # **Interpretation**: Features that rank highly across all four models
@@ -298,11 +303,11 @@ plt.show()
 # ## 6. Key Takeaways
 #
 # 1. **Explanation instability**: Samples with similar predictions can have
-#    different top SHAP contributors — the same output is reachable through
+#    different top SHAP contributors: the same output is reachable through
 #    different feature-contribution paths.
 #
 # 2. **Rashomon effect**: Models with different architectures or random seeds
-#    attribute predictions to different features — SHAP explanations reflect
+#    attribute predictions to different features, so SHAP explanations reflect
 #    model-specific fitting patterns, not ground truth about the data.
 #
 # 3. **Best practices**: Report confidence intervals on feature importance,

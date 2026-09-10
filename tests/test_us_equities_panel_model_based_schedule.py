@@ -24,9 +24,12 @@ import pytest
 import yaml
 
 from case_studies.utils.temporal import (
+    fit_wasserstein_kmeans,
     garch11_conditional_volatility,
+    lift_stream,
     refit_boundaries,
     walk_forward_feature,
+    wasserstein_distance_1d,
 )
 
 NOTEBOOK = (
@@ -93,12 +96,12 @@ def _garch_kwargs() -> dict:
     return {key: declared[key] for key in keys}
 
 
+# What the notebook composes, not what it imports. The Wasserstein estimator moved into
+# `case_studies.utils.temporal` beside the HMM helpers, so it is injected below the way
+# `walk_forward_feature` and `garch11_conditional_volatility` already were: these tests are
+# about whether a value reads the sessions before it, and that is a property of the walk the
+# notebook builds rather than of the estimator it calls.
 DEFINITIONS = (
-    "LiftedStream",
-    "lift_stream",
-    "wasserstein_distance_1d",
-    "wasserstein_barycenter_1d",
-    "fit_wasserstein_kmeans",
     "fit_regime_centroids",
     "assign_regime_features",
     "garch_walk",
@@ -121,6 +124,9 @@ def _load(arch_model) -> dict:
         "arch_model": arch_model,
         "walk_forward_feature": walk_forward_feature,
         "garch11_conditional_volatility": garch11_conditional_volatility,
+        "lift_stream": lift_stream,
+        "fit_wasserstein_kmeans": fit_wasserstein_kmeans,
+        "wasserstein_distance_1d": wasserstein_distance_1d,
         "FloatArray": np.ndarray,
         "IntArray": np.ndarray,
         "WASSERSTEIN_WINDOW": REGIME["window"],

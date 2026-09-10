@@ -304,7 +304,7 @@ dl_rank1_display.select(
 fig, forest_ax = plot_cross_cs_forest(
     dl_rank1,
     family=FAMILY,
-    title="Highest-IC DL per case study (primary label, average daily IC ± HAC 95 % CI)",
+    title="Highest-IC DL per case study, average daily IC with HAC 95 % CI",
 )
 forest_ax.set_xlabel("Average daily IC (HAC 95 % CI)")
 show_with_alt(
@@ -579,7 +579,7 @@ order = dl_rank1.sort("ic_mean_daily", descending=True)["short_name"].to_list()
 fig, _ = plot_per_fold_violin(
     dl_fold,
     order=order,
-    title="Per-fold IC distribution for the highest-IC DL configuration (primary label)",
+    title="Per-fold IC of the highest-IC DL configuration, primary label",
 )
 show_with_alt(
     fig,

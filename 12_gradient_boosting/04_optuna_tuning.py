@@ -24,7 +24,7 @@
 # This notebook demonstrates efficient hyperparameter optimization using Optuna's
 # Bayesian optimization framework with TPE on the ETF case study. It covers
 # single-fold tuning with pruning and early stopping, then extends to averaged
-# walk-forward HPO — the recommended approach for financial data.
+# walk-forward HPO, which is the approach Section 12.4 recommends for financial data.
 #
 # ## Learning Objectives
 # After completing this notebook, you will be able to:
@@ -42,7 +42,7 @@
 # ## 1. Setup
 
 # %%
-"""Hyperparameter Tuning with Optuna — demonstrate TPE-based optimization with pruning for GBMs."""
+"""Hyperparameter Tuning with Optuna - TPE-based optimization with pruning for GBMs."""
 
 import time
 import warnings
@@ -53,7 +53,15 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-warnings.filterwarnings("ignore")
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
 
 import lightgbm as lgb
 import optuna
@@ -81,11 +89,10 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
 from utils.cv_splits import load_evaluation_config
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# %%
 # %% tags=["parameters"]
 N_TRIALS = 50
 # 0 = all folds for walk-forward HPO
@@ -108,24 +115,16 @@ n_folds = len(mds.splits)
 if MAX_FOLDS > 0:
     n_folds = min(n_folds, MAX_FOLDS)
 
-# The TEST set is the case study's sealed holdout (setup.yaml `holdout_start` /
-# `holdout_end`). All eight walk-forward folds live strictly BEFORE holdout_start,
-# so the entire Optuna search — single-fold AND averaged walk-forward — is
-# confined to the selection region and never touches the holdout. This is the
-# invariant that makes the "acid test" on the held-out fold legitimate.
+# The test set is the case study's holdout, declared in `setup.yaml`; every
+# walk-forward fold ends before it starts, so no part of the search sees it.
 eval_cfg = load_evaluation_config("etfs")
 holdout_start = pd.Timestamp(eval_cfg["holdout_start"])
 holdout_end = pd.Timestamp(eval_cfg["holdout_end"])
-LABEL_HORIZON = 21  # trading days — fwd_ret_21d
+LABEL_HORIZON = 21  # trading days, matching fwd_ret_21d
 
-# Embargo: trim any validation date whose 21-trading-day label horizon would
-# reach into the holdout, so early stopping never observes a return realized on
-# or after the first holdout day. A fwd_ret_21d label at date d is realized 21
-# trading days later, so the last admissible val date must have at least 21
-# trading days BEFORE holdout_start — i.e. index -(LABEL_HORIZON + 1) into the
-# pre-holdout calendar (the -LABEL_HORIZON date lands on the first holdout day).
-# Only the fold adjacent to holdout_start (fold 0) is affected; earlier folds end
-# well before the cutoff.
+# Embargo: a label at date d resolves LABEL_HORIZON trading days later, so the last
+# admissible validation date is that many days before the holdout starts. Index
+# -(LABEL_HORIZON + 1) is it; -LABEL_HORIZON would land on the holdout's first day.
 pre_holdout_dates = np.sort(df.loc[df[date_col] < holdout_start, date_col].unique())
 val_embargo_cutoff = pd.Timestamp(pre_holdout_dates[-(LABEL_HORIZON + 1)])
 
@@ -162,7 +161,7 @@ X_test, y_test = X_test[valid], y_test[valid]
 dates_test, symbols_test = dates_test[valid], symbols_test[valid]
 
 print(f"ETFs: {len(FEATURE_COLS)} features, N_TRIALS: {N_TRIALS}")
-print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test (sealed holdout): {len(X_test):,}")
+print(f"Train: {len(X_train):,}, Val: {len(X_val):,}, Test (holdout): {len(X_test):,}")
 print(f"Holdout window: {holdout_start.date()} → {holdout_end.date()}")
 print(f"Walk-forward folds available: {len(mds.splits)} (using {n_folds})")
 
@@ -174,23 +173,26 @@ print(f"Walk-forward folds available: {len(mds.splits)} (using {n_folds})")
 # effects. The key insight: **regularization parameters often have the largest
 # impact** on out-of-sample performance in low signal-to-noise regimes.
 #
-# ### High-Impact Parameters
+# The ranges are the `suggest_*` calls in the objective below, so this table says what
+# each parameter does rather than repeating a bound that can drift away from the code.
 #
-# | Parameter | Range | Effect |
-# |-----------|-------|--------|
-# | `num_leaves` | 15–127 | Tree complexity — higher = more expressive but overfits |
-# | `learning_rate` | 0.01–0.1 | Step size — fix low, let early stopping find rounds |
-# | `max_depth` | 3–8 | Secondary depth constraint on leaf-wise growth |
-# | `min_child_samples` | 20–100 | Regularization — higher = less overfitting |
+# ### Structure
 #
-# ### Regularization Parameters
+# | Parameter | Effect |
+# |-----------|--------|
+# | `num_leaves` | Tree complexity: more leaves fit more and overfit sooner |
+# | `learning_rate` | Step size; keep it low and let early stopping find the rounds |
+# | `max_depth` | A second constraint on leaf-wise growth |
+# | `min_child_samples` | Minimum rows behind a leaf; higher smooths the fit |
 #
-# | Parameter | Range | Effect |
-# |-----------|-------|--------|
-# | `reg_alpha` (L1) | 1e-4–10.0 | Lasso regularization on leaf weights |
-# | `reg_lambda` (L2) | 1e-4–10.0 | Ridge regularization on leaf weights |
-# | `subsample` | 0.5–1.0 | Row sampling per tree |
-# | `colsample_bytree` | 0.5–1.0 | Column sampling per tree |
+# ### Regularization
+#
+# | Parameter | Effect |
+# |-----------|--------|
+# | `reg_alpha` (L1) | Lasso penalty on leaf weights |
+# | `reg_lambda` (L2) | Ridge penalty on leaf weights |
+# | `subsample` | Row sampling per tree |
+# | `colsample_bytree` | Column sampling per tree |
 
 # %% [markdown]
 # ## 4. Define Objective with Early Stopping and Pruning
@@ -213,7 +215,7 @@ class ICPruningCallback:
     """LightGBM callback that reports validation IC to an Optuna trial.
 
     Reports every `report_every` rounds (predicting after every round is
-    expensive). Honors the study's MAXIMIZE direction — `should_prune()` fires
+    expensive). Honors the study's MAXIMIZE direction: `should_prune()` fires
     when the trial's reported IC is below the running median.
     """
 
@@ -241,7 +243,7 @@ class ICPruningCallback:
 def objective(trial: optuna.Trial) -> float:
     """Optuna objective with early stopping and IC-based pruning."""
     params: dict[str, Any] = {
-        "n_estimators": 500,  # High ceiling — early stopping finds actual count
+        "n_estimators": 500,  # a ceiling; early stopping finds the count
         "max_depth": trial.suggest_int("max_depth", 2, 8),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
         "num_leaves": trial.suggest_int("num_leaves", 8, 64),
@@ -271,7 +273,12 @@ def objective(trial: optuna.Trial) -> float:
 
     y_pred = model.predict(X_val)
     ic = cross_sectional_ic_mean(y_val, y_pred, dates_val, symbols_val)
-    return ic if np.isfinite(ic) else -1.0
+    if not np.isfinite(ic):
+        # An undefined IC is not a score of minus one, which would be a perfect inverse
+        # ranking and a strong signal. It means no validation date had enough distinct
+        # predictions to rank, so the trial produced no value: that is a pruned trial.
+        raise optuna.TrialPruned
+    return ic
 
 
 # %% [markdown]
@@ -303,7 +310,7 @@ print(f"Wall time: {study_time:.1f}s")
 # %% [markdown]
 # **Pruning effectiveness**: Trials pruned early free compute budget for more
 # promising configurations. The pruning rate and wall-time savings depend on
-# the signal-to-noise ratio — noisier objectives prune more aggressively.
+# the signal-to-noise ratio: noisier objectives prune more aggressively.
 
 # %% [markdown]
 # ## 6. Best Hyperparameters
@@ -379,19 +386,17 @@ comparison = pl.DataFrame(
 comparison
 
 # %% [markdown]
-# **Interpretation**: The signal here is weak but not absent. On fold 0's
-# validation window the default configuration lands slightly negative (IC −0.011)
-# while Optuna's tuned "best" trial reaches +0.036. Note the tuned model is
-# essentially degenerate: it early-stops at a single boosting round
-# (`best_iteration_ = 1`) because the validation L2 trajectory rose from round 1,
-# so its predictions are nearly flat and its positive val IC rests on razor-thin
-# rank differences. On the **sealed 2024–2025 holdout** — never seen during the
-# search — both models are positive and the tuned one-tree model (test IC 0.103)
-# edges the default 100-tree model (0.073). That a one-tree model generalizes at
-# all is the cautionary note of Box 12.3 of §12.4: a single noisy validation
-# period barely constrains the search, so the "win" is fragile. Section 10 checks
-# whether averaging the objective across walk-forward folds selects sturdier
-# hyperparameters.
+# **Interpretation**: the table above holds the comparison, and the column that matters
+# is `n_trees`. Where the tuned configuration early-stops after a single boosting round,
+# its predictions are nearly flat and whatever validation IC it earned rests on rank
+# differences too small to mean much; a holdout number from such a model is not evidence
+# that tuning worked, whichever way it lands.
+#
+# That is the case Section 12.4's box on validation overfitting makes. One validation window barely
+# constrains a search over eight hyperparameters, so the configuration it selects is
+# partly a fit to that window's noise, and the holdout can flatter or punish it at
+# random. Section 10 repeats the search with the objective averaged across walk-forward
+# folds, which is the cheapest thing that changes the answer.
 
 # %% [markdown]
 # ## 8. Optimization History
@@ -411,7 +416,7 @@ best_so_far = completed["value"].cummax()
 ax1.plot(completed["number"], best_so_far, color=COLORS["amber"], linewidth=2, label="Best so far")
 ax1.set_xlabel("Trial Number")
 ax1.set_ylabel("Validation IC")
-ax1.set_title(f"Tuning gains plateau early (best val IC {study.best_value:.3f})")
+ax1.set_title("Validation IC by trial, with the best so far")
 ax1.legend()
 
 # Right: pruned vs completed
@@ -421,14 +426,16 @@ counts = [n_complete, n_pruned]
 colors = [COLORS["slate"], COLORS["silver_muted"]]
 ax2.bar(states, counts, color=colors)
 ax2.set_ylabel("Count")
-ax2.set_title(
-    f"MedianPruner cut {n_pruned} of {N_TRIALS} trials ({100 * n_pruned / N_TRIALS:.0f}%)"
-)
+ax2.set_title("Trials completed and pruned")
 for i, c in enumerate(counts):
     ax2.text(i, c + 0.5, str(c), ha="center", fontweight="bold")
 
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels. Left: each trial's validation IC against its trial number, with a line "
+    "tracing the best value reached so far. Right: two bars, the number of trials that "
+    "completed and the number pruned, each labelled with its count.",
+)
 
 # %% [markdown]
 # ## 9. Hyperparameter Importance
@@ -441,21 +448,23 @@ params_sorted = list(importance.keys())
 values_sorted = list(importance.values())
 ax.barh(params_sorted, values_sorted, color=COLORS["slate"])
 ax.set_xlabel("Importance (fANOVA)")
-ax.set_title(f"{params_sorted[0]} dominates the tuning objective (fANOVA {values_sorted[0]:.2f})")
+ax.set_title("Hyperparameter importance for the validation objective")
 ax.invert_yaxis()
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of fANOVA importance, one per tuned hyperparameter, ordered from "
+    "the largest share of the objective's variance down.",
+)
 
 # %% [markdown]
-# **Interpretation**: fANOVA-based importance decomposes validation IC variance
-# across hyperparameters. In this single-fold study `max_depth` dominates almost
-# entirely (fANOVA ≈ 0.94); every other parameter sits near zero, so their
-# ordering among themselves is noise. The read is that **capping depth** is the
-# one knob that moves this fold's (thin) IC — once depth is constrained, most
-# configurations early-stop before the leaf-weight penalties or column/row
-# sampling can matter. That is a study-specific result, not a law: with a signal
+# **Interpretation**: fANOVA importance decomposes the variance of the validation
+# objective across the hyperparameters, and the chart above shows how concentrated that
+# decomposition is here. Where one parameter takes almost all of it, the others' order
+# among themselves is noise, and the reading is that most configurations early-stop
+# before the leaf-weight penalties or the sampling fractions get to matter. That is a
+# statement about this study, not a law: with a signal
 # this weak the importance surface is itself noisy, and Section 12.4's general
-# guidance still holds — fix the learning rate low and let Optuna trade off tree
+# guidance still holds. Fix the learning rate low and let Optuna trade off tree
 # structure against regularization.
 
 # %% [markdown]
@@ -494,8 +503,47 @@ def prepare_fold_data(fold_idx):
 
 
 # Pre-load all fold data to avoid repeated I/O
-fold_data = [prepare_fold_data(i) for i in range(n_folds)]
-print(f"Prepared {n_folds} walk-forward folds for averaged HPO")
+# %% [markdown]
+# A date is scored only when at least `IC_MIN_OBS` names are priced on it, so a fold
+# whose validation window never reaches that width cannot be scored by any
+# configuration at all. Those folds come out here, before the search, which keeps the
+# set of scored folds a property of the data. Every trial is then scored on the same
+# folds, which is what makes two trial values comparable, and a configuration that
+# cannot rank one of them has no value rather than a partial one.
+
+# %%
+IC_MIN_OBS = 10
+
+
+def fold_is_scorable(dates_va, min_obs=IC_MIN_OBS):
+    """Whether any validation date in this fold carries enough names to rank."""
+    per_date = pl.DataFrame({"timestamp": dates_va}).group_by("timestamp").len()
+    return bool((per_date["len"] >= min_obs).any())
+
+
+def widest_cross_section(dates_va, y_hat):
+    """Largest spread of predictions inside a single validation date.
+
+    Zero means the model returned one number per date, which leaves the
+    cross-section with no order and Spearman with nothing to measure.
+    """
+    per_date = (
+        pl.DataFrame({"timestamp": dates_va, "prediction": y_hat})
+        .group_by("timestamp")
+        .agg((pl.col("prediction").max() - pl.col("prediction").min()).alias("spread"))
+    )
+    return float(per_date["spread"].max())
+
+
+all_folds = [prepare_fold_data(i) for i in range(n_folds)]
+fold_data = [fold for fold in all_folds if fold_is_scorable(fold[4])]
+if len(fold_data) < len(all_folds):
+    print(
+        f"Dropped {len(all_folds) - len(fold_data)} of {len(all_folds)} folds: no "
+        f"validation date carries {IC_MIN_OBS} names, so no configuration could be "
+        "scored on them."
+    )
+print(f"Scoring the averaged objective on {len(fold_data)} walk-forward folds")
 
 
 # %%
@@ -517,7 +565,7 @@ def walkforward_objective(trial: optuna.Trial) -> float:
     }
 
     ics = []
-    for X_tr, y_tr, X_va, y_va, dates_va, symbols_va in fold_data:
+    for fold_idx, (X_tr, y_tr, X_va, y_va, dates_va, symbols_va) in enumerate(fold_data):
         model = LGBMRegressor(**params)
         model.fit(
             X_tr,
@@ -525,8 +573,16 @@ def walkforward_objective(trial: optuna.Trial) -> float:
             eval_set=[(X_va, y_va)],
             callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=0)],
         )
-        ic = cross_sectional_ic_mean(y_va, model.predict(X_va), dates_va, symbols_va)
-        ics.append(ic if np.isfinite(ic) else -1.0)
+        y_hat = model.predict(X_va)
+        ic = cross_sectional_ic_mean(y_va, y_hat, dates_va, symbols_va)
+        if not np.isfinite(ic):
+            # Same folds for every trial, or no value at all: averaging whichever folds
+            # a configuration managed to rank would score each trial on its own set.
+            # Record the widest cross-section so an absence has a reason attached.
+            trial.set_user_attr("unranked_fold", fold_idx)
+            trial.set_user_attr("widest_cross_section", widest_cross_section(dates_va, y_hat))
+            raise optuna.TrialPruned
+        ics.append(ic)
 
     return float(np.mean(ics))
 
@@ -541,7 +597,36 @@ start_time = time.time()
 wf_study.optimize(walkforward_objective, n_trials=N_TRIALS, show_progress_bar=True)
 wf_time = time.time() - start_time
 
-print(f"Walk-forward HPO: best mean IC = {wf_study.best_value:.4f}")
+# A trial is pruned when it cannot rank one of the folds, so a fold set short enough
+# that one hard fold is most of the evidence can prune every trial. Read that as a
+# statement about the folds rather than an error.
+wf_completed = [
+    trial for trial in wf_study.trials if trial.state == optuna.trial.TrialState.COMPLETE
+]
+unranked = sorted(
+    {
+        trial.user_attrs["unranked_fold"]
+        for trial in wf_study.trials
+        if "unranked_fold" in trial.user_attrs
+    }
+)
+print(f"Walk-forward HPO: {len(wf_completed)} of {len(wf_study.trials)} trials scored")
+if wf_completed:
+    print(f"Best mean IC across folds: {wf_study.best_value:.4f}")
+else:
+    widest = max(
+        (
+            trial.user_attrs["widest_cross_section"]
+            for trial in wf_study.trials
+            if "widest_cross_section" in trial.user_attrs
+        ),
+        default=float("nan"),
+    )
+    print(
+        f"No configuration ranked fold(s) {unranked}, so every trial was pruned and the "
+        f"averaged search selected nothing. Widest spread within a date there: {widest:.2e}. "
+        "The comparison below reports the single-fold search alone."
+    )
 print(f"Wall time: {wf_time:.1f}s ({wf_time / study_time:.1f}x single-fold)")
 
 # %% [markdown]
@@ -551,79 +636,100 @@ print(f"Wall time: {wf_time:.1f}s ({wf_time / study_time:.1f}x single-fold)")
 # test fold to see which generalizes better.
 
 # %%
-# Single-fold tuned model (already trained above)
 single_test_ic = cross_sectional_ic_mean(
     y_test, tuned_model.predict(X_test), dates_test, symbols_test
 )
 
-# Walk-forward tuned model
-wf_params: dict[str, Any] = {
-    **wf_study.best_params,
-    "n_estimators": 500,
-    "random_state": SEED,
-    "verbose": -1,
-    "n_jobs": -1,
+rows = {
+    "method": ["Single-fold HPO"],
+    "best_val_ic": [round(study.best_value, 4)],
+    "test_ic": [round(single_test_ic, 4)],
+    "wall_time_s": [round(study_time, 1)],
 }
-wf_model = LGBMRegressor(**wf_params)
-wf_model.fit(
-    X_train,
-    y_train,
-    eval_set=[(X_val, y_val)],
-    callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=0)],
-)
-wf_test_ic = cross_sectional_ic_mean(y_test, wf_model.predict(X_test), dates_test, symbols_test)
-
-tuning_comparison = pl.DataFrame(
-    {
-        "method": ["Single-fold HPO", "Walk-forward HPO"],
-        "best_val_ic": [round(study.best_value, 4), round(wf_study.best_value, 4)],
-        "test_ic": [round(single_test_ic, 4), round(wf_test_ic, 4)],
-        "wall_time_s": [round(study_time, 1), round(wf_time, 1)],
+if wf_completed:
+    wf_params: dict[str, Any] = {
+        **wf_study.best_params,
+        "n_estimators": 500,
+        "random_state": SEED,
+        "verbose": -1,
+        "n_jobs": -1,
     }
-)
+    wf_model = LGBMRegressor(**wf_params)
+    wf_model.fit(
+        X_train,
+        y_train,
+        eval_set=[(X_val, y_val)],
+        callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=0)],
+    )
+    wf_test_ic = cross_sectional_ic_mean(y_test, wf_model.predict(X_test), dates_test, symbols_test)
+    rows["method"].append("Walk-forward HPO")
+    rows["best_val_ic"].append(round(wf_study.best_value, 4))
+    rows["test_ic"].append(round(wf_test_ic, 4))
+    rows["wall_time_s"].append(round(wf_time, 1))
+
+tuning_comparison = pl.DataFrame(rows)
 tuning_comparison
 
 # %% [markdown]
-# **Interpretation**: The two objective *values* tell opposite stories from the
-# two holdout results, and that gap is the lesson. The walk-forward best trial's
-# averaged objective is negative (mean validation IC −0.082): several folds
-# degenerate to near-constant predictions — one-tree fits whose cross-sectional
-# IC is undefined — and the objective penalizes each undefined fold with −1.0, so
-# the mean is dragged below zero by the degenerate folds rather than by a clean
-# signal. Yet on the **sealed 2024–2025 holdout** the walk-forward hyperparameters
-# reach test IC 0.107, edging the single-fold model's 0.103 and clearly above the
-# untuned default's 0.073. Averaging across regimes is the right instinct: even
-# with an ugly-looking objective it selects hyperparameters that generalize
-# marginally better than tuning against one window. But the margins are tiny and
-# the wall-time cost is real (~20× single-fold here), which is exactly §12.4's
-# caution — HPO gains on daily-return targets are small and easily swamped by
-# noise, so pay for walk-forward evaluation only when the compute buys robustness
-# you can measure.
+# **Interpretation**: the two objectives and the two holdout numbers do not tell the
+# same story, and why they differ is worth more than either number. A fold whose
+# cross-sectional IC is undefined carries no information about the hyperparameters that
+# produced it: a near-constant prediction has no ranking to correlate. Two different
+# things follow, and the notebook keeps them apart. A fold too narrow for any
+# configuration to rank is a property of the data, so it is removed before the search
+# and every trial then faces the same folds. A fold that this particular configuration
+# could not rank is a property of the trial, so the trial has no value and is pruned.
+# Scoring either case at minus one would enter a perfect inverse ranking into the
+# average, which on four folds moves the mean by a quarter.
+#
+# Refusing to score a fold has a consequence worth seeing. A fold's IC is undefined when
+# no validation date carries `IC_MIN_OBS` names, which the filter above removes before
+# the search, and also when the predictions tie inside every date. Early stopping
+# produces the second case: on a fold whose validation loss stops improving at the first
+# iteration, the fit is one shallow tree, every name on a date lands in the same leaf,
+# and the cross-section has no order to rank. Escaping that is a matter of how many
+# configurations the search draws. Over all eight folds and `N_TRIALS` at its default,
+# some configuration ranks every one of them; with both cut down, every trial can end
+# pruned, and the cell above then names the unranked fold and the comparison below
+# carries one row instead of two.
+#
+# What is left is the shape Section 12.4 warns about. The margins between tuned and
+# untuned on the holdout are small, and the walk-forward search costs many times the
+# single-fold one; the timing line above says how many. Averaging across folds is the
+# right instinct because it stops one window's noise from choosing the configuration,
+# not because it can manufacture signal in a target this weak.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Early stopping + pruning save compute** — setting `n_estimators` high
-#    and using `lgb.early_stopping` lets the data determine the tree count,
-#    while `MedianPruner` (driven by the custom `ICPruningCallback`) terminated
-#    34 of the 50 single-fold trials early — a 68 % prune rate that scales the
-#    available compute toward configurations Optuna deems promising.
-# 2. **Evaluate on a sealed holdout, never on a fold the search touched** — the
-#    test set here is the case study's declared 2024–2025 holdout; all eight
-#    walk-forward folds precede it, so no Optuna trial ever scored on it. On that
-#    holdout both tuned configurations beat the untuned default (test IC 0.103
-#    single-fold and 0.107 walk-forward vs 0.073 default), but the margins are
-#    thin — a reminder that a "held-out" number is only trustworthy if the search
-#    could not see it.
-# 3. **Single-fold objectives are noisy and can reward degenerate models** — the
-#    single-fold "best" trial early-stopped to a one-tree model (`best_iteration_`
-#    = 1); across the eight folds that same parameter family collapses to
-#    near-constant predictions on two folds (undefined IC). Walk-forward averaging
-#    penalizes those degenerate folds (best mean val IC −0.082) and still selects
-#    hyperparameters that generalize marginally better, but it cannot manufacture
-#    signal where the target is this noisy — the textbook Box 12.3 caution.
-# 4. **50–100 trials suffice for GBMs** — TPE converges quickly; beyond this
-#    range, marginal gains are outweighed by validation overfitting risk.
+# 1. **Let the data set the tree count, and let the pruner spend the budget.** A high
+#    `n_estimators` with `lgb.early_stopping` picks the count per configuration, and
+#    `MedianPruner`, driven here by a custom IC callback, stops trials that are behind
+#    at an intermediate checkpoint. The figure above says how many trials that was.
+#
+# 2. **Score the search and score the result on different data.** The test set is the
+#    case study's declared holdout and every walk-forward fold ends before it starts, so
+#    no trial could see it. That is what makes the holdout column readable at all; the
+#    margins it shows are thin, which is what makes it worth reading carefully.
+#
+# 3. **A single validation window rewards degenerate models.** The single-fold search
+#    selected a configuration that early-stops after one tree, whose predictions are
+#    nearly flat. Its objective value was real and its meaning was not. Across folds the
+#    same family produces undefined ICs on some folds, which is the same fact from the
+#    other side.
+#
+# 4. **An undefined score is not a bad score, and it is not a smaller sample either.**
+#    How a search treats a fold it cannot score decides what it selects. Scoring the
+#    fold at the worst possible value teaches the sampler to avoid a region for a reason
+#    nothing measured. Averaging over the folds a configuration did manage scores every
+#    trial on its own set, which rewards ranking one easy fold and predicting a constant
+#    everywhere else. What is left is to score every trial on the same folds, and to
+#    treat a trial that cannot as having no value.
+#
+# 5. **The trial budget is a parameter, and Section 12.4 gives its range.** The book
+#    suggests starting in the low hundreds and warns that beyond that the marginal gain
+#    shrinks while the validation-overfitting risk grows. `N_TRIALS` in the parameters
+#    cell is what this run used, which is smaller so the notebook stays runnable.
 #
 # **Next**: See `07_hpo_comparison` for grid search vs Optuna efficiency,
 # or `06_optuna_multi_asset` for multi-objective IC vs turnover optimization.

@@ -31,7 +31,7 @@
 # - Summarize per-product coverage and group products by asset class.
 # - Verify OHLC invariants on a representative continuous series.
 #
-# **Book reference**: §2.2 ("The Asset-Class Market Data Landscape" — Futures).
+# **Book reference**: §2.2, "The asset-class market data landscape" - the futures part of it.
 #
 # **Prerequisites**: `data` package on `PYTHONPATH`; CME parquet present at
 # `ML4T_DATA_PATH/futures/`. Run `python data/futures/market/download.py` if
@@ -45,7 +45,7 @@ import polars as pl
 
 from data import list_cme_products, load_cme_futures
 from utils.data_quality import check_ohlc_invariants
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -120,6 +120,14 @@ ASSET_CLASS_COLORS = {
 }
 
 # %%
+unmapped = [p for p in products if p not in ASSET_CLASS_MAP]
+if unmapped:
+    raise ValueError(
+        f"{unmapped} have no asset class. The map above is written by hand and the product "
+        "list comes from the data, so a newly captured product has to be added here."
+    )
+
+# %%
 class_counts = (
     pl.DataFrame({"product": products})
     .with_columns(asset_class=pl.col("product").replace(ASSET_CLASS_MAP))
@@ -138,13 +146,23 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="CME universe: products per asset class",
+    title="Products per asset class",
     xaxis_title="Asset class",
     yaxis_title="Number of products",
     height=420,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A bar chart counting products in each asset-class bucket, sorted from largest to "
+    "smallest, with the count written above each bar. No bucket holds more than about a "
+    "fifth of the universe.",
+)
+
+# %% [markdown]
+# The universe is spread across asset classes rather than concentrated in one, which is what
+# makes it usable for cross-asset work later. It is not balanced, though, so the counts above
+# are worth carrying forward rather than assuming an even split.
 
 # %% [markdown]
 # ## 2. Data Structure Example: E-mini S&P 500 (ES)
@@ -174,9 +192,10 @@ print(f"Shape: {es_continuous.shape}")
 print(f"Date range: {es_continuous['timestamp'].min()} to {es_continuous['timestamp'].max()}")
 
 # %% [markdown]
-# The front-month continuous series splices successive contracts into a single
-# price history. Plotted at daily resolution, it runs unbroken across the full
-# 2011–2025 window — the volume-roll splicing leaves no visible gaps.
+# The front-month continuous series splices successive contracts into one price history.
+# Plotted at daily resolution it runs unbroken, which is what a roll is supposed to look
+# like from the outside; `06_futures_continuous` opens up what the splice does to the
+# returns either side of it.
 
 # %%
 es_daily = (
@@ -195,12 +214,23 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title="ES E-mini S&P 500 — front-month continuous close (daily)",
+    title="ES front-month close, spliced at the volume roll",
     xaxis_title="Date",
     yaxis_title="Price",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A daily closing price line for the E-mini S&P 500 front-month continuous series. It "
+    "runs unbroken across the whole window, rising overall with the drawdowns of 2020 and "
+    "2022 visible, and shows no step or gap where one contract hands over to the next.",
+)
+
+# %% [markdown]
+# No break is visible at the splices, which is the point and also the risk: the series looks
+# continuous whether or not the roll was handled correctly, so nothing about this chart
+# establishes that it was. `06_futures_continuous` builds the same series from individual
+# contracts and checks it against the vendor's, which is the test this picture cannot perform.
 
 # %% [markdown]
 # Each individual contract trades for a finite window before expiry. Aggregating
@@ -220,11 +250,15 @@ contract_stats = (
 )
 print(f"Total ES contracts: {len(contract_stats)}")
 
+# %% [markdown]
+# Each of the most recent contracts is drawn as a horizontal bar spanning its trading window.
+# Where neighbouring bars overlap, both the expiring contract and the next one are quoted at
+# the same time; that overlap is the roll period, and it is what a continuous series has to
+# choose a date inside.
+
 # %%
-# Draw each of the most recent 24 contracts as a horizontal bar spanning its
-# trading window. The overlap between neighboring bars is the roll period, when
-# both the expiring and the next contract trade at once.
-recent = contract_stats.tail(24)
+RECENT_CONTRACTS = 24
+recent = contract_stats.tail(RECENT_CONTRACTS)
 
 fig = go.Figure()
 for row in recent.iter_rows(named=True):
@@ -238,13 +272,24 @@ for row in recent.iter_rows(named=True):
         )
     )
 fig.update_layout(
-    title="ES contracts overlap at the roll (most recent 24 contracts)",
+    title="Trading window of each ES contract",
     xaxis_title="Date",
     yaxis_title="Contract (instrument_id)",
     yaxis=dict(type="category"),
     height=560,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "One horizontal bar per contract, stacked in order of first trade. Each bar spans "
+    "several months and starts before the bar below it ends, so consecutive contracts are "
+    "quoted at the same time for part of their lives.",
+)
+
+# %% [markdown]
+# Each contract trades for months, and neighbouring contracts overlap for a stretch around the
+# roll. That overlap is what makes a volume-based roll possible at all: for those weeks both
+# contracts are liquid, and the question of which one is the front month has an answer that
+# changes day to day.
 
 # %% [markdown]
 # ## 3. Coverage Summary
@@ -277,12 +322,16 @@ def get_product_coverage(product_list: list[str]) -> pl.DataFrame:
 
 # %%
 coverage = get_product_coverage(products)
-print(f"Products with data: {len(coverage)} / {len(products)}")
+print(f"Loaded {len(coverage)} continuous series, {coverage['rows'].sum():,} hourly bars total")
+print(
+    f"Earliest history starts {coverage['start_date'].min()}; latest starts {coverage['start_date'].max()}"
+)
 
 # %% [markdown]
-# One horizontal bar per product spans its continuous front-month history, sorted
-# and colored by asset class. Most products cover the full 2011–2025 window; the
-# late-starting ones entered the dataset when Databento began capturing them.
+# One horizontal bar per product spans its continuous front-month history, grouped and
+# coloured by asset class. A bar that starts late is a product Databento began capturing
+# later, not a contract that began trading then - the distinction matters because a
+# backtest reading this panel sees the second and gets the first.
 
 # %%
 cov_timeline = coverage.with_columns(
@@ -307,13 +356,23 @@ for row in cov_timeline.iter_rows(named=True):
     )
     seen.add(cls)
 fig.update_layout(
-    title="CME futures: per-product coverage of the front-month continuous series",
+    title="First and last session per product",
     xaxis_title="Date",
     yaxis_title="Product",
     height=760,
     legend_title="Asset class",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "One horizontal bar per product spanning its continuous history, grouped and coloured "
+    "by asset class. Most bars start at the left edge and run to the right edge; a small "
+    "number begin several years in, and none stops early.",
+)
+
+# %% [markdown]
+# Most products cover the whole window and a few enter part-way through, so a panel built by
+# requiring every product on every date would be shorter than the data allows. The start dates
+# above are the ones to check against before choosing a common sample.
 
 # %% [markdown]
 # ## 4. Data Quality
@@ -326,26 +385,37 @@ for row in invariants.iter_rows(named=True):
     print(f"  {status} {row['check']}: {row['valid_pct']:.2f}%")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **30 products across 7 asset-class buckets**: FX (6), Grains (5),
-#    Energy / Equity Index / Metals / Rates (4 each), Livestock (3).
-# 2. **Hierarchy**: each product has 100+ individual contracts (194 for ES) and
-#    one or more continuous series; downstream notebooks operate on the
-#    continuous front month unless they specifically need contract-level data.
-# 3. **Hourly granularity**, full coverage 2011-01-02 through 2025-12-30 for
-#    products with the longest history. ES individual contract data starts
-#    later (2016) because earlier contracts have already rolled off.
-# 4. **Canonical schema**: `timestamp` for time and `product` for entity (CME's
-#    contract identity is non-trivial — see also `instrument_id` for individual
-#    contracts).
-# 5. **OHLC invariants hold at 100% for ES continuous** — all six checks pass
-#    on every observation.
+# - **A futures product is not a series.** Product, contract and continuous series are three
+#   different things. Each contract has its own observed price history and stops at expiry;
+#   the continuous series is built by joining successive contracts into one long history that
+#   no single instrument ever traded. Everything downstream reads the continuous front month,
+#   and anything that needs to know which contract a price came from goes back to
+#   `instrument_id`.
+# - **Continuous series are constructed, and the construction is a choice.** The unbroken
+#   line here is the result of splicing at a volume roll. A different roll rule produces a
+#   different history from the same contracts, which is why the adjustment method is a
+#   decision the next notebook makes explicitly rather than a property of the data.
+# - **Contract windows overlap, and the overlap is where the roll lives.** Two contracts
+#   quoting at once is not duplication; it is the period a roll rule has to pick a date
+#   inside, and the width of that window is what makes the choice consequential.
+# - **A history that starts late is usually a capture date, not a listing date.** The
+#   difference is invisible in the panel and decisive for a backtest, which is why the
+#   coverage figure draws every product's history rather than reporting a start date.
+# - **The classification is hand-written, so check it against the data.** The asset-class map
+#   is this repository's, not the exchange's, and the notebook now fails with a readable
+#   message if the loader returns a product the map has never heard of.
 #
-# ### Next Steps
+# **Known limitations.** OHLC invariants are checked on one product's continuous series rather
+# than across the universe, and no notebook in this chapter checks them across the CME panel -
+# `13_data_quality_framework` demonstrates the validation methods on US equities, so the
+# technique transfers and the coverage does not. The continuous
+# series here are unadjusted, so a return computed across a roll includes the price gap
+# between two contracts rather than a market move. And hourly bars are stamped in UTC, which
+# is not the grid any of these products trades on - `05_futures_session_aggregation` is what
+# puts them on a session.
 #
-# - **`05_futures_session_aggregation`**: Aligning hourly bars to CME trading
-#   sessions.
-# - **`06_futures_continuous`**: Roll detection and the three adjustment
-#   methods (ratio, difference, calendar).
-# - **Chapter 8**: Feature engineering on term structure and roll yield.
+# **Next**: `05_futures_session_aggregation` aligns hourly bars to CME sessions;
+# `06_futures_continuous` covers roll detection and the ratio, difference and calendar
+# adjustments. Chapter 8 builds term-structure and roll-yield features on top.

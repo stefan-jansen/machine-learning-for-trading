@@ -88,6 +88,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
+    candidate_set_supersedes,
     declared_labels,
     load_model_configs,
     model_requests,
@@ -110,6 +111,7 @@ CONFIG_NAMES: list[str] = []
 DIAGNOSTIC_CONFIG_NAMES = ["ols"]
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_SETS: dict = {}
 
 # %%
 study = open_study("us_equities_panel", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -144,11 +146,13 @@ declared_labels(study, "linear")
 # - **Lasso** penalizes the sum of absolute coefficients, which drives some of them exactly to
 #   zero: it selects features rather than shrinking them. **ElasticNet** mixes the two.
 #
-# Lasso and ElasticNet are parameterized here by `alpha_frac` rather than a raw penalty. For any
-# fold there is a threshold penalty $\alpha_{\max}$ - the smallest one that zeros every
-# coefficient - computed from that fold's own data. `alpha_frac` is the fraction of it to apply,
-# so one declared `alpha_frac` means the same thing on every fold, while a fixed raw penalty would
-# mean something different on each.
+# Lasso and ElasticNet are declared with a raw `alpha`, two values each an order of magnitude
+# apart, and ElasticNet also carries `l1_ratio` - the share of the penalty that is L1 rather than
+# L2. An L1 penalty behaves differently from Ridge in one way that matters for reading the grid:
+# for any fold there is a threshold penalty $\alpha_{\max}$, the smallest one that zeros every
+# coefficient, and where it falls depends on that fold's own design matrix. So one declared
+# `alpha` is a different fraction of the way to that threshold on every fold, and a configuration
+# can zero out on some folds and not on others. Section 4's coverage column is what shows it.
 
 # %%
 configs = load_model_configs(
@@ -287,13 +291,15 @@ planned.select(
 # parameter as much as a changed menu - produces a different population under the same name, and
 # the registry refuses to write it without being told which snapshot it supersedes. That lineage
 # is the only record of which generation is which.
+#
+# A declared `SUPERSEDES_POPULATION` hash only means something where a generation of this name
+# already exists. A preview run, a first canonical run against an empty `run_log/`, and a run
+# under a caller-chosen `POPULATION_NAME` are all refused by `OfficialPopulation.create` if one
+# is passed anyway, so `supersedes_for_run` works out which of those cases this run is and
+# resolves the hash accordingly.
 
 # %%
 population_name = POPULATION_NAME or "us-equities-linear-checkpoints-v1"
-# The declared hash is only meaningful where a generation of this name already exists. A
-# preview run, a first canonical run against an empty `run_log/`, and a run under a
-# caller-chosen `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is
-# passed anyway. The resolution lives in shared code so no notebook branches on the tier.
 supersedes = supersedes_for_run(
     study,
     population_name=population_name,
@@ -422,11 +428,12 @@ catalog.select(
 # backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
 # chain, which is the failure the named-set design exists to prevent.
 #
-# The diagnostic subset is bounded on purpose. `15` holds every diagnostic member's prediction
-# frame in memory at once and correlates them pairwise, so the cost is quadratic in members. The
-# full grid is sixteen configurations on each of three labels; `ols` is the unpenalized baseline
-# every penalized configuration is a shrinkage of, which makes it the one that means something on
-# its own.
+# The diagnostic subset is bounded hard, and the reason is arithmetic. `15` loads every diagnostic
+# member's raw prediction frame and holds them all while it joins them pairwise; one frame on this
+# panel is over seven million rows and about 225 MB in memory. So the set is one member per label and
+# family: the diagnostic configuration at its last checkpoint. Here that is `ols`, the unpenalized
+# baseline every penalized configuration is a shrinkage of, and a linear model has one fitted
+# state, so its last checkpoint is its only one.
 #
 # Only an unnarrowed canonical run publishes. The guard on `narrows_declared_catalog` above already
 # refuses to publish the canonical *population* from a narrowed run; the same condition governs the
@@ -438,18 +445,35 @@ if is_published_population:
     for label_value in panel_labels:
         label_name = label_value.replace("_", "-")
         label_rows = execution.catalog_rows.filter(pl.col("label") == label_value)
+        full_set_name = f"us-equities-{label_name}-linear-v1"
         full_set = study.predictions.freeze(
             label_rows,
-            name=f"us-equities-{label_name}-linear-v1",
+            name=full_set_name,
+            supersedes=candidate_set_supersedes(
+                study, name=full_set_name, declared=SUPERSEDES_SETS.get(full_set_name, "")
+            ),
         )
-        diagnostic_rows = label_rows.filter(pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES))
+        diagnostic_rows = label_rows.filter(
+            pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES)
+            # `.fill_null(True)` covers a family that publishes no checkpoint value at all, where
+            # the comparison is null rather than false and would otherwise empty the frame.
+            & (
+                pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("config_name")
+            ).fill_null(True)
+        )
         if diagnostic_rows.height == 0:
             raise ValueError(
                 f"no {label_value} rows for diagnostic configurations {DIAGNOSTIC_CONFIG_NAMES}"
             )
+        diagnostic_set_name = f"us-equities-{label_name}-linear-diagnostics-v1"
         diagnostic_set = study.predictions.freeze(
             diagnostic_rows,
-            name=f"us-equities-{label_name}-linear-diagnostics-v1",
+            name=diagnostic_set_name,
+            supersedes=candidate_set_supersedes(
+                study,
+                name=diagnostic_set_name,
+                declared=SUPERSEDES_SETS.get(diagnostic_set_name, ""),
+            ),
         )
         set_rows.extend(
             [
@@ -648,10 +672,10 @@ else:
 # **Where the Ridge curve turns tells you how collinear the design matrix is.** It is flat while
 # the penalty is too weak to bind, rises as shrinkage starts collapsing groups of near-duplicate
 # features onto their common direction, and falls once the penalty is strong enough to erode the
-# signal along with the noise. The distance from the peak back to unregularized OLS is the part of
-# the signal that multicollinearity was burying. On a feature set close to orthogonal the same
-# curve would be nearly flat, and that comparison is worth making on your own data before spending
-# a grid on it.
+# signal along with the noise. How far it climbs above its own flat left end is how much of the
+# signal collinearity was burying, because the left end is where the penalty is too weak to change
+# what the fit does. On a feature set close to orthogonal the curve would be nearly flat
+# throughout, and that comparison is worth making on your own data before spending a grid on it.
 #
 # **Whether the three horizons agree is the second thing to read.** They are the same features and
 # the same folds, differing only in how far ahead the label looks. Where the orderings agree, the

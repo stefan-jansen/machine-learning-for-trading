@@ -88,15 +88,20 @@
 # %%
 """Generate TSMixer validation predictions through the shared research interface."""
 
-import os
-from pathlib import Path
-
+import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
-from case_studies.research import open_study, plan_models
+from case_studies.research import (
+    candidate_set_supersedes,
+    open_study,
+    plan_models,
+    run_model_population,
+    supersedes_for_run,
+)
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
+from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -104,13 +109,15 @@ PRIMARY_LABEL = ""
 CONFIG_NAMES = []
 COMMON_OVERRIDES = {}
 CONFIG_OVERRIDES = {}
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION = ""
+SUPERSEDES_SETS: dict = {}
 DEVICE = "cuda"
 EXECUTION_TIER = "canonical"
-WORKSPACE = "experiments"
-MAX_SYMBOLS = 0
-FOLD_IDS = []
-MAX_TRAIN_SEQUENCES = 0
-PREVIEW_N_EPOCHS = 0
+WORKSPACE = ""
+PREVIEW_MAX_SYMBOLS = 0
+PREVIEW_FOLD_IDS = []
+PREVIEW_MAX_TRAIN_SEQUENCES = 0
 
 # %% [markdown]
 # ## 1. Which configurations, and on which label
@@ -118,7 +125,7 @@ PREVIEW_N_EPOCHS = 0
 # The menu at `config/training/{label}.yaml` lists the sequence configurations declared for a
 # label, and this notebook takes the ones whose architecture is `tsmixer`. Each name resolves to a
 # preset holding the full parameter set - here a 60-session lookback, 100 epochs, a checkpoint
-# every 5, and a dropout of 0.1.
+# every 5, and dropout on the hidden units. The frame below prints the resolved values.
 #
 # What each setting a run may pass decides:
 #
@@ -133,9 +140,15 @@ PREVIEW_N_EPOCHS = 0
 #   every fold at the published epoch schedule. A preview run has to declare at least one
 #   reduction and carries it in the identity, so its results can never be compared against
 #   canonical ones or reach a holdout decision.
-# - **`PREVIEW_N_EPOCHS`** shortens the schedule for a preview. It is part of the identity rather
-#   than a runtime detail, because a model trained for fewer epochs is a different model rather
-#   than the same one measured sooner.
+#
+# A shortened training schedule is not among the reductions a preview may declare, and
+# deliberately. This family's preview contract - `SEQUENCE_PREVIEW_FIELDS` in
+# `case_studies/utils/preview_fields.py` - accepts a narrower universe, a fold subset and a cap on
+# training sequences, and no epoch count, because a model trained for fewer epochs is a different
+# model rather than the same one measured sooner. To train a short schedule, pass `n_epochs` in
+# `COMMON_OVERRIDES`. It moves the training identity, so the result registers beside the published
+# one, and a run carrying any override publishes neither the canonical population nor the
+# canonical set names.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
@@ -173,32 +186,43 @@ menu = pl.DataFrame(
 )
 menu
 
+# %% [markdown]
+# A run that narrows the selection, overrides a parameter or fits on another device produces a
+# different set of predictions from the one the canonical name stands for. Publishing it under
+# that name would leave the name meaning two different member sets at two different times, so the
+# guard below requires such a run to say what to call its own population, and the frozen set names
+# in Section 6 are withheld from it for the same reason.
+
+# %%
+is_published_population = (
+    EXECUTION_TIER == "canonical"
+    and selected_names == published_names
+    and not COMMON_OVERRIDES
+    and not CONFIG_OVERRIDES
+    and DEVICE == "cuda"
+)
+if EXECUTION_TIER == "canonical" and not is_published_population and not POPULATION_NAME:
+    raise ValueError(
+        "this run narrows or overrides what the menu declares, so it cannot publish the canonical "
+        "population; pass POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
+# Both tiers resolve the study through `open_study`. It reads the labels and features in place
+# and redirects only writes, so a preview run scores the same inputs a canonical one does and
+# cannot publish over it. A preview must be given a workspace to write into; a canonical run
+# leaves `WORKSPACE` empty and regenerates the case study's own artifacts in place.
+
 # %%
 preview_reductions = {}
-if MAX_SYMBOLS:
-    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
-if FOLD_IDS:
-    preview_reductions["folds"] = [int(fold) for fold in FOLD_IDS]
-if MAX_TRAIN_SEQUENCES:
-    preview_reductions["max_train_sequences"] = int(MAX_TRAIN_SEQUENCES)
+if PREVIEW_MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(PREVIEW_MAX_SYMBOLS)
+if PREVIEW_FOLD_IDS:
+    preview_reductions["folds"] = [int(fold) for fold in PREVIEW_FOLD_IDS]
+if PREVIEW_MAX_TRAIN_SEQUENCES:
+    preview_reductions["max_train_sequences"] = int(PREVIEW_MAX_TRAIN_SEQUENCES)
 
-# Both tiers resolve the study through `open_study`. It reads the labels and features in place and
-# redirects only writes, so a preview run scores the same inputs a canonical one does and cannot
-# publish over it.
-if EXECUTION_TIER == "canonical":
-    if preview_reductions or PREVIEW_N_EPOCHS:
-        raise ValueError("Canonical execution cannot declare preview reductions")
-    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
-elif EXECUTION_TIER == "preview":
-    if not preview_reductions:
-        raise ValueError("Preview execution requires a data or fold reduction")
-    study = open_study(
-        CASE_STUDY_ID,
-        execution_tier=EXECUTION_TIER,
-        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
-    )
-else:
-    raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -213,8 +237,6 @@ for config_name in selected_names:
         **COMMON_OVERRIDES,
         **dict(CONFIG_OVERRIDES.get(config_name, {})),
     }
-    if PREVIEW_N_EPOCHS:
-        overrides["n_epochs"] = int(PREVIEW_N_EPOCHS)
     requests.append(
         study.model(
             family="deep_learning",
@@ -251,11 +273,6 @@ request_table
 
 # %%
 plan = plan_models(study, requests=requests)
-official_population = None
-if EXECUTION_TIER == "canonical":
-    official_population = plan.create_population(
-        name="us-equities-tsmixer-checkpoints-v1",
-    )
 
 planned_population = pl.DataFrame(
     {
@@ -269,8 +286,35 @@ planned_population = pl.DataFrame(
 )
 planned_population
 
+# %% [markdown]
+# `run_model_population` takes the plan, writes the population down, fits every member and then
+# checks that what came out is what was declared. The same call serves both tiers: a canonical run
+# registers an immutable population that the later notebooks bind to, and a preview run gets a
+# declaration that is verified and then discarded with its workspace, so no notebook here has to
+# branch on the tier to decide what to publish.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is a set of
+# prediction identities, so anything that moves a training identity - a changed preset as much as a
+# changed menu - produces a different population under the same name, and the registry refuses to
+# write it without being told which snapshot it supersedes. Leaving it empty is right for a first
+# run and for a reader's clean clone, and `supersedes_for_run` withholds a declared hash wherever
+# offering it would be refused.
+
 # %%
-execution = plan.run()
+population_name = POPULATION_NAME or "us-equities-tsmixer-checkpoints-v1"
+execution, official_population = run_model_population(
+    study,
+    plan,
+    population_name=population_name,
+    supersedes=supersedes_for_run(
+        study,
+        population_name=population_name,
+        declared=SUPERSEDES_POPULATION,
+        execution_tier=EXECUTION_TIER,
+    ),
+)
+
+print(f"population {official_population.name}: {len(official_population.members)} prediction sets")
 
 # %% [markdown]
 # ## 4. What was actually fitted
@@ -342,6 +386,75 @@ if not unscored.is_empty():
     raise RuntimeError(f"prediction sets scored no dates: {unscored.to_dicts()}")
 scored
 
+# %% [markdown]
+# ### Where more training stopped helping
+#
+# Each line traces one configuration's validation information coefficient as epochs are added to
+# it. This is the figure the checkpoint dimension exists to produce, and it separates two things a
+# single end-of-training number cannot.
+#
+# A line that rises and then falls has an interior optimum: the model was still learning, then
+# began fitting the training windows at the expense of the validation folds. That is the evidence about whether alternating
+# time and feature mixing over two blocks has more capacity than the number of eligible
+# windows supports.
+# A line that wanders around zero without trend never had anything to learn, and its highest point
+# is wherever the noise happened to peak. Both produce a respectable-looking maximum, which is why
+# the curve rather than the maximum is what to read.
+#
+# Nothing here selects a checkpoint. Every one of them is registered as its own candidate, and
+# which one a strategy would use is decided by validation backtest Sharpe in
+# [`16_backtest`](16_backtest.ipynb).
+
+# %%
+curves = scored.sort("config_name", "checkpoint_value")
+config_names = curves.get_column("config_name").unique(maintain_order=True).to_list()
+# `ml4t_palette` returns a list of that many colours, so it is called once and indexed.
+palette = ml4t_palette(len(config_names), categorical=True)
+
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+for index, config_name in enumerate(config_names):
+    series = curves.filter(pl.col("config_name") == config_name)
+    ax.plot(
+        series.get_column("checkpoint_value"),
+        series.get_column("ic_mean"),
+        marker="o",
+        markersize=4,
+        lw=1.4,
+        color=palette[index],
+        label=config_name,
+    )
+zero_line(ax)
+ax.set_xlabel("Training epochs")
+ax.set_ylabel("Mean validation IC")
+ax.legend(fontsize=8, frameon=False)
+add_message_title(
+    ax,
+    "Mean validation IC against training epoch",
+    subtitle="One line per configuration, over the epochs the schedule checkpoints at",
+)
+# The alt text counts rather than asserts: whether a curve turns over is the question the figure
+# exists to answer, and a line described as peaking when it does not is a claim the data refutes.
+_peaks = (
+    curves.group_by("config_name")
+    .agg(
+        peak=pl.col("checkpoint_value").sort_by("ic_mean", descending=True).first(),
+        first=pl.col("checkpoint_value").min(),
+        last=pl.col("checkpoint_value").max(),
+    )
+    .with_columns(
+        interior=pl.col("peak").is_between(pl.col("first"), pl.col("last"), closed="none")
+    )
+)
+_n_interior = int(_peaks.get_column("interior").sum())
+show_with_alt(
+    fig,
+    "A line chart of mean validation information coefficient against training epoch, one line per "
+    "configuration, with a dashed line at zero. Counted from the underlying frame, "
+    f"{_n_interior} of {_peaks.height} configurations reach their highest information coefficient "
+    "at an epoch that is neither the first nor the last, which is what an interior optimum looks "
+    "like on this chart.",
+)
+
 # %%
 coverage_rows = []
 for run in execution.runs:
@@ -367,8 +480,6 @@ for run in execution.runs:
         )
 
 coverage_table = pl.DataFrame(coverage_rows).sort("config_name", "checkpoint")
-if official_population is not None:
-    official_population.require_complete()
 coverage_table
 
 # %%
@@ -376,33 +487,61 @@ execution_diagnostics = pl.DataFrame(execution.diagnostics)
 execution_diagnostics
 
 # %% [markdown]
-# ## 6. Naming the set the later notebooks open
+# ## 6. Naming the sets the later notebooks open
 #
-# A canonical default CUDA run freezes every returned TSMixer prediction row under a stable name.
-# The same bounded family set supplies raw diagnostics because this notebook has one published
-# configuration. Preview and customized canonical requests do not publish an official set.
+# A canonical default CUDA run freezes what it produced under two stable names, and preview or
+# customized canonical requests publish neither.
+#
+# The first name is the **full set**: every prediction row this run returned, which
+# [`16_backtest`](16_backtest.ipynb) backtests member by member.
+#
+# The second is the **bounded diagnostic set**, and it is bounded hard.
+# [`15_model_analysis`](15_model_analysis.ipynb) loads every diagnostic member's raw prediction
+# frame and holds them all while it joins them pairwise; one frame on this panel is over seven
+# million rows and about 225 MB in memory, so a set that grew with the checkpoint count would not fit
+# beside the other seven families'. The bound is the last checkpoint of each published
+# configuration - one member here, because the menu declares one TSMixer configuration. The
+# epoch dimension is still read, in the learning-curve figure above, which is drawn from registry
+# metrics rather than from raw frames.
 
 # %% tags=["results"]
 set_rows = []
-is_published_population = (
-    EXECUTION_TIER == "canonical"
-    and selected_names == published_names
-    and not COMMON_OVERRIDES
-    and not CONFIG_OVERRIDES
-    and DEVICE == "cuda"
-)
 if is_published_population:
     label_name = label.replace("_", "-")
+    full_set_name = f"us-equities-{label_name}-tsmixer-v1"
     full_set = study.predictions.freeze(
         execution.catalog_rows,
-        name=f"us-equities-{label_name}-tsmixer-v1",
+        name=full_set_name,
+        supersedes=candidate_set_supersedes(
+            study, name=full_set_name, declared=SUPERSEDES_SETS.get(full_set_name, "")
+        ),
+    )
+    diagnostic_rows = execution.catalog_rows.filter(
+        # `.fill_null(True)` covers a family that publishes no checkpoint value at all, where the
+        # comparison is null rather than false and would otherwise empty the frame.
+        (
+            pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("config_name")
+        ).fill_null(True)
+    )
+    diagnostic_set_name = f"us-equities-{label_name}-tsmixer-diagnostics-v1"
+    diagnostic_set = study.predictions.freeze(
+        diagnostic_rows,
+        name=diagnostic_set_name,
+        supersedes=candidate_set_supersedes(
+            study, name=diagnostic_set_name, declared=SUPERSEDES_SETS.get(diagnostic_set_name, "")
+        ),
     )
     set_rows = [
         {
-            "role": "backtest and diagnostic population",
+            "role": "backtest population",
             "set_name": full_set.name,
             "members": len(full_set.members),
-        }
+        },
+        {
+            "role": "bounded diagnostics",
+            "set_name": diagnostic_set.name,
+            "members": len(diagnostic_set.members),
+        },
     ]
 compatible_sets = pl.DataFrame(
     set_rows,
@@ -411,9 +550,10 @@ compatible_sets = pl.DataFrame(
 compatible_sets
 
 # %% [markdown]
-# `15_model_analysis.py` reopens the named set for descriptive analysis. `16_backtest.py` passes
-# every catalog row directly to the shared backtest runner. Model metrics do not choose a
-# configuration or checkpoint.
+# `15_model_analysis` reopens both names: the full set to confirm the run filled every member it
+# promised, and the diagnostic set to read raw predictions. `16_backtest` passes every full-set
+# catalog row to the shared backtest runner. Neither the metrics here nor the ones there choose a
+# configuration or a checkpoint; selection is on validation backtest Sharpe in `16_backtest`.
 
 # %% [markdown]
 # ## What to notice

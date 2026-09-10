@@ -109,8 +109,9 @@ torch.backends.cudnn.deterministic = True
 # A network's weights are fitted to inputs on a particular numerical scale, so the
 # prices are standardised - shifted and divided so the training window has mean zero
 # and standard deviation one. The shift and the scale are computed on the training
-# window alone; using the whole series would let the network's input scaling carry
-# information about how high prices eventually went.
+# window alone, so the scaling the network sees is a function of data available when
+# training starts. Statistics taken over the whole series would encode how high prices
+# eventually went into every input the network reads, including the held-back ones.
 
 # %%
 etf_df = load_etfs()

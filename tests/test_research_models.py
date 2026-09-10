@@ -1909,6 +1909,118 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
     assert population.require_complete() == plan.expected_prediction_hashes
 
 
+def _frames_held_by(candidate: Any) -> list[pl.DataFrame]:
+    """Every prediction frame the candidate still references, directly or in one of its lists."""
+    held = []
+    for value in vars(candidate).values():
+        if isinstance(value, pl.DataFrame):
+            held.append(value)
+        elif isinstance(value, list):
+            held.extend(item for item in value if isinstance(item, pl.DataFrame))
+    return held
+
+
+def test_gbm_batch_releases_each_fold_shard_before_the_next_configuration(
+    tmp_path, monkeypatch
+) -> None:
+    """A fitted fold's predictions are on disk, so nothing holds them in memory.
+
+    Fold-major execution fits every configuration in a compatibility group against one prepared
+    fold, so a prediction frame retained by a candidate lives until that candidate finishes -
+    after the last fold, for every candidate at once. nasdaq's fifteen-configuration group over
+    two folds accumulated 52 GB of frames it had already written to parquet, and earlyoom killed
+    the notebook at a 62.4 GB peak. The shard is the durable copy; the frame is not kept.
+    """
+    monkeypatch.setenv("ML4T_FOLD_MEMO_BUDGET_BYTES", "1")
+    from case_studies.utils import folds as fold_utils
+
+    fold_utils.clear_memo()
+    study = _gbm_study(tmp_path / "batch", monkeypatch)
+    shard_frames: list[weakref.ReferenceType[pl.DataFrame]] = []
+    original_shard = gbm_utils._gbm_fold_prediction_shard
+    original_run_fold = gbm_utils._run_gbm_batch_fold
+
+    def observed_shard(entries, context):
+        frame = original_shard(entries, context)
+        shard_frames.append(weakref.ref(frame))
+        return frame
+
+    def observed_run_fold(candidate, fold):
+        gc.collect()
+        assert all(reference() is None for reference in shard_frames)
+        assert not _frames_held_by(candidate)
+        original_run_fold(candidate, fold)
+
+    monkeypatch.setattr(gbm_utils, "_gbm_fold_prediction_shard", observed_shard)
+    monkeypatch.setattr(gbm_utils, "_run_gbm_batch_fold", observed_run_fold)
+    requests = [
+        study.model(
+            family="gbm",
+            label="fwd_ret_1d",
+            config_name="leaves_7_mse",
+            overrides={"device": "cpu", "max_bin": 63, "learning_rate": learning_rate},
+        )
+        for learning_rate in (0.1, 0.2, 0.3)
+    ]
+
+    batch = run_models(study, requests=requests)
+    gc.collect()
+
+    assert len(shard_frames) == 6
+    assert all(reference() is None for reference in shard_frames)
+    assert all(run.diagnostics["compatibility_group_size"] == 3 for run in batch.runs)
+    for run in batch.runs:
+        shard_dir = run.training.root / "run_log" / "training" / run.training.hash
+        shards = sorted((shard_dir / "prediction_folds").glob("fold_*.parquet"))
+        assert [path.name for path in shards] == ["fold_0.parquet", "fold_1.parquet"]
+        assert all(prediction.load().height for prediction in run.predictions)
+
+
+def test_linear_batch_releases_each_fold_shard_before_the_next_configuration(
+    tmp_path, monkeypatch
+) -> None:
+    """The same contract in the linear runner, whose batch path has the same shape."""
+    study = _linear_study(tmp_path / "batch", monkeypatch)
+    shard_frames: list[weakref.ReferenceType[pl.DataFrame]] = []
+    original_frame = linear._prediction_frame
+    original_run_fold = linear._run_batch_candidate_fold
+
+    def observed_frame(fold, predictions, context):
+        frame = original_frame(fold, predictions, context)
+        shard_frames.append(weakref.ref(frame))
+        return frame
+
+    def observed_run_fold(candidate, fold):
+        gc.collect()
+        assert all(reference() is None for reference in shard_frames)
+        assert not _frames_held_by(candidate)
+        original_run_fold(candidate, fold)
+
+    monkeypatch.setattr(linear, "_prediction_frame", observed_frame)
+    monkeypatch.setattr(linear, "_run_batch_candidate_fold", observed_run_fold)
+    requests = [
+        study.model(
+            family="linear",
+            label="fwd_ret_1d",
+            config_name="ridge",
+            overrides={"alpha": alpha},
+        )
+        for alpha in (1.0, 2.0, 3.0)
+    ]
+
+    batch = run_models(study, requests=requests)
+    gc.collect()
+
+    assert len(shard_frames) == 6
+    assert all(reference() is None for reference in shard_frames)
+    assert all(run.diagnostics["compatibility_group_size"] == 3 for run in batch.runs)
+    for run in batch.runs:
+        shard_dir = run.training.root / "run_log" / "training" / run.training.hash
+        shards = sorted((shard_dir / "prediction_folds").glob("fold_*.parquet"))
+        assert [path.name for path in shards] == ["fold_0.parquet", "fold_1.parquet"]
+        assert run.predictions[0].load().height
+
+
 def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatch) -> None:
     study = _gbm_study(tmp_path, monkeypatch)
     original_prepare = gbm_utils.prepare_gbm_folds_from_mds

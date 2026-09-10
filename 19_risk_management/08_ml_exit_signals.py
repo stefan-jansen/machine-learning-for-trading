@@ -618,11 +618,13 @@ signal_counts = pl.DataFrame(
 signal_counts
 
 # %% tags=["results"]
+confidence_fire_rate = exit_signal_confidence.mean()
+combined_fire_rate = exit_signal_combined.mean()
 display(
     Markdown(
         f"""**Interpretation**: The confidence-drop clause fires on
-{exit_signal_confidence.mean():.1%} of test bars and the combined rule fires on
-{exit_signal_combined.mean():.1%}. Because the rare-event entry model usually assigns low
+{confidence_fire_rate:.1%} of test bars and the combined rule fires on
+{combined_fire_rate:.1%}. Because the rare-event entry model usually assigns low
 probability, most bars sit below the confidence-drop level already, so that clause fires on nearly
 everything and the combined rule inherits its behaviour rather than the exit model's. The next
 section reads the holding periods and trade returns instead of assuming more exits are better."""
@@ -930,8 +932,8 @@ importance_xmax = 1.1 * max(
 )
 fig.update_layout(
     title=(
-        f"Entry confidence ranks #{entry_prediction_rank} in the enhanced exit model"
-        f"<br><sup>Mean normalized gain across {N_IMPORTANCE_REPEATS} seeded GPU repeats; "
+        "Feature importance in the entry and enhanced exit models"
+        f"<br><sup>Mean normalized gain across {N_IMPORTANCE_REPEATS} seeded repeats; "
         "error bars show ±1 SD</sup>"
     ),
     width=950,
@@ -942,7 +944,11 @@ fig.update_layout(
 fig.update_xaxes(title_text="Mean normalized gain importance (%)", range=[0, importance_xmax])
 show_plotly_with_alt(
     fig,
-    "Two histograms of predicted probability on a shared scale and bin width, entry above and exit below, each with its decision threshold marked. Nearly all the mass sits well below the threshold in both.",
+    "Two panels of horizontal bars on a shared importance scale, the entry model on the left "
+    "and the enhanced exit model on the right, each feature carrying an error bar for its "
+    "repeat-to-repeat spread and the bars ordered from most important down. Both panels fall "
+    "away steeply from their top feature. The stacked entry-prediction feature is highlighted "
+    "in the right-hand panel, in the middle of that ordering rather than at either end.",
 )
 
 # %% tags=["results"]
@@ -986,7 +992,7 @@ fig.add_trace(
 fig.add_vline(x=exit_threshold, line_dash="dash", line_color=COLORS["amber"], row=1, col=2)
 
 fig.update_layout(
-    title="The fixed rules select only the upper tail of each distribution",
+    title="Predicted probability by model, with each decision threshold",
     height=400,
     showlegend=False,
 )
@@ -994,7 +1000,11 @@ fig.update_xaxes(title_text="Predicted probability", range=[0, 1])
 fig.update_yaxes(title_text="Test bars (count)")
 show_plotly_with_alt(
     fig,
-    "Grouped bars comparing the exit rules on mean trade return and average holding period, showing that the rules differ far more in how long they hold than in what they earn.",
+    "Two histograms of predicted probability sharing a scale and bin width, the entry model on "
+    "the left and the exit model on the right, each with a dashed vertical line at its "
+    "decision threshold. The entry distribution is pressed hard against the low end and decays "
+    "away long before its threshold; the exit distribution is a broad hump centred close to "
+    "its own threshold, so the line cuts through the bulk of it rather than past the tail.",
 )
 
 # %% [markdown]
@@ -1090,9 +1100,11 @@ ax_pub.set_yticks(range(0, 101, 20))
 ax_pub.legend(loc="upper center", ncols=3, frameon=False)
 show_with_alt(
     fig_pub,
-    "Stacked bars of outcome share by signal quintile: adverse move, neutral, and strong upside. "
-    "The strong-upside share grows across the quintiles from near zero, while the adverse-move "
-    "share stays broadly flat.",
+    "Stacked bars of outcome share by signal quintile, each bar split into adverse move, neutral "
+    "and strong upside. The strong-upside band grows steadily across the quintiles from almost "
+    "nothing in the weakest. The adverse-move band does not follow it: it rises over the first "
+    "four quintiles and then falls back in the strongest, so the two bands are not simply "
+    "trading off against each other.",
 )
 
 # %% tags=["results"]
@@ -1131,10 +1143,11 @@ takeaways = pl.DataFrame(
 takeaways
 
 # %% tags=["results"]
+meta_train_rows = meta_train_mask.sum()
 display(
     Markdown(
         f"The purged out-of-fold pass supplies an entry probability for "
-        f"**{meta_train_mask.sum():,} training rows** without any of them coming from a model that "
+        f"**{meta_train_rows:,} training rows** without any of them coming from a model that "
         f"saw its own row. Basic and enhanced exit AUC are **{exit_auc_basic:.3f}** and "
         f"**{exit_auc_enhanced:.3f}**. On the test interval, **{best_mean_row['Strategy']}** has "
         f"the highest mean compounded trade return at **{best_mean_row['mean_return']:.2%}**, and "

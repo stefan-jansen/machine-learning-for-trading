@@ -361,14 +361,15 @@
   requires_import: gensim
   timeout: 300
 10_text_feature_engineering/04_bert_finetuning:
-  env:
-    TEST: '1'
   gpu: true
+  parameters:
+    MAX_TRAIN_STEPS: 20
   timeout: 600
 10_text_feature_engineering/05_financial_ner_finetuning:
-  env:
-    TEST: '1'
   gpu: true
+  parameters:
+    N_EPOCHS: 1
+    N_SAMPLES: 100
   timeout: 600
 10_text_feature_engineering/06_finbert_cross_dataset:
   gpu: true
@@ -455,7 +456,9 @@
     N_TRIALS: 5
   timeout: 360
 12_gradient_boosting/05_cross_library_hpo:
-  gpu: true
+  # No GPU required: the notebook reads torch.cuda.is_available() and falls back to
+  # XGB_DEVICE=cpu / CB_TASK_TYPE=CPU. Measured at these parameters with the card
+  # hidden: 81s wall clock, 2.3 GB peak (2026-09-10).
   parameters:
     N_LIBRARIES: 1
     N_TRIALS: 2
@@ -506,7 +509,8 @@
   timeout: 300
 12_gradient_boosting/10_shap_nlp_sentiment:
   docker_env: py312
-  gpu: true
+  # No GPU required: line 65 reads torch.cuda.is_available() and falls back to CPU.
+  # Measured in the py312 CPU image: 73s wall clock, 1.9 GB peak (2026-09-10).
   timeout: 300
 12_gradient_boosting/11_conformal_gbm:
   # No `gpu:`. This one is stronger than stale: line 229 passes `"device_type": "cpu"`, and
@@ -933,6 +937,12 @@
     # Isolated test registry has no nasdaq out-of-band cost-feasible carrier,
     # so its spine can't resolve; report cost/risk N/A instead of raising.
     ALLOW_MISSING_SPINE: true
+    # The notebook refuses a full-mode run unless all nine registries are present and
+    # hold backtests, so a partial aggregation cannot overwrite the nine-case-study
+    # artifacts as if it were complete (ml4t/agent-workspace#964). The seeded test
+    # registry is not the production store and is not expected to satisfy that, so the
+    # precondition is relaxed here and nowhere else.
+    REQUIRE_ALL_REGISTRIES: false
   timeout: 600
 20_strategy_synthesis/02_feature_evaluation:
   timeout: 300
@@ -990,15 +1000,13 @@
     COHORT_SAMPLE: 10
   timeout: 300
 22_rag_financial_research/01_sec_filing_pipeline:
-  # SYMBOLS, not TICKERS: the notebook's parameters cell declares SYMBOLS, so the
-  # old key was dropped by Papermill and the weekly job fetched all five default
-  # symbols across both default years from EDGAR instead of one.
-  parameters:
-    SYMBOLS:
-    - AAPL
-    YEARS:
-    - 2024
-  requires_env: EDGAR_IDENTITY
+  # The notebook no longer contacts EDGAR: it reads the shipped 10-K corpus
+  # through data.load_sec_filings and describes it. SYMBOLS and YEARS narrowed
+  # the download it used to perform and have no counterpart in the parameters
+  # cell, and EDGAR_IDENTITY gated a fetch that is gone. Both are removed.
+  # It stays on the weekly tier only because that is where it has always run;
+  # nothing external is left to wait for, and it reads the same corpus the
+  # per-commit fixture already ships.
   tier: weekly
   timeout: 300
 22_rag_financial_research/02_domain_embeddings_comparison:
@@ -1043,8 +1051,13 @@
     NUM_QUARTERS: 2
   timeout: 300
 22_rag_financial_research/08_rag_security:
+  # MAX_ATTACK_CASES is a cap that must not bind: the notebook raises on any
+  # value between one and the fixture count, because dropping a fixture drops
+  # an attack class and the two policies would then be compared on different
+  # threat sets. It was pinned at 5, which stopped binding the moment act_01
+  # made six. 0 means all of them and cannot go stale as fixtures are added.
   parameters:
-    MAX_ATTACK_CASES: 5
+    MAX_ATTACK_CASES: 0
   skip: true
   skip_reason: Requires RAG infrastructure (chromadb + embedding models) not provisioned in CI
   tier: weekly
@@ -1214,12 +1227,27 @@
 26_mlops_governance/01_drift_monitoring:
   timeout: 300
 26_mlops_governance/02_online_drift_detection:
+  # RIDGE_CONFIG is overridden because the fixture registry carries a different slice
+  # of the linear grid than production does. Both notebooks in this chapter pin a
+  # configuration NAME rather than a prediction hash, so they survive a refit - but the
+  # fixture is sampled from production by tests/sample_registry_for_tests.py and has not
+  # been regenerated since PINNED_PREDICTION_CONFIGS changed, so the names it holds are
+  # ols, ridge_a100000.0 and ridge_a10000000.0.
+  #
+  # ridge_a10000000.0 is the right substitute rather than an arbitrary one: this notebook
+  # needs a stream that genuinely differs from the incumbent's, and the assertion in
+  # section 1 fails the run if it does not. Measured on production over the monitored
+  # year, its bad-day rate differs from ols on 250 of 251 sessions at correlation 0.683,
+  # against 240 and 0.889 for the shipped default. Raise this alongside the fixture.
+  parameters:
+    RIDGE_CONFIG: ridge_a10000000.0
   timeout: 300
 26_mlops_governance/03_safe_model_rollout:
   # Was skipped for a cause that no longer exists: the reason described an A/B and
   # staged-capital slicing the notebook has since dropped, and it now stops after
-  # the 63-session shadow decision. With the prediction artifacts it pins present
-  # in the fixture it runs, so it is a real test again.
+  # the 63-session shadow decision. The prediction sets it needs reach the fixture
+  # through PINNED_PREDICTION_CONFIGS in tests/sample_registry_for_tests.py, so it
+  # is a real test again.
   #
   # TOP_K is reduced because the book is dollar-neutral over the top and bottom
   # TOP_K predictions and the fixture carries well under 200 symbols on any
@@ -1227,8 +1255,18 @@
   # a silent failure any more: build_portfolio_stream raises when a date ranks
   # fewer than 2 * TOP_K distinct symbols. Raise this only alongside the fixture
   # universe.
+  #
+  # CANDIDATE_CONFIG is overridden for the reason given under 02: the fixture holds a
+  # different slice of the linear grid. The shipped default, ridge_a100.0, demonstrates
+  # the case the gate exists for - an improvement that is positive and below the
+  # threshold, +0.185 against a required 0.20 on production. The fixture cannot supply
+  # it, and of what it does hold, ridge_a100000.0 is the one that clears the hurdle
+  # (+0.730) while ridge_a10000000.0 misses it by so much that the minimum-effect
+  # threshold does no work. CI therefore exercises the promotion path and production
+  # demonstrates the near miss. Raise this alongside the fixture.
   parameters:
     TOP_K: 10
+    CANDIDATE_CONFIG: ridge_a100000.0
   timeout: 300
 26_mlops_governance/04_circuit_breakers:
   timeout: 300
@@ -3519,29 +3557,32 @@ case_studies/us_equities_panel/08_tabular_dl:
     DEVICE: cpu
     CONFIG_NAMES: [tabm_s]
     DIAGNOSTIC_CONFIG_NAMES: [tabm_s]
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 20
+    PREVIEW_MAX_FOLDS: 2
+    PREVIEW_MAX_SYMBOLS: 20
     PREVIEW_N_EPOCHS: 1
   timeout: 180
 case_studies/us_equities_panel/09_dl_nlinear:
+  # n_epochs rides in COMMON_OVERRIDES rather than in a PREVIEW_N_EPOCHS parameter of its own.
+  # SEQUENCE_PREVIEW_FIELDS does not accept an epoch count, so the notebook's old parameter fed
+  # `overrides` while its name promised a preview-tier restriction the shared validation could
+  # not enforce - a canonical run carrying it would have trained one epoch and published it.
+  # An override is refused a canonical population by the notebook's own publish guard.
   # MAX_FOLDS became FOLD_IDS: the sequence runner takes the fold ids it should
   # keep, not a count to slice to.
   parameters:
     DEVICE: cpu
     CONFIG_NAMES: [nlinear]
-    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
-    FOLD_IDS: [0, 1]
-    MAX_SYMBOLS: 5
-    PREVIEW_N_EPOCHS: 1
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5, n_epochs: 1}
+    PREVIEW_FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 5
   timeout: 600
 case_studies/us_equities_panel/10_dl_lstm:
   parameters:
     DEVICE: cpu
     CONFIG_NAMES: [lstm_h64]
-    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
-    FOLD_IDS: [0, 1]
-    MAX_SYMBOLS: 5
-    PREVIEW_N_EPOCHS: 1
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5, n_epochs: 1}
+    PREVIEW_FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 5
   timeout: 600
 case_studies/us_equities_panel/11_dl_tsmixer:
   # The pinned SYMBOLS whitelist this entry used to carry has no parameter to
@@ -3555,10 +3596,9 @@ case_studies/us_equities_panel/11_dl_tsmixer:
   parameters:
     DEVICE: cpu
     CONFIG_NAMES: [tsmixer]
-    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
-    FOLD_IDS: [0, 1]
-    MAX_SYMBOLS: 8
-    PREVIEW_N_EPOCHS: 1
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5, n_epochs: 1}
+    PREVIEW_FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 8
   timeout: 600
 case_studies/us_equities_panel/12_dl_weekly:
   parameters:
@@ -3577,19 +3617,24 @@ case_studies/us_equities_panel/13a_pca:
   # 11b_ipca run under.
   parameters:
     LABELS: [fwd_ret_1d]
-    MAX_SYMBOLS: 5
-    FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 5
+    PREVIEW_FOLD_IDS: [0, 1]
     PREVIEW_N_FACTORS: 2
   timeout: 300
 case_studies/us_equities_panel/13b_ipca:
   # See 13a_pca on why this is no longer skipped.
   parameters:
     LABELS: [fwd_ret_1d]
-    MAX_SYMBOLS: 5
-    FOLD_IDS: [0, 1]
+    PREVIEW_MAX_SYMBOLS: 5
+    PREVIEW_FOLD_IDS: [0, 1]
     PREVIEW_N_FACTORS: 2
   timeout: 300
 case_studies/us_equities_panel/14_causal_dml:
+  # MAX_SYMBOLS carries the PREVIEW_ prefix here. Without it, injected_parameters strips it on
+  # neither path: canonically_refused_parameters reads the notebook's canonical guard, whose test
+  # is the local `preview_reductions` aggregate rather than a declared parameter name, so the
+  # intersection with the parameters cell is empty. It reached a canonical run and raised
+  # "Canonical execution cannot declare preview reductions".
   # CV_FOLDS, MAX_SAMPLES and N_PLACEBO became PREVIEW_N_FOLDS,
   # PREVIEW_MAX_SAMPLES and PREVIEW_N_PLACEBO: the reduced fold count, sample
   # cap and placebo count are part of the preview identity now, not free knobs.
@@ -3598,7 +3643,7 @@ case_studies/us_equities_panel/14_causal_dml:
   # any n below 20 and the draws are spent on a verdict that cannot be reached. 20 is
   # the first reachable count; 24 leaves margin for draws that fail.
   parameters:
-    MAX_SYMBOLS: 5
+    PREVIEW_MAX_SYMBOLS: 5
     PREVIEW_N_FOLDS: 2
     PREVIEW_MAX_SAMPLES: 5000
     PREVIEW_N_PLACEBO: 25

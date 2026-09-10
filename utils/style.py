@@ -356,10 +356,13 @@ def add_message_title(
     subtitle: str | None = None,
     source: str | None = None,
 ) -> None:
-    """Left-aligned takeaway title (a claim, not a label), optional subtitle + source note.
+    """Left-aligned descriptive title, optional subtitle + source note.
 
-    `message` should state the finding ("Momentum decays beyond a 12-month hold"), not
-    label the axes. `subtitle` carries the qualifier the title omits (metric, universe,
+    `message` describes what the figure shows - the quantity, the entities and the axis
+    they sit on ("Classification error metrics"), and then stops. It does not interpret;
+    the interpretation goes in the markdown around the figure, where a reader can argue
+    with it and where correcting it costs no re-run. Ruled 2026-09-09; the parameter name
+    predates the rule. `subtitle` carries the qualifier the title omits (metric, universe,
     frequency, period); `source` is a small bottom-left note. No figure number — the
     publisher captions separately.
     """
@@ -399,9 +402,11 @@ def add_message_title(
         pad=(15 + extra_lines * (SUBTITLE_SIZE + 2)) if subtitle else 8,
     )
     if source:
-        ax.figure.text(
-            0.01, 0.005, source, ha="left", va="bottom", fontsize=8, color=COLORS["neutral"]
-        )
+        # `figure.text` is not a laid-out artist, so constrained layout reserved nothing for
+        # it and the note landed on top of the x-axis label and the rotated tick labels in
+        # all four figures of 18_transaction_costs/01_cost_taxonomy. `supxlabel` is laid
+        # out, so the engine makes room for it; `x`/`ha` keep it bottom-left.
+        ax.figure.supxlabel(source, x=0.01, ha="left", fontsize=8, color=COLORS["neutral"])
 
 
 def show_with_alt(fig: object, alt: str) -> None:

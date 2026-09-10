@@ -36,18 +36,14 @@
 # %%
 """Ch20 Feature Evaluation — cross-case-study triage ledger comparison."""
 
-import warnings
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from IPython.display import Markdown, display
 
-warnings.filterwarnings("ignore")
-
 from case_studies.utils.analytics import CASE_STUDY_IDS, SHORT_NAMES, load_triage_ledger
 from utils.paths import REPO_ROOT, get_chapter_dir
-from utils.style import show_with_alt
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 MAX_CASE_STUDIES = 0  # 0 = all available
@@ -153,9 +149,9 @@ fig, ax = plt.subplots(figsize=(9, 5))
 y = np.arange(funnel.height)
 height = 0.26
 series = [
-    ("n_candidate", "candidates", "lightgrey"),
-    ("n_fdr_sig", f"clears BH-FDR at {FDR_ALPHA:.2f}", "#9ecae1"),
-    ("n_proceed", "PROCEED", "#3182bd"),
+    ("n_candidate", "candidates", COLORS["silver_muted"]),
+    ("n_fdr_sig", f"clears BH-FDR at {FDR_ALPHA:.2f}", COLORS["blue_light"]),
+    ("n_proceed", "PROCEED", COLORS["blue"]),
 ]
 for offset, (col, label, color) in zip((-height, 0.0, height), series):
     ax.barh(
@@ -164,7 +160,7 @@ for offset, (col, label, color) in zip((-height, 0.0, height), series):
         height=height,
         color=color,
         label=label,
-        edgecolor="black",
+        edgecolor=COLORS["neutral"],
         linewidth=0.4,
     )
 ax.set_yticks(y)
@@ -173,7 +169,6 @@ ax.invert_yaxis()
 ax.set_xlabel("Number of features")
 ax.set_title("Candidate features, FDR-significant, and PROCEED, by case study")
 ax.legend(loc="lower right", frameon=False)
-fig.tight_layout()
 show_with_alt(
     fig,
     "Grouped horizontal bars per case study giving the candidate feature count, "
@@ -194,6 +189,7 @@ _top = _f.row(0, named=True)
 _pr = funnel.sort("pct_proceed", descending=True)
 _hi, _lo = _pr.row(0, named=True), _pr.row(-1, named=True)
 _stab = funnel["n_proceed_by_stability"].sum()
+_total_proceed = funnel["n_proceed"].sum()
 display(
     Markdown(
         f"Across {funnel.height} case studies, the share of candidate features "
@@ -209,7 +205,7 @@ display(
         f"({_lo['cs_short']}, {_lo['n_proceed']} of {_lo['n_candidate']}) to "
         f"{_hi['pct_proceed']:.1f} percent ({_hi['cs_short']}, "
         f"{_hi['n_proceed']} of {_hi['n_candidate']}). "
-        f"Of {funnel['n_proceed'].sum()} PROCEED decisions in total, {_stab} "
+        f"Of {_total_proceed} PROCEED decisions in total, {_stab} "
         "were reached on effect size and fold stability without clearing BH, "
         "which is why the PROCEED bars are not contained inside the FDR bars."
     )
@@ -263,7 +259,12 @@ for ax, ycol, ylabel in zip(
 ):
     pts = forward.filter(pl.col(ycol).is_not_null()).to_pandas()
     ax.scatter(
-        pts["pct_proceed"], pts[ycol], color="#3182bd", s=40, edgecolor="black", linewidth=0.5
+        pts["pct_proceed"],
+        pts[ycol],
+        color=COLORS["blue"],
+        s=40,
+        edgecolor=COLORS["neutral"],
+        linewidth=0.5,
     )
     for _, row in pts.iterrows():
         ax.annotate(
@@ -273,11 +274,10 @@ for ax, ycol, ylabel in zip(
             xytext=(4, 3),
             textcoords="offset points",
         )
-    ax.axhline(0, color="grey", linestyle="--", linewidth=0.7)
+    ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.7)
     ax.set_xlabel("% candidate features in PROCEED")
     ax.set_ylabel(ylabel)
 fig.suptitle("Feature survival against strategy Sharpe, by case study")
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two scatter panels plotting each case study's percentage of PROCEED "

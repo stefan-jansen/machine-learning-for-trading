@@ -53,8 +53,6 @@
 # %% tags=[]
 """Hyperparameter Selection and Validation Bias - nested CV for unbiased performance evaluation."""
 
-import warnings
-
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -71,7 +69,6 @@ from utils.paths import display_path, get_case_study_dir, get_chapter_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, ml4t_diverging, show_with_alt
 
-warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # %% tags=["parameters"]
@@ -311,7 +308,7 @@ ax.set_xticklabels(
 ax.set_yticks(range(len(ic_matrix.index)))
 ax.set_yticklabels([f"Fold {i}" for i in ic_matrix.index])
 ax.set_xlabel(r"Alpha (log spacing, $10^{-2}$ to $10^{9}$)")
-ax.set_title("The same alpha does not score alike on every fold")
+ax.set_title("IC by alpha and fold")
 fig.colorbar(im, ax=ax, label="IC", shrink=0.8)
 show_with_alt(
     fig,
@@ -350,7 +347,7 @@ ax.semilogx(
 )
 ax.set_xlabel("Alpha (log scale)")
 ax.set_ylabel("Information Coefficient")
-ax.set_title("Mean IC moves smoothly with alpha, inside a wide error band")
+ax.set_title("Mean IC against alpha, with the spread across folds")
 show_with_alt(
     fig,
     "Mean information coefficient against alpha on a log axis, with a shaded band "
@@ -915,7 +912,7 @@ axes[0].bar(
 axes[0].set_xticks(x)
 axes[0].set_xticklabels([f"Fold {f}" for f in folds])
 axes[0].set_ylabel("Information Coefficient")
-axes[0].set_title("(a) IC by Fold")
+axes[0].set_title("IC by fold, single-loop against nested")
 axes[0].legend(frameon=False)
 
 # (b) Alpha selection
@@ -925,15 +922,36 @@ axes[1].semilogy(
 axes[1].semilogy(folds, nested_results["best_alpha"], "s-", color=COLORS["amber"], label="Nested")
 axes[1].set_xlabel("Fold")
 axes[1].set_ylabel("Best Alpha (log)")
-axes[1].set_title("(b) Alpha Selection by Fold")
+axes[1].set_title("Alpha chosen in each fold, by procedure")
 axes[1].legend(frameon=False)
 
-fig.suptitle("Isolating the search from the evaluation changes both", fontsize=13)
+fig.suptitle("Single-loop and nested selection, fold by fold", fontsize=13)
 show_with_alt(
     fig,
     "Two panels: paired bars of information coefficient per fold for the single-loop "
     "and nested protocols, and the alpha each protocol selected per fold on a log axis.",
 )
+# %% [markdown] tags=[]
+# The left panel is the cost of selecting and scoring on the same data. Where the two bars
+# differ, the single-loop score is the more favourable of the pair - less negative where the
+# fold is negative, higher where it is positive - and the nested score is what the procedure
+# is worth when the alpha it picked was chosen without seeing the fold it is scored on. Where
+# the bars are equal, the two procedures happened to select the same alpha.
+#
+# The gap has one cause and it is not in the right panel: the single-loop procedure picks its
+# alpha using the same fold it is then scored on, so its score is partly a report on how well
+# the choice fitted that fold. Nested selection picks on an inner split and scores on data
+# the choice never saw, which is what makes its number an estimate of the procedure rather
+# than of one fold.
+#
+# The right panel is worth reading alongside that and does not establish it. It shows the
+# single-loop choice swinging across orders of magnitude while the nested choice moves
+# smoothly, which is a fact about these five folds. Choosing a different alpha for different
+# training data is what an adaptive procedure does and is not itself a defect - nested CV
+# evaluates that procedure honestly whether its choice is stable or not, and a procedure that
+# picked the same alpha every time would be no less exposed to selection bias if it picked it
+# on the evaluation fold.
+
 
 # %% [markdown] tags=[]
 # ## 13. Key Takeaways

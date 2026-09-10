@@ -1934,8 +1934,18 @@ def _seed_demo_predictions(cs_dir: Path, cs_id: str, primary_label: str) -> None
 def _seed_news_features(output_dir: Path) -> None:
     """Seed a minimal news_features.parquet for Ch10/08_text_feature_evaluation.
 
-    The notebook loads from get_output_dir(8, "fnspid") / "news_features.parquet".
-    In test mode that becomes {ML4T_OUTPUT_DIR}/ch08_fnspid/news_features.parquet.
+    The panel is produced by 10/07_news_return_signals, which declares `gpu: true` and so
+    skips on a CI runner. 08 is the only chapter-10 notebook that runs there, so without this
+    seed it fails on a missing input rather than exercising anything. The notebook is right to
+    raise on the missing file - a notebook that tolerates absent input reports success for a
+    run that computed nothing - which is why the fixture supplies it instead.
+
+    The notebook loads from get_output_dir(10, "fnspid") / "news_features.parquet"; in test
+    mode that is {ML4T_OUTPUT_DIR}/ch10_fnspid/news_features.parquet. This directory name is
+    the notebook's chapter number, so it moves whenever the notebook's does - it read
+    get_output_dir(8, ...) until #902 corrected chapter 10's artifacts out of chapter 8's
+    output tree, and this seed did not move with it.
+
     Required columns: symbol, timestamp, fwd_ret_1d, fwd_ret_5d, fwd_ret_20d,
     weighted_surprise, sentiment_mean, sentiment_momentum, coverage_count.
     """
@@ -1945,7 +1955,7 @@ def _seed_news_features(output_dir: Path) -> None:
     except ImportError:
         return
 
-    out_dir = output_dir / "ch08_fnspid"
+    out_dir = output_dir / "ch10_fnspid"
     path = out_dir / "news_features.parquet"
     if path.exists():
         return

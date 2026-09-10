@@ -158,7 +158,7 @@ def test_fold_persistence_keeps_fit_and_evaluation_targets(tmp_path) -> None:
         eval_col="eval_actual",
     )
 
-    saved = pl.read_parquet(tmp_path / "tabm_probe_fold0.parquet")
+    saved = pl.read_parquet(tmp_path / "tabm_probe_fold0_ep25.parquet")
     assert saved["y_true"].to_list() == [0.0, 1.0]
     assert saved["eval_actual"].to_list() == [-0.1, 0.3]
 
@@ -789,7 +789,7 @@ def test_direct_registered_batch_preserves_completed_sibling_on_later_failure(
         )
 
     assert registered == ["tabm_s"]
-    assert (tmp_path / "return" / "_incremental" / "tabm_s_fold0.parquet").exists()
+    assert (tmp_path / "return" / "_incremental" / "tabm_s_fold0_ep1.parquet").exists()
 
 
 def test_saved_artifact_message_does_not_leak_absolute_path(

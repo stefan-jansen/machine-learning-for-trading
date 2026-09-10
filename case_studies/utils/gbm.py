@@ -122,7 +122,7 @@ class _GBMBatchCandidate:
     training: TrainingResult | None = None
     ledger: ExecutionLedger | None = None
     attempt: ExecutionAttempt | None = None
-    frames: list[pl.DataFrame] = field(default_factory=list)
+    shards: list[Path] = field(default_factory=list)
     reused_folds: list[int] = field(default_factory=list)
     fitted_folds: list[int] = field(default_factory=list)
     fit_elapsed_s: float = 0.0
@@ -2315,7 +2315,16 @@ def _gbm_fold_prediction_shard(entries: list[dict[str, Any]], context: GBMContex
 def _fit_or_reuse_gbm_fold(
     candidate: _GBMBatchCandidate,
     fold: dict[str, Any],
-) -> tuple[pl.DataFrame, bool, float]:
+) -> tuple[Path, bool, float]:
+    """Fit one fold of one configuration, and return the shard it is persisted in.
+
+    Returning the path rather than the frame is what bounds the group. Fold-major execution
+    holds one prepared fold and fits every configuration in the compatibility group against it,
+    so a returned frame is retained until that configuration finishes - which is after the last
+    fold, for every configuration at once. A nasdaq fold shard is 1.75 GB in memory, and a
+    fifteen-configuration group over two folds accumulated 52 GB of frames that were already
+    on disk.
+    """
     assert candidate.spec is not None
     assert candidate.context is not None
     assert candidate.training is not None
@@ -2333,7 +2342,7 @@ def _fit_or_reuse_gbm_fold(
         prediction_shard=shard,
         resolved_settings=settings,
     ):
-        return pl.read_parquet(shard), True, 0.0
+        return shard, True, 0.0
 
     started = time.perf_counter()
     staging = training_dir / f".fold_{fold_id}.{uuid.uuid4().hex}.tmp"
@@ -2383,7 +2392,7 @@ def _fit_or_reuse_gbm_fold(
         )
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    return frame, False, time.perf_counter() - started
+    return shard, False, time.perf_counter() - started
 
 
 def _write_gbm_training_manifest(training: TrainingResult, fold_ids: tuple[int, ...]) -> None:
@@ -2404,33 +2413,32 @@ def _write_gbm_training_manifest(training: TrainingResult, fold_ids: tuple[int, 
         temporary.unlink(missing_ok=True)
 
 
-def _gbm_curves_from_shards(
+def _gbm_checkpoint_curve(
     config_name: str,
-    predictions: pl.DataFrame,
-    checkpoints: tuple[int, ...],
-) -> list[dict[str, Any]]:
-    target = "eval_actual" if "eval_actual" in predictions.columns else "actual"
-    curves = []
-    for checkpoint in checkpoints:
-        frame = predictions.filter(pl.col("checkpoint") == checkpoint)
-        metric = cross_sectional_ic(
-            frame,
-            frame,
-            pred_col="prediction",
-            ret_col=target,
-            date_col="timestamp",
-            entity_col="symbol",
-            min_obs=5,
-        )
-        curves.append(
-            {
-                "config": config_name,
-                "iteration": checkpoint,
-                "ic_mean": float(metric["ic_mean"]),
-                "ic_std": float(metric.get("ic_std", 0.0)),
-            }
-        )
-    return curves
+    checkpoint: int,
+    frame: pl.DataFrame,
+) -> dict[str, Any]:
+    """One learning-curve point, from that checkpoint's predictions alone.
+
+    Taking one checkpoint's frame rather than the whole prediction set is what lets the caller
+    publish and score a checkpoint, release it, and move to the next.
+    """
+    target = "eval_actual" if "eval_actual" in frame.columns else "actual"
+    metric = cross_sectional_ic(
+        frame,
+        frame,
+        pred_col="prediction",
+        ret_col=target,
+        date_col="timestamp",
+        entity_col="symbol",
+        min_obs=5,
+    )
+    return {
+        "config": config_name,
+        "iteration": checkpoint,
+        "ic_mean": float(metric["ic_mean"]),
+        "ic_std": float(metric.get("ic_std", 0.0)),
+    }
 
 
 def _write_gbm_runtime_fields(path: Path, **fields: float) -> None:
@@ -2512,7 +2520,7 @@ def _reuse_gbm_batch_fold(candidate: _GBMBatchCandidate, fold_id: int) -> bool:
         resolved_settings=_gbm_fold_settings(candidate, fold_id),
     ):
         return False
-    candidate.frames.append(pl.read_parquet(shard))
+    candidate.shards.append(shard)
     candidate.reused_folds.append(fold_id)
     return True
 
@@ -2524,11 +2532,11 @@ def _run_gbm_batch_fold(candidate: _GBMBatchCandidate, fold: dict[str, Any]) -> 
     if fold_id in candidate.reused_folds or fold_id in candidate.fitted_folds:
         return
     try:
-        frame, reused, elapsed = _fit_or_reuse_gbm_fold(candidate, fold)
+        shard, reused, elapsed = _fit_or_reuse_gbm_fold(candidate, fold)
     except Exception as exc:
         _fail_gbm_batch_candidate(candidate, exc)
         return
-    candidate.frames.append(frame)
+    candidate.shards.append(shard)
     candidate.fit_elapsed_s += elapsed
     (candidate.reused_folds if reused else candidate.fitted_folds).append(fold_id)
 
@@ -2566,19 +2574,28 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
     assert candidate.training is not None
     assert candidate.attempt is not None
     try:
-        if len(candidate.frames) != len(candidate.context.fold_ids):
+        if len(candidate.shards) != len(candidate.context.fold_ids):
             raise RuntimeError(
-                f"GBM candidate produced {len(candidate.frames)} of "
+                f"GBM candidate produced {len(candidate.shards)} of "
                 f"{len(candidate.context.fold_ids)} fold shards"
             )
         _write_gbm_training_manifest(candidate.training, candidate.context.fold_ids)
-        predictions = pl.concat(candidate.frames).sort("checkpoint", "symbol", "timestamp", "fold")
         prediction_results = []
+        curves = []
         checkpoints = tuple(
             int(item["value"]) for item in candidate.spec["computation"]["checkpoint_schedule"]
         )
+        # One checkpoint at a time, read back from the fold shards this configuration already
+        # persisted. Concatenating every fold and then filtering held the whole prediction set
+        # plus a copy of the slice; a nasdaq configuration is 3.5 GB whole and 0.35 GB a slice.
         for checkpoint in checkpoints:
-            frame = predictions.filter(pl.col("checkpoint") == checkpoint).drop("checkpoint")
+            frame = (
+                pl.scan_parquet(candidate.shards)
+                .filter(pl.col("checkpoint") == checkpoint)
+                .drop("checkpoint")
+                .sort("symbol", "timestamp", "fold")
+                .collect()
+            )
             prediction_results.append(
                 study.results.publish_predictions(
                     candidate.training,
@@ -2593,6 +2610,9 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
                     label=candidate.spec["label"],
                 )
             )
+            curves.append(_gbm_checkpoint_curve(candidate.spec["config_name"], checkpoint, frame))
+            del frame
+        gc.collect()
         curves_path = (
             candidate.training.root
             / "run_log"
@@ -2600,7 +2620,6 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
             / candidate.training.hash
             / "learning_curves.parquet"
         )
-        curves = _gbm_curves_from_shards(candidate.spec["config_name"], predictions, checkpoints)
         _write_learning_curves(curves_path, curves)
         diagnostics = {
             "cache_hit": False,
@@ -2742,18 +2761,24 @@ def plan_model_requests(
 
     ordered: list[dict[str, Any] | None] = [None] * len(requests)
     planned_groups = []
-    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
+    # One entry, not a growing dict. The cache is here so two compatibility groups over the same
+    # inputs read the panel once; keeping every group's panel instead is what made a multi-label
+    # plan carry one modeling dataset per label to the end of the run. Measured 2026-09-10 on
+    # nasdaq100_microstructure, one `load_modeling_dataset` per label with nothing released:
+    # 6.71, 12.65, 18.41, 22.53 GiB resident and a 35.79 GiB peak, before a single fit.
+    cached_input_key: tuple[str, str, int] | None = None
+    cached_inputs: tuple[Any, Any] | None = None
     for key, indexed_requests in groups.items():
         input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
+        if cached_input_key != input_key:
+            # Released before the next panel is read, so the two are never alive together.
+            cached_input_key, cached_inputs = None, None
         base = _load_gbm_batch_base(
             study,
             indexed_requests[0][1],
-            inputs=input_cache.get(input_key),
+            inputs=cached_inputs,
         )
-        input_cache.setdefault(
-            input_key,
-            (base["label_ref"], base["mds"]),
-        )
+        cached_input_key, cached_inputs = input_key, (base["label_ref"], base["mds"])
         mds = base["mds"]
         placeholder_folds = tuple({"fold": int(split["fold"])} for split in base["splits"])
         planned_candidates = {}
@@ -2787,6 +2812,14 @@ def plan_model_requests(
             ordered[index] = spec
             planned_candidates[index] = (config, effective, device, max_bin, num_threads)
         planned_groups.append((key, indexed_requests, base, planned_candidates))
+        # The payload outlives planning by the whole length of the run, and `mds` is by far the
+        # largest thing in `base`. `run_model_plan` reloads this group's panel when it reaches
+        # the group and drops it again afterwards, so one is alive at a time instead of one per
+        # group. Nothing else planning derived is rebuilt - the splits, the expected keys and
+        # the provenance in `base` are the planned ones - so no identity can move.
+        mds = None
+        base["mds"] = None
+    cached_input_key, cached_inputs = None, None
     if any(spec is None for spec in ordered):
         raise RuntimeError("GBM batch planner did not resolve every request")
     return tuple(spec for spec in ordered if spec is not None), tuple(planned_groups)
@@ -2798,6 +2831,21 @@ def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ..
     ]
     failures = []
     for key, indexed_requests, base, planned_candidates in payload:
+        if base.get("mds") is None:
+            # Planning dropped it rather than carry every group's panel to the end of the run.
+            # One reload per group - a scan - against one modeling dataset per label held for
+            # the length of a multi-label call.
+            from utils.modeling import load_modeling_dataset
+
+            request = indexed_requests[0][1]
+            tier = ExecutionTier(request["execution_tier"])
+            study.require_writable()
+            study.activate(tier)
+            base["mds"] = load_modeling_dataset(
+                study.case_study,
+                base["label_ref"].name,
+                max_symbols=int(dict(request["preview_reductions"]).get("max_symbols", 0)),
+            )
         try:
             candidates = _run_gbm_batch_group(
                 study,
@@ -2810,6 +2858,9 @@ def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ..
         except Exception as error:
             failures.append(error)
             continue
+        finally:
+            # Whatever the group did, its panel goes now: the next group loads its own.
+            base["mds"] = None
         for candidate in candidates:
             if candidate.error is not None:
                 failures.append(candidate.error)
@@ -2831,18 +2882,21 @@ def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[Mo
 
     ordered: list[ModelRun | None] = [None] * len(requests)
     failures = []
-    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
+    # One entry, not a growing dict - see `plan_model_requests`. A dict keyed by input holds
+    # every label's panel to the end of the call; measured at 22.53 GiB over four labels on
+    # nasdaq100_microstructure, before a single fit.
+    cached_input_key: tuple[str, str, int] | None = None
+    cached_inputs: tuple[Any, Any] | None = None
     for key, indexed_requests in groups.items():
         input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
+        if cached_input_key != input_key:
+            cached_input_key, cached_inputs = None, None
         base = _load_gbm_batch_base(
             study,
             indexed_requests[0][1],
-            inputs=input_cache.get(input_key),
+            inputs=cached_inputs,
         )
-        input_cache.setdefault(
-            input_key,
-            (base["label_ref"], base["mds"]),
-        )
+        cached_input_key, cached_inputs = input_key, (base["label_ref"], base["mds"])
         candidates = _run_gbm_batch_group(
             study,
             indexed_requests,

@@ -26,14 +26,14 @@
 # **Learning objectives**:
 #
 # - Understand why CME session dates differ from UTC calendar dates and how
-#   bars on Sunday evening belong to Monday's session.
+#   Sunday-evening bars are counted into Monday's session.
 # - Apply ratio (multiplicative) back-adjustment to a continuous series so
 #   percentage returns are preserved across rolls.
 # - Aggregate hourly bars to session-correct daily OHLCV across all 30 products
 #   and three tenors (front month, first deferred, second deferred).
 #
-# **Book reference**: §2.2 ("The Asset-Class Market Data Landscape" — Futures);
-# adjustment methodology compared in `06_futures_continuous`.
+# **Book reference**: §2.2, "The asset-class market data landscape" - the futures part of
+# it. `06_futures_continuous` compares the adjustment methods.
 #
 # **Prerequisites**: `data` package on `PYTHONPATH`; hourly continuous parquet
 # present at `ML4T_DATA_PATH/futures/market/continuous/`. See
@@ -55,7 +55,7 @@ from plotly.subplots import make_subplots
 from data import load_cme_futures
 from utils import ML4T_DATA_PATH
 from utils.paths import REPO_ROOT, get_chapter_dir
-from utils.style import COLORS, ml4t_palette
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 
 def _rel(path):
@@ -66,14 +66,18 @@ def _rel(path):
         return path
 
 
+# %% [markdown]
+# ### Where the aggregated bars are written
+#
+# `WRITE_TO_DATA=1` materialises the canonical daily parquet under `ML4T_DATA_PATH`, which is
+# what the later chapters and case studies read. The default writes to a chapter-local output
+# directory instead, so running this notebook to see how it works cannot overwrite the data
+# everything downstream depends on.
+
 # %% tags=["parameters"]
-# WRITE_TO_DATA=1 materializes the canonical daily parquet under ML4T_DATA_PATH
-# for the downstream chapters and case studies; the default (0) writes to a
-# chapter-local output dir so a demo run never overwrites production data.
 WRITE_TO_DATA = os.environ.get("WRITE_TO_DATA", "0") == "1"
 
 # %%
-# Output path for the session-aggregated daily data, selected by WRITE_TO_DATA.
 OUTPUT_DIR = (
     ML4T_DATA_PATH / "futures" / "market" / "continuous" / "daily"
     if WRITE_TO_DATA
@@ -100,7 +104,7 @@ OUTPUT_DIR = (
 # | **Calendar Day (Wrong)** | Sunday | Monday |
 # | **CME Session (Correct)** | Monday | Monday |
 #
-# Both bars belong to Monday's session (which ends Monday 4 PM CT).
+# Both bars fall inside Monday's session, which ends Monday 4 PM CT.
 
 # %%
 # Timezone constants
@@ -187,11 +191,8 @@ hourly.filter(pl.col("product") == "ES").select(
 #
 # We add a `session_date` column using Polars expressions for efficiency.
 
+
 # %%
-# Vectorized session date assignment using Polars
-# Convert to Central Time, then check if hour >= 16 (4 PM)
-
-
 def add_session_date(df: pl.DataFrame) -> pl.DataFrame:
     """Add session_date column based on CME session boundaries.
 
@@ -276,19 +277,31 @@ for sess in _sessions:
         )
     )
 fig.update_layout(
-    title="One color per CME session: Sunday-evening bars belong to Monday",
+    title="Hourly bars coloured by CME session date",
     xaxis_title="Timestamp (Central Time)",
     yaxis_title="ES front-month close",
     height=420,
     legend_title="Session date",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A close-price line over several days in Central Time, coloured by the session each bar "
+    "is assigned to. The colour changes at 4 PM rather than at midnight, so a Sunday evening "
+    "and the Monday after it carry one colour between them.",
+)
+
+# %% [markdown]
+# The colours make the session boundary visible: bars that trade on Sunday evening carry
+# Monday's colour, because their CME session runs on until Monday afternoon. A calendar date
+# would have split them off into a day of their own holding a few evening hours and nothing
+# else.
 
 # %% [markdown]
 # ## 3b. Ratio Back-Adjustment
 #
-# Databento's continuous contracts are **unadjusted** — price gaps at roll transitions
-# produce spurious returns (e.g., ES Mar 2020: -11.08% artificial gap). We apply
+# Databento's continuous contracts are **unadjusted**, so the price steps at every roll and a
+# return computed across that step is the gap between two contracts rather than a market move.
+# The roll table below reports how large the steps are. We apply
 # **ratio (multiplicative)** back-adjustment using `instrument_id` to detect roll points:
 #
 # 1. Detect where `instrument_id` changes between adjacent hourly bars
@@ -329,10 +342,8 @@ roll_ratios = rolls.select(
 print(f"Roll transitions detected: {len(roll_ratios)}")
 print(f"Products with rolls: {roll_ratios['product'].n_unique()}")
 
-# Front month (tenor 0) only — its ~quarterly rolls are what the adjusted
-# front-month series below is built from. Deferred tenors roll far more often
-# (thin volume flips leadership back and forth), so mixing tenors here would
-# overstate the front-month roll count.
+# Front month only: deferred tenors roll far more often, because thin volume flips
+# leadership back and forth, so mixing tenors overstates the front-month count.
 es_rolls = roll_ratios.filter((pl.col("product") == "ES") & (pl.col("tenor") == 0)).sort(
     "timestamp"
 )
@@ -395,14 +406,24 @@ for i, row in enumerate(products_tenors.iter_rows(named=True)):
 
 hourly_adjusted = pl.concat(adjusted_groups)
 
-# Emit two explicit price series and NO bare OHLC. Ratio adjustment preserves
-# within-tenor *returns* but distorts price *levels*: differencing adjusted
-# tenor-0/tenor-1 levels reads accumulated roll history, not the curve. Every
-# downstream consumer must name which series it wants:
-#   - adj_* (returns / momentum / volatility / labels — roll-continuous)
-#   - raw_* (carry / term structure / roll yield / notional / costs — contemporaneous)
-# cum_ratio is carried through so the two are reconcilable (adj_close == raw_close * cum_ratio).
-# Dropping bare open/high/low/close makes the adjusted-vs-raw choice impossible to skip.
+# %% [markdown]
+# ### Two price series, and no unlabelled one
+#
+# Ratio adjustment preserves returns within a tenor and moves price levels, so the two things
+# a reader might want from this frame cannot come out of one column.
+#
+# - `adj_*` is roll-continuous, and is what returns, momentum, volatility and labels are built
+#   from.
+# - `raw_*` is the price as it was quoted, and is what carry, term structure, roll yield,
+#   notional and costs need, because each of those compares contracts at one moment.
+#
+# Differencing adjusted front-month and deferred levels reads accumulated roll history rather
+# than the shape of the curve, and produces a plausible-looking number while doing it. So the
+# frame ships both series, carries `cum_ratio` so they reconcile as
+# `adj_close == raw_close * cum_ratio`, and ships no bare `open`/`high`/`low`/`close` at all:
+# a consumer has to say which one it means.
+
+# %%
 hourly_adjusted = hourly_adjusted.with_columns(
     pl.col("open").alias("raw_open"),
     pl.col("high").alias("raw_high"),
@@ -493,18 +514,26 @@ fig.add_trace(
 )
 fig.add_hline(y=1.0, line=dict(color=COLORS["neutral"], width=1, dash="dot"), row=2, col=1)
 fig.update_layout(
-    title="ES front month: ratio back-adjustment removes roll gaps",
+    title="ES front month, raw and ratio-adjusted close",
     height=560,
     legend_title="Price series",
 )
 fig.update_yaxes(title_text="Price", row=1, col=1)
 fig.update_yaxes(title_text="Cumulative ratio", row=2, col=1)
 fig.update_xaxes(title_text="Session date", row=2, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Above, the unadjusted and ratio-adjusted front-month price series over the full "
+    "history. The unadjusted line steps at each roll while the adjusted one runs through the "
+    "same dates without a break. Below, the cumulative adjustment ratio: a staircase that "
+    "changes only on roll dates and stays close to one.",
+)
+
+# %% [markdown]
+# The adjusted frame replaces the hourly one for the aggregation below, keeping `cum_ratio`
+# so the raw and adjusted series stay reconcilable.
 
 # %%
-# Replace hourly_with_sessions with adjusted data for downstream aggregation.
-# Keep the cumulative ratio (as cum_ratio) so raw and adjusted stay reconcilable.
 hourly_with_sessions = hourly_adjusted.drop("_prev_instrument_id", "_prev_close").rename(
     {"_cumulative_ratio": "cum_ratio"}
 )
@@ -559,9 +588,19 @@ es_daily.select(
 # %% [markdown]
 # ## 5. Validate Aggregation
 #
-# Check that daily aggregation is correct:
-# - Bar counts should be ~23 per session (23-hour trading day)
-# - OHLC relationships should hold (Low ≤ Open/Close ≤ High)
+# Two things are worth measuring on the daily frame, and they establish different things.
+#
+# The **bar count per session** is genuinely informative: it is the number of hourly bars that
+# went into each daily bar, and its distribution says which sessions were short and why.
+#
+# The **OHLC invariants** are not. Every daily price here is selected from an hourly price
+# rather than computed from several: the open is the session's first open, the close its last
+# close, the high the maximum of the hourly highs and the low the minimum of the hourly lows.
+# So if each hourly bar satisfies low ≤ open, close ≤ high, the daily bar inherits it - the
+# minimum over the session is at or below the first bar's own low, which is at or below its
+# open. The check below cannot detect a bad aggregation. What it can detect is an hourly bar
+# that arrived broken, or a later edit that replaces a selection with an arithmetic. Because
+# the relation is exact rather than approximate, any breach at all is a finding.
 
 # %%
 bar_counts = daily.group_by("bar_count").len().sort("bar_count")
@@ -589,14 +628,24 @@ fig.add_annotation(
     yshift=6,
 )
 fig.update_layout(
-    title="Hourly bars per session: the full 23-hour day dominates",
+    title="Hourly bars per session",
     xaxis_title="Hourly bars in the session",
     yaxis_title="Number of daily bars",
     height=420,
     showlegend=False,
     xaxis=dict(dtick=2),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A histogram of how many hourly bars each daily session contains. One column towers over "
+    "the rest at the full-length session, with a thin tail of shorter sessions to its left.",
+)
+
+# %% [markdown]
+# One bucket dominates: the full-length session is the overwhelming mode, and everything to its
+# left has a reason - holidays, half days, and deferred tenors thin enough to stop printing for
+# part of the day. The tail is small in count and worth keeping visible, because a session with
+# a handful of bars produces a daily bar whose high and low mean much less than the others.
 
 # %%
 # OHLC invariant check
@@ -609,11 +658,11 @@ ohlc_check = daily.with_columns(
     ]
 )
 
-print("OHLC Invariant Check:")
+print(f"OHLC invariants over {len(ohlc_check):,} daily bars:")
 for col in ["low_le_open", "low_le_close", "high_ge_open", "high_ge_close"]:
-    pct = ohlc_check[col].mean() * 100
-    status = "[OK]" if pct > 99.9 else "[FAIL]"
-    print(f"  {status} {col}: {pct:.2f}%")
+    breaches = int((~ohlc_check[col]).sum())
+    status = "[OK]" if breaches == 0 else "[FAIL]"
+    print(f"  {status} {col}: {breaches} breaches")
 
 # %% [markdown]
 # ## 6. Coverage Summary
@@ -702,20 +751,24 @@ es_nq_2024.head(10)
 # ## Key Takeaways
 #
 # 1. **CME sessions end at 4 PM CT**, not midnight UTC. The session date is
-#    the date the session ends — Sunday-evening trading belongs to Monday's
-#    session.
-# 2. **Volume here is 5,463,741 hourly bars across 30 products and 3 tenors**,
-#    aggregating to 312,859 daily bars over 2011-01-03 through 2025-12-31.
-# 3. **Ratio back-adjustment** is applied per (product, tenor) before
-#    aggregation — for ES front month the cumulative ratio ranges 0.87–1.16
-#    over its 62 (roughly quarterly) rolls, preserving percentage returns
-#    across roll boundaries.
-# 4. **Full sessions have 23 hourly bars** (23-hour trading day): the 23-bar
-#    bucket is by far the largest in the bar-count distribution. Shorter
-#    sessions arise from holidays, deferred tenors with thin trading, and
-#    partial days.
-# 5. **OHLC invariants hold at 100%** on the aggregated daily bars across all
-#    four checks.
+#    the date the session ends, so Sunday-evening trading is counted into Monday.
+# 2. **Aggregate on the session, not the calendar.** Grouping by UTC date splits one trading
+#    session across two rows and produces a daily bar whose open, high, low and close come
+#    from two different sessions. Nothing downstream can recover from that, and nothing about
+#    the resulting frame looks wrong.
+# 3. **Ratio back-adjustment is applied per product and tenor, before aggregation.** The order
+#    matters: adjusting after aggregating would compute the daily high and low from prices on
+#    two sides of a roll. The cumulative ratio stays near one over this history, which is what
+#    a series of quarterly rolls in a liquid contract looks like.
+# 4. **The session length has a mode, and everything else is a reason.** Most sessions run the
+#    full trading day; the shorter ones are holidays, partial days, and deferred tenors thin
+#    enough to stop printing. The distribution is worth drawing rather than summarising,
+#    because the tail is the part that needs explaining.
+# 5. **A check that cannot fail is not a check.** The daily OHLC invariants follow from the
+#    aggregation being four selections rather than four calculations, so they hold for any
+#    valid hourly input. Running them is still worth the line, because they catch a broken
+#    input bar or a future edit that computes where it used to select - but the section says
+#    which of those it would be finding, rather than implying the aggregation is on trial.
 #
 # ## Next Steps
 #

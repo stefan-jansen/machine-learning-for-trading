@@ -46,18 +46,13 @@
 # ## 1. Setup
 
 # %%
-"""SHAP Analysis — demonstrate model explainability and feature drift detection for GBMs."""
+"""SHAP Analysis - model explainability and feature drift detection for GBMs."""
 
 import warnings
 from pathlib import Path
 
-# lightgbm must be imported before scikit-learn. Both ship their own OpenMP
-# runtime and the first one loaded wins for the whole process; on macOS ARM64,
-# loading scikit-learn's libomp first makes LightGBM's first multithreaded fit
-# segfault in __kmp_suspend_initialize_thread. This notebook fits an
-# LGBMRegressor three times. Plain `import` statements sort ahead of
-# `from ... import` ones, so this order is what isort produces and will not
-# drift back.
+# lightgbm loads before scikit-learn: the first OpenMP runtime loaded wins the whole
+# process, and sklearn's first segfaults LightGBM's next threaded fit on macOS ARM64.
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
@@ -70,9 +65,17 @@ from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
-warnings.filterwarnings("ignore")
+# LightGBM records synthetic feature names when fitted on an array with an eval_set,
+# and sklearn then warns at every predict on an array that has none to compare. One
+# message, not the category: the fit and the predictions are unaffected.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names",
+    category=UserWarning,
+    module="sklearn.utils.validation",
+)
 
 
 def cross_sectional_ic_mean(
@@ -99,17 +102,13 @@ def cross_sectional_ic_mean(
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0  # 0 = all symbols
 SEED = 42
-# Repo-root-anchored (matches sibling chapter notebooks) so the artifact lands in
-# 12_gradient_boosting/output/shap_analysis regardless of the kernel's working
-# directory — a raw relative Path resolves against the notebook dir under nbconvert
-# and produces a stray nested 12_gradient_boosting/12_gradient_boosting/ tree.
+# Anchored at the repo root, so the artifact lands in the chapter's output directory
+# whatever the kernel's working directory is.
 OUTPUT_DIR = get_output_dir(12, "shap_analysis")
 
 
 # %%
 set_global_seeds(SEED)
-# %%
-
 # %% [markdown]
 # ## 2. Load Data
 
@@ -186,7 +185,12 @@ explanation = shap.Explanation(
 )
 
 shap.plots.beeswarm(explanation, max_display=15, show=False)
-plt.show()
+show_with_alt(
+    plt.gcf(),
+    "SHAP beeswarm: one row per feature ordered by mean absolute attribution, one dot "
+    "per observation positioned by its SHAP value and coloured by that feature's own "
+    "value.",
+)
 
 # %% [markdown]
 # **Interpretation**: Features at the top contribute most to predictions on
@@ -219,8 +223,11 @@ ax.barh(
 ax.set_yticks(range(top_n_display))
 ax.set_yticklabels(plot_df["feature"].reverse().to_list())
 ax.set_xlabel("Mean |SHAP Value|")
-ax.set_title("SHAP Feature Importance")
-plt.show()
+ax.set_title("Mean absolute SHAP value by feature")
+show_with_alt(
+    fig,
+    "Horizontal bars of mean absolute SHAP value, one per feature, ordered from the largest down.",
+)
 
 # %% [markdown]
 # ## 7. Feature Importance Consensus
@@ -323,10 +330,13 @@ scatter = ax.scatter(
 )
 ax.set_xlabel(top_feat)
 ax.set_ylabel("SHAP Value")
-ax.set_title(f"SHAP Dependence: {top_feat}")
+ax.set_title(f"SHAP value against {top_feat}")
 plt.colorbar(scatter, ax=ax, label=second_feat)
-fig.subplots_adjust(left=0.12, right=0.92, top=0.9, bottom=0.12)
-plt.show()
+show_with_alt(
+    fig,
+    f"Scatter of the SHAP value for {top_feat} against that feature's own value, one "
+    f"point per observation, coloured by {second_feat}.",
+)
 
 # %% [markdown]
 # **Interpretation**: The color gradient reveals how the interaction with
@@ -361,23 +371,27 @@ ax.set_xticks(range(TOP_N))
 ax.set_xticklabels(top_feature_names, rotation=45, ha="right", fontsize=9)
 ax.set_yticks(range(TOP_N))
 ax.set_yticklabels(top_feature_names, fontsize=9)
-ax.set_title(f"SHAP Feature Interactions (Top {TOP_N})")
+ax.set_title("Mean absolute SHAP interaction between the leading features")
 plt.colorbar(im, ax=ax, label="Mean |Interaction|", shrink=0.8)
-fig.subplots_adjust(left=0.18, right=0.9, top=0.9, bottom=0.2)
-plt.show()
+show_with_alt(
+    fig,
+    "Square heatmap of mean absolute SHAP interaction, the leading features on both "
+    "axes, with each feature's main effect on the diagonal.",
+)
 
 # %% [markdown]
 # **Interpretation**: Diagonal entries represent main effects; off-diagonal
 # entries quantify pairwise interactions. Strong off-diagonal cells indicate
-# features whose SHAP contributions depend on each other's values — a
+# features whose SHAP contributions depend on each other's values, which is
 # signal that the underlying relationship is regime-conditional.
 
 # %% [markdown]
 # ### Approximate Friedman H-Statistic
 #
-# The H-statistic (Friedman & Popescu, 2008) measures interaction strength
-# as the fraction of joint effect attributable to the interaction. Values
-# above 0.1 indicate meaningful pairwise dependence.
+# The H-statistic (Friedman & Popescu, 2008) measures interaction strength as the
+# fraction of a pair's joint effect attributable to the interaction rather than to the
+# two main effects. It runs from zero to one, and what counts as meaningful on a given
+# feature library is a convention rather than a threshold this notebook measures.
 
 # %%
 main_effects = np.diag(mean_interaction)
@@ -413,9 +427,10 @@ h_strong_df
 # %% [markdown]
 # ## 11. Drift Detection Across Walk-Forward Folds
 #
-# Tracking mean |SHAP| per feature across walk-forward folds detects
-# mechanism changes before they manifest in performance metrics. Features
-# with importance shifts exceeding 50% warrant investigation.
+# Tracking mean absolute SHAP per feature across walk-forward folds can show a
+# mechanism changing before a performance metric does. `DRIFT_THRESHOLD` is the
+# percentage change this notebook flags as worth looking at; it is a convention, not a
+# measured cutoff.
 
 # %%
 DRIFT_THRESHOLD = 50  # percent change threshold
@@ -448,13 +463,14 @@ for fold_idx, split in enumerate(mds.splits):
 
 fold_imp_df = pl.DataFrame(fold_importances)
 
+# %% [markdown]
+# Drift compares each fold's importance against the first fold. A percentage change is
+# only meaningful where the denominator is, and a feature whose baseline mean absolute
+# SHAP is near zero turns a negligible absolute shift into an enormous percentage. So
+# drift is ranked only among features whose baseline importance clears a small fraction
+# of the largest feature's.
+
 # %%
-# Compute drift: compare each fold's importance to the first fold baseline.
-# Percent change is only meaningful for features that carry real importance: a
-# feature whose baseline mean|SHAP| is ~0 turns a negligible absolute shift into
-# an astronomical percentage (a near-zero-denominator artifact, not drift). We
-# therefore rank drift only among features whose baseline importance clears a
-# small fraction of the most important feature's importance.
 if len(fold_importances) >= 2:
     baseline = {k: v for k, v in fold_importances[0].items() if k != "fold"}
     importance_floor = 0.05 * max(baseline.values())
@@ -478,7 +494,7 @@ if len(fold_importances) >= 2:
     drifted_features = drift_df.filter(pl.col("max_change_pct") > DRIFT_THRESHOLD)
 
 # %% [markdown]
-# ### Features with >50% importance shift across folds
+# ### Features whose importance shifts more than `DRIFT_THRESHOLD` across folds
 
 # %%
 if len(fold_importances) < 2:
@@ -514,12 +530,13 @@ if len(fold_importances) >= 2:
     lead_change = drift_df["max_change_pct"][0]
     ax.set_xlabel("Walk-Forward Fold")
     ax.set_ylabel("Mean |SHAP|")
-    ax.set_title(
-        f"Mean |SHAP| drifts across walk-forward folds: {lead_feat} moves most "
-        f"(+{lead_change:.0f}% vs fold 0)"
-    )
+    ax.set_title("Mean absolute SHAP by walk-forward fold, one line per feature")
     ax.legend(fontsize=8, ncol=2)
-    plt.show()
+    show_with_alt(
+        fig,
+        "Mean absolute SHAP value against walk-forward fold, one line per leading "
+        "feature, showing how each feature's attribution moves from fold to fold.",
+    )
 
 # %% [markdown]
 # **Interpretation**: Features whose importance varies substantially across
@@ -531,8 +548,9 @@ if len(fold_importances) >= 2:
 # ## 12. SHAP-Based Feature Selection
 #
 # Rank features by mean |SHAP|, retrain on the top-$k$, and evaluate
-# cross-sectional IC on the fold's **validation** window (not a sealed holdout).
-# Removing noise features often improves performance by reducing overfitting.
+# cross-sectional IC on the fold's **validation** window, which the model selection
+# above has already seen. Dropping noise features can help by giving the model less to
+# fit; whether it does here is what the curve says.
 
 
 # %%
@@ -564,16 +582,16 @@ ax.plot(
     markersize=8,
 )
 # NaN is a float value, not a null, so filter it explicitly (a top-k of purely
-# market-level features gives an undefined cross-sectional IC — see below).
+# market-level features gives an undefined cross-sectional IC; see below).
 defined_ic = selection_df.filter(pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
 best_row = defined_ic.sort("ic", descending=True).row(0, named=True)
 ax.set_xlabel("Number of Features (Top-k by SHAP)")
 ax.set_ylabel("Validation IC")
-ax.set_title(
-    f"Every SHAP-ranked subset gives near-zero, non-monotonic validation IC on this "
-    f"fold (best is top-{best_row['top_k']} at {best_row['ic']:+.3f})"
+ax.set_title("Validation IC against the number of SHAP-ranked features kept")
+show_with_alt(
+    fig,
+    "Validation IC against the number of top-ranked features retained, one point per subset size.",
 )
-plt.show()
 
 # %% [markdown]
 # **Reading the result**: the `selection_df` table above lists the exact values;
@@ -584,7 +602,7 @@ plt.show()
 # differenced QQQ/VNQ prices), which take the **same value for every symbol on a
 # given date**. A model built on those alone predicts identically across the
 # cross-section each day, so the cross-sectional IC is undefined (reported as
-# `NaN`) — a useful reminder that cross-sectional signal must come from features
+# `NaN`), which is a reminder that cross-sectional signal must come from features
 # that vary *across* assets, not from macro state alone. Among the subsets that do
 # admit an IC, none is distinguishable from zero: in a regime where the
 # full-feature validation IC is itself indistinguishable from zero, SHAP-ranked
@@ -650,12 +668,23 @@ def write_figure_12_7_artifact() -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     panels = {}
     panel_ids = []
+    skipped = []
     for cs_id in BEESWARM_CASE_STUDIES:
         label = PRIMARY_LABELS.get(cs_id)
         if label is None:
             continue
-        panels[cs_id] = _build_beeswarm_panel(cs_id, label)
+        try:
+            panels[cs_id] = _build_beeswarm_panel(cs_id, label)
+        except FileNotFoundError as exc:
+            # The book figure wants every panel, but a reader with one case study's
+            # artifacts should still get this notebook's own analysis. Record which
+            # panel is absent rather than ending the run on it.
+            skipped.append(f"{cs_id} ({exc})")
+            continue
         panel_ids.append(cs_id)
+
+    if skipped:
+        print("Beeswarm panels skipped for want of artifacts: " + "; ".join(skipped))
 
     artifact = OUTPUT_DIR / "figure_12_7_shap_beeswarm.npz"
     payload: dict[str, np.ndarray | str | int] = {"panel_ids": np.array(panel_ids)}
@@ -688,12 +717,12 @@ print(f"Wrote publication figure artifact: {figure_12_7_artifact}")
 # **Drift detection**: the observable is each feature's per-fold mean
 # |SHAP|, tracked across walk-forward folds, and summarized as the
 # maximum percent change from the fold-0 baseline. That percentage is
-# only reported for features that carry real baseline importance —
+# only reported for features that carry real baseline importance:
 # near-zero-importance features are excluded because a tiny absolute
 # shift over a near-zero denominator inflates into a spurious "drift."
-# Whether an observed shift constitutes actionable drift is a threshold
-# question (here, 50%) whose answer depends on the universe and feature
-# library.
+# Whether an observed shift is worth acting on is a threshold question, and
+# `DRIFT_THRESHOLD` is this notebook's convention rather than an answer that
+# transfers to another universe or feature library.
 #
 # **Feature selection**: on this fold every SHAP-ranked subset yields a
 # validation IC near zero, and the sweep is not monotonic in $k$, so no

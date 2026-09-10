@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 from collections.abc import Mapping
@@ -1256,6 +1257,68 @@ def _save_parquet(path: Path, frame) -> None:
 # ---------------------------------------------------------------------------
 
 
+_INCREMENTAL_SHARD = re.compile(r"^(?P<stem>.+)_ep(?P<epoch>\d+)\.parquet$")
+
+
+def incremental_shard_path(incr_dir: Path, config_name: str, fold: int, epoch: int) -> Path:
+    """The one file a (config, fold, checkpoint) triple ever writes."""
+    return incr_dir / f"{config_name}_fold{int(fold)}_ep{int(epoch)}.parquet"
+
+
+def clear_fold_predictions(incr_dir: Path, config_name: str, fold: int) -> None:
+    """Drop whatever an earlier attempt at this (config, fold) left behind.
+
+    A shard is written once and never rewritten, so a re-fit that produces fewer
+    checkpoints than the attempt before it would otherwise read the leftovers back as
+    its own. Rewriting one file per fold used to truncate them implicitly.
+    """
+    if not incr_dir.exists():
+        return
+    for path in incr_dir.glob(f"{config_name}_fold{int(fold)}_ep*.parquet"):
+        path.unlink()
+    legacy = incr_dir / f"{config_name}_fold{int(fold)}.parquet"
+    if legacy.exists():
+        legacy.unlink()
+
+
+def incremental_prediction_shards(
+    incr_dir: Path,
+    config_name: str | None = None,
+) -> list[tuple[str, int, Path]]:
+    """Return ``(stem, checkpoint, path)`` in the order their rows concatenate.
+
+    The order is the one a single file per fold produced: folds by the lexicographic
+    order of ``<config>_fold<fold>``, and inside a fold the checkpoints ascending, which
+    is the order they were fitted in. Registry identity does not depend on it -
+    ``published_prediction_digest`` sorts its row hashes - but every artifact these
+    runners write does, and holding the order is what let the change be compared against
+    the implementation it replaced.
+    """
+    pattern = "*.parquet" if config_name is None else f"{config_name}_fold*.parquet"
+    shards: list[tuple[str, int, Path]] = []
+    legacy: list[str] = []
+    for path in incr_dir.glob(pattern):
+        match = _INCREMENTAL_SHARD.match(path.name)
+        if match is None:
+            legacy.append(path.name)
+            continue
+        shards.append((match["stem"], int(match["epoch"]), path))
+    if legacy:
+        raise ValueError(
+            f"{incr_dir} holds {len(legacy)} prediction file(s) written one-per-fold by an "
+            f"earlier version ({', '.join(sorted(legacy)[:3])}). They carry every checkpoint "
+            f"the fold reached and would be counted a second time alongside the per-checkpoint "
+            f"shards beside them. Delete the directory and re-fit."
+        )
+    shards.sort(key=lambda item: (item[0], item[1]))
+    return shards
+
+
+def incremental_prediction_files(incr_dir: Path, config_name: str | None = None) -> list[Path]:
+    """The shard paths from :func:`incremental_prediction_shards`, in the same order."""
+    return [path for _stem, _epoch, path in incremental_prediction_shards(incr_dir, config_name)]
+
+
 def flush_fold_predictions(
     incr_dir: Path,
     config_name: str,
@@ -1270,10 +1333,19 @@ def flush_fold_predictions(
     eval_actual: np.ndarray | None = None,
     eval_col: str = "eval_actual",
 ) -> None:
-    """Write one fold's checkpoint predictions to parquet for crash safety.
+    """Write each checkpoint's fold predictions to its own parquet shard.
 
     Shared by deep_learning, tabular_dl, and darts_forecasting runners.
     Handles Object-typed date columns from pandas datetime arrays.
+
+    One shard per (config, fold, checkpoint), written once. The sequence runner calls
+    this at every checkpoint with every checkpoint fitted so far, and this used to
+    rewrite one file per fold from all of them, so both the frames it built and the bytes
+    it wrote grew with the square of the schedule. A nasdaq fold is 3,993,874 validation
+    rows, which is a measured 172 MB a checkpoint: at the twentieth checkpoint of twenty
+    the writer built 3.8 GB of frames to write a file it had already written nineteen
+    times, and wrote 210 checkpoints' worth of parquet over the fold where 20 were new. A
+    shard that already exists is left alone.
     """
     import numpy as np
     import polars as pl
@@ -1284,8 +1356,10 @@ def flush_fold_predictions(
             strict=False
         )
 
-    frames = []
     for ep, preds in checkpoint_preds.items():
+        shard = incremental_shard_path(incr_dir, config_name, fold, ep)
+        if shard.exists():
+            continue
         n = len(preds)
         entities = val_entities if val_entities is not None else np.array(["unknown"] * n)
         df = pl.DataFrame(
@@ -1301,10 +1375,8 @@ def flush_fold_predictions(
         )
         if eval_actual is not None:
             df = df.with_columns(pl.Series(eval_col, eval_actual.astype(np.float64)))
-        frames.append(df)
-
-    if frames:
-        _save_parquet(incr_dir / f"{config_name}_fold{fold}.parquet", pl.concat(frames))
+        _save_parquet(shard, df)
+        del df
 
 
 def flush_fold_training_log(
