@@ -120,6 +120,10 @@ GPU_AVAILABLE = torch.cuda.is_available()
 
 XGB_DEVICE = "cuda" if GPU_AVAILABLE else "cpu"
 CB_TASK_TYPE = "GPU" if GPU_AVAILABLE else "CPU"
+# CatBoost scores an MAE eval metric every fifth iteration on GPU, which it cannot
+# compute on the device; declaring that period keeps the behaviour without the
+# per-fit announcement on stderr.
+CB_METRIC_PERIOD = 5 if GPU_AVAILABLE else 1
 print(f"GPU available: {GPU_AVAILABLE} (XGB: {XGB_DEVICE}, CatBoost: {CB_TASK_TYPE})")
 
 # %% [markdown]
@@ -298,6 +302,7 @@ def make_catboost_objective():
             "random_strength": trial.suggest_float("random_strength", 0.0, 10.0),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
             "task_type": CB_TASK_TYPE,
+            "metric_period": CB_METRIC_PERIOD,
             "random_seed": SEED,
             "verbose": False,
             "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
@@ -350,6 +355,7 @@ def build_model(lib_code, params):
         **eval_params,
         loss_function=cb_loss,
         task_type=CB_TASK_TYPE,
+        metric_period=CB_METRIC_PERIOD,
         early_stopping_rounds=EARLY_STOPPING_ROUNDS,
         random_seed=SEED,
         verbose=False,
