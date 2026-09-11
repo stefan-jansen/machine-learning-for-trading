@@ -308,10 +308,34 @@ def replace_temporal_state(mds, temporal, fold_id: int) -> pl.DataFrame:
 
 
 # %% [markdown] tags=[]
+# ### Checking the Outer Purge
+#
+# The calibration split above builds its own embargo, so that boundary is purged by
+# construction. The outer train-validation boundary is not. It arrives from the case study's
+# canonical splits and this notebook only consumes it, so the sentence "every boundary carries
+# the label horizon" is a claim about an input artifact rather than about anything here.
+#
+# It is worth checking rather than repeating, because a split file that stopped carrying the
+# horizon would let a forward label from training resolve inside validation, and every coverage
+# number below would still look reasonable. The check counts the panel's own timestamps between
+# the two boundaries, which is the unit the horizon has to be expressed in once a calendar has
+# gaps in it.
+
+
+# %% tags=[]
+def outer_purge_steps(unique_dates: np.ndarray, train_end, val_start) -> int:
+    """Observed timestamps strictly between the end of training and the start of validation."""
+    return int(((unique_dates > train_end) & (unique_dates < val_start)).sum())
+
+
+# %% [markdown] tags=[]
 # ### Fold-Specific Arrays
 #
 # The joined frame is sorted before conversion so row order, feature order, and complete
-# timestamp groups remain stable across deterministic CPU fits.
+# timestamp groups remain stable across deterministic CPU fits. Masking on dates rather than
+# row offsets is what keeps a panel timestamp wholly on one side of the boundary: a row-offset
+# cut on a multi-asset panel splits one decision date between training and validation, which
+# leaks the same timestamp rather than a short gap.
 
 
 # %% tags=[]
@@ -329,6 +353,16 @@ def build_fold_arrays(mds, split: dict, temporal: pl.DataFrame | None) -> dict:
         np.datetime64(split[key].to_datetime64())
         for key in ("train_start", "train_end", "val_start", "val_end")
     )
+    embargo_steps = embargo_steps_from_buffer(mds.label_buffer, dates)
+    purge_steps = outer_purge_steps(np.unique(dates.astype("datetime64[ns]")), train_end, val_start)
+    if purge_steps < embargo_steps:
+        raise ValueError(
+            f"fold {int(split['fold'])}: {purge_steps} timestamp(s) lie between the training "
+            f"end {train_end} and the validation start {val_start}, short of the "
+            f"{embargo_steps} that a {mds.label_buffer} label horizon needs. A forward label "
+            f"from training resolves inside validation, so the coverage below would be "
+            f"measured on leaked outcomes."
+        )
     train_mask = (dates >= train_start) & (dates <= train_end)
     val_mask = (dates >= val_start) & (dates <= val_end)
     X = frame.select(mds.feature_names).to_numpy()
@@ -341,6 +375,8 @@ def build_fold_arrays(mds, split: dict, temporal: pl.DataFrame | None) -> dict:
         "y_val": frame[mds.label_col].to_numpy()[val_mask],
         "dates_val": dates[val_mask],
         "symbols_val": frame["__entity"].to_numpy()[val_mask],
+        "embargo_steps": embargo_steps,
+        "purge_steps": purge_steps,
     }
 
 
@@ -373,9 +409,12 @@ for cs_id, label, display_name in ASSET_CONFIGS:
             "feature_cols": mds.feature_names,
             "label_buffer": mds.label_buffer,
         }
+        tightest = min(fold["purge_steps"] for fold in fold_data)
         print(
             f"  {display_name}: {len(fold_data)} fold-aware matrices "
-            f"({len(mds.feature_names)} features; embargo={mds.label_buffer})"
+            f"({len(mds.feature_names)} features; embargo={mds.label_buffer}); "
+            f"tightest outer purge {tightest} step(s) against {fold_data[0]['embargo_steps']} "
+            f"required"
         )
     except FileNotFoundError as missing:
         # The only tolerable absence: a reader who has not built this case study's inputs.
@@ -392,10 +431,10 @@ print(f"\nLoaded {len(processed_datasets)} asset classes")
 # ## 4. Conformal Prediction Evaluation
 #
 # We use each case study's canonical pre-holdout walk-forward folds. Every outer
-# train-validation boundary carries the label horizon configured in `setup.yaml`, and
-# the calibration split inside each training fold applies the same embargo. The declared
-# holdouts play no role in model fitting, calibration, method comparison, or
-# interpretation.
+# train-validation boundary is checked above against the label horizon configured in
+# `setup.yaml` rather than assumed to carry it, and the calibration split inside each training
+# fold applies the same embargo to its own boundary. The declared holdouts play no role in
+# model fitting, calibration, method comparison, or interpretation.
 
 
 # %% [markdown] tags=[]
