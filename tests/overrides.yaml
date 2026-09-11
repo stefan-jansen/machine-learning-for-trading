@@ -1239,8 +1239,14 @@
 25_live_trading/02_etfs_deployment_loop:
   parameters:
     REFRESH_DATA: false
-  skip: true
-  skip_reason: Requires running IB Gateway (not available in CI)
+  # Was skipped for "Requires running IB Gateway", which described a different
+  # notebook: this one stages a basket for Alpaca paper equities, and with
+  # SUBMIT_PAPER_ORDERS false by default it opens no broker session at all. Its
+  # real inputs are the ETFs case study's fwd_ret_21d labels and its registry,
+  # both of which the intermediates tree carries - the fixture registry's
+  # validation-IC leader for that label is ridge_a1000000.0, the configuration
+  # the notebook pins, so EXPECTED_RIDGE_CONFIG needs no override here. Measured
+  # against the fixture: 21s, 2.3 GB peak.
   tier: weekly
   timeout: 360
 25_live_trading/03_ib_paper_trading_demo:

@@ -71,8 +71,9 @@
 # - ETF data downloaded under `ML4T_DATA_PATH/etfs/market`.
 # - FRED macro data under `ML4T_DATA_PATH/macro` (for the yield-curve
 #   regime feature).
-# - Forward-return label parquet at
-#   `case_studies/etfs/labels/fwd_ret_21d.parquet`.
+# - The ETFs case study's forward-return label parquet and its registry,
+#   by default `case_studies/etfs/labels/fwd_ret_21d.parquet` and
+#   `case_studies/etfs/run_log/registry.db`.
 # - Alpaca paper credentials in `ALPACA_API_KEY` / `ALPACA_SECRET_KEY`
 #   (free at <https://app.alpaca.markets/paper>).
 
@@ -83,6 +84,7 @@ import json
 import logging
 import os
 import pickle
+import sqlite3
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
@@ -90,19 +92,24 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, OrderSide, Strategy
+from _etfs_features import build_yield_curve, compute_financial_features, feature_columns
+from async_utils import run_async
+from ml4t.backtest import (
+    BacktestConfig,
+    DataFeed,
+    Engine,
+    ExecutionMode,
+    OrderSide,
+    OrderStatus,
+    Strategy,
+)
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from data import load_etfs, load_macro
-from utils.paths import display_path, get_chapter_dir, get_output_dir
+from utils.paths import display_path, get_case_study_dir, get_output_dir
 from utils.style import COLORS, add_message_title, show_with_alt
-
-CHAPTER_DIR = get_chapter_dir(25)
-
-from _etfs_features import build_yield_curve, compute_financial_features, feature_columns
-from async_utils import run_async
 
 # basicConfig is a no-op once a handler exists, and importing the feature libraries installs one,
 # so configuring the root logger here would leave two handlers attached and print every line
@@ -118,11 +125,12 @@ for _noisy in ("ml4t", "mlquant", "mlquant.features"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 # %% tags=["parameters"]
-RIDGE_ALPHA = 1_000_000.0  # ridge_a1000000.0 from the ETF case study's CV sweep
+EXPECTED_RIDGE_CONFIG = "ridge_a1000000.0"  # None reports the registry's pick instead of asserting
 PRIMARY_LABEL = "fwd_ret_21d"
 LIVE_WINDOW_START = "2025-01-01"  # cross-sections from here become "live" predictions
 FORWARD_HORIZON_DAYS = 21  # fwd_ret_21d label horizon (trading days)
 TOP_K = 5
+CASH_BUFFER = 0.02  # share of the account left unallocated, so a next-bar fill is affordable
 REBALANCE_EVERY_N_DAYS = 21  # match the label horizon
 INITIAL_CASH = 100_000.0
 COMMISSION_RATE = 0.0005
@@ -205,16 +213,94 @@ print(f"Features: {features.shape}, {len(fc)} feature columns")
 #
 # The deployment fit is a **single Ridge regression on the full extended
 # panel** - no walk-forward CV, no per-fold scaling, no hyperparameter
-# search. The hyperparameters come from the case study (`α = 10⁶` is the
-# highest-validation-IC Ridge configuration in the ETFs registry); we adopt it here
-# rather than re-deriving them. This separates the *research artefact*
+# search. The regularisation strength comes from the case study rather
+# than from a sweep here, which separates the *research artefact*
 # (registry-stored, CV-evaluated, IC-reported) from the *deployment
 # artefact* (single fit, full history, governed path).
+#
+# ### Where the regularisation strength comes from
+#
+# A borrowed hyperparameter that sits in the parameters cell as a literal is a number nobody can
+# check: the registry's leader can move on the next sweep and nothing here would notice. The cell
+# below asks the registry which Ridge configuration leads on validation IC for this label, reads
+# the alpha out of that run's resolved specification, and checks the answer against
+# `EXPECTED_RIDGE_CONFIG`. Setting that pin to `None` reports the registry's pick instead of
+# asserting it, which is what to do when the case study is deliberately re-swept.
+#
+# The pin names a **configuration**, not a training hash. A refit re-keys the hash while selecting
+# the same configuration, so a hash pin would fire on runs where nothing had changed.
 
 # %%
-labels = pl.read_parquet(
-    CHAPTER_DIR.parent / "case_studies" / "etfs" / "labels" / f"{PRIMARY_LABEL}.parquet"
+etfs_dir = get_case_study_dir("etfs")
+labels_path = etfs_dir / "labels" / f"{PRIMARY_LABEL}.parquet"
+registry_path = etfs_dir / "run_log" / "registry.db"
+# Read-only, but not `immutable=1`: the registry is a WAL database that sweeps write to
+# concurrently, and an immutable connection ignores the -wal file and reads the pre-WAL main
+# file, which shows up here as a stale leader or as a table that appears not to exist.
+registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro"
+with sqlite3.connect(registry_uri, uri=True) as conn:
+    winner = conn.execute(
+        """SELECT tr.config_name, tr.spec_json, pm.ic_mean
+           FROM training_runs tr
+           JOIN prediction_sets ps ON ps.training_hash = tr.training_hash
+           JOIN prediction_metrics pm ON pm.prediction_hash = ps.prediction_hash
+           WHERE tr.family = 'linear'
+             AND tr.label = ?
+             AND tr.config_name LIKE 'ridge_%'
+             AND ps.split = 'validation'
+           ORDER BY pm.ic_mean DESC
+           LIMIT 1""",
+        (PRIMARY_LABEL,),
+    ).fetchone()
+if winner is None:
+    raise RuntimeError(
+        f"The ETFs registry holds no validated Ridge run for {PRIMARY_LABEL}; "
+        "the case study's linear stage has to run before this notebook can borrow from it."
+    )
+SOURCE_CONFIG, source_spec_json, source_ic = winner
+source_spec = json.loads(source_spec_json)
+
+# Every fold of a sweep configuration is fitted at one alpha; a set with more than one member
+# would mean the configuration name no longer identifies a single regularisation strength.
+fold_alphas = {
+    params["alpha"]
+    for params in source_spec["computation"]["model"]["effective_params_by_fold"].values()
+}
+if len(fold_alphas) != 1:
+    raise RuntimeError(f"{SOURCE_CONFIG} was fitted at more than one alpha: {sorted(fold_alphas)}")
+RIDGE_ALPHA = float(fold_alphas.pop())
+
+# The artefacts the source run read are what its feature set was; "label" is the target, not a
+# feature family.
+SOURCE_FEATURE_SETS = sorted(set(source_spec["computation"]["feature_artifacts"]) - {"label"})
+
+# `_etfs_features.compute_financial_features` builds exactly the financial families, so this names
+# what was fitted above rather than restating an intention.
+DEPLOYED_FEATURE_SETS = ["financial"]
+
+assert EXPECTED_RIDGE_CONFIG in (None, SOURCE_CONFIG), (
+    f"The registry now leads with {SOURCE_CONFIG}, not {EXPECTED_RIDGE_CONFIG}. "
+    "Re-pin deliberately rather than following the leader silently."
 )
+print(f"Registry leader on validation IC: {SOURCE_CONFIG}  (IC {source_ic:.4f})")
+print(f"  alpha:        {RIDGE_ALPHA:g}")
+print(f"  tuned on:     {SOURCE_FEATURE_SETS}")
+print(f"  deployed on:  {DEPLOYED_FEATURE_SETS}")
+dropped_feature_sets = sorted(set(SOURCE_FEATURE_SETS) - set(DEPLOYED_FEATURE_SETS))
+print(f"  dropped here: {dropped_feature_sets or 'none'}")
+
+# %% [markdown]
+# Whatever the run prints as dropped is the cost of the transfer. This notebook fits the financial
+# families alone, because an HMM and a GARCH refit per symbol on every data update is what the
+# deployment declines to pay for, and the configuration it borrows from was tuned on whichever
+# families the registry records against it. An alpha selected against one feature set is not
+# selected against another, so with anything in that dropped list the number below is a starting
+# point carried over from research rather than a tuned value for the model actually fitted here.
+# Nothing in this notebook re-derives it, and a deployment that wanted it re-derived would sweep on
+# its own feature set.
+
+# %%
+labels = pl.read_parquet(labels_path)
 panel = features.join(labels, on=["timestamp", "symbol"], how="inner")
 print(f"Joined panel: {len(panel):,} rows over {panel['symbol'].n_unique()} symbols")
 
@@ -298,8 +384,9 @@ training_metadata = {
     "model_class": "sklearn.linear_model.Ridge",
     "ridge_alpha": RIDGE_ALPHA,
     "source_case_study": "etfs",
-    "source_config_name": f"ridge_a{RIDGE_ALPHA:g}",
-    "source_feature_sets": ["financial"],  # deployment dropped model_based
+    "source_config_name": SOURCE_CONFIG,
+    "source_config_feature_sets": SOURCE_FEATURE_SETS,  # what the alpha was tuned on
+    "deployed_feature_sets": DEPLOYED_FEATURE_SETS,  # what this fit used
     "intercept": float(model.intercept_),
     "coef_l2_norm": float(np.linalg.norm(model.coef_)),
 }
@@ -328,7 +415,13 @@ live_panel = live_panel.filter(~pl.all_horizontal([pl.col(c).is_null() for c in 
 X_live = live_panel.select(fc).to_numpy()
 preds = model.predict(scaler.transform(imputer.transform(X_live)))
 predictions = live_panel.select(["timestamp", "symbol"]).with_columns(pl.Series("score", preds))
-assert predictions["timestamp"].max() == live_panel["timestamp"].max()
+# The live window must reach the end of the feature panel: a prediction tape that stops short is
+# how a deployment silently scores a stale cross-section. Comparing against `predictions` itself
+# would compare the frame with a copy of its own column and could not fail.
+assert predictions["timestamp"].max() == features["timestamp"].max(), (
+    f"Predictions stop at {predictions['timestamp'].max()} but features run to "
+    f"{features['timestamp'].max()}; the newest cross-section carries no score."
+)
 print(
     f"Predictions over live window: {len(predictions):,} rows on {predictions['timestamp'].n_unique()} dates"
 )
@@ -341,6 +434,15 @@ print(
 # `on_data` interface is identical to every other strategy in this
 # chapter: receive the bar dictionary, look up the prediction frame for
 # the current timestamp, compute target weights, route orders.
+#
+# Positions are sized against the broker's current account value rather than `INITIAL_CASH`, so
+# leverage stays constant as profit and loss accrue, and against slightly less than all of it.
+# `CASH_BUFFER` exists because the order is sized on the current bar's close and fills at the next
+# bar's: an overnight move against the position, plus commission, makes a basket sized at the full
+# account value unaffordable, and the broker answers that by refusing the last leg rather than by
+# filling it smaller. Two per cent is a margin measured on this window, not a guarantee - a basket that
+# gaps up about two per cent overnight is unaffordable again - and the disposition check below is
+# what turns that into a stop rather than a quietly short basket.
 
 
 # %%
@@ -354,11 +456,13 @@ class CrossSectionalRidgeStrategy(Strategy):
         top_k: int,
         rebalance_every: int,
         symbols: list[str],
+        cash_buffer: float,
     ):
         self.predictions = predictions
         self.top_k = top_k
         self.rebalance_every = rebalance_every
         self.symbols = symbols
+        self.cash_buffer = cash_buffer
         self._bars_seen = 0
         self.signal_log: list[dict] = []
         self.rebalance_log: list[dict] = []
@@ -384,10 +488,7 @@ class CrossSectionalRidgeStrategy(Strategy):
         self.rebalance_log.append({"timestamp": timestamp, "targets": targets})
         prices = {s: data[s]["close"] for s in self.symbols if s in data}
 
-        # Size positions against the broker's current account value rather
-        # than INITIAL_CASH so leverage stays constant as PnL accrues across
-        # rebalances.
-        account_value = broker.get_account_value()
+        account_value = broker.get_account_value() * (1.0 - self.cash_buffer)
 
         for symbol in self.symbols:
             position = broker.get_position(symbol)
@@ -451,6 +552,7 @@ strategy_backtest = CrossSectionalRidgeStrategy(
     top_k=TOP_K,
     rebalance_every=REBALANCE_EVERY_N_DAYS,
     symbols=ALL_SYMBOLS,
+    cash_buffer=CASH_BUFFER,
 )
 engine_backtest = Engine(
     feed=feed_backtest,
@@ -466,6 +568,41 @@ assert strategy_backtest.rebalance_log, "Offline replay produced no scheduled re
 print(f"Backtest final value: ${backtest_results['final_value']:,.2f}")
 print(f"Backtest total return: {backtest_results['total_return_pct']:.2f}%")
 print(f"Backtest signals: {len(strategy_backtest.signal_log)}")
+
+# %% [markdown]
+# The replay is read below as the deterministic record of what the deployment would have done, so
+# an order it emitted and the broker refused has to stop it being read that way. The same four
+# buckets the live leg reports apply here: a signal the strategy logged is intended, and only a
+# filled order is accepted. Sizing every leg at the full account value produced eight refusals
+# over this window before `CASH_BUFFER` existed, and nothing in the notebook looked.
+#
+# An order still pending on the last bar is a different thing and is counted separately. Under
+# `NEXT_BAR` the engine fills an order at the start of the following bar, and the final bar has
+# no following bar, so a rebalance that lands on the last day of the window leaves its whole
+# basket unfilled. That is the replay running out of tape, not the broker refusing anything.
+
+# %%
+last_bar_ts = engine_backtest.equity_curve[-1][0]
+refused, pending_at_end = [], []
+for order in engine_backtest.broker.orders:
+    if order.status is OrderStatus.FILLED:
+        continue
+    if order.status is OrderStatus.PENDING and order.created_at == last_bar_ts:
+        pending_at_end.append(order)
+    else:
+        refused.append(order)
+
+print(f"Offline orders: {len(engine_backtest.broker.orders)}")
+print(f"  filled:              {len(engine_backtest.broker.fills)}")
+print(f"  unfilled at the end: {len(pending_at_end)}")
+print(f"  refused:             {len(refused)}")
+for order in refused[:5]:
+    print(f"    {order.asset} {order.side.value} {order.quantity:g}: {order.rejection_reason}")
+assert not refused, (
+    f"The offline replay did not place the basket it logged: {len(refused)} order(s) refused. "
+    "A refused order means the reference tape and the strategy's own signal log disagree, "
+    "so the reconciliation below would compare an intended basket against one never held."
+)
 
 # %% [markdown]
 # ### What the replay looks like over the window
@@ -492,15 +629,17 @@ axes[1].set_ylabel("Drawdown (%)")
 axes[1].set_xlabel("Date")
 add_message_title(
     axes[0],
-    "The offline replay of the live window, and what it gave back on the way",
+    "Account value and drawdown over the live window",
     subtitle="Deterministic replay through the backtest engine, not a live result",
 )
 show_with_alt(
     fig,
-    "Two stacked panels over the live window. The upper panel is account value against a dashed "
-    f"line at the {INITIAL_CASH:,.0f} starting balance, ending at "
-    f"{backtest_results['final_value']:,.0f}. The lower panel is drawdown from the running peak, "
-    f"reaching {drawdown.min():.1%} at its worst.",
+    "Two panels sharing a date axis over the live window. The upper panel traces account value "
+    "against a dashed line at the starting balance, "
+    + ("ending above it" if backtest_results["final_value"] >= INITIAL_CASH else "ending below it")
+    + ". The lower panel shades the drawdown from the running peak, which returns to zero at each "
+    "new high; its deepest point falls in "
+    f"{equity_dates[int(np.argmin(drawdown))]:%B %Y}.",
 )
 
 # %% [markdown]
@@ -796,12 +935,16 @@ print(f"Run metadata: {display_path(run_path)}")
 #   extended panel and a single train pass, not the case study's
 #   walk-forward CV.
 # - **The financial-only feature subset is a deliberate operational
-#   simplification.** Dropping HMM regimes and GARCH conditional
-#   volatility makes the refit complete in seconds instead of minutes; the
-#   resulting feature set is slightly weaker but cheap enough to refit on
-#   every data update.
-# - **Retrain cadence is monthly, not per-prediction.** The live trading
-#   loop re-runs the prediction and offline-reference steps daily against
-#   the persisted artefact and revisits the refit only when the artefact
-#   has aged past the configured window; Chapter 26 picks up the
+#   simplification, and it is not free.** Dropping the model-based
+#   families makes the refit complete in seconds instead of minutes. It
+#   also means the alpha this notebook borrows may have been selected
+#   against a feature set the deployment does not use, which the run
+#   prints as a dropped list rather than leaving implicit. What that
+#   costs in forecast quality is not measured here; measuring it means
+#   sweeping on the deployment's own feature set.
+# - **This notebook refits once per run, and does not decide how often to
+#   run.** Prediction and the offline reference could be re-run daily
+#   against a persisted artefact while the refit happens far less often.
+#   Nothing here implements that split - the artefact carries
+#   `trained_at` so a scheduler can, and Chapter 26 picks up the
 #   cadence-decoupling discussion.
