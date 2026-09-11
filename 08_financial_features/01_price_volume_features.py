@@ -24,7 +24,7 @@
 #
 # This notebook demonstrates the **core feature families** derived from a single
 # asset's price and volume history. These are the workhorse features of most
-# quantitative strategies — available for every tradeable instrument.
+# quantitative strategies, available for every tradeable instrument.
 #
 # ## Learning Objectives
 #
@@ -52,11 +52,11 @@
 # All examples use **real ETF data** (no synthetic data).
 
 # %%
-"""Price and Volume Feature Families — core feature families derived from a single asset's price and volume history."""
+"""Price and Volume Feature Families: the core feature families derived from a single asset's price and volume history."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import numpy as np
 import plotly.graph_objects as go
@@ -428,7 +428,7 @@ def rolling_regression_slope(
         .rolling_map(
             lambda s: np.polyfit(np.arange(len(s)), s.to_numpy(), 1)[0] / s.mean() * len(s),
             window_size=period,
-            min_periods=period,
+            min_samples=period,
         )
         .alias(f"slope_{period}d")
     )
@@ -525,7 +525,7 @@ vol_df = spy.with_columns(
     pl.col("close").pct_change().alias("ret"),
 ).with_columns(
     [
-        # Close-to-close (annualized) — note: realized_volatility expects returns, not prices
+        # Close-to-close (annualized); realized_volatility expects returns, not prices
         realized_volatility("ret", period=21, annualize=True).alias("vol_cc_21"),
         # Yang-Zhang (most efficient)
         yang_zhang_volatility("open", "high", "low", "close", period=21, annualize=True).alias(
@@ -543,24 +543,38 @@ vol_df.select(["timestamp", "close", "vol_cc_21", "vol_yz_21"]).tail(10)
 # Range-based estimators use OHLC data for much higher efficiency than
 # close-to-close. Key formulas:
 #
-# **Parkinson (1980)** — uses high-low range only:
+# **Parkinson (1980)** uses the high-low range only:
 #
 # $$\hat{\sigma}^2_P = \frac{1}{4 \ln 2} (\ln H_t - \ln L_t)^2$$
 #
-# **Garman-Klass (1980)** — adds open-close information:
+# **Garman-Klass (1980)** adds open-close information:
 #
 # $$\hat{\sigma}^2_{GK} = \tfrac{1}{2} (\ln H_t - \ln L_t)^2 - (2\ln 2 - 1)(\ln C_t - \ln O_t)^2$$
-#
-# | Estimator | Efficiency vs CC | Data Required |
-# |-----------|-----------------|---------------|
-# | Close-to-Close | 1× | Close |
-# | Parkinson | ~5× | High, Low |
-# | Garman-Klass | ~7× | Open, High, Low, Close |
-# | Yang-Zhang | ~8–14× | Open, High, Low, Close |
 #
 # **Note**: ATR (Average True Range) measures price *range* in dollar terms,
 # not *volatility* in return terms. ATR is useful for stop placement and
 # normalization but is not a volatility estimator.
+
+# %% [markdown]
+# The four estimators and what each buys. The efficiency column holds the published
+# asymptotic variance ratio against the close-to-close estimator, derived in each paper
+# under driftless geometric Brownian motion with no overnight gap. Nothing in this
+# notebook measures these; they are the reason to reach for a range estimator, and the
+# figures below are where you see what the assumption costs on real data. The legend of
+# the overlaid figure reads these same values, so the table and the chart cannot disagree.
+
+# %%
+# col, label, published efficiency vs close-to-close, prices required
+ESTIMATORS = [
+    ("vol_cc", "Close-to-Close", 1.0, "close"),
+    ("vol_parkinson", "Parkinson", 5.2, "high, low"),
+    ("vol_gk", "Garman-Klass", 7.4, "open, high, low, close"),
+    ("vol_yz", "Yang-Zhang", 8.4, "open, high, low, close"),
+]
+
+print(f"{'Estimator':<16}{'Efficiency vs CC':>18}   Prices required")
+for _col, _label, _eff, _inputs in ESTIMATORS:
+    print(f"{_label:<16}{_eff:>17.1f}x   {_inputs}")
 
 
 # %%
@@ -585,13 +599,13 @@ vol_compare_df = spy.with_columns(
     pl.col("close").pct_change().alias("ret"),
 ).with_columns(
     [
-        # Close-to-close — realized_volatility expects returns, not prices
+        # Close-to-close; realized_volatility expects returns, not prices
         realized_volatility("ret", period=21, annualize=True).alias("vol_cc"),
-        # Parkinson (manual — works on OHLC directly)
+        # Parkinson (manual, works on OHLC directly)
         parkinson_vol(period=21).alias("vol_parkinson"),
-        # Garman-Klass (manual — works on OHLC directly)
+        # Garman-Klass (manual, works on OHLC directly)
         garman_klass_vol(period=21).alias("vol_gk"),
-        # Yang-Zhang (library — works on OHLC directly, most efficient)
+        # Yang-Zhang (library, works on OHLC directly, most efficient)
         yang_zhang_volatility("open", "high", "low", "close", period=21, annualize=True).alias(
             "vol_yz"
         ),
@@ -645,26 +659,46 @@ show_plotly_with_alt(
     fig,
     alt=(
         "Four small-multiple panels of annualized SPY volatility over the same two years, "
-        "one per estimator, drawn on a single shared vertical range from zero. All four "
-        "trace the same broad shape: a quiet level under 0.15 for most of the span, a "
-        "bump in mid-2024, and a tall spike in the first half of 2025. The close-to-close "
-        "panel reaches the highest peak and is visibly the noisiest line of the four; "
-        "Parkinson and Garman-Klass peak lower and run smoother; Yang-Zhang sits between "
-        "them, near the close-to-close peak height but with far less day-to-day jitter."
+        "one per estimator, drawn on a single shared vertical range from zero. Each panel "
+        "shows the same two events, a bump in mid-2024 and a tall spike in the spring of "
+        "2025, against a quiet level for the rest of the span; the mid-2024 bump is "
+        "clearest in Yang-Zhang and faintest in Parkinson. The close-to-close panel "
+        "reaches the highest peak of the four and is visibly the noisiest line. Parkinson "
+        "and Garman-Klass peak lower and run smoother. Yang-Zhang peaks between them and "
+        "the close-to-close panel, with far less day-to-day jitter than close-to-close."
     ),
 )
 
 # %% [markdown]
-# **Interpretation**: on one scale the ordering is legible. Close-to-close sits highest
-# and is the most jagged of the four; the range-based estimators are both lower and
-# smoother, because a day's high-low range carries more information about that day's
-# variation than its two endpoints do. Yang-Zhang, which uses all four prices, tracks
-# close-to-close closely at the peaks while keeping the range estimators' smoothness,
-# which is why it is the usual default.
+# **Interpretation**: on one scale the ordering is legible, and it is not a single
+# ordering. Close-to-close reaches the highest peak and is the most jagged of the four,
+# but it is not the highest line most of the time: the counts printed below say which
+# estimator sits on top day by day, and Yang-Zhang holds that position on the majority of
+# days in this window. Parkinson and Garman-Klass are never the highest and are usually
+# the lowest.
+#
+# The smoothness has one cause and the level has another, and it is worth keeping them
+# apart. Range estimators are smoother because a day's high and low carry more
+# information about that day's variation than its two endpoints do, which is what the
+# efficiency column claims. They read lower for a different reason, developed against
+# the next figure.
 #
 # This panel covers only the last two years. The overlaid figure below runs the full
-# history, where a much larger volatility event makes the same comparison at a scale this
-# window does not contain.
+# history, where a much larger volatility event separates the estimators far more than
+# this window can.
+
+# %%
+# Which estimator is on top, and which at the bottom, day by day.
+_cols = [c for c, _l, _e, _i in ESTIMATORS]
+_w = vol_compare_df.drop_nulls(subset=_cols).tail(n)
+_m = _w.select(_cols).to_numpy()
+_top, _bot = _m.argmax(axis=1), _m.argmin(axis=1)
+print(f"over the {len(_w)} days plotted above:")
+for _j, (_col, _label, _eff, _inputs) in enumerate(ESTIMATORS):
+    print(
+        f"  {_label:<16} highest on {(_top == _j).mean():>6.1%} of days, "
+        f"lowest on {(_bot == _j).mean():>6.1%}, peak {_m[:, _j].max():.3f}"
+    )
 
 # %% [markdown]
 # ### Four OHLC Estimators Overlaid
@@ -676,7 +710,7 @@ show_plotly_with_alt(
 # %%
 import matplotlib.pyplot as plt
 
-# Prepare data — use full history for a window that includes a volatility spike
+# Prepare data: the full history, so the window includes a volatility spike
 vol_plot = vol_compare_df.drop_nulls(subset=["vol_cc", "vol_parkinson", "vol_gk", "vol_yz"])
 
 fig_mpl, ax = plt.subplots(figsize=(12, 5))
@@ -690,16 +724,17 @@ ax2.tick_params(axis="y", labelcolor=COLORS["neutral"])
 
 # Vol estimators on primary axis (convert to percentage for readability).
 # Line styles vary alongside color so the four series stay distinct in grayscale print.
-estimators = [
-    ("vol_cc", "Close-to-Close (eff. 1.0\u00d7)", "-", COLORS["blue"]),
-    ("vol_parkinson", "Parkinson (eff. 5.2\u00d7)", "--", COLORS["amber"]),
-    ("vol_gk", "Garman-Klass (eff. 7.4\u00d7)", ":", COLORS["copper"]),
-    ("vol_yz", "Yang-Zhang (eff. 8.4\u00d7)", "-.", COLORS["slate"]),
-]
+_STYLES = {
+    "vol_cc": ("-", COLORS["blue"]),
+    "vol_parkinson": ("--", COLORS["amber"]),
+    "vol_gk": (":", COLORS["copper"]),
+    "vol_yz": ("-.", COLORS["slate"]),
+}
 
-for col, label, ls, color in estimators:
+for col, label, eff, _inputs in ESTIMATORS:
+    ls, color = _STYLES[col]
     vals = [v * 100 for v in vol_plot[col].to_list()]
-    ax.plot(dates, vals, ls=ls, color=color, label=label, linewidth=1.2)
+    ax.plot(dates, vals, ls=ls, color=color, label=f"{label} (eff. {eff:.1f}\u00d7)", linewidth=1.2)
 
 ax.set_ylabel("Annualized Volatility (%)")
 ax.set_title("Rolling Volatility Estimates: Four OHLC Estimators on SPY")
@@ -712,12 +747,16 @@ show_with_alt(
     alt=(
         "A decade of annualized rolling volatility for SPY with four estimators overlaid "
         "in different line styles, the legend naming each with its efficiency relative to "
-        "close-to-close. The four lines move together throughout, rising and falling with "
-        "the same events; the close-to-close line is consistently the highest and the most "
-        "jagged, and Parkinson and Garman-Klass sit lowest. A tall spike near 95 percent "
-        "dominates early 2020, with smaller peaks around 40 percent in 2015 and above 50 "
-        "in 2025. Behind them the SPY close is shaded in pale grey against a second axis "
-        "on the right, climbing from under 200 to near 700 dollars over the same span."
+        "close-to-close. The four lines rise and fall on the same events and stay close "
+        "together at quiet levels, but they separate at the peaks: the solid "
+        "close-to-close line and the dash-dot Yang-Zhang line run together at the top, "
+        "swapping which is higher, while the dashed Parkinson and dotted Garman-Klass "
+        "lines reach only about two thirds as high. Close-to-close is the most jagged of "
+        "the four. One spike in the spring of 2020 towers over the rest of the decade, "
+        "reaching the top of the axis; smaller peaks stand out in 2015, 2018, 2022 and "
+        "2025, and it is at these peaks that the range estimators fall furthest behind. "
+        "Behind the lines the SPY close is shaded in pale grey against a second axis on "
+        "the right, climbing steadily across the span."
     ),
 )
 
@@ -735,9 +774,47 @@ vol_plot.select(
 ).write_parquet(_FIG_8_3_ARTIFACT)
 
 # %% [markdown]
+# Why the range estimators read low at the peaks: the share of daily variation that
+# happens between one close and the next open, which a within-session range cannot see.
+
+# %%
+_gaps = spy.with_columns(
+    [
+        (pl.col("open").log() - pl.col("close").log().shift(1)).alias("overnight"),
+        (pl.col("close").log() - pl.col("close").log().shift(1)).alias("total"),
+    ]
+).drop_nulls(["overnight", "total"])
+_crisis = _gaps.filter(pl.col("timestamp").is_between(date(2020, 2, 15), date(2020, 4, 30)))
+_calm = _gaps.filter(pl.col("timestamp").is_between(date(2017, 1, 1), date(2017, 12, 31)))
+for _label, _sample in (("Feb-Apr 2020", _crisis), ("all of 2017", _calm)):
+    _share = _sample["overnight"].var() / _sample["total"].var()
+    print(f"{_label:<14} overnight share of daily return variance: {_share:.3f}")
+
+print()
+_peak = vol_plot.filter(pl.col("vol_cc") == pl.col("vol_cc").max())
+print(f"at the close-to-close peak, {_peak['timestamp'][0]}:")
+for _col, _label, _eff, _inputs in ESTIMATORS:
+    print(f"  {_label:<16} {_peak[_col][0] * 100:>5.1f}%")
+
+# %% [markdown]
+# The separation at the peaks is not a question of efficiency. Parkinson and Garman-Klass
+# read the high, the low and the open of a session, so everything they measure happens
+# between the opening bell and the close. The overnight share printed above says how much
+# of the daily return variance that leaves out, and in the spring of 2020 it was the
+# majority of it: the market gapped between sessions rather than travelling within them,
+# so a within-session range understates the move by construction rather than by noise. A
+# more efficient estimator of the wrong quantity is still an estimator of the wrong
+# quantity.
+#
+# Yang-Zhang carries an explicit overnight term alongside its range terms, which is why it
+# stays with close-to-close through the 2020 peak while the other two fall away. That is
+# the reason to prefer it as a default, and it matters most in exactly the periods a risk
+# model is built for.
+
+# %% [markdown]
 # ### Volatility-of-Volatility (Vol-of-Vol)
 #
-# Second moment of volatility — useful for detecting unstable regimes.
+# Second moment of volatility, which detects unstable regimes.
 
 # %%
 from ml4t.engineer.features.volatility import volatility_of_volatility
@@ -779,7 +856,7 @@ vol_state_df = (
         ]
     )
     .with_columns(
-        # Vol ratio: short/long — >1 means expansion, <1 contraction
+        # Vol ratio: short over long; above one is expansion, below one contraction
         (pl.col("vol_short") / pl.col("vol_long").clip(1e-10, None)).alias("vol_ratio"),
     )
 )
@@ -790,7 +867,7 @@ vol_state_df = vol_state_df.with_columns(
     .rolling_map(
         lambda s: 100 * (s.rank().last() - 1) / max(len(s) - 1, 1),
         window_size=PERCENTILE_LOOKBACK,
-        min_periods=PERCENTILE_LOOKBACK // 2,
+        min_samples=PERCENTILE_LOOKBACK // 2,
     )
     .alias("vol_percentile")
 )
@@ -841,8 +918,8 @@ regime_ind_df.select(
 # below 1 indicates mean-reversion. This is the Lo-MacKinlay (1988) test as a
 # rolling feature.
 #
-# **Fractal Efficiency**: Measures path efficiency — 1 means price moves in a
-# straight line (trend), 0 means random wandering.
+# **Fractal Efficiency**: Measures path efficiency. One means price moves in a
+# straight line (trend), zero means random wandering.
 #
 # **Note**: These are *rolling-window* regime indicators derived purely from price.
 # Parametric regime models (HMM, Markov-switching GARCH) appear in Chapter 9.
@@ -1018,7 +1095,7 @@ vwap_df.select(["timestamp", "close", "vwap_5d", "vwap_distance"]).tail(10)
 
 # %% [markdown]
 # **Interpretation**: Positive VWAP distance means the close is above the
-# volume-weighted average — buying pressure exceeded selling pressure over the
+# volume-weighted average, so buying pressure exceeded selling pressure over the
 # lookback. Negative indicates the opposite. For intraday strategies this is a
 # key mean-reversion anchor; for daily data it proxies volume-weighted trend.
 
@@ -1106,7 +1183,7 @@ print(f"Vol-scaled cross-sectional momentum ({sample_date}):")
 )
 
 # %% [markdown]
-# **Interpretation**: Vol-scaling reshuffles the ranking — high-momentum assets
+# **Interpretation**: Vol-scaling reshuffles the ranking. High-momentum assets
 # with elevated volatility drop, while steady trending assets rise. This is the
 # same intuition as the Sharpe ratio applied cross-sectionally.
 
@@ -1161,7 +1238,7 @@ print(f"Cross-sectional z-scores for {sample_date}:")
 # 3. **Look-ahead in ranks**: Ranking before data was available
 #
 # **Safe Pattern**: Always use `.over("timestamp")` for cross-sectional
-# operations — this guarantees that each date's statistics use only
+# operations; that guarantees each date's statistics use only
 # contemporaneous data:
 #
 # ```python
@@ -1289,6 +1366,6 @@ ffd_df.select(["timestamp", "close", "close_ffd_05", "close_ffd_10"]).tail(10)
 #
 # ### Next Notebooks
 #
-# - `02_microstructure_features` — Trade-based features (§8.2)
-# - `03_structural_cross_instrument_features` — Carry, cross-asset, options (§8.3)
-# - `04_fundamentals_macro_calendar` — Fundamentals, macro, calendar (§8.4)
+# - `02_microstructure_features`: trade-based features (§8.2)
+# - `03_structural_cross_instrument_features`: carry, cross-asset, options (§8.3)
+# - `04_fundamentals_macro_calendar`: fundamentals, macro, calendar (§8.4)
