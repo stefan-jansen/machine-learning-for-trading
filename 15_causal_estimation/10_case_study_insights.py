@@ -392,8 +392,11 @@ display(
 # is anything to find. `04_dml_crypto_regime` prints how much of its treatment's variance
 # its controls leave - under a tenth - and moving its own comparison to
 # t-statistics took its permutation p from the floor to the middle of the null.
-# ml4t/agent-workspace#1120 carried the same correction into the shared implementation these
-# registries are written by, and the rows below were refit under it.
+# ml4t/agent-workspace#1120 carries the same correction into `case_studies/utils/causal.py`,
+# the shared runner these registries are written by, and the rows below were refit under the
+# corrected runner. That correction has not landed in this checkout: the runner here still
+# collects each placebo's effect and compares those, so regenerating a registry from this
+# tree reproduces the column as it read before the refit rather than the column below.
 #
 # Comparing t-statistics cancels that one-directional bias and does not make the test
 # calibrated. Measured on twelve synthetic panels with the true effect fixed at exactly
