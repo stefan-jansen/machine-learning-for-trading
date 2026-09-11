@@ -514,7 +514,7 @@ if (
 # buying pressure; a negative value is the reverse.
 #
 # **What this construction counts.** Adds come from `A` and `F` messages, removals from
-# `D`, `X` and `E`. It does not read `U` replaces, so an order moved from one price to
+# `D`, `X`, `E` and `C`. It does not read `U` replaces, so an order moved from one price to
 # another contributes nothing here. That is a deliberate simplification for building the
 # quantity by hand: `02_itch_lob_reconstruction` computes an imbalance inside the
 # reconstruction loop that does process replaces, and Section 5 uses that one. The two
@@ -554,11 +554,15 @@ def load_order_registry(messages_dir: Path, symbol: str) -> pl.DataFrame:
 # %% [markdown]
 # ### Load the removals
 #
-# Three message types take shares off the book: `D` deletes what is left of an order, `X`
-# cancels part of one, and `E` executes against one. `D` carries no share count, because
-# it removes whatever remained: its size is the original add less the cancels and
-# executions that came before it. Charging a delete the full original size would count a
-# partially filled order twice, once for the fill and again for the remainder.
+# Four message types take shares off the book: `D` deletes what is left of an order, `X`
+# cancels part of one, and `E` and `C` execute against one. `E` and `C` differ only in
+# whether the print carries its own price, so both count the same shares off the book and
+# leaving `C` out would undercount executions.
+#
+# `D` carries no share count, because it removes whatever remained: its size is the
+# original add less the cancels and executions that came before it. Charging a delete the
+# full original size would count a partially filled order twice, once for the fill and
+# again for the remainder.
 
 
 # %%
@@ -607,6 +611,20 @@ def load_order_removals(messages_dir: Path, order_refs: set) -> pl.DataFrame:
             e_df = e_df.with_columns(pl.lit("execute").alias("event_type"))
             removals.append(e_df)
 
+    # Execute-with-price messages (C) - same shares off the book, priced separately
+    c_path = messages_dir / "C"
+    if c_path.exists():
+        c_df = (
+            pl.scan_parquet(c_path / "*.parquet")
+            .filter(pl.col("order_reference_number").is_in(order_refs))
+            .select(["timestamp", "order_reference_number", "executed_shares"])
+            .collect()
+        )
+        if len(c_df) > 0:
+            c_df = c_df.rename({"executed_shares": "shares_removed"})
+            c_df = c_df.with_columns(pl.lit("execute").alias("event_type"))
+            removals.append(c_df)
+
     if not removals:
         return pl.DataFrame()
     return pl.concat(removals, how="diagonal")
@@ -653,11 +671,13 @@ def _enrich_removals(removals: pl.DataFrame, registry: pl.DataFrame) -> pl.DataF
     if "shares_removed" not in removals.columns:
         removals = removals.with_columns(pl.lit(None, dtype=pl.Int64).alias("shares_removed"))
 
-    # Shares already taken off this order by earlier cancels and executions.
+    # Shares already taken off this order by earlier cancels and executions. A delete has
+    # to sort after a partial that shares its timestamp, and polars does not keep input
+    # order for tied keys, so the sort ranks deletes last explicitly.
     sized = pl.col("shares_removed").fill_null(0).cast(pl.Int64)
-    removals = removals.sort(["order_reference_number", "timestamp"]).with_columns(
-        (sized.cum_sum() - sized).over("order_reference_number").alias("removed_before")
-    )
+    removals = removals.sort(
+        ["order_reference_number", "timestamp", (pl.col("event_type") == "delete")]
+    ).with_columns((sized.cum_sum() - sized).over("order_reference_number").alias("removed_before"))
     return removals.with_columns(
         pl.when(pl.col("shares_removed").is_null())
         .then((pl.col("shares").cast(pl.Int64) - pl.col("removed_before")).clip(lower_bound=0))
