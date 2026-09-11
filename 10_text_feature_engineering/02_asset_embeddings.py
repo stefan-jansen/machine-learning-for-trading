@@ -403,7 +403,7 @@ print(f"Selected {len(subset_cusips)} most widely-held stocks for visualization"
 #
 # A two-dimensional projection is the tempting picture and it does not test this. t-SNE
 # distorts the points at the edge of a cloud hardest, and the mega-caps here are exactly
-# those points: run on this subset it presses all ten into a single spot against the left
+# those points: run on this subset it presses them all into a single spot against the left
 # boundary, which looks like strong evidence and is a property of the projection.
 #
 # So: take the recognizable mega-caps, measure every pair among them, and compare that
@@ -461,10 +461,10 @@ ax.set_title("Cosine similarity among widely recognized holdings")
 
 show_with_alt(
     fig,
-    "A square matrix of cosine similarities between the embeddings of nine large, widely "
-    "recognized companies, shaded light at zero and dark at one. Two darker blocks are "
-    "visible along the diagonal: the software and consumer-technology names in the upper left "
-    "are very close to one another, and the bank, oil, carmaker and conglomerate in the lower "
+    "A square matrix of cosine similarities between the embeddings of the large, widely "
+    "recognized companies the vocabulary carries, shaded light at zero and dark at one. Two "
+    "darker blocks are visible along the diagonal: the software and consumer-technology names "
+    "in the upper left are very close to one another, and the remaining names in the lower "
     "right form a second, looser group. The cells linking one block to the other are "
     "noticeably lighter than the cells inside either.",
 )

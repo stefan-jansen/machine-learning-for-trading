@@ -689,8 +689,8 @@ show_with_alt(
     fig,
     "A grouped bar chart with one pair of bars per entity type, the left bar of each pair "
     "counting the entities in the test labels and the right bar counting those the model "
-    "predicted. There are five pairs, ten bars in two colors, and the two bars of each pair "
-    "are the same height as each other, so no pair shows a gap between labeled and predicted. "
+    "predicted. The two bars of each pair are in different colors and are the same height as "
+    "each other, so no pair shows a gap between labeled and predicted. "
     "The pairs differ from one another by up to a factor of three.",
 )
 
