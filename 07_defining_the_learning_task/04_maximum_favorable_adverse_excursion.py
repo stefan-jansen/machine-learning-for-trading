@@ -985,9 +985,18 @@ for name, horizon, mfe_p, mae_p, stop_mult in barrier_rows:
     print(line)
 
 if spy_mfe_mae is not None and es_mfe_mae is not None:
-    print(f"\nES vs SPY adverse excursions, same {FUTURES_HORIZON}-day horizon:")
+    if ETF_HORIZON == FUTURES_HORIZON:
+        print(f"\nES vs SPY adverse excursions, same {FUTURES_HORIZON}-day horizon:")
+    else:
+        print(
+            f"\nES vs SPY adverse excursions - NOT comparable, SPY is over "
+            f"{ETF_HORIZON} days and ES over {FUTURES_HORIZON}:"
+        )
     for label, q in (("median", 50), ("p75", 75)):
-        print(f"  MAE {label:<7} SPY {mae_pctls[q]:.2f}%   ES {es_mae_pctls[q]:.2f}%")
+        print(
+            f"  MAE {label:<7} SPY ({ETF_HORIZON}d) {mae_pctls[q]:.2f}%"
+            f"   ES ({FUTURES_HORIZON}d) {es_mae_pctls[q]:.2f}%"
+        )
 
 # %% [markdown]
 # **What the table says.** BTC's excursions over one funding cycle are an order of
@@ -998,9 +1007,11 @@ if spy_mfe_mae is not None and es_mfe_mae is not None:
 # *wider* than one ATR, so an implementation that reaches for a round `1xATR` stop
 # will be stopped out by ordinary movement.
 #
-# Note the ES-versus-SPY comparison printed above. ES adverse excursions are wider
-# than SPY's at both quantiles, so the intuition that an index future deserves a
-# *tighter* stop than the matching ETF is contradicted by the measurement. This is
+# Note the ES-versus-SPY comparison printed above, which holds only while the two
+# instruments carry the same horizon - the print says so when they do not. At the shipped
+# horizons ES adverse excursions are wider than SPY's at both quantiles, so the intuition
+# that an index future deserves a *tighter* stop than the matching ETF is contradicted by
+# the measurement. This is
 # the same trap as the take-profit/stop-loss ordering under **Barrier Validation via
 # Hit-Type Analysis**: a plausible-sounding
 # asymmetry, asserted rather than measured, pointing the wrong way.
@@ -1027,7 +1038,7 @@ summary = {
     "generated_at": datetime.now(UTC).isoformat(),
     "horizons": {
         "etf_spy": ETF_HORIZON,
-        "crypto_btc": 8,
+        "crypto_btc": CRYPTO_HORIZON,
         "futures_es": FUTURES_HORIZON,
     },
     "datasets": {},
