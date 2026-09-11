@@ -676,13 +676,26 @@ fig.update_xaxes(title_text="Lookback (observations)", row=1, col=1)
 fig.update_xaxes(title_text="Lookback (observations)", row=1, col=2)
 fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
+# Read off the plotted frames rather than written from one run: ROLLING_WINDOWS is a papermill
+# parameter, so the x-axis a test run plots is not the one the production render shows.
+_ends = {
+    CASE_STUDIES[cs]: (
+        lookback_plot_data[cs]["signal_rate"].to_list(),
+        lookback_plot_data[cs]["transition_rate"].to_list(),
+    )
+    for cs in CASE_STUDIES
+}
+_sentences = " ".join(
+    f"{name}: signal rate {sig[0] * 100:.1f} to {sig[-1] * 100:.1f} percent across the grid, "
+    f"state-transition rate {tr[0] * 100:.1f} to {tr[-1] * 100:.1f} percent."
+    for name, (sig, tr) in _ends.items()
+)
 show_plotly_with_alt(
     fig,
-    "Two line panels against lookback length in observations, navy for crypto perpetuals and "
-    "amber for ETFs. On signal rate the ETF line rises from about 13.2 to 14.7 percent as the "
-    "lookback lengthens while the crypto line is flat near 9.6. On state-transition rate both "
-    "fall, but the ETF line drops from 14 to 11 percent and the crypto line only from 16.5 to "
-    "15.7.",
+    "Two line panels against lookback length in observations, one line per prediction set, with "
+    "signal rate on the left and state-transition rate on the right. Reading each line from the "
+    f"shortest lookback in the grid to the longest: {_sentences} The two rates do not move "
+    "together, and they do not move the same way in the two sets.",
 )
 
 # %% [markdown]
@@ -738,13 +751,29 @@ fig.update_xaxes(title_text="Percentile", row=1, col=1)
 fig.update_xaxes(title_text="Percentile", row=1, col=2)
 fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
+_pct_ends = {}
+for case_study in CASE_STUDIES:
+    _row = comparison_df.filter(
+        (pl.col("case_study") == case_study)
+        & (pl.col("method") == "rolling_percentile")
+        & (pl.col("window") == min(ROLLING_WINDOWS))
+    ).sort("percentile")
+    _pct_ends[CASE_STUDIES[case_study]] = (
+        _row["signal_rate"].to_list(),
+        _row["transition_rate"].to_list(),
+    )
+_pct_sentences = " ".join(
+    f"{name}: signal rate {sig[0] * 100:.1f} down to {sig[-1] * 100:.1f} percent, "
+    f"state-transition rate {tr[0] * 100:.1f} down to {tr[-1] * 100:.1f} percent."
+    for name, (sig, tr) in _pct_ends.items()
+)
 show_plotly_with_alt(
     fig,
-    "Two line panels against the percentile cutoff from 75 to 95, navy for crypto perpetuals and "
-    "amber for ETFs. Signal rate falls close to linearly in both sets, from roughly 24 and 27 "
-    "percent down to 5 and 7. State-transition rate also falls in both, but from a much higher "
-    "starting point for crypto, 33 percent against 19, and the two lines converge near 10 percent "
-    "at the 95th percentile.",
+    f"Two line panels against the percentile cutoff, from {min(PERCENTILES)} to "
+    f"{max(PERCENTILES)}, one line per prediction set, with signal rate on the left and "
+    "state-transition rate on the right. Both rates fall in both sets as the cutoff rises. "
+    f"Reading each line from the lowest cutoff to the highest: {_pct_sentences} The two sets "
+    "start far apart on state-transition rate and converge at the top of the range.",
 )
 
 # %% [markdown]

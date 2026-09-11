@@ -731,13 +731,19 @@ fig.update_layout(
     height=450,
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
 )
+# The description reads its numbers off the plotted series rather than naming the ones this
+# run happened to produce: INITIAL_CASH is a papermill parameter, so a test-mode run plots a
+# different capital base and any hard-coded figure here would contradict its own chart.
+_aware = list(ec_with.values)
+_counter = list(ec_without.values)
 show_plotly_with_alt(
     fig,
-    "Line chart of portfolio value in dollars from an initial ten million. The multiplier-aware "
-    "run, solid navy, swings between about 8.5 and 13.8 million and ends near 9.6 million. The "
-    "unit-multiplier counterfactual, dashed grey, is visually flat on the same axis because "
-    "replacing every multiplier with one shrinks each point move to a rounding error against the "
-    "capital base.",
+    f"Line chart of portfolio value in dollars from an initial ${INITIAL_CASH:,.0f}. The "
+    f"multiplier-aware run, solid navy, swings between ${min(_aware):,.0f} and "
+    f"${max(_aware):,.0f} and ends at ${_aware[-1]:,.0f}. The unit-multiplier counterfactual, "
+    f"dashed grey, stays within ${min(_counter):,.0f} to ${max(_counter):,.0f} and reads as a "
+    "flat line on the same axis, because replacing every multiplier with one shrinks each point "
+    "move to a rounding error against the capital base.",
 )
 
 # %% [markdown]

@@ -221,7 +221,11 @@ labels = [f"{row.strategy}\n{row.engine}" for row in plot_data.itertuples()]
 y = list(range(len(plot_data)))
 height = 0.36
 
-fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], layout="constrained")
+# Height scales with the row count, width does not. Each tick label is two lines, so a fixed
+# preset height crushes them together as soon as the audit grows: the committed artifact
+# carries seventeen correctness-passing pairs. The width stays at the typeset column.
+_fig_height = 0.32 * len(plot_data) + 0.9
+fig, ax = plt.subplots(figsize=(FIGSIZE["single_tall"][0], _fig_height), layout="constrained")
 ax.barh(
     [value + height / 2 for value in y], plot_data["external_seconds"], height, label="External"
 )
