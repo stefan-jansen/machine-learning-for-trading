@@ -177,13 +177,40 @@ yield_curve = macro_frame.select(
     "timestamp", (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope")
 ).drop_nulls()
 
+# %% [markdown]
+# The row count below only establishes that the Treasury series had started by the first ETF
+# date. A backward as-of join matches every later date to something, so a stretch where the
+# Fed published nothing would be carried across rather than reported. The measurement that
+# does see such a gap is the age of the observation each date matched, against a tolerance
+# declared before the result is printed.
+
 # %%
+MAX_SLOPE_AGE_DAYS = 4
+
 regime_panel = (
     price_panel.select("timestamp")
-    .join_asof(yield_curve.sort("timestamp"), on="timestamp", strategy="backward")
+    .join_asof(
+        yield_curve.sort("timestamp").with_columns(pl.col("timestamp").alias("slope_asof")),
+        on="timestamp",
+        strategy="backward",
+    )
     .drop_nulls()
 )
-assert regime_panel.height == price_panel.height
+assert regime_panel.height == price_panel.height, (
+    "Yield-curve history begins after the ETF panel does"
+)
+
+slope_age_days = regime_panel.select(
+    (pl.col("timestamp") - pl.col("slope_asof")).dt.total_days()
+).to_series()
+print(
+    f"Yield-curve observation age when read: median {slope_age_days.median():.0f}d, "
+    f"max {slope_age_days.max()}d (tolerance {MAX_SLOPE_AGE_DAYS}d)"
+)
+assert slope_age_days.max() <= MAX_SLOPE_AGE_DAYS, (
+    f"Yield curve went {slope_age_days.max()} days without a publication"
+)
+
 yield_curve_slope = regime_panel["slope"].to_numpy()
 allocation_risk_on = yield_curve_slope > YIELD_CURVE_THRESHOLD
 

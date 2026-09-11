@@ -258,13 +258,44 @@ yield_curve = macro_df.select(
     (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope"),
 ).drop_nulls()
 
+# %% [markdown]
+# A backward as-of join has exactly one way to produce no match: no yield observation dated
+# on or before the ETF date. That happens only before the Treasury series begins. Once it has
+# begun the join always matches something, so a row count answers *did the series start in
+# time* and says nothing about whether it kept going - a month the Fed published nothing would
+# carry the last slope across it and still fill every row.
+#
+# What separates the two is the age of the observation each date matched. The series is
+# published every business day, so one day is a normal match and a long holiday weekend is the
+# most a healthy feed should ever be behind. The tolerance is declared here rather than read
+# off the result, so the print below is a check and not just a number.
+
 # %%
+MAX_SLOPE_AGE_DAYS = 4
+
 regime_panel = (
     price_panel.select("timestamp")
-    .join_asof(yield_curve.sort("timestamp"), on="timestamp", strategy="backward")
+    .join_asof(
+        yield_curve.sort("timestamp").with_columns(pl.col("timestamp").alias("slope_asof")),
+        on="timestamp",
+        strategy="backward",
+    )
     .drop_nulls()
 )
-assert regime_panel.height == price_panel.height, "Yield-curve history does not cover the panel"
+assert regime_panel.height == price_panel.height, (
+    "Yield-curve history begins after the ETF panel does"
+)
+
+slope_age_days = regime_panel.select(
+    (pl.col("timestamp") - pl.col("slope_asof")).dt.total_days()
+).to_series()
+print(
+    f"Yield-curve observation age when read: median {slope_age_days.median():.0f}d, "
+    f"max {slope_age_days.max()}d (tolerance {MAX_SLOPE_AGE_DAYS}d)"
+)
+assert slope_age_days.max() <= MAX_SLOPE_AGE_DAYS, (
+    f"Yield curve went {slope_age_days.max()} days without a publication"
+)
 
 yield_curve_slope = regime_panel["slope"].to_numpy()
 regime = yield_curve_slope > REGIME_THRESHOLD

@@ -140,6 +140,7 @@ PROB_SHORT_THRESHOLD = (
 NOTIONAL_PER_LEG_USD = 100.0  # paper notional per symbol
 SUBMIT_PAPER_ORDERS = False  # explicit opt-in only; publication execution is dry-run
 MIN_OKX_LIVE_COVERAGE = 0.75
+MAX_FUNDING_AGE_HOURS = 8.0  # funding settles every 8h; one missed settlement is the limit
 
 # %% [markdown]
 # ## 1. Setup and Venue Connections
@@ -922,14 +923,14 @@ if len(live_funding) > 0:
                 [
                     pl.lit(None, dtype=pl.Float64).alias("funding_rate"),
                     pl.lit(None, dtype=pl.Float64).alias("premium"),
+                    pl.lit(None, dtype=pl.Datetime("ms", "UTC")).alias("funding_asof"),
                 ]
             )
         else:
-            joined = sym_bars.join_asof(
-                sym_fund.select(["timestamp", "funding_rate"]),
-                on="timestamp",
-                strategy="backward",
+            sym_fund_asof = sym_fund.select(["timestamp", "funding_rate"]).with_columns(
+                pl.col("timestamp").alias("funding_asof")
             )
+            joined = sym_bars.join_asof(sym_fund_asof, on="timestamp", strategy="backward")
             sym_bars = joined.with_columns((pl.col("funding_rate") * 3.0).alias("premium"))
         parts.append(sym_bars)
     live_panel = pl.concat(parts).sort(["symbol", "timestamp"])
@@ -938,26 +939,65 @@ else:
         [
             pl.lit(None, dtype=pl.Float64).alias("funding_rate"),
             pl.lit(None, dtype=pl.Float64).alias("premium"),
+            pl.lit(None, dtype=pl.Datetime("ms", "UTC")).alias("funding_asof"),
         ]
     )
 
 
 # %% [markdown]
-# The latest fully populated row per symbol is the only live observation eligible for inference.
+# The latest fully populated row per symbol is the only live observation eligible for inference,
+# and populated is not the same as current. The as-of join carries the last funding print forward
+# for as long as the feed stays silent, so `funding_rate` and the `premium` derived from it are
+# never null once a single rate has arrived: a symbol whose funding stopped publishing a week ago
+# still produces a complete feature row, and the null check cannot distinguish it from a live one.
+# A null count answers when the series began, never whether it kept going. The age of the matched
+# print against the eight-hour settlement grid answers the second question, and a symbol reading a
+# rate older than `MAX_FUNDING_AGE_HOURS` leaves the cross-section rather than being scored.
 
 
 # %%
-live_features = compute_features_8h(live_panel)
+live_features = compute_features_8h(live_panel).with_columns(
+    ((pl.col("timestamp") - pl.col("funding_asof")).dt.total_minutes() / 60.0).alias(
+        "funding_age_hours"
+    )
+)
 
-# The latest valid feature row per symbol becomes the prediction input
-latest_features = (
+# The latest valid feature row per symbol is the prediction candidate
+latest_candidates = (
     live_features.filter(pl.all_horizontal([pl.col(c).is_not_null() for c in FEATURE_COLS]))
     .group_by("symbol")
     .agg(pl.all().last())
     .sort("symbol")
 )
-print(f"Latest valid feature rows: {latest_features.shape[0]} of {len(CASE_STUDY_UNIVERSE)} perps")
-assert set(latest_features["symbol"]) == set(available_symbols)
+print(
+    f"Latest valid feature rows: {latest_candidates.shape[0]} of {len(CASE_STUDY_UNIVERSE)} perps"
+)
+assert set(latest_candidates["symbol"]) == set(available_symbols)
+
+funding_age = latest_candidates["funding_age_hours"]
+print(
+    f"Funding age at the inference row: median {funding_age.median():.1f}h, "
+    f"max {funding_age.max():.1f}h (tolerance {MAX_FUNDING_AGE_HOURS:.0f}h)"
+)
+is_fresh = pl.col("funding_age_hours").is_not_null() & (
+    pl.col("funding_age_hours") <= MAX_FUNDING_AGE_HOURS
+)
+stale_funding = latest_candidates.filter(~is_fresh).select("symbol", "funding_age_hours")
+if len(stale_funding) > 0:
+    print("Dropped for stale funding: " + ", ".join(stale_funding["symbol"]))
+    print(stale_funding)
+
+latest_features = latest_candidates.filter(is_fresh)
+fresh_coverage = len(latest_features) / len(CASE_STUDY_UNIVERSE)
+print(
+    f"Inference cross-section: {len(latest_features)} of "
+    f"{len(CASE_STUDY_UNIVERSE)} requested perps ({fresh_coverage:.1%})"
+)
+if fresh_coverage < MIN_OKX_LIVE_COVERAGE:
+    raise RuntimeError(
+        f"Coverage after the funding-freshness gate is {fresh_coverage:.1%}, below the "
+        f"{MIN_OKX_LIVE_COVERAGE:.0%} deployment floor"
+    )
 
 # %% [markdown]
 # ## 5. Predict Direction Probabilities
@@ -1215,6 +1255,10 @@ run = {
         "instruments_fetched": available_symbols,
         "coverage": coverage,
         "minimum_coverage": MIN_OKX_LIVE_COVERAGE,
+        "instruments_scored": latest_features["symbol"].to_list(),
+        "coverage_after_funding_freshness": fresh_coverage,
+        "maximum_funding_age_hours": MAX_FUNDING_AGE_HOURS,
+        "stale_funding": stale_funding.to_dicts(),
         "fetch_errors": [{"symbol": s, "error": e} for s, e in fetch_errors],
         "latest_bar_ts_utc": str(live_prices["timestamp"].max()),
         "candle_parser_audit": audit_frame.to_dicts(),
@@ -1253,7 +1297,11 @@ print(f"Run persisted: {display_path(run_path)}")
 #    fixed teaching map routes eleven perps to Alpaca paper and records the
 #    remaining eight as signal-only. The OKX data plane separately records
 #    instruments retired by the live venue and stops if coverage falls below
-#    the declared floor. Both gaps are explicit deployment inputs.
+#    the declared floor. A symbol can also drop out while still returning
+#    data: the funding as-of join carries the last print forward for as long
+#    as the feed is silent, so freshness is checked as an age against the
+#    eight-hour settlement grid rather than as a null. All three gaps are
+#    explicit deployment inputs.
 # 3. **The deployment artefact is not the research artefact.** Same data,
 #    same labels, different feature subset (the thirteen the live pipeline
 #    can compute), different code path. Hyperparameters cross over from
