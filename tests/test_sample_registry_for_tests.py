@@ -6,13 +6,16 @@ its source, and a production registry.db is 43-180 MB and gitignored. A wrong
 from, which is the one failure in this path that cannot be undone by re-running it.
 """
 
+import ast
 import sqlite3
 from pathlib import Path
 
+from tests.pm_helpers import REPO_ROOT, get_overrides, invocations_for
 from tests.sample_registry_for_tests import (
     CASE_STUDY_IDS,
     CODE_CS_DIR,
     DEFAULT_INTERMEDIATES_DIR,
+    PINNED_PREDICTION_CONFIGS,
     _populate_sample_db,
     rejected_output_root,
 )
@@ -167,3 +170,108 @@ def test_a_registry_without_these_tables_still_samples(tmp_path: Path) -> None:
 
     assert stats["causal_runs"] == 0
     assert stats["status"] == "OK"
+
+
+PARAMETERS_CELL = '# %% tags=["parameters"]'
+
+
+def _parameters_cell(notebook_py: Path) -> str | None:
+    """The source of a percent-format notebook's parameters cell, if it declares one.
+
+    Papermill replaces assignments in that cell and nowhere else, so a ``*_CONFIG``
+    defined further down the notebook is not a parameter and must not be read as one.
+    The cell runs from the tagged marker to the next ``# %%`` at the start of a line.
+    """
+    lines = notebook_py.read_text(encoding="utf-8").splitlines()
+    try:
+        opened = lines.index(PARAMETERS_CELL)
+    except ValueError:
+        return None
+    body = lines[opened + 1 :]
+    for offset, line in enumerate(body):
+        if line.startswith("# %%"):
+            return "\n".join(body[:offset])
+    return "\n".join(body)
+
+
+def _pinned_parameters_of(notebook_py: Path) -> tuple[str | None, dict[str, str]]:
+    """A notebook's CASE_STUDY_ID and the ``*_CONFIG`` names its parameters cell assigns.
+
+    Both are read as string constants assigned in that cell, which is what papermill
+    replaces at run time.
+    """
+    cell = _parameters_cell(notebook_py)
+    if cell is None:
+        return None, {}
+    case_study_id: str | None = None
+    configs: dict[str, str] = {}
+    for node in ast.parse(cell).body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        value = node.value
+        if not isinstance(target, ast.Name):
+            continue
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        if target.id == "CASE_STUDY_ID":
+            case_study_id = value.value
+        elif target.id.endswith("_CONFIG"):
+            configs[target.id] = value.value
+    return case_study_id, configs
+
+
+def test_every_config_a_pinned_notebook_runs_with_is_declared_for_sampling() -> None:
+    """A configuration the sampler does not carry fails only in CI, halfway through a run.
+
+    PINNED_PREDICTION_CONFIGS is what puts a configuration's predictions parquet in the
+    fixture. Nothing couples it to what the notebooks actually ask for: _resolve_pinned_hashes
+    checks the declaration against production, where every configuration exists, so a name
+    the declaration omits resolves a registry row with no artifact behind it and the notebook
+    raises mid-run. That has happened once already, to
+    26_mlops_governance/02_online_drift_detection.
+
+    Both sources of a name are checked: the ``*_CONFIG`` defaults in the notebook's own
+    parameters cell, and whatever `tests/overrides.yaml` replaces them with. A default is
+    checked even where an override currently replaces it, because the declaration is meant
+    to carry it - that is what lets an override be deleted once a regenerated fixture holds
+    every pinned configuration. Runs are enumerated through
+    ``invocations_for`` rather than by reading ``parameters``, so an entry moved to the
+    ``invocations`` shape is validated rather than silently dropped - and a dropped entry
+    looks exactly like a passing one.
+    """
+    checked: list[str] = []
+    for notebook_py in sorted(REPO_ROOT.rglob("*.py")):
+        if any(part.startswith(".") for part in notebook_py.parts):
+            continue
+        text = notebook_py.read_text(encoding="utf-8")
+        if "CASE_STUDY_ID" not in text:
+            continue
+        case_study_id, defaults = _pinned_parameters_of(notebook_py)
+        declared = PINNED_PREDICTION_CONFIGS.get(case_study_id or "")
+        if not declared:
+            continue
+
+        key = notebook_py.relative_to(REPO_ROOT).with_suffix("").as_posix()
+        names = {config for _family, _label, config, _split in declared}
+        for run in invocations_for(get_overrides(key), key=key):
+            named = set(defaults.items()) | {
+                (name, value)
+                for name, value in run.parameters.items()
+                if name.endswith("_CONFIG") and isinstance(value, str)
+            }
+            if not named:
+                continue
+            where = f"{key} [{run.id}]" if run.id else key
+            missing = {f"{name}={value}" for name, value in named if value not in names}
+            assert not missing, (
+                f"{where} names a configuration the fixture is not built to carry: "
+                f"{sorted(missing)}. Add it to PINNED_PREDICTION_CONFIGS[{case_study_id!r}] "
+                "in tests/sample_registry_for_tests.py, or name one already there."
+            )
+            checked.append(where)
+
+    assert checked, (
+        "no notebook names a *_CONFIG for a case study in PINNED_PREDICTION_CONFIGS, "
+        "so this check covered nothing"
+    )

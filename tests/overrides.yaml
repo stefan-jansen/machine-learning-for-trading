@@ -1312,7 +1312,13 @@
   # configuration NAME rather than a prediction hash, so they survive a refit - but the
   # fixture is sampled from production by tests/sample_registry_for_tests.py and has not
   # been regenerated since PINNED_PREDICTION_CONFIGS changed, so the names it holds are
-  # ols, ridge_a100000.0 and ridge_a10000000.0.
+  # ols, ridge_a0.001, ridge_a100000.0 and ridge_a10000000.0.
+  #
+  # Only three of those four are usable, and the registry does not say which: ridge_a0.001
+  # has a training run and a prediction set but no run_log/predictions/<hash>/predictions
+  # parquet, because the sampler carried the rows and not the artifact. Both notebooks in
+  # this chapter check the file and raise when it is absent, so a substitute has to be
+  # picked against the tree rather than against the registry alone.
   #
   # ridge_a10000000.0 is the right substitute rather than an arbitrary one: this notebook
   # needs a stream that genuinely differs from the incumbent's, and the assertion in
@@ -1337,16 +1343,30 @@
   # universe.
   #
   # CANDIDATE_CONFIG is overridden for the reason given under 02: the fixture holds a
-  # different slice of the linear grid. The shipped default, ridge_a100.0, demonstrates
-  # the case the gate exists for - an improvement that is positive and below the
-  # threshold, +0.185 against a required 0.20 on production. The fixture cannot supply
-  # it, and of what it does hold, ridge_a100000.0 is the one that clears the hurdle
-  # (+0.730) while ridge_a10000000.0 misses it by so much that the minimum-effect
-  # threshold does no work. CI therefore exercises the promotion path and production
-  # demonstrates the near miss. Raise this alongside the fixture.
+  # different slice of the linear grid, and ridge_a100.0 is not in it. Production's
+  # default candidate demonstrates the case the gate exists for - an improvement that
+  # is positive and falls short of the required threshold - so what is worth covering
+  # here is the other branch, a candidate that clears all five criteria.
+  #
+  # ridge_a10000000.0 is the one that does. Measured 2026-09-10 against the shipped
+  # fixture at TOP_K: 10, it promotes on all five: Sharpe improvement +3.49 against 0.20,
+  # signal correlation 0.368 and position agreement 0.341 against 0.30 each, drawdown
+  # ratio 0.58 against 1.25, over the full 63 sessions. The two similarity criteria are
+  # what to watch - they clear by 0.068 and 0.041, so they are what a fixture rebuild
+  # would flip first. The previous pin, ridge_a100000.0, fails on Sharpe improvement at
+  # +0.18 against the required 0.20, which is the same criterion and the same direction
+  # production fails on, so CI was covering the rejection path twice and the promotion
+  # path not at all. Of the fixture's remaining linear configs, ols is the incumbent and
+  # ridge_a0.001 has a registry row whose predictions parquet was never sampled, so it
+  # resolves to nothing.
+  #
+  # Nothing asserts the verdict, in this notebook or in the harness, so a fixture rebuild
+  # that moves this model's predictions will silently change which branch CI covers.
+  # Re-measure after a rebuild, and re-pick from whatever linear configs the rebuilt
+  # fixture carries if the margins above have gone.
   parameters:
     TOP_K: 10
-    CANDIDATE_CONFIG: ridge_a100000.0
+    CANDIDATE_CONFIG: ridge_a10000000.0
   timeout: 300
 26_mlops_governance/04_circuit_breakers:
   timeout: 300
