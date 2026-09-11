@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 import polars as pl
 import pytest
 
 from research.mnq_strategy.volume_profile import (
+    LVN_PERCENTILE,
     attach_previous_rth_profile,
     build_rth_profile,
 )
@@ -48,7 +49,7 @@ def test_value_area_expansion_uses_available_side_at_price_range_edge():
     assert profile["vah"] == 100.25
 
 
-def test_lvn_zones_are_contiguous_low_volume_bins():
+def test_lvn_zones_use_the_25th_percentile_threshold():
     bars = pl.DataFrame(
         {
             "price": [100.0, 100.25, 100.5, 100.75, 101.0, 101.25, 101.5, 101.75, 102.0, 102.25],
@@ -59,7 +60,7 @@ def test_lvn_zones_are_contiguous_low_volume_bins():
     profile = build_rth_profile(bars)
 
     assert profile["lvn_zones"] == [
-        {"low": 100.25, "high": 100.5},
+        {"low": 100.25, "high": 100.75},
     ]
 
 
@@ -67,10 +68,10 @@ def test_attach_uses_only_previous_fully_closed_rth_session():
     bars = pl.DataFrame(
         {
             "timestamp": [
-                datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc),
-                datetime(2026, 1, 5, 14, 35, tzinfo=timezone.utc),
-                datetime(2026, 1, 6, 14, 30, tzinfo=timezone.utc),
-                datetime(2026, 1, 6, 14, 35, tzinfo=timezone.utc),
+                datetime(2026, 1, 5, 14, 30, tzinfo=UTC),
+                datetime(2026, 1, 5, 14, 35, tzinfo=UTC),
+                datetime(2026, 1, 6, 14, 30, tzinfo=UTC),
+                datetime(2026, 1, 6, 14, 35, tzinfo=UTC),
             ],
             "timestamp_ny": [
                 datetime(2026, 1, 5, 15, 55),
@@ -96,7 +97,12 @@ def test_attach_uses_only_previous_fully_closed_rth_session():
 
     result = attach_previous_rth_profile(bars)
 
-    assert result["previous_profile_date"].to_list() == [None, None, datetime(2026, 1, 5).date(), datetime(2026, 1, 5).date()]
+    assert result["previous_profile_date"].to_list() == [
+        None,
+        None,
+        datetime(2026, 1, 5).date(),
+        datetime(2026, 1, 5).date(),
+    ]
     assert result["previous_poc"].to_list() == [None, None, 100.0, 100.0]
 
 

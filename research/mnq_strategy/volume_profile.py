@@ -8,10 +8,9 @@ from typing import Any
 
 import polars as pl
 
-
 MNQ_TICK_SIZE = 0.25
-# LVN detection uses the 20th percentile as a fixed, strict-below threshold.
-LVN_PERCENTILE = 0.20
+# LVN detection uses the 25th percentile as a fixed, strict-below threshold.
+LVN_PERCENTILE = 0.25
 # Task 1 timestamps identify bar starts; a 5-minute bar starting at 15:55 ends at 16:00 ET.
 RTH_FINAL_BAR_START = time(15, 55)
 
@@ -23,9 +22,17 @@ def _validate_profile_input(frame: pl.DataFrame) -> None:
     if frame.height == 0:
         raise ValueError("profile input must not be empty")
     for price, volume in frame.select(["price", "volume"]).iter_rows():
-        if not isinstance(price, (int, float)) or not math.isfinite(float(price)) or float(price) <= 0:
+        if (
+            not isinstance(price, (int, float))
+            or not math.isfinite(float(price))
+            or float(price) <= 0
+        ):
             raise ValueError("price values must be finite and positive")
-        if not isinstance(volume, (int, float)) or not math.isfinite(float(volume)) or float(volume) <= 0:
+        if (
+            not isinstance(volume, (int, float))
+            or not math.isfinite(float(volume))
+            or float(volume) <= 0
+        ):
             raise ValueError("volume values must be finite and positive")
 
 
@@ -45,7 +52,7 @@ def _percentile(values: list[float], fraction: float) -> float:
 
 
 def _find_lvn_zones(volume_by_price: dict[float, float]) -> list[dict[str, float]]:
-    """Return contiguous bins strictly below the linearly interpolated 20th percentile."""
+    """Return contiguous bins strictly below the linearly interpolated 25th percentile."""
     threshold = _percentile(list(volume_by_price.values()), LVN_PERCENTILE)
     low_bins = [price for price, volume in volume_by_price.items() if volume < threshold]
     zones: list[dict[str, float]] = []
@@ -57,11 +64,11 @@ def _find_lvn_zones(volume_by_price: dict[float, float]) -> list[dict[str, float
     return zones
 
 
-def build_rth_profile(
-    rth_bars: pl.DataFrame, value_area_fraction: float = 0.40
-) -> dict[str, Any]:
+def build_rth_profile(rth_bars: pl.DataFrame, value_area_fraction: float = 0.40) -> dict[str, Any]:
     """Build a deterministic MNQ price-volume profile from one RTH session."""
-    if not isinstance(value_area_fraction, (int, float)) or not math.isfinite(float(value_area_fraction)):
+    if not isinstance(value_area_fraction, (int, float)) or not math.isfinite(
+        float(value_area_fraction)
+    ):
         raise ValueError("value_area_fraction must be finite")
     if not 0 < value_area_fraction <= 1:
         raise ValueError("value_area_fraction must be greater than 0 and at most 1")
@@ -87,7 +94,9 @@ def build_rth_profile(
         right = max(included_indices) + 1
         if left >= 0 and right < len(ordered_prices):
             included_indices.update((left, right))
-            included_volume += volume_by_price[ordered_prices[left]] + volume_by_price[ordered_prices[right]]
+            included_volume += (
+                volume_by_price[ordered_prices[left]] + volume_by_price[ordered_prices[right]]
+            )
         elif left >= 0:
             included_indices.add(left)
             included_volume += volume_by_price[ordered_prices[left]]
@@ -132,7 +141,9 @@ def attach_previous_rth_profile(bars: pl.DataFrame) -> pl.DataFrame:
     session_dates = sorted(profiles)
     attached: list[dict[str, Any] | None] = []
     for current_date in bars.get_column("session_date").to_list():
-        previous_dates = [profile_date for profile_date in session_dates if profile_date < current_date]
+        previous_dates = [
+            profile_date for profile_date in session_dates if profile_date < current_date
+        ]
         previous_date = max(previous_dates) if previous_dates else None
         profile = profiles.get(previous_date) if previous_date is not None else None
         attached.append(
@@ -148,9 +159,28 @@ def attach_previous_rth_profile(bars: pl.DataFrame) -> pl.DataFrame:
         )
 
     return bars.with_columns(
-        pl.Series("previous_profile_date", [item["previous_profile_date"] if item else None for item in attached], dtype=pl.Date),
-        pl.Series("previous_poc", [item["previous_poc"] if item else None for item in attached], dtype=pl.Float64),
-        pl.Series("previous_vah", [item["previous_vah"] if item else None for item in attached], dtype=pl.Float64),
-        pl.Series("previous_val", [item["previous_val"] if item else None for item in attached], dtype=pl.Float64),
-        pl.Series("previous_lvn_zones", [item["previous_lvn_zones"] if item else None for item in attached]),
+        pl.Series(
+            "previous_profile_date",
+            [item["previous_profile_date"] if item else None for item in attached],
+            dtype=pl.Date,
+        ),
+        pl.Series(
+            "previous_poc",
+            [item["previous_poc"] if item else None for item in attached],
+            dtype=pl.Float64,
+        ),
+        pl.Series(
+            "previous_vah",
+            [item["previous_vah"] if item else None for item in attached],
+            dtype=pl.Float64,
+        ),
+        pl.Series(
+            "previous_val",
+            [item["previous_val"] if item else None for item in attached],
+            dtype=pl.Float64,
+        ),
+        pl.Series(
+            "previous_lvn_zones",
+            [item["previous_lvn_zones"] if item else None for item in attached],
+        ),
     )
