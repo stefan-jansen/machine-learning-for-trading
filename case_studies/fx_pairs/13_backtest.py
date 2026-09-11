@@ -84,8 +84,14 @@ RUN_SWEEP = True
 FORCE_REBACKTEST = False
 TOP_N_PREDICTIONS = None
 POPULATION_NAME = ""
-SUPERSEDES_EQUAL_WEIGHT_BASELINES: str = "59edb30b6271"
-SUPERSEDES_VALIDATION_PREDICTIONS: str = "16787d96bf75"
+# Both name the lineage rather than a generation of it. The hashes these replace -
+# `59edb30b6271` and `16787d96bf75` - are in no lineage the registry holds, and the names
+# they publish under are built by `research_name`, so nothing could look them up to say
+# whether they were dead or waiting for a first publication. `"live"` does not have to
+# decide: it resolves against the name this run publishes under, which is the one thing
+# both call sites already know. See `case_studies.research.population.SUPERSEDES_LIVE`.
+SUPERSEDES_EQUAL_WEIGHT_BASELINES: str = "live"
+SUPERSEDES_VALIDATION_PREDICTIONS: str = "live"
 
 # %% [markdown]
 # ## Select the exact prediction population
