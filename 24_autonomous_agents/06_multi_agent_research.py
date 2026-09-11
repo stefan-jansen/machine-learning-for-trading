@@ -55,6 +55,7 @@
 """Multi-Agent Research - parallel agents on one shared question."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -95,8 +96,8 @@ from utils.style import COLORS, add_message_title, format_pct_axis, show_with_al
 # the input nothing here measures, and the sensitivity section further down is what says how
 # much rests on it.
 #
-# `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set. The capture
-# used `claude-sonnet-4`. Setting it to `"openrouter"` with
+# `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set; the cell
+# below reports which provider the capture used. Setting it to `"openrouter"` with
 # `OPENROUTER_MODEL="deepseek/deepseek-v4-pro"` drives an open model instead. `"mock"` returns
 # a constant forecast and is a smoke test, not a reproduction of this run.
 
@@ -136,13 +137,16 @@ if RUN_LIVE:
     question = get_chapter_clear_question()
     provider_name = llm.model_name
     n_agents = N_AGENTS
+    captured_on = date.today().isoformat()
 else:
     pinned_run = RunTrace.load(TRACES_DIR / PINNED_TRACE)
     question = pinned_run.question_obj()
     provider_name = pinned_run.provider
     n_agents = len(pinned_run.agents)
+    captured_on = datetime.fromisoformat(pinned_run.created_at).date().isoformat()
 
-print(f"Mode:         {'LIVE' if RUN_LIVE else 'REPLAY (pinned 2026-06-09 trace)'}")
+mode = "live" if RUN_LIVE else f"replay of a capture recorded {captured_on}"
+print(f"Mode:         {mode}")
 print(f"Provider:     {provider_name}")
 print(f"Question:     {question.question}")
 print(f"Market p_yes: {question.current_market_price}")
@@ -231,7 +235,7 @@ panel_df = pl.DataFrame(
         for a in artifacts
     ]
 )
-print(f"Market price shown to the agents: {question.current_market_price:.2f}")
+print(f"Market price shown to the agents: {question.current_market_price:.1%}")
 print(f"Total tokens across the panel:    {total_tokens.total_tokens:,}\n")
 panel_df
 
@@ -264,15 +268,16 @@ ax.set_ylim(0, max(probabilities) + 0.08)
 format_pct_axis(ax)
 add_message_title(
     ax,
-    "Identical agents on one question do not return one answer",
-    subtitle="Three agents, same prompt, tools and temperature; 2026-06-09 capture",
+    "Probability of recession, by research agent",
+    subtitle=f"Same prompt, tools and temperature; capture recorded {captured_on}",
 )
 ax.legend(loc="upper left")
 show_with_alt(
     fig,
-    f"Bar chart of {len(probabilities)} agent forecasts, ranging from {min(probabilities):.0%} "
-    f"to {max(probabilities):.0%}, with a dashed line at the {question.current_market_price:.0%} "
-    "market price that every agent was shown.",
+    "Bar chart with one bar per research agent, each labelled with the probability that agent "
+    "returned, and a dashed horizontal line at the market price every agent was shown. Two of "
+    "the bars are the same height and sit just above the market line; the third is much "
+    "shorter and sits well below it.",
 )
 
 # %% [markdown]
@@ -299,7 +304,7 @@ display(
     Markdown(
         f"**This run**: the three agents returned {probability_text}, a range of "
         f"{probability_range:.2f} on a question where the market stood at "
-        f"{question.current_market_price:.2f}. That range is one observation from one capture. "
+        f"{question.current_market_price:.1%}. That range is one observation from one capture. "
         "It says the panel is not degenerate; it does not say how large the spread would be on "
         "another question, another day, or with a different model."
     )
@@ -380,10 +385,15 @@ for rho in [0.0, 0.1, 0.3, 0.5, 0.7, 0.9]:
     rw = neyman_extremize_weighted(
         panel_probabilities, panel_confidences, base=0.5, correlation=rho
     )
+    # The reported aggregate is clamped into [0.01, 0.99]. Recovering the value before the
+    # clamp from the same result - the mean, the base rate and the diversity factor it used -
+    # is what shows when the clamp is carrying the answer.
+    unclamped = 0.5 + r.extremization_factor * (r.raw_probability - 0.5)
     correlation_rows.append(
         {
             "correlation": rho,
             "neyman": round(r.extremized_probability, 3),
+            "before the clamp": round(unclamped, 3),
             "weighted_neyman": round(rw.extremized_probability, 3),
             "shift_from_mean": round((r.extremized_probability or 0) - simple_mean, 3),
         }
@@ -391,17 +401,34 @@ for rho in [0.0, 0.1, 0.3, 0.5, 0.7, 0.9]:
 correlation_df = pl.DataFrame(correlation_rows)
 correlation_df
 
+# %% [markdown]
+# The `before the clamp` column is the one to read first. This panel sits far enough below the
+# base rate that the formula, credited with three near-independent observations, returns a
+# **negative** probability, and `neyman_extremize` floors it. Where the two columns differ, the
+# reported aggregate is the floor rather than the method's answer, and the sensitivity curve
+# below is flat there for that reason and no other.
+
 # %%
 rho_values = correlation_df["correlation"].to_list()
 
+unclamped_values = correlation_df["before the clamp"].to_list()
+
 fig, ax = plt.subplots()
+ax.plot(
+    rho_values,
+    unclamped_values,
+    ":",
+    color=COLORS["negative"],
+    linewidth=1.5,
+    label="Neyman before the clamp",
+)
 ax.plot(
     rho_values,
     correlation_df["neyman"].to_list(),
     "o-",
     color=COLORS["blue"],
     linewidth=2,
-    label="Neyman",
+    label="Neyman as reported",
 )
 ax.plot(
     rho_values,
@@ -414,35 +441,44 @@ ax.plot(
 ax.axhline(
     simple_mean,
     color=COLORS["neutral"],
-    linestyle=":",
+    linestyle="-.",
     linewidth=1.5,
     label="Simple mean",
 )
 ax.set_xlabel(r"Assumed pairwise correlation ($\rho$)")
 ax.set_ylabel("Aggregate probability")
 ax.set_xlim(0, 0.9)
-ax.set_ylim(0, 0.22)
+ax.set_ylim(min(unclamped_values) - 0.02, simple_mean + 0.04)
 format_pct_axis(ax)
 add_message_title(
     ax,
-    "The assumed correlation moves the aggregate more than the agents disagree",
+    "Aggregate probability against the assumed correlation",
     subtitle="Same three forecasts throughout; the mean is the unextremized baseline",
 )
 ax.legend(loc="lower right")
 show_with_alt(
     fig,
     "Line chart of the aggregate probability against the assumed pairwise correlation, from "
-    f"independent to nearly identical. The unweighted Neyman aggregate falls from "
-    f"{correlation_df['neyman'][0]:.0%} to {correlation_df['neyman'][-1]:.0%} as the assumed "
-    f"correlation rises, converging on the unextremized mean of {simple_mean:.0%}. The "
-    "confidence-weighted variant tracks it closely.",
+    "independent to nearly identical. Both reported series rise steadily toward the horizontal "
+    "line marking the unextremized mean, and both run flat at the independent end. The dotted "
+    "line showing the value before the clamp keeps falling there, below zero, which is what "
+    "the flat section is hiding.",
 )
 
 # %% [markdown]
-# At the independent end the panel is credited with three observations and the aggregate is
-# pushed well away from the base rate; at the dependent end it is credited with barely more
-# than one and the aggregate settles onto the mean. The agents' own forecasts never move along
-# that curve. Everything that does move is the assumption.
+# At the dependent end the panel is credited with barely more than one observation and the
+# aggregate settles onto the mean. At the independent end it is credited with three, the
+# formula pushes so far below the base rate that it leaves the unit interval, and what the
+# chart shows there is the floor. The agents' own forecasts never move along any of these
+# curves. Everything that does move is the assumption.
+#
+# A clamp that carries the answer is worth naming rather than tolerating. It is not part of
+# the theory: it exists so the function always returns something a downstream consumer can
+# treat as a probability, and where it binds, the method has failed on this panel rather than
+# answered it. The reading to take from the left of this chart is that a three-agent panel this
+# far from even odds, under an independence assumption, is mapped outside the unit interval by
+# this formula, which therefore has no answer to give: not that the aggregate is whatever the
+# floor happens to be set to, and not that these three agents are in fact correlated.
 #
 # Nothing in this run estimates $\rho$, and the confidence values feeding the weighted variant
 # are the extremity heuristic from [`04_research_agent`](04_research_agent.ipynb) rather than
@@ -453,10 +489,13 @@ show_with_alt(
 # ## What the Next Stages Receive
 #
 # Debate and supervisor reconciliation do not read the artifacts directly. They read this
-# summary: the agent's id, its probability and confidence, the opening of its rationale, and
-# its first few key findings. Everything else - the full search trail, the evidence, the
-# uncertainties - stays in the record and out of the next prompt, which is a context budget
-# decision as much as a design one.
+# summary: the agent's id, its probability and confidence, the opening of its rationale, and,
+# where the model enumerated any, its first few key findings. None of these three rationales
+# enumerates anything - all three are continuous prose - so no findings block appears below,
+# which is what [`04_research_agent`](04_research_agent.ipynb) means when it says the field
+# records how the model chose to present its reasons. Everything else - the full search trail,
+# the evidence, the uncertainties - stays in the record and out of the next prompt, which is a
+# context budget decision as much as a design one.
 
 # %%
 all_summaries = "\n\n---\n\n".join(format_agent_summary(a) for a in artifacts)

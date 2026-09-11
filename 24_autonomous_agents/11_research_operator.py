@@ -41,7 +41,7 @@
 # consult on demand. The operator stitches the LLM, the libraries, and the
 # skills together.
 #
-# We point the operator at the ETFs case study and ask it to execute the
+# The operator is pointed at the ETFs case study and asked to execute the
 # **§20.9 next-step suggestion** verbatim:
 #
 # > *Ensemble GBM, tabular deep learning, and the CAE configuration, and
@@ -83,7 +83,7 @@ import research_operator as ro
 from IPython.display import Markdown, display
 
 from utils.paths import get_chapter_dir
-from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 # %% [markdown]
 # ## Settings
@@ -359,15 +359,15 @@ ax.set_xlabel("Tool calls")
 ax.set_ylabel("Operator tool")
 add_message_title(
     ax,
-    "Running experiments and reading the registry take most of the turns",
-    subtitle=f"{result['iterations']} turns in the pinned ETFs replay",
+    "Tool calls by operator tool, in the pinned ETFs replay",
+    subtitle="One bar per tool, sorted by call count; each bar carries its own count",
 )
 show_with_alt(
     fig,
-    f"Horizontal bar chart of tool-call counts across {int(hist['n_calls'].sum())} calls in "
-    f"{result['iterations']} turns, led by "
-    + ", ".join(f"{row['tool']} at {row['n_calls']}" for row in hist.head(3).iter_rows(named=True))
-    + ".",
+    "Horizontal bar chart of how many times the run called each operator tool, sorted longest "
+    "bar first and labelled with its own count. The top three bars are "
+    + ", ".join(row["tool"] for row in hist.head(3).iter_rows(named=True))
+    + ", and the remaining tools trail well behind them.",
 )
 
 # %%
@@ -387,8 +387,9 @@ for s in skill_reads:
 # agent ran its ensemble on the validation window only, and said why: the registry holds
 # holdout predictions for the LSTM alone, and producing them for the other three families
 # means retraining all three, which costs an order of magnitude more than the experiment it
-# ran. It then matched the LSTM baseline's exact backtest
-# long-only) and computed IC + Sharpe with `ml4t.diagnostic.api`.
+# ran. It then matched the LSTM baseline's backtest specification, so that the two rows differ
+# only in the signal they are built from, and computed IC and Sharpe with `ml4t.diagnostic.api`.
+# The allocation that specification names is printed above the table.
 
 # %%
 comparison = pl.DataFrame(
@@ -471,20 +472,23 @@ axes[1].errorbar(
     capsize=3,
 )
 axes[1].set_ylabel("Validation Sharpe ratio")
+# A Sharpe interval whose lower end is below zero is the whole point of drawing the interval,
+# and an axis that starts at zero clips it out of sight.
+zero_line(axes[1])
+axes[1].set_ylim(bottom=min(comparison["val_sharpe_ci_lo"].min(), 0) - 0.1)
 for ax in axes:
     ax.tick_params(axis="x", labelrotation=30)
 add_message_title(
     axes[0],
-    "The highest rank correlation is not the highest Sharpe",
+    "Rank correlation and validation Sharpe, by model",
     subtitle="Validation window only; Sharpe bars carry the intervals the run recorded",
 )
 show_with_alt(
     fig,
-    f"Two bar charts over the same {comparison.height} models. On the left, mean "
-    f"cross-sectional IC, where the ensemble is higher at {ensemble['ic']:.4f} against the "
-    f"baseline's {baseline['ic']:.4f}. On the right, validation Sharpe ratio with confidence "
-    f"intervals, where the ensemble is {ensemble['sharpe']:.2f} against the baseline's "
-    f"{baseline['sharpe']:.2f} and its interval spans zero.",
+    "Two bar charts over the same models. On the left, mean cross-sectional IC, where the "
+    "ensemble bar is the taller of the two. On the right, validation Sharpe ratio with "
+    "confidence intervals against a dashed line at zero, where the ensemble bar is the shorter "
+    "and its interval crosses that line while the baseline's stays above it.",
 )
 
 # %%
@@ -505,7 +509,6 @@ display(
 # from negative to strongly positive while the baseline's stays positive and small, and that
 # the `score_weighted_top_k` allocator turns that instability into portfolio losses by sizing
 # positions on the score. That is an association the run observed rather than a mechanism it
-# isolated, and it arrives at the point Chapter 20 already makes: the family with the highest
 # isolated, and it arrives at the point Chapter 20 already makes: the family with the highest
 # rank correlation is not the family with the highest portfolio Sharpe, and the allocator is
 # where the two come apart. The operator was not told any of that.
@@ -614,15 +617,14 @@ for ax, metric in zip(axes, us_panels, strict=True):
     ax.invert_yaxis()
 add_message_title(
     axes[0],
-    "Dropping the smallest quartile takes the Sharpe with it",
+    "Full universe against the top three market-cap quartiles",
     subtitle="Validation-window signal filter; no retraining and no impact-cost estimate",
 )
 show_with_alt(
     fig,
-    "Three horizontal bar charts comparing the full universe against the top three market-cap "
-    "quartiles: "
-    + "; ".join(f"{m} falls from {us_metrics[m][0]:g} to {us_metrics[m][1]:g}" for m in us_panels)
-    + ".",
+    "Three stacked panels, each comparing the full universe against the top three market-cap "
+    "quartiles on one measure: " + ", ".join(us_panels) + ". In each panel the filtered bar is "
+    "the shorter of the two, and both bars carry their own value as a label.",
 )
 
 # %%
@@ -657,7 +659,6 @@ display(
 # it changed which firms are in it, and this experiment does not separate the two.
 #
 # A natural follow-up the agent flagged: **retrain on the filtered universe**
-# A natural follow-up the agent flagged: **retrain on the filtered universe**
 # (rather than just signal-filter the existing predictions) to see whether
 # the model can find alpha in the larger-cap names that the original training
 # universe diluted with small-cap signal.
@@ -669,7 +670,14 @@ display(
 # Only `RESEARCH_OPERATOR_CASE_STUDY` and the task configuration changed.
 # The two outcomes differ, and the operator records both.
 
+# %% [markdown]
+# Each row's Sharpe pair is the validation Sharpe before and after the change that run made:
+# the baseline against the ensemble for ETFs, and the full universe against the filtered one
+# for US firms. Both pairs are read from the same parsed records the sections above used, so
+# nothing in this table is a second copy of a number typed by hand.
+
 # %%
+us_sharpe_before, us_sharpe_after = us_metrics["Sharpe"]
 runs = [
     {
         "case_study": "etfs",
@@ -679,7 +687,9 @@ runs = [
         "tokens_out": result["total_out_tokens"],
         "elapsed_s": result["elapsed_s"],
         "cost_usd": _run_cost(result),
-        "headline": "no improvement (SR 0.92 → 0.56); diagnosed IC-vs-SR gap",
+        "val_sharpe_before": round(baseline["sharpe"], 2),
+        "val_sharpe_after": round(ensemble["sharpe"], 2),
+        "outcome": "no improvement; diagnosed the gap between IC and Sharpe",
     },
     {
         "case_study": "us_firm_characteristics",
@@ -689,7 +699,9 @@ runs = [
         "tokens_out": us_firms["total_out_tokens"],
         "elapsed_s": us_firms["elapsed_s"],
         "cost_usd": _run_cost(us_firms),
-        "headline": "SR 4.27 → 2.24 (−48%); shows small-cap sensitivity",
+        "val_sharpe_before": round(us_sharpe_before, 2),
+        "val_sharpe_after": round(us_sharpe_after, 2),
+        "outcome": "Sharpe falls once the smallest quartile is excluded",
     },
 ]
 pl.DataFrame(runs)

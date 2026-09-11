@@ -54,13 +54,15 @@
 # across the two notebooks; the question is what differs, and a panel that agrees gives debate
 # nothing to work on.
 #
-# As in 06, the numbers are one live `claude-sonnet-4` capture from 2026-06-09, replayed by
-# default so the table, transcript and figure are the same on every machine. `RUN_LIVE = True`
-# with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY` debates a current question instead and will not
-# reproduce these values.
+# As in 06, the numbers come from one live capture replayed by default, so the table, the
+# transcript and the figure are the same on every machine; the setup cell reports which
+# provider made it and when. `RUN_LIVE = True` with `ANTHROPIC_API_KEY` and `TAVILY_API_KEY`
+# debates a current question instead and will not reproduce these values.
 
 # %%
 """Bull vs Bear Debate - adversarial stress-testing of forecasts."""
+
+from datetime import date, datetime
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
@@ -81,7 +83,7 @@ from agent_research import ResearchAgent, format_agent_summary, parse_json
 from agent_schemas import AgentForecastArtifact, DebateArtifact, DebateRound
 from agent_tools import create_search_client
 
-from utils.style import COLORS, add_message_title, show_with_alt
+from utils.style import COLORS, add_message_title, label_line_ends, show_with_alt
 
 # %% [markdown]
 # ## Settings
@@ -107,8 +109,8 @@ from utils.style import COLORS, add_message_title, show_with_alt
 # `NEYMAN_CORRELATION` is the pairwise correlation assumed when the research panel is
 # aggregated, as in [`05_aggregation_math`](05_aggregation_math.ipynb).
 #
-# `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set; the capture
-# used `claude-sonnet-4`, and `"mock"` is a smoke test rather than a reproduction.
+# `LLM_PROVIDER` is empty so the factory picks the first provider whose key is set, and
+# `"mock"` is a smoke test rather than a reproduction.
 
 # %% tags=["parameters"]
 RUN_LIVE = False
@@ -401,9 +403,10 @@ class DebateAgent:
 # %% [markdown]
 # ## Setup: Run Research Agents
 #
-# We first run the research agents from [`06_multi_agent_research`](06_multi_agent_research.ipynb) to establish baseline probability
-# estimates that the debate will stress-test — this time on the pinned contested
-# question, where the agents are expected to disagree.
+# The research agents from
+# [`06_multi_agent_research`](06_multi_agent_research.ipynb) run first, to establish the
+# baseline estimates the debate stress-tests. This time they run on the pinned contested
+# question, where they are expected to disagree.
 
 # %%
 artifacts: list[AgentForecastArtifact] = []
@@ -413,9 +416,10 @@ if RUN_LIVE:
     search = create_search_client(LLM_PROVIDER)
     question = get_chapter_contested_question()
     provider_name = llm.model_name
+    captured_on = date.today().isoformat()
 
-    # Run N agents, each under its own tracer so the full conversation — every
-    # prompt sent and every raw response — is captured and attributed per agent.
+    # Run N agents, each under its own tracer, so that every prompt sent and every raw
+    # response is captured and attributed to the agent that made it.
     agent_tracers = []
     for i in range(N_AGENTS):
         tracer = trace_llm(llm, label=f"agent_{i}")
@@ -428,6 +432,7 @@ else:
     question = pinned_run.question_obj()
     provider_name = pinned_run.provider
     artifacts = pinned_run.agent_artifacts()
+    captured_on = datetime.fromisoformat(pinned_run.created_at).date().isoformat()
 
 artifacts.sort(key=lambda a: a.agent_id)
 answered = [a for a in artifacts if a.forecast_produced]
@@ -436,10 +441,11 @@ if not answered:
 panel_probabilities = [a.p_yes for a in answered]
 aggregate = neyman_extremize(panel_probabilities, base=0.5, correlation=NEYMAN_CORRELATION)
 
-print(f"Mode:         {'LIVE' if RUN_LIVE else 'REPLAY (pinned 2026-06-09 trace)'}")
+mode = "live" if RUN_LIVE else f"replay of a capture recorded {captured_on}"
+print(f"Mode:         {mode}")
 print(f"Provider:     {provider_name}")
 print(f"Question:     {question.question}")
-print(f"Market p_yes: {question.current_market_price}\n")
+print(f"Market p_yes: {question.current_market_price:.1%}\n")
 print("Pre-debate agent estimates:")
 for a in answered:
     print(f"  {a.agent_id}: p_yes={a.p_yes:.2f}, confidence={a.confidence:.2f}")
@@ -462,9 +468,21 @@ print(show_agents(artifacts))
 # The `DebateAgent` makes real LLM calls for each round. The bull and bear
 # prompts include the agent summaries so both sides argue from the same
 # evidence base.
+#
+# Both debaters are anchored on the research panel's aggregate, which the cell below reads off
+# the `AggregationResult`. That field is `None` when there was nothing to aggregate, and the
+# fallback to the plain mean is meant for exactly that case. Testing it with `or` would also
+# fall through on a probability of zero, which is a different thing entirely: `neyman_extremize`
+# cannot return one today, because it clamps just inside the unit interval, but that is a
+# property of one clamp rather than of the field. Testing against `None` says what is meant
+# whatever the clamp does next.
 
 # %%
-agg_p = aggregate.extremized_probability or aggregate.raw_probability
+agg_p = (
+    aggregate.extremized_probability
+    if aggregate.extremized_probability is not None
+    else aggregate.raw_probability
+)
 
 if RUN_LIVE:
     agent_summaries = "\n\n---\n\n".join(format_agent_summary(a) for a in artifacts)
@@ -510,13 +528,11 @@ rounds_df = pl.DataFrame(
 rounds_df
 
 # %% [markdown]
-# The table above is the *shape* of the debate; the transcript below is its
-# *substance*. `show_debate_transcript` prints each round in full — both sides'
-# complete arguments and the key evidence they cited, with nothing truncated —
-# so the reader can see not just that the gap stayed open but the reasoning each
-# side used to hold its ground. This is the debate counterpart to the panel's
-# per-agent timelines: the same auditing discipline applied to the adversarial
-# stage.
+# The table gives the shape of the debate and the transcript below gives its substance.
+# `show_debate_transcript` prints each round in full: both sides' complete arguments and the
+# key evidence they cited, with nothing truncated. The table says whether the gap stayed open;
+# only the transcript says what reasoning each side used to hold its ground. It is the debate
+# counterpart to the panel's per-agent timelines.
 
 # %%
 print(show_debate_transcript(result))
@@ -547,27 +563,37 @@ ax.plot(
 )
 ax.plot(rounds_x, midpoints, "o--", color=COLORS["neutral"], markersize=5, label="Midpoint")
 ax.fill_between(rounds_x, bull_probs, bear_probs, alpha=0.15, color=COLORS["blue_light"])
-ax.axhline(agg_p, color=COLORS["blue"], linestyle=":", label="Pre-debate aggregate")
+# The aggregate is a reference line rather than a series, so it is annotated in place; the
+# three series are direct-labelled at their right ends, which keeps a legend off the data.
+ax.axhline(agg_p, color=COLORS["blue"], linestyle=":")
+ax.annotate(
+    "Pre-debate aggregate",
+    xy=(rounds_x[0], agg_p),
+    xytext=(0, -12),
+    textcoords="offset points",
+    color=COLORS["blue"],
+    fontsize=9,
+)
 ax.set_xlabel("Debate round")
 ax.set_ylabel("Probability of yes")
 ax.set_xticks(rounds_x)
 ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
 add_message_title(
     ax,
-    f"Adversarial debate {direction} the bull-bear gap",
+    "Bull and bear probabilities by debate round",
     subtitle="Shaded band is the disagreement between the two sides",
 )
-ax.legend(loc="best")
 y_min = min(bear_probs + bull_probs + [agg_p])
 y_max = max(bear_probs + bull_probs + [agg_p])
 pad = max(0.05, (y_max - y_min) * 0.15)
 ax.set_ylim(max(0.0, y_min - pad), min(1.0, y_max + pad))
+label_line_ends(ax)
 show_with_alt(
     fig,
-    f"Line chart over {len(rounds_x)} debate rounds. The bull line runs from "
-    f"{bull_probs[0]:.0%} to {bull_probs[-1]:.0%} and the bear line from {bear_probs[0]:.0%} "
-    f"to {bear_probs[-1]:.0%}, with the shaded band between them going from {gaps[0]:.0%} to "
-    f"{gaps[-1]:.0%} wide. A dotted line marks the pre-debate aggregate at {agg_p:.0%}.",
+    "Line chart over the debate rounds, one point per round. The bull line runs along the top "
+    "and the bear line along the bottom, each direct-labelled at its right end. The shaded "
+    f"band between them {direction} from the first round to the last. A dashed midpoint line "
+    "sits between the two, above a dotted line marking the pre-debate aggregate.",
 )
 
 # %% [markdown]
@@ -629,7 +655,6 @@ else:
 panel_disagreement = max(panel_probabilities) - min(panel_probabilities)
 gap_change = gaps[-1] - gaps[0]
 midpoint_move = midpoints[-1] - midpoints[0]
-midpoint_move = midpoints[-1] - midpoints[0]
 
 print(f"Panel disagreement before debate:   {panel_disagreement:.2f}")
 print(f"Bull-bear gap, first to last round: {gaps[0]:.2f} -> {gaps[-1]:.2f}")
@@ -656,12 +681,11 @@ else:
 # %% [markdown]
 # ## Persisting the Full Run Trace
 #
-# The same record as the panel notebook keeps, now covering both stages. `RunTrace`
-# bundles the question, the research-agent artifacts, the complete debate
-# transcript, and the raw model conversation for every research and debate call
-# — captured by the per-agent and debate `TracingLLMClient`s — into one JSON
-# record under `forecast_traces/`. Reload it to replay exactly what each
-# debater was shown and how it responded, round by round.
+# The same record as the panel notebook keeps, now covering both stages. `RunTrace` bundles
+# the question, the research-agent artifacts, the complete debate transcript, and the raw
+# model conversation for every research and debate call (captured by the per-agent and debate
+# `TracingLLMClient`s) into one JSON record under `forecast_traces/`. Reload it to replay
+# exactly what each debater was shown and how it responded, round by round.
 
 # %%
 if RUN_LIVE:
@@ -701,10 +725,10 @@ else:
 # %% [markdown]
 # ## Replaying the Debate Calls
 #
-# The raw audit view for the debate: every bull and bear prompt — including the
-# opposing side's previous argument that gets fed back in each round — next to
-# the untruncated JSON each debater returned. The transcript and trajectory
-# figure above are both derived from exactly these responses.
+# The raw audit view for the debate: every bull and bear prompt, including the opposing
+# side's previous argument that is fed back in each round, next to the untruncated JSON each
+# debater returned. The transcript and the trajectory figure above are both derived from
+# exactly these responses.
 
 # %%
 debate_calls = [c for c in llm_calls if c.label == "debate"]
