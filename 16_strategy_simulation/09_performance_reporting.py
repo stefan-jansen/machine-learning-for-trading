@@ -927,14 +927,18 @@ fig.update_layout(
     height=360,
 )
 _dd = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
-_under_water = sum(1 for v in _dd if v < 0) / len(_dd) if _dd else 0.0
+_dd_note = (
+    f"The rule is below its own high-water mark on "
+    f"{sum(1 for v in _dd if v < 0) / len(_dd):.0%} of the sample's days, reaches "
+    f"{min(_dd):.1f} percent at its worst and ends at {_dd[-1]:.1f}"
+    if _dd
+    else "The chart has no plotted days"
+)
 show_plotly_with_alt(
     fig,
-    "Filled drawdown chart from the high-water mark, zero at the top and losses below. The rule "
-    f"is below its own high-water mark on {_under_water:.0%} of the sample's days, reaches "
-    f"{min(_dd):.1f} percent at its worst and ends at {_dd[-1]:.1f}. The flat segments are the "
-    "stretches with no position, where the drawdown can neither deepen nor recover because "
-    "nothing is at risk.",
+    "Filled drawdown chart from the high-water mark, zero at the top and losses below. "
+    f"{_dd_note}. The flat segments are the stretches with no position, where the drawdown can "
+    "neither deepen nor recover because nothing is at risk.",
 )
 
 # %% [markdown]
@@ -974,13 +978,17 @@ fig.update_layout(
 _roll = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
 _roll_signs = [v > 0 for v in _roll if v != 0]
 _crossings = sum(1 for a, b in itertools.pairwise(_roll_signs) if a != b)
+_roll_note = (
+    f"It ranges from {min(_roll):.2f} to {max(_roll):.2f} and changes sign {_crossings} times"
+    if _roll
+    else "No window in this sample is long enough to plot"
+)
 show_plotly_with_alt(
     fig,
     f"Line chart of the {ROLLING_WINDOW_DAYS}-day rolling Sharpe ratio with {_level_note}. "
     "The series starts one window into the sample, because that is the "
-    f"first date a full window exists. It ranges from {min(_roll):.2f} to {max(_roll):.2f} and "
-    f"changes sign {_crossings} times. One rule therefore sits on both sides of every reference "
-    "level, depending only on which stretch of the sample the window covers.",
+    f"first date a full window exists. {_roll_note}. One rule therefore sits on both sides of "
+    "every reference level, depending only on which stretch of the sample the window covers.",
 )
 
 # %%
