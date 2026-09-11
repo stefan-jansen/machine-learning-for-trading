@@ -511,6 +511,12 @@ def test_sp500_options_corpus_uses_financial_timeline_geometry() -> None:
     case_study = "sp500_options"
     primary_label = "ret_to_expiry"
     artifact = _available_corpus_artifact(case_study)
+    if "fold" not in pl.read_parquet_schema(artifact):
+        # Same guard as the test above, for the same reason: sp500_options writes a fold-free
+        # model-based artifact now, so there is no fold geometry here to compare against the
+        # label timeline. Without this the test raises ColumnNotFoundError on `group_by("fold")`
+        # wherever the canonical artifact is reachable, and passes only where it is absent.
+        pytest.skip(f"{case_study} writes a fold-free model-based artifact")
     case_dir = artifact.parent.parent
     repo_root = Path(__file__).resolve().parents[1]
     setup = yaml.safe_load(
