@@ -266,9 +266,11 @@ comparison_df
 # **How to read this comparison.** Grid evaluates every combination in `PARAM_GRID`, so
 # whatever it returns is that space's maximum by construction. Optuna is given the
 # same number of trials on the same categorical space, and TPE samples with replacement, so
-# those trials do not cover that many distinct points. On a space small enough to enumerate
-# there is nothing for a sampler to exploit in exchange for the coverage it gives up; search
-# pays where the space is too big to enumerate, which is what section 6 tests instead.
+# those trials do not cover that many distinct points. It therefore cannot beat the
+# enumeration here and can only tie it, by happening to sample the maximum - which is not a
+# fact about the two samplers. On a space small enough to enumerate there is nothing for a
+# sampler to exploit in exchange for the coverage it gives up; search pays where the space is
+# too big to enumerate, which is what section 6 tests instead.
 #
 # The wall-time column is one uncontrolled measurement on a shared machine, and the two
 # searches fit different sets of configurations, which cost different amounts to train. It is
@@ -277,10 +279,6 @@ comparison_df
 # The chapter's recommendation stands either way: grid is fine for ≤4 parameters × ≤3 values
 # each. What the continuous space adds is reach, to configurations a discrete grid cannot
 # represent at all - a property of the space, not a measurement of the sampler.
-
-# %% [markdown] tags=["results"]
-# Optuna, at the grid's own budget on the grid's own space, selected a configuration whose
-# validation IC is below the best the enumeration found.
 
 # %% [markdown]
 # ## 6. Optuna with Continuous Space
@@ -401,17 +399,17 @@ show_with_alt(
 #
 # The ladder is a diagnostic and not a selection procedure, and it is bounded on one side
 # only: it starts at its shortest budget and cannot see below it. It also varies neither the
-# seed nor the fold, so it gives a direction without a width. Section 10 asks a different
+# seed nor the fold, so it gives a direction without a width. Where the two series sit
+# relative to each other in level is a property of the holdout window, not a sign that tuning
+# helped. Section 10 asks a different
 # question - how the two selected configurations compare after refitting on train plus
 # validation - and a budget sweep inside one space is not the same measurement as a
 # comparison of two picks from different spaces.
 
 # %% [markdown] tags=["results"]
-# Validation IC rises at every step of the ladder and holdout IC falls at every step, ending
-# below zero at the longest budget. Holdout IC is highest at the shortest budget measured, so
-# the turn this section exists to show is at or below that budget rather than inside the
-# range swept. Holdout sits above validation in level at the shortest budgets, which is a
-# property of that window and not evidence that tuning helped.
+# Holdout IC is already highest at the shortest budget swept, so the turn this section exists
+# to show sits at or below the ladder rather than inside it. Read the figure as evidence that
+# the two criteria diverge, not as a way to locate where.
 
 # %% [markdown]
 # ## 9. Visualization
