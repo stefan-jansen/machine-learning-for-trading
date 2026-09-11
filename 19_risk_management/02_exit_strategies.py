@@ -47,7 +47,6 @@
 # %%
 """Compare fixed, trailing, and volatility-adjusted exit rules."""
 
-import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -74,9 +73,6 @@ from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_plotly_with_alt
-
-# %%
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -1736,7 +1732,9 @@ for quintile in merged["signal_quintile"].unique():
 
 # %%
 # Visualize barrier outcomes
-outcome_summary = merged.groupby(["signal_quintile", "label"]).size().unstack(fill_value=0)
+outcome_summary = (
+    merged.groupby(["signal_quintile", "label"], observed=True).size().unstack(fill_value=0)
+)
 outcome_summary.columns = ["SL Hit", "Timeout", "TP Hit"]
 outcome_pct = outcome_summary.div(outcome_summary.sum(axis=1), axis=0) * 100
 
