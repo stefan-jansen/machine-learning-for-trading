@@ -77,11 +77,19 @@ END_DATE = "2024-01-01"
 # The two-sided normal critical value the confidence bands, the bar shading and the
 # significance verdicts all read. Declared once so a reader changing it changes all three.
 Z_CRIT = 1.96
-# The level that critical value implies, so every band label follows the parameter.
-CONF_LEVEL = 2 * stats.norm.cdf(Z_CRIT) - 1
 SEED = 42
 
+# %% [markdown]
+# `CONF_LEVEL` is derived in the next cell rather than beside `Z_CRIT` in the parameters
+# cell above, and the placement is load-bearing. Papermill injects an override as a new
+# cell *after* the tagged one, so anything computed inside the tagged cell runs against
+# the default. Deriving the level there would leave every band label reading the same
+# while an overridden critical value quietly moved the band.
+
 # %%
+CONF_LEVEL = 2 * stats.norm.cdf(Z_CRIT) - 1
+print(f"confidence bands and significance shading use z = {Z_CRIT}, a {CONF_LEVEL:.1%} level")
+
 set_global_seeds(SEED)
 
 # %% [markdown]
@@ -801,17 +809,21 @@ if len(result["event_cars"]) > 0:
 #
 # Between the rows, the comparison is what the distributions can be used for, and on this
 # sample the two rows disagree about the sign. The full-window figures cover days minus
-# five to plus ten, and the pre-event days rose by construction, so a positive full-window
-# mean is guaranteed by how the event was defined. The post-event row drops those days and
-# keeps only what was unknown when the signal fired; compare its mean, its median and its
-# share of positive events against the row above.
+# five to plus ten. Those pre-event days are not arbitrary: the event was selected for a
+# price rise over exactly that stretch, so the sample is chosen partly on the quantity the
+# first row measures. That selection does not force a positive abnormal return, since an
+# abnormal return subtracts the fitted market return and a stock can rise while its
+# residual falls, and a large post-event loss could outweigh the pre-event gain in any
+# case. What it does is bias the full-window figure upward by an amount the study cannot
+# separate out, which is enough to make the first row useless as evidence about what
+# follows a breakout. The second row drops those days and keeps only what was unknown when
+# the signal fired.
 #
-# Take that seriously rather than as a caveat. An event study whose window straddles the
-# trigger will show a positive average abnormal return for any event defined by a past
-# price move, and the CAAR figure earlier in this notebook has the same problem: most of
-# its rise happens before day zero. Splitting the window is what separates the definition
-# from the finding, and it is the first thing to do to any event study whose events are
-# chosen by a signal rather than by an announcement.
+# On this sample the difference decides the sign, and the CAAR figure earlier in the
+# notebook shows the same thing in shape: most of its rise sits to the left of day zero.
+# Splitting the window is what separates the selection from the finding, and it is the
+# first thing to do to any event study whose events are chosen by a signal rather than by
+# an announcement.
 #
 # One sample of a hundred-odd breakouts on a handful of ETFs settles nothing on its own,
 # and a single number from a single window is not the basis for a decision either way.
