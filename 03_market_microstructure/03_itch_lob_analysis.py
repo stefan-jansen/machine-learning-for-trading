@@ -961,15 +961,23 @@ def compute_ofi_correlation(lob_df: pl.DataFrame, symbol: str) -> dict | None:
 
 # %%
 def load_order_counts() -> dict[str, int]:
-    """Load daily order counts per stock from A (add order) messages."""
-    a_path = MESSAGES_DIR / "A"
-    if not a_path.exists():
-        return {}
-    files = list(a_path.glob("*.parquet"))
-    if not files:
-        return {}
-    counts = pl.scan_parquet(files).group_by("stock").len().collect()
-    return {row["stock"]: row["len"] for row in counts.iter_rows(named=True)}
+    """Count each stock's add messages, A and F together.
+
+    F is an Add Order carrying the market participant's identifier, so it creates an
+    order reference exactly as A does. It is 1% of the day's adds overall but a third of
+    them for some thinly quoted names, and load_order_registry above reads both.
+    """
+    # Scanned per type, not as one file list: F carries an `attribution` column that A
+    # does not, and a single scan over both raises on the schema mismatch.
+    counts: dict[str, int] = {}
+    for msg_type in ("A", "F"):
+        files = list((MESSAGES_DIR / msg_type).glob("*.parquet"))
+        if not files:
+            continue
+        by_stock = pl.scan_parquet(files).select("stock").group_by("stock").len().collect()
+        for row in by_stock.iter_rows(named=True):
+            counts[row["stock"]] = counts.get(row["stock"], 0) + row["len"]
+    return counts
 
 
 # %% [markdown]
