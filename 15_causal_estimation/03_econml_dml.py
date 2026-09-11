@@ -558,6 +558,17 @@ if len(placebo_effects) < PERMUTATION_MIN_SUCCESS:
 # reaches it reports zero, which no finite number of permutations can establish. With n draws
 # the smallest reportable value is 1 / (n + 1), printed beside it as the floor. It is not a
 # false discovery rate, which is what this quantity used to be called.
+#
+# **What cancelling the scale does not buy.** It removes one known bias and does not make the
+# test calibrated. A permutation test is valid when the permuted labels are exchangeable under
+# the null, and a treatment that persistent confounders predict is not: the shuffle breaks the
+# confounding along with the effect, so an estimate that is itself biased sits far from its own
+# permutation null and the test reports that distance. Measured on twelve synthetic panels with
+# a true effect of exactly zero and persistent AR(1) confounders, the studentized comparison
+# still rejects at the conventional five percent level on five of the twelve, against eleven for
+# the raw-effect comparison. The measurement is on ml4t/agent-workspace#1120 and
+# `10_case_study_insights` carries it. Read the count below as a comparison against a shuffle
+# rather than as a significance level.
 
 # %%
 if len(placebo_t_stats) > 10:

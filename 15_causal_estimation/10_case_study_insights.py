@@ -92,6 +92,14 @@ CASE_ORDER = {case_study: rank for rank, case_study in enumerate(CASE_STUDY_IDS)
 # A registry that is intact and simply holds no causal row is a different thing: that case
 # study has not run its causal stage yet, and the loader returns an empty frame so the
 # section below can name it rather than the notebook failing on it.
+#
+# Supersession is one of three conditions the case-study code uses to decide what a reader
+# resolves: a current row also has to carry the current identity version and the execution
+# tier asked for. This notebook reads the registries as files and implements the supersession
+# condition alone, so it would admit a row written under an older identity version or at a
+# preview tier. On the registries as they stand the two rules select the same rows.
+# `current_causal_identities` in `case_studies/utils/registry/store.py` is the authority, and
+# a reader who needs the full rule should call it rather than copy the query below.
 
 
 # %%

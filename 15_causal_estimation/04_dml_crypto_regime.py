@@ -660,6 +660,15 @@ print(f"  Difference: {abs(econml_effect - dml_effect):.6f}")
 # placebo fitted on fewer folds is a different estimator on a different number of cross-fitted
 # rows, and the null would then be centred wherever that difference puts it rather than where
 # the absence of an effect does.
+#
+# **What cancelling the scale does not buy.** It removes one known bias and does not make the
+# test calibrated. A permutation test is valid when the permuted labels are exchangeable under
+# the null; a treatment that persistent confounders predict is not, because the shuffle breaks
+# the confounding along with the effect. An estimate that is itself biased then sits far from
+# its own permutation null and the test reports that distance. Measured on twelve synthetic
+# panels with a true effect of exactly zero, the studentized comparison still rejects at the
+# conventional five percent level on five of the twelve (ml4t/agent-workspace#1120). The sweep
+# below compares block lengths against a shuffle; it does not certify a significance level.
 
 # %%
 block_sweep_rows = []
