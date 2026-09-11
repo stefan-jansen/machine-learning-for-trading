@@ -137,6 +137,7 @@ the three regime labels, the separate-call wording, the holdout label, and the R
 
 ```bash
 uv run python - <<'PY'
+import re
 from pathlib import Path
 
 from research.mnq_strategy.config import StrategyConfig
@@ -164,9 +165,21 @@ for phrase in required_report_phrases:
     assert phrase in report, phrase
 assert 'research/reports/mnq-baseline-validation.md' in readme
 assert '**NOT CLEARED**' in readme
-assert StrategyConfig().config_hash in report
+actual_hash = StrategyConfig().config_hash
+hash_lines = [
+    line
+    for line in report.splitlines()
+    if 'configuration hash' in line.lower() or 'configuration sha-256' in line.lower()
+]
+hash_occurrences = []
+for line in hash_lines:
+    tokens = re.findall(r'`([^`]+)`', line)
+    assert len(tokens) == 1, line
+    hash_occurrences.extend(tokens)
+assert len(hash_occurrences) == 3, hash_occurrences
+assert all(value == actual_hash for value in hash_occurrences), hash_occurrences
 assert 'separate one-window' in process
-print(f'report consistency: PASS ({len(required_report_phrases)} required phrases; hash/link/call checks passed)')
+print(f'report consistency: PASS ({len(required_report_phrases)} required phrases; {len(hash_occurrences)}/{len(hash_occurrences)} hashes matched; link/call checks passed)')
 PY
 ```
 
@@ -217,4 +230,22 @@ Post-fix checks:
 - `uv run python scripts/verify_installation.py`: required checks passed, `149/155`; CUDA was
   skipped on the CPU-only macOS host and five optional Docker-only packages remained absent.
 - The exact report-consistency command above: `PASS`.
+- `git diff --check`: completed without whitespace errors.
+
+## Final review fix: configuration hash evidence
+
+The final review correction was applied only to the two permitted files:
+
+- corrected the truncated November holdout configuration SHA-256 so all three report occurrences
+  equal `StrategyConfig().config_hash` exactly;
+- strengthened the recorded report-consistency command to extract every backtick-delimited
+  configuration-hash occurrence, require exactly three occurrences, and compare every value to the
+  active `StrategyConfig().config_hash` rather than checking only for one valid hash.
+
+Post-fix checks:
+
+- the exact report-consistency command above: `PASS` with `3/3 hashes matched`;
+- `uv run pytest tests/research -q`: `140 passed`, `0 failed`;
+- `uv run python scripts/verify_installation.py`: required checks passed, `149/155`; CUDA was
+  skipped on the CPU-only macOS host and five optional Docker-only packages remained absent;
 - `git diff --check`: completed without whitespace errors.

@@ -166,7 +166,7 @@ holdout from `2024-11-01` through `2024-11-30`.
 | Average R | `0.05` |
 | Per-setup `10am` | 1 trade; `-$36.00`; `0.0%` wins; `0.05` average R |
 | `lookahead_check` | `True` |
-| Configuration hash | `95524d8d563c8c03cf966112a4f10e3d9d5fbbe078fbc20de9b4c597443daf` |
+| Configuration hash | `95524d8d563c8c03cf966112a4f10e3d9d5fbdfbe078fbc20de9b4c597443daf` |
 
 The holdout includes modeled costs and drawdown as required by the extension gate. Its negative
 synthetic result reinforces that the fixture is a mechanics sample and cannot support a
