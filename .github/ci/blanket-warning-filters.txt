@@ -42,7 +42,6 @@
 03_market_microstructure/17_databento_bar_sampling.py
 03_market_microstructure/18_algoseek_jump_detection.py
 07_defining_the_learning_task/_benchmark_utils.py
-08_financial_features/07_event_studies.py
 08_financial_features/case_study_feature_summary.py
 16_strategy_simulation/01_backtest_first_principles.py
 16_strategy_simulation/02_futures_backtesting.py

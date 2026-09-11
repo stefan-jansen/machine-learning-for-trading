@@ -53,7 +53,7 @@
 # All examples use **real ETF data**.
 
 # %%
-"""Event Studies — measure abnormal returns around signal triggers and macro announcements."""
+"""Event Studies: abnormal returns around signal triggers and macro announcements."""
 
 from __future__ import annotations
 
@@ -66,20 +66,24 @@ import polars as pl
 from scipy import stats
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # importing utils.style activates the ml4t Plotly template
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 START_DATE = "2018-01-01"
 END_DATE = "2024-01-01"
+# The two-sided normal critical value the confidence bands, the bar shading and the
+# significance verdicts all read. Declared once so a reader changing it changes all three.
+Z_CRIT = 1.96
 SEED = 42
 
 # %%
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## 1. Data Loading
+# ## Data Loading
 #
 # We use ETF data to demonstrate event studies. Events will be generated from
 # momentum breakouts (trading signal) as a validation example.
@@ -127,7 +131,7 @@ benchmark_returns = (
 print(f"Benchmark: {len(benchmark_returns):,} days")
 
 # %% [markdown]
-# ## 2. Generate Events
+# ## Generate Events
 #
 # For demonstration, we generate events from **momentum breakouts** (new 20-day highs).
 # In practice, events could be:
@@ -198,7 +202,7 @@ print("\nEvents by symbol:")
 events_df.group_by("symbol").len().sort("symbol")
 
 # %% [markdown]
-# ## 3. Event Study: Manual Implementation
+# ## Event Study: Manual Implementation
 #
 # We align every symbol and the benchmark on a single shared date index (a
 # wide-format returns table) so that event windows are located by integer
@@ -464,7 +468,7 @@ if len(result["event_cars"]) > 0:
     print(f"  Std CAR: {np.std(cars) * 100:.2f}%")
 
 # %% [markdown]
-# ## 4. Visualize CAAR with Confidence Bands
+# ## Visualize CAAR with Confidence Bands
 #
 # The variance of the CAAR is the **cumulative sum** of the daily AAR variances,
 # not a rolling calculation - abnormal returns accumulate day by day, so their
@@ -485,8 +489,8 @@ if len(result["daily_aar"]) > 0:
     caar_se = daily_aar["caar_se"].to_numpy() * 100
 
     # 95% confidence band (Var(CAAR_t) = cumulative sum of daily AAR variances)
-    upper = caar + 1.96 * caar_se
-    lower = caar - 1.96 * caar_se
+    upper = caar + Z_CRIT * caar_se
+    lower = caar - Z_CRIT * caar_se
 
     fig.add_trace(
         go.Scatter(
@@ -521,20 +525,47 @@ if len(result["daily_aar"]) > 0:
     fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
 
     fig.update_layout(
-        title="Momentum breakouts earn abnormal return by the event day, then fade",
+        title="Cumulative average abnormal return around the event, with a 95% band",
         xaxis_title="Trading days relative to event",
         yaxis_title="Cumulative average abnormal return (%)",
         height=500,
     )
 
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "A line chart of cumulative average abnormal return, in percent, against trading "
+            "days relative to the event, running from five days before to ten days after. A "
+            "grey band marks the ninety-five percent confidence interval and an amber "
+            "vertical line labelled Event day marks day zero. The line starts at zero five "
+            "days before, climbs steadily through the pre-event days, and rises most "
+            "steeply between the day before and the event day itself, where it reaches its "
+            "highest level. After the event it is flat to slightly declining for the rest "
+            "of the window, ending a little below its peak. The confidence band is narrow "
+            "before the event and widens steadily after it, with its lower edge "
+            "coming closer to zero at the right without reaching it."
+        ),
+    )
 
 # %% [markdown]
+# Two features of this curve are worth separating before reading it as a result.
+#
+# The pre-event rise is not evidence of anything predictive. The event is *defined* by a
+# momentum breakout, so the days leading up to it are days on which the price rose by
+# construction; a cumulative abnormal return that climbs from day minus five to day zero
+# is that definition showing up in the chart. The quantity to read is what happens after
+# day zero, because only that part was unknown at the moment the signal fired.
+#
+# What happens after day zero is a flat to gently declining line inside a band that widens
+# with every additional day. Widening is mechanical, since each day adds variance to a
+# cumulative sum, and it is the reason a CAAR window has to be fixed in advance: extending
+# it until the band excludes zero is a search, and the band was chosen to make that easy.
+#
 # ### Daily abnormal returns
 #
 # Decomposing the CAAR into its per-day contributions shows *where* the abnormal
-# return is earned. Bars significant at the 5% level (|t| > 1.96) are drawn in the
-# primary color; insignificant days are muted; the event day is highlighted.
+# return is earned. Bars whose t-statistic clears `Z_CRIT` are drawn in the primary
+# colour, the rest are muted, and the event day is highlighted whatever its significance.
 
 # %%
 if len(result["daily_aar"]) > 0:
@@ -546,7 +577,9 @@ if len(result["daily_aar"]) > 0:
 
     # Color by significance; highlight the event day
     bar_colors = [
-        COLORS["amber"] if d == 0 else (COLORS["blue"] if abs(t) > 1.96 else COLORS["silver_muted"])
+        COLORS["amber"]
+        if d == 0
+        else (COLORS["blue"] if abs(t) > Z_CRIT else COLORS["silver_muted"])
         for d, t in zip(days, t_stats, strict=True)
     ]
 
@@ -556,13 +589,26 @@ if len(result["daily_aar"]) > 0:
     fig.add_vline(x=0, line_dash="dash", line_color=COLORS["amber"])
 
     fig.update_layout(
-        title="The abnormal return is earned on the breakout day; other days are noise",
+        title="Average abnormal return by day, shaded by significance",
         xaxis_title="Trading days relative to event",
         yaxis_title="Average abnormal return (%)",
         height=400,
     )
 
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "A bar chart of average abnormal return in percent by trading day relative to the "
+            "event, from five days before to ten days after, against a dashed zero line. "
+            "Bars are shaded by significance: those whose t-statistic clears the critical "
+            "value are dark, the rest are pale grey, and the event-day bar is amber. The "
+            "amber bar at day zero is by far the tallest, several times the height of any "
+            "other. Two pre-event bars, three days and one day before, are dark and "
+            "positive, so they clear the threshold too. The remaining bars are small and "
+            "pale, scattered on both sides of zero, with the post-event days slightly more "
+            "often negative than positive."
+        ),
+    )
 
 # %% [markdown]
 # ## 4b. Library Alternative: EventStudyAnalysis
@@ -612,7 +658,19 @@ lib_analysis = EventStudyAnalysis(
     benchmark=lib_benchmark,
     config=config,
 )
-lib_result = lib_analysis.run()
+# The library warns when it drops events it cannot fit. That is a fact about this
+# analysis rather than a problem with it, so catch the warnings and report them as part of
+# the output; a reader needs to know how many events the numbers below actually rest on.
+with warnings.catch_warnings(record=True) as _caught:
+    warnings.simplefilter("always")
+    lib_result = lib_analysis.run()
+
+_skips = [str(w.message) for w in _caught if "Skipped" in str(w.message)]
+print(f"events supplied: {len(lib_events)}")
+for _msg in _skips:
+    print(f"  {_msg}")
+if not _skips:
+    print("  none skipped")
 
 # %%
 # Compare results
@@ -640,7 +698,7 @@ print(f"Significant at 5%: {'Yes' if lib_result.p_value < 0.05 else 'No'}")
 # | Event clustering handling | No | Yes |
 
 # %% [markdown]
-# ## 5. CAR Distribution
+# ## CAR Distribution
 #
 # Examining the distribution of individual event CARs reveals whether the
 # aggregate effect is driven by many small effects or few large ones.
@@ -648,6 +706,15 @@ print(f"Significant at 5%: {'Yes' if lib_result.p_value < 0.05 else 'No'}")
 # %%
 if len(result["event_cars"]) > 0:
     cars = result["event_cars"]["car"].to_numpy() * 100
+
+    # The paragraph under this figure turns on a mean-median comparison and on whether the
+    # distribution is skewed, so compute both rather than inviting the reader to eyeball
+    # them off a histogram.
+    print(f"cumulative abnormal return over the event window, across {len(cars)} events:")
+    print(f"  mean   {cars.mean():+.2f}%")
+    print(f"  median {np.median(cars):+.2f}%")
+    print(f"  skewness {float(stats.skew(cars)):+.2f}")
+    print(f"  share positive {float((cars > 0).mean()):.1%}")
 
     fig = go.Figure()
 
@@ -677,13 +744,25 @@ if len(result["event_cars"]) > 0:
     )
 
     fig.update_layout(
-        title="Breakout CARs skew positive, with a mean of +1.1% over the 16-day window",
+        title="Cumulative abnormal return per event, with zero and mean marked",
         xaxis_title="Cumulative abnormal return over event window (%)",
         yaxis_title="Number of events",
         height=400,
     )
 
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "A histogram of cumulative abnormal return per event, in percent, with the count "
+            "of events on the vertical axis. The bulk of the distribution sits between "
+            "about minus five and plus ten percent, with a tall bar just above zero and a "
+            "roughly symmetric fall-off on both sides; a few isolated events sit far out "
+            "in each tail. Two vertical dashed lines cross the distribution near its "
+            "centre, one labelled Zero and one labelled with the mean, the mean line "
+            "sitting a little to the right of zero. The gap between them is small relative "
+            "to the width of the distribution."
+        ),
+    )
 
     # Statistical test: Mean CAR = 0
     t_stat, p_value = stats.ttest_1samp(cars, 0)
@@ -696,15 +775,23 @@ if len(result["event_cars"]) > 0:
     print(f"  Significant at 5%: {'Yes' if p_value < 0.05 else 'No'}")
 
 # %% [markdown]
-# **Interpretation**: A right-skewed CAR distribution with a statistically significant
-# positive mean suggests that momentum breakouts are followed by genuine abnormal
-# returns -- not just a few outlier events. If the distribution were bimodal or
-# heavily skewed by a handful of events, the aggregate CAAR would be unreliable
-# for strategy design. The mean/median comparison also matters: if the median is
-# near zero but the mean is positive, a few large events drive the result.
+# **Interpretation**: read the four numbers printed above the figure together. The
+# question they answer is whether the aggregate effect is a property of the typical event
+# or the work of a few large ones, and the mean alone cannot tell you.
+#
+# A mean and a median close to each other, with a skewness near zero and a share of
+# positive events meaningfully above half, describe an effect spread across the sample:
+# the aggregate CAAR then says something about what to expect from the next breakout. A
+# mean well above a median near zero would say the opposite, that a handful of events
+# carry the average, and an aggregate built that way is not something to size a position
+# against however significant its t-statistic looks.
+#
+# The histogram shows the same thing in shape rather than in numbers, and the two dashed
+# lines are there so the gap between zero and the mean can be read against the width of
+# the distribution, which is the comparison that matters.
 
 # %% [markdown]
-# ## 6. Event Study Heatmap
+# ## Event Study Heatmap
 #
 # Visualize abnormal returns across events and days to identify patterns.
 
@@ -752,16 +839,28 @@ if len(result["abnormal_returns"]) > 0:
     fig.add_vline(x=0, line_dash="dash", line_color=COLORS["amber"], line_width=2)
 
     fig.update_layout(
-        title="Event-day abnormal returns stand out across individual breakout events",
+        title="Abnormal return by event and day, one row per event",
         xaxis_title="Trading days relative to event",
         yaxis_title="Event (date + symbol)",
         height=600,
     )
 
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "A heatmap with one row per event, labelled by date and ticker down the left "
+            "edge, and trading days relative to the event across the bottom from five "
+            "before to ten after. Cells are shaded by abnormal return on a diverging "
+            "scale, green for positive and red for negative, with a colour bar at the "
+            "right. A dashed amber vertical line marks the event day. Most of the grid is "
+            "pale, including the event-day column, where only one or two rows show a "
+            "strong green; the largest individual cells, in both directions, are scattered "
+            "through the pre- and post-event days rather than concentrated at day zero."
+        ),
+    )
 
 # %% [markdown]
-# ## 7. Caveats and Best Practices
+# ## Caveats and Best Practices
 #
 # ### Event Clustering
 #
@@ -788,7 +887,7 @@ if len(result["abnormal_returns"]) > 0:
 # - Analyze subsamples
 
 # %% [markdown]
-# ## 8. Using Event Studies for Signal Validation
+# ## Using Event Studies for Signal Validation
 #
 # Event studies validate trading signals by testing whether signal-generated
 # "events" produce abnormal returns.
@@ -858,9 +957,11 @@ def validate_signal_with_event_study(
     return results
 
 
+# %% [markdown]
+# A worked example: validating a momentum signal by treating each of its triggers as an
+# event and asking whether abnormal returns follow.
+
 # %%
-# Example: Validate momentum signal
-# Create momentum signal
 prices_wide = (
     etf_filtered.select(["timestamp", "symbol", "close"])
     .pivot(on="symbol", index="timestamp", values="close")
@@ -900,7 +1001,7 @@ if "long" in validation and len(validation["long"]["daily_aar"]) > 0:
     final_t = aar_long["caar_t_stat"].to_numpy()[-1]
     print(f"  Final CAAR: {final_caar:.2f}%")
     print(f"  CAAR t-stat: {final_t:.2f}")
-    print(f"  Significant: {'Yes' if abs(final_t) > 1.96 else 'No'}")
+    print(f"  Significant: {'Yes' if abs(final_t) > Z_CRIT else 'No'}")
 
 if "short" in validation and len(validation["short"]["daily_aar"]) > 0:
     print("\nShort Signal Validation:")
@@ -909,10 +1010,10 @@ if "short" in validation and len(validation["short"]["daily_aar"]) > 0:
     final_t = aar_short["caar_t_stat"].to_numpy()[-1]
     print(f"  Final CAAR: {final_caar:.2f}%")
     print(f"  CAAR t-stat: {final_t:.2f}")
-    print(f"  Significant: {'Yes' if abs(final_t) > 1.96 else 'No'}")
+    print(f"  Significant: {'Yes' if abs(final_t) > Z_CRIT else 'No'}")
 
 # %% [markdown]
-# ## 9. Summary
+# ## Summary
 #
 # ### Methodology
 #
@@ -965,4 +1066,4 @@ if "short" in validation and len(validation["short"]["daily_aar"]) > 0:
 #
 # ### Next Notebook
 #
-# - `case_study_feature_summary` — cross-case-study feature inventory
+# - `case_study_feature_summary`: cross-case-study feature inventory
