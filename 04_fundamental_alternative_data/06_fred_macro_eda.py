@@ -193,8 +193,9 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Line chart of the two-year and ten-year Treasury yields from 2020 onward. Both begin "
-    "between one and two percent, fall almost to zero during 2020 and stay there through 2021, "
-    "then rise steeply through 2022 and 2023 to around five percent before easing. The "
+    "between one and two percent and fall almost to zero during 2020; the two-year stays there "
+    "through 2021 while the ten-year recovers to between one and two percent. Both then rise "
+    "steeply through 2022 and 2023 to around five percent before easing. The "
     "two-year rises further and faster than the ten-year and crosses above it in 2022, staying "
     "above for most of the rest of the window. Two annotations mark the first and last policy "
     "increases of the cycle.",
@@ -427,7 +428,10 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of the ten-year minus two-year Treasury spread from 2020, crossing below the zero line in mid-2022 and staying below it into 2024, with the negative region shaded.",
+    "Line chart of the ten-year minus two-year Treasury spread from 2020. It is positive and "
+    "rising into early 2021, falls through 2021, crosses below zero in mid-2022, stays negative "
+    "until late 2024 apart from brief excursions back above the line, and is positive again "
+    "through 2025. The negative region is shaded.",
 )
 
 # %% [markdown]
@@ -480,16 +484,24 @@ fig = px.bar(
     },
     log_x=True,
 )
-fig.update_layout(height=620, yaxis=dict(categoryorder="total ascending"))
+fig.update_layout(
+    height=620,
+    yaxis=dict(categoryorder="total ascending"),
+    margin=dict(l=150),  # `YIELD_CURVE_SLOPE` and `YIELD_CURVE_5_10` clip against the default
+)
 show_plotly_with_alt(
     fig,
-    "Horizontal bar chart, on a logarithmic axis, of how often each series changes value per year, coloured by its published frequency. The bars separate into distinct groups matching daily, weekly, monthly and quarterly publication.",
+    "Horizontal bar chart, on a logarithmic axis, of how often each series changes value per "
+    "year, coloured by published frequency across five categories. The bars fall into groups: "
+    "the daily and derived-daily series between about one hundred and two hundred and fifty "
+    "changes a year, the two weekly series near fifty, the monthly series between eight and "
+    "thirteen, and the two quarterly series at four.",
 )
 
 # %% [markdown]
 # The bars separate into groups that match the metadata's `native_frequency` without being told
-# it: the business-daily series in the hundreds of changes a year, the weekly one near fifty, the
-# monthly ones near ten and the quarterly ones near four. Reading the same panel by row count
+# it: the business-daily series in the hundreds of changes a year, the two weekly ones near fifty,
+# the monthly ones near ten and the quarterly ones near four. Reading the same panel by row count
 # would have said all of them were daily.
 #
 # The unemployment rate is the case where the lower bound bites, and it is worth seeing rather
@@ -610,11 +622,19 @@ fig.update_yaxes(title_text="Index", row=3, col=1)
 fig.update_layout(
     height=650,
     title_text="Yields, curve spread and volatility on one time axis",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="center", x=0.5),
+    # The legend sits above the plotting area, between the figure title and the first subplot
+    # title, and the three crowd each other at the default top margin.
+    margin=dict(t=130),
 )
 show_plotly_with_alt(
     fig,
-    "Three stacked panels sharing a time axis from 2020: Treasury yields, the ten-year minus two-year spread with a zero line, and the VIX with a rule at twenty.",
+    "Three stacked panels sharing one time axis from 2020: Treasury yields, the ten-year minus "
+    "two-year spread with a dashed zero line, and the VIX with a dashed rule at twenty. The "
+    "yields rise together from near zero in 2021 to around five percent by 2023; the spread "
+    "falls across the same stretch and is below its zero line from mid-2022 to late 2024; the "
+    "VIX has its tallest spike at the left edge in 2020 and sits mostly below its rule "
+    "thereafter.",
 )
 
 # %% [markdown]

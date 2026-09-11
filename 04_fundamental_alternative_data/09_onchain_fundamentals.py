@@ -139,24 +139,55 @@ total_tvl = (
 print(f"Observations: {len(total_tvl):,}")
 print(f"History: {total_tvl['timestamp'].min()} to {total_tvl['timestamp'].max()}")
 print(f"Highest level reached: ${total_tvl['tvl_bn'].max():.0f}bn")
-total_tvl.tail(3)
+
+# The four landmarks the figure below turns on, so the description under it argues from
+# numbers rather than from the shape of a line.
+_peak = total_tvl.filter(pl.col("tvl_bn") == pl.col("tvl_bn").max())
+_peak_bn, _peak_at = _peak["tvl_bn"][0], _peak["timestamp"][0]
+_post = total_tvl.filter(pl.col("timestamp") > _peak_at)
+_trough = _post.filter(pl.col("tvl_bn") == pl.col("tvl_bn").min())
+_rec = _post.filter(pl.col("timestamp") > _trough["timestamp"][0])
+_rec_high = _rec.filter(pl.col("tvl_bn") == _rec["tvl_bn"].max())
+for _label, _row in (
+    ("peak", _peak),
+    ("post-peak trough", _trough),
+    ("recovery high", _rec_high),
+):
+    print(
+        f"  {_label:<18} ${_row['tvl_bn'][0]:>6.1f}bn on {_row['timestamp'][0]}"
+        f"   {_row['tvl_bn'][0] / _peak_bn:>5.0%} of peak"
+    )
+print(
+    f"  {'latest':<18} ${total_tvl['tvl_bn'][-1]:>6.1f}bn on {total_tvl['timestamp'][-1]}"
+    f"   {total_tvl['tvl_bn'][-1] / _peak_bn:>5.0%} of peak"
+)
 
 # %%
 fig = px.line(
     total_tvl.to_pandas(),
     x="timestamp",
     y="tvl_bn",
-    title="DeFi's capital base grew, collapsed, and rebuilt over eight years",
+    title="Total value locked across DeFi, full history",
     labels={"timestamp": "Date", "tvl_bn": "Total value locked (USD billions)"},
     color_discrete_sequence=[COLORS["blue"]],
 )
 fig.update_layout(height=380)
 show_plotly_with_alt(
     fig,
-    "Line chart of total value locked across all DeFi from 2017 to 2026, near zero until 2020, "
-    "rising steeply to a peak at the end of 2021, falling by about four fifths into late 2023, "
-    "and recovering to roughly half the peak since.",
+    "Line chart of total value locked across DeFi, in billions of dollars, from late 2017 to "
+    "2026. The series is indistinguishable from zero until the middle of 2020, then rises "
+    "steeply through 2021 to its highest point at the end of that year. It falls by about "
+    "four fifths over the next two years to a low in late 2023, climbs back through 2024 and "
+    "2025 to a second peak nearly level with the first, and then falls by roughly half again, "
+    "ending the chart well below both peaks and far above the trough.",
 )
+
+# %% [markdown]
+# The landmarks printed above are the figure's shape in numbers, and the third one is what a
+# description written from the line alone tends to miss. The series does not fall from its 2021
+# peak and stay down: it climbs back to nearly the same level three years later before falling
+# by about half again. The level at the right edge sits below two highs rather than recovering
+# from one, and the share-of-peak column says how far below each.
 
 # %% [markdown]
 # ### Which chains hold it
@@ -191,6 +222,13 @@ composition = pl.concat(
         ),
     ]
 ).with_columns(share=pl.col("tvl_bn") / recent_total)
+
+# How concentrated the total is, ranked across every bar including the residual, so the claim
+# under the figure is read off a number rather than off the length of a rectangle.
+_ranked = composition.sort("share", descending=True)
+_top = _ranked.row(0, named=True)
+print(f"Largest single bar: {_top['chain']}, {_top['share']:.1%} of the total")
+print(f"Every other bar combined: {1 - _top['share']:.1%}")
 composition
 
 # %%
@@ -199,8 +237,8 @@ fig = px.bar(
     x="share",
     y="chain",
     orientation="h",
-    title="One chain holds more than all the others together",
-    labels={"share": f"Share of total value locked, {RECENT_DAYS}-day average", "chain": ""},
+    title=f"Share of total value locked by chain, {RECENT_DAYS}-day average",
+    labels={"share": "Share of total value locked", "chain": ""},
     color_discrete_sequence=[COLORS["blue"]],
 )
 fig.update_layout(height=320, xaxis_tickformat=".0%", yaxis=dict(categoryorder="total ascending"))
@@ -210,6 +248,12 @@ show_plotly_with_alt(
     "days. The largest bar is longer than the other four combined, and the residual bar for all "
     "remaining chains is the second longest.",
 )
+
+# %% [markdown]
+# Over the window printed above, one chain holds more than every other bar combined, and that
+# includes the residual standing for the hundreds of chains not loaded here. A "DeFi total" is
+# mostly one chain's series with a minority of others averaged into it, which is worth knowing
+# before any result about the total is read as a result about the sector.
 
 # %% [markdown]
 # ## 3. The price series, and what bounds the study
@@ -247,6 +291,10 @@ print(
 panel.tail(3)
 
 # %%
+_level_corr = float(panel.select(pl.corr("tvl_bn", "eth_price")).item())
+print(f"Pearson correlation of the two levels over the joined window: {_level_corr:.2f}")
+
+# %%
 fig = make_subplots(
     rows=2,
     cols=1,
@@ -275,17 +323,23 @@ fig.add_trace(
 )
 fig.update_yaxes(title_text="USD billions", row=1, col=1)
 fig.update_yaxes(title_text="USD", row=2, col=1)
-fig.update_layout(height=560, showlegend=False, title="TVL and the ether price move together")
+fig.update_layout(
+    height=560,
+    showlegend=False,
+    title="Total value locked and the ether price over the joined window",
+)
 show_plotly_with_alt(
     fig,
-    "Two stacked panels over the joined one-year window: total value locked and the ether price. "
-    "The two lines rise and fall at the same times, which is what a dollar-denominated stock of "
-    "crypto assets does.",
+    "Two stacked panels sharing one date axis over the joined one-year window: total value "
+    "locked in billions of dollars above, the ether price in dollars below. Both rise over the "
+    "first months of the window to highs in the second half of 2025, the price peaking a few "
+    "weeks before the level does, and both fall through the winter into 2026.",
 )
 
 # %% [markdown]
-# The two lines moving together is the first thing to be careful about. TVL is a dollar value of
-# crypto holdings, so it mechanically follows the price of those holdings. Any test of whether
+# The correlation printed above puts a number on the two lines turning together, and that is the
+# first thing to be careful about. TVL is a dollar value of crypto holdings, so it mechanically
+# follows the price of those holdings. Any test of whether
 # TVL predicts the price has to work with a quantity that is not simply the price again, which
 # is why the features below are growth rates and z-scores rather than levels.
 
@@ -417,7 +471,7 @@ fig = px.bar(
     x="tvl_regime",
     y="mean_forward_return",
     error_y="standard_error",
-    title="The error bars are wider than the differences between the regimes",
+    title="Mean forward return by TVL regime, with Newey-West standard errors",
     labels={
         "tvl_regime": f"TVL regime, {ZSCORE_DAYS}-day z-score",
         "mean_forward_return": f"Mean {FORWARD_DAYS}-day forward return",
@@ -427,9 +481,10 @@ fig = px.bar(
 fig.update_layout(height=400, yaxis_tickformat=".0%")
 show_plotly_with_alt(
     fig,
-    "Bar chart of the mean forward ether return in each of the three TVL regimes, with "
-    "Newey-West standard errors as error bars. The two extreme regimes have error bars spanning "
-    "zero; the middle regime's mean is the furthest from zero of the three.",
+    "Bar chart of the mean thirty-day forward ether return in each of the three TVL regimes, "
+    "with Newey-West standard errors as error bars. The contraction bar is slightly positive "
+    "and the expansion bar slightly negative, and both error bars cross zero. The neutral bar "
+    "is far below both, near minus sixteen percent, and its error bar does not reach zero.",
 )
 
 # %% [markdown]
@@ -442,7 +497,7 @@ show_plotly_with_alt(
 # this section set out to test - that TVL expansion precedes higher returns and contraction lower
 # ones - is not supported by these estimates.
 #
-# What the estimates do show puts the mean furthest from zero on the middle bucket, the one
+# What the estimates do show puts the mean furthest from zero on the neutral bucket, the one
 # defined as carrying no signal, and it is a negative mean. That is not what any monotonic
 # relationship in the z-score would produce, in either direction. Noise
 # partitioned three ways is one explanation and this sample cannot separate it from another; the
