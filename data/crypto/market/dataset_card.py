@@ -363,8 +363,12 @@ for dataset, filename in [
             print(f"Memory: {mem:.1f} MB")
         print()
     else:
-        print(f"Profile not found: {profile_path}")
-        print(f"Generate with: python generate_profiles.py --dataset crypto_{dataset.lower()}\n")
+        print(f"No profile at {profile_path}")
+        print(
+            "A profile is written by the loader that builds the dataset, through\n"
+            "ml4t.data.storage.data_profile. There is no separate profile-generating\n"
+            "script; rebuild the dataset and its loader writes one.\n"
+        )
 
 # %% [markdown]
 # ## 6. Loader Options

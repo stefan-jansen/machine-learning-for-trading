@@ -305,20 +305,24 @@ if all(c in df.columns for c in ["dgs10", "dgs2"]):
 # ## 5. Data Profile
 
 # %%
+from ml4t.data.storage.data_profile import load_profile
+
 from utils import ML4T_DATA_PATH
 
-# Check for existing profile
-profile_path = ML4T_DATA_PATH / "macro" / "profile.json"
+profile_path = ML4T_DATA_PATH / "macro" / "fred_macro_profile.json"
+profile = load_profile(profile_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== Macro Profile ===")
-    print(f"Rows: {profile['rows']:,}")
-    print(f"Columns: {profile['columns']}")
-    print(f"Memory: {profile['memory_mb']:.1f} MB")
+if profile is None:
+    print(f"No profile at {profile_path}")
+    print(
+        "A profile is written by the loader that builds the dataset, through\n"
+        "ml4t.data.storage.data_profile. There is no separate profile-generating\n"
+        "script; rebuild the dataset and its loader writes one."
+    )
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset macro")
+    print("=== Macro Profile ===")
+    print(f"Written by {profile.source}")
+    print(profile.summary())
 
 # %% [markdown]
 # ## 6. Loader Options

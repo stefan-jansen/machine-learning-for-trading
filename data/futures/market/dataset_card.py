@@ -381,20 +381,24 @@ print(f"Date range: {hourly['timestamp'].min()} to {hourly['timestamp'].max()}")
 # Profiles document the dataset structure, statistics, and quality metrics.
 
 # %%
+from ml4t.data.storage.data_profile import load_profile
+
 from utils import ML4T_DATA_PATH
 
-# Check for existing profile
-profile_path = ML4T_DATA_PATH / "futures" / "market" / "profile.json"
+profile_path = ML4T_DATA_PATH / "futures" / "market" / "continuous" / "hourly" / "_profile.json"
+profile = load_profile(profile_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== Futures Profile ===")
-    print(f"Dataset: {profile['dataset']}")
-    print(f"Rows: {profile['rows']:,}")
-    print(f"Memory: {profile['memory_mb']:.1f} MB")
+if profile is None:
+    print(f"No profile at {profile_path}")
+    print(
+        "A profile is written by the loader that builds the dataset, through\n"
+        "ml4t.data.storage.data_profile. There is no separate profile-generating\n"
+        "script; rebuild the dataset and its loader writes one."
+    )
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset cme_futures")
+    print("=== Futures Profile ===")
+    print(f"Written by {profile.source}")
+    print(profile.summary())
 
 # %% [markdown]
 # ## 6. Loader Options

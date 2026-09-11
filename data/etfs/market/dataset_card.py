@@ -252,35 +252,24 @@ category_summary
 # They are stored alongside the data files.
 
 # %%
+from ml4t.data.storage.data_profile import load_profile
+
 from utils import ML4T_DATA_PATH
 
-# Check for existing profile
-profile_path = ML4T_DATA_PATH / "etfs" / "market" / "profile.json"
+profile_path = ML4T_DATA_PATH / "etfs" / "market" / "etf_universe_profile.json"
+profile = load_profile(profile_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== ETF Universe Profile ===")
-    print(f"Dataset: {profile['dataset']}")
-    print(f"Rows: {profile['rows']:,}")
-    print(f"Columns: {profile['columns']}")
-    print(f"Memory: {profile['memory_mb']:.1f} MB")
-    print("\nSchema:")
-    for col, dtype in profile["schema"].items():
-        print(f"  {col}: {dtype}")
-    print(f"\nDate range: {profile['column_stats']['timestamp']['min']}")
-    print(f"         to {profile['column_stats']['timestamp']['max']}")
+if profile is None:
+    print(f"No profile at {profile_path}")
+    print(
+        "A profile is written by the loader that builds the dataset, through\n"
+        "ml4t.data.storage.data_profile. There is no separate profile-generating\n"
+        "script; rebuild the dataset and its loader writes one."
+    )
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset etfs")
-
-# %% [markdown]
-# ### Generate/Refresh Profile
-#
-# To regenerate the profile after downloading new data:
-#
-# ```bash
-# python generate_profiles.py --dataset etfs --force
-# ```
+    print("=== ETF Universe Profile ===")
+    print(f"Written by {profile.source}")
+    print(profile.summary())
 
 # %% [markdown]
 # ## 6. Loader Options

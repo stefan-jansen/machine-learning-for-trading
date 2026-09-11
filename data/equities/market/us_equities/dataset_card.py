@@ -249,7 +249,7 @@ top_volume.head(20)
 from utils import ML4T_DATA_PATH
 
 # Check for existing profile
-profile_path = ML4T_DATA_PATH / "equities" / "market" / "us_equities" / "us_equities_profile.json"
+profile_path = ML4T_DATA_PATH / "equities" / "market" / "us_equities_profile.json"
 
 if profile_path.exists():
     profile = json.loads(profile_path.read_text())
@@ -264,8 +264,12 @@ if profile_path.exists():
     if mem is not None:
         print(f"Memory: {mem:.1f} MB")
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset us_equities")
+    print(f"No profile at {profile_path}")
+    print(
+        "A profile is written by the loader that builds the dataset, through\n"
+        "ml4t.data.storage.data_profile. There is no separate profile-generating\n"
+        "script; rebuild the dataset and its loader writes one."
+    )
 
 # %% [markdown]
 # ## 6. Loader Options

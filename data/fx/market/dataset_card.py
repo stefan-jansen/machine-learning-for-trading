@@ -294,18 +294,12 @@ if profile_path.exists():
             print(f"\nDate range: {ts['min']}")
             print(f"         to {ts['max']}")
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset fx_pairs_4h")
-
-# %% [markdown]
-# ### Generate/Refresh Profile
-#
-# To regenerate the profile after downloading new data:
-#
-# ```bash
-# python generate_profiles.py --dataset fx_pairs_4h --force
-# python generate_profiles.py --dataset fx_pairs_daily --force
-# ```
+    print(f"No profile at {profile_path}")
+    print(
+        "A profile is written by the loader that builds the dataset, through\n"
+        "ml4t.data.storage.data_profile. There is no separate profile-generating\n"
+        "script; rebuild the dataset and its loader writes one."
+    )
 
 # %% [markdown]
 # ## 6. Loader Options
