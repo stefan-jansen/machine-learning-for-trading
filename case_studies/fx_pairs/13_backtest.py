@@ -64,6 +64,7 @@ from case_studies.research import (
     plan_backtests,
     population_supersedes,
     research_name,
+    reuse_disclosure,
     run_backtests,
     superseded_members,
 )
@@ -355,7 +356,7 @@ if set(backtest_rows.get_column("stage")) != {"signal"}:
 
 served = run_status.count("reused")
 print(
-    f"Equal-weight baselines: {len(backtests) - served} computed, {served} served from the registry, "
+    f"Equal-weight baselines: {reuse_disclosure(len(backtests) - served, served)}, "
     f"{len(backtests)} in the population"
 )
 

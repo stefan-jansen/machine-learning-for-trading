@@ -57,6 +57,7 @@ from case_studies.research import (
     population_supersedes,
     predictions_identity,
     published_population_names_at,
+    reuse_disclosure,
     sweep_plan_name,
 )
 from case_studies.utils.backtest_explorer import BacktestExplorer
@@ -540,10 +541,7 @@ for pred_hash, group in planned_by_prediction:
             print(f"  [{processed}/{total_backtests}] {rate:.1f} bt/s | failed: {failed}")
 
 elapsed = time.time() - t0
-print(
-    f"\nSweep complete: {completed} run in {elapsed:.0f}s "
-    f"({failed} failed, {skipped} already complete)"
-)
+print(f"\nSweep complete in {elapsed:.0f}s: {reuse_disclosure(completed, skipped, failed)}")
 
 # A failure here stops the notebook rather than being counted and printed. `require_complete`
 # below cannot be relied on to catch one: a member that failed because its registered artifact
