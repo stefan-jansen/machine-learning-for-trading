@@ -654,11 +654,21 @@ baseline_results = run_arms(pred_index, baseline_arms, "Pass 1 (baseline)")
 # whatever pass 1 had left to do: the whole pass on a first run, a fragment of it after an
 # interruption, and nothing at all on a re-run of a finished sweep, which would silently move
 # the selection or empty it. The registry holds every pass-1 cell either way.
-_cells = (
-    pl.DataFrame(baseline_results).select("prediction_hash", "backtest_hash").drop_nulls()
-    if baseline_results
-    else pl.DataFrame(schema={"prediction_hash": pl.String, "backtest_hash": pl.String})
-)
+#
+# Built from the two hash fields under an explicit schema rather than from the records
+# whole. `pl.DataFrame` infers a schema from the first 100 rows, the metric columns of a
+# skipped record are all null, and a run that skips its first hundred cells and then
+# computes one would hand a float to a column inferred as Null and fail at construction -
+# before the `.select` that discards those columns ever runs. Resuming a long sweep is
+# exactly the case that orders the records that way.
+_cells = pl.DataFrame(
+    [
+        {"prediction_hash": r["prediction_hash"], "backtest_hash": r["backtest_hash"]}
+        for r in baseline_results
+    ],
+    schema={"prediction_hash": pl.String, "backtest_hash": pl.String},
+    orient="row",
+).drop_nulls()
 pass2_index = pred_index.head(0)
 if mechanism_arms and not _cells.is_empty():
     _conn = sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db"))
