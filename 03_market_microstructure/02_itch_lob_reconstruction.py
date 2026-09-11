@@ -51,7 +51,7 @@
 #   algorithm).
 #
 # **Output**: per-second LOB snapshots saved to
-# `output/ch03/nasdaq_itch/order_book/{SYMBOL}/lob_snapshots.parquet`.
+# `03_market_microstructure/output/nasdaq_itch/order_book/{SYMBOL}/lob_snapshots.parquet`.
 
 # %% [markdown]
 # ## Setup

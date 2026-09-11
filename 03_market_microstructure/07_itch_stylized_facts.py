@@ -45,7 +45,7 @@
 # ## Prerequisites
 #
 # - The canonical enriched-trade parquet at
-#   `output/ch03/nasdaq_itch/trading_activity/trades.parquet` and the matching
+#   `03_market_microstructure/output/nasdaq_itch/trading_activity/trades.parquet` and the matching
 #   `trade_summary.parquet` (used for ticker selection and the liquidity-spectrum
 #   section); both are produced by `05_itch_trading_activity`.
 # - For the order-arrival panel, parsed ITCH `A`/`F`/`X` parquets at the

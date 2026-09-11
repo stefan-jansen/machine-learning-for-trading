@@ -46,7 +46,7 @@
 # - Parsed ITCH message parquets at `data/equities/market/microstructure/nasdaq_itch/messages/`
 #   (output of `01_itch_parser` or the Rust parser).
 # - Notebooks 06 and 07 read the canonical trade table this notebook writes
-#   under `output/ch03/nasdaq_itch/trading_activity/`.
+#   under `03_market_microstructure/output/nasdaq_itch/trading_activity/`.
 #
 # ---
 
@@ -195,7 +195,7 @@ if HAS_MESSAGE_DATA:
 #
 # This enables filtering trades by stock symbol and analyzing execution quality.
 #
-# The result is written to `output/ch03/nasdaq_itch/enriched/` and read by
+# The result is written to `03_market_microstructure/output/nasdaq_itch/enriched/` and read by
 # `04_itch_order_lifecycle_analysis` and `07_itch_stylized_facts`, so the join runs once
 # for the whole chapter rather than three times. It goes under the chapter's output
 # directory rather than beside the parsed messages because it is derived here, and the
