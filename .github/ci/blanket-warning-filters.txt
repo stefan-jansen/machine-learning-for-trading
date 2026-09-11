@@ -25,7 +25,6 @@
 # fx_pairs are stamped and wait for a re-execution, and theirs must not regenerate
 # features/model_based.parquet, whose sha256 keys every model fitted against it.
 
-07_defining_the_learning_task/_benchmark_utils.py
 16_strategy_simulation/01_backtest_first_principles.py
 16_strategy_simulation/02_futures_backtesting.py
 16_strategy_simulation/08_signal_method_comparison.py
