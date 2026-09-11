@@ -536,29 +536,36 @@
     N_TRIALS: 2
   timeout: 600
 12_gradient_boosting/07_hpo_comparison:
-  # No `gpu:`, because nothing here asks for a device: the source holds no occurrence of cuda,
-  # device_type, torch or gpu. It fits lightgbm, xgboost and catboost through optuna on whatever
-  # the machine has, and the flag it carried had no relation to why it is slow.
+  # Per-commit as of ml4t/agent-workspace#1101, which gave the searches a knob the notebook
+  # reads. It has none before that: the parameters cell declared `N_GRID_POINTS` and
+  # `N_OPTUNA_TRIALS`, the notebook read neither, and the cost came from `N_GRID = len(grid)`,
+  # derived rather than declared. `PARAM_GRID` is now the declared space and sets what both
+  # searches spend; `MAX_SYMBOLS` caps the universe each fit trains on, which is the reduction
+  # taken here because it leaves the comparison itself untouched.
   #
-  # It cannot be per-commit yet, and the reason is a defect in the notebook rather than a budget.
-  # Measured 2026-09-08 with the card hidden: 2,411s at its declared settings, and it did not
-  # finish. Its parameters cell declares `N_GRID_POINTS = 50` and `N_OPTUNA_TRIALS = 50` and the
-  # notebook reads neither - `pm_helpers.unusable_parameters` names both, "the notebook never
-  # reads it below the parameters cell". What it actually reads is `N_GRID = len(grid)` at line
-  # 200, derived rather than declared, plus `trial_budgets = [10, 25, 50, 75, N_GRID]` at 326,
-  # which runs five more studies. So there is no knob to turn from here: setting the two declared
-  # names reduces nothing, and a run at 6 and 6 took 617s and still timed out.
+  # No `gpu:` - nothing here asks for a device; the source holds no occurrence of cuda,
+  # device_type, torch or gpu. No `long_running:` either: that marker means ">10min even with
+  # reduced params" (tests/conftest.py:522) and this is 160s.
   #
-  # `long_running: true` was never what excluded it - no workflow deselects that marker, so the
-  # GPU flag was the whole of it, and removing the flag without this would turn the chapter job
-  # red. Per-commit coverage waits on ml4t/agent-workspace#1101 giving the search a knob the
-  # notebook reads.
-  long_running: true
-  tier: on_demand
-  timeout: 2400
-12_gradient_boosting/08_shap_analysis:
-  env:
+  # Measured 2026-09-11 at MAX_SYMBOLS: 10 against the test-data fixture, pinned to four cores:
+  # the whole notebook runs in 160s, and the 54-fit grid loop alone in 27.3s. The 600s per-cell
+  # budget is roughly four times the slowest cell.
+  #
+  # Do not re-time this at twenty-four threads on a loaded workstation. `evaluate_params` passes
+  # `n_jobs=-1`, which wins over the harness's OMP_NUM_THREADS cap (tests/pm_helpers.py:113), so
+  # every fit asks for every core; the same grid loop that takes 27.3s at four threads exceeded
+  # 900s in-notebook at twenty-four while two other chains held the machine. That is thread
+  # contention, not the search, and a timeout raised from such a run prices nothing.
+  parameters:
     MAX_SYMBOLS: 10
+  timeout: 600
+12_gradient_boosting/08_shap_analysis:
+  # No reduction, because this notebook has none to set. It declares `MAX_SYMBOLS` and calls
+  # `load_modeling_dataset("etfs", "fwd_ret_21d")` without it, so the name reaches nothing.
+  # The entry carried `MAX_SYMBOLS: 10` under an `env:` key, which `test_chapter_notebook`
+  # never passes on, so CI has always run this at the full universe inside this budget - the
+  # declaration was describing an intent, not a setting. Stating no reduction is the honest
+  # version of the same run. ml4t/agent-workspace#1129 adds the parameter to the notebook.
   timeout: 300
 12_gradient_boosting/09_xai_limitations:
   # MAX_SYMBOLS is stated because this notebook declares the parameter for the reduced run and

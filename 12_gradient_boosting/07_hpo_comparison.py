@@ -96,9 +96,32 @@ from utils.style import COLORS, show_with_alt
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+# %% [markdown]
+# ## Settings
+#
+# `PARAM_GRID` is the searched space and the only thing that sets what either search costs.
+# The grid is exhaustive, so its size is `len(ParameterGrid(PARAM_GRID))`, and section 5 gives
+# Optuna that same number of trials because equal budget is what the comparison holds fixed.
+# There is deliberately no separate trial count beside it: one would let a caller set a budget
+# that is not the grid's and break the comparison without saying so. Shrink the space and both
+# searches shrink with it.
+#
+# `TRIAL_BUDGETS` is the ladder for the overfitting sweep in section 8, which searches the
+# continuous space. The grid does not bound that space, so the ladder is declared rather than
+# derived from the grid's size.
+#
+# `MAX_SYMBOLS` caps the universe each fit trains on, and is what a reduced run sets. Zero is
+# the full universe.
+
 # %% tags=["parameters"]
-N_GRID_POINTS = 50
-N_OPTUNA_TRIALS = 50
+MAX_SYMBOLS = 0
+PARAM_GRID = {
+    "n_estimators": [50, 100, 200],
+    "learning_rate": [0.01, 0.05, 0.1],
+    "max_depth": [3, 5, 7],
+    "num_leaves": [15, 31],
+}
+TRIAL_BUDGETS = [10, 25, 50, 75]
 SEED = 42
 
 
@@ -109,7 +132,7 @@ set_global_seeds(SEED)
 # ## 2. Load Data
 
 # %%
-mds = load_modeling_dataset("etfs", "fwd_ret_21d")
+mds = load_modeling_dataset("etfs", "fwd_ret_21d", max_symbols=MAX_SYMBOLS)
 df = mds.dataset.to_pandas()
 date_col = mds.date_col
 FEATURE_COLS = mds.feature_names
@@ -178,17 +201,10 @@ def evaluate_params(params):
 # %% [markdown]
 # ## 4. Grid Search
 #
-# A small grid (3 x 3 x 3 x 2 = 54 combinations) to keep exhaustive
-# search tractable.
+# `PARAM_GRID` in the settings cell is four parameters with a handful of values each, small
+# enough that enumerating it is tractable. Its size is what both searches spend.
 
 # %%
-PARAM_GRID = {
-    "n_estimators": [50, 100, 200],
-    "learning_rate": [0.01, 0.05, 0.1],
-    "max_depth": [3, 5, 7],
-    "num_leaves": [15, 31],
-}
-
 grid = list(ParameterGrid(PARAM_GRID))
 N_GRID = len(grid)
 print(f"Grid Search: {N_GRID} combinations")
@@ -220,12 +236,9 @@ print(f"Done in {grid_time:.1f}s, best IC {best_grid['ic']:.4f}")
 
 # %%
 def optuna_objective(trial):
-    params = {
-        "n_estimators": trial.suggest_categorical("n_estimators", [50, 100, 200]),
-        "learning_rate": trial.suggest_categorical("learning_rate", [0.01, 0.05, 0.1]),
-        "max_depth": trial.suggest_categorical("max_depth", [3, 5, 7]),
-        "num_leaves": trial.suggest_categorical("num_leaves", [15, 31]),
-    }
+    # Suggested from `PARAM_GRID` itself rather than from a second copy of the values, so
+    # "same space" holds by construction instead of by two lists agreeing.
+    params = {name: trial.suggest_categorical(name, values) for name, values in PARAM_GRID.items()}
     return evaluate_params(params)
 
 
@@ -250,20 +263,22 @@ comparison_df = pl.DataFrame(
 comparison_df
 
 # %% [markdown]
-# **Interpretation**: On this small discrete grid, exhaustion is the safer method.
-# Grid ran every one of the 54 combinations, so it found the global best by
-# construction. Optuna, given the same 54-trial budget on the same categorical
-# space, came in below it: TPE samples with replacement, so 54 trials do not cover
-# 54 points, and on a space this small there is nothing for the sampler to exploit
-# in exchange. Search only pays where the space is too big to enumerate. The
-# wall-time column is one uncontrolled measurement on a shared machine, and the
-# two searches fit different sets of configurations, which cost different amounts
-# to train, so it is neither a benchmark nor evidence that either method is
-# cheaper. The lesson is not that one method wins but that on a space this small
-# there is nothing to optimize; the chapter's recommendation stands. Grid is
-# fine for ≤4 parameters × ≤3 values each. What the continuous space tested next
-# adds is reach, to configurations a discrete grid cannot represent at all; that
-# is a property of the space, and it is not a measurement of the sampler.
+# **How to read this comparison.** Grid evaluates every combination in `PARAM_GRID`, so
+# whatever it returns is that space's maximum by construction. Optuna is given the
+# same number of trials on the same categorical space, and TPE samples with replacement, so
+# those trials do not cover that many distinct points. It therefore cannot beat the
+# enumeration here and can only tie it, by happening to sample the maximum - which is not a
+# fact about the two samplers. On a space small enough to enumerate there is nothing for a
+# sampler to exploit in exchange for the coverage it gives up; search pays where the space is
+# too big to enumerate, which is what section 6 tests instead.
+#
+# The wall-time column is one uncontrolled measurement on a shared machine, and the two
+# searches fit different sets of configurations, which cost different amounts to train. It is
+# neither a benchmark nor evidence that either method is cheaper.
+#
+# The chapter's recommendation stands either way: grid is fine for ≤4 parameters × ≤3 values
+# each. What the continuous space adds is reach, to configurations a discrete grid cannot
+# represent at all - a property of the space, not a measurement of the sampler.
 
 # %% [markdown]
 # ## 6. Optuna with Continuous Space
@@ -317,10 +332,9 @@ print(f"Trials to reach 95% of best: {trials_to_95}")
 # configuration it selected at that budget.
 
 # %%
-trial_budgets = [10, 25, 50, 75, N_GRID]
 overfit_results = []
 
-for budget in trial_budgets:
+for budget in TRIAL_BUDGETS:
     sub_study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=SEED))
     sub_study.optimize(optuna_continuous_objective, n_trials=budget, show_progress_bar=False)
 
@@ -365,29 +379,37 @@ ax.set_title("Validation and holdout IC against the trial budget")
 ax.legend()
 show_with_alt(
     fig,
-    "Two lines against the number of trials in the search: the best validation IC the "
-    "search reached at that budget, and the holdout IC of the configuration it selected "
-    "there.",
+    "Two lines against the number of trials in the search: the validation IC the search "
+    "reached at each budget, and the holdout IC of the configuration it selected there.",
 )
 
 # %% [markdown]
-# **Interpretation**: The gap between the two curves is the point. Read the table
-# above by column: the highest *validation* IC rises with the budget and then
-# plateaus,
-# while the *holdout* IC of the configuration selected at that budget peaks partway
-# through and then falls. Past that peak the extra trials buy fit to the validation
-# window's noise and pay for it out of sample, which is the effect Section 12.4's box
-# on validation overfitting describes and the reason a trial budget is a parameter to
-# choose rather than to maximize.
+# **How to read the two columns, and why only one of them can say anything.** The
+# validation column cannot fall. Each budget builds a fresh study from the same seed, so a
+# longer budget repeats the shorter one's trials in the same order before adding any of its
+# own, and the value it records is a running maximum over them. Whatever that column does is
+# arithmetic. The holdout column has no such constraint - it is the out-of-sample IC of
+# whichever configuration the search selected at that budget, and nothing pins it in either
+# direction - so it is the only one of the two that carries information about the budget.
 #
-# Two things this figure does not say. The holdout IC sitting above the validation IC
-# in level is a property of that window, not evidence that tuning helped. And a
-# single fold at a fixed seed shows the direction of the effect without pricing it,
-# because nothing here varies the seed or the fold to give the curve a width. Section
-# 10 asks a different question - how the two selected configurations compare after
-# refitting on train plus validation - and does not reproduce this shape, which is two
-# experiments disagreeing about nothing: a budget sweep inside one space and a
-# comparison of two picks from different spaces are not the same measurement.
+# What the mechanism predicts: past some budget the extra trials buy fit to the validation
+# window's noise and pay for it out of sample. That is the effect Section 12.4's box on
+# validation overfitting describes, and the reason a trial budget is a parameter to choose
+# rather than to maximize.
+#
+# The ladder is a diagnostic and not a selection procedure, and it is bounded on one side
+# only: it starts at its shortest budget and cannot see below it. It also varies neither the
+# seed nor the fold, so it gives a direction without a width. Where the two series sit
+# relative to each other in level is a property of the holdout window, not a sign that tuning
+# helped. Section 10 asks a different
+# question - how the two selected configurations compare after refitting on train plus
+# validation - and a budget sweep inside one space is not the same measurement as a
+# comparison of two picks from different spaces.
+
+# %% [markdown] tags=["results"]
+# Holdout IC is already highest at the shortest budget swept, so the turn this section exists
+# to show sits at or below the ladder rather than inside it. Read the figure as evidence that
+# the two criteria diverge, not as a way to locate where.
 
 # %% [markdown]
 # ## 9. Visualization
@@ -466,17 +488,17 @@ final_df
 # two configurations and not about the spaces they came from, because the rest of the
 # grid was never scored on the holdout.
 #
-# Read it against the budget sweep above rather than on its own. *How long* you
-# search within a space stops helping and starts hurting, which is what the test
-# curve turning down shows. Neither result licenses trusting the validation number
-# itself: on this ETF target every IC here is thin.
-#
-# **One run of this notebook does not decide grid against Optuna.** An earlier
-# execution of this same code, on an earlier vintage of the ETF artifacts, ranked the
-# two in the opposite order. That instability is the finding: when
-# validation IC is low and noisy, the search method is not what decides the outcome,
-# and the only reliable defence is a holdout the search cannot touch, plus
-# walk-forward HPO, demonstrated in `04_optuna_tuning`.
+# Read it against the budget sweep above rather than on its own. That sweep is drawn to
+# separate a different question - *how long* you search within one space - from this one,
+# which is which of two spaces the selected configuration came from. Neither licenses
+# trusting a validation number on its own: on this ETF target the ICs are thin.
+
+# %% [markdown] tags=["results"]
+# **One run of this notebook does not decide grid against Optuna.** An earlier execution of
+# this same code, on an earlier vintage of the ETF artifacts, ranked the two in the opposite
+# order. That instability is the finding: when validation IC is low and noisy, the search
+# method is not what decides the outcome, and the only reliable defence is a holdout the
+# search cannot touch, plus walk-forward HPO, demonstrated in `04_optuna_tuning`.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -504,8 +526,8 @@ final_df
 # 3. **Budget**: 50–100 trials is the common convention for GBM tuning, but it is
 #    a parameter, not a default. Choose it with nested or walk-forward
 #    validation, then score the holdout once. Section 8 reads the holdout
-#    across budgets to *show* that the turn exists; that is a diagnostic run
-#    after the fact, not a way to select the budget
+#    across budgets to *show* the two criteria diverging; that is a diagnostic
+#    run after the fact, not a way to select the budget
 # 4. **Always**: Hold out a test set untouched during optimization
 #
 # **Next**: See `04_optuna_tuning` for the full Optuna workflow with pruning

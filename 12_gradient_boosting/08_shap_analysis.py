@@ -100,7 +100,9 @@ def cross_sectional_ic_mean(
 
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0  # 0 = all symbols
+# 0 is the full ETF universe. The `=` in a trailing comment here made papermill's
+# inspector unable to parse the declaration, so the override never reached the notebook.
+MAX_SYMBOLS = 0
 SEED = 42
 # Anchored at the repo root, so the artifact lands in the chapter's output directory
 # whatever the kernel's working directory is.

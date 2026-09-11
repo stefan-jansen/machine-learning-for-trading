@@ -84,6 +84,40 @@ import yaml
 REPO_ROOT = Path(__file__).parent.parent
 OVERRIDES_PATH = REPO_ROOT / "tests" / "overrides.yaml"
 
+# Every key an entry in that file may carry, each with a reader named beside it. The file
+# is plain YAML, so a key nothing reads is accepted in silence: `env:` was, and it reached
+# nothing, because `test_chapter_notebook` calls `run_notebook` without `extra_env`. A
+# reduction that arrives nowhere does not present as a broken reduction, it presents as an
+# expensive notebook - `12_gradient_boosting/08_shap_analysis` declared `MAX_SYMBOLS: 10`
+# against a 300 s per-cell timeout and trained on the full universe, and the cost read as
+# the notebook being slow.
+#
+# Adding a key here is the act of saying what reads it. `tests/test_overrides_schema.py`
+# fails on any key in the file that is not listed, and separately on any entry whose
+# parameter names do not reach papermill, which catches a new key of this shape without
+# waiting for this list to be updated.
+KNOWN_OVERRIDE_KEYS = frozenset(
+    {
+        "docker_env",  # pm_helpers.check_kernel_routing
+        "gpu",  # pm_helpers.gpu_skip_reason
+        "invocations",  # pm_helpers.invocations_for
+        "kernel_launcher",  # pm_helpers.check_kernel_routing
+        "kernel_python",  # pm_helpers.check_kernel_routing
+        "long_running",  # tests/conftest.py, marker application
+        "parameters",  # pm_helpers.sole_invocation -> papermill
+        "record_mode",  # pm_helpers.get_record_mode
+        "requires_env",  # pm_helpers.missing_required_env
+        "requires_import",  # tests/test_chapter_notebooks.py
+        "requires_stage",  # tests/test_case_studies.py
+        "research_preview",  # pm_helpers.injected_parameters
+        "reruns",  # pm_helpers.get_reruns
+        "skip",  # tests/test_chapter_notebooks.py
+        "skip_reason",  # tests/test_chapter_notebooks.py
+        "tier",  # pm_helpers.get_tier
+        "timeout",  # tests/test_chapter_notebooks.py -> run_notebook
+    }
+)
+
 STAGE_RE = re.compile(r"^(\d{2})([a-z]?)_")
 
 
