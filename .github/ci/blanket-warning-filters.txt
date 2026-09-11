@@ -25,22 +25,6 @@
 # fx_pairs are stamped and wait for a re-execution, and theirs must not regenerate
 # features/model_based.parquet, whose sha256 keys every model fitted against it.
 
-03_market_microstructure/01_itch_parser.py
-03_market_microstructure/02_itch_lob_reconstruction.py
-03_market_microstructure/03_itch_lob_analysis.py
-03_market_microstructure/04_itch_order_lifecycle_analysis.py
-03_market_microstructure/05_itch_trading_activity.py
-03_market_microstructure/06_itch_intraday_patterns.py
-03_market_microstructure/07_itch_stylized_facts.py
-03_market_microstructure/08_databento_lob_reconstruction.py
-03_market_microstructure/09_databento_mbo_analysis.py
-03_market_microstructure/10_iex_lob_reconstruction.py
-03_market_microstructure/13_algoseek_minute_bars_eda.py
-03_market_microstructure/14_itch_bar_sampling.py
-03_market_microstructure/15_itch_lee_ready.py
-03_market_microstructure/16_itch_information_bars.py
-03_market_microstructure/17_databento_bar_sampling.py
-03_market_microstructure/18_algoseek_jump_detection.py
 07_defining_the_learning_task/_benchmark_utils.py
 16_strategy_simulation/01_backtest_first_principles.py
 16_strategy_simulation/02_futures_backtesting.py
