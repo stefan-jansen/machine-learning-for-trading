@@ -5,6 +5,18 @@ price factor separately, so a panel built on the printed close books every split
 reverse split and cash dividend as P&L. `02_labels` builds every label from
 `close * adj_factor` inside a `sec_id`, which left the label and the backtest
 measuring returns on two different price series.
+
+Three of these tests assert an **absolute** property of the production extract - a shared
+window wider than 50,000 rows, 15 ticker reassignments, a 2019 panel wider than 100,000
+rows. `ml4t/third-edition-test-data` ships a reduced extract that is large enough for
+`load_sp500_daily_bars` to succeed and far too small to satisfy those counts, so the
+`DataNotFoundError` guard never fires and they fail locally on size. In CI they skip,
+because there are no licensed bars there at all: green where nobody looks and red where
+everybody does. They carry `@pytest.mark.production_extract`, which CI deselects, and are
+verified locally against the real data. The guard stays: it answers whether the data is
+present, the marker answers whether it is the production extract, and a checkout with no
+licensed bars still needs the first. The other tests in this file assert relations that
+hold on any extract, and those are the ones a CI job can gate.
 """
 
 from __future__ import annotations
@@ -235,6 +247,7 @@ def test_two_windows_of_one_series_agree_about_the_dates_they_share():
     assert max(abs(r) for r in _returns(seam, "GE")) < 0.20
 
 
+@pytest.mark.production_extract
 def test_two_real_loads_agree_about_the_dates_they_share():
     """The same guard through `load_backtest_prices`, on the windows holdout actually uses.
 
@@ -264,6 +277,7 @@ def test_two_real_loads_agree_about_the_dates_they_share():
     assert seam.filter(pl.col("r").abs() > 0.60).is_empty()
 
 
+@pytest.mark.production_extract
 def test_the_real_panel_carries_no_corporate_action_as_a_price_move():
     """The shipped 2017-2021 extract, through the loader the backtest calls."""
     try:
@@ -325,6 +339,7 @@ def test_the_real_panel_keeps_prices_at_the_level_positions_are_sized_against():
     assert drift == pytest.approx(0.0, abs=1e-9)
 
 
+@pytest.mark.production_extract
 def test_the_real_panel_matches_the_price_basis_the_labels_use():
     """`02_labels` builds every label from `close * adj_factor` within a `sec_id`."""
     try:
