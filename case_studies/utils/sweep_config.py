@@ -1000,3 +1000,65 @@ def get_portfolio_risk_controls(case_study: str) -> list[dict]:
     """Return the Ch19 portfolio-level risk controls (all case studies)."""
     risk = load_sweep(case_study).get("risk_controls") or {}
     return list(risk.get("portfolio") or [])
+
+
+def get_signal_passes_for(case_study: str) -> dict | None:
+    """Return the declared two-pass plan for the signal stage, or ``None``.
+
+    Shape, from ``backtest.sweep.signal_passes`` in ``setup.yaml``::
+
+        signal_passes:
+          baseline_schemes: [ew_top5, ew_top10, ew_top20]
+          baseline_universe: cost_feasible
+          mechanism_top_n: 8
+          reference_schemes: [ew_top5, ew_top10, ew_top20]
+          reference_universe: full
+
+    Pass 1 runs ``baseline_schemes`` on ``baseline_universe`` over every
+    admissible prediction. Pass 2 runs every remaining entry scheme on
+    ``baseline_universe``, plus ``reference_schemes`` on ``reference_universe``,
+    over the ``mechanism_top_n`` predictions with the highest pass-1 Sharpe.
+
+    A case study that declares no block gets ``None`` and its sweep is the
+    single pass over the full cross-product, which is what every case study
+    other than ``nasdaq100_microstructure`` runs.
+
+    Universe names are normalized the way ``get_universe_filters_for``
+    normalizes them: ``full`` and ``none`` become ``None``, because a ``None``
+    written into a spec is not the same thing as an absent key and every row
+    registered before the universe axis existed carries the absent one.
+
+    Raises on a block that is present but unusable, rather than returning a
+    plan that quietly sweeps nothing: an empty ``baseline_schemes`` would run
+    pass 1 over zero arms, rank nothing, and hand pass 2 an empty selection,
+    which reports a completed sweep and registers no rows.
+    """
+    sweep = load_sweep(case_study)
+    block = sweep.get("signal_passes")
+    if block is None:
+        return None
+
+    def _universe(key: str) -> str | None:
+        raw = block.get(key)
+        if raw is None:
+            return None
+        return None if str(raw).lower() in ("full", "none") else str(raw)
+
+    baseline = [str(x) for x in (block.get("baseline_schemes") or [])]
+    reference = [str(x) for x in (block.get("reference_schemes") or [])]
+    top_n = int(block.get("mechanism_top_n") or 0)
+    if not baseline or top_n <= 0:
+        msg = (
+            f"backtest.sweep.signal_passes for {case_study} declares "
+            f"baseline_schemes={baseline} and mechanism_top_n={top_n}; both must be "
+            "non-empty or the sweep ranks nothing and pass 2 selects nothing. Remove "
+            "the block to sweep the full cross-product instead."
+        )
+        raise ValueError(msg)
+    return {
+        "baseline_schemes": baseline,
+        "baseline_universe": _universe("baseline_universe"),
+        "mechanism_top_n": top_n,
+        "reference_schemes": reference,
+        "reference_universe": _universe("reference_universe"),
+    }

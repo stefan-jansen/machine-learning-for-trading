@@ -72,6 +72,7 @@ from case_studies.utils.registry import (
 )
 from case_studies.utils.sweep_config import (
     get_entry_schemes_for,
+    get_signal_passes_for,
     get_top_k_values_for,
     get_top_n_predictions,
     get_universe_filters_for,
@@ -89,10 +90,12 @@ FORCE_REBACKTEST = False  # Set True to re-backtest even if a complete backtest_
 TOP_N_PREDICTIONS = None
 # Zero means every feasible entry scheme. A positive value keeps the first N, which is what makes
 # a reduced run of this notebook finish in minutes: `backtest.sweep.signal_nasdaq100` crosses two
-# selection methods, three quantiles, two directions, three slot counts and three hold windows,
-# and 75 of those combinations are feasible on this panel. At roughly 5.8 s a backtest that is a
-# 21-minute sweep for three prediction sets, which is a production cost and not a smoke one. The
-# same lever as `MAX_RISK_VARIANTS` in 16 and `MAX_COST_POINTS` in the cost notebooks.
+# selection methods, three quantiles, two directions, three slot counts, two hold windows and two
+# signal-exit thresholds, and 42 of those combinations are feasible on this panel. A backtest of
+# this panel was measured at 31.8 s on 2026-09-11, so the full 45 arms is about 34 minutes for a
+# single prediction set. The same lever as `MAX_RISK_VARIANTS` in 16 and `MAX_COST_POINTS` in the
+# cost notebooks. Truncating the list keeps the canonical equal-weight arms, which are what
+# `signal_passes.baseline_schemes` names, so a reduced run still completes pass 1.
 MAX_ENTRY_SCHEMES = 0
 # Both names stay bound here although nothing below reads them: that is what makes the harness
 # force preview and supply a workspace - `_declares_tier_and_workspace` in `tests/pm_helpers.py`
@@ -240,18 +243,26 @@ except ValueError as e:
         raise
 
 # %% [markdown]
-# ## 2. The Full-Universe Sweep (Act 1: Cost-Defeat)
+# ## 2. The Signal Sweep
 #
-# We begin with the naive approach the feasibility analysis warned against:
-# rank across the whole universe and trade the ordering directly, with no
-# screen on how expensive a name is to trade. Every combination of prediction
-# and entry scheme runs through the same `run_backtest()` call as a single
-# backtest, so the sweep and a one-off backtest cannot diverge.
+# Every combination of prediction and entry scheme below runs through the same
+# `run_backtest()` call as a one-off backtest would, so the sweep and a single
+# backtest cannot diverge.
 #
-# This is the baseline the rest of the chapter is measured against. Ranking over
-# the whole universe means the ordering will often place its strongest views on
-# the least liquid names in it, and at this rebalancing frequency each of those
-# positions is entered and exited repeatedly.
+# The sweep runs in two passes. The first trades every prediction three ways -
+# equal weight over the top 5, 10 and 20 names - on the cost-feasible universe,
+# which is the universe the strategy this chapter ends on actually trades. The
+# second takes the predictions that scored highest in the first and asks what the
+# entry mechanism does to them, across the slot grid declared in
+# `backtest.sweep.signal_nasdaq100`. The same three equal-weight arms are also run
+# without the cost screen, on those same predictions: that unscreened pair is what
+# Section 3 reads.
+#
+# Ranking over the whole universe is the naive approach the feasibility analysis
+# warned against, and it is kept here as the comparison rather than as the main
+# grid. The ordering will often place its strongest views on the least liquid
+# names in the panel, and at this rebalancing frequency each of those positions is
+# entered and exited repeatedly.
 #
 # The sweep also separates two things that are easily conflated: how well a
 # prediction orders the cross-section, and how much trading that ordering
@@ -367,7 +378,7 @@ entry_schemes = get_entry_schemes_for(
 if MAX_ENTRY_SCHEMES:
     entry_schemes = entry_schemes[:MAX_ENTRY_SCHEMES]
 
-# The universe axis, crossed with the entry schemes rather than pinned to one value.
+# The universe axis, and which arms are crossed with which of its values.
 #
 # `backtest.sweep.universe_filter` declares `cost_feasible` here, and `universe.cost_feasible`
 # names the 50 validation and 50 holdout symbols `apply_universe_filter` restricts to. Nothing
@@ -376,14 +387,56 @@ if MAX_ENTRY_SCHEMES:
 # two readers that ask for the declared value got nothing - Section 4 below printed an empty
 # table and exited 0, `17_costs` priced nothing and exited 0, and only `20_strategy_analysis`
 # failed. Measured 2026-09-09: 202 signal backtests registered, 0 carrying the key.
-#
-# Both arms are needed rather than the declared one alone. Act 1 compares the full universe;
-# Section 4 and everything downstream of it read the cost-feasible one. A case study that
-# declares no filter gets `[None]` and its sweep is unchanged.
 _declared_universes = [u for u in get_universe_filters_for(CASE_STUDY_ID) if u]
 universe_filters: list[str | None] = [None, *_declared_universes]
-scheme_arms = [(scheme, universe) for universe in universe_filters for scheme in entry_schemes]
-n_schemes = len(scheme_arms)
+
+# The grid is walked in two passes, declared under `backtest.sweep.signal_passes`.
+#
+# Crossing every arm with every universe over every prediction is what this cell used to
+# build, and on this case study that is 741 prediction sets × 117 arms × 2 universes =
+# 173,394 backtests. One backtest of this panel was measured at 31.8 s on 2026-09-11, which
+# puts the cross-product at about 1,500 hours. No other case study in the book declares more
+# than four entry schemes or more than one universe.
+#
+# Pass 1 asks which predictions are worth studying, on three equal-weight concentrations and
+# on the universe the carrier trades. Pass 2 asks what the entry mechanism does to them, and
+# asks it only of the predictions pass 1 ranked highest. The two questions have different
+# widths, and one cross-product answered both at the width of the wider one.
+_passes = get_signal_passes_for(CASE_STUDY_ID)
+_by_name = {s["name"]: s for s in entry_schemes}
+
+if _passes is None:
+    # No plan declared: the full cross-product, which is what every other case study runs.
+    baseline_arms = [(s, u) for u in universe_filters for s in entry_schemes]
+    mechanism_arms: list[tuple[dict, str | None]] = []
+    mechanism_top_n = 0
+else:
+    _missing = [n for n in _passes["baseline_schemes"] if n not in _by_name]
+    if _missing and not MAX_ENTRY_SCHEMES:
+        # Checked only when the scheme list is the full declared one. A preview run truncates
+        # `entry_schemes` and is expected to lose names; a canonical run that loses one has a
+        # typo in `signal_passes`, and it would otherwise rank nothing, select nothing, and
+        # report a completed sweep.
+        msg = (
+            f"backtest.sweep.signal_passes.baseline_schemes names {_missing}, which "
+            f"get_entry_schemes_for does not produce for {LABEL}. Arms it does produce: "
+            f"{sorted(_by_name)[:8]}"
+        )
+        raise KeyError(msg)
+    _baseline_names = [n for n in _passes["baseline_schemes"] if n in _by_name]
+    baseline_arms = [(_by_name[n], _passes["baseline_universe"]) for n in _baseline_names]
+    mechanism_arms = [
+        (s, _passes["baseline_universe"]) for s in entry_schemes if s["name"] not in _baseline_names
+    ]
+    # The reference universe carries the canonical concentrations only. It is what `17_costs`
+    # reads for its full-vs-screened comparison and what Act 1 below reads for the unscreened
+    # baseline. It is not a second copy of the sweep.
+    mechanism_arms += [
+        (_by_name[n], _passes["reference_universe"])
+        for n in _passes["reference_schemes"]
+        if n in _by_name
+    ]
+    mechanism_top_n = _passes["mechanism_top_n"]
 
 print(f"\nEntry schemes ({len(entry_schemes)}):", flush=True)
 for es in entry_schemes:
@@ -393,145 +446,219 @@ print(
     flush=True,
 )
 
-total_backtests = n_predictions * n_schemes
+n_pass2_predictions = min(mechanism_top_n, n_predictions) if mechanism_arms else 0
+n_pass1 = n_predictions * len(baseline_arms)
+n_pass2 = n_pass2_predictions * len(mechanism_arms)
+total_backtests = n_pass1 + n_pass2
 print(
-    f"\nTotal grid: {n_predictions} predictions × {len(entry_schemes)} schemes × "
-    f"{len(universe_filters)} universes = {total_backtests} backtests",
+    f"\nPass 1 (baseline): {n_predictions} predictions × {len(baseline_arms)} arms "
+    f"= {n_pass1} backtests",
     flush=True,
 )
+print(
+    f"Pass 2 (mechanism): top {n_pass2_predictions} by pass-1 Sharpe × "
+    f"{len(mechanism_arms)} arms = {n_pass2} backtests",
+    flush=True,
+)
+print(f"Total grid: {total_backtests} backtests", flush=True)
 
 # %%
-results = []
 t0 = time.time()
-failed = 0
-completed = 0
-skipped = 0
+tally = {"completed": 0, "skipped": 0, "failed": 0}
 existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="signal")
 # Identities already registered, plus the ones this sweep has queued. Both mean
 # "running this grid cell would add nothing", which is what the skip test needs.
 planned = set(existing_hashes)
 print(f"Existing signal-stage hashes in registry: {len(existing_hashes):,}", flush=True)
 
-for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
-    pred_hash = pred_row["prediction_hash"]
-    source = pred_row["source"]
-    ic_mean = pred_row["ic_mean"]
 
-    pending_schemes = []
+def run_arms(rows, arms, pass_name):
+    """Run one pass: every arm in `arms` against every prediction in `rows`.
 
-    for j, (scheme, universe) in enumerate(scheme_arms):
-        idx = i * n_schemes + j + 1
+    Both passes walk the same loop, so what separates them is only which
+    predictions and which arms they are handed. A pass that is given no arms
+    returns nothing rather than raising: a preview run truncates the scheme list
+    and can legitimately leave pass 2 empty.
+    """
+    out = []
+    n_cells = len(rows) * len(arms)
+    if not n_cells:
+        print(f"\n{pass_name}: no grid cells", flush=True)
+        return out
+    print(
+        f"\n{pass_name}: {len(rows)} predictions × {len(arms)} arms = {n_cells} cells", flush=True
+    )
 
-        signal = {
-            "method": scheme["method"],
-            "top_k": scheme.get("top_k", 20),
-            "long_short": bt_config.long_short,
-        }
-        signal.update({k: v for k, v in scheme.items() if k not in ("name", "method")})
-        # Only when a filter is declared. A `None` written into the spec is not the same as an
-        # absent key: it would move `backtest_hash` for every row registered before this axis
-        # existed, and `get_universe_filters_for` normalizes "full" and "none" to None for that
-        # reason.
-        if universe is not None:
-            signal["universe_filter"] = universe
-        spec = build_backtest_spec(
-            CASE_STUDY_ID,
-            bt_config,
-            prices=prices,
-            traded_universe=TRADED_UNIVERSE,
-            prediction_hash=pred_hash,
-            initial_cash=bt_config.initial_cash,
-            chapter="ch16",
-            label=LABEL,
-            signal=signal,
-        )
-        backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
+    for i, pred_row in enumerate(rows.iter_rows(named=True)):
+        pred_hash = pred_row["prediction_hash"]
+        source = pred_row["source"]
+        ic_mean = pred_row["ic_mean"]
 
-        if backtest_hash in planned:
-            skipped += 1
-            if idx % 20 == 0 or idx == total_backtests:
+        pending_schemes = []
+
+        for j, (scheme, universe) in enumerate(arms):
+            idx = i * len(arms) + j + 1
+
+            signal = {
+                "method": scheme["method"],
+                "top_k": scheme.get("top_k", 20),
+                "long_short": bt_config.long_short,
+            }
+            signal.update({k: v for k, v in scheme.items() if k not in ("name", "method")})
+            # Only when a filter is declared. A `None` written into the spec is not the same as
+            # an absent key: it would move `backtest_hash` for every row registered before this
+            # axis existed, and `get_universe_filters_for` normalizes "full" and "none" to None
+            # for that reason.
+            if universe is not None:
+                signal["universe_filter"] = universe
+            spec = build_backtest_spec(
+                CASE_STUDY_ID,
+                bt_config,
+                prices=prices,
+                traded_universe=TRADED_UNIVERSE,
+                prediction_hash=pred_hash,
+                initial_cash=bt_config.initial_cash,
+                chapter="ch16",
+                label=LABEL,
+                signal=signal,
+            )
+            backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
+
+            if backtest_hash in planned:
+                tally["skipped"] += 1
+                continue
+            planned.add(backtest_hash)
+            pending_schemes.append((idx, scheme, universe, spec))
+
+        if not pending_schemes:
+            continue
+
+        predictions = normalize_prediction_columns(read_predictions(CASE_STUDY_ID, pred_hash))
+
+        for idx, scheme, universe, spec in pending_schemes:
+            record = {
+                "prediction_hash": pred_hash,
+                "source": source,
+                "ic_mean": ic_mean,
+                "family": pred_row["family"],
+                "config_name": pred_row["config_name"],
+                "signal_method": scheme["name"],
+                "universe": "full" if universe is None else universe,
+                "pass": pass_name,
+            }
+            try:
+                result = run_backtest(
+                    CASE_STUDY_ID,
+                    pred_hash,
+                    spec,
+                    prices=prices,
+                    predictions=predictions,
+                    label=LABEL,
+                    register=True,
+                    force_rebacktest=FORCE_REBACKTEST,
+                    initial_cash=bt_config.initial_cash,
+                    calendar=bt_config.calendar,
+                )
+                record.update(
+                    backtest_hash=result.backtest_hash,
+                    sharpe=result.metrics["sharpe"],
+                    total_return=result.metrics["total_return"],
+                    max_drawdown=result.metrics["max_drawdown"],
+                    cagr=result.metrics.get("cagr", 0.0),
+                    volatility=result.metrics.get("volatility", 0.0),
+                    num_trades=result.metrics.get("num_trades", 0),
+                )
+                tally["completed"] += 1
+                if result.backtest_hash:
+                    existing_hashes.add(result.backtest_hash)
+                    planned.add(result.backtest_hash)
+            except Exception:
+                tally["failed"] += 1
+                record.update(
+                    backtest_hash=None,
+                    sharpe=None,
+                    total_return=None,
+                    max_drawdown=None,
+                    cagr=None,
+                    volatility=None,
+                    num_trades=None,
+                )
+            out.append(record)
+
+            if idx % 20 == 0 or idx == n_cells:
                 elapsed = time.time() - t0
                 rate = idx / elapsed if elapsed > 0 else 0
                 print(
-                    f"  [{idx}/{total_backtests}] {elapsed:.0f}s ({rate:.1f} bt/s) | "
-                    f"completed: {completed} skipped: {skipped} failed: {failed}",
+                    f"  [{idx}/{n_cells}] {elapsed:.0f}s ({rate:.1f} bt/s) | "
+                    f"completed: {tally['completed']} skipped: {tally['skipped']} "
+                    f"failed: {tally['failed']}",
                     flush=True,
                 )
-            continue
-        planned.add(backtest_hash)
-        pending_schemes.append((idx, scheme, spec))
+    return out
 
-    if not pending_schemes:
-        continue
 
-    predictions = normalize_prediction_columns(read_predictions(CASE_STUDY_ID, pred_hash))
+baseline_results = run_arms(pred_index, baseline_arms, "Pass 1 (baseline)")
 
-    for idx, scheme, spec in pending_schemes:
-        try:
-            result = run_backtest(
-                CASE_STUDY_ID,
-                pred_hash,
-                spec,
-                prices=prices,
-                predictions=predictions,
-                label=LABEL,
-                register=True,
-                force_rebacktest=FORCE_REBACKTEST,
-                initial_cash=bt_config.initial_cash,
-                calendar=bt_config.calendar,
-            )
+# %% [markdown]
+# ### Which predictions pass 2 studies
+#
+# The mechanism grid runs on the predictions that scored highest in pass 1, and
+# on nothing else. The ranking is by pass-1 validation Sharpe.
+#
+# Not by information coefficient. `load_prediction_index` returns its rows
+# ordered by `ic_mean` descending, so taking the head of it - which is what
+# `top_n_predictions.signal` would do - would let a rank correlation decide which
+# models are backtested at all. A rank correlation and a traded result disagree
+# whenever turnover differs between two predictions of the same ordering quality,
+# which is the whole subject of this chapter. Every case study in the book
+# declares `signal: 0` for that reason.
+#
+# What this does inherit from pass 1 is pass 1's own arbitrariness: the three
+# equal-weight concentrations are one way to trade a prediction, and a prediction
+# that suits the slot mechanism but not equal weight will not reach pass 2. That
+# is a property of a two-pass design and not of this particular grid, and it is
+# the price of not running the cross-product.
 
-            results.append(
-                {
-                    "prediction_hash": pred_hash,
-                    "source": source,
-                    "ic_mean": ic_mean,
-                    "family": pred_row["family"],
-                    "config_name": pred_row["config_name"],
-                    "signal_method": scheme["name"],
-                    "backtest_hash": result.backtest_hash,
-                    "sharpe": result.metrics["sharpe"],
-                    "total_return": result.metrics["total_return"],
-                    "max_drawdown": result.metrics["max_drawdown"],
-                    "cagr": result.metrics.get("cagr", 0.0),
-                    "volatility": result.metrics.get("volatility", 0.0),
-                    "num_trades": result.metrics.get("num_trades", 0),
-                }
-            )
-            completed += 1
-            if result.backtest_hash:
-                existing_hashes.add(result.backtest_hash)
-                planned.add(result.backtest_hash)
-        except Exception as e:
-            failed += 1
-            results.append(
-                {
-                    "prediction_hash": pred_hash,
-                    "source": source,
-                    "ic_mean": ic_mean,
-                    "family": pred_row["family"],
-                    "config_name": pred_row["config_name"],
-                    "signal_method": scheme["name"],
-                    "backtest_hash": None,
-                    "sharpe": None,
-                    "total_return": None,
-                    "max_drawdown": None,
-                    "cagr": None,
-                    "volatility": None,
-                    "num_trades": None,
-                }
-            )
+# %%
+pass2_index = pred_index.head(0)
+if mechanism_arms and baseline_results:
+    _scored = pl.DataFrame(baseline_results).drop_nulls("sharpe")
+    if not _scored.is_empty():
+        _ranked = (
+            _scored.group_by("prediction_hash")
+            .agg(best_sharpe=pl.col("sharpe").max())
+            .sort("best_sharpe", descending=True)
+            .head(mechanism_top_n)
+        )
+        pass2_index = pred_index.join(
+            _ranked.select("prediction_hash"), on="prediction_hash", how="inner"
+        )
+        print(
+            _ranked.join(
+                _scored.select("prediction_hash", "source", "family").unique(
+                    subset="prediction_hash"
+                ),
+                on="prediction_hash",
+                how="left",
+            ).select("source", "family", "best_sharpe")
+        )
 
-        if idx % 20 == 0 or idx == total_backtests:
-            elapsed = time.time() - t0
-            rate = idx / elapsed if elapsed > 0 else 0
-            print(
-                f"  [{idx}/{total_backtests}] {elapsed:.0f}s ({rate:.1f} bt/s) | "
-                f"completed: {completed} skipped: {skipped} failed: {failed}",
-                flush=True,
-            )
+if mechanism_arms and pass2_index.is_empty():
+    # Every pass-1 backtest failed or was skipped, and pass 2 would run over nothing while
+    # the sweep reported success. On a re-run every pass-1 cell is legitimately skipped, so
+    # this is a warning rather than a raise - `FORCE_REBACKTEST` re-scores them.
+    print(
+        "  No pass-1 result carries a Sharpe, so pass 2 has nothing to select. On a re-run "
+        "this is expected: the pass-1 cells were already registered and were skipped.",
+        flush=True,
+    )
+
+# %%
+mechanism_results = run_arms(pass2_index, mechanism_arms, "Pass 2 (mechanism)")
+results = baseline_results + mechanism_results
 
 elapsed = time.time() - t0
+completed, skipped, failed = tally["completed"], tally["skipped"], tally["failed"]
 print(
     f"\nSweep complete in {elapsed:.0f}s: {reuse_disclosure(completed, skipped, failed)}",
     flush=True,
@@ -541,15 +668,19 @@ print(
 # ## 3. Full-Universe Signal Evaluation (Act 1)
 #
 # This section is **read-only** — it queries the registry via `BacktestExplorer`
-# and analyzes the full-universe sweep just run. Every table and figure here is
-# **scoped to the full universe** (no cost-feasibility screen); the cost-feasible
+# and reads the rows that carry no cost-feasibility screen. The cost-feasible
 # carrier is Section 4.
 #
-# Two selection methods are in the sweep: the naive **equal-weight top-k**
-# baseline (re-rank and rebalance every bar) and the turnover-controlled **slot
-# mechanism** (introduced in Section 4). The contrast between them is Act 1 of
-# the cost story — turnover, not signal quality, sets the validation Sharpe at
-# 15-minute cadence.
+# What it reads is the unscreened arm of pass 2: equal weight over the top 5, 10
+# and 20 names, on the predictions pass 1 ranked highest, with every name in the
+# panel eligible. The slot mechanism is not in these rows - it is run on the
+# screened universe only - so the comparison this section draws is between
+# concentrations and between model families at one entry rule, and not between
+# entry rules. The entry-rule comparison is Section 4's.
+#
+# Reading the unscreened arm against the screened one is what makes the cost
+# screen a measured decision rather than a declared one: the same predictions and
+# the same three ways of trading them, with and without the constraint.
 
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
@@ -761,12 +892,11 @@ if not trade_df.is_empty():
         )
 
 # %% [markdown]
-# The scatter confirms the pattern: positive Sharpe concentrates at the
-# low-trade-count end. These are strategies where the model produces smooth
-# predictions that trigger few position changes — essentially trading less
-# frequently within the 15-minute bar structure. This is the motivation for
-# the explicit cadence sweep in Ch18: rather than relying on model smoothness
-# as a proxy for reduced trading, we directly control the rebalance frequency.
+# A prediction that changes little from bar to bar triggers few position changes,
+# and so pays little in spread, whatever its ordering quality. That is model
+# smoothness standing in for a decision about how often to trade, and it is not a
+# decision anyone made. `17_costs` makes it explicitly, by sweeping the rebalance
+# cadence itself.
 
 # %% [markdown]
 # ## 4. The Cost-Feasible Carrier (Act 2)
@@ -783,9 +913,11 @@ if not trade_df.is_empty():
 #
 # The design shown here fixes the number of concurrent slots, the maximum time a
 # position may be held, the percentile a signal must clear to enter, and the exit
-# rule. Each was fixed on the full-universe grid before this section runs. These
-# backtests are registered under `universe_filter='cost_feasible'` and are
-# queried directly.
+# rule. The grid those four were chosen from runs on the screened universe only,
+# which is also the universe the chosen design is read on: a mechanism whose
+# purpose is to cut the cost of trading a cost-expensive tail has nothing to
+# choose between on a panel that still contains the tail. These backtests are
+# registered under `universe_filter='cost_feasible'` and are queried directly.
 
 # %%
 conn = sqlite3.connect(str(db_path))
@@ -817,12 +949,13 @@ print(carrier)
 # %% [markdown]
 # ### The Slot Mechanism Clears the Cost Barrier
 #
-# The featured slot design on the cost-feasible universe trades ~900–1,000 times
-# over the validation window — an order of magnitude fewer than the full-universe
-# every-bar sweep — and turns positive. The equal-weight top-k baseline, run on
-# the *same* screened universe, stays cost-defeated (only the widest, top-20 book
-# clears zero): the screen alone is not enough, the turnover control is what
-# converts the signal into a tradeable strategy.
+# The table below puts the featured slot design next to the equal-weight top-k
+# baseline on the *same* screened universe, so the two differ only in when they
+# trade. What to read off it is the trade count first and the Sharpe second: the
+# slot book holds a fixed number of positions and replaces one only when a fresher
+# signal displaces it, so it trades a fraction of what re-ranking every bar does.
+# Whether that is enough to clear the cost barrier is the measurement, and it is
+# printed rather than described here.
 
 # %%
 slot_design = carrier.filter(

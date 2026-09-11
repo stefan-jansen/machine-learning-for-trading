@@ -557,12 +557,22 @@ backtest:
     # belongs to eq_w_topk / quintile_long_short.
     #
     # Per-prediction cardinality:
-    #   slot:      long_q(3) × max_slots(3) × hold_bars(3) × exit_signal_q(4)
-    #              × bars_per_day_grid(1) = 108 (long_only only)
+    #   slot:      long_q(3) × max_slots(3) × hold_bars(2) × exit_signal_q(2)
+    #              × bars_per_day_grid(1) = 36 (long_only only)
     #   eq_w_topk: top_k(3) × direction(2) = 6
-    # ~114 per prediction × ~12 representative preds ≈ ~1,400 backtests
-    # for the signal stage on val (less than the original 2,800 estimate
-    # because slot × long_short is dropped).
+    # 42 per prediction, and `signal_passes` below says how many predictions
+    # each of them runs on.
+    #
+    # `hold_bars` and `exit_signal_q` were cut here, from 3 and 4 values to 2
+    # each, on 2026-09-11. Both keep their endpoints: hold_bars keeps 2h and 8h
+    # and drops the 4h midpoint, exit_signal_q keeps "off" and the median
+    # crossover and drops 0.30 and 0.70. A midpoint is what a grid can lose
+    # without losing the comparison it draws - the question the sweep asks is
+    # whether a longer hold and a signal exit move the result, and two values
+    # answer it. `long_q` and `max_slots` are untouched: `14_backtest.py`'s
+    # Act 2 selects the carrier by `slots == 10` and `entry_q == 0.9`
+    # literally, so removing either value empties the table that section
+    # prints.
     signal_nasdaq100:
       selection_method: [slot_persistent_signal_exit, eq_w_topk]
       long_q: [0.90, 0.95, 0.99]
@@ -572,12 +582,60 @@ backtest:
       # the PRICE grid, now one minute. Restated from the fifteen-minute counts they carried
       # (8/16/32 and 14) at the same wall-clock durations, so the sweep asks the same question
       # of the same intervals rather than silently asking about 8, 16 and 32 minutes.
-      hold_bars: [120, 240, 480]          # 2h, 4h, 8h, in minute bars
-      exit_signal_q: [null, 0.30, 0.50, 0.70]  # null disables signal-exit
+      hold_bars: [120, 480]               # 2h, 8h, in minute bars
+      exit_signal_q: [null, 0.50]         # null disables signal-exit
       pred_freshness_max_min: 14          # tolerated staleness of a prediction, in minutes
       bars_per_day_grid: [210]            # was 14 bars of 15 minutes; same 3.5h window
       top_k_grid: [5, 10, 20]
       lookback_days: 21
+    # How the signal stage walks the grid above. Two passes, because the whole
+    # grid over every prediction is not affordable here and nothing else in the
+    # book has this shape: every other case study declares 2 to 4 entry schemes
+    # and one universe, and no completed case study holds more than about 3,000
+    # signal backtests.
+    #
+    # Counted against this registry and measured on 2026-09-11. A backtest of
+    # this panel costs 31.8 s (four arms timed on the live 10.1M-row price
+    # frame, both universes, 29.2 s to 36.3 s), and the registry offers 741
+    # admissible prediction sets: 226 for each of the three continuous labels
+    # and 63 for `fwd_dir_15m`.
+    #
+    #   pass 1  baseline    741 × 3 canonical arms  × cost_feasible = 2,223
+    #   pass 2  mechanism    32 × 42 arms           × cost_feasible = 1,344
+    #   pass 2  reference    32 × 3 canonical arms  × full          =    96
+    #                                                       total   = 3,663  ≈ 32 h
+    #
+    # Crossing all 117 arms with both universes over all 741 predictions, which
+    # is what this block replaces, is 173,394 backtests and about 1,500 hours.
+    # The prediction count is not what was wrong with it: 741 sets is what three
+    # DL families at 20 epoch checkpoints, 15 gbm configs at 10 tree-count
+    # checkpoints and 16 linear configs come to, and every one of them is a
+    # configuration this case study fitted on purpose. The arm count was.
+    signal_passes:
+      # Pass 1 ranks every admissible prediction on three equal-weight
+      # concentrations, on the universe the carrier actually trades. Ranking on
+      # the full universe instead would order the predictions by a Sharpe no
+      # selected strategy ever earns, because the cost-expensive tail of the
+      # panel is exactly what `universe.cost_feasible` removes.
+      baseline_schemes: [ew_top5, ew_top10, ew_top20]
+      baseline_universe: cost_feasible
+      # Pass 2 runs the mechanism grid on the strongest predictions of pass 1,
+      # per label, ranked by pass-1 validation Sharpe.
+      #
+      # By Sharpe and not by IC. `top_n_predictions.signal` is the other lever
+      # that would cut this grid and it is the wrong one: `load_prediction_index`
+      # ends `ORDER BY m.ic_mean DESC NULLS LAST`, so any positive value there
+      # screens the signal stage on rank correlation and decides which models are
+      # backtested at all before a backtest has run. All nine case studies
+      # declare `signal: 0` for that reason, and it stays 0 here.
+      mechanism_top_n: 8
+      # The full universe is kept as a reference arm rather than a second copy of
+      # the sweep: the canonical concentrations only, on the pass-2 predictions.
+      # That is what `17_costs` reads for its full-vs-screened comparison - it
+      # prices the top-1 of each pre-cost stage, which is always inside pass 2 -
+      # and what Act 1 of `14_backtest` reads to show the unscreened baseline.
+      reference_schemes: [ew_top5, ew_top10, ew_top20]
+      reference_universe: full
     # Ch19 risk overlays.
     risk_controls:
       position:
