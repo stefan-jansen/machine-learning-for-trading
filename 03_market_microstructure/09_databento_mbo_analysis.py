@@ -622,10 +622,8 @@ if multi_day is not None and len(multi_day) > 0:
         ]
     )
 
-    # Correlation analysis
-    # Only the predictor is dropped here. Dropping the markouts as well would truncate
-    # every horizon to the longest one's sample, and the per-horizon dropna() below would
-    # then have nothing left to select.
+    # Predictor only: dropping the markouts here would truncate every horizon to the
+    # longest one's sample, leaving the per-horizon dropna() below nothing to select.
     pdf = multi_day.drop_nulls(["ofi", "ofi_lag1"]).to_pandas()
 
     print("Correlation of OFI(t-1) with the return over the following window\n")
