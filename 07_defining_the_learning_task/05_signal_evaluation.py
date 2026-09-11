@@ -31,7 +31,7 @@
 #
 # 1. Compute cross-sectional IC and understand its time series properties
 # 2. Interpret IC, ICIR, and HAC-adjusted significance
-# 3. Analyze quantile returns, spread, and monotonicity
+# 3. Analyze quantile returns, spread, and the monotonicity of the quantile ladder
 # 4. Understand horizon comparison with proper overlap warnings
 # 5. Measure turnover and signal half-life
 #
@@ -633,7 +633,7 @@ for period in PERIODS:
             "horizon": period_key,
             "spread_pct": round(spread * 100, 4),
             "t_stat": round(t_stat, 2),
-            "monotonicity_pct": round(mono * 100, 1),
+            "monotonicity_rho": round(mono, 3),
         }
     )
 
@@ -643,16 +643,22 @@ spread_summary
 # %% [markdown]
 # ### Monotonicity Interpretation
 #
-# Monotonicity is the fraction of consecutive quantile steps that move in the intended
-# direction. A perfectly ordered set of quantiles scores one; a perfectly reversed one
-# scores zero, which is the case worth watching for, because a reversed signal is a
-# working signal with its sign the wrong way round. The bands below are conventions, kept
-# in a declared table so the reading applied to this factor is the one the prose states.
+# `analyze_signal` reports monotonicity as the **Spearman rank correlation between the
+# quantile ranks and their mean returns**, so it runs from $-1$ to $+1$: $+1$ is a
+# perfectly increasing ladder of quantile returns, $-1$ a perfectly decreasing one, and
+# $0$ no rank association at all. It is a correlation, not a percentage, and is reported
+# as such below.
 #
-# The bands score the **strength** of the ordering, so they read the magnitude. The sign is
-# a separate fact and the more important one here: a strongly ordered signal pointing the
-# wrong way is not a weak signal, it is an inverted one, and the two call for opposite
-# actions.
+# That is not the same statistic as the one the fold section computes further down, which
+# is the *fraction of adjacent quantile steps that move upward* and runs from $0$ to $1$.
+# The two answer the same question differently and do not share a scale; where both appear
+# they are named apart.
+#
+# The bands below score the **strength** of the ordering, so they read the magnitude. The
+# sign is a separate fact and the more important one here: a strongly ordered signal
+# pointing the wrong way is not a weak signal, it is an inverted one, and the two call for
+# opposite actions. The bands are kept in a declared table so the reading the prose gives
+# is the one the code applies.
 
 # %% tags=["results"]
 MONOTONICITY_BANDS = (
@@ -663,7 +669,7 @@ MONOTONICITY_BANDS = (
 
 
 def monotonicity_band(value: float) -> str:
-    """Return the strength convention |monotonicity| falls into."""
+    """Return the strength convention the magnitude of a monotonicity rho falls into."""
     for upper, description in MONOTONICITY_BANDS:
         if abs(value) < upper:
             return description
@@ -671,7 +677,7 @@ def monotonicity_band(value: float) -> str:
 
 
 lower = 0.0
-print("Reference bands for |monotonicity| (strength; the sign is read separately):")
+print("Reference bands for |rho| (ordering strength; the sign is read separately):")
 for upper, description in MONOTONICITY_BANDS:
     print(f"  {lower:.2f} to {min(upper, 1.0):.2f}  {description}")
     lower = upper
@@ -1082,7 +1088,8 @@ for fold_idx, (train_dates, test_dates) in enumerate(splits):
 
     fold_ic = np.mean(ic_per_date)
 
-    # Quantile spread and monotonicity
+    # Quantile spread, and the adjacent-step ordering fraction (NOT the Spearman rho
+    # analyze_signal reports; see "Monotonicity Interpretation" above).
     test_with_q = test_data.with_columns(
         quantile=pl.col("factor")
         .rank()
@@ -1096,9 +1103,9 @@ for fold_idx, (train_dates, test_dates) in enumerate(splits):
     # Monotonicity: fraction of consecutive quantiles in correct order
     if len(q_vals) >= 2:
         diffs = [q_vals[i + 1] - q_vals[i] for i in range(len(q_vals) - 1)]
-        fold_mono = sum(1 for d in diffs if d > 0) / len(diffs)
+        fold_step_frac = sum(1 for d in diffs if d > 0) / len(diffs)
     else:
-        fold_mono = float("nan")
+        fold_step_frac = float("nan")
 
     evaluated_dates.extend(test_dates)
     fold_results.append(
@@ -1109,7 +1116,7 @@ for fold_idx, (train_dates, test_dates) in enumerate(splits):
             "n_obs": len(test_data),
             "ic": fold_ic,
             "spread": fold_spread,
-            "monotonicity": fold_mono,
+            "up_step_fraction": fold_step_frac,
         }
     )
 
@@ -1795,7 +1802,7 @@ if fold_auc_results:
 # | **ICIR** | Risk-adjusted IC (mean/std) | Together with IC; a near-zero ICIR says the mean is inside the daily dispersion |
 # | **Fold ICIR** | IC stability across test folds | Alongside which dates the folds actually cover |
 # | **Spread** | Top-bottom quantile difference | Sign first, then size against costs |
-# | **Monotonicity** | Quantile ordering consistency | Against the bands printed under *Monotonicity Interpretation* |
+# | **Monotonicity** | Spearman rho of quantile rank against mean return | Magnitude against the bands printed under *Monotonicity Interpretation*; sign first |
 # | **Turnover** | Signal stability | Against the break-even cost computed above |
 # | **Half-life** | Signal decay rate | Only where the horizon profile actually decays |
 #
@@ -1830,7 +1837,7 @@ if fold_auc_results:
 # result.ic_ir           # ICIR by period
 # result.quantile_returns # Returns by quantile
 # result.spread          # Top-bottom spread
-# result.monotonicity    # Quantile ordering
+# result.monotonicity    # Spearman rho of quantile rank vs mean return, in [-1, 1]
 # result.turnover        # Signal turnover
 # result.summary()       # Human-readable summary
 # ```
