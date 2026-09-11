@@ -56,7 +56,7 @@ This section makes experimentation auditable. Its value is not just reproducibil
 uv run python 06_strategy_definition/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "06_strategy_definition"
+uv run pytest tests/test_chapter_notebooks.py -v -k "06_strategy_definition"
 ```
 
 ## References

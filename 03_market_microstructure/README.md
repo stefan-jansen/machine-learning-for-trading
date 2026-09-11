@@ -65,7 +65,7 @@ This section focuses on intraday failure modes that quietly corrupt research: se
 uv run python 03_market_microstructure/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "03_market_microstructure"
+uv run pytest tests/test_chapter_notebooks.py -v -k "03_market_microstructure"
 ```
 
 ### Memory requirements

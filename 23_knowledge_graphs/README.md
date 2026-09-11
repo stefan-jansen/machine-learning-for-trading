@@ -82,7 +82,7 @@ three-timestamp model for temporal integrity and the engineering choices that ke
 uv run python 23_knowledge_graphs/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "23_knowledge_graphs"
+uv run pytest tests/test_chapter_notebooks.py -v -k "23_knowledge_graphs"
 
 # Headless (no display)
 MPLBACKEND=Agg PLOTLY_RENDERER=json uv run python 23_knowledge_graphs/<notebook>.py
