@@ -200,7 +200,7 @@ print(f"\n{FOCUS_STOCK}: {len(focus_bars):,} bars")
 # | Feature | What the library computes here | Interpretation |
 # |---------|-------------------------------|----------------|
 # | Kyle λ | mean of \|r\| / (V / V̄), over the window | Return per unit of *relative* volume |
-# | Amihud | mean of \|r\| / DollarVol, over the window | Return per dollar traded |
+# | Amihud | mean of \|r\| / DollarVol × 10⁶, over the window | Return per *million* dollars traded |
 # | Roll Spread | 2√(-Cov(ΔP_t, ΔP_{t-1})) | Implied bid-ask spread |
 #
 # The Kyle row is the one to read carefully. `kyle_lambda` takes a `method` argument that
@@ -382,17 +382,17 @@ print(f"  Spearman {corr_spearman:+.3f}")
 # against each other, and the sign is the thing to notice rather than the magnitude, which
 # one session of one name does not pin down.
 #
-# The mechanism is the denominator, and one experiment separates it from every other
-# explanation. Multiply every volume by a constant and recompute both: the cell below does
-# exactly that. Kyle's ratio normalizes volume by its own rolling mean, so the constant
-# cancels and the measure does not move. Amihud divides by dollar volume in dollars, so
-# the constant passes straight through and the measure scales by its reciprocal.
+# The denominators differ in one respect that is easy to check: what happens if every
+# volume is multiplied by a constant, returns and prices left alone. Kyle's ratio divides
+# volume by its own rolling mean, so the constant cancels. Amihud divides by dollar volume
+# in dollars, so the constant passes through. The cell below runs that substitution and
+# prints both ratios to the original.
 #
-# That is why an afternoon like this one pulls them apart. Volume builds into the close,
-# which drags Amihud down because its denominator is growing in absolute terms, while
-# Kyle's ratio sees a bar's volume only against the recent average and barely responds.
-# Neither is measuring the other badly. One is scale-free and one is not, and a reader who
-# wants "the" liquidity number has to decide which of those they wanted.
+# Read it for what it is. It establishes that the two measures answer differently to the
+# units volume is quoted in, and it does not by itself explain the negative correlation
+# above, which arises from returns, prices and volumes all moving together across the
+# session. The cross-stock section later in this notebook does the decomposition that
+# explains the disagreement.
 
 # %%
 # Scale every volume by a constant and recompute. One measure is invariant, one is not.
@@ -407,6 +407,11 @@ _scaled = features_df.with_columns((pl.col("volume") * VOLUME_SCALE).alias("volu
 print(f"with every volume multiplied by {VOLUME_SCALE}, the median ratio to the original:")
 print(f"  Kyle lambda {(_scaled['kyle_scaled'] / _scaled['kyle_lambda']).median():.3f}")
 print(f"  Amihud      {(_scaled['amihud_scaled'] / _scaled['amihud']).median():.3f}")
+
+# %% [markdown]
+# What the substitution shows: Kyle's ratio is unchanged and Amihud moves by the
+# reciprocal of the factor. The measures are not on a common footing, and a threshold
+# tuned on one says nothing about the other.
 
 # %% [markdown]
 # ## Order Flow Imbalance (OFI)
@@ -713,7 +718,10 @@ summary = (
         [
             pl.col("kyle_lambda").median().alias("kyle_median"),
             pl.col("amihud").median().alias("amihud_median"),
-            pl.col("volume").sum().alias("total_volume"),
+            # The two ingredients the estimators are built from, so the ordering
+            # below can be traced rather than asserted.
+            pl.col("returns").abs().median().alias("abs_return_median"),
+            (pl.col("close") * pl.col("volume")).median().alias("dollar_volume_median"),
             pl.len().alias("n_bars"),
         ]
     )
@@ -723,10 +731,20 @@ summary = (
 print("Liquidity Summary by Stock:")
 print(summary)
 
+summary = summary.with_columns(
+    (pl.col("abs_return_median") / pl.col("dollar_volume_median") * 1e6).alias("return_per_mm")
+)
+
 print()
-print("most to least liquid, by each measure:")
-print(f"  Kyle lambda: {' < '.join(summary.sort('kyle_median')['stock'].to_list())}")
-print(f"  Amihud:      {' < '.join(summary.sort('amihud_median')['stock'].to_list())}")
+print("orderings, smallest value first:")
+for _col, _label in (
+    ("kyle_median", "Kyle lambda"),
+    ("amihud_median", "Amihud"),
+    ("abs_return_median", "median |return| per bar"),
+    ("dollar_volume_median", "median dollar volume per bar"),
+    ("return_per_mm", "median |return| per million dollars"),
+):
+    print(f"  {_label:<36} {' < '.join(summary.sort(_col)['stock'].to_list())}")
 
 # %% [markdown]
 # **Interpretation**: compare the two orderings printed above before drawing anything from
@@ -735,13 +753,20 @@ print(f"  Amihud:      {' < '.join(summary.sort('amihud_median')['stock'].to_lis
 # had taken one measure as *the* liquidity ranking and sized positions against it would
 # have sized them against the other measure's answer inverted.
 #
-# Neither measure is wrong, and the reversal follows from the scale test above. Amihud
-# divides by dollar volume in dollars, so the most heavily traded name scores as the most
-# liquid almost regardless of how far its price travelled. Kyle's ratio divides by volume
-# relative to that name's own rolling mean, so trading more than its peers earns a name
-# nothing; what moves it is a bar whose return is large against that name's usual volume.
-# A name that trades enormous volume and still moves a lot therefore sits at opposite ends
-# of the two lists. That is a fact about the definitions rather than a defect in either.
+# Neither measure is wrong, and on this sample the five orderings printed above say where
+# the disagreement comes from. Compare the Kyle ordering against the median absolute
+# return, and the Amihud ordering against the median absolute return per million dollars.
+# Each estimator's ordering is the ordering of one of those two raw quantities.
+#
+# That is what the denominators do. Kyle's ratio divides volume by its own rolling mean,
+# which is close to one on a typical bar, so across names it is left ranking by how large
+# a typical return is. Amihud divides by dollar volume in dollars, which differs across
+# names by a large factor, so it ranks by return per dollar traded. A name whose returns
+# are the largest and whose dollar volume is also the largest therefore lands at the
+# illiquid end of one list and the liquid end of the other. The reversal is a property of
+# these three names on this session rather than something that must happen; what is
+# general is that the two estimators rank by different quantities, and the orderings above
+# are how you check which.
 #
 # What follows for practice is that "illiquid" has to name a measure, and a feasibility
 # overlay has to say which one it gates on and why. It also follows that one session of
