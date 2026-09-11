@@ -39,20 +39,22 @@
 # ## Prerequisites
 #
 # - `01_data_quality_diagnostics` - establishes the ETF coverage assumptions used here.
-# - Familiarity with leakage-aware splitting (Chapter 6 §6.3) and forward-return semantics.
+# - Familiarity with leakage-aware splitting (Chapter 6, *Data leakage and estimation bias*)
+#   and forward-return semantics.
 # - Polars DataFrame manipulation; basic statistics (t-statistics, percentiles).
 #
 # ## Data Contract
 #
 # - **Input**: Real ETF OHLCV from data loaders (SPY for single-asset, full universe for cross-sectional)
-# - **Output**: Example labels for teaching (use `compute_labels()` for production)
+# - **Output**: Example labels for teaching. Each case study builds its production labels in its
+#   own `02_labels` notebook, reading the horizon from that case study's `config/setup.yaml`
+#   through `utils.artifact_specs.resolve_label_horizon`.
 
 # %%
 """Label Methods - fixed-horizon, cross-sectional, and event-driven labeling for supervised learning."""
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -78,9 +80,10 @@ from scipy import stats as sp_stats
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS  # importing also registers the ML4T Plotly template
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # importing also registers the ML4T Plotly template
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 SEED = 42
@@ -112,7 +115,7 @@ def first_col_matching_any(df: pl.DataFrame, needles: Sequence[str]) -> str:
 
 
 # %% [markdown]
-# ## 1. Load Sample Data
+# ## Load Sample Data
 #
 # We use the ETF universe for demonstrations. SPY serves as the single-asset
 # example; the full universe enables cross-sectional analysis.
@@ -140,7 +143,7 @@ print(f"SPY data: {len(spy):,} days from {spy['timestamp'].min()} to {spy['times
 spy.head()
 
 # %% [markdown]
-# ## 2. Fixed Time Horizon Labels
+# ## Fixed Time Horizon Labels
 #
 # The simplest approach: compute forward returns over a fixed window.
 # This is the workhorse of factor-based ML strategies.
@@ -165,7 +168,7 @@ labels_returns = fixed_time_horizon_labels(
 )
 
 # Discover the produced label column robustly
-fh_label_col = first_col_matching_any(labels_returns, [f"{HORIZON}", "label_return", "label"])
+fh_label_col = first_col_matching_any(labels_returns, ["label_return", "label"])
 print(f"Fixed Horizon Labels (horizon={HORIZON}):")
 print(f"  Column added: {fh_label_col}")
 labels_returns.select(["timestamp", "close", fh_label_col]).head(10)
@@ -192,7 +195,7 @@ print("Binary label distribution:")
 display(labels_binary.group_by(binary_label_col).len().sort(binary_label_col))
 
 # %% [markdown]
-# ## 3. Anchor Alignment Demo
+# ## Anchor Alignment
 #
 # **Critical concept**: The anchor point determines when returns are measured.
 # Different anchors produce different labels even with the same horizon.
@@ -227,7 +230,6 @@ print(f"Mean difference:               {spy_anchors['anchor_diff'].mean():.4f}")
 print(f"Std difference:                {spy_anchors['anchor_diff'].std():.4f}")
 
 # %%
-# Visualize the difference over time
 fig = make_subplots(
     rows=2,
     cols=1,
@@ -280,17 +282,30 @@ fig.add_trace(
     col=1,
 )
 
-fig.update_yaxes(title_text="Return Difference", row=1, col=1)
-fig.update_xaxes(title_text="Return Difference", row=2, col=1)
+fig.update_xaxes(title_text="Date", row=1, col=1)
+fig.update_yaxes(title_text="Return difference", row=1, col=1)
+fig.update_xaxes(title_text="Return difference", row=2, col=1)
 fig.update_yaxes(title_text="Count", row=2, col=1)
 fig.update_layout(
     height=550,
-    title_text=f"Anchor choice nets to zero but moves every trade ({HORIZON}-day)",
+    title_text=f"Close-to-close minus next-open-to-open return ({HORIZON}-day)",
     font=dict(size=12),
     showlegend=True,
     legend=dict(x=0.02, y=0.98),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two stacked panels of the difference between the close-to-close and "
+        "next-open-to-open 21-day SPY return, 2015 to 2024. The top panel plots the "
+        "daily difference as a thin grey line that oscillates within roughly plus or "
+        "minus two percent, widening to plus or minus ten percent around the March 2020 "
+        "crash, with an amber 63-day moving average that stays pinned to the zero line "
+        "throughout. The bottom panel is a histogram of the same differences: a tall "
+        "narrow peak centred on zero, roughly symmetric, with most observations inside "
+        "plus or minus two percent and thin tails reaching eight percent."
+    ),
+)
 
 # %%
 # Example timestamps showing anchor shift
@@ -299,14 +314,16 @@ spy_anchors.select(
 ).head(10)
 
 # %% [markdown]
-# **Key Insight**: The anchor difference is noisy at the trade level (standard
-# deviation ~100bps for SPY), even though it averages close to zero. This means
-# individual label assignments can differ substantially between anchors, affecting
-# model training. For end-of-day signals executed at next open, labels should use
-# next-open anchoring to match the actual execution price.
+# The two anchors agree on average and disagree on every individual trade. The mean
+# difference printed above is indistinguishable from zero, while its standard deviation
+# is of the same order as a typical daily move - so the choice of anchor is invisible in
+# a summary statistic and decisive for any single label. A model trained on close-to-close
+# labels is being scored on a price its strategy could not have transacted at.
+#
+# For an end-of-day signal executed at the next open, anchor the label at the next open.
 
 # %% [markdown]
-# ## 4. Time-Series Percentile Labels
+# ## Time-Series Percentile Labels
 #
 # Labels are relative to recent history for a **single instrument**,
 # making them adaptive to volatility regimes.
@@ -332,20 +349,60 @@ print("Label Distribution:")
 display(labels_ts_pct.group_by(ts_pct_label_col).len().sort(ts_pct_label_col))
 
 # %%
-# Visualize threshold adaptation
 threshold_col = [c for c in labels_ts_pct.columns if "threshold" in c.lower()]
 if threshold_col:
     fig = px.line(
         labels_ts_pct.to_pandas(),
         x="timestamp",
         y=threshold_col[0],
-        title=f"The rolling threshold adapts to volatility regimes ({HORIZON}-day)",
+        title=f"Rolling 75th percentile of trailing {HORIZON}-day SPY returns",
     )
-    fig.update_layout(height=350, xaxis_title="Date", yaxis_title="Return Threshold")
-    fig.show()
+    fig.update_layout(height=350, xaxis_title="Date", yaxis_title="Return threshold")
+    show_plotly_with_alt(
+        fig,
+        alt=(
+            "A single navy line of the rolling 75th-percentile threshold for SPY 21-day "
+            "returns from 2015 to 2024, computed over a 252-day lookback. The line starts "
+            "near four percent, falls to below two percent through 2016, drifts up through "
+            "2018 and 2019, and peaks near five and a half percent in early 2021. It falls "
+            "back to below three percent in mid-2022 before rising again to around five "
+            "percent in 2023 and easing to four percent by the end of 2024."
+        ),
+    )
+
+# %% tags=["results"]
+# What the threshold actually tracks: trailing dispersion, and trailing drift as well.
+_diag = (
+    spy.select("timestamp", "close")
+    .with_columns(
+        fwd=(pl.col("close").shift(-HORIZON) / pl.col("close") - 1),
+        daily=(pl.col("close") / pl.col("close").shift(1) - 1),
+    )
+    .with_columns(
+        threshold=pl.col("fwd").rolling_quantile(0.75, window_size=252),
+        trailing_vol=pl.col("daily").rolling_std(252) * np.sqrt(252),
+        trailing_drift=pl.col("fwd").rolling_mean(252),
+    )
+    .drop_nulls()
+)
+print("Rolling threshold, correlation against:")
+print(
+    f"  trailing 1-year realized volatility: {_diag.select(pl.corr('threshold', 'trailing_vol')).item():.2f}"
+)
+print(
+    f"  trailing 1-year mean {HORIZON}-day return: {_diag.select(pl.corr('threshold', 'trailing_drift')).item():.2f}"
+)
 
 # %% [markdown]
-# ## 5. Cross-Sectional Percentile Labels
+# The threshold is not a fixed return; it is whatever the top quartile of the last year
+# looked like. It moves mostly with trailing volatility, which is the property the method
+# is usually sold on, but the correlation above is well short of one because it also moves
+# with trailing drift: a year of steady gains raises the bar for "top quartile" without
+# any change in dispersion. Both effects raise the threshold, and a reader cannot tell
+# them apart from the line alone.
+
+# %% [markdown]
+# ## Cross-Sectional Percentile Labels
 #
 # **The most natural use of percentile labels**: rank assets within the universe
 # at each decision time, then label top/bottom quantiles.
@@ -382,25 +439,28 @@ print(f"Cross-sectional ranking: {len(etf_cs):,} asset-date observations")
 
 # %%
 # Assign labels: top quintile = +1, bottom quintile = -1, else 0
-quintile_threshold = 20  # Top/bottom 20%
+QUINTILE_THRESHOLD = 20  # Top/bottom quintile
 etf_cs = etf_cs.with_columns(
     [
-        pl.when(pl.col("pct_rank") >= (100 - quintile_threshold))
+        pl.when(pl.col("pct_rank") >= (100 - QUINTILE_THRESHOLD))
         .then(pl.lit(1))
-        .when(pl.col("pct_rank") <= quintile_threshold)
+        .when(pl.col("pct_rank") <= QUINTILE_THRESHOLD)
         .then(pl.lit(-1))
         .otherwise(pl.lit(0))
         .alias("cs_label")
     ]
 )
 
-print(f"Cross-Sectional Labels ({HORIZON}d horizon, {quintile_threshold}th percentile cutoffs):")
+print(f"Cross-Sectional Labels ({HORIZON}d horizon, {QUINTILE_THRESHOLD}th percentile cutoffs):")
 print(f"  Total observations: {len(etf_cs):,}")
 display(etf_cs.group_by("cs_label").len().sort("cs_label"))
 
+# %% [markdown]
+# Counts per class move with the size of the universe on each date; proportions do not,
+# because the cut is a rank. Converting to proportions before plotting is what makes the
+# construction visible rather than the coverage.
+
 # %%
-# Verify stable class proportions over time
-# Note: Counts vary if universe size changes; proportions are stable by construction.
 label_by_date = (
     etf_cs.group_by(["timestamp", "cs_label"])
     .len()
@@ -442,11 +502,21 @@ for label in [-1, 0, 1]:
 
 fig.update_layout(
     height=400,
-    title="Cross-Sectional Label Proportions Over Time (Stable by Construction)",
+    title=f"Cross-sectional label proportions by date (top/bottom {QUINTILE_THRESHOLD}%)",
     xaxis_title="Date",
     yaxis_title="Proportion",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Three flat lines across 2015 to 2024 showing the share of ETFs in each "
+        "cross-sectional label class on each date. The neutral class sits just under "
+        "0.6 and the two extreme classes sit just above 0.2, where they coincide exactly "
+        "and plot as one line. Every line is horizontal apart from a few one-pixel steps "
+        "around 2016, 2018 and 2019 where the number of ETFs with a forward return "
+        "changes and the quintile cut lands on a different count."
+    ),
+)
 
 # %%
 # Show cross-sectional threshold values over time
@@ -454,8 +524,8 @@ cs_thresholds = (
     etf_with_fwd.group_by("timestamp")
     .agg(
         [
-            pl.col("fwd_return").quantile(quintile_threshold / 100).alias("bottom_threshold"),
-            pl.col("fwd_return").quantile(1 - quintile_threshold / 100).alias("top_threshold"),
+            pl.col("fwd_return").quantile(QUINTILE_THRESHOLD / 100).alias("bottom_threshold"),
+            pl.col("fwd_return").quantile(1 - QUINTILE_THRESHOLD / 100).alias("top_threshold"),
         ]
     )
     .sort("timestamp")
@@ -482,19 +552,34 @@ fig.add_trace(
 )
 fig.update_layout(
     height=400,
-    title="Cross-Sectional Return Thresholds Widen in Volatile Markets",
+    title=f"Cross-sectional cut points for the top and bottom {QUINTILE_THRESHOLD}%",
     xaxis_title="Date",
-    yaxis_title=f"{HORIZON}-day Return Threshold",
+    yaxis_title=f"{HORIZON}-day return threshold",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two lines from 2015 to 2024 tracing the cross-sectional cut points that define "
+        "the top and bottom ETF quintiles on each date. The green top-quintile line sits "
+        "mostly between zero and plus ten percent and the red bottom-quintile line mostly "
+        "between zero and minus ten percent, so the band between them is usually about "
+        "ten percentage points wide. The band narrows to a few percentage points in the "
+        "calm stretches of 2017 and 2024, and blows out in March 2020 to a single spike "
+        "reaching plus twenty-six percent above and minus forty percent below."
+    ),
+)
 
 # %% [markdown]
-# **Key Insight**: Cross-sectional percentile labels maintain stable class distributions
-# by construction, but the absolute return thresholds vary with market conditions.
-# In high-volatility periods, larger absolute returns are needed to qualify as "top quintile".
+# The two figures make the same point from opposite sides. Class proportions are fixed by
+# construction, so the first figure is flat by design and carries no information about the
+# market; the small steps in it are changes in the number of ETFs, not changes in returns.
+# Everything that varies has been pushed into the second figure: the return a fund needs
+# to reach the top quintile is a few percent in a quiet month and tens of percent in a
+# dislocation. A model trained on these labels sees a constant class balance and a target
+# whose economic meaning changes underneath it.
 
 # %% [markdown]
-# ## 6. Triple-Barrier Labels
+# ## Triple-Barrier Labels
 #
 # Path-dependent labeling that captures realistic trade outcomes:
 # - **Upper barrier**: Take profit hit → +1
@@ -502,6 +587,14 @@ fig.show()
 # - **Time barrier**: Neither hit → label based on final return
 #
 # This method is from De Prado's *Advances in Financial Machine Learning*.
+#
+# **What the barriers are tested against.** `triple_barrier_labels` takes `high_col`,
+# `low_col` and `open_col` alongside `price_col`. Supplied, it detects a touch on the bar's
+# range and executes a gap-through at the open. Omitted - as here, to keep the mechanics
+# visible on a single series - the bar reduces to its close: a barrier is touched only if
+# a *close* crosses it, and the trade is then booked at the barrier price rather than at the
+# close that crossed it. Both simplifications flatter the label set, and the section below
+# measures by how much.
 
 # %%
 # Fixed percentage barriers: 2% take profit, 1% stop loss
@@ -528,10 +621,15 @@ print("Barrier Hit Distribution:")
 display(labels_tb.group_by("barrier_hit").len().sort("barrier_hit"))
 
 # %% [markdown]
-# ### 6.1 Triple-Barrier Path Visualization
+# ### Triple-Barrier Path Visualization
 #
-# **Understanding triple-barrier requires seeing the price paths**.
-# Below we plot several example trades showing how barriers are hit.
+# Each figure below is one trade. The navy segment is the window in which the position was
+# open, the copper cross is the bar the label resolves on and the price it books, and the
+# dotted grey continuation is the rest of the twenty-day window - drawn because a reader
+# needs to see what the label deliberately ignores. The lower-barrier example is the one to
+# study: the label records a one percent loss on a path that went on to fall twenty-eight
+# percent, which is the whole point of a stop and the whole risk of trusting the label as a
+# description of the market rather than of the trade.
 
 # %%
 # Find examples of each barrier hit type
@@ -543,11 +641,12 @@ tb_with_price = labels_tb.join(
 def plot_triple_barrier_example(
     df: pl.DataFrame, entry_idx: int, config: LabelingConfig, title: str
 ) -> go.Figure:
-    """Plot a single triple-barrier trade example with barriers overlaid."""
+    """Plot a single triple-barrier trade example with barriers and the exit overlaid."""
     # Get entry point
     entry_row = df.row(entry_idx, named=True)
     entry_price = entry_row["close"]
     entry_time = entry_row["timestamp"]
+    exit_bars = entry_row["label_bars"]
 
     # Calculate barrier levels
     upper_level = entry_price * (1 + config.upper_barrier)
@@ -555,20 +654,48 @@ def plot_triple_barrier_example(
 
     # Get the forward price path
     forward_rows = df.filter(pl.col("timestamp") >= entry_time).head(config.max_holding_period + 1)
+    times = forward_rows["timestamp"].to_list()
+    prices = forward_rows["close"].to_numpy()
 
     fig = go.Figure()
 
-    # Price path
+    # Bars after the exit are not part of the trade; draw them as context, not as price.
+    if exit_bars is not None and exit_bars < len(times) - 1:
+        fig.add_trace(
+            go.Scatter(
+                x=times[int(exit_bars) :],
+                y=prices[int(exit_bars) :],
+                mode="lines",
+                name="After exit",
+                line=dict(color=COLORS["neutral"], width=1, dash="dot"),
+                opacity=0.5,
+            )
+        )
+    held = int(exit_bars) + 1 if exit_bars is not None else len(times)
+
+    # Price path while the position is open
     fig.add_trace(
         go.Scatter(
-            x=forward_rows["timestamp"].to_list(),
-            y=forward_rows["close"].to_numpy(),
+            x=times[:held],
+            y=prices[:held],
             mode="lines+markers",
-            name="Price",
+            name="Price (position open)",
             line=dict(color=COLORS["blue"], width=2),
             marker=dict(size=4),
         )
     )
+
+    # Exit point
+    if exit_bars is not None and int(exit_bars) < len(times):
+        fig.add_trace(
+            go.Scatter(
+                x=[times[int(exit_bars)]],
+                y=[entry_row["label_price"]],
+                mode="markers",
+                name="Exit (booked)",
+                marker=dict(color=COLORS["copper"], size=12, symbol="x"),
+            )
+        )
 
     # Entry point
     fig.add_trace(
@@ -645,6 +772,32 @@ if "barrier_hit" in labels_tb.columns:
             row_idx = matches["row_idx"][idx]
             examples.append((barrier_type, row_idx))
 
+    alts = {
+        "upper": (
+            "One SPY trade entered at the close of 27 April 2020 near 264, with a dashed "
+            "green take-profit line at 269.15 and a dashed red stop line at 261.23. The "
+            "navy price line rises across two bars and closes above the take-profit, where "
+            "a copper cross marks the booked exit at the barrier price. The remaining "
+            "eighteen bars of the holding window are drawn as a faint dotted grey line "
+            "that dips to 259 in early May and ends near 275, none of it part of the trade."
+        ),
+        "lower": (
+            "One SPY trade entered at the close of 25 February 2020 near 286, with a dashed "
+            "green take-profit line at 291.44 and a dashed red stop line at 282.86. The navy "
+            "price line falls across two bars through the stop, where a copper cross marks "
+            "the booked exit at the barrier price. The rest of the holding window is a faint "
+            "dotted grey line collapsing to about 205 by late March, a twenty-eight percent "
+            "decline that the label does not see because the position closed on the second bar."
+        ),
+        "time": (
+            "One SPY trade entered at the close of 1 June 2017 near 211, with a dashed green "
+            "take-profit line at 215.25 well above the path and a dashed red stop line at "
+            "208.92 well below it. The navy price line wanders between 210 and 213.2 for the "
+            "whole twenty-bar window without approaching either barrier, and a copper cross "
+            "marks the exit at the final bar, where the vertical dotted time barrier sits."
+        ),
+    }
+
     # Plot examples
     for barrier_type, idx in examples[:3]:  # Limit to 3 examples
         if idx < len(tb_with_price):
@@ -652,12 +805,12 @@ if "barrier_hit" in labels_tb.columns:
                 tb_with_price,
                 idx,
                 config,
-                f"Triple-Barrier Example: {barrier_type.upper()} barrier hit",
+                f"SPY triple-barrier trade closed by the {barrier_type} barrier",
             )
-            fig.show()
+            show_plotly_with_alt(fig, alt=alts[barrier_type])
 
 # %% [markdown]
-# ### 6.2 ATR-Based Barriers
+# ### ATR-Based Barriers
 #
 # Volatility-adjusted barriers adapt to market conditions:
 # - Low volatility → Tighter barriers (capture smaller moves)
@@ -714,7 +867,7 @@ print("ATR as % of Close:")
 display(spy_atr["upper_barrier_pct"].describe())
 
 # %% [markdown]
-# ### 6.3 Sample Weights from Uniqueness
+# ### Sample Weights from Uniqueness
 #
 # Overlapping labels create mechanical dependence: high-concurrency periods
 # dominate training loss. Weighting by uniqueness prevents these periods
@@ -726,18 +879,26 @@ if "sample_weight" in labels_tb.columns:
     print("Sample Weight Statistics:")
     display(labels_tb["sample_weight"].describe())
 
-    # Visualize weight distribution
     fig = px.histogram(
         labels_tb.filter(pl.col("sample_weight").is_not_null()).to_pandas(),
         x="sample_weight",
         nbins=50,
-        title="Triple-Barrier Sample Weight Distribution",
+        title="Uniqueness-based sample weights, SPY triple-barrier labels",
     )
-    fig.update_layout(height=350)
-    fig.show()
+    fig.update_layout(height=350, xaxis_title="Sample weight", yaxis_title="Count")
+    show_plotly_with_alt(
+        fig,
+        alt=(
+            "A right-skewed histogram of uniqueness-based sample weights for the SPY "
+            "triple-barrier labels. The weights are normalised to average one. The bulk "
+            "sits between zero and one and a half with a mode near 0.4, and a long thin "
+            "tail runs out past four. A minority of near-isolated labels therefore carry "
+            "several times the weight of a label drawn from a crowded stretch."
+        ),
+    )
 
 # %% [markdown]
-# ### 6.4 Rich Triple-Barrier Output
+# ### Rich Triple-Barrier Output
 #
 # Unlike simple forward-return labels, triple-barrier output includes the **full
 # trade outcome**. This is critical for MFE/MAE analysis (NB04) and position
@@ -769,7 +930,6 @@ print("Trade Outcomes by Barrier Type:")
 display(barrier_summary)
 
 # %%
-# Return distribution colored by barrier hit type
 fig = px.histogram(
     labels_tb.filter(pl.col("label_return").is_not_null()).to_pandas(),
     x="label_return",
@@ -777,13 +937,65 @@ fig = px.histogram(
     nbins=50,
     barmode="overlay",
     opacity=0.7,
-    title="Label Return Distribution by Barrier Hit Type",
+    title="Booked label return by barrier type, SPY",
 )
-fig.update_layout(height=350, xaxis_title="Label Return", yaxis_title="Count")
-fig.show()
+fig.update_layout(height=350, xaxis_title="Booked label return", yaxis_title="Count")
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "A histogram of the booked label return for every SPY triple-barrier trade, "
+        "coloured by which barrier closed it. Almost all the mass is two narrow spikes: "
+        "about 1,250 lower-barrier trades at exactly minus one percent and about 1,100 "
+        "upper-barrier trades at exactly plus two percent. Between them the axis is empty "
+        "apart from a sliver of roughly 160 time-barrier trades scattered near plus one "
+        "percent. Nothing lies beyond either barrier."
+    ),
+)
 
 # %% [markdown]
-# ### 6.5 Sequential Bootstrap
+# The two spikes sit exactly on the barriers because a close-only test books the barrier
+# price, not the close that crossed it. That is an assumption, and it is measurable: the
+# cell below compares what each trade was booked at against the close that actually
+# triggered it.
+
+# %% tags=["results"]
+_triggered = (
+    labels_tb.filter(pl.col("barrier_hit").is_in(["upper", "lower"]))
+    .join(
+        spy.select(pl.col("timestamp").alias("label_time"), pl.col("close").alias("exit_close")),
+        on="label_time",
+        how="left",
+    )
+    .with_columns(realized=(pl.col("exit_close") / pl.col("close") - 1))
+)
+print("Booked at the barrier vs realized at the close that crossed it:")
+for hit in ("upper", "lower"):
+    part = _triggered.filter(pl.col("barrier_hit") == hit)
+    print(
+        f"  {hit:<6} n={len(part):>5}  booked {part['label_return'].mean():+.4f}"
+        f"   realized {part['realized'].mean():+.4f}"
+        f"   gap {(part['realized'] - part['label_return']).mean():+.4f}"
+    )
+print(
+    f"  all barrier exits: booked {_triggered['label_return'].mean():+.4f}"
+    f"   realized {_triggered['realized'].mean():+.4f}"
+)
+
+# %% [markdown]
+# The gap runs the wrong way on both sides, and further on the lower side than the upper
+# one. An upper-barrier exit is booked at the take-profit when the close that triggered it
+# was already above it, so the label gives away part of the gain; a lower-barrier exit is
+# booked at the stop when the close that triggered it was well below, so the label hides
+# part of the loss.
+# Averaged over every barrier exit the label set is better than what those closes would
+# have paid, and the bias is asymmetric rather than a wash.
+#
+# Passing `high_col`, `low_col` and `open_col` replaces the assumption with the bar's own
+# range and executes a gap-through at the open. That is the production setting, and the
+# difference above is what it is worth.
+
+# %% [markdown]
+# ### Sequential Bootstrap
 #
 # Overlapping labels create sample dependence. The **sequential bootstrap**
 # (De Prado, AFML Ch4) generates bootstrap indices that respect label
@@ -817,36 +1029,63 @@ print(f"  Sequential mean uniqueness: {seq_uniqueness.mean():.3f}")
 print(f"  Naive mean uniqueness:      {naive_uniqueness.mean():.3f}")
 print(f"  Improvement:                {(seq_uniqueness.mean() / naive_uniqueness.mean() - 1):.1%}")
 
+# %% [markdown]
+# Overlaid on one axis with one binning. Side-by-side panels rescale independently, which
+# would let two nearly identical distributions look like a finding.
+
 # %%
-# Visualize the difference
-fig = make_subplots(rows=1, cols=2, subplot_titles=["Naive Bootstrap", "Sequential Bootstrap"])
-
+bins = dict(start=0.0, end=float(uniqueness.max()), size=float(uniqueness.max()) / 30)
+fig = go.Figure()
 fig.add_trace(
     go.Histogram(
-        x=naive_uniqueness, nbinsx=30, name="Naive", marker_color=COLORS["neutral"], opacity=0.7
-    ),
-    row=1,
-    col=1,
+        x=naive_uniqueness,
+        xbins=bins,
+        name="Naive",
+        marker_color=COLORS["neutral"],
+        opacity=0.6,
+    )
 )
 fig.add_trace(
     go.Histogram(
-        x=seq_uniqueness, nbinsx=30, name="Sequential", marker_color=COLORS["positive"], opacity=0.7
-    ),
-    row=1,
-    col=2,
+        x=seq_uniqueness,
+        xbins=bins,
+        name="Sequential",
+        marker_color=COLORS["blue"],
+        opacity=0.6,
+    )
 )
-fig.update_xaxes(title_text="Uniqueness", row=1, col=1)
-fig.update_xaxes(title_text="Uniqueness", row=1, col=2)
-fig.update_layout(height=300, title_text="Sequential Bootstrap Favors Higher-Uniqueness Samples")
-fig.show()
+for values, color in ((naive_uniqueness, COLORS["neutral"]), (seq_uniqueness, COLORS["blue"])):
+    fig.add_vline(x=float(values.mean()), line_dash="dash", line_color=color, line_width=1.5)
+fig.update_layout(
+    height=320,
+    barmode="overlay",
+    title=f"Uniqueness of {n_draws} draws, naive vs sequential bootstrap",
+    xaxis_title="Average uniqueness of the drawn label",
+    yaxis_title="Count",
+)
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two overlaid histograms on one axis of the average uniqueness of 500 labels "
+        "drawn by naive random sampling in grey and by sequential bootstrap in navy, with "
+        "a dashed vertical line at each mean. Both distributions are right-skewed over the "
+        "same range from about 0.05 to 0.5 with a mode near 0.09, and they overlap almost "
+        "everywhere. The sequential histogram is slightly thinner at the low end and "
+        "slightly heavier around 0.3, and its mean line sits just to the right of the "
+        "naive one - a separation far smaller than the spread of either distribution."
+    ),
+)
 
 # %% [markdown]
-# Sequential bootstrap produces training sets where each sample contributes
-# more independent information. This reduces effective sample size but
-# improves model generalization on overlapping label data.
+# The two histograms are nearly the same shape, and the printed comparison above says how
+# far apart their means are. The shift is real and it is small: the sequential draw tilts
+# toward less-overlapped labels, it does not select them. What it cannot do is manufacture
+# independent observations that the sampling scheme never generated - the overlap is a
+# property of labelling every bar over a horizon of many bars, and the next section
+# measures what that leaves.
 
 # %% [markdown]
-# ### 6.6 Effective Sample Size
+# ### Effective Sample Size
 #
 # The section text defines $N_{\text{eff}} = \sum_{t,a} w_{t,a}$ and notes that
 # for fixed-horizon labels sampled at every bar, $N_{\text{eff}} \approx N / H$.
@@ -858,13 +1097,14 @@ fig.show()
 # figures, because they answer different questions: how many independent
 # observations does *one* series carry, and how many does the *panel* carry.
 
+# %% [markdown]
+# Uniqueness depends only on the index geometry of the labels, not on prices: label $i$ is
+# alive over bars $[i, i+H]$, and $w_i$ averages $1/c(u)$ over that span. Concurrency is a
+# per-symbol quantity, because two different ETFs' labels do not overlap each other in the
+# sense the weight measures, so the panel figure is a sum over symbols rather than one
+# calculation on the stacked frame.
+
 # %%
-# Measure effective sample size for fixed-horizon labels on the ETF universe.
-#
-# Uniqueness depends only on the label index geometry (start, end, n_bars), not on
-# prices: label i is alive over bars [i, i+H], and w_i averages 1/c(u) over that span.
-# Concurrency is a per-symbol quantity - two different ETFs' labels do not overlap
-# each other in the sense the uniqueness weight measures - so we sum per symbol.
 N_nominal = len(etf_with_fwd)
 n_symbols = etf_with_fwd["symbol"].n_unique()
 
@@ -917,7 +1157,7 @@ print(f"  overlap gives w = 1/(H+1) = {1 / (HORIZON + 1):.4f}, not 1/H = {1 / HO
 print("  That is why the measured N_eff sits slightly below the N/H shortcut.")
 
 # %% [markdown]
-# ## 7. Trend Scanning Labels
+# ## Trend Scanning Labels
 #
 # De Prado's adaptive approach that identifies trends using t-statistics.
 # The method scans forward with varying windows and selects the one
@@ -941,16 +1181,23 @@ if "t_value" in labels_trend.columns:
     display(labels_trend["t_value"].describe())
 
 # %% [markdown]
-# ### 7.1 Selection Bias in Trend Scanning
+# ### What the Trend-Scanning t-statistic Measures
 #
-# Trend scanning picks the horizon with the strongest t-statistic for each
-# observation. This maximization introduces **selection bias**: the reported
-# t-statistics are systematically inflated. The Bonferroni correction raises
-# the critical value to account for the number of horizons tested, requiring
-# each t-statistic to clear a higher bar for significance.
+# For each bar the method regresses the **price level** on a time index over every window
+# from five to twenty bars and keeps the window with the largest absolute t-statistic. Two
+# separate things inflate that number, and only one of them is a multiple-comparisons
+# problem:
+#
+# 1. **Selection.** The reported t is a maximum over sixteen candidates, not a single draw.
+# 2. **Dependence.** Prices are close to a random walk, so the residuals of a regression on
+#    their levels are strongly autocorrelated. The ordinary least-squares standard error
+#    assumes they are not, and is therefore far too small.
+#
+# The usual answer addresses the first: raise the critical value to $\alpha/k$. The cells
+# below apply it, and then test whether it was the binding problem by running the identical
+# scan on a price path with no trend structure left in it at all.
 
 # %%
-# Distribution of selected horizons
 if "optimal_window" in labels_trend.columns:
     horizon_col = "optimal_window"
 elif "best_window" in labels_trend.columns:
@@ -958,21 +1205,51 @@ elif "best_window" in labels_trend.columns:
 else:
     horizon_col = None
 
+N_CANDIDATES = 20 - 5 + 1  # max_window - min_window + 1
+ALPHA = 0.05
+bonferroni_crit = sp_stats.norm.ppf(1 - ALPHA / (2 * N_CANDIDATES))
+
+# %% [markdown]
+# The null the t-statistic is compared against says: no trend. Rather than assume its
+# shape, build it. Shuffling the daily log returns destroys every trend while preserving
+# the return distribution exactly, and the resulting path is a random walk by construction.
+# Whatever the scan reports on it is what the method reports when there is nothing to find.
+
+# %%
+_log_returns = np.diff(np.log(spy["close"].to_numpy()))
+_shuffled = np.log(spy["close"][0]) + np.concatenate(
+    [[0.0], np.cumsum(np.random.default_rng(SEED).permutation(_log_returns))]
+)
+spy_permuted = spy.with_columns(pl.Series("close", np.exp(_shuffled)))
+
+labels_permuted = trend_scanning_labels(
+    spy_permuted,
+    min_window=5,
+    max_window=20,
+    step=1,
+    price_col="close",
+)
+
+raw_t = labels_trend["t_value"].drop_nulls()
+null_t = labels_permuted["t_value"].drop_nulls()
+
 # %%
 if horizon_col is not None:
     fig = make_subplots(
         rows=1,
         cols=2,
-        subplot_titles=["Selected Horizon Distribution", "Raw t-statistics (with critical values)"],
+        subplot_titles=[
+            "Window length selected by the scan",
+            "Absolute t-statistic: SPY vs a shuffled path",
+        ],
     )
 
-    # (a) Histogram of selected horizons
     selected_horizons = labels_trend[horizon_col].drop_nulls().cast(pl.Int32, strict=False)
     fig.add_trace(
         go.Histogram(
             x=selected_horizons.to_numpy(),
-            nbinsx=16,
-            name="Selected horizon",
+            xbins=dict(start=4.5, end=20.5, size=1),
+            name="Selected window",
             marker_color=COLORS["blue"],
             showlegend=False,
         ),
@@ -980,82 +1257,122 @@ if horizon_col is not None:
         col=1,
     )
 
-    # (b) Raw t-statistics vs Bonferroni-adjusted critical value
-    if "t_value" in labels_trend.columns:
-        n_candidates = 20 - 5 + 1  # max_window - min_window + 1
-        raw_t = labels_trend["t_value"].drop_nulls()
+    T_AXIS_MAX = 45  # a handful of near-perfect fits run far past this; disclosed on the axis
+    t_bins = dict(start=0, end=T_AXIS_MAX, size=1)
+    n_clipped = int((raw_t.abs() > T_AXIS_MAX).sum() + (null_t.abs() > T_AXIS_MAX).sum())
+    fig.add_trace(
+        go.Histogram(
+            x=raw_t.abs().to_numpy(),
+            xbins=t_bins,
+            name="SPY",
+            marker_color=COLORS["blue"],
+            opacity=0.6,
+        ),
+        row=1,
+        col=2,
+    )
+    fig.add_trace(
+        go.Histogram(
+            x=null_t.abs().to_numpy(),
+            xbins=t_bins,
+            name="Shuffled returns",
+            marker_color=COLORS["neutral"],
+            opacity=0.6,
+        ),
+        row=1,
+        col=2,
+    )
+    fig.add_vline(
+        x=1.96,
+        line_dash="dash",
+        line_color=COLORS["negative"],
+        annotation_text="t=1.96",
+        annotation_position="top right",
+        row=1,
+        col=2,
+    )
 
-        # Bonferroni: raise the critical value by dividing alpha by n_candidates
-        alpha = 0.05
-        bonferroni_crit = sp_stats.norm.ppf(1 - alpha / (2 * n_candidates))
-
-        fig.add_trace(
-            go.Histogram(
-                x=raw_t.to_numpy(),
-                nbinsx=50,
-                name="Raw t",
-                marker_color=COLORS["blue"],
-                opacity=0.5,
-            ),
-            row=1,
-            col=2,
-        )
-
-        # Mark both critical values - stagger the labels (left vs right) so they don't overlap
-        fig.add_vline(
-            x=1.96,
-            line_dash="dash",
-            line_color=COLORS["slate"],
-            annotation_text="t=1.96",
-            annotation_position="top left",
-            row=1,
-            col=2,
-        )
-        fig.add_vline(x=-1.96, line_dash="dash", line_color=COLORS["slate"], row=1, col=2)
-        fig.add_vline(
-            x=bonferroni_crit,
-            line_dash="dash",
-            line_color=COLORS["negative"],
-            annotation_text=f"Bonf={bonferroni_crit:.2f}",
-            annotation_position="top right",
-            row=1,
-            col=2,
-        )
-        fig.add_vline(
-            x=-bonferroni_crit, line_dash="dash", line_color=COLORS["negative"], row=1, col=2
-        )
-
-        # Significance counts
-        raw_significant = (raw_t.abs() > 1.96).sum()
-        corrected_significant = (raw_t.abs() > bonferroni_crit).sum()
-
-    fig.update_xaxes(title_text="Horizon (bars)", row=1, col=1)
-    fig.update_xaxes(title_text="t-statistic", row=1, col=2)
+    fig.update_xaxes(title_text="Window (bars)", row=1, col=1)
+    fig.update_xaxes(
+        title_text=f"|t| of the selected window ({n_clipped} beyond {T_AXIS_MAX} not shown)",
+        row=1,
+        col=2,
+    )
     fig.update_yaxes(title_text="Count", row=1, col=1)
-    fig.update_layout(height=350, font=dict(size=12))
-    fig.show()
+    fig.update_yaxes(title_text="Count", row=1, col=2)
+    fig.update_layout(
+        height=360,
+        barmode="overlay",
+        font=dict(size=12),
+        title_text="Trend scanning: selected window, and |t| against a shuffled path",
+    )
+    show_plotly_with_alt(
+        fig,
+        alt=(
+            "Two panels. The left panel is a histogram of the window length the scan "
+            "selects for each SPY bar, from five to twenty. Counts sit near 100 for every "
+            "window from six to nineteen, with a small rise to about 160 at five and a "
+            "single dominant spike of roughly 800 at twenty, the longest window offered. "
+            "The right panel overlays the absolute t-statistic of the selected window for "
+            "SPY in navy and for a path built from the same returns shuffled into random "
+            "order in grey. The two distributions sit almost on top of each other, both "
+            "centred near six and running past thirty, and both lie almost entirely to the "
+            "right of the dashed red line at 1.96. A single observation from the shuffled "
+            "path falls beyond the plotted range and is noted on the axis."
+        ),
+    )
+
+# %% tags=["results"]
+raw_significant = int((raw_t.abs() > 1.96).sum())
+corrected_significant = int((raw_t.abs() > bonferroni_crit).sum())
+null_significant = int((null_t.abs() > 1.96).sum())
+at_max_window = int((selected_horizons == 20).sum())
+
+print(f"Candidate windows scanned per bar:   {N_CANDIDATES}")
+print(f"Bonferroni critical value:           {bonferroni_crit:.2f} (vs 1.96 uncorrected)")
+print(
+    f"  longest window selected:           {at_max_window:,} / {len(selected_horizons):,}"
+    f" ({at_max_window / len(selected_horizons):.1%})"
+)
+print()
+print(
+    f"SPY, significant at 5% raw:          {raw_significant:,} / {len(raw_t):,}"
+    f" ({raw_significant / len(raw_t):.1%})"
+)
+print(
+    f"SPY, significant after Bonferroni:   {corrected_significant:,} / {len(raw_t):,}"
+    f" ({corrected_significant / len(raw_t):.1%})"
+)
+print(
+    f"Shuffled returns, significant at 5%: {null_significant:,} / {len(null_t):,}"
+    f" ({null_significant / len(null_t):.1%})   <- a 5% test should reject 5% here"
+)
+print()
+print(f"Median |t|, SPY:                     {float(raw_t.abs().median()):.2f}")
+print(f"Median |t|, shuffled returns:        {float(null_t.abs().median()):.2f}")
 
 # %% [markdown]
-# The Bonferroni correction is conservative but illustrates the magnitude of
-# the selection effect. After correction, many trends that appeared "significant"
-# under the uncorrected test lose significance - confirming the text's warning
-# that uncorrected trend scanning t-statistics should not be taken at face value.
-
-# %%
-if horizon_col is not None and "t_value" in labels_trend.columns:
-    sign_change_frac = 1 - corrected_significant / max(raw_significant, 1)
-    print(f"Candidate horizons tested: {n_candidates}")
-    print(f"Bonferroni critical value: {bonferroni_crit:.2f} (vs 1.96 uncorrected)")
-    print(
-        f"Significant at 5% (raw):        {raw_significant:,} / {len(raw_t):,} ({raw_significant / len(raw_t):.1%})"
-    )
-    print(
-        f"Significant at 5% (Bonferroni): {corrected_significant:,} / {len(raw_t):,} ({corrected_significant / len(raw_t):.1%})"
-    )
-    print(f"Fraction losing significance:    {sign_change_frac:.1%}")
+# The shuffled path has no trends in it and the scan calls almost every bar significant
+# anyway, at very nearly the rate it does on SPY and with a median absolute t-statistic of
+# the same size. A test that rejects this often under its own null is not measuring whether
+# a trend exists; it is measuring that the residuals of a regression on price levels are
+# autocorrelated, which they are whatever the prices do.
+#
+# Against that, the Bonferroni correction moves the rejection rate by a few percentage
+# points. It is doing what it claims - the reported t really is a maximum over sixteen
+# candidates - and the correction is not where the problem is. The selected-window panel
+# shows the same thing from the other side: the scan lands on the longest window far more
+# often than on any other, because a longer window buys more observations and a larger t
+# under drift of any sign, so the sixteen candidates are neither independent nor exchangeable.
+#
+# Trend scanning still produces a usable label: the **sign** of the fitted slope is a
+# statement about the path, and that is what `label` records. It is the accompanying
+# t-statistic that should not be read as significance, before or after correction. To use
+# one, calibrate it against a permutation null like the one above rather than against a
+# Student-t table.
 
 # %% [markdown]
-# ## 7.5 Meta-Labeling Concept
+# ## Meta-Labeling
 #
 # **Meta-labeling** separates the signal from the sizing decision:
 #
@@ -1083,26 +1400,79 @@ spy_meta = meta_labels(spy_meta, signal_col="signal", return_col="fwd_return")
 print("Meta-Label Distribution:")
 display(spy_meta.group_by("meta_label").len().sort("meta_label"))
 
+# %% [markdown]
+# The second half of meta-labeling is turning the meta-model's probability into a position
+# size. `compute_bet_size` offers three mappings; the figure below is the mapping itself,
+# plotted over the whole probability range, which is the part that transfers to any model.
+
 # %%
-# Bet sizing: convert meta-model probability to position size
-# Here we use the meta_label directly as a proxy for probability
+BET_SCALE = 5.0
+prob_grid = pl.DataFrame({"p": np.linspace(0.0, 1.0, 201)})
+curves = prob_grid.with_columns(
+    linear=compute_bet_size("p", method="linear"),
+    sigmoid=compute_bet_size("p", method="sigmoid", scale=BET_SCALE),
+    discrete=compute_bet_size("p", method="discrete", threshold=0.5),
+)
+
+fig = go.Figure()
+for name, color in (
+    ("linear", COLORS["neutral"]),
+    ("sigmoid", COLORS["blue"]),
+    ("discrete", COLORS["amber"]),
+):
+    fig.add_trace(
+        go.Scatter(
+            x=curves["p"].to_numpy(),
+            y=curves[name].to_numpy(),
+            mode="lines",
+            name=name,
+            line=dict(color=color, width=2),
+        )
+    )
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], line_width=0.8)
+fig.update_layout(
+    height=360,
+    title=f"Bet size against meta-model probability (sigmoid scale {BET_SCALE:g})",
+    xaxis_title="Meta-model probability of success",
+    yaxis_title="Bet size",
+)
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Three curves mapping a meta-model probability on the horizontal axis, from zero "
+        "to one, to a bet size on the vertical axis. The grey linear mapping is a straight "
+        "line from minus one to plus one crossing zero at a probability of 0.5. The navy "
+        "sigmoid mapping at scale five is a gentle S through the same crossing point but "
+        "reaches only about plus or minus 0.85 at the ends, so at this scale it is flatter "
+        "than the linear one rather than sharper. The amber discrete mapping is a step that "
+        "sits at zero below 0.5 and jumps to one above it."
+    ),
+)
+
+# %%
 spy_meta = spy_meta.with_columns(
-    # Simulate a meta-model probability (in practice, this comes from a trained classifier)
+    # Stand in for a trained meta-model: two confidence levels, not a calibrated score.
     pseudo_prob=pl.col("meta_label").cast(pl.Float64) * 0.3 + 0.5,
 ).with_columns(
-    bet_size=compute_bet_size("pseudo_prob", method="sigmoid", scale=5.0),
+    bet_size=compute_bet_size("pseudo_prob", method="sigmoid", scale=BET_SCALE),
 )
 
 print("Bet Size Statistics (sigmoid method):")
 display(spy_meta["bet_size"].describe())
 
 # %% [markdown]
-# **Key Insight**: Meta-labeling turns a classification problem (direction)
-# into a probability calibration problem (confidence). This enables
-# Kelly-criterion-style position sizing from ML predictions.
+# The statistics above have a minimum, a maximum and no spread worth the name, because the
+# stand-in probability takes two values and therefore touches the curve in two places. That
+# is a property of the placeholder, not of meta-labeling: a trained classifier emits a
+# continuous score and the whole curve comes into play.
+#
+# It is also where meta-labeling earns its keep and where it can mislead. Sizing on a
+# probability is only as good as the calibration of that probability, and a classifier
+# optimised for accuracy or AUC is not calibrated by default. Ranking well and being right
+# about *how often* are different properties, and only the second one sizes a position.
 
 # %% [markdown]
-# ## 8. Label Diagnostics
+# ## Label Diagnostics
 #
 # The function below provides a reusable diagnostic template. Run it on any
 # label column to check distribution stability and class balance-the two
@@ -1137,15 +1507,33 @@ def label_diagnostics(
         print("Value Counts:")
         display(df_non_null.group_by(label_col).len().sort(label_col))
 
-        # Bar chart of label distribution
+        counts = df_non_null.group_by(label_col).len().sort(label_col)
         fig = px.bar(
-            df_non_null.group_by(label_col).len().sort(label_col).to_pandas(),
+            counts.to_pandas(),
             x=label_col,
             y="len",
-            title=f"{title_prefix} Label Distribution",
+            title=f"{title_prefix} label counts by class",
         )
-        fig.update_layout(height=300)
-        fig.show()
+        fig.update_layout(
+            height=300,
+            xaxis_title=f"{label_col} value",
+            yaxis_title="Count",
+            xaxis=dict(type="category"),
+        )
+        show_plotly_with_alt(
+            fig,
+            alt=(
+                f"A bar chart of how many observations carry each value of {label_col}. "
+                f"The classes and their counts are "
+                + ", ".join(
+                    f"{v}: {n:,}"
+                    for v, n in zip(
+                        counts[label_col].to_list(), counts["len"].to_list(), strict=True
+                    )
+                )
+                + "."
+            ),
+        )
 
         # Class balance over time
         if timestamp_col in df.columns:
@@ -1186,10 +1574,25 @@ def label_diagnostics(
                     )
             fig.update_layout(
                 height=300,
-                title=f"{title_prefix} Class Proportions Over Time",
+                title=f"{title_prefix} class proportions by date",
+                xaxis_title="Date",
                 yaxis_title="Proportion",
             )
-            fig.show()
+            show_plotly_with_alt(
+                fig,
+                alt=(
+                    f"One line per class showing the share of observations carrying each "
+                    f"value of {label_col} on each date, over "
+                    f"{by_date[timestamp_col].min()} to {by_date[timestamp_col].max()}. "
+                    f"The classes plotted are "
+                    + ", ".join(
+                        str(c).replace("_pct", "")
+                        for c in by_date.columns
+                        if str(c).endswith("_pct")
+                    )
+                    + "."
+                ),
+            )
     else:
         # Continuous label diagnostics
         print(f"\n{'=' * 60}")
@@ -1197,14 +1600,23 @@ def label_diagnostics(
         print(f"{'=' * 60}")
         display(labels.describe())
 
-        # Histogram
         fig = px.histogram(
             x=labels.to_numpy(),
             nbins=50,
-            title=f"{title_prefix} Label Distribution",
+            title=f"{title_prefix} label distribution",
         )
         fig.update_layout(height=300, xaxis_title="Label value", yaxis_title="Count")
-        fig.show()
+        show_plotly_with_alt(
+            fig,
+            alt=(
+                f"A histogram of {len(labels):,} values of {label_col}. The distribution "
+                f"runs from {labels.min():.3f} to {labels.max():.3f} with a median of "
+                f"{labels.median():.3f} and a standard deviation of {labels.std():.3f}, "
+                f"so the plotted range is roughly "
+                f"{(labels.max() - labels.min()) / labels.std():.0f} standard deviations "
+                f"wide and the mass is concentrated near the median."
+            ),
+        )
 
         # Time series if available
         if timestamp_col in df.columns:
@@ -1212,111 +1624,152 @@ def label_diagnostics(
                 df.select([timestamp_col, label_col]).drop_nulls().to_pandas(),
                 x=timestamp_col,
                 y=label_col,
-                title=f"{title_prefix} Labels Over Time",
+                title=f"{title_prefix} label value by date",
             )
             fig.update_layout(height=300, xaxis_title="Date", yaxis_title="Label value")
-            fig.show()
+            show_plotly_with_alt(
+                fig,
+                alt=(
+                    f"A single line of {label_col} plotted against {timestamp_col}, "
+                    f"oscillating around a median of {labels.median():.3f} within a range "
+                    f"of {labels.min():.3f} to {labels.max():.3f}. Because the label is a "
+                    f"forward return, neighbouring points share most of their window and "
+                    f"the line is far smoother than a series of independent draws."
+                ),
+            )
 
 
 # Example: run diagnostics on fixed horizon labels
 label_diagnostics(labels_returns, fh_label_col, title_prefix=f"Fixed Horizon ({HORIZON}d)")
 
 # %% [markdown]
-# ## 9. Label Method Comparison
+# ## Label Method Comparison
 #
-# **Important**: We must compare continuous vs discrete labels separately.
-# Mixing them on the same visual axis is conceptually misleading.
+# Continuous and discrete targets go on separate axes: they are different quantities and
+# putting them on one would be a category error. Within each figure the panels share their
+# axes, so a difference in spread is a difference in the labels rather than an artefact of
+# letting each panel pick its own range.
 
 # %%
-# Continuous targets comparison
 fig = make_subplots(
     rows=1,
     cols=2,
-    subplot_titles=["Fixed Horizon Returns", "Label Return (from Triple-Barrier)"],
+    subplot_titles=[f"Fixed horizon, {HORIZON}-day", "Triple-barrier, booked return"],
     horizontal_spacing=0.1,
+    shared_xaxes=True,
+    shared_yaxes=True,
 )
 
-# Fixed horizon returns
+fh_values = labels_returns[fh_label_col].drop_nulls().to_numpy()
+tb_values = labels_tb["label_return"].drop_nulls().to_numpy()
+span = float(max(np.abs(fh_values).max(), np.abs(tb_values).max()))
+ret_bins = dict(start=-span, end=span, size=2 * span / 60)
+
 fig.add_trace(
     go.Histogram(
-        x=labels_returns[fh_label_col].drop_nulls().to_numpy(),
-        nbinsx=50,
+        x=fh_values,
+        xbins=ret_bins,
         name="Fixed Horizon",
+        marker_color=COLORS["blue"],
         showlegend=False,
     ),
     row=1,
     col=1,
 )
-
-# Triple-barrier final returns (before discretization)
-if "label_return" in labels_tb.columns:
-    fig.add_trace(
-        go.Histogram(
-            x=labels_tb["label_return"].drop_nulls().to_numpy(),
-            nbinsx=50,
-            name="TB Label Return",
-            showlegend=False,
-        ),
-        row=1,
-        col=2,
-    )
-
-fig.update_layout(
-    height=350,
-    title_text="Continuous Targets Comparison",
-)
-fig.show()
-
-# %%
-# Discrete targets comparison
-fig = make_subplots(
-    rows=1,
-    cols=3,
-    subplot_titles=["Fixed Horizon Binary", "Triple-Barrier Label", "ATR-Barrier Label"],
-    horizontal_spacing=0.08,
-)
-
-# Fixed horizon binary
 fig.add_trace(
     go.Histogram(
-        x=labels_binary[binary_label_col].drop_nulls().to_numpy(),
-        name="Binary",
-        showlegend=False,
-    ),
-    row=1,
-    col=1,
-)
-
-# Triple barrier discrete
-fig.add_trace(
-    go.Histogram(
-        x=labels_tb.filter(pl.col("label").is_not_null())["label"].to_numpy(),
-        name="Triple Barrier",
+        x=tb_values,
+        xbins=ret_bins,
+        name="TB Label Return",
+        marker_color=COLORS["amber"],
         showlegend=False,
     ),
     row=1,
     col=2,
 )
 
-# ATR barrier discrete
-fig.add_trace(
-    go.Histogram(
-        x=labels_atr.filter(pl.col("label").is_not_null())["label"].to_numpy(),
-        name="ATR Barrier",
-        showlegend=False,
+for col in (1, 2):
+    fig.update_xaxes(title_text="Return", range=[-span, span], row=1, col=col)
+fig.update_yaxes(title_text="Count", row=1, col=1)
+fig.update_layout(height=360, title_text="Continuous targets on a shared return axis")
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two histograms of SPY label values on the same return axis running from about "
+        "minus 0.33 to plus 0.33. The left panel, fixed-horizon 21-day returns, is a broad "
+        "bell centred slightly above zero with visible tails on both sides. The right "
+        "panel, the booked triple-barrier return, is two thin spikes crowded together near "
+        "the middle at minus one and plus two percent, with the rest of the axis empty. "
+        "The barrier target occupies a small fraction of the range the fixed-horizon "
+        "target spans."
     ),
-    row=1,
-    col=3,
 )
-
-fig.update_layout(
-    height=350,
-    title_text="Discrete Targets Comparison",
-)
-fig.show()
 
 # %% [markdown]
-# ## 10. Method Comparison: Decision Guide
+# On a shared axis the barriers stop looking like a variation on the forward return and
+# start looking like what they are: a target censored to two values a few percent apart.
+# Everything the fixed-horizon label says about the size of a move has been discarded, in
+# exchange for a statement about which of two thresholds arrived first. That is the right
+# trade when the strategy really does exit at those thresholds and the wrong one when the
+# model is meant to forecast magnitude.
+
+# %%
+discrete_sets = [
+    ("Fixed horizon binary", labels_binary[binary_label_col], COLORS["blue"]),
+    ("Triple barrier", labels_tb["label"], COLORS["amber"]),
+    ("ATR barrier", labels_atr["label"], COLORS["copper"]),
+]
+
+fig = make_subplots(
+    rows=1,
+    cols=3,
+    subplot_titles=[name for name, _, _ in discrete_sets],
+    horizontal_spacing=0.08,
+    shared_yaxes=True,
+)
+
+for i, (name, series, color) in enumerate(discrete_sets, start=1):
+    counts = series.drop_nulls().value_counts().sort(series.name).rename({series.name: "value"})
+    fig.add_trace(
+        go.Bar(
+            x=[str(v) for v in counts["value"].to_list()],
+            y=counts["count"].to_numpy(),
+            name=name,
+            marker_color=color,
+            showlegend=False,
+        ),
+        row=1,
+        col=i,
+    )
+    fig.update_xaxes(title_text="Class", type="category", row=1, col=i)
+
+fig.update_yaxes(title_text="Count", row=1, col=1)
+fig.update_layout(height=360, title_text="Discrete targets, shared count axis")
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Three bar charts of class counts on a shared vertical axis. Fixed-horizon binary "
+        "labels are lopsided: about 780 bars at minus one against about 1,710 at plus one. "
+        "The triple-barrier labels are close to balanced, roughly 1,250 at minus one and "
+        "1,100 at plus one, with a short bar near 160 at zero for trades that reached the "
+        "time barrier. The ATR-barrier labels are balanced in the same way, about 1,270 "
+        "and 1,230, with the zero class almost invisible because volatility-scaled "
+        "barriers are nearly always reached inside the holding window."
+    ),
+)
+
+# %% [markdown]
+# The three targets disagree about what a positive month is. The fixed-horizon binary label
+# inherits the drift of the sample - over a decade in which SPY mostly rose, "up" is simply
+# more common - so a classifier that predicts the majority class scores well above half
+# without learning anything. Both barrier variants are near balanced instead, because the
+# stop is set tighter than the take-profit and is therefore hit more often; that balance is
+# a property of the barrier geometry, not evidence that the barrier label is more
+# informative. The ATR variant almost never reaches the time barrier, since barriers scaled
+# to recent volatility sit inside the range the price covers in twenty days.
+
+# %% [markdown]
+# ## Choosing a Method
 #
 # | Strategy Type | Recommended Method | Rationale |
 # |--------------|-------------------|-----------|
@@ -1324,36 +1777,45 @@ fig.show()
 # | Stat arb (intraday) | Fixed horizon binary | Speed matters |
 # | Cross-sectional ranking | **Cross-sectional percentile** | Stable class balance |
 # | Active trading | Triple barrier (ATR) | Matches trade mechanics |
-# | Trend following | Trend scanning | Data-driven trend ID |
+# | Trend following | Trend scanning, sign only | Adaptive horizon; ignore its t-statistic |
 #
 # **Key Considerations**:
 #
 # 1. **Anchor alignment**: Match label computation to execution timing
 # 2. **Cross-sectional vs time-series**: Most equity/ETF strategies need cross-sectional
 # 3. **Path-dependence**: Use triple-barrier when stop losses are part of the strategy
-# 4. **Volatility adaptation**: ATR-based barriers for changing market conditions
+# 4. **Bar resolution**: Give the barrier engine `high_col`, `low_col` and `open_col` in
+#    production; a close-only test books every exit at the barrier price
+# 5. **Volatility adaptation**: ATR-based barriers for changing market conditions
 
 # %% [markdown]
 # ## Summary
 #
 # ### Key Takeaways
 #
-# 1. **Fixed horizon** for simple regression/classification targets
-# 2. **Rolling percentile** for time-series adaptive thresholds (single instrument)
-# 3. **Cross-sectional percentile** for relative ranking within a universe
-# 4. **Triple barrier (ATR)** for realistic trading simulations with stops
-# 5. **Trend scanning** for data-driven trend identification
-# 6. **Anchor alignment** is critical - close-to-close vs next-open matters
+# 1. **Fixed horizon** for simple regression and classification targets.
+# 2. **Rolling percentile** thresholds adapt to the recent return distribution, which moves
+#    with trailing volatility and with trailing drift together.
+# 3. **Cross-sectional percentile** fixes the class balance by construction and pushes all
+#    the variation into the cut point, where it is easy to stop looking at it.
+# 4. **Triple barrier** describes the trade, not the market: it censors the target to the
+#    two barrier levels and discards the rest of the path.
+# 5. **Trend scanning** gives a useful adaptive horizon and a sign. Its t-statistic is a
+#    regression on price levels and rejects at almost any threshold under its own null.
+# 6. **Anchor alignment** nets to zero on average and changes every individual label.
+# 7. **Overlapping labels** cut the effective sample size by roughly the horizon; sample
+#    weights and the sequential bootstrap tilt against the overlap without removing it.
 #
 # ### Production Usage
 #
-# For production label computation, use the experiment configuration module
-# which centralizes method, horizon, and threshold choices per case study.
-# The case study label notebooks (NB09–NB17) demonstrate this pipeline.
+# Each case study computes its labels in its own `02_labels` notebook, which reads the
+# horizon and the label set from that case study's `config/setup.yaml` rather than from
+# constants typed into a cell. `utils.artifact_specs.resolve_label_horizon` is the accessor.
 #
 # ### References
 #
 # - Lopez de Prado, M. (2018). *Advances in Financial Machine Learning*. Wiley.
 #   - Chapter 3: Labeling (Triple-Barrier, Meta-Labeling)
 #   - Chapter 4: Sample Weights (Uniqueness)
-# - See [`04_minimum_favorable_adverse_excursion`](04_minimum_favorable_adverse_excursion.ipynb) for empirical barrier calibration
+# - See [`04_maximum_favorable_adverse_excursion`](04_maximum_favorable_adverse_excursion.ipynb)
+#   for empirical barrier calibration
