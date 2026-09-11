@@ -230,10 +230,17 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # block for `fwd_ret_5d`. Neither length is a property of `carry_pct`, whose own persistence the
 # cell below measures on this case study's feature panel: the autocorrelation is pooled within
 # product, each product demeaned before pooling so a level difference between products cannot
-# stand in for persistence within one. Blocks of 5 and 21 periods are short against that profile,
-# so they destroy serial dependence the real treatment has. That narrows the placebo distribution
-# relative to the true null and pushes the empirical p-value toward zero whether or not the effect
-# is real.
+# stand in for persistence within one, and on one row per product-session, because the block
+# counts sessions.
+#
+# **The two blocks land on opposite sides of that profile, so the concern applies to one label
+# and not the other.** `carry_pct` has an AR(1) half-life of 3.6 sessions. The 5-session block
+# used for `fwd_ret_5d` is about 1.4 half-lives, and autocorrelation is still 0.52 at lag 5, so
+# that block leaves real dependence unpreserved; the placebo is a slightly weaker opponent than
+# the truth and `fwd_ret_5d`'s empirical p-value is biased toward zero by some amount this
+# notebook does not quantify. The 21-session block used for `fwd_ret_21d` is about six
+# half-lives, and autocorrelation is 0.14 at lag 21 and indistinguishable from zero by lag 63,
+# so that block is long against the dependence and the concern does not apply to it.
 #
 # **That is no longer what the column reports, and the reason is worth following.** `fwd_ret_5d`
 # used to sit at 0.0396 and `fwd_ret_21d` at 0.0099, which is 1/101 and the floor 100 draws can
@@ -241,16 +248,22 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # treatment is not predictable from the controls, its residual keeps nearly all its variance, and
 # that variance is the denominator of the second-stage effect - so every placebo effect was divided
 # by a larger number than the observed one. Correcting that moved `fwd_ret_5d` to 0.5545 and
-# `fwd_ret_21d` to 0.2673, both `Fails`, on an identical fit. The block-length argument above still
-# stands and is a separate, uncorrected narrowing; it simply is no longer visible in these two
-# numbers. Read the DML point estimate and its HAC standard error. The refutation column is recorded
-# for completeness and carries no evidence here.
+# `fwd_ret_21d` to 0.2673, both `Fails`, on an identical fit. The block-length argument above is a
+# separate, uncorrected narrowing and it bears on `fwd_ret_5d` only; either way it is no longer
+# visible in these two numbers. Read the DML point estimate and its HAC standard error. The
+# refutation column is recorded for completeness and carries no evidence here.
 
 # %%
+# The panel carries one row per contract position, so a product-session appears up to three
+# times with the same carry_pct. Lagging without de-duplicating steps ~2.78 rows per session
+# and reports a persistence profile stretched by that factor. The block the refutation permutes
+# counts sessions - run_dml_analysis requires strictly increasing timestamps within a product -
+# so sessions are the scale the two have to be compared on.
 carry = (
     pl.read_parquet(get_case_study_dir(CASE_STUDY) / "features" / "financial.parquet")
     .select(["product", "timestamp", "carry_pct"])
     .drop_nulls()
+    .unique(subset=["product", "timestamp"])
     .sort(["product", "timestamp"])
 )
 autocorr = []

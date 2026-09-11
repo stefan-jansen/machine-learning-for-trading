@@ -113,12 +113,14 @@
 # **A one-bar construction window is not a claim that the column is serially independent**, and
 # the two are worth keeping apart. The declared window says how many bars the formula reads;
 # the column's empirical persistence is a separate quantity and is much larger here.
-# `12_model_analysis` measures it from the feature panel rather than asserting it, pooling the
-# autocorrelation within product with each product demeaned first. It prints the profile at lags
-# 1, 5, 21 and 63 beside the AR(1) half-life implied by lag 1, and that profile decays over
-# months rather than days - long against both blocks, so neither preserves all of the dependence
-# the treatment actually has. That is a known narrowing of the refutation on this case study,
-# stated there rather than left for the reader to infer from a `Fails`.
+# `12_model_analysis` measures it from the feature panel rather than asserting it, on one row per
+# product-session because that is the unit the block counts, pooling the autocorrelation within
+# product with each product demeaned first. The AR(1) half-life is 3.6 sessions. The two blocks
+# straddle it: the 5-session block for `fwd_ret_5d` is about 1.4 half-lives and leaves real
+# dependence unpreserved, which narrows that label's placebo distribution by some amount neither
+# notebook quantifies; the 21-session block for `fwd_ret_21d` is about six, with autocorrelation
+# indistinguishable from zero by lag 63, so it is long against the dependence rather than short.
+# The narrowing is a limitation of one of the two refutations here, not of both.
 #
 # The contrast with a rolling treatment is worth holding onto, because it is where this is
 # usually got wrong. A treatment built from a 252-session window overlaps its neighbours in 251
