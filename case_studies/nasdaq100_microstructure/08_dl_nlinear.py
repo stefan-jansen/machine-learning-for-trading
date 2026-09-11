@@ -40,7 +40,7 @@
 # **Book Reference**: Chapter 13
 #
 # **Prerequisites**: [`05_evaluation`](05_evaluation.ipynb)
-
+#
 # **What it writes**: one training run per label and one complete validation prediction set per
 # label and checkpoint, in `run_log/registry.db` and under `run_log/training/` and
 # `run_log/predictions/`, grouped under a population this notebook alone publishes.
