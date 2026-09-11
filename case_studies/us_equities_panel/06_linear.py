@@ -130,14 +130,17 @@ SUPERSEDES_POPULATION: str = ""
 # that moves their members is refused at the freeze, which is after the fit. That refusal cost
 # 78 minutes of cold fitting once already.
 #
-# The two fwd_ret_1d hashes moved on 2026-09-11 for the same reason and were missed: that run
-# published generation 2 (55d64275dfd6 and ed1840bfaeb8), so the generation-1 hashes this file
-# still named would have been refused on the next run. Read the live generation out of
-# `candidate_set_names` before trusting a literal here; every literal in this dict goes stale
-# the moment the notebook it sits in succeeds.
+# A literal here does NOT have to be re-typed after every successful run, and re-typing it is
+# the mistake. `candidate_set_supersedes` accepts the declared hash when it is either the tip
+# or what the tip supersedes, and those two mean different things: naming what the tip
+# supersedes is the re-run, and resolves to the set already published; naming the tip itself is
+# the refit, and publishes a generation over it. The two fwd_ret_1d entries name generation 1
+# while generation 2 (55d64275dfd6, ed1840bfaeb8) is in force, which is the re-run - correct
+# whenever this notebook re-runs with the members it last published. Advancing them to the tip
+# would declare a refit and write a third generation with identical members.
 SUPERSEDES_SETS: dict = {
-    "us-equities-fwd-ret-1d-linear-v1": "55d64275dfd6",
-    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "ed1840bfaeb8",
+    "us-equities-fwd-ret-1d-linear-v1": "454f73021f33",
+    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "29155b2c69f1",
     "us-equities-fwd-ret-5d-linear-v1": "e7b744f380d5",
     "us-equities-fwd-ret-5d-linear-diagnostics-v1": "5514968cd0bb",
     "us-equities-fwd-ret-21d-linear-v1": "6e8179623f0a",
