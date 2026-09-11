@@ -68,6 +68,7 @@ from case_studies.research import (
     plan_backtests,
     population_supersedes,
     research_name,
+    reuse_disclosure,
     run_backtests,
     strategy_warmup_periods,
     superseded_members,
@@ -552,7 +553,7 @@ if any(
 
 served = run_status.count("reused")
 print(
-    f"Allocation backtests: {len(allocation_results) - served} computed, {served} served from the registry, "
+    f"Allocation backtests: {reuse_disclosure(len(allocation_results) - served, served)}, "
     f"{len(allocation_results)} in the population"
 )
 

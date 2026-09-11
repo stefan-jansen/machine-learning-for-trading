@@ -1533,3 +1533,64 @@ def test_backtest_execution_discloses_its_own_counts(tmp_path: Path, monkeypatch
     assert execution.n_reused == 1
     assert execution.disclosure() == reuse_disclosure(2, 1)
     assert execution.disclosure(3) == reuse_disclosure(2, 1, 3)
+
+
+def test_no_case_study_notebook_spells_its_own_reuse_disclosure() -> None:
+    """Every sweep summary routes through the shared wording, and none rebuilds it.
+
+    The wording was worth fixing only because it is the same sentence in fourteen
+    notebooks; fixing one and leaving the rest would make that one the odd case study out,
+    which is worse for a reader than the phrasing it replaced. So the regression to guard
+    is not the old text returning to a line already changed - it is the next sweep
+    spelling its own count pair beside the shared one, which no unit test of
+    ``reuse_disclosure`` can see.
+
+    What is banned is a count interpolated directly before ``computed`` or ``served from
+    the registry``, which is the shape that renders as ``0 computed, 262 served from the
+    registry`` against a warm registry. The model notebooks' ``{n} configurations:
+    {fitted} folds fitted, {reused} reused`` is deliberately not banned: its leading count
+    is the configuration total, which is never zero, so the sentence reads correctly warm
+    - twenty configurations, none refitted, five hundred folds reused. Same for the
+    ``Planned {n} backtests; {m} already complete`` lines, which state a plan before the
+    sweep rather than what the sweep did.
+
+    The scan is over the ``.py`` halves, which is where a notebook is edited, and skips
+    comment lines: a markdown cell explaining what reuse means is not a disclosure, and
+    several of these notebooks carry one.
+    """
+    import re
+
+    case_studies = Path(__file__).resolve().parents[1] / "case_studies"
+    spellings = re.compile(r"\{[^{}]+\}\s*(?:computed|served from the registry)|computed\s*=\s*\{")
+    offenders = []
+    for path in sorted(case_studies.glob("*/[0-9]*.py")):
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            if "reuse_disclosure(" in line or ".disclosure(" in line:
+                continue
+            if spellings.search(line):
+                offenders.append(f"{path.relative_to(case_studies.parent)}:{number}: {stripped}")
+    assert not offenders, (
+        "these lines build a reuse disclosure instead of calling reuse_disclosure():\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_reuse_disclosure_guard_catches_the_phrasing_it_replaced() -> None:
+    """The guard above passes; this is what shows it can fail.
+
+    A scan that finds nothing is indistinguishable from a scan whose pattern is broken, so
+    the exact line #1083 was filed against is run through the same expression here.
+    """
+    import re
+
+    spellings = re.compile(r"\{[^{}]+\}\s*(?:computed|served from the registry)|computed\s*=\s*\{")
+    assert spellings.search('f"  this execution: {execution.n_computed} computed, "')
+    assert spellings.search('f"{execution.n_reused} served from the registry"')
+    assert spellings.search('f"completed={completed}, skipped={skipped}"') is None
+    assert (
+        spellings.search('f"{len(execution.runs)} configurations: {fitted} folds fitted"') is None
+    )
+    assert spellings.search('f"  this execution: {execution.disclosure()}"') is None
