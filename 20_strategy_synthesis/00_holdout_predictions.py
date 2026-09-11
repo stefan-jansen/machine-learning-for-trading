@@ -277,11 +277,12 @@ summary_df
 # `(HO − Val) / Val`.
 #
 # The chapter prose (§20.1, *First-pass results across nine case studies*) uses
-# this output to discuss three *decay patterns*. In the first the prediction itself degrades and
-# the rank IC falls toward zero. In the second the IC holds while the Sharpe halves or changes
-# sign, because portfolio construction, costs or a regime shift stand between a correct ranking
-# and a return. In the third the relationship breaks structurally. This notebook does not grade
-# case studies; it produces the numbers that discussion rests on.
+# this output to name three mechanisms behind a validation-to-holdout fall. Under
+# *prediction-quality drift* the signal itself weakens and the rank IC falls toward zero. Under
+# *portfolio-translation drift* the IC holds while the Sharpe halves or changes sign, because
+# portfolio construction and costs stand between a correct ranking and a return. Under *regime
+# change* the fitted relationships stop being informative on the holdout tape. This notebook
+# does not grade case studies; it produces the numbers that discussion rests on.
 #
 # Two design disciplines apply when reading the table:
 #
