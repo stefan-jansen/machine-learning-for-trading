@@ -221,3 +221,81 @@ Observed results:
 ## Report path
 
 `/Users/theinnerchild/quant-references/machine-learning-for-trading-mnq-strategy/.superpowers/sdd/2026-09-11-mnq-objective-strategy/task-6-report.md`
+
+## Task 6 review fix: initial equity baseline
+
+### Finding
+
+The notebook's drawdown table started at the first realized trade instead of at zero equity.
+For the default synthetic fixture, the first net result is `-36.0`, so the previous calculation
+reported a drawdown of `0.0` because the first negative equity value also became the running peak.
+This differed from `evaluation._max_drawdown`, whose initial peak is zero and therefore reports a
+drawdown of `36.0` for the same PnL sequence.
+
+### Fix
+
+- Added an explicit zero-PnL, zero-equity baseline row before closed trades in
+  `research/notebooks/mnq_objective_strategy_validation.ipynb`.
+- Kept the existing cumulative net-PnL calculation and drawdown formula, so the notebook now
+  follows the evaluator's initial-peak semantics.
+- Added notebook assertions for the initial equity value and the default fixture drawdown:
+  `equity_curve["equity"][0] == 0.0` and `equity_curve["drawdown"].max() == 36.0`.
+- The executed notebook output shows the baseline row followed by `net_pnl=-36.0`,
+  `equity=-36.0`, and `drawdown=36.0`.
+
+### Fix verification
+
+```bash
+uv run python - <<'PY'
+import json
+from pathlib import Path
+import nbformat
+path = Path('research/notebooks/mnq_objective_strategy_validation.ipynb')
+nb = nbformat.read(path, as_version=4)
+nbformat.validate(nb)
+raw = json.loads(path.read_text(encoding='utf-8'))
+assert raw['nbformat'] == 4
+assert all('id' in cell for cell in raw['cells'])
+print(f'notebook validation: PASS ({len(nb.cells)} cells, nbformat {raw["nbformat"]}.{raw["nbformat_minor"]})')
+PY
+```
+
+Observed result: `notebook validation: PASS (11 cells, nbformat 4.5)`.
+
+```bash
+rm -f /tmp/mnq_objective_strategy_validation.executed.ipynb && \
+uv run jupyter nbconvert --to notebook --execute \
+  research/notebooks/mnq_objective_strategy_validation.ipynb \
+  --output-dir /tmp \
+  --output mnq_objective_strategy_validation.executed.ipynb
+```
+
+Observed result: headless conversion passed and wrote `64667 bytes` to
+`/tmp/mnq_objective_strategy_validation.executed.ipynb`. The rendered table contained:
+
+```text
+null                           0.0     0.0    0.0
+2024-01-08 10:10:00 EST      -36.0   -36.0   36.0
+```
+
+The executed notebook was not added to the repository.
+
+```bash
+uv run pytest tests/research -q
+uv run ruff check research/notebooks/mnq_objective_strategy_validation.ipynb
+uv run ruff format --check research/notebooks/mnq_objective_strategy_validation.ipynb
+uv run python -m compileall -q research/mnq_strategy
+git diff --check
+```
+
+Observed results:
+
+- `tests/research`: `140 passed in 0.37s`.
+- Ruff check: `All checks passed!`.
+- Ruff format check: `1 file already formatted`.
+- Compileall completed without output or errors.
+- `git diff --check` completed without whitespace errors.
+
+The first format check correctly identified the edited notebook as needing formatting; Ruff format
+was run once, then the notebook validation, headless execution, lint, format, compile, and diff
+checks were rerun successfully.
