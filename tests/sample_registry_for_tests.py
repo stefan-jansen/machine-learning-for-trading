@@ -78,22 +78,24 @@ TOP_N_PER_GROUP = 3
 # hashes it named on 2026-09-09 were in no registry on this machine, so this function raised
 # on every case study that reached it and the notebooks pinning them could not run outside
 # CI. The notebooks now pin configuration names and resolve the hash, and so does this.
-# Five entries for two notebooks, because each names one configuration by default and a
-# second under `tests/overrides.yaml`. The overrides exist only while this declaration is
-# ahead of the deployed fixture: regenerating `us_equities_panel` here carries all five, and
-# both overrides can then be deleted.
+# Four entries for two notebooks: each names one configuration by default and a second
+# under `tests/overrides.yaml`, and both overrides happen to name `ridge_a10000000.0`.
+# 26/02's override exists only while this declaration is ahead of the deployed fixture, and
+# can be deleted once a regenerated `us_equities_panel` carries all four. 26/03's cannot:
+# its default candidate fails the promotion gate on production and the fixture's only
+# candidate that clears it is `ridge_a10000000.0`, so the override is what keeps CI on the
+# promotion branch rather than repeating production's rejection.
 PINNED_PREDICTION_CONFIGS = {
     "us_equities_panel": [
         # 26/02_online_drift_detection OLS_CONFIG, 26/03_safe_model_rollout INCUMBENT_CONFIG
         ("linear", "fwd_ret_1d", "ols", "validation"),
         # 26/02_online_drift_detection RIDGE_CONFIG, shipped default
         ("linear", "fwd_ret_1d", "ridge_a1000000.0", "validation"),
-        # 26/02_online_drift_detection RIDGE_CONFIG under tests/overrides.yaml
+        # 26/02_online_drift_detection RIDGE_CONFIG and 26/03_safe_model_rollout
+        # CANDIDATE_CONFIG, both under tests/overrides.yaml
         ("linear", "fwd_ret_1d", "ridge_a10000000.0", "validation"),
         # 26/03_safe_model_rollout CANDIDATE_CONFIG, shipped default
         ("linear", "fwd_ret_1d", "ridge_a100.0", "validation"),
-        # 26/03_safe_model_rollout CANDIDATE_CONFIG under tests/overrides.yaml
-        ("linear", "fwd_ret_1d", "ridge_a100000.0", "validation"),
     ],
 }
 

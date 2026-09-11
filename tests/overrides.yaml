@@ -1343,17 +1343,21 @@
   # here is the other branch, a candidate that clears all five criteria.
   #
   # ridge_a10000000.0 is the one that does. Measured 2026-09-10 against the shipped
-  # fixture at TOP_K: 10, it promotes on +3.49 Sharpe improvement with every similarity
-  # and drawdown criterion met. The previous pin, ridge_a100000.0, does not: it fails on
-  # Sharpe improvement at +0.18 against the required 0.20, which is the same criterion
-  # and the same direction production fails on, so CI was covering the rejection path
-  # twice and the promotion path not at all. Of the fixture's remaining linear configs,
-  # ols is the incumbent and ridge_a0.001 has a registry row whose predictions parquet
-  # was never sampled, so it resolves to nothing.
+  # fixture at TOP_K: 10, it promotes on all five: Sharpe improvement +3.49 against 0.20,
+  # signal correlation 0.368 and position agreement 0.341 against 0.30 each, drawdown
+  # ratio 0.58 against 1.25, over the full 63 sessions. The two similarity criteria are
+  # what to watch - they clear by 0.068 and 0.041, so they are what a fixture rebuild
+  # would flip first. The previous pin, ridge_a100000.0, fails on Sharpe improvement at
+  # +0.18 against the required 0.20, which is the same criterion and the same direction
+  # production fails on, so CI was covering the rejection path twice and the promotion
+  # path not at all. Of the fixture's remaining linear configs, ols is the incumbent and
+  # ridge_a0.001 has a registry row whose predictions parquet was never sampled, so it
+  # resolves to nothing.
   #
   # Nothing asserts the verdict, in this notebook or in the harness, so a fixture rebuild
-  # that moves either model's predictions will silently change which branch CI covers.
-  # Re-measure both configs when the fixture is rebuilt.
+  # that moves this model's predictions will silently change which branch CI covers.
+  # Re-measure after a rebuild, and re-pick from whatever linear configs the rebuilt
+  # fixture carries if the margins above have gone.
   parameters:
     TOP_K: 10
     CANDIDATE_CONFIG: ridge_a10000000.0
