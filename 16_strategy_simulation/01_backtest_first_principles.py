@@ -348,13 +348,17 @@ fig.update_layout(
     showlegend=False,
 )
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
+_scores = latest_scores["momentum_score"].to_list()
+_gap_in_top = _scores[0] - _scores[TOP_N - 1]
+_gap_to_next = _scores[TOP_N - 1] - _scores[TOP_N]
 show_plotly_with_alt(
     fig,
-    "Horizontal bar chart of the ten ETFs' trailing risk-adjusted momentum on the last session of "
-    "the sample, sorted with the highest at the top. QQQ, SPY and GLD lead and are drawn in navy "
-    "as the three a risk-on month would buy; six funds sit between them and zero; TLT is the only "
-    "fund with a negative score. The three leaders are close enough together that their order is "
-    "not well separated.",
+    f"Horizontal bar chart of the {len(_scores)} funds' trailing risk-adjusted momentum on "
+    f"{dates[-1]}, sorted with the highest at the top and spanning {min(_scores):.2f} to "
+    f"{max(_scores):.2f}. The top {TOP_N} are drawn in navy as the ones a risk-on month would "
+    f"buy: {', '.join(latest_top)}. They are spread over {_gap_in_top:.2f} among themselves "
+    f"against {_gap_to_next:.2f} between the last of them and the first fund left out, so what "
+    "the chart shows is the size of the gap the selection rests on rather than a clean break.",
 )
 
 # %% [markdown]
@@ -455,12 +459,13 @@ fig.update_yaxes(title_text="ETF symbol", row=2, col=1)
 fig.update_xaxes(title_text="Date", row=2, col=1)
 show_plotly_with_alt(
     fig,
-    "Two stacked panels sharing a date axis from 2010 to 2023. The upper panel is the 10Y-2Y "
-    "Treasury spread in percentage points with a dashed line at the risk-off threshold: the "
-    "spread falls from about three points in 2010, crosses the threshold from below around 2019, "
-    "and spends 2022 and 2023 inverted. The lower panel is a heatmap of target weight by fund and "
-    "date; the AGG and TLT rows are dark through the stretches where the spread sits under the "
-    "threshold, and the equity rows carry the lighter one-third weights of the risk-on months in "
+    f"Two stacked panels sharing a date axis from {dates[0]} to {dates[-1]}. The upper panel is "
+    "the 10Y-2Y Treasury spread in percentage points with a dashed line at the risk-off "
+    f"threshold; the spread runs from {yield_curve_slope.min() * 100:.2f} to "
+    f"{yield_curve_slope.max() * 100:.2f} points and sits above the threshold on "
+    f"{risk_on_share:.0%} of days. The lower panel is a heatmap of target weight by fund and "
+    "date: the defensive rows are dark through every stretch where the spread is under the "
+    "threshold, and the equity rows carry the lighter equal weights of the risk-on months in "
     "between.",
 )
 
@@ -681,12 +686,15 @@ fig.update_layout(
     height=500,
 )
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
+_lead = "ahead of" if strategy_cum[-1] > benchmark_cum[-1] else "behind"
 show_plotly_with_alt(
     fig,
     "Line chart of cumulative net return in percent for the ETF momentum portfolio, in solid "
-    "navy, and the 60/40 benchmark, dashed grey, both starting at zero in 2010. The two track "
-    "each other closely for the whole sample; momentum runs modestly ahead from 2012 to the 2021 "
-    "peak near 280 percent, then gives more back through 2022 and finishes below the benchmark.",
+    f"navy, and the 60/40 benchmark, dashed grey, both starting at zero on {dates[0]}. The two "
+    f"track each other closely throughout. Momentum peaks at {strategy_cum.max() * 100:.0f} "
+    f"percent and ends at {strategy_cum[-1] * 100:.0f}; the benchmark peaks at "
+    f"{benchmark_cum.max() * 100:.0f} and ends at {benchmark_cum[-1] * 100:.0f}, so momentum "
+    f"finishes {_lead} it.",
 )
 
 # %% [markdown]
@@ -732,9 +740,11 @@ fig.update_yaxes(range=[min(strategy_dd.min(), benchmark_dd.min()) * 110, 0])
 show_plotly_with_alt(
     fig,
     "Underwater chart of each portfolio's drawdown from its own running peak, zero at the top. "
-    "Momentum is a filled navy area and the 60/40 benchmark a dashed grey line. Both stay within "
-    "about 10 percent for most of the sample and both fall through 2022, where momentum reaches "
-    "about -31 percent against the benchmark's -22.",
+    "Momentum is a filled navy area and the 60/40 benchmark a dashed grey line. Momentum's worst "
+    f"fall is {strategy_dd.min() * 100:.0f} percent against the benchmark's "
+    f"{benchmark_dd.min() * 100:.0f}; momentum's low is dated {dates[int(strategy_dd.argmin())]} "
+    f"and the benchmark's {dates[int(benchmark_dd.argmin())]}, so the chart says whether the "
+    "deeper fall is the same episode or a different one.",
 )
 
 # %% [markdown]
@@ -797,12 +807,19 @@ fig.update_yaxes(title_text="Mean daily return (bps)", row=1, col=1)
 fig.update_yaxes(title_text="Annualized volatility (%)", row=1, col=2)
 fig.update_xaxes(title_text="Yield-curve regime", row=1, col=1)
 fig.update_xaxes(title_text="Yield-curve regime", row=1, col=2)
+_ret_bps = regime_metrics["mean_daily_return_bps"].to_list()
+_vol_pct = regime_metrics["annualized_volatility_pct"].to_list()
+_regimes = regime_metrics["regime"].to_list()
 show_plotly_with_alt(
     fig,
     "Two bar panels comparing the momentum strategy's realized daily returns by contemporaneous "
-    "yield-curve state. Mean daily return is about 4 basis points on risk-on days against under 2 "
-    "on risk-off days; annualized volatility is close on both, near 12 percent risk-on and 10 "
-    "percent risk-off.",
+    "yield-curve state. Mean daily return is "
+    + ", ".join(
+        f"{r:.1f} basis points in {name}" for name, r in zip(_regimes, _ret_bps, strict=True)
+    )
+    + "; annualized volatility is "
+    + ", ".join(f"{v:.1f} percent in {name}" for name, v in zip(_regimes, _vol_pct, strict=True))
+    + ". The return panel separates the states much more than the volatility panel does.",
 )
 
 # %% [markdown]

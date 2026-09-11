@@ -548,13 +548,21 @@ fig.update_layout(
     height=500,
     margin={"r": 105},
 )
+_curves = {
+    trace.name: [float(v) for v in trace.y if v is not None and np.isfinite(v)]
+    for trace in fig.data
+}
+_curve_phrase = "; ".join(
+    f"{name} runs from {min(vals):.0f} to {max(vals):.0f} percent and ends at {vals[-1]:.0f}"
+    for name, vals in _curves.items()
+    if vals
+)
 show_plotly_with_alt(
     fig,
-    "Line chart of net cumulative return in percent for two rules on the same bars and costs, "
-    "direct-labelled at the right. Buy-and-hold, dashed, rises above 600 percent twice, in early "
-    "and late 2021, falls under 100 by late 2022 and ends near +360. The RSI rule never rises far "
-    "above its start, reaches about -56 percent at its mid-2022 low and ends at about -25 "
-    "percent. The axis buy-and-hold needs is wide enough that the RSI line reads as flat.",
+    "Line chart of net cumulative return in percent for two rules on the same bars and the same "
+    f"costs, direct-labelled at the right. {_curve_phrase}. The axis one of them needs is wide "
+    "enough that the other reads as flat, which is why the smaller line's own losses are not "
+    "legible here and the drawdown chart below is the one that shows them.",
 )
 
 # %% [markdown]
@@ -634,12 +642,15 @@ fig.update_layout(
     height=420,
     hovermode="x unified",
 )
+_gross = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
+_flat_share = sum(1 for v in _gross if v == 0) / len(_gross) if _gross else 0.0
 show_plotly_with_alt(
     fig,
     "Step chart of gross exposure, solid navy, and net exposure, dotted amber, as a share of "
-    "equity. The two lines sit exactly on top of each other for the whole sample because the rule "
-    "is long-only, and the path is square: either near the target share of equity or at zero, "
-    "with roughly a dozen active stretches spread across four years.",
+    "equity. The two lines sit exactly on top of each other for the whole sample, because the "
+    "rule is long-only and a long-only book has the same gross and net. The path is square "
+    f"rather than smooth: exposure is either at zero or near its target, and it is at zero on "
+    f"{_flat_share:.0%} of the sample's days.",
 )
 
 # %% [markdown]
@@ -914,14 +925,21 @@ fig.update_layout(
     yaxis_title="Drawdown (%)",
     height=360,
 )
+_dd = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
+_under_water = sum(1 for v in _dd if v < 0) / len(_dd) if _dd else 0.0
 show_plotly_with_alt(
     fig,
-    "Filled drawdown chart from the high-water mark, zero at the top. The rule is under water for "
-    "almost the entire sample: it reaches about -45 percent in early 2020, returns to zero only "
-    "in the first months of 2021, then falls to a marked low near -66 percent in mid-2022 and is "
-    "still about -40 percent at the end. The flat segments are the stretches with no position, "
-    "where the drawdown cannot recover because nothing is at risk.",
+    "Filled drawdown chart from the high-water mark, zero at the top and losses below. The rule "
+    f"is below its own high-water mark on {_under_water:.0%} of the sample's days, reaches "
+    f"{min(_dd):.1f} percent at its worst and ends at {_dd[-1]:.1f}. The flat segments are the "
+    "stretches with no position, where the drawdown can neither deepen nor recover because "
+    "nothing is at risk.",
 )
+
+# %% [markdown]
+# The library labels its two reference lines with adjectives as well as levels. An adjective
+# printed on an axis rules on a strategy this notebook has not finished measuring, and a reader
+# cannot argue with it, so the chart below keeps the levels and drops the words.
 
 # %%
 rolling = analysis_net.compute_rolling_metrics(windows=[ROLLING_WINDOW_DAYS], metrics=["sharpe"])
@@ -931,11 +949,7 @@ for shape in fig.layout.shapes:
     shape.line.color = COLORS["neutral"]
 for annotation in fig.layout.annotations:
     annotation.font.color = COLORS["neutral"]
-# The library labels its two reference lines "Good (1.0)" and "Excellent (2.0)". Those are
-# verdicts on a rule this notebook has not judged, and a reader cannot argue with a word printed
-# on an axis, so the levels stay and the adjectives go. The level is read back out of the label
-# rather than off the shape: the figure carries three horizontal lines and only two of them are
-# annotated, so the two lists do not correspond position by position.
+# Read the level back out of the label, not off the shape: three lines, two annotations.
 for annotation in fig.layout.annotations:
     level = re.search(r"\(([\d.]+)\)", annotation.text or "")
     if level:
@@ -949,13 +963,15 @@ fig.update_layout(
     yaxis_title="Rolling Sharpe ratio",
     height=420,
 )
+_roll = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
+_crossings = sum(1 for a, b in zip(_roll, _roll[1:], strict=True) if (a > 0) != (b > 0))
 show_plotly_with_alt(
     fig,
-    "Line chart of the rolling Sharpe ratio with dashed reference lines at 1.0 and 2.0. The "
-    "series begins a year into the sample, spikes above 2.5 in early 2021, falls through zero in "
-    "late 2021 and spends 2022 between 0 and -1, then climbs back to roughly 1.5 through the "
-    "second half of 2023. The same rule sits on both sides of every reference level depending on "
-    "which year the window covers.",
+    f"Line chart of the {ROLLING_WINDOW_DAYS}-day rolling Sharpe ratio with dashed reference "
+    "lines at 1.0 and 2.0. The series starts one window into the sample, because that is the "
+    f"first date a full window exists. It ranges from {min(_roll):.2f} to {max(_roll):.2f} and "
+    f"changes sign {_crossings} times. One rule therefore sits on both sides of every reference "
+    "level, depending only on which stretch of the sample the window covers.",
 )
 
 # %%
@@ -969,13 +985,15 @@ fig.update_layout(
     xaxis_title="Month",
     yaxis_title="Year",
 )
+_cells = [float(v) for row in fig.data[0].z for v in row if v is not None and np.isfinite(v)]
+_zero_cells = sum(1 for v in _cells if v == 0)
 show_plotly_with_alt(
     fig,
     "Heatmap of net return by calendar month and year with an annual column at the right, on a "
-    "diverging scale where green is positive and red negative, each cell labelled. Many cells are "
-    "exactly zero, the months with no position. The extremes are concentrated: -33.9 percent in "
-    "May 2021, -35.0 in June 2022 and +34.0 for 2023 as a whole, against annual figures of -16.0, "
-    "-0.6 and -33.4 for the three preceding years.",
+    "diverging scale where positive is green and negative red, each cell labelled. "
+    f"{_zero_cells} of the {len(_cells)} cells are exactly zero, the months the rule held no "
+    f"position. The rest run from {min(_cells):.1f} to {max(_cells):.1f}, so the months that are "
+    "not flat are large in both directions rather than a gentle spread around the mean.",
 )
 
 # %%
@@ -1009,12 +1027,15 @@ fig.update_layout(
     bargap=0.04,
     height=420,
 )
+_daily = daily_returns["net_return"].to_list()
+_flat_days = sum(1 for r in _daily if r == 0)
 show_plotly_with_alt(
     fig,
     "Histogram of daily net returns with a dotted red vertical line at the empirical 95 percent "
-    "value at risk. One bar at zero holds close to a thousand days, the flat days with no "
-    "position, and the rest of the mass is a short, wide skirt reaching past -30 percent on the "
-    "left and about +10 on the right. The distribution is two populations rather than one.",
+    f"value at risk of {dist.var_95:.2%}. A single bar at zero holds the {_flat_days:,} flat "
+    f"days out of {len(_daily):,}, the days the rule held no position, and the remaining mass is "
+    f"a short, wide skirt running from {min(_daily):.1%} to {max(_daily):.1%}. The chart shows "
+    "two populations rather than one distribution.",
 )
 
 # %% [markdown]
