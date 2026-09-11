@@ -186,22 +186,29 @@ pl.DataFrame(
 # estimate, and then pays for the placebo refits - which is where most of the cost is, since the
 # whole procedure is repeated once per placebo draw.
 #
-# The check below refuses a result whose *identity* is not the one that was resolved. That is not
-# defensive coding: the identity covers the estimand, the fold geometry and the refutation
+# The check below refuses a result whose *computation* is not the one that was resolved. That is not
+# defensive coding: the computation carries the estimand, the fold geometry and the refutation
 # contract, and a result carrying a different one describes a contract that no longer exists. The
 # notebook downstream would then resolve the label to two live identities and stop.
 #
-# It compares the identity and not the whole specification, because the specification also carries
+# It compares `spec["computation"]` and not the whole spec, because the spec also carries
 # `provenance` - the git commit, the platform and the package versions of the run that fitted. Those
-# are a record of that run's own circumstances and are meant to differ from any later run that reads
-# the row back from cache. Comparing the whole spec makes the notebook fail on every re-run from a
-# different commit, which is the opposite of the property this check is for: the second run of this
-# notebook fits nothing, and has to say so rather than raise.
+# record that run's own circumstances and are meant to differ from any later run that reads the row
+# back from cache. Comparing whole specs asserts that nothing has been committed since, which is not
+# a property of the estimate, and it makes the notebook raise on every re-run from a different
+# commit - the opposite of what this check is for. The second run of this notebook fits nothing and
+# has to say so rather than raise.
+#
+# Comparing `result.hash` against `resolved.identity` would not do it either: both are
+# `training_hash_from_spec` of the same resolved spec, so that comparison cannot fail and would
+# assert nothing. Same check, same reasoning, as `etfs/12_causal_dml`.
 
 # %% tags=["results"]
 result = resolved.run()
-if not result.complete or result.hash != resolved.identity:
-    raise RuntimeError("causal execution is incomplete or has conflicting identity")
+if not result.complete:
+    raise RuntimeError("causal execution is incomplete")
+if result.spec["computation"] != resolved.spec["computation"]:
+    raise RuntimeError("the registered causal computation differs from the resolved one")
 pl.DataFrame(
     {
         "causal_hash": [result.hash],

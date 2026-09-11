@@ -195,12 +195,6 @@ class CausalResult:
                     # not there. An empty list rather than None when the column exists
                     # but the run predates it, so callers need one check, not two.
                     "placebo_effects": json.loads(row[9]) if row[9] else [],
-                    # The diagnostic the refutation's own warning tells the reader to
-                    # weigh the p-value against. It reaches a reader only from here: the
-                    # warning fires while the fit runs, and a re-run that hits the cache
-                    # performs no fit. None rather than 0.0 when the column is absent or
-                    # the refutation recorded none - zero asserts that permutation moved
-                    # every row, which is the opposite of not knowing.
                     # The draws refutation_p is actually computed on since
                     # ml4t/agent-workspace#1120. Empty means the p-value on this row was
                     # computed the old way, on raw thetas, and is anti-conservative: a
@@ -211,6 +205,12 @@ class CausalResult:
                     # render the distribution behind the verdict must use these and not
                     # `placebo_effects`, and must say so when they are missing.
                     "placebo_t_stats": json.loads(row[10]) if row[10] else [],
+                    # The diagnostic the refutation's own warning tells the reader to
+                    # weigh the p-value against. It reaches a reader only from here: the
+                    # warning fires while the fit runs, and a re-run that hits the cache
+                    # performs no fit. None rather than 0.0 when the column is absent or
+                    # the refutation recorded none - zero asserts that permutation moved
+                    # every row, which is the opposite of not knowing.
                     "placebo_frozen_fraction": row[11],
                     # Derived here so every reader gets the same verdict from the same
                     # rule. A p-value alone cannot say whether the draws could have

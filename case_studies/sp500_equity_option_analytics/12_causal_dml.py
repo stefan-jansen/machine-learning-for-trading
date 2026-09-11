@@ -354,7 +354,7 @@ else:
         observed_t,
         color=COLORS["negative"] if observed_t < 0 else COLORS["positive"],
         linewidth=2,
-        label=f"Adjusted estimate ({observed_t:+.2f})",
+        label=f"Observed t-statistic ({observed_t:+.2f})",
     )
     relation = "outside" if refutation_p < 0.05 else "inside"
     add_message_title(

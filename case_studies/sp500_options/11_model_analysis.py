@@ -291,9 +291,15 @@ fig.show()
 # corrects for the serial correlation that overlapping labels induce, which is what makes the
 # conventional error too small on this data. The placebo p-value is a permutation test: the
 # treatment is shuffled in blocks long enough to preserve that serial dependence, the estimate is
-# recomputed, and the reported value is the share of shuffles reaching the observed effect. The
-# first asks whether the estimate is distinguishable from zero given the dependence; the second
-# asks whether the procedure would have produced it from a treatment that carries no signal.
+# recomputed, and the reported value is the share of shuffles whose HAC t-statistic reaches the
+# observed one. The comparison is on the t-statistic rather than the effect because a permuted
+# treatment is no longer predictable from the controls, so its residual keeps nearly all its
+# variance - and that variance is the denominator of the second-stage effect. On the effect scale
+# every placebo draw is divided by a larger number than the observed one, which narrows the null in
+# the one direction that makes a refutation read as passed. The t-statistic carries the same
+# denominator and cancels it. The first asks whether the estimate is distinguishable from zero given
+# the dependence; the second asks whether the procedure would have produced it from a treatment that
+# carries no signal.
 #
 # It is resolved as canonical whatever tier this notebook runs at, because the populations above
 # are canonical whatever tier this notebook runs at. Asking a preview run for a preview causal
