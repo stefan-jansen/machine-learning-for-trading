@@ -37,7 +37,7 @@ This section shows how fundamentals, calendars, and macro variables enter ML sys
 
 - [`04_fundamentals_macro_calendar`](04_fundamentals_macro_calendar.ipynb) — Slow-moving features that condition faster signals: SEC XBRL fundamentals (value/quality factors with point-in-time ASOF alignment), FRED macro indicators (yield curve, VIX regimes, credit spreads with publication-lag handling), and calendar encodings (cyclical sin/cos, time-to-event proximity).
 
-### 8.5 Cross-Cutting Features and the Limits of Aggregation
+### 8.5 Cross-Cutting Feature Types and the Limits of Direct Aggregation
 
 This section marks the conceptual boundary of the chapter. It explains when deterministic rolling transformations are enough and when hidden structure -- latent states, conditional dynamics, cycle strength, or path shape -- requires fitted models and learned representations, which sets up Chapter 9 cleanly without duplicating it.
 

@@ -28,7 +28,7 @@
 # - Compare graph retrieval and vector retrieval on direct lookup and multi-entity questions
 # - Measure support recall and retrieval-token budgets on the same corpus
 #
-# **Book Reference**: Chapter 23, Section 23.3 (Graph RAG: Deterministic Relational Reasoning)
+# **Book Reference**: Chapter 23, Section 23.3 (Deterministic relational reasoning with graph RAG)
 #
 # **Prerequisites**: The 13F artifacts written by
 # `data/equities/positioning/13f_download.py` (run that first if missing).

@@ -27,7 +27,8 @@
 # 3. Read clustered error patterns and the hypotheses the library generates.
 # 4. Connect SHAP-driven diagnosis to feature-engineering or regime decisions.
 #
-# **Book reference**: §19.5 (Trade-Level SHAP as Diagnostic Tool).
+# **Book reference**: §19.5 (Decomposing factor, sector, and macro exposures), under
+# "Trade-level SHAP as a diagnostic tool".
 #
 # **Prerequisites**: Familiarity with SHAP values (Lundberg & Lee 2017), gradient
 # boosting on cross-sectional features, and the ML4T trade-record contract

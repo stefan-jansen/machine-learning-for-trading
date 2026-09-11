@@ -17,7 +17,7 @@
 # # Tail-GAN: Learning to Generate Tail-Risk Preserving Scenarios
 #
 # **Chapter 5: Synthetic Data Generation**
-# **Section Reference**: Section 5.5 (GANs for Time Series)
+# **Section Reference**: Section 5.5 (GANs for financial time series)
 #
 # **Docker image**: `ml4t-gpu`
 #

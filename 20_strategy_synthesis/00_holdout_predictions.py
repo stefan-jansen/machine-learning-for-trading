@@ -38,7 +38,8 @@
 # - Compare validation vs holdout Sharpe ratios to surface overfit
 # - Read the validation→holdout decay pattern per case study
 #
-# **Book Reference**: Chapter 20, Section 20.6 (Stability Across Time and Regimes)
+# **Book Reference**: Chapter 20, Section 20.1 (First-pass results across nine case
+# studies), under "From validation to holdout"
 #
 # **Prerequisites**: A case study appears in the table below only once its signal-stage backtests
 # are in the registry. One whose earlier stages have not been run reports the reason it could not
@@ -275,7 +276,7 @@ summary_df
 # pre-holdout data, the rank IC on holdout, and the arithmetic decay
 # `(HO − Val) / Val`.
 #
-# The chapter prose (§20.6, *Stability Across Time and Regimes*) uses
+# The chapter prose (§20.1, *First-pass results across nine case studies*) uses
 # this output to discuss three *decay patterns*. In the first the prediction itself degrades and
 # the rank IC falls toward zero. In the second the IC holds while the Sharpe halves or changes
 # sign, because portfolio construction, costs or a regime shift stand between a correct ranking

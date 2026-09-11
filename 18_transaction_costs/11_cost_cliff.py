@@ -37,7 +37,7 @@
 # - Estimate the turnover ceiling implied by a target net Sharpe
 # - Use the cost cliff as a publication-quality sanity check for intraday claims
 #
-# **Book Reference:** Chapter 18: Section 18.8 (Practical Guardrails)
+# **Book Reference:** Chapter 18: Section 18.8 (Designing practical cost guardrails)
 #
 # **Prerequisites:** Read [`02_spread_estimation`](02_spread_estimation.ipynb) for spread realism and
 # [`09_frequency_tradeoff`](09_frequency_tradeoff.ipynb) for the slower-frequency guardrail framing.
