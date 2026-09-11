@@ -647,7 +647,10 @@ def compare_liquidity_metrics(trades_df: pl.DataFrame, tickers: list[str]) -> pl
 # traded value: the top, the three quartiles, and the bottom. Five spans the range while
 # staying readable on a bar chart, and taking them by position rather than by name means
 # the comparison follows the data rather than a list someone wrote down. Where fewer than
-# five clear the floor, whatever cleared it is compared instead.
+# five clear the floor, whatever cleared it is compared instead, and where nothing clears
+# it there is no spectrum to draw: a truncated parse is the case that reaches this, and
+# widening the selection to every ticker in the session would answer a different question
+# from the one the section asks.
 
 # %%
 tradeable = trade_summary.filter(pl.col("trade_count") >= MIN_TRADES)
@@ -659,9 +662,15 @@ if n_pool >= 5:
 elif n_pool > 0:
     spectrum_tickers = tradeable["ticker"].to_list()
 else:
-    spectrum_tickers = trade_summary["ticker"].to_list()
+    spectrum_tickers = []
+    print(
+        f"No ticker reached {MIN_TRADES:,} trades in this sample, so there is no "
+        f"liquidity spectrum to compare.\n"
+    )
 
-liquidity_comparison = compare_liquidity_metrics(all_trades, spectrum_tickers)
+liquidity_comparison = (
+    compare_liquidity_metrics(all_trades, spectrum_tickers) if spectrum_tickers else pl.DataFrame()
+)
 
 kept = liquidity_comparison["ticker"].to_list() if len(liquidity_comparison) else []
 dropped = [t for t in spectrum_tickers if t not in kept]

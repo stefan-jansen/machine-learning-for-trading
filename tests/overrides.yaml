@@ -84,6 +84,10 @@
 03_market_microstructure/03_itch_lob_analysis:
   timeout: 300
 03_market_microstructure/04_itch_order_lifecycle_analysis:
+  # The enriched sections at the end read what 05_itch_trading_activity writes, and the
+  # suite runs notebooks in sorted order into a per-job output directory, so 04 always
+  # runs before 05 and those sections take their "not found" branch. A green run here is
+  # not coverage of the whole notebook; the local production render is.
   timeout: 300
 03_market_microstructure/05_itch_trading_activity:
   timeout: 300

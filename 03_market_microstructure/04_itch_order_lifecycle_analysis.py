@@ -98,8 +98,9 @@ from utils.style import COLORS, show_with_alt
 # so the per-order work is done on one symbol; the last section widens back out to the
 # whole day with only two columns per message.
 #
-# `MAX_ORDERS` caps how many rows are read after the symbol filter. `None` reads them all;
-# CI sets a small number so the notebook runs the same code in seconds.
+# `MAX_ORDERS` caps how many rows are read after the symbol filter. `None` reads them all,
+# which is what the committed run does. A small cap makes a first pass quick on the same
+# code path.
 
 # %% tags=["parameters"]
 SYMBOL = "AAPL"
