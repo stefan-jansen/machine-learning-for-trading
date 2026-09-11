@@ -250,7 +250,18 @@ def test_the_scan_reads_the_real_corpus_without_falling_over():
     if not any(f.status != "no-registry" for f in findings):
         pytest.skip("registries present but none holds an official_populations table")
 
-    known = {"live", "stale", "superseded", "unresolved", "forked", "no-registry"}
+    # `undeclared` joined the set when `_undeclared_heads` did: a live generation that no
+    # declaration names at all, which `main()` reports separately and exits non-zero on under
+    # `--require-declarations`. It is a status the checker declares, not one it invented.
+    known = {
+        "live",
+        "stale",
+        "superseded",
+        "unresolved",
+        "forked",
+        "no-registry",
+        "undeclared",
+    }
     unclassified = [f for f in findings if f.status not in known]
     assert not unclassified, f"unrecognised status: {unclassified}"
     assert all(f.detail for f in findings), "a finding with no explanation is not usable"
