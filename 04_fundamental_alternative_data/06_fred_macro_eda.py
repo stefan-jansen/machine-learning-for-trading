@@ -359,9 +359,10 @@ for _label, _frame in (("full history", vix), ("plotted window", vix_recent)):
 # %% [markdown] tags=["results"]
 # Read the median and the longest spell together rather than either alone. A median describes the
 # typical episode and says nothing about the worst one, which is the episode a risk model exists
-# for, and the two rows show what the choice of window does to each: a figure drawn on recent
-# years cannot show a tail that falls outside it. The 2008-09 crisis carries the longest spell in
-# the full history, and the plotted window starts after it.
+# for. The two rows give both statistics over the full history and over the plotted window, so
+# comparing them is what says whether the chart contains the tail: where the window's longest
+# spell is the shorter of the two, the worst episode in the record falls outside the figure, and
+# no amount of looking at the figure will tell the reader that.
 
 # %% [markdown]
 # ## 5. The yield curve spread, and checking a derived column
