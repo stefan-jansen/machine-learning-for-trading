@@ -9,20 +9,22 @@ able to rebuild it and every test still pass - which is how 149 of 327 files got
 there.
 
 A file with no producer cannot be regenerated when production moves, cannot be
-checked against production, and cannot be explained: three of them turned out to be
-byte-identical copies of each other at pre-migration paths that nothing reads, and
-one holds the whole FinancialPhraseBank corpus under a filename that promises the
-unanimous subset.
+checked against production, and cannot be explained. The backlog has so far turned
+up three files byte-identical to each other at pre-migration paths that nothing
+reads, one holding the whole FinancialPhraseBank corpus under a filename that
+promises the unanimous subset, and an options panel built from a different universe
+than the one its loader documents, so four of the eight symbols a chapter-8 notebook
+asks for come back empty under CI.
 
 `UNPRODUCED` is the remaining backlog, and it is a ratchet: a new fixture file with
 no producer fails immediately, and a file that gains one has to leave the list. It
 only shrinks.
 
-Two producers are declared. `create_test_data.py` derives from production and each
-`Dataset` names what it owns; `generate_test_microstructure.py` is synthetic and
-`generate_all` returns what it writes. A third, `generate_skip_data.py`, declares
-nothing at all - its outputs are in `UNPRODUCED` below, and one of them,
-`enrich_adv_columns`, writes back into two files `create_test_data.py` owns.
+Two producers are declared, and two is the whole list. `create_test_data.py` derives
+from production and each `Dataset` names what it owns; `generate_test_microstructure.py`
+is synthetic and `generate_all` returns what it writes. `generate_skip_data.py` used to
+be a third, writing two paths into the fixture and declaring neither; both turned out to
+be paths no loader resolves, so it was cut back to `intermediates/` instead of declared.
 """
 
 from __future__ import annotations
@@ -46,43 +48,17 @@ from tests.create_test_data import DATASETS  # noqa: E402
 # it is a judgement that goes stale and a comment here would not be re-checked.
 UNPRODUCED = frozenset(
     {
-        # academic/ - 3
-        "academic/firm_characteristics_all.parquet",
-        "academic/firm_characteristics_test.parquet",
-        "academic/firm_characteristics_train.parquet",
-        # alternative/ - 4
-        "alternative/institutional/13f_expanded/institutional_holdings.parquet",
-        "alternative/institutional/13f_expanded/stock_features.parquet",
+        # Each of these exists in production and the fixture copy is a genuine
+        # reduction of it, so declaring one means writing a builder that performs
+        # that reduction, not a `Dataset` that copies. `nasdaq100_taq` is the
+        # exception: it is AlgoSeek data redistributed by permission, with no
+        # production or workstation copy, so its declaration has to say so.
         "alternative/text/financial_phrasebank/sentences_allagree.parquet",
-        "alternative/text/sp500_10q_mda.parquet",
-        # autonomous_agents/ - 3
-        "autonomous_agents/operator_artifacts/run_20260504T201005.json",
-        "autonomous_agents/operator_artifacts/run_etfs_20260504T223150.json",
-        "autonomous_agents/operator_artifacts/run_us_firm_characteristics_20260504T225521.json",
-        # crypto/ - 6
-        # equities/ - 9
-        "equities/market/microstructure/iex/deep/parsed/path_signatures/data.parquet",
         "equities/market/microstructure/nasdaq100_taq/data.parquet",
-        "equities/market/microstructure/nasdaq_itch/messages/enriched/C.parquet",
-        "equities/market/microstructure/nasdaq_itch/messages/enriched/E.parquet",
-        "equities/market/microstructure/nasdaq_itch/messages/enriched/X.parquet",
         "equities/market/sp500/options_eda/year=2019.parquet",
         "equities/market/sp500/options_eda/year=2020.parquet",
-        "equities/market/sp500/sp500.csv",
         "equities/positioning/13f/bulk/2024Q3/institutional_holdings.parquet",
-        # factors/ - 38
-        # institutional/ - 1
-        "institutional/13f/institutional_holdings.parquet",
-        # macro/ - 7
-        # prediction_markets/ - 1
         "prediction_markets/polymarket_events.parquet",
-        # sec_filings/ - 6
-        "sec_filings/sp100/10k/AAPL/2023.parquet",
-        "sec_filings/sp100/10k/AAPL/2024.parquet",
-        "sec_filings/sp100/10k/GOOG/2023.parquet",
-        "sec_filings/sp100/10k/GOOG/2024.parquet",
-        "sec_filings/sp100/10k/MSFT/2023.parquet",
-        "sec_filings/sp100/10k/MSFT/2024.parquet",
     }
 )
 

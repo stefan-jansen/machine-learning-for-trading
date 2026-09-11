@@ -13,13 +13,13 @@ from what was actually generated.
 
 ``tests/test_fixture_manifest_matches_builders.py`` checks each entry of the
 manifest against a declaration and against the data on disk. What it cannot check
-is a file no declaration mentions, and most of the test-data repo is still in that
-state: named neither by a ``Dataset.owns`` nor by ``manifest.json``. Such a fixture
-has no builder, no recorded budget and nothing comparing it to the datasets it has
-to join against - which is how the FNSPID news fixture came to sit entirely past
-the end of its own price panel (ml4t/agent-workspace#1116). Adding a declaration is
-how a fixture leaves that state; ml4t/agent-workspace#1117 carries the running
-count and the remaining groups.
+is a file no declaration mentions. A fixture in that state has no builder, no
+recorded budget and nothing comparing it to the datasets it has to join against -
+which is how the FNSPID news fixture came to sit entirely past the end of its own
+price panel, and how an options panel built from a different universe than its
+loader documents survived a year of green CI. ``UNPRODUCED`` in
+``tests/test_every_fixture_file_has_a_producer.py`` is what is left of that backlog,
+and it only shrinks.
 
 It is also not a from-empty rebuild of the fixture repo: it operates on a checkout
 of ml4t/third-edition-test-data and replaces the datasets it is asked for.
