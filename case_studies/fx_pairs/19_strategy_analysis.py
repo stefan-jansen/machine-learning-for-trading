@@ -171,7 +171,7 @@ candidate_field = selectable_validation_candidates(CASE_STUDY_ID, admitted=ADMIT
 
 pl.DataFrame(
     {
-        "field": ["carrier backtest", "carrier stage", "candidates ranked", "validation Sharpe"],
+        "field": ["selected backtest", "selected stage", "candidates ranked", "validation Sharpe"],
         "value": [
             selected_validation.hash,
             str(carrier["val_stage"]),
