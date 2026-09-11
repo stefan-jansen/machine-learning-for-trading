@@ -328,6 +328,7 @@ def ensure_backtest_spec(
     prices: pl.DataFrame,
     prediction_hash: str,
     initial_cash: float,
+    traded_universe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize ``strategy_spec`` to the canonical backtest spec form.
 
@@ -341,6 +342,17 @@ def ensure_backtest_spec(
     always populated in ``strategy.rebalance`` — taken from ``execution.*``
     when present, otherwise from ``case_config`` (which sources them from
     ``setup.yaml::backtest.rebalance.default``).
+
+    ``traded_universe`` is the same declaration ``build_backtest_spec`` takes, for the
+    same reason and with the same rule: build it with ``traded_universe_declaration``
+    when the price panel was deliberately reduced, and it lands in ``strategy.signal``,
+    which is hashed whole, so the reduction reaches ``backtest_hash`` instead of hashing
+    like the full run over the same predictions (ml4t/agent-workspace#911, #1119). It is
+    written only when a caller declares one, on both the carried-forward and the projected
+    path, so every existing call site produces byte-identical specs and no registered
+    backtest re-keys. A declaration handed here overwrites one inherited from the spec
+    being normalized, because the panel this run was given is the universe it trades;
+    ``apply_traded_universe`` then checks that claim against the panel in the runner.
     """
     if is_backtest_spec(strategy_spec):
         spec = deepcopy(strategy_spec)
@@ -356,6 +368,8 @@ def ensure_backtest_spec(
         rb = spec.setdefault("strategy", {}).setdefault("rebalance", {})
         rb.setdefault("min_weight_change", float(getattr(case_config, "min_weight_change", 0.005)))
         rb.setdefault("min_trade_value", float(getattr(case_config, "min_trade_value", 100.0)))
+        if traded_universe is not None:
+            spec["strategy"].setdefault("signal", {})["traded_universe"] = deepcopy(traded_universe)
         if "backtest_config" in spec:
             # Always overwrite metadata.prediction_hash with the caller's
             # argument — the spec may have been cloned from another run
@@ -411,6 +425,8 @@ def ensure_backtest_spec(
     }
     if case_study == "sp500_options":
         strategy["signal"].setdefault("schedule_contract", SP500_OPTIONS_SCHEDULE_CONTRACT)
+    if traded_universe is not None:
+        strategy["signal"]["traded_universe"] = deepcopy(traded_universe)
     if "allocation" in strategy_spec:
         strategy["allocation"] = deepcopy(strategy_spec["allocation"])
     if "risk" in strategy_spec:
