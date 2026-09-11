@@ -464,9 +464,9 @@ show_with_alt(
     "A square matrix of cosine similarities between the embeddings of the large, widely "
     "recognized companies the vocabulary carries, shaded light at zero and dark at one. Two "
     "darker blocks are visible along the diagonal: the software and consumer-technology names "
-    "in the upper left are very close to one another, and the remaining names in the lower "
-    "right form a second, looser group. The cells linking one block to the other are "
-    "noticeably lighter than the cells inside either.",
+    "in the upper left are very close to one another, and the bank, oil, carmaker and "
+    "conglomerate in the lower right form a second, looser group. The cells linking one block "
+    "to the other are noticeably lighter than the cells inside either.",
 )
 
 # %% [markdown]
