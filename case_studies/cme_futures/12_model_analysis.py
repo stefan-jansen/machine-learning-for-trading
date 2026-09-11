@@ -223,25 +223,25 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 #
 # **The `refutation_p` column below is not evidence that these effects survived a placebo test.**
 # The refutation permutes contiguous blocks within each product, and the shared runner sizes those
-# blocks from the label buffer rather than from the treatment: `block_size` is set equal to
-# `embargo`, so the registered rows carry a 21-period block for `fwd_ret_21d` and a 5-period block
-# for `fwd_ret_5d`. Neither length is a property of `carry_pct`. Measured on this case study's own
-# feature panel, `carry_pct` has a lag-1 autocorrelation of 0.943, an AR(1) half-life of 11.8
+# blocks as `max(label_buffer, treatment_window)`. `causal.treatment_window` is 1 here, so the label
+# buffer binds and the registered rows carry a 21-period block for `fwd_ret_21d` and a 5-period
+# block for `fwd_ret_5d`. Neither length is a property of `carry_pct`. Measured on this case study's
+# own feature panel, `carry_pct` has a lag-1 autocorrelation of 0.943, an AR(1) half-life of 11.8
 # trading days, and autocorrelation still at 0.44 by lag 21 and 0.17 by lag 63. Blocks of 5 and 21
 # periods therefore destroy serial dependence that the real treatment has. That narrows the placebo
 # distribution relative to the true null and pushes the empirical p-value toward zero whether or not
 # the effect is real.
 #
-# **That is no longer what the column reports, and the reason is worth following.** `fwd_ret_5d` used
-# to sit at 0.0396 and `fwd_ret_21d` at 0.0099, which is 1/101 and the floor 100 draws can report.
-# The refutation now compares HAC t-statistics rather than raw effects, because a permuted treatment
-# is not predictable from the controls, its residual keeps nearly all its variance, and that variance
-# is the denominator of the second-stage effect - so every placebo effect was divided by a larger
-# number than the observed one. Correcting that moved `fwd_ret_5d` to 0.5545 and `fwd_ret_21d` to
-# 0.2673, both `Fails`, on an identical fit. The block-length argument above still stands and is a separate, uncorrected
-# narrowing; it simply is no longer visible in these two numbers. Read the DML point estimate and its
-# HAC standard error. The refutation column is recorded for completeness and carries no evidence
-# here.
+# **That is no longer what the column reports, and the reason is worth following.** `fwd_ret_5d`
+# used to sit at 0.0396 and `fwd_ret_21d` at 0.0099, which is 1/101 and the floor 100 draws can
+# report. The refutation now compares HAC t-statistics rather than raw effects, because a permuted
+# treatment is not predictable from the controls, its residual keeps nearly all its variance, and
+# that variance is the denominator of the second-stage effect - so every placebo effect was divided
+# by a larger number than the observed one. Correcting that moved `fwd_ret_5d` to 0.5545 and
+# `fwd_ret_21d` to 0.2673, both `Fails`, on an identical fit. The block-length argument above still
+# stands and is a separate, uncorrected narrowing; it simply is no longer visible in these two
+# numbers. Read the DML point estimate and its HAC standard error. The refutation column is recorded
+# for completeness and carries no evidence here.
 
 # %%
 causal_rows = []

@@ -91,25 +91,40 @@
 # the result is a confidence interval that is too narrow and a t-statistic that is too large.
 # The HAC estimator does not fix the estimate - it corrects what may be claimed about it.
 #
-# ### Why the placebo block is one bar here, and not 252
+# ### Why the label buffer sizes the placebo block here, and not the treatment
 #
 # The refutation permutes the treatment in contiguous blocks and re-runs the whole estimation,
 # building a distribution of effects under the hypothesis that the treatment does nothing. The
-# block has to be long enough to preserve whatever serial dependence the real treatment has, or
-# the placebo is a weaker opponent than the truth and every p-value looks significant.
+# block has to be long enough to preserve whatever serial dependence the data has, or the
+# placebo is a weaker opponent than the truth and every p-value looks significant.
+#
+# Two separate scales create that dependence, and the block spans the longer of them:
+# `block_size = max(label_buffer, treatment_window)`. The overlapping labels span the label
+# horizon, and the treatment's own construction window spans itself.
 #
 # `causal.treatment_window` is 1 for this case study, and the reason is a property of the
 # construction rather than a judgement. `carry_pct` is
 # `(c0_price - c1_price) / c0_price * 12`, computed from two prices at the same timestamp.
-# Nothing rolls, nothing averages, no window is spanned - so one value carries no dependence of
-# its own and a one-bar block destroys nothing the refutation needs.
+# Nothing rolls, nothing averages, no window is spanned. The label buffer is therefore the
+# binding scale here: the registered blocks are 5 periods for `fwd_ret_5d` and 21 for
+# `fwd_ret_21d`, and each row records its own `block_size` beside a `block_size_basis` of
+# `label_buffer` saying which of the two set it.
+#
+# **A one-bar construction window is not a claim that the column is serially independent**, and
+# the two are worth keeping apart. The declared window says how many bars the formula reads;
+# the column's empirical persistence is a separate quantity and is much larger here.
+# `12_model_analysis` measures it - lag-1 autocorrelation 0.943, AR(1) half-life 11.8 trading
+# days - which is longer than either block, so these blocks do not preserve all of the
+# dependence the treatment actually has. That is a known narrowing of the refutation on this
+# case study, stated there rather than left for the reader to infer from a `Fails`.
 #
 # The contrast with a rolling treatment is worth holding onto, because it is where this is
 # usually got wrong. A treatment built from a 252-session window overlaps its neighbours in 251
-# of them, and permuting it in short blocks shreds that overlap; the placebo distribution
-# narrows, and the p-value collapses toward zero whether or not the effect is real. The number
-# is declared in `setup.yaml` and derived from how the column is built, because inferring it
-# from a window list would put a wrong number behind a right-looking one.
+# of them, and a block sized by a 21-day label buffer would shred that overlap; the placebo
+# distribution narrows, and the p-value collapses toward zero whether or not the effect is
+# real. That is the case the `max` exists for. The number is declared in `setup.yaml` and
+# derived from how the column is built, because inferring it from a window list would put a
+# wrong number behind a right-looking one.
 
 # %%
 """Fit the declared CME futures double-machine-learning requests."""
