@@ -233,12 +233,12 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # stand in for persistence within one, and on one row per product-session, because the block
 # counts sessions.
 #
-# **The two blocks land on opposite sides of that profile, so the concern applies to one label
-# and not the other.** Read the block lengths against the autocorrelation at those lags rather
-# than against the half-life: the decay is slower than the AR(1) half-life implies - an AR(1)
-# with this lag-1 value would sit at 0.38 by lag 5 and 0.02 by lag 21, where the panel is at
-# 0.52 and 0.14 - so the half-life is a lower bound on persistence, not the yardstick for the
-# block. At the 5-session block used for `fwd_ret_5d` the autocorrelation is still 0.52, so that
+# **The two blocks sit at very different points on that profile, so the concern bears much more
+# on one label than the other.** Read the block lengths against the autocorrelation at those
+# lags rather than against the half-life: the decay is slower than the AR(1) half-life implies -
+# an AR(1) with this lag-1 value would sit at 0.38 by lag 5 and 0.02 by lag 21, where the panel
+# is at 0.52 and 0.14 - so the half-life is a lower bound on persistence, not the yardstick for
+# the block. At the 5-session block used for `fwd_ret_5d` the autocorrelation is still 0.52, so that
 # block leaves real dependence unpreserved; the placebo is a weaker opponent than the truth and
 # `fwd_ret_5d`'s empirical p-value is biased toward zero by some amount this notebook does not
 # quantify. At the 21-session block used for `fwd_ret_21d` it is 0.14, and indistinguishable
@@ -252,7 +252,7 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # that variance is the denominator of the second-stage effect - so every placebo effect was divided
 # by a larger number than the observed one. Correcting that moved `fwd_ret_5d` to 0.5545 and
 # `fwd_ret_21d` to 0.2673, both `Fails`, on an identical fit. The block-length argument above is a
-# separate, uncorrected narrowing and it bears on `fwd_ret_5d` only; either way it is no longer
+# separate, uncorrected narrowing and it bears mainly on `fwd_ret_5d`; either way it is no longer
 # visible in these two numbers. Read the DML point estimate and its HAC standard error. The
 # refutation column is recorded for completeness and carries no evidence here.
 
