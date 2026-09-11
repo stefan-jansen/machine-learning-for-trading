@@ -451,6 +451,12 @@ display(
 
 # %%
 N_REGIMES_SELECTED = 2
+# fit_gmm_grid fitted exactly the counts in N_REGIMES_GRID, and the swimlane and label
+# cells below read gmm_grid[N_REGIMES_SELECTED]. Narrowing the grid without moving this
+# constant reaches them as a KeyError.
+assert N_REGIMES_SELECTED in N_REGIMES_GRID, (
+    f"N_REGIMES_SELECTED={N_REGIMES_SELECTED} was never fitted; N_REGIMES_GRID={N_REGIMES_GRID}"
+)
 
 # %% [markdown]
 # ## What each cluster count partitions
