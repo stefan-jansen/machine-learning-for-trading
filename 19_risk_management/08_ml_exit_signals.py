@@ -15,7 +15,7 @@
 
 # %% [markdown]
 # # ML-Based Exit Signals: Two-Model Architecture
-# **Docker image**: `ml4t-gpu`
+# **Docker image**: `ml4t`
 #
 # ## Purpose
 # Demonstrate a two-model exit architecture in which entry-model confidence becomes an

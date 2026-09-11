@@ -926,18 +926,19 @@
 19_risk_management/04_factor_exposure:
   timeout: 300
 19_risk_management/05_trade_shap_diagnostics:
-  # `GPU_DEVICE = "cuda"` at line 80, passed as `device_type` at 222 and asserted at 231.
-  # That needs a LightGBM built with -DUSE_CUDA=1, which the PyPI wheel this repo's lockfile
-  # resolves is not; torch seeing a card says nothing about it. ml4t/agent-workspace#862.
-  gpu: lightgbm_cuda
+  # Moved to CPU 2026-09-11. It asked for `device_type="cuda"`, which needs a LightGBM built
+  # with -DUSE_CUDA=1; the PyPI wheel this lockfile resolves is not one, so the notebook ran
+  # nowhere - not in CI, not on the workstation, and its last render came from a container
+  # whose kaleido had no Chrome, so its figures carried no text. `LGB_DEVICE` now defaults to
+  # "cpu" and the fit asserts the booster honoured it. ml4t/agent-workspace#862.
   timeout: 300
 19_risk_management/06_stress_testing:
   timeout: 300
 19_risk_management/07_drift_detection:
-  # Both, and separately: `device_type="cuda"` at line 306 needs the CUDA LightGBM build,
-  # and lines 223-226 read `torch.cuda.get_device_name` directly. It runs only where both
-  # are present.
-  gpu: [torch, lightgbm_cuda]
+  # Moved to CPU 2026-09-11, same reason as 05. It also carried a fail-closed
+  # `torch.cuda.is_available()` gate that had nothing to do with what the notebook computes -
+  # no tensor is ever built here - so torch is gone from it entirely. `LGB_DEVICE` defaults to
+  # "cpu" and every fold plus the final fit is checked against it.
   timeout: 300
 19_risk_management/08_ml_exit_signals:
   # `LGB_DEVICE` defaults to "cpu" and the run asserts the booster honoured whatever was
