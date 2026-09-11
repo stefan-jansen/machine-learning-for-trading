@@ -47,3 +47,34 @@ def test_must_exist_false_without_get_base_path_is_refused(tmp_path, monkeypatch
 
     with pytest.raises(ValueError, match="get_base_path"):
         loader.load_nasdaq_itch(must_exist=False)
+
+
+def test_an_empty_messages_directory_still_refuses(tmp_path, monkeypatch) -> None:
+    """A parse that wrote nothing must not silence the instruction for later notebooks.
+
+    `01_itch_parser` used to create `messages/` where it resolved the path, before it
+    checked for the raw binary, so a reader without the feed left an empty directory
+    behind. Notebooks 02 to 07 ask only for the path, and an existence check alone
+    handed it to them; they then failed on empty frames instead of being told to
+    download. An empty directory is not parsed data.
+    """
+    messages = _clean_start(tmp_path)
+    messages.mkdir(parents=True)
+    monkeypatch.setattr(loader, "ML4T_DATA_PATH", tmp_path)
+
+    with pytest.raises(DataNotFoundError):
+        loader.load_nasdaq_itch(get_base_path=True)
+    with pytest.raises(DataNotFoundError):
+        loader.load_nasdaq_itch(message_types=["A"])
+
+    # The parser still has to be able to resolve it in order to write into it.
+    assert loader.load_nasdaq_itch(get_base_path=True, must_exist=False) == messages
+
+
+def test_a_directory_holding_message_types_is_accepted(tmp_path, monkeypatch) -> None:
+    """The empty-directory rule must not reject a real store."""
+    messages = _clean_start(tmp_path)
+    (messages / "A").mkdir(parents=True)
+    monkeypatch.setattr(loader, "ML4T_DATA_PATH", tmp_path)
+
+    assert loader.load_nasdaq_itch(get_base_path=True) == messages

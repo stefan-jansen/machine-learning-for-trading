@@ -271,6 +271,7 @@ if trades is not None and len(trades) > 0:
         f"({unclassified / len(trades):.1%}); every bar type below is built from the "
         f"remaining {len(classified):,}."
     )
+    trades_all_sides = trades
     trades = classified
 
 # %% [markdown]
@@ -282,9 +283,10 @@ if trades is not None and len(trades) > 0:
 
 # %%
 if trades is not None and len(trades) > 0:
-    # Compute daily statistics
+    # Every print of the day, including the ones with no aggressor side: this section
+    # describes the day's trading, not the subset the bar samplers can use.
     daily_stats = (
-        trades.group_by("date")
+        trades_all_sides.group_by("date")
         .agg(
             [
                 pl.len().alias("trade_count"),
@@ -316,7 +318,11 @@ if trades is not None and len(trades) > 0:
     print(f"  Trade count CV: {cv_trades:.2%}")
     print(f"  Volume CV:      {cv_volume:.2%}")
     print(f"  Dollar volume CV: {cv_dollar:.2%}")
-    print("\nConclusion: ~20-40% daily variability means single-day calibration is unreliable.")
+    widest = max(cv_trades, cv_volume, cv_dollar)
+    print(
+        f"\nConclusion: the widest of these is {widest:.0%}, so a threshold calibrated on "
+        f"one day does not carry to the next."
+    )
 
 # %% [markdown]
 # ## 4. Bar Samplers

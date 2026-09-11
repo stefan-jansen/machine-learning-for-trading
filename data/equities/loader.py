@@ -1167,7 +1167,13 @@ def load_nasdaq_itch(
     )
     if not must_exist and not get_base_path:
         raise ValueError("must_exist=False only makes sense with get_base_path=True")
-    if not base_path.exists() and must_exist:
+    # An empty directory counts as absent. A parse that stops before writing anything can
+    # leave one behind, and a caller asking only for the path would then be handed it
+    # instead of the download instruction, to fail later on empty frames.
+    has_messages = base_path.is_dir() and any(
+        d.is_dir() and len(d.name) == 1 and d.name.isupper() for d in base_path.iterdir()
+    )
+    if must_exist and not has_messages:
         raise DataNotFoundError(
             dataset_name="NASDAQ ITCH Parsed Messages",
             path=base_path,

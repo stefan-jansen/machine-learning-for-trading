@@ -131,11 +131,12 @@ MAX_MESSAGES = None
 # `must_exist=False` is what makes a clean start work. For every other notebook in this
 # chapter an absent `messages/` directory is the download instruction and the loader is
 # right to refuse; this notebook is the one that creates it, and it has to be told where
-# before there is anything there.
+# before there is anything there. The directory itself is created in Section 4, where the
+# parse is about to write: creating it here would leave an empty one behind on a machine
+# with no raw feed, and an empty directory is exactly what stops the loader refusing.
 
 # %%
 MESSAGE_DIR = load_nasdaq_itch(get_base_path=True, must_exist=False)
-MESSAGE_DIR.mkdir(parents=True, exist_ok=True)
 ITCH_RAW_DIR = MESSAGE_DIR.parent / "raw"
 
 print(f"Raw ITCH binary (input):  {display_path(ITCH_RAW_DIR)}")
@@ -465,6 +466,10 @@ if not SKIP_PARSING and (gz_files or bin_files):
 
     # Parse ITCH file (full-day parse: ~22 min on the reference machine)
     if itch_file and itch_file.exists():
+        # Created here, not where the path is resolved: an empty messages/ directory
+        # left behind by a run that found no raw binary would stop load_nasdaq_itch
+        # raising for every later notebook in the chapter.
+        MESSAGE_DIR.mkdir(parents=True, exist_ok=True)
         counts = parse_itch_file(
             itch_file=itch_file,
             trading_day=trading_day,
