@@ -545,7 +545,7 @@ fig.update_layout(
         f"<br><sup>Net cumulative return; both target {POSITION_SIZE:.0%} of equity and fill at "
         "the next open</sup>"
     ),
-    yaxis_title="Cumulative return (%)",
+    yaxis_title="Cumulative return",
     height=500,
     margin={"r": 105},
 )
@@ -554,7 +554,7 @@ _curves = {
     for trace in fig.data
 }
 _curve_phrase = "; ".join(
-    f"{name} runs from {min(vals):.0f} to {max(vals):.0f} percent and ends at {vals[-1]:.0f}"
+    f"{name} runs from {min(vals):.0%} to {max(vals):.0%} and ends at {vals[-1]:.0%}"
     for name, vals in _curves.items()
     if vals
 )
@@ -638,7 +638,7 @@ fig.update_layout(
         "<br><sup>Position value divided by contemporaneous equity; net backtest</sup>"
     ),
     xaxis_title="Date",
-    yaxis_title="Share of equity at risk (%)",
+    yaxis_title="Share of equity at risk",
     yaxis_tickformat=".0%",
     height=420,
     hovermode="x unified",
@@ -923,14 +923,14 @@ fig.update_layout(
         "<br><sup>Net peak-to-trough return; zero is the high-water mark</sup>"
     ),
     xaxis_title="Date",
-    yaxis_title="Drawdown (%)",
+    yaxis_title="Drawdown",
     height=360,
 )
 _dd = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
 _dd_note = (
     f"The rule is below its own high-water mark on "
     f"{sum(1 for v in _dd if v < 0) / len(_dd):.0%} of the sample's days, reaches "
-    f"{min(_dd):.1f} percent at its worst and ends at {_dd[-1]:.1f}"
+    f"{min(_dd):.1%} at its worst and ends at {_dd[-1]:.1%}"
     if _dd
     else "The chart has no plotted days"
 )
@@ -1063,7 +1063,7 @@ fig.update_layout(
         "Distribution of daily returns"
         "<br><sup>Net calendar-day returns; vertical line marks the empirical 95% VaR</sup>"
     ),
-    xaxis_title="Daily return (%)",
+    xaxis_title="Daily return",
     yaxis_title="Number of days",
     xaxis_tickformat=".1%",
     bargap=0.04,
