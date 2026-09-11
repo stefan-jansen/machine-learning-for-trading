@@ -119,7 +119,7 @@ def make_confirmed_signal_fixture() -> pl.DataFrame:
             entry_window_start=entry,
             entry_window_end=entry,
         ),
-        _row(entry, 100.25, 100.75, 100.00, 100.50),
+        _row(entry, 100.25, 100.75, 100.00, 100.50, signal=False),
         _row(entry + timedelta(minutes=5), 100.50, 101.00, 100.25, 100.75),
     ]
     return _canonical_frame(rows)
@@ -171,7 +171,7 @@ def make_multi_month_fixture() -> pl.DataFrame:
     rows: list[dict[str, Any]] = []
     months = (1, 3, 5, 7, 9, 11)
     for index, month in enumerate(months):
-        signal_time = datetime(2024, month, 8, 9, 30)
+        signal_time = datetime(2024, month, 8, 10, 0)
         is_test_signal = month >= 7
         entry_time = signal_time + timedelta(minutes=5)
         rows.extend(
@@ -279,28 +279,44 @@ def make_stop_target_fixture() -> pl.DataFrame:
                 entry_window_start=datetime(2024, 1, 11, 10, 5),
                 entry_window_end=datetime(2024, 1, 11, 10, 10),
             ),
-            _row(datetime(2024, 1, 11, 10, 5), 100.25, 120.25, 100, 110),
+            _row(datetime(2024, 1, 11, 10, 5), 100.25, 120.25, 80.25, 110),
         ]
     )
 
 
 def make_cost_fixture() -> pl.DataFrame:
-    """Return one deterministic signal row for cost calculations."""
-    return make_confirmed_signal_fixture().head(1)
+    """Return a deterministic signal and its matching entry bar."""
+    return make_confirmed_signal_fixture()
 
 
 def make_daily_guard_fixture() -> pl.DataFrame:
     """Return three trades with two consecutive losses for guard tests."""
-    frame = _canonical_frame(
-        [
-            _row(datetime(2024, 1, 12, 10, 0), 100, 100.25, 99.75, 100),
-            _row(datetime(2024, 1, 12, 10, 5), 100, 100.25, 99.75, 100),
-            _row(datetime(2024, 1, 12, 10, 10), 100, 100.25, 99.75, 100),
-        ]
-    )
+    rows = []
+    for index, pnl in enumerate((-200.0, -200.0, 100.0)):
+        signal_time = datetime(2024, 1, 12, 10, index * 10)
+        entry_time = signal_time + timedelta(minutes=5)
+        rows.extend(
+            [
+                _row(
+                    signal_time,
+                    100,
+                    100.25,
+                    99.75,
+                    100,
+                    signal=True,
+                    direction="long",
+                    signal_type="10am",
+                    entry_time=entry_time,
+                    entry_window_start=entry_time,
+                    entry_window_end=entry_time,
+                ),
+                _row(entry_time, 100, 100.25, 99.75, 100, volume=100),
+            ]
+        )
+    frame = _canonical_frame(rows)
     return frame.with_columns(
         pl.col("session_date").alias("trade_date"),
-        pl.Series("net_pnl", [-200.0, -200.0, 100.0]),
+        pl.Series("net_pnl", [pnl for pnl in (-200.0, -200.0, 100.0) for _ in range(2)]),
     )
 
 

@@ -19,6 +19,7 @@ from research.mnq_strategy.fixtures import (
     make_overlapping_signals_fixture,
     make_profile_attachment_fixture,
     make_rejection_fixture,
+    make_session_transition_fixture,
     make_stop_target_fixture,
 )
 from research.mnq_strategy.signals import (
@@ -39,7 +40,24 @@ CANONICAL_COLUMNS = {
     "close",
     "volume",
     "bar_closed",
+    "signal",
+    "direction",
+    "signal_type",
+    "entry_time",
+    "entry_window_start",
+    "entry_window_end",
 }
+
+SUPPLEMENTARY_FIXTURES = [
+    make_session_transition_fixture,
+    make_profile_attachment_fixture,
+    make_rejection_fixture,
+    make_lvn_retest_fixture,
+    make_10am_confirmation_fixture,
+    make_stop_target_fixture,
+    make_cost_fixture,
+    make_daily_guard_fixture,
+]
 
 
 def test_default_config_matches_approved_spec():
@@ -116,6 +134,75 @@ def test_config_hash_uses_canonical_sorted_json():
 def test_config_is_frozen():
     with pytest.raises(FrozenInstanceError):
         StrategyConfig().bar_minutes = 1
+
+
+def test_config_rejects_invalid_session_time_values():
+    boundaries = dict(StrategyConfig().session_boundaries)
+    boundaries["rth_start"] = "99:99"
+
+    with pytest.raises(ValueError, match="rth_start|HH:MM|time"):
+        StrategyConfig(session_boundaries=boundaries)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"rth_start": "16:00"},
+        {"maintenance_start": "16:05"},
+        {"maintenance_end": "17:55"},
+    ],
+)
+def test_config_rejects_non_contiguous_session_boundaries(overrides):
+    boundaries = dict(StrategyConfig().session_boundaries)
+    boundaries.update(overrides)
+
+    with pytest.raises(ValueError, match="session|boundary|ordered|contiguous"):
+        StrategyConfig(session_boundaries=boundaries)
+
+
+def test_config_rejects_unknown_timezone():
+    with pytest.raises(ValueError, match="timezone"):
+        StrategyConfig(timezone="Mars/Olympus")
+
+
+@pytest.mark.parametrize("lookback", [6.0, True])
+def test_config_requires_integer_momentum_lookback(lookback):
+    with pytest.raises(ValueError, match="momentum_lookback.*integer"):
+        StrategyConfig(momentum_lookback=lookback)
+
+
+@pytest.mark.parametrize("stop_points,target_points", [(20.0, 10.0), (10.0, 10.0)])
+def test_config_requires_stop_below_target(stop_points, target_points):
+    with pytest.raises(ValueError, match="stop_points.*target_points"):
+        StrategyConfig(stop_points=stop_points, target_points=target_points)
+
+
+def test_nested_session_boundaries_are_immutable_and_hash_is_stable():
+    config = StrategyConfig()
+    original_hash = config.config_hash
+
+    with pytest.raises(TypeError, match="immutable"):
+        config.session_boundaries["rth_start"] = "10:00"
+
+    serialized = config.to_dict()
+    serialized["session_boundaries"]["rth_start"] = "10:00"
+    assert config.session_boundaries["rth_start"] == "09:30"
+    assert config.config_hash == original_hash
+    assert (
+        StrategyConfig(session_boundaries=serialized["session_boundaries"]).config_hash
+        != original_hash
+    )
+
+
+def test_default_config_matches_fixed_signal_contract():
+    assert StrategyConfig().validate_fixed_contract() is True
+
+
+def test_config_rejects_signal_threshold_drift_before_backtest_execution():
+    changed = StrategyConfig(rejection_wick_ratio=2.1)
+
+    with pytest.raises(ValueError, match="rejection_wick_ratio"):
+        changed.validate_fixed_contract()
 
 
 @pytest.mark.parametrize(
@@ -196,6 +283,35 @@ def test_multi_month_fixture_is_chronological_and_has_a_test_window_signal():
     assert frame.filter(pl.col("signal") & (pl.col("session_date") >= date(2024, 7, 1))).height >= 1
 
 
+def test_multi_month_test_signals_are_at_1000_with_1005_entries():
+    frame = make_multi_month_fixture()
+    signals = frame.filter(
+        pl.col("signal")
+        & (pl.col("signal_type") == "10am")
+        & (pl.col("session_date") >= date(2024, 7, 1))
+    )
+
+    assert signals.height >= 1
+    assert all(value.hour == 10 and value.minute == 0 for value in signals["timestamp_ny"])
+    assert all(value.hour == 10 and value.minute == 5 for value in signals["entry_time"])
+
+
+@pytest.mark.parametrize("fixture_factory", SUPPLEMENTARY_FIXTURES)
+def test_every_supplementary_fixture_has_canonical_schema_and_timezones(fixture_factory):
+    frame = fixture_factory()
+
+    assert CANONICAL_COLUMNS.issubset(frame.columns)
+    assert frame.schema["timestamp"].time_zone == "UTC"
+    assert frame.schema["timestamp_ny"].time_zone == "America/New_York"
+    assert frame.schema["entry_time"].time_zone == "America/New_York"
+    assert frame.schema["entry_window_start"].time_zone == "America/New_York"
+    assert frame.schema["entry_window_end"].time_zone == "America/New_York"
+    assert frame.schema["bar_closed"] == pl.Boolean
+    assert frame.schema["signal"] == pl.Boolean
+    assert frame.schema["direction"] == pl.Utf8
+    assert frame.schema["signal_type"] == pl.Utf8
+
+
 def test_supplementary_fixtures_feed_existing_signal_and_profile_contracts():
     assert detect_midnight_rejection(make_rejection_fixture()).filter(pl.col("signal")).height == 1
     assert detect_lvn_break_retest(make_lvn_retest_fixture()).filter(pl.col("signal")).height == 1
@@ -210,11 +326,30 @@ def test_supplementary_fixtures_feed_existing_signal_and_profile_contracts():
 
 def test_supplementary_execution_fixtures_include_explicit_trade_fields():
     stop_target = make_stop_target_fixture().filter(pl.col("signal"))
-    costs = make_cost_fixture().filter(pl.col("signal"))
+    cost_frame = make_cost_fixture()
+    costs = cost_frame.filter(pl.col("signal"))
 
     assert stop_target.height == 1
     assert stop_target["direction"][0] == "long"
     assert stop_target["signal_type"][0] == "10am"
     assert stop_target["entry_time"][0] is not None
-    assert costs.height == 1
-    assert make_daily_guard_fixture()["net_pnl"].to_list() == [-200.0, -200.0, 100.0]
+    entry = make_stop_target_fixture().filter(
+        pl.col("timestamp_ny") == stop_target["entry_time"][0]
+    )
+    assert entry.height == 1
+    assert entry["low"][0] <= entry["open"][0] - StrategyConfig().stop_points
+    assert entry["high"][0] >= entry["open"][0] + StrategyConfig().target_points
+
+    cost_signal = costs.filter(pl.col("signal"))
+    assert cost_signal.height == 1
+    cost_entry = cost_frame.filter(pl.col("timestamp_ny") == cost_signal["entry_time"][0])
+    assert cost_entry.height == 1
+    assert cost_entry["open"][0] == 100.25
+
+    guard = make_daily_guard_fixture()
+    guard_signals = guard.filter(pl.col("signal"))
+    assert guard_signals.height == 3
+    assert guard_signals["direction"].null_count() == 0
+    assert guard_signals["signal_type"].null_count() == 0
+    assert guard_signals["entry_time"].null_count() == 0
+    assert guard_signals["net_pnl"].to_list() == [-200.0, -200.0, 100.0]

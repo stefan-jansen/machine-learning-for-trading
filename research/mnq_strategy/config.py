@@ -5,10 +5,29 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+from datetime import time
+from types import MappingProxyType
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import signals
 from .risk import MAX_CONTRACTS, MIN_CONTRACTS, MNQ_POINT_VALUE, CostModel
+
+
+class _ImmutableBoundaries(dict[str, str]):
+    """Mapping-compatible immutable session boundaries with clear errors."""
+
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("session_boundaries is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
 
 
 def _validate_finite(name: str, value: float) -> None:
@@ -53,13 +72,15 @@ class StrategyConfig:
     target_points: float = 20.0
 
     session_boundaries: dict[str, str] = field(
-        default_factory=lambda: {
-            "rth_start": "09:30",
-            "rth_end": "16:00",
-            "maintenance_start": "16:00",
-            "maintenance_end": "18:00",
-            "overnight_start": "18:00",
-        }
+        default_factory=lambda: _ImmutableBoundaries(
+            {
+                "rth_start": "09:30",
+                "rth_end": "16:00",
+                "maintenance_start": "16:00",
+                "maintenance_end": "18:00",
+                "overnight_start": "18:00",
+            }
+        )
     )
 
     def __post_init__(self) -> None:
@@ -67,6 +88,10 @@ class StrategyConfig:
             raise ValueError("instrument must not be empty")
         if not self.timezone:
             raise ValueError("timezone must not be empty")
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("timezone must be a valid IANA timezone") from exc
         if not isinstance(self.bar_minutes, int) or self.bar_minutes <= 0:
             raise ValueError("bar_minutes must be a positive integer")
         if not 0 < self.value_area_fraction <= 1:
@@ -101,8 +126,12 @@ class StrategyConfig:
             raise ValueError("risk limits must be positive")
         if self.stop_points <= 0 or self.target_points <= 0:
             raise ValueError("stop_points and target_points must be positive")
+        if not isinstance(self.momentum_lookback, int) or isinstance(self.momentum_lookback, bool):
+            raise ValueError("momentum_lookback must be an integer")
         if self.momentum_lookback < 1:
             raise ValueError("momentum_lookback must be positive")
+        if self.stop_points >= self.target_points:
+            raise ValueError("stop_points must be less than target_points")
         if not 0 <= self.rejection_close_pct <= 1:
             raise ValueError("rejection_close_pct must be between 0 and 1")
         if not 0 <= self.momentum_body_range <= 1:
@@ -121,18 +150,61 @@ class StrategyConfig:
             "overnight_start",
         }:
             raise ValueError("session_boundaries must define the approved session times")
-        if any(
-            not isinstance(value, str) or len(value) != 5 or value[2] != ":"
-            for value in self.session_boundaries.values()
+        parsed_boundaries: dict[str, time] = {}
+        for name, value in self.session_boundaries.items():
+            if not isinstance(value, str):
+                raise ValueError("session_boundaries must use HH:MM strings")
+            try:
+                parsed_boundaries[name] = time.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError(f"invalid session boundary {name}: expected HH:MM") from exc
+        if not (
+            parsed_boundaries["rth_start"] < parsed_boundaries["rth_end"]
+            and parsed_boundaries["rth_end"] == parsed_boundaries["maintenance_start"]
+            and parsed_boundaries["maintenance_start"] < parsed_boundaries["maintenance_end"]
+            and parsed_boundaries["maintenance_end"] == parsed_boundaries["overnight_start"]
         ):
-            raise ValueError("session_boundaries must use HH:MM strings")
+            raise ValueError("session boundaries must be ordered and contiguous")
+        object.__setattr__(
+            self, "session_boundaries", _ImmutableBoundaries(self.session_boundaries)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain JSON-compatible representation of this configuration."""
-        serialized = asdict(self)
+        serialized = {
+            item.name: getattr(self, item.name)
+            for item in fields(self)
+            if item.name != "session_boundaries"
+        }
         serialized["cost_model"] = asdict(self.cost_model)
         serialized["session_boundaries"] = dict(self.session_boundaries)
         return serialized
+
+    def validate_fixed_contract(self) -> bool:
+        """Ensure fixed signal thresholds match the Task 3 implementation."""
+        expected = {
+            "rejection_wick_ratio": signals.REJECTION_WICK_RATIO,
+            "rejection_close_pct": signals.REJECTION_CLOSE_PCT,
+            "momentum_body_range": signals.MOMENTUM_BODY_RANGE,
+            "momentum_close_pct": signals.MOMENTUM_CLOSE_PCT,
+            "momentum_lookback": signals.MOMENTUM_LOOKBACK,
+            "momentum_multiplier": signals.MOMENTUM_MULT,
+        }
+        actual = {name: getattr(self, name) for name in expected}
+        actual["lvn_percentile"] = self.lvn_percentile
+        expected["lvn_percentile"] = 0.25
+        differences = {
+            name: (actual[name], expected[name])
+            for name in expected
+            if actual[name] != expected[name]
+        }
+        if differences:
+            details = ", ".join(
+                f"{name}={actual_value!r} (expected {expected_value!r})"
+                for name, (actual_value, expected_value) in differences.items()
+            )
+            raise ValueError(f"fixed signal contract drift: {details}")
+        return True
 
     @property
     def config_hash(self) -> str:
