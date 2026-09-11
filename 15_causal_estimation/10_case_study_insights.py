@@ -84,11 +84,14 @@ TREATMENT_LABELS = {
 CASE_ORDER = {case_study: rank for rank, case_study in enumerate(CASE_STUDY_IDS)}
 
 # %% [markdown]
-# The loader returns all causal rows from one registry. A missing registry, a failed
-# integrity check and a duplicate label all stop the notebook, because each of those is a
-# broken registry. A registry that is intact and simply holds no causal row is a different
-# thing: that case study has not run its causal stage yet, and the loader returns an empty
-# frame so the section below can name it rather than the notebook failing on it.
+# The loader returns the current causal row per label from one registry. A refit does not
+# overwrite the row it replaces: it writes a new row whose `supersedes_hash` names the old
+# one, so the registry keeps the history and the query has to exclude every superseded hash
+# to get one row per label. A missing registry, a failed integrity check and a label still
+# carrying two live rows all stop the notebook, because each of those is a broken registry.
+# A registry that is intact and simply holds no causal row is a different thing: that case
+# study has not run its causal stage yet, and the loader returns an empty frame so the
+# section below can name it rather than the notebook failing on it.
 
 
 # %%
@@ -108,7 +111,9 @@ def _load_causal_runs(case_study: str) -> pl.DataFrame:
             "SELECT causal_hash, label, treatment, confounders_json, n_folds, "
             "embargo, n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
             "confounding_bias_pct, refutation_p, created_at FROM causal_runs "
-            "ORDER BY label"
+            "WHERE causal_hash NOT IN ("
+            "  SELECT supersedes_hash FROM causal_runs WHERE supersedes_hash IS NOT NULL"
+            ") ORDER BY label"
         ).fetchall()
 
     if not rows:
@@ -116,7 +121,10 @@ def _load_causal_runs(case_study: str) -> pl.DataFrame:
     frame = pl.DataFrame([dict(row) for row in rows], infer_schema_length=None)
     duplicates = frame.group_by("label").len().filter(pl.col("len") != 1)
     if not duplicates.is_empty():
-        raise RuntimeError(f"Ambiguous causal labels for {case_study}: {duplicates}")
+        raise RuntimeError(
+            f"Ambiguous causal labels for {case_study}, two rows neither of which is "
+            f"superseded: {duplicates}"
+        )
     return frame
 
 
@@ -384,8 +392,8 @@ display(
 # is anything to find. `04_dml_crypto_regime` prints how much of its treatment's variance
 # its controls leave - under a tenth - and moving its own comparison to
 # t-statistics took its permutation p from the floor to the middle of the null.
-# ml4t/agent-workspace#1120 carries the same correction into the shared implementation
-# these registries are written by.
+# ml4t/agent-workspace#1120 carried the same correction into the shared implementation these
+# registries are written by, and the rows below were refit under it.
 #
 # Comparing t-statistics cancels that one-directional bias and does not make the test
 # calibrated. Measured on twelve synthetic panels with the true effect fixed at exactly
@@ -480,9 +488,9 @@ display(
 
 # %% [markdown]
 # A refutation pass means the observed effect is unusual under the registered
-# block-permutation null. It does not remove the unconfoundedness assumption. This is
-# especially important for SP500 Options, where treatment and outcome both depend on
-# the implied-volatility surface.
+# block-permutation null. It does not remove the unconfoundedness assumption, and would not
+# for SP500 Options, where treatment and outcome both depend on the implied-volatility
+# surface.
 
 # %% [markdown]
 # ## 5. Multiple labels versus multiple horizons
