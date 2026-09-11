@@ -197,11 +197,17 @@ print(f"\n{FOCUS_STOCK}: {len(focus_bars):,} bars")
 # These features require only OHLCV bars (widely available).
 # They proxy for market liquidity and trading costs.
 #
-# | Feature | Formula | Interpretation |
-# |---------|---------|----------------|
-# | Kyle λ | Cov(ΔP, V) / Var(V) | Price impact per unit volume |
-# | Amihud | \|r\| / DollarVol | Illiquidity ratio |
+# | Feature | What the library computes here | Interpretation |
+# |---------|-------------------------------|----------------|
+# | Kyle λ | mean of \|r\| / (V / V̄), over the window | Return per unit of *relative* volume |
+# | Amihud | mean of \|r\| / DollarVol, over the window | Return per dollar traded |
 # | Roll Spread | 2√(-Cov(ΔP_t, ΔP_{t-1})) | Implied bid-ask spread |
+#
+# The Kyle row is the one to read carefully. `kyle_lambda` takes a `method` argument that
+# defaults to `"ratio"`, and `method="regression"` raises `NotImplementedError` in the
+# installed version, so what this notebook computes is the ratio approximation above and
+# not the regression slope of Kyle (1985). Both are called Kyle lambda. Only one of them
+# is a covariance, and it is not the one running here.
 
 # %%
 from ml4t.engineer.features.microstructure import (
@@ -232,16 +238,12 @@ print("Trade-based features computed:")
 features_df.select(["timestamp", "close", "kyle_lambda", "amihud", "roll_spread", "ofi"]).tail(10)
 
 # %% [markdown]
-# **Interpretation**: Kyle lambda measures price impact per unit volume, so higher values
-# mean the market is less liquid. Amihud reaches for the same idea through absolute
-# return per dollar traded. Naming both "illiquidity" invites the assumption that they
-# agree, and the correlation printed below this notebook's second figure says how far
-# that holds on this session. The two differ in what they are sensitive to: Kyle lambda
-# is a return-volume covariance, so it carries a direction and a bar where price fell on
-# heavy volume pulls it the opposite way from a bar where price rose on heavy volume;
-# Amihud takes the absolute return, so both those bars push it the same way. Treat them
-# as two measurements that happen to share a word, and read the number rather than the
-# word.
+# **Interpretation**: both measures are an absolute return divided by a volume, averaged
+# over the window, so neither carries a direction and the difference between them is
+# entirely in the denominator. Kyle's ratio divides by volume *relative to its own rolling
+# mean*; Amihud divides by dollar volume in dollars. Naming both "illiquidity" invites the
+# assumption that they agree, and the correlation printed under the next figure says how
+# far that holds on this session.
 
 # %% [markdown]
 # ### Kyle Lambda (Price Impact)
@@ -249,7 +251,21 @@ features_df.select(["timestamp", "close", "kyle_lambda", "amihud", "roll_spread"
 # High Kyle λ means prices move a lot per unit of volume: the market is **illiquid**
 # and trades have high impact.
 #
-# $$\lambda = \frac{\text{Cov}(\Delta P, V)}{\text{Var}(V)}$$
+# Kyle (1985) defines λ as the slope of returns on signed order flow, which is a
+# regression coefficient:
+#
+# $$r_t = \lambda \, S_t + \varepsilon_t$$
+#
+# The installed `ml4t-engineer` does not fit that regression. Its default `method="ratio"`
+# averages a per-bar ratio over the window instead, with volume normalized by its own
+# rolling mean:
+#
+# $$\lambda_{\text{ratio}} = \text{mean}_{t}\!\left(\frac{|r_t|}{V_t / \bar{V}_t}\right)$$
+#
+# Read the second formula when reading the figure below, because the second formula is
+# what produced it. The two agree on the direction of "less liquid" and they are not the
+# same statistic: the ratio uses the absolute return and so has no sign, while the
+# regression slope does.
 
 # %%
 # Visualize Kyle Lambda
@@ -366,12 +382,31 @@ print(f"  Spearman {corr_spearman:+.3f}")
 # against each other, and the sign is the thing to notice rather than the magnitude, which
 # one session of one name does not pin down.
 #
-# The mechanism is in the definitions. Kyle lambda is a covariance between price change
-# and volume, so it asks how much price moves *per unit of volume* and rises when a given
-# volume shifts the price further. Amihud divides absolute return by dollar volume, so
-# heavy trading pushes it down almost regardless of what the price did. An afternoon in
-# which volume builds into the close can therefore send one up and the other down. Neither
-# is measuring the other badly; they are measuring different things under one word.
+# The mechanism is the denominator, and one experiment separates it from every other
+# explanation. Multiply every volume by a constant and recompute both: the cell below does
+# exactly that. Kyle's ratio normalizes volume by its own rolling mean, so the constant
+# cancels and the measure does not move. Amihud divides by dollar volume in dollars, so
+# the constant passes straight through and the measure scales by its reciprocal.
+#
+# That is why an afternoon like this one pulls them apart. Volume builds into the close,
+# which drags Amihud down because its denominator is growing in absolute terms, while
+# Kyle's ratio sees a bar's volume only against the recent average and barely responds.
+# Neither is measuring the other badly. One is scale-free and one is not, and a reader who
+# wants "the" liquidity number has to decide which of those they wanted.
+
+# %%
+# Scale every volume by a constant and recompute. One measure is invariant, one is not.
+VOLUME_SCALE = 10
+
+_scaled = features_df.with_columns((pl.col("volume") * VOLUME_SCALE).alias("volume")).with_columns(
+    [
+        kyle_lambda("returns", "volume", period=PERIOD).alias("kyle_scaled"),
+        amihud_illiquidity("returns", "volume", "close", period=PERIOD).alias("amihud_scaled"),
+    ]
+)
+print(f"with every volume multiplied by {VOLUME_SCALE}, the median ratio to the original:")
+print(f"  Kyle lambda {(_scaled['kyle_scaled'] / _scaled['kyle_lambda']).median():.3f}")
+print(f"  Amihud      {(_scaled['amihud_scaled'] / _scaled['amihud']).median():.3f}")
 
 # %% [markdown]
 # ## Order Flow Imbalance (OFI)
@@ -700,12 +735,13 @@ print(f"  Amihud:      {' < '.join(summary.sort('amihud_median')['stock'].to_lis
 # had taken one measure as *the* liquidity ranking and sized positions against it would
 # have sized them against the other measure's answer inverted.
 #
-# Neither measure is wrong. Kyle lambda is a price-impact slope and rises with the price
-# move a given volume produces; Amihud is absolute return per dollar traded and falls as
-# dollar volume grows, so a heavily traded name scores liquid on Amihud even when its
-# price moves a lot. A name that trades enormous volume and still moves can therefore sit
-# at opposite ends of the two lists. That is a fact about the definitions rather than a
-# defect in either.
+# Neither measure is wrong, and the reversal follows from the scale test above. Amihud
+# divides by dollar volume in dollars, so the most heavily traded name scores as the most
+# liquid almost regardless of how far its price travelled. Kyle's ratio divides by volume
+# relative to that name's own rolling mean, so trading more than its peers earns a name
+# nothing; what moves it is a bar whose return is large against that name's usual volume.
+# A name that trades enormous volume and still moves a lot therefore sits at opposite ends
+# of the two lists. That is a fact about the definitions rather than a defect in either.
 #
 # What follows for practice is that "illiquid" has to name a measure, and a feasibility
 # overlay has to say which one it gates on and why. It also follows that one session of
