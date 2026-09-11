@@ -739,6 +739,7 @@ def load_modeling_dataset(
     max_symbols: int = 0,
     symbols: list[str] | None = None,
     verify_input_digests: bool = False,
+    columns: Sequence[str] | None = None,
 ) -> ModelingDataset:
     """Load and join features + temporal + labels for a case study.
 
@@ -761,6 +762,15 @@ def load_modeling_dataset(
         is guaranteed to exist in the reduced test-data (e.g. the Darts base
         return series), rather than the top-by-history selection ``max_symbols``
         makes — which can pick symbols absent from a sampled data set.
+    columns : sequence of str, optional
+        Feature columns to keep, projected into the scans so the panel is never
+        materialized at full width. ``max_symbols`` narrows the row axis and this
+        narrows the column axis; a caller that needs the whole universe can still
+        use this one. The join keys, the detected date and entity columns and the
+        label are always added, so the returned frame is the requested columns
+        plus what the join and the fold geometry need. A name that is in none of
+        the three artifacts raises rather than being dropped silently. Passing
+        nothing keeps the full width.
 
     Returns
     -------
@@ -879,6 +889,33 @@ def load_modeling_dataset(
     # comes first. Important when downstream code uses entity_cols[0] for IC
     # (e.g., CME futures: 'product' has 30 values vs 'position' has 3).
     entity_cols = sorted(entity_cols, key=lambda c: cardinality[c], reverse=True)
+
+    # Column projection, pushed into the SCANS for the reason the universe reduction below is:
+    # a caller that projects the frame it is handed has already paid the full width.
+    # ``us_equities_panel``'s DML estimand reads 7 of the 74 columns the join returns and
+    # peaked at 17.6 GiB doing it, against 0.47 GB for the seven.
+    #
+    # The request is unioned with what the join and the fold geometry need rather than taken
+    # literally: without the join keys the frames cannot be joined, without the label there is
+    # nothing to model, and without ``fold`` the per-fold substitution has no key to select on.
+    # That union is why the parameter belongs here instead of in each caller.
+    if columns is not None:
+        requested = list(dict.fromkeys(columns))
+        known = set(feature_columns) | set(temporal_columns) | set(label_columns)
+        unknown = [c for c in requested if c not in known]
+        if unknown:
+            raise ValueError(
+                f"load_modeling_dataset({case_study_id!r}, {primary_label!r}) was asked for "
+                f"columns no artifact carries: {unknown}. The three artifacts carry "
+                f"{sorted(known)}."
+            )
+        keep_cols = set(requested) | set(join_cols) | set(feature_keys) | set(entity_cols)
+        keep_cols |= {date_col, label_col}
+        feature_columns = [c for c in feature_columns if c in keep_cols]
+        features_lazy = features_lazy.select(feature_columns)
+        if temporal is not None:
+            temporal_columns = [c for c in temporal_columns if c in keep_cols | {"fold"}]
+            temporal = temporal.select(temporal_columns)
 
     # Universe reduction, pushed into the SCANS instead of applied to the finished panel.
     #
