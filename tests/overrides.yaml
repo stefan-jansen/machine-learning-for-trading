@@ -560,12 +560,13 @@
     MAX_SYMBOLS: 10
   timeout: 600
 12_gradient_boosting/08_shap_analysis:
-  # No reduction, because this notebook has none to set. It declares `MAX_SYMBOLS` and calls
-  # `load_modeling_dataset("etfs", "fwd_ret_21d")` without it, so the name reaches nothing.
-  # The entry carried `MAX_SYMBOLS: 10` under an `env:` key, which `test_chapter_notebook`
-  # never passes on, so CI has always run this at the full universe inside this budget - the
-  # declaration was describing an intent, not a setting. Stating no reduction is the honest
-  # version of the same run. ml4t/agent-workspace#1129 adds the parameter to the notebook.
+  # `MAX_SYMBOLS` reaches the notebook as of ml4t/agent-workspace#1129, which passed it into
+  # both `load_modeling_dataset` calls: the ETF fold this notebook analyses, and each panel of
+  # the publication beeswarm, which loads its own case study. Before that the name was declared
+  # and read nowhere, and the entry set it under an `env:` key that `test_chapter_notebook`
+  # never passes on, so CI ran the full universe twice inside this budget either way.
+  parameters:
+    MAX_SYMBOLS: 10
   timeout: 300
 12_gradient_boosting/09_xai_limitations:
   # MAX_SYMBOLS is stated because this notebook declares the parameter for the reduced run and
