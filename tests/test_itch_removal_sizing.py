@@ -19,7 +19,8 @@ from typing import Any
 import polars as pl
 import pytest
 
-NOTEBOOK = Path("03_market_microstructure/03_itch_lob_analysis.py")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+NOTEBOOK = REPO_ROOT / "03_market_microstructure" / "03_itch_lob_analysis.py"
 
 
 @pytest.fixture(scope="module")

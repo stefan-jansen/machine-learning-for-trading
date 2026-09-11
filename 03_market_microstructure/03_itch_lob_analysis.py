@@ -555,9 +555,9 @@ def load_order_registry(messages_dir: Path, symbol: str) -> pl.DataFrame:
 # ### Load the removals
 #
 # Four message types take shares off the book: `D` deletes what is left of an order, `X`
-# cancels part of one, and `E` and `C` execute against one. `E` and `C` differ only in
-# whether the print carries its own price, so both count the same shares off the book and
-# leaving `C` out would undercount executions.
+# cancels part of one, and `E` and `C` execute against one. `C` adds an execution price
+# and a printable flag that `E` does not carry, but neither changes `executed_shares`, so
+# both take the same shares off the book and leaving `C` out undercounts executions.
 #
 # `D` carries no share count, because it removes whatever remained: its size is the
 # original add less the cancels and executions that came before it. Charging a delete the
