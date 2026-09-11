@@ -93,15 +93,18 @@ EXPECTED_PREDICTIONS_SHA256 = "2efad22dbf40464939d143745116165c6447c3e4dfd154bd6
 EXPORT_PATH = get_output_dir(25, "quantconnect_export") / "ml4t_qc_predictions.json"
 
 
+# %% [markdown]
+# The registry is opened read-only, and deliberately not with `immutable=1`. That flag promises
+# SQLite the file cannot move while it is open, which lets it skip locking and WAL recovery. It
+# holds for a released case directory and not for a live one a sweep may be writing, and an
+# immutable read of a database with an uncheckpointed write-ahead log sees the pre-WAL main file:
+# a stale configuration selected silently, or a table that appears not to exist.
+
 # %%
 case_study_dir = get_case_study_dir("etfs")
 registry_path = case_study_dir / "run_log" / "registry.db"
 registry_hash_before = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 
-# Read-only, and deliberately not `immutable=1`. That flag promises SQLite the file cannot move
-# while it is open, which lets it skip WAL recovery; it holds for a released case directory and
-# not for a live one a sweep may be writing, and an immutable read of a database with an
-# uncheckpointed WAL sees the pre-WAL main file.
 registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro"
 with sqlite3.connect(registry_uri, uri=True) as conn:
     winner = conn.execute(
