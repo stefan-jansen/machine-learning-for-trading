@@ -19,13 +19,19 @@
 #
 # **Docker image**: `ml4t`
 #
-# **Section Reference**: See Section 3.3 (Limit Order Book Analysis)
+# ## Book reference
+#
+# Section §3.3, *From raw messages to the limit order book*, and Figure 3.3.
 #
 # ## Purpose
 #
-# This notebook analyzes reconstructed order book data to demonstrate empirically-grounded
-# patterns with predictive power. These patterns motivate feature engineering in **Chapter 8**
-# and execution cost modeling in **Chapter 19**.
+# The reconstructed books from `02_itch_lob_reconstruction` are the input. This notebook
+# reads them for three things: how the spread moves through a session, how the shares
+# resting at the touch move with it, and whether the imbalance between buying and selling
+# pressure says anything about the return over the bucket that follows. The last of those
+# is measured
+# across a cross-section of stocks rather than one, because a single symbol cannot
+# distinguish a signal from a coincidence.
 #
 # ## Pipeline Position
 #
@@ -38,7 +44,7 @@
 # ```
 #
 # **Upstream**: LOB snapshots from `02_itch_lob_reconstruction` in
-# `output/ch03/nasdaq_itch/order_book/{SYMBOL}/`
+# `03_market_microstructure/output/nasdaq_itch/order_book/{SYMBOL}/`
 #
 # See the **README.md** for the full notebook inventory and learning paths.
 #
@@ -46,17 +52,21 @@
 #
 # After completing this notebook, you will be able to:
 #
-# | Pattern | What You'll Learn | Chapter Connection |
-# |---------|-------------------|-------------------|
-# | **LOB reconstruction** | Verify spread validity as quality check | Section 3.3 |
-# | **Spread dynamics** | Intraday U-shape in spreads and volatility | Ch8: Time features |
-# | **Order flow imbalance** | Buying/selling pressure predicts returns | Ch8: OFI features |
-# | **Liquidity spectrum** | 100x+ variation across stocks | Ch19: Price impact |
+# - Read the bid-ask spread off a reconstructed book and express it in basis points, so
+#   that a wide spread on a $300 stock and a wide spread on a $3 stock are comparable.
+# - Plot how the spread and the depth at the touch move through a trading session, and
+#   say what shape they take.
+# - Build order-flow imbalance - shares added to one side minus shares taken off it -
+#   from raw ITCH messages, and say which messages that construction ignores.
+# - Correlate that imbalance against the following bucket's return for one stock, then
+#   for a cross-section of fifty, and read the spread of correlations rather than any
+#   single value.
 #
-# ## Key Insight
+# ## Prerequisites
 #
-# The patterns demonstrated here are well-documented "stylized facts" of market
-# microstructure. See Bouchaud et al. (2018) for a comprehensive treatment.
+# - LOB snapshots from `02_itch_lob_reconstruction`, one directory per symbol. The
+#   cross-section in Section 5 needs that notebook run once per symbol.
+# - Parsed ITCH messages from `01_itch_parser`, for the imbalance built in Section 4.
 #
 # ---
 
@@ -64,62 +74,56 @@
 # ## Setup
 
 # %%
-"""LOB Analysis: Stylized Facts and Predictive Patterns — empirical patterns in reconstructed order book data."""
+"""LOB analysis: spread, depth and order-flow imbalance over reconstructed ITCH books."""
 
-import warnings
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
-
-
-# %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-
-# %%
-# Visualization style - centralized in utils/style.py
-import matplotlib.dates as mdates  # noqa: F401 - used in depth evolution
+import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import polars as pl
-from matplotlib.ticker import FuncFormatter  # noqa: F401
 
-from utils.style import COLORS
-
-# LOB-specific colors extending the ML4T palette
-COLORS = {
-    **COLORS,
-    "bid": "#2E7D32",  # Green for bids
-    "ask": "#C62828",  # Red for asks
-}
-
-# %%
-# Configuration - Unified output directory structure
 from data.equities.loader import load_nasdaq_itch
 from utils.paths import display_path, get_output_dir
+from utils.style import COLORS, show_with_alt
 
-# All ITCH-related outputs under a single chapter directory
+# %% [markdown]
+# ### Declared parameters
+#
+# `TRADING_DATE` is the session the books were reconstructed for; it labels the figures
+# and nothing else selects on it, because each symbol directory holds one day.
+#
+# `BUCKET_FREQ` is the interval the imbalance is summed over and the return measured
+# across. One minute is short enough that order flow and the next price move are plausibly
+# related and long enough that a bucket holds many messages.
+#
+# `MIN_BUCKETS` is how many buckets a symbol must contribute before its
+# correlation is reported. A correlation over a handful of points is noise with a value
+# attached, so thinly traded symbols drop out rather than widening the cross-section with
+# estimates nobody should read.
+
+# %% tags=["parameters"]
+TRADING_DATE = "2020-01-30"
+BUCKET_FREQ = "1m"
+MIN_BUCKETS = 50
+
+# %%
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
 OUTPUT_DIR = get_output_dir(3, "lob_analysis")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# Input: LOB snapshots from notebook 02 (order book reconstruction)
 ORDER_BOOK_DIR = NASDAQ_ITCH_OUTPUT / "order_book"
-
-# Input: Pre-parsed ITCH messages from canonical data location
 MESSAGES_DIR = load_nasdaq_itch(get_base_path=True)
 
-# Output: Figures go with their source data in ORDER_BOOK_DIR/{symbol}/
-# (no separate lob_analysis directory - keep outputs with their data)
-
 # %% [markdown]
-# ### Discover Available Symbols
+# ### Which symbols have a reconstructed book
 #
-# Scan the order book directory for symbols with reconstructed LOB data.
+# `02_itch_lob_reconstruction` writes one directory per symbol it was run for, so the
+# directory listing is the inventory: whatever is there is what this notebook can read.
+
 
 # %%
-TRADING_DATE = "2020-01-30"
-
-
 def discover_available_symbols(base_dir: Path) -> list[str]:
     """Find all symbols with reconstructed LOB data."""
     symbols = []
@@ -137,14 +141,13 @@ print(f"Data directory: {display_path(ORDER_BOOK_DIR)}")
 print(
     f"Available symbols: {AVAILABLE_SYMBOLS if AVAILABLE_SYMBOLS else 'None (run notebook 02 first)'}"
 )
-print("(Figures saved to each symbol's directory)")
 
 
 # %% [markdown]
 # ## 1. Load Reconstructed LOB Data
 #
 # LOB snapshots were generated by `02_itch_lob_reconstruction.py` and saved to
-# `output/ch03/nasdaq_itch/order_book/{SYMBOL}/`. Each symbol has its own directory
+# `03_market_microstructure/output/nasdaq_itch/order_book/{SYMBOL}/`. Each symbol has its own directory
 # containing snapshots and order-level data.
 #
 # If data is missing, run notebook 02 first.
@@ -188,12 +191,17 @@ print(f"\nLoaded {len(lob_data)} symbols for analysis.")
 # %% [markdown]
 # ## 2. Spread Dynamics: Intraday Patterns
 #
-# The bid-ask spread exhibits a well-documented **U-shape** throughout the trading day:
-# - **Wide at open**: Uncertainty, overnight news digestion
-# - **Narrow midday**: Lower volatility, stable information flow
-# - **Wide at close**: Position squaring, end-of-day volatility
+# The spread is the distance between the highest bid and the lowest ask: what it costs to
+# buy and immediately sell. Quoted in dollars it is not comparable across stocks, so it is
+# converted to basis points - hundredths of a percent of the mid price - which is what
+# makes a penny spread on a $3 stock and a penny spread on a $300 stock tell different
+# stories.
 #
-# See Section 3.3 for discussion; Chapter 8 shows how to engineer time-of-day features.
+# Spreads are widely reported to trace a U through the session: wide at the open while
+# overnight information is still being priced, narrower through the middle of the day,
+# and wide again into the close as positions are squared. The figure below is one symbol
+# on one day, which is an illustration of the shape rather than evidence for it.
+# Chapter 8 builds time-of-day features on the same idea.
 
 
 # %%
@@ -238,7 +246,8 @@ if lob_data and SPREAD_SYMBOL:
         # Convert timestamp to pandas for time-series operations
         spread_pd = spread_df.to_pandas()
         if "timestamp" in spread_pd.columns:
-            # CRITICAL: Force datetime64[ns] - pandas .plot() fails with [us]
+            # Polars hands back microseconds; pandas resampling and plotting want
+            # nanoseconds, so make the unit explicit rather than inferred.
             spread_pd["timestamp"] = spread_pd["timestamp"].astype("datetime64[ns]")
             spread_pd = spread_pd.set_index("timestamp")
 
@@ -250,18 +259,17 @@ if lob_data and SPREAD_SYMBOL:
         print(f"Not enough valid spread data for {SPREAD_SYMBOL}")
 
 # %%
-# Visualize spread dynamics — build panels
+ALT_SPREAD_DYNAMICS = "Two stacked line charts sharing a clock-time axis across one trading session. The upper panel plots the mid price as a single line. The lower panel plots the bid-ask spread in basis points as a thin noisy line with a heavier five-minute rolling mean over it, both on the same axis."
+
 if spread_1m is not None and mid_1m is not None:
     fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
 
-    # Panel 1: Mid price (use matplotlib directly for reliable datetime handling)
     mid_clean = mid_1m.dropna()
     axes[0].plot(mid_clean.index, mid_clean.values, color=COLORS["blue"], linewidth=1)
-    axes[0].set_title(f"{SPREAD_SYMBOL} Mid Price Evolution")
+    axes[0].set_title(f"{SPREAD_SYMBOL} mid price, one-minute samples")
     axes[0].set_ylabel("Price ($)")
     axes[0].grid(True, alpha=0.3)
 
-    # Panel 2: Spread with rolling mean
     spread_clean = spread_1m.dropna()
     axes[1].plot(
         spread_clean.index,
@@ -271,8 +279,6 @@ if spread_1m is not None and mid_1m is not None:
         alpha=0.7,
         label="Spread",
     )
-
-    # Rolling mean (5-minute window) shows trend without noise
     if len(spread_clean) > 5:
         rolling_mean = spread_clean.rolling(window=5, min_periods=1).mean()
         axes[1].plot(
@@ -280,51 +286,37 @@ if spread_1m is not None and mid_1m is not None:
             rolling_mean.values,
             color=COLORS["amber"],
             linewidth=2,
-            label="5-min rolling mean",
+            label="5-minute rolling mean",
         )
 
-    axes[1].set_title("Bid-Ask Spread (Basis Points)")
+    axes[1].set_title(f"{SPREAD_SYMBOL} bid-ask spread in basis points")
     axes[1].set_ylabel("Spread (bps)")
-    axes[1].set_xlabel("Time")
+    axes[1].set_xlabel("Time (US/Eastern)")
     axes[1].legend(loc="upper right")
     axes[1].grid(True, alpha=0.3)
-
-# %%
-# Format and display spread dynamics figure
-if spread_1m is not None and mid_1m is not None:
-    import matplotlib.dates as mdates
-
     axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     fig.autofmt_xdate()
 
-    plt.suptitle(
-        f"Intraday Spread Dynamics - {SPREAD_SYMBOL} ({TRADING_DATE})",
-        fontsize=12,
-        fontweight="bold",
-    )
-    plt.show()
+    show_with_alt(fig, ALT_SPREAD_DYNAMICS)
 
-    print(f"\nSpread Statistics ({SPREAD_SYMBOL}):")
-    print(f"  Mean: {spread_clean.mean():.2f} bps")
+    print(f"Spread for {SPREAD_SYMBOL} on {TRADING_DATE}:")
+    print(f"  Mean:   {spread_clean.mean():.2f} bps")
     print(f"  Median: {spread_clean.median():.2f} bps")
 
 # %% [markdown]
 # ## 3. Top-of-Book Evolution
 #
-# This visualization tracks the evolution of best bid, best ask, and mid price
-# across the trading session, with bid/ask point intensity encoding the
-# resting depth at the inside quote.
+# The previous figure shows what the touch cost; this one shows where it sat and how much
+# was resting there. Each minute contributes one bid point and one ask point, positioned
+# at that side's price, and shaded by the log of the shares behind it - darker means more
+# depth. The mid price runs through the middle as a line.
 #
-# - **X-axis**: Time
-# - **Y-axis**: Price (\$)
-# - **Blue points**: Best bid, intensity = log(bid_size_0)
-# - **Red points**: Best ask, intensity = log(ask_size_0)
-# - **Black line**: Mid price evolution
+# The log scaling on the shading matters: depth at the touch spans several orders of
+# magnitude within a session, so a linear shade would leave every minute but the busiest
+# few indistinguishable.
 #
-# The reconstruction from `02_itch_lob_reconstruction` emits inside-quote
-# snapshots (`best_bid`, `best_ask`, `bid_size_0`, `ask_size_0`); deeper
-# levels are out of scope for the Numba LOB path. For multi-level book
-# visualizations see `08_databento_lob_reconstruction` (Databento MBO).
+# These snapshots carry the top of the book only. `08_databento_lob_reconstruction`
+# builds the same picture with several price levels a side.
 
 
 # %%
@@ -368,16 +360,12 @@ def build_depth_scatter_data(
         Tuple of (mid_prices_df, bid_scatter_df, ask_scatter_df)
         Each scatter df has columns: [timestamp, price, depth, log_depth]
     """
-    import pandas as pd
-
-    # Convert to pandas for resampling
     pdf = lob_df.to_pandas()
     pdf["timestamp"] = pd.to_datetime(pdf["timestamp"])
     pdf = pdf.set_index("timestamp")
 
-    # Schema compatibility: the ITCH Numba LOB path emits top-of-book
-    # (best_bid/best_ask) rather than per-level price columns; alias them
-    # to the level-0 names that the resampler expects.
+    # The ITCH snapshots name the touch best_bid/best_ask; the resampler asks for the
+    # level-0 names, so alias them.
     if "bid_price_0" not in pdf.columns and "best_bid" in pdf.columns:
         pdf["bid_price_0"] = pdf["best_bid"]
     if "ask_price_0" not in pdf.columns and "best_ask" in pdf.columns:
@@ -412,9 +400,6 @@ def build_depth_scatter_data(
 
 
 # %%
-# Build depth evolution scatter data
-import matplotlib.patches as mpatches
-
 DEPTH_SYMBOL = list(lob_data.keys())[0] if lob_data else None
 mid_prices = None
 bid_scatter = None
@@ -423,17 +408,12 @@ ask_scatter = None
 if lob_data and DEPTH_SYMBOL:
     depth_lob = lob_data[DEPTH_SYMBOL]
 
-    # Build scatter data — the ITCH LOB path tracks the inside quote only,
-    # so a single level is what's available. Resample to 1-minute for
-    # cleaner visualization.
+    # These snapshots carry one level a side, so n_levels=1 is what there is to draw.
     mid_prices, bid_scatter, ask_scatter = build_depth_scatter_data(
         depth_lob, n_levels=1, resample_freq="1min"
     )
 
 # %%
-# Visualize depth evolution (scatter plot style) - SINGLE cell so the inline
-# backend cannot flush an intermediate render with raw-nanosecond x-ticks
-# (feedback_split_cell_figure_bug).
 if (
     mid_prices is not None
     and len(mid_prices) > 10
@@ -442,11 +422,8 @@ if (
 ):
     fig, ax = plt.subplots(figsize=(14, 7))
 
-    # Convert timestamps to numeric for matplotlib
-    # CRITICAL: Ensure consistent nanosecond precision. The mid_prices index from
-    # resampling retains the original Polars microsecond unit (datetime64[us]),
-    # while DataFrames built from dicts default to nanoseconds (datetime64[ns]).
-    # Without explicit conversion, these differ by 1000x causing axis misalignment.
+    # Cast both series to nanoseconds before plotting: the resampled index keeps polars'
+    # microseconds, a frame built from dicts defaults to nanoseconds.
     mid_ts_numeric = mid_prices.index.astype("datetime64[ns]").astype(np.int64)
     bid_ts_numeric = bid_scatter["timestamp"].astype("datetime64[ns]").astype(np.int64)
     ask_ts_numeric = ask_scatter["timestamp"].astype("datetime64[ns]").astype(np.int64)
@@ -493,16 +470,18 @@ if (
     black_line = plt.Line2D([0], [0], color="black", linewidth=1.5, label="Mid Price")
     ax.legend(handles=[blue_patch, red_patch, black_line], loc="upper left")
 
-    ax.set_title(
-        f"{DEPTH_SYMBOL} Top-of-Book Evolution | {TRADING_DATE}",
-        fontsize=13,
-        fontweight="bold",
-    )
+    ax.set_title(f"{DEPTH_SYMBOL} best bid and ask with resting depth, {TRADING_DATE}")
     ax.grid(True, alpha=0.3)
 
-    plt.show()
+    show_with_alt(
+        fig,
+        "A scatter chart over one trading session. Blue points trace the best bid and red points the best ask, one of each per minute, positioned at that side's price and shaded by the logarithm of the shares resting there, so darker points carry more depth. A black line runs between the two bands showing the mid price. The horizontal axis is labelled in clock time and the vertical axis in dollars.",
+    )
 else:
-    print("WARNING: Insufficient LOB data for top-of-book evolution visualization")
+    print(
+        "Not enough snapshots for the depth figure; reconstruct a fuller session in "
+        "02_itch_lob_reconstruction."
+    )
 
 # %%
 # Summary statistics
@@ -512,36 +491,42 @@ if (
     and bid_scatter is not None
     and not bid_scatter.empty
 ):
-    print(f"\nTop-of-Book Evolution Summary ({DEPTH_SYMBOL}):")
-    print(f"  Time range: {mid_prices.index.min()} to {mid_prices.index.max()}")
-    print(f"  Price range: ${mid_prices.min():.2f} to ${mid_prices.max():.2f}")
-    print(f"  Bid points: {len(bid_scatter):,}")
-    print(f"  Ask points: {len(ask_scatter):,}")
+    print(f"Top of book for {DEPTH_SYMBOL}:")
+    print(f"  Session covered: {mid_prices.index.min()} to {mid_prices.index.max()}")
+    print(f"  Mid price range: ${mid_prices.min():.2f} to ${mid_prices.max():.2f}")
+    print(f"  Bid points drawn: {len(bid_scatter):,}")
+    print(f"  Ask points drawn: {len(ask_scatter):,}")
     if not bid_scatter.empty:
-        print(f"  Avg bid depth: {bid_scatter['depth'].mean():,.0f} shares")
+        print(f"  Mean bid depth: {bid_scatter['depth'].mean():,.0f} shares")
     if not ask_scatter.empty:
-        print(f"  Avg ask depth: {ask_scatter['depth'].mean():,.0f} shares")
+        print(f"  Mean ask depth: {ask_scatter['depth'].mean():,.0f} shares")
 
 # %% [markdown]
-# ## 4. Order Flow Imbalance (OFI)
+# ## 4. Order-flow imbalance, built from raw messages
 #
-# **Order Flow Imbalance** measures the net pressure from incoming orders, cancellations,
-# and executions. Unlike static depth (a snapshot), OFI captures *dynamics*—who is
-# actively adding vs removing liquidity.
+# Depth says how much is resting; order-flow imbalance says which way it is moving. Within
+# a time bucket, count the shares added to the bid and subtract the shares taken off it,
+# do the same for the ask, and take the difference of the two:
 #
-# **Formula** (per time bucket):
-# ```
-# OFI = (Bid Additions - Bid Removals) - (Ask Additions - Ask Removals)
-# ```
+# $$\text{OFI} = (\text{bid adds} - \text{bid removes}) - (\text{ask adds} - \text{ask removes})$$
 #
-# - OFI > 0: Net buying pressure
-# - OFI < 0: Net selling pressure
+# A positive value means the bid side grew relative to the ask, which is the footprint of
+# buying pressure; a negative value is the reverse.
+#
+# **What this construction counts.** Adds come from `A` and `F` messages, removals from
+# `D`, `X`, `E` and `C`. It does not read `U` replaces, so an order moved from one price to
+# another contributes nothing here. That is a deliberate simplification for building the
+# quantity by hand: `02_itch_lob_reconstruction` computes an imbalance inside the
+# reconstruction loop that does process replaces, and Section 5 uses that one. The two
+# will not agree to the share, and the section that reports a cross-section says which it
+# is reading.
 
 # %% [markdown]
-# ### 4.1 Build Order Registry
+# ### Build the order registry
 #
-# First, we build a registry of all orders from Add messages (A/F) to track
-# which orders belong to which side.
+# A removal names an order, not a side. So the first step is a registry built from the
+# add messages: every order reference the day created, with the side, size and price it
+# was created at.
 
 
 # %%
@@ -567,12 +552,20 @@ def load_order_registry(messages_dir: Path, symbol: str) -> pl.DataFrame:
 
 
 # %% [markdown]
-# ### 4.2 Load Order Removals
+# ### Load the removals
 #
-# Track when orders are removed: deletions (D), cancellations (X), and executions (E).
+# Four message types take shares off the book: `D` deletes what is left of an order, `X`
+# cancels part of one, and `E` and `C` execute against one. `C` adds an execution price
+# and a printable flag that `E` does not carry, but neither changes `executed_shares`, so
+# both take the same shares off the book and leaving `C` out undercounts executions.
+#
+# `D` carries no share count, because it removes whatever remained: its size is the
+# original add less the cancels and executions that came before it. Charging a delete the
+# full original size would count a partially filled order twice, once for the fill and
+# again for the remainder.
 
 
-# %% — single function body, cannot split
+# %%
 def load_order_removals(messages_dir: Path, order_refs: set) -> pl.DataFrame:
     """Load cancel/delete/execute messages for orders in our registry."""
     removals = []
@@ -618,15 +611,30 @@ def load_order_removals(messages_dir: Path, order_refs: set) -> pl.DataFrame:
             e_df = e_df.with_columns(pl.lit("execute").alias("event_type"))
             removals.append(e_df)
 
+    # Execute-with-price messages (C) - same shares off the book, priced separately
+    c_path = messages_dir / "C"
+    if c_path.exists():
+        c_df = (
+            pl.scan_parquet(c_path / "*.parquet")
+            .filter(pl.col("order_reference_number").is_in(order_refs))
+            .select(["timestamp", "order_reference_number", "executed_shares"])
+            .collect()
+        )
+        if len(c_df) > 0:
+            c_df = c_df.rename({"executed_shares": "shares_removed"})
+            c_df = c_df.with_columns(pl.lit("execute").alias("event_type"))
+            removals.append(c_df)
+
     if not removals:
         return pl.DataFrame()
     return pl.concat(removals, how="diagonal")
 
 
 # %% [markdown]
-# ### 4.3 Compute OFI
+# ### Aggregate into buckets
 #
-# Aggregate additions and removals by time bucket, then compute the imbalance.
+# Adds and removals are summed within each time bucket and each side, laid out one column
+# per side, and the four columns combined into the imbalance.
 
 
 # %%
@@ -654,20 +662,28 @@ def _pivot_by_side(
 
 # %%
 def _enrich_removals(removals: pl.DataFrame, registry: pl.DataFrame) -> pl.DataFrame:
-    """Join removals with registry to get side and shares; fill missing shares_removed."""
+    """Join removals with the registry and size each delete at the shares still resting."""
     removals = removals.join(
         registry.select(["order_reference_number", "side", "shares"]),
         on="order_reference_number",
         how="left",
     )
-    # Use shares from registry for deletes (full removal)
     if "shares_removed" not in removals.columns:
-        removals = removals.with_columns(pl.col("shares").alias("shares_removed"))
-    else:
-        removals = removals.with_columns(
-            pl.coalesce("shares_removed", "shares").alias("shares_removed")
-        )
-    return removals
+        removals = removals.with_columns(pl.lit(None, dtype=pl.Int64).alias("shares_removed"))
+
+    # Shares already taken off this order by earlier cancels and executions. A delete has
+    # to sort after a partial that shares its timestamp, and polars does not keep input
+    # order for tied keys, so the sort ranks deletes last explicitly.
+    sized = pl.col("shares_removed").fill_null(0).cast(pl.Int64)
+    removals = removals.sort(
+        ["order_reference_number", "timestamp", (pl.col("event_type") == "delete")]
+    ).with_columns((sized.cum_sum() - sized).over("order_reference_number").alias("removed_before"))
+    return removals.with_columns(
+        pl.when(pl.col("shares_removed").is_null())
+        .then((pl.col("shares").cast(pl.Int64) - pl.col("removed_before")).clip(lower_bound=0))
+        .otherwise(pl.col("shares_removed").cast(pl.Int64))
+        .alias("shares_removed")
+    ).drop("removed_before")
 
 
 # %% [markdown]
@@ -676,8 +692,16 @@ def _enrich_removals(removals: pl.DataFrame, registry: pl.DataFrame) -> pl.DataF
 
 
 # %%
-def compute_ofi(messages_dir: Path, symbol: str, freq: str = "1m") -> pl.DataFrame:
-    """Compute Order Flow Imbalance from raw ITCH messages."""
+def compute_ofi(messages_dir: Path, symbol: str, freq: str) -> pl.DataFrame:
+    """Compute Order Flow Imbalance from raw ITCH messages.
+
+    Args:
+        messages_dir: Parsed ITCH message store, one directory per message type.
+        symbol: Stock to build the imbalance for.
+        freq: Bucket width, as a polars duration string. The caller passes
+            `BUCKET_FREQ` so the single stock and the cross-section are measured
+            over the same interval.
+    """
     # Build order registry
     registry = load_order_registry(messages_dir, symbol)
     if registry.is_empty():
@@ -694,21 +718,25 @@ def compute_ofi(messages_dir: Path, symbol: str, freq: str = "1m") -> pl.DataFra
 
     # Aggregate additions and removals by time bucket
     add_pivot = _pivot_by_side(registry, freq, "shares", "bid_adds", "ask_adds")
+    # The empty case needs the bucket column typed. `pl.DataFrame({"bucket": []})` gives it
+    # Null, and a join against a datetime key then fails on the schema rather than
+    # returning the adds unchanged, which is what a session with no removals means.
     rem_pivot = (
         _pivot_by_side(removals, freq, "shares_removed", "bid_removes", "ask_removes")
         if not removals.is_empty()
-        else pl.DataFrame({"bucket": []})
+        else pl.DataFrame(schema={"bucket": add_pivot.schema["bucket"]})
     )
 
-    # Join and compute OFI
-    ofi_df = add_pivot.join(rem_pivot, on="bucket", how="outer").fill_null(0)
+    # A bucket may hold adds with no removals, or removals with no adds, so the join keeps
+    # both sides and coalesces the key rather than dropping either.
+    ofi_df = add_pivot.join(rem_pivot, on="bucket", how="full", coalesce=True).fill_null(0)
 
     for col in ["bid_adds", "ask_adds", "bid_removes", "ask_removes"]:
         if col not in ofi_df.columns:
             ofi_df = ofi_df.with_columns(pl.lit(0).alias(col))
 
-    # CRITICAL: Cast to Int64 before subtraction to avoid UInt32 underflow
-    # (e.g., 100 - 200 as UInt32 = 4,294,967,196 instead of -100)
+    # Share counts arrive as unsigned integers, and imbalance is a signed quantity.
+    # Cast before subtracting: 100 - 200 in UInt32 wraps to 4,294,967,196.
     ofi_df = ofi_df.with_columns(
         (
             (pl.col("bid_adds").cast(pl.Int64) - pl.col("bid_removes").cast(pl.Int64))
@@ -720,9 +748,12 @@ def compute_ofi(messages_dir: Path, symbol: str, freq: str = "1m") -> pl.DataFra
 
 
 # %% [markdown]
-# ### 4.4 OFI vs Returns Analysis
+# ### Imbalance against the next bucket's return
 #
-# Join OFI with price data to measure predictive power.
+# Line the buckets up with the mid price at the end of each, take the return over the
+# following bucket, and correlate. The return is shifted backwards by one bucket so that
+# each imbalance is matched with what happened *after* it, which is the only alignment
+# that could be predictive rather than contemporaneous.
 
 
 # %%
@@ -737,7 +768,7 @@ corr_log = None
 # Compute OFI and align with price data
 if MESSAGES_DIR.exists() and OFI_SYMBOL:
     print(f"Computing OFI for {OFI_SYMBOL}...")
-    ofi_df = compute_ofi(MESSAGES_DIR, OFI_SYMBOL, freq="1m")
+    ofi_df = compute_ofi(MESSAGES_DIR, OFI_SYMBOL, freq=BUCKET_FREQ)
 
     if not ofi_df.is_empty() and OFI_SYMBOL in lob_data:
         lob_df = lob_data[OFI_SYMBOL]
@@ -745,7 +776,7 @@ if MESSAGES_DIR.exists() and OFI_SYMBOL:
         if "mid_price" in lob_df.columns:
             # Get price buckets
             prices = (
-                lob_df.with_columns(pl.col("timestamp").dt.truncate("1m").alias("bucket"))
+                lob_df.with_columns(pl.col("timestamp").dt.truncate(BUCKET_FREQ).alias("bucket"))
                 .group_by("bucket")
                 .agg(pl.col("mid_price").last())
             )
@@ -775,9 +806,12 @@ if MESSAGES_DIR.exists() and OFI_SYMBOL:
                 corr_raw = np.corrcoef(ofi_arr, ret_arr)[0, 1]
                 corr_log = np.corrcoef(ofi_log, ret_arr)[0, 1]
             else:
-                print(f"WARNING: Only {len(valid)} valid observations - need more LOB data")
+                print(
+                    f"Only {len(valid)} buckets survived the return filter; a correlation "
+                    f"needs more than that to mean anything."
+                )
 else:
-    print("WARNING: No ITCH messages found. Run notebook 01 first.")
+    print("No parsed ITCH messages found. Run 01_itch_parser first.")
 
 # %%
 # Visualize OFI vs returns
@@ -790,9 +824,9 @@ if ofi_arr is not None and ret_arr is not None:
     ofi_scaled = ofi_arr / 1000  # Scale to thousands for display
     axes[0].bar(range(len(ofi_arr)), ofi_scaled, color=COLORS["slate"], alpha=0.7)
     axes[0].axhline(0, color="black", lw=0.5)
-    axes[0].set_xlabel("Time bucket (1-min)")
+    axes[0].set_xlabel(f"Time bucket ({BUCKET_FREQ})")
     axes[0].set_ylabel("OFI (thousands of shares)")
-    axes[0].set_title("Order Flow Imbalance Over Time")
+    axes[0].set_title(f"Imbalance per {BUCKET_FREQ} bucket")
     axes[0].set_yscale("symlog", linthresh=1)  # Log scale for signed data
     axes[0].grid(True, alpha=0.3)
 
@@ -807,133 +841,86 @@ if ofi_arr is not None and ret_arr is not None:
     axes[1].axhline(0, color="black", lw=0.5)
     axes[1].axvline(0, color="black", lw=0.5)
     axes[1].set_xlabel("OFI (signed log scale)")
-    axes[1].set_ylabel("Next-minute return (bps)")
-    axes[1].set_title("Next-minute return against order-flow imbalance")
+    axes[1].set_ylabel("Next-bucket return (bps)")
+    axes[1].set_title("Next-bucket return against order-flow imbalance")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
-    plt.suptitle(
-        f"Order-flow imbalance analysis — {OFI_SYMBOL}",
+    fig.suptitle(
+        f"Order-flow imbalance and next-bucket return over {BUCKET_FREQ}, {OFI_SYMBOL}",
         fontsize=12,
-        fontweight="bold",
     )
-    plt.show()
 
-    print(f"\nOFI Analysis ({OFI_SYMBOL}):")
-    print(f"  Observations: {len(ofi_arr)}")
-    print(f"  Correlation (raw):  {corr_raw:.4f}")
-    print(f"  Correlation (log):  {corr_log:.4f}")
-    print(f"  OFI range: {ofi_arr.min():,.0f} to {ofi_arr.max():,.0f} shares")
+    show_with_alt(
+        fig,
+        f"Two panels side by side. The left is a bar chart of order-flow imbalance per {BUCKET_FREQ} bucket "
+        "against bucket number, on a symmetric logarithmic vertical scale with a line at zero, so bars run "
+        "both above and below. The right is a scatter of the next bucket's return in basis points against the "
+        "signed log of the same imbalance, with a straight fitted trend line through it and reference lines "
+        "at zero on both axes.",
+    )
+
+    print(f"Order-flow imbalance for {OFI_SYMBOL}, {BUCKET_FREQ} buckets:")
+    print(f"  Buckets: {len(ofi_arr)}")
+    print(f"  Correlation with next-bucket return, raw imbalance: {corr_raw:.4f}")
+    print(f"  Correlation with next-bucket return, signed log:    {corr_log:.4f}")
+    print(f"  Imbalance range: {ofi_arr.min():,.0f} to {ofi_arr.max():,.0f} shares")
 
 
 # %% [markdown]
-# ### Compute Book Imbalance
+# ## 5. The same measurement across fifty stocks
 #
-# Measure the ratio of bid-to-ask depth at the best level for predictability analysis.
+# One stock's correlation is one number, and a single number cannot say whether order flow
+# carries information or whether this stock happened to trend. The cross-section can: run
+# the same measurement on fifty stocks and read the distribution of correlations rather
+# than any one of them.
+#
+# The imbalance used here is the one the reconstruction computed per second, summed into
+# one-minute buckets - not the hand-built version from Section 4, which ignores replaces.
+#
+# A symbol reaches the figure only if it contributed at least `MIN_BUCKETS` buckets, so
+# the number of points is at most fifty and the cell prints what it was on this run
+# rather than leaving the reader to count them.
+#
+# The fifty symbols are fixed rather than discovered, so the figure redraws to the same
+# cross-section on every run. They are drawn in five strata of ten by daily message
+# count, because a cross-section of only heavily traded names would answer a narrower
+# question than the one being asked. Reconstructing another symbol is a run of
+# `02_itch_lob_reconstruction` with `ITCH_SYMBOL` set to it.
+
+
+# %% [markdown]
+# ### One stock's correlation
+#
+# Sum the per-second imbalance into `BUCKET_FREQ` buckets, take the mid price at the end of
+# each bucket, and correlate the bucket's imbalance against the return over the following
+# bucket. The imbalance enters as a signed log - the sign kept, the magnitude compressed -
+# because a handful of enormous buckets would otherwise decide a Pearson correlation on
+# their own.
 
 
 # %%
-def compute_book_imbalance(lob_df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Compute order book imbalance from LOB snapshots.
-
-    Imbalance at best level: (bid_size_0 - ask_size_0) / (bid_size_0 + ask_size_0)
-
-    Note: We add +1 to the denominator to avoid division by zero when both
-    sides are empty. This creates a slight bias toward zero for small values,
-    which is acceptable for analysis purposes.
-    """
-    bid_col = "bid_size_0" if "bid_size_0" in lob_df.columns else None
-    ask_col = "ask_size_0" if "ask_size_0" in lob_df.columns else None
-
-    if bid_col is None or ask_col is None:
-        return lob_df
-
-    result = lob_df.clone()
-
-    # Ensure spread column exists for downstream filtering
-    if "spread" not in result.columns:
-        if "best_ask" in result.columns and "best_bid" in result.columns:
-            result = result.with_columns((pl.col("best_ask") - pl.col("best_bid")).alias("spread"))
-
-    # Ensure mid_price exists
-    if "mid_price" not in result.columns:
-        if "best_ask" in result.columns and "best_bid" in result.columns:
-            result = result.with_columns(
-                ((pl.col("best_ask") + pl.col("best_bid")) / 2).alias("mid_price")
-            )
-
-    # Compute imbalance (add 1 to denominator to avoid div-by-zero)
-    result = result.with_columns(
-        ((pl.col(bid_col) - pl.col(ask_col)) / (pl.col(bid_col) + pl.col(ask_col) + 1)).alias(
-            "book_imbalance"
-        )
-    )
-
-    # Compute future returns for predictability analysis
-    if "mid_price" in result.columns:
-        result = result.with_columns(
-            (pl.col("mid_price").pct_change().shift(-1) * 10000).alias("future_return_bps")
-        )
-
-    return result
-
-
-# %% [markdown]
-# ## 5. Multi-Stock OFI Analysis: Correlation with Returns
-#
-# Order Flow Imbalance (OFI) measures buying vs selling pressure over time:
-# OFI = (Bid Adds - Bid Removes) - (Ask Adds - Ask Removes)
-#
-# Positive OFI → net buying pressure (more bids added/asks removed)
-# Negative OFI → net selling pressure (more asks added/bids removed)
-#
-# This section examines OFI's predictive power across 50 stocks stratified by activity.
-#
-# **Key finding**: OFI shows **weak, noisy correlation** with subsequent returns when
-# used naively. Across this cross-section the correlations cluster near zero with high
-# variance, spanning roughly -0.35 to +0.16.
-#
-# **Implication**: Raw OFI isn't directly tradeable. Chapter 6 shows how **conditional
-# signals**—extreme OFI events plus spread dynamics—extract the actual edge.
-#
-# To regenerate with different stocks:
-# ```bash
-# ITCH_SYMBOL=XYZ uv run python 02_itch_lob_reconstruction.py
-# ```
-
-
-# %% [markdown]
-# ### Compute Per-Stock OFI Correlation
-#
-# Measure OFI-to-return correlation for a single stock using 1-minute buckets.
-
-
-# %% — single function body, cannot split
 def compute_ofi_correlation(lob_df: pl.DataFrame, symbol: str) -> dict | None:
-    """Compute OFI → return correlation for a single stock.
-
-    Uses pre-computed OFI from LOB snapshots (generated in notebook 02).
-    Aggregates to 1-minute buckets for correlation with next-minute returns.
+    """Correlate bucketed order-flow imbalance against the next bucket's return.
 
     Args:
-        lob_df: LOB snapshot DataFrame with ofi, mid_price columns
-        symbol: Stock symbol (for reporting)
+        lob_df: LOB snapshots carrying `ofi` and `mid_price`.
+        symbol: Stock symbol, for reporting.
 
     Returns:
-        Dictionary with symbol, bucket_count, correlation, or None if insufficient data
+        Dictionary with symbol, bucket count, correlation and imbalance dispersion,
+        or None when the symbol contributes fewer than MIN_BUCKETS buckets.
     """
-    # Check if OFI column exists (generated by reconstruct_lob_with_ofi)
     if "ofi" not in lob_df.columns:
-        print(f"  {symbol}: No OFI column - rerun notebook 02 for this symbol")
+        print(f"  {symbol}: snapshots carry no ofi column")
         return None
 
     # Aggregate to 1-minute buckets
     df = (
-        lob_df.with_columns(pl.col("timestamp").dt.truncate("1m").alias("bucket"))
+        lob_df.with_columns(pl.col("timestamp").dt.truncate(BUCKET_FREQ).alias("bucket"))
         .group_by("bucket")
         .agg(
-            pl.col("ofi").sum().alias("ofi_1m"),
+            pl.col("ofi").sum().alias("ofi_bucket"),
             pl.col("mid_price").last().alias("mid_price"),
         )
         .sort("bucket")
@@ -945,15 +932,14 @@ def compute_ofi_correlation(lob_df: pl.DataFrame, symbol: str) -> dict | None:
     )
 
     # Filter to valid observations
-    valid = df.filter(pl.col("ofi_1m").is_not_null() & pl.col("next_return_bps").is_finite())
+    valid = df.filter(pl.col("ofi_bucket").is_not_null() & pl.col("next_return_bps").is_finite())
 
-    if len(valid) < 50:
+    if len(valid) < MIN_BUCKETS:
         return None
 
-    ofi_arr = valid["ofi_1m"].to_numpy()
+    ofi_arr = valid["ofi_bucket"].to_numpy()
     returns = valid["next_return_bps"].to_numpy()
 
-    # Use signed log transform for correlation (reduces outlier domination)
     ofi_log = np.sign(ofi_arr) * np.log1p(np.abs(ofi_arr))
     correlation = np.corrcoef(ofi_log, returns)[0, 1]
 
@@ -966,28 +952,39 @@ def compute_ofi_correlation(lob_df: pl.DataFrame, symbol: str) -> dict | None:
 
 
 # %% [markdown]
-# ### Load Order Counts
+# ### How active each stock was
 #
-# Count daily orders per stock from Add Order (A) messages for activity stratification.
+# The number of add messages a stock received over the day is the plainest measure of how
+# actively it was quoted, and it is what the cross-section figure uses for its horizontal
+# axis.
 
 
 # %%
 def load_order_counts() -> dict[str, int]:
-    """Load daily order counts per stock from A (add order) messages."""
-    a_path = MESSAGES_DIR / "A"
-    if not a_path.exists():
-        return {}
-    files = list(a_path.glob("*.parquet"))
-    if not files:
-        return {}
-    counts = pl.scan_parquet(files).group_by("stock").len().collect()
-    return {row["stock"]: row["len"] for row in counts.iter_rows(named=True)}
+    """Count each stock's add messages, A and F together.
+
+    F is an Add Order carrying the market participant's identifier, so it creates an
+    order reference exactly as A does. It is 1% of the day's adds overall but a third of
+    them for some thinly quoted names, and load_order_registry above reads both.
+    """
+    # Scanned per type, not as one file list: F carries an `attribution` column that A
+    # does not, and a single scan over both raises on the schema mismatch.
+    counts: dict[str, int] = {}
+    for msg_type in ("A", "F"):
+        files = list((MESSAGES_DIR / msg_type).glob("*.parquet"))
+        if not files:
+            continue
+        by_stock = pl.scan_parquet(files).select("stock").group_by("stock").len().collect()
+        for row in by_stock.iter_rows(named=True):
+            counts[row["stock"]] = counts.get(row["stock"], 0) + row["len"]
+    return counts
 
 
 # %% [markdown]
-# ### Run Multi-Stock OFI Analysis
+# ### The cross-section
 #
-# Compute OFI-return correlation across all available stocks.
+# Run the single-stock measurement over every symbol that has a book, attach its daily
+# order count, and drop the ones too thinly quoted to estimate.
 
 
 # %%
@@ -1009,24 +1006,21 @@ def analyze_all_stocks_ofi(
 
 
 # %% [markdown]
-# ### Plot OFI vs Returns
+# ### Reading the cross-section
 #
-# Scatter plot showing activity level versus OFI-return correlation across stocks.
+# Each stock is one point: how many orders it received that day against its imbalance-to-
+# return correlation. The horizontal axis is logarithmic because daily order counts span
+# several orders of magnitude across the cross-section. What to look at is the spread of
+# the points around zero and whether it narrows as activity rises.
 
 
-# %% — single function body, cannot split
+# %%
 def plot_ofi_vs_returns(results: list[dict], ax=None):
-    """Plot scatter of order count (activity) vs OFI → return correlation.
-
-    This figure demonstrates that **Order Flow Imbalance (OFI)** has weak, noisy
-    correlation with subsequent returns when used naively across stocks.
-
-    The message: raw microstructure features aren't directly tradeable. Chapter 6
-    shows how conditional signals (extreme OFI events, spread dynamics) extract the edge.
+    """Scatter each stock's daily order count against its imbalance-return correlation.
 
     Args:
-        results: List of dicts with 'symbol', 'order_count', 'corr'
-        ax: Optional matplotlib axis (creates new figure if None)
+        results: One dict per stock with 'symbol', 'order_count' and 'corr'.
+        ax: Optional axis; a new figure is created when None.
     """
     if not results:
         print("No results to plot")
@@ -1042,16 +1036,17 @@ def plot_ofi_vs_returns(results: list[dict], ax=None):
     corrs = np.array([r["corr"] for r in results])
     symbols = [r["symbol"] for r in results]
 
-    # Use coolwarm colormap - publication-friendly, works in grayscale
-    # Blue = negative correlation, Red = positive correlation
+    # Blue for negative, red for positive, on a scale centred on zero and set by the
+    # widest correlation actually observed, so the neutral colour always means neutral.
+    color_bound = float(np.max(np.abs(corrs))) if len(corrs) else 1.0
     scatter = ax.scatter(
         order_counts,
         corrs,
         s=150,
         c=corrs,
         cmap="coolwarm",
-        vmin=-0.36,
-        vmax=0.36,
+        vmin=-color_bound,
+        vmax=color_bound,
         edgecolor="black",
         linewidth=1.5,
     )
@@ -1062,30 +1057,26 @@ def plot_ofi_vs_returns(results: list[dict], ax=None):
             sym, (oc, c), textcoords="offset points", xytext=(8, 5), fontsize=9, fontweight="bold"
         )
 
-    # No trend line - the point is that naive correlation shows no clear pattern
-    # This sets up Chapter 6's insight: you need conditional signals (extreme events,
-    # spread dynamics) to extract a tradeable edge from order flow data.
-
     ax.set_xscale("log")
-    ax.set_xlabel("Daily Order Count (log scale)", fontsize=12)
-    ax.set_ylabel("Correlation: OFI → Next Return (1-min)", fontsize=12)
-    ax.set_title(
-        "Naive OFI Shows Weak, Noisy Signal",
-        fontsize=13,
-        fontweight="bold",
-    )
+    ax.set_xlabel("Add messages received that day (log scale)", fontsize=12)
+    ax.set_ylabel("Correlation, imbalance to next-bucket return", fontsize=12)
+    ax.set_title("Imbalance-return correlation by trading activity")
     ax.axhline(0, color="gray", linestyle="-", alpha=0.5, linewidth=1.5)
     ax.grid(True, alpha=0.3)
 
-    cbar = plt.colorbar(scatter, ax=ax, label="ρ (correlation)")
-    cbar.ax.axhline(0, color="gray", linewidth=1)  # Mark zero on colorbar
+    cbar = plt.colorbar(scatter, ax=ax, label="Correlation")
+    cbar.ax.axhline(0, color="gray", linewidth=1)
+    return fig
 
+
+# %% [markdown]
+# The five strata below were drawn from the day's stocks by daily add-message count, ten
+# from each, and then fixed. Fixing them is what makes the figure reproducible: a
+# cross-section re-sampled on every run would move for reasons that have nothing to do
+# with order flow.
 
 # %%
-# Fixed set of 50 symbols for reproducible Figure 3.3
-# Stratified by activity level (5 strata x 10 symbols each)
-# Generated from symbols with verified LOB reconstruction and OFI data
-_HIGH_AND_MID_ACTIVITY = [
+HIGH_AND_MID_ACTIVITY = [
     # Stratum 1: high activity
     "QQQ",
     "SPY",
@@ -1121,9 +1112,7 @@ _HIGH_AND_MID_ACTIVITY = [
     "AVGR",
 ]
 
-# %%
-# Lower-activity strata for Figure 3.3
-_LOW_ACTIVITY = [
+LOW_ACTIVITY = [
     # Stratum 4: medium-low activity
     "AUG",
     "ISR",
@@ -1148,21 +1137,28 @@ _LOW_ACTIVITY = [
     "BRN",
 ]
 
-FIGURE_3_3_SYMBOLS = _HIGH_AND_MID_ACTIVITY + _LOW_ACTIVITY
+CROSS_SECTION_SYMBOLS = HIGH_AND_MID_ACTIVITY + LOW_ACTIVITY
 
 # %%
-# Filter to symbols with OFI data for Figure 3.3
-figure_lob_data = {
-    s: lob_data[s] for s in FIGURE_3_3_SYMBOLS if s in lob_data and "ofi" in lob_data[s].columns
+cross_section_data = {
+    sym: lob_data[sym]
+    for sym in CROSS_SECTION_SYMBOLS
+    if sym in lob_data and "ofi" in lob_data[sym].columns
 }
-print(f"\nFigure 3.3: Using {len(figure_lob_data)}/{len(FIGURE_3_3_SYMBOLS)} symbols")
+print(
+    f"Cross-section: {len(cross_section_data)} of {len(CROSS_SECTION_SYMBOLS)} symbols have "
+    f"a reconstructed book with imbalance"
+)
 
-# Run multi-stock OFI analysis on fixed symbol set
-multi_stock_results = analyze_all_stocks_ofi(figure_lob_data)
+cross_section_results = analyze_all_stocks_ofi(cross_section_data)
+print(
+    f"Of those, {len(cross_section_results)} contributed at least {MIN_BUCKETS} buckets "
+    f"and carry a correlation"
+)
 
-if len(multi_stock_results) >= 3:
-    # Persist the 50-stock cross-section so book figure scripts can rebuild
-    # Figure 3.3 without re-executing the notebook (Hard Rule 15).
+if len(cross_section_results) >= 3:
+    # The book's figure script rebuilds this chart from the saved cross-section rather
+    # than re-running the chapter's ITCH pipeline.
     results_df = pl.DataFrame(
         [
             {
@@ -1171,49 +1167,53 @@ if len(multi_stock_results) >= 3:
                 "corr": r["corr"],
                 "buckets": r.get("buckets", 0),
             }
-            for r in multi_stock_results
+            for r in cross_section_results
         ]
     )
-    results_path = OUTPUT_DIR / "figure_3_3_ofi_correlation_50_stocks.parquet"
+    results_path = OUTPUT_DIR / "ofi_correlation_cross_section.parquet"
     results_path.parent.mkdir(parents=True, exist_ok=True)
     results_df.write_parquet(results_path)
+    print(f"Saved cross-section to {display_path(results_path)}")
+
+    print(f"Cross-section: {len(cross_section_results)} NASDAQ stocks")
+    fig = plot_ofi_vs_returns(cross_section_results)
+    show_with_alt(
+        fig,
+        "A scatter chart with one labelled point per stock. The horizontal axis is the number of add messages the stock received that day, on a logarithmic scale spanning several orders of magnitude; the vertical axis is that stock's correlation between bucketed order-flow imbalance and the next bucket's return, with a horizontal line at zero. Points are shaded blue through red by the same correlation, on a scale centred on zero, and a colour bar to the right gives the mapping.",
+    )
+else:
     print(
-        f"Persisted Fig 3.3 cross-section: {display_path(results_path)} ({len(results_df)} symbols)"
+        f"Only {len(cross_section_results)} symbol(s) cleared the bucket threshold; the "
+        f"cross-section needs at least three. Run 02_itch_lob_reconstruction for more "
+        f"symbols with ITCH_SYMBOL."
     )
 
-    # Generate Figure 3.3 from actual data
-    plot_ofi_vs_returns(multi_stock_results)
-    plt.show()
-else:
-    print("\nWARNING: Multi-stock OFI analysis requires multiple stocks for comparison")
-    print(
-        f"   Only {len(multi_stock_results)} stock(s) available: "
-        f"{[r['symbol'] for r in multi_stock_results]}"
-    )
-    print("   Run notebook 02 with multiple symbols (AAPL, MSFT, UGA, JMST) to see spectrum.")
+# %% [markdown]
+# The cross-section as a table, sorted from the most positive correlation to the most
+# negative, with the spread of the whole set below it.
 
 # %%
-# Print summary
-print("\nFigure 3.3: OFI → Return Correlation Across Stocks")
-print("=" * 55)
-print(f"{'Symbol':<8} {'Orders':>12} {'Correlation':>12}")
-print("-" * 35)
-for r in multi_stock_results[:5]:
-    oc = r.get("order_count", r.get("buckets", 0))
-    print(f"{r['symbol']:<8} {oc:>12,} {r['corr']:>12.3f}")
-if len(multi_stock_results) > 8:
-    print("...")
-    for r in multi_stock_results[-3:]:
-        oc = r.get("order_count", r.get("buckets", 0))
-        print(f"{r['symbol']:<8} {oc:>12,} {r['corr']:>12.3f}")
+cross_section_table = pl.DataFrame(
+    [
+        {
+            "symbol": r["symbol"],
+            "add_messages": r.get("order_count", 0),
+            "buckets": r.get("buckets", 0),
+            "correlation": r["corr"],
+        }
+        for r in cross_section_results
+    ]
+)
+cross_section_table
 
-if len(multi_stock_results) >= 3:
-    corrs = [r["corr"] for r in multi_stock_results]
-    print(f"\nCorrelation range: {min(corrs):.2f} to {max(corrs):.2f}")
-    print(f"Mean correlation:  {np.mean(corrs):.2f} (weak)")
-    print(f"Std deviation:     {np.std(corrs):.2f} (high variance)")
-    print("\n→ Naive imbalance is not directly tradeable.")
-    print("  Chapter 6 shows how conditional signals extract the edge.")
+# %%
+if len(cross_section_results) >= 3:
+    corrs = np.array([r["corr"] for r in cross_section_results])
+    print(f"Correlations across {len(corrs)} stocks:")
+    print(f"  Range:              {corrs.min():.3f} to {corrs.max():.3f}")
+    print(f"  Mean:               {corrs.mean():.3f}")
+    print(f"  Standard deviation: {corrs.std():.3f}")
+    print(f"  Positive:           {(corrs > 0).sum()} of {len(corrs)}")
 
 # %% [markdown]
 # ## 6. Summary Statistics
@@ -1271,34 +1271,38 @@ if lob_data:
 # %% [markdown]
 # ## Key Takeaways
 #
-# ### Empirical Patterns Demonstrated
+# 1. **Quote the spread in basis points, not dollars.** A dollar spread mixes the cost of
+#    trading with the price level, so it cannot be compared across stocks or across a
+#    period in which the price moved.
+# 2. **Compress before correlating.** Bucketed order flow is heavy-tailed, and a Pearson
+#    correlation on the raw values is decided by a handful of buckets. The signed log
+#    keeps the direction and takes the scale out. The notebook reports both, and the gap
+#    between them is the size of that effect.
+# 3. **A cross-section answers what one stock cannot.** A single correlation has no
+#    reference; a cross-section has a distribution, and the spread of that distribution
+#    is the quantity to read.
+# 4. **Say which imbalance.** This chapter has two: one built by hand from adds and
+#    removals, which ignores replaces, and one computed inside the reconstruction, which
+#    does not. They are different numbers under one name, so every section names its
+#    source.
+# 5. **Fix the cross-section to make the figure reproducible.** Symbols discovered at run
+#    time move the chart for reasons unconnected to the question.
 #
-# | Pattern | Finding | Implication |
-# |---------|---------|-------------|
-# | **Spread dynamics** | Intraday U-shape in spreads | Time-of-day conditioning matters |
-# | **Naive imbalance** | Weak, noisy correlation with returns | Raw features aren't tradeable |
-# | **Liquidity spectrum** | 100x+ depth variation across stocks | Normalization required |
-# | **Book reconstruction** | Valid spreads confirm correct parsing | Quality check |
+# ### Known limitations
 #
-# ### The Signal Extraction Problem
-#
-# Figure 3.3 demonstrates a key lesson: **naive order flow metrics don't work**.
-# Across the 41 NASDAQ stocks with enough intraday activity for a stable estimate,
-# the bucketed OFI→return correlation has a cross-stock mean of ρ ≈ 0.01 with a
-# standard deviation of ≈ 0.10 and a range from −0.35 to 0.16: centered on noise
-# with high cross-stock dispersion.
-#
-# **What's missing?** Chapter 6's order flow reversal strategy shows that tradeable
-# signals emerge only when you condition on:
-# - **Extreme events**: One-sided flow above threshold percentiles
-# - **Spread dynamics**: Transient spread dislocation (expansion ratio)
-# - **Time-of-day**: Open and close behave differently than midday
+# - One venue and one day. Everything here is NASDAQ-routed activity on a single session,
+#   so nothing about it establishes what holds over time or across venues.
+# - The correlations are contemporaneous with the data that produced them: no split, no
+#   holdout, nothing withheld. They describe the day; they do not forecast another one.
+# - Thinly quoted stocks drop out at the bucket threshold, so the cross-section is
+#   conditioned on having been quoted enough to measure.
+# - The books carry the top of the book only, so depth here means depth at the touch.
 #
 # ### Bridge to Later Chapters
 #
 # | Chapter | How These Patterns Connect |
 # |---------|---------------------------|
-# | **Chapter 6** | Order flow reversal strategy with conditional signals |
+# | **Chapter 6** | An order-flow strategy that conditions on extreme flow and spread |
 # | **Chapter 8** | Feature engineering: spread, imbalance, time-of-day |
 # | **Chapter 9** | Evaluating microstructure signal decay |
 # | **Chapter 19** | Price impact modeling using liquidity |

@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -22,10 +22,11 @@
 #
 # ## Purpose
 #
-# Walk through tick-level AAPL TAQ data on March 16, 2020 (the S&P fell 12%,
-# its worst single-day drop since 1987) to see how market-microstructure
-# observables — quote activity, spread, fragmentation, trade flow, price —
-# behave under extreme stress.
+# Walk through tick-level AAPL TAQ data for March 16, 2020, the day the S&P 500 fell
+# about twelve percent in its worst session since 1987, and read what happens to the
+# microstructure observables under that stress: how often quotes update, how wide the
+# spread runs, how volume splits across venues, what sizes trade, and where the price
+# goes.
 #
 # ## Learning Objectives
 #
@@ -61,7 +62,7 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from data import load_nasdaq100_taq
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 
 def rgba(color: str, alpha: float) -> str:
@@ -138,10 +139,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=dict(
-        text="Quote updates outnumber trades roughly 10 to 1"
-        "<br><sub>AAPL TAQ event composition, regular hours, March 16, 2020</sub>"
-    ),
+    title=dict(text="AAPL TAQ event composition, regular hours, March 16, 2020"),
     xaxis_title="Number of events (regular hours)",
     xaxis=dict(range=[0, event_counts["len"].max() * 1.12]),
     yaxis=dict(categoryorder="total ascending"),
@@ -149,7 +147,10 @@ fig.update_layout(
     margin=dict(l=150, r=40),
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A horizontal bar chart counting the day's TAQ events by type over regular trading hours, sorted so the most numerous type is the longest bar, each labelled with its percentage. The horizontal axis is a plain count of events.",
+)
 
 # %% [markdown]
 # **Key observation**: Quote updates outnumber trades by ~10:1. This reflects
@@ -160,13 +161,24 @@ fig.show()
 # %% [markdown]
 # ## 2. The Opening Chaos
 #
-# March 16 opened with a 7% gap down, immediately triggering Level 1 circuit
-# breakers. Let's see how trading activity evolved through the day.
+# March 16 gapped down at the open by enough to trip the first of the market-wide
+# circuit breakers, which halt trading across every US equity venue when the S&P 500
+# falls seven percent from the previous close. What follows is what the tape looks like
+# around that.
+
+# %% [markdown]
+# Two filters stand between the raw tape and anything worth plotting.
+#
+# Condition code `80000002` marks a late-reported trade, and on this tape every one of
+# them carries the prior session's closing price rather than the price it traded at. A
+# late report is a real trade with an unusable price, so it is dropped rather than
+# corrected.
+#
+# The price band is a second net under the first. It is set from where the symbol
+# actually traded that session, so it is specific to this symbol-day and would have to
+# be re-derived for another; what it catches is anything the condition codes missed.
 
 # %%
-# Extract trades, filtering out erroneous prints
-# - Condition 80000002 = late-reported trades with incorrect prices (all at $277.97)
-# - Price bounds: AAPL traded $240-260 that day; anything outside is an error
 trades = taq.filter(
     (pl.col("event_type") == "TRADE")
     & (pl.col("conditions") != "80000002")  # Exclude erroneous late-reported trades
@@ -222,10 +234,7 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title=dict(
-        text=f"Trading floods in at the open, then drains through the day"
-        f"<br><sub>{SYMBOL} trade activity per minute, March 16, 2020 (ET)</sub>"
-    ),
+    title=dict(text=f"{SYMBOL} trades and volume per minute, March 16, 2020"),
     height=500,
     showlegend=False,
 )
@@ -233,7 +242,10 @@ fig.update_yaxes(title_text="Trades per Minute", row=1, col=1)
 fig.update_yaxes(title_text="Volume (shares)", tickformat=",", row=2, col=1)
 fig.update_xaxes(title_text="Time (ET)", row=2, col=1)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels sharing a clock-time axis over the session. The upper counts trades in each minute, the lower sums the shares traded in the same minute.",
+)
 
 # %%
 # Quantify the pattern
@@ -258,11 +270,17 @@ print(f"Closing hour (15:00-16:00): {close_hour['trade_count'].mean():,.0f} trad
 # The bid-ask spread is the price of immediacy. During calm markets, AAPL
 # trades with a 1-2 cent spread (~1-2 bps). What happened on March 16?
 
-# %%
-# Extract NBBO (National Best Bid/Offer) quotes only
-# Use "QUOTE BID NB" and "QUOTE ASK NB" - these are the consolidated best prices
-# Filter out zero-price quotes (stale/empty from some exchanges)
+# %% [markdown]
+# The spread has to be measured on the consolidated quote, not on any one venue's. The
+# national best bid and offer is the highest bid and lowest ask across every US equity
+# venue at a moment, and it is what a marketable order actually meets - a single venue's
+# quote can be wide while the consolidated one is tight.
+#
+# Zero-priced quotes are dropped: a venue with nothing resting on a side publishes a zero
+# rather than an absence, and treating that as a price would put the spread at hundreds
+# of dollars.
 
+# %%
 nbbo_quotes = (
     taq.filter(
         pl.col("event_type").str.contains("NB")  # Only NBBO quotes
@@ -361,8 +379,7 @@ fig.add_trace(
 
 fig.update_layout(
     title=dict(
-        text=f"Panic widens the spread at the open, then it heals into the close"
-        f"<br><sub>{SYMBOL} NBBO spread (bps) and midpoint, 1-second samples, March 16, 2020 (ET)</sub>"
+        text=f"{SYMBOL} consolidated spread and midpoint, one-second samples, March 16, 2020"
     ),
     height=500,
     showlegend=False,
@@ -371,7 +388,10 @@ fig.update_yaxes(title_text=f"Spread (bps, capped at {spread_cap:.0f})", row=1, 
 fig.update_yaxes(title_text="Price ($)", row=2, col=1)
 fig.update_xaxes(title_text="Time (ET)", row=2, col=1)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels sharing a clock-time axis. The upper plots the consolidated bid-ask spread in basis points, sampled once a second and clipped at a stated cap so a few extreme seconds do not flatten the rest. The lower plots the quote midpoint in dollars over the same seconds.",
+)
 
 # %% [markdown]
 # **What the spread tells us**:
@@ -381,9 +401,11 @@ fig.show()
 #   informed or noise
 # - The spread narrows through midday as volatility subsided and market makers
 #   regained confidence
-# - Even the median spread (~2.4 bps) is 2-3x wider than a normal day
-# - The spread-price relationship is clear: when price drops sharply, spreads
-#   widen as uncertainty increases
+# - The median spread printed above is a multiple of what AAPL quotes on an ordinary
+#   session, which is the cost of trading rising with the uncertainty about what the
+#   next trade is worth
+# - Read the two panels against each other: where the price falls fastest is where the
+#   spread runs widest, which is the same mechanism seen from the other side
 
 # %% [markdown]
 # ## 4. Exchange Fragmentation: Where Did Liquidity Go?
@@ -419,10 +441,7 @@ fig = px.bar(
 fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
 
 fig.update_layout(
-    title=dict(
-        text=f"Even under stress, {SYMBOL} volume stays split across many venues"
-        f"<br><sub>Top-10 exchange share of executed volume, March 16, 2020</sub>"
-    ),
+    title=dict(text=f"{SYMBOL} executed volume by venue, ten largest, March 16, 2020"),
     xaxis_title="Volume share (%)",
     xaxis=dict(range=[0, top_exchanges["share"].max() * 1.1]),
     yaxis_title="Exchange",
@@ -432,19 +451,26 @@ fig.update_layout(
     showlegend=False,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A horizontal bar chart of the ten venues with the largest share of executed volume, longest bar at the top, each labelled with its percentage. The horizontal axis is share of volume and the vertical axis names the venues.",
+)
 
 # %% [markdown]
-# **Reading the venue breakdown** (the chart labels venues by name):
-# - **NASDAQ** (43.2%): the primary listing exchange for AAPL
-# - **FINRA** (21.6%): the off-exchange TRF, where dark-pool and internalized
-#   prints are reported — the second-largest share on this day
-# - **Cboe/BATS family**: BATS (9.9%), EDGX (6.7%), EDGA (1.0%), BATS Y (0.8%)
-# - **CSE** (6.5%), **NYSE Arca** (6.1%), **NASDAQ BX** (1.9%), **NYSE** (0.8%)
+# What to read off that chart, in the order it matters:
 #
-# **Key insight**: Even during extreme stress, liquidity remains fragmented.
-# No single exchange dominates - algorithmic traders must aggregate across
-# venues to get a complete picture of available liquidity.
+# - **The listing exchange leads but does not dominate.** AAPL is listed on NASDAQ, and
+#   NASDAQ takes the largest single share - well short of a majority.
+# - **FINRA is not an exchange.** Its bar is the trade reporting facility, where
+#   off-exchange prints are recorded: dark pools and trades internalised by brokers. It
+#   is one line on the chart and many venues in reality.
+# - **The Cboe and NYSE families each span several bars.** BATS, EDGX, EDGA and BATS Y
+#   are one operator; NYSE, NYSE Arca and NYSE National are another. Read them grouped
+#   and the picture concentrates; read them as listed and it does not.
+#
+# The practical consequence is that a quote from any one venue is a partial view. An
+# execution system that watches the listing exchange alone sees a fraction of the day's
+# liquidity, and that stays true under stress rather than breaking down under it.
 
 # %% [markdown]
 # ## 5. Trade Size Distribution: Retail vs Institutional
@@ -505,10 +531,7 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title=dict(
-        text=f"Odd lots dominate the tape while a few blocks carry the volume"
-        f"<br><sub>{SYMBOL} trade-size mix, share of trade count vs share of volume, March 16, 2020</sub>"
-    ),
+    title=dict(text=f"{SYMBOL} trade sizes: share of trades and share of volume, March 16, 2020"),
     xaxis_title="Trade-size category (shares)",
     yaxis_title="Share (%)",
     barmode="group",
@@ -516,27 +539,33 @@ fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A grouped bar chart with one pair of bars per trade-size category. One bar in each pair is that category's share of the trade count and the other its share of volume, both as percentages, with the size categories in shares along the horizontal axis.",
+)
 
 # %% [markdown]
-# **The odd-lot era**: Odd-lot trades (<100 shares) dominate both by count
-# (~99.9%) and by volume (~81%). At AAPL's pre-split price of ~$242, even
-# moderate dollar amounts translate to fewer than 100 shares. The high odd-lot
-# share of volume reflects both retail participation and institutional
-# algorithms that slice orders into small lots to minimize market impact.
+# The two bars at each size are the point of that chart, and the gap between them is
+# what a trade-count statistic hides. An odd lot is anything under a hundred shares, and
+# at a pre-split price in the hundreds of dollars a perfectly ordinary dollar amount buys
+# fewer than a hundred shares - so odd lots are not small trades in any economic sense.
+# They arrive from two directions at once: retail orders sized in dollars, and
+# institutional algorithms slicing a large order into pieces small enough not to move
+# the price.
 #
-# The few large trades (>2,000 shares) account for ~18% of volume despite
-# being a negligible fraction of trades—these are the block-sized institutional
-# prints that move the market.
+# At the other end, blocks are a negligible share of the trade count and a visible share
+# of the volume. Counting trades and counting shares rank the same day differently, and
+# a statistic that does not say which it counted is not interpretable.
 
 # %% [markdown]
 # ## 6. The Day's Journey: Price Action
 #
 # Finally, let's see how the price evolved throughout this historic day.
 #
-# > **Note on prices**: AAPL had a 4:1 stock split on August 31, 2020.
-# > The tick data shows pre-split prices (~$240-260). Multiply by 0.25
-# > to compare with split-adjusted historical data (~$60-65).
+# > **Note on prices**: AAPL split four for one on 31 August 2020, after this session.
+# > The tick data carries the prices as they were quoted at the time, so they are four
+# > times the split-adjusted series most historical databases return. Divide by four
+# > before comparing the two.
 
 # %%
 # Build 5-minute OHLCV bars from cleaned trade data
@@ -615,10 +644,7 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title=dict(
-        text=f"{SYMBOL} swings ~10% intraday and closes back near its open"
-        f"<br><sub>5-minute OHLC bars (pre-split prices) and volume, March 16, 2020 (ET)</sub>"
-    ),
+    title=dict(text=f"{SYMBOL} five-minute bars and volume, March 16, 2020 (pre-split prices)"),
     xaxis_rangeslider_visible=False,
     height=550,
     showlegend=False,
@@ -627,41 +653,63 @@ fig.update_yaxes(title_text="Price ($)", row=1, col=1)
 fig.update_yaxes(title_text="Volume", tickformat=",", row=2, col=1)
 fig.update_xaxes(title_text="Time (ET)", row=2, col=1)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A candlestick chart of five-minute bars over the session in the upper panel and the shares traded in each bar in the lower panel, sharing a clock-time axis. Prices are as quoted at the time, before the later split.",
+)
 
 # %% [markdown]
-# **Reading the chart**:
+# Four things to find on that chart, in time order:
 #
-# - **9:30 AM**: Opens at ~$242 (pre-split), about 13% below Friday's close of ~$278
-# - **9:34-9:49 AM**: Circuit breaker halt (S&P 500 fell 7%)
-# - **9:49-11:00 AM**: Resumed trading, continued volatility
-# - **11:00 AM-2:00 PM**: Price consolidates in the $248-253 range
-# - **2:00-4:00 PM**: Sells off into close, finishing near the open
+# - **The gap at the open.** The first bar is far below Friday's close; the fall
+#   happened overnight, not during the session.
+# - **A gap in the bars shortly after the open.** That is the market-wide circuit
+#   breaker: the S&P 500 fell seven percent and every US equity venue halted for fifteen
+#   minutes. No bar exists because no trading did.
+# - **A long middle.** Between the late morning and the early afternoon the bars settle
+#   into a range, with volume falling away from its opening level.
+# - **The close relative to the open.** Where the last bar sits against the first is what
+#   the day cost a buy-and-hold position, and it is not the same as how far the price
+#   travelled to get there.
 #
-# The ~$24 intraday range (~10% of price) is extraordinary — AAPL typically
-# moves 1-2% in a day. This kind of volatility creates both opportunity and
-# risk for algorithmic traders: spreads widen, but so do potential profits
-# from correct directional bets.
+# That last distinction is the one worth carrying. The intraday range is a multiple of
+# what AAPL covers on an ordinary session, and a strategy that trades within the day is
+# exposed to the range rather than to the close-to-close move.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# **1. Quote activity dominates**: 10x more quote updates than trades - this is
-# where price discovery happens. Analyzing only trades misses most of the story.
+# **1. Most of the tape is quotes, not trades.** The event composition chart is the
+# first thing this notebook draws for that reason: an analysis built on the trade
+# stream alone discards the larger part of what the venue published, and price discovery
+# happens in the part it discarded.
 #
-# **2. Spreads reveal stress**: The 2-3 bps median spread (vs ~1 bps normally)
-# shows market makers demanding compensation for uncertainty. Execution costs
-# on March 16 were 2-3x higher than normal.
+# **2. The spread is a price, and stress raises it.** Widening spreads are market makers
+# charging more to stand between buyers and sellers when they are less sure what the
+# next trade is worth. Read as an execution cost, that is the day getting more expensive
+# to trade, not just more volatile.
 #
-# **3. Fragmentation persists**: Even during panic, no single exchange captures
-# majority flow. Algorithmic traders must aggregate liquidity across venues.
+# **3. Liquidity stays fragmented under stress.** The venue chart does not concentrate
+# when the market falls, so an execution system still has to look in many places at
+# once - and has to know which bars are exchanges and which are reporting facilities.
 #
-# **4. Odd lots dominate**: At AAPL's pre-split price (~$242), odd-lot trades
-# dominate both by count (~99.9%) and volume (~81%), reflecting algorithmic
-# order slicing and the retail trading boom during COVID.
+# **4. Counting trades and counting shares rank a day differently.** Odd lots take
+# almost all the trade count and much less of the volume; blocks are the reverse. Any
+# statistic about trade sizes has to say which it counted.
 #
-# **5. The U-shape amplifies**: The normal open/close activity concentration
-# becomes extreme during stress as participants rush to adjust positions.
+# **5. A price level is not a price series.** These are pre-split prices, four times the
+# adjusted series a database returns for the same day. Joining the two without adjusting
+# produces a four-fold jump that looks like an event.
+#
+# ### Known limitations
+#
+# - One symbol on one exceptional day. Everything here describes March 16, 2020 for
+#   AAPL, and the point of choosing it is that it is not typical.
+# - Erroneous late-reported prints are excluded by condition code and by a price band.
+#   The band is set from what AAPL traded at that day, so it would need changing for
+#   another symbol or another session.
+# - Venue shares are of executed volume on this tape, and the reporting-facility line
+#   aggregates many off-exchange destinations into one bar.
 #
 # ## Next Steps
 #

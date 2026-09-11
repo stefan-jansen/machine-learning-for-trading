@@ -64,7 +64,7 @@
 # | Aspect | NASDAQ ITCH | IEX DEEP |
 # |--------|-------------|----------|
 # | LOB granularity | Order-level (L3) | Price-level aggregated (L2) |
-# | Market share | ~20% | ~3% |
+# | Share of US equity volume | Among the largest single venues | A small single-digit share |
 # | Speed bump | None | 350μs delay |
 # | Message types | ~20 | 11 |
 # | Data access | Licensed | Free public download |
@@ -80,15 +80,13 @@
 # %%
 """IEX LOB Reconstruction — free market data alternative for limit order book analysis."""
 
-import warnings
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import polars as pl
 
 from data import load_iex_hist
 from utils.paths import get_output_dir
+from utils.style import show_plotly_with_alt
 
 # %% tags=["parameters"]
 MAX_MESSAGES = 0  # 0 = all messages
@@ -710,7 +708,7 @@ if not snapshots.is_empty() and top_symbol and not snapshots_plot.is_empty():
 # %%
 if not snapshots.is_empty() and top_symbol and not snapshots_plot.is_empty():
     fig.update_layout(
-        title=f"IEX LOB Evolution - {top_symbol}",
+        title=f"{top_symbol}: midpoint and spread reconstructed from IEX DEEP",
         height=500,
         showlegend=True,
         template="ml4t",
@@ -719,7 +717,10 @@ if not snapshots.is_empty() and top_symbol and not snapshots_plot.is_empty():
     fig.update_yaxes(title_text="Price ($)", row=1, col=1)
     fig.update_yaxes(title_text="Spread ($)", row=2, col=1)
 
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        f"Two stacked panels sharing a time axis for {top_symbol}. The upper traces the midpoint of the best bid and offer through the session as a single line. The lower traces the bid-ask spread in dollars as a single line filled down to zero.",
+    )
 
 # %% [markdown]
 # ## 8. Key Takeaways: IEX vs ITCH

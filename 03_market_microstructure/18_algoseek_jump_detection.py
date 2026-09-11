@@ -63,10 +63,6 @@
 
 from __future__ import annotations
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
 import math
 
 import matplotlib.pyplot as plt
@@ -76,12 +72,29 @@ from scipy.stats import norm
 
 from data import load_nasdaq100_bars
 from utils.paths import display_path, get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
+
+# %% [markdown]
+# ### Declared parameters
+#
+# `SYMBOLS` names three NASDAQ-100 members. AlgoSeek stores the ticker each name carried
+# at the time, so Meta appears as "FB" for 2020 dates - the change to "META" came in
+# 2022, and asking for the later symbol on an earlier date returns nothing.
+#
+# `BAR_MINUTES` sets the sampling frequency. Jump tests want bars short enough that a
+# jump is not averaged away with the diffusion around it, and long enough that the
+# bid-ask bounce does not dominate the return.
+#
+# `LEE_MYKLAND_K` is the window, in bars, over which local volatility is estimated. The
+# test asks whether a return is large relative to volatility *nearby*, so the window has
+# to be long enough to estimate that and short enough to stay local.
+#
+# `JUMP_ALPHA` is the significance level for the whole session, not for one bar. A
+# session holds dozens of bars, so testing each one at that level independently would
+# flag several a day by chance alone; the threshold computed below is the one that
+# holds the error rate at this level across the session as a whole.
 
 # %% tags=["parameters"]
-# AlgoSeek preserves historical tickers — for 2020 the Meta entry is "FB"
-# (the symbol change to "META" landed in mid-2022). load_nasdaq100_bars will
-# return zero rows for "META" on 2020 dates.
 SYMBOLS = ["AMD", "AMZN", "FB"]
 START_DATE = "2020-01-01"
 END_DATE = "2020-12-31"
@@ -190,10 +203,12 @@ for sym, color in zip(SYMBOLS, sym_colors):
 ax.axhline(0.5, color=COLORS["neutral"], ls="--", lw=0.8)
 ax.set_xlabel("Jump share of realized variance (%)")
 ax.set_ylabel("Cumulative fraction of symbol-days")
-ax.set_title("Jumps explain little realized variance on most symbol-days")
+ax.set_title("Jump share of realized variance, by symbol")
 ax.legend(title="Symbol")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "A cumulative distribution curve per symbol, stepping from zero to one, plotting the share of a symbol-day's realized variance attributed to jumps along the horizontal axis against the fraction of symbol-days at or below it, with a dashed horizontal line at the median.",
+)
 
 # %% [markdown]
 # Annualized, BV gives the continuous-volatility floor of each name and
@@ -292,9 +307,14 @@ def lee_mykland_jumps_session(rets: pl.DataFrame, k: int, threshold: float) -> p
     return pl.concat(sessions)
 
 
+# %% [markdown]
+# The threshold depends on how many bars a session holds, because testing more bars gives
+# more chances for a large return to appear by accident. It is computed once from the
+# median session length so that every bar in the study is tested against the same
+# threshold, rather than a symbol with a slightly longer session facing a slightly
+# harder test.
+
 # %%
-# Multiple-testing constants depend on bars per session; computed once across
-# all (symbol, date) groups so every bar is tested against the same threshold.
 n_per_session = returns.group_by(["symbol", "date"]).len()["len"].to_numpy()
 N_PER_SESSION = int(np.median(n_per_session))
 threshold_used = gumbel_threshold(N_PER_SESSION, JUMP_ALPHA)
@@ -336,12 +356,11 @@ for sym, color in zip(SYMBOLS, sym_colors):
     axes[0].hist(counts, bins=range(0, int(counts.max()) + 2), alpha=0.5, label=sym, color=color)
 axes[0].set_xlabel("Lee–Mykland jumps per day (count)")
 axes[0].set_ylabel("Trading days")
-axes[0].set_title("Most days see only a handful of jumps")
+axes[0].set_title("Lee-Mykland jumps detected per trading day")
 axes[0].legend(title="Symbol")
 
-# Q-Q of standardized returns: all vs jump-filtered. sigma_local is NaN for
-# the first LEE_MYKLAND_K-1 bars of each session (no within-session window
-# yet), so division yields NaN — filter explicitly.
+# Local volatility is undefined for the first bars of each session, before the window
+# has filled, so those returns standardize to NaN and are dropped explicitly.
 all_z_raw = (flagged["log_return"] / flagged["sigma_local"]).to_numpy()
 all_z = all_z_raw[np.isfinite(all_z_raw)]
 filt = flagged.filter(~pl.col("is_jump"))
@@ -360,10 +379,12 @@ axes[1].set_xlim(-4, 4)
 axes[1].set_ylim(-8, 8)
 axes[1].set_xlabel("Theoretical quantile, N(0,1) (std. dev.)")
 axes[1].set_ylabel("Empirical quantile (std. dev.)")
-axes[1].set_title("Removing flagged jumps pulls the return tails back to normal")
+axes[1].set_title("Standardized returns against the normal, with and without flagged jumps")
 axes[1].legend()
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels. The left is an overlaid histogram, one series per symbol, of how many jumps were detected per trading day. The right is a quantile-quantile plot of standardized returns against the standard normal, with one series for all returns and another for returns with flagged jumps removed, and a dashed forty-five degree reference line.",
+)
 
 # %% [markdown]
 # ## 5. Jumps cluster in time of day
@@ -411,11 +432,13 @@ ax.bar(
 )
 ax.set_xlabel("Hour of day (ET)")
 ax.set_ylabel("Jumps per 1,000 bars")
-ax.set_title("The jump rate rises into the close of the trading session")
+ax.set_title("Jump rate by time of day")
 ax.axvspan(9.5, 10.0, alpha=0.12, color=COLORS["neutral"])
 ax.axvspan(15.5, 16.0, alpha=0.12, color=COLORS["neutral"])
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "A chart of the rate at which jumps are detected against time of day across the trading session.",
+)
 
 # %% [markdown]
 # ## 6. Variance decomposition over the year
@@ -441,10 +464,12 @@ ax.fill_between(
 )
 ax.set_xlabel("Date (2020)")
 ax.set_ylabel("Daily realized variance (sum of squared log returns)")
-ax.set_title(f"{SYMBOLS[0]}: jump variance is episodic while diffusion runs steady")
+ax.set_title(f"{SYMBOLS[0]}: daily jump and diffusive variance over time")
 ax.legend()
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two series over time for one symbol: the daily variance attributed to jumps and the daily variance attributed to continuous diffusion, on the same axis.",
+)
 
 # %% [markdown]
 # ## 7. Why the local-volatility adjustment matters
@@ -499,10 +524,12 @@ ax.set_xticks(x)
 ax.set_xticklabels(syms)
 ax.set_xlabel("Symbol")
 ax.set_ylabel("Flagged bars (count)")
-ax.set_title("The fixed-threshold rule both misses and over-fires against Lee–Mykland")
+ax.set_title("Bars flagged by a fixed return threshold against Lee-Mykland")
 ax.legend()
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "A comparison of which bars two rules flag as jumps: a fixed return threshold and the Lee-Mykland test, showing where they agree and where each fires alone.",
+)
 
 # %% [markdown]
 # ## 8. Materialize the jump-feature panel
