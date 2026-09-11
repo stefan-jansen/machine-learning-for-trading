@@ -25,18 +25,27 @@ def test_value_area_is_40_percent_and_contains_poc():
     assert sum(profile["volume_by_price"].values()) == 190
 
 
-def test_value_area_expands_one_adjacent_bin_at_a_time():
+def test_value_area_expands_both_equidistant_sides_together():
     bars = pl.DataFrame(
         {
             "price": [99.5, 99.75, 100.0, 100.25, 100.5],
-            "volume": [1, 40, 100, 30, 1],
+            "volume": [1, 40, 100, 100, 1],
         }
     )
 
     profile = build_rth_profile(bars, value_area_fraction=0.80)
 
     assert profile["val"] == 99.75
-    assert profile["vah"] == 100.0
+    assert profile["vah"] == 100.25
+
+
+def test_value_area_expansion_uses_available_side_at_price_range_edge():
+    bars = pl.DataFrame({"price": [100.0, 100.25], "volume": [100, 80]})
+
+    profile = build_rth_profile(bars, value_area_fraction=0.90)
+
+    assert profile["val"] == 100.0
+    assert profile["vah"] == 100.25
 
 
 def test_lvn_zones_are_contiguous_low_volume_bins():
@@ -64,8 +73,8 @@ def test_attach_uses_only_previous_fully_closed_rth_session():
                 datetime(2026, 1, 6, 14, 35, tzinfo=timezone.utc),
             ],
             "timestamp_ny": [
-                datetime(2026, 1, 5, 9, 30),
-                datetime(2026, 1, 5, 9, 35),
+                datetime(2026, 1, 5, 15, 55),
+                datetime(2026, 1, 5, 15, 55),
                 datetime(2026, 1, 6, 9, 30),
                 datetime(2026, 1, 6, 9, 35),
             ],
@@ -99,6 +108,11 @@ def test_current_day_later_rth_bars_cannot_change_attached_profile():
                 datetime(2026, 1, 6).date(),
                 datetime(2026, 1, 6).date(),
             ],
+            "timestamp_ny": [
+                datetime(2026, 1, 5, 15, 55),
+                datetime(2026, 1, 6, 9, 30),
+                datetime(2026, 1, 6, 15, 55),
+            ],
             "session_type": ["rth"] * 3,
             "close": [100.0, 200.0, 300.0],
             "volume": [100, 1, 10000],
@@ -109,6 +123,61 @@ def test_current_day_later_rth_bars_cannot_change_attached_profile():
     result = attach_previous_rth_profile(bars)
 
     assert result["previous_poc"].to_list() == [None, 100.0, 100.0]
+
+
+def test_partial_prior_rth_session_is_not_used_as_previous_profile():
+    bars = pl.DataFrame(
+        {
+            "session_date": [
+                datetime(2026, 1, 5).date(),
+                datetime(2026, 1, 6).date(),
+            ],
+            "timestamp_ny": [
+                datetime(2026, 1, 5, 15, 50),
+                datetime(2026, 1, 6, 9, 30),
+            ],
+            "session_type": ["rth", "rth"],
+            "close": [100.0, 200.0],
+            "volume": [100, 1],
+            "bar_closed": [True, True],
+        }
+    )
+
+    result = attach_previous_rth_profile(bars)
+
+    assert result["previous_profile_date"].to_list() == [None, None]
+
+
+def test_non_rth_rows_do_not_become_profiles():
+    bars = pl.DataFrame(
+        {
+            "session_date": [datetime(2026, 1, 5).date(), datetime(2026, 1, 6).date()],
+            "timestamp_ny": [datetime(2026, 1, 5, 15, 55), datetime(2026, 1, 6, 9, 30)],
+            "session_type": ["overnight", "rth"],
+            "close": [100.0, 200.0],
+            "volume": [100, 1],
+            "bar_closed": [True, True],
+        }
+    )
+
+    result = attach_previous_rth_profile(bars)
+
+    assert result["previous_profile_date"].to_list() == [None, None]
+
+
+def test_missing_session_metadata_is_rejected():
+    bars = pl.DataFrame(
+        {
+            "session_date": [datetime(2026, 1, 5).date()],
+            "session_type": ["rth"],
+            "close": [100.0],
+            "volume": [100],
+            "bar_closed": [True],
+        }
+    )
+
+    with pytest.raises(ValueError, match="timestamp_ny"):
+        attach_previous_rth_profile(bars)
 
 
 @pytest.mark.parametrize("fraction", [0.0, -0.1, 1.1])

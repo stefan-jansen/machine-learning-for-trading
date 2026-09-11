@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, time
 from typing import Any
 
 import polars as pl
 
 
 MNQ_TICK_SIZE = 0.25
+# LVN detection uses the 20th percentile as a fixed, strict-below threshold.
 LVN_PERCENTILE = 0.20
+# Task 1 timestamps identify bar starts; a 5-minute bar starting at 15:55 ends at 16:00 ET.
+RTH_FINAL_BAR_START = time(15, 55)
 
 
 def _validate_profile_input(frame: pl.DataFrame) -> None:
@@ -42,6 +45,7 @@ def _percentile(values: list[float], fraction: float) -> float:
 
 
 def _find_lvn_zones(volume_by_price: dict[float, float]) -> list[dict[str, float]]:
+    """Return contiguous bins strictly below the linearly interpolated 20th percentile."""
     threshold = _percentile(list(volume_by_price.values()), LVN_PERCENTILE)
     low_bins = [price for price, volume in volume_by_price.items() if volume < threshold]
     zones: list[dict[str, float]] = []
@@ -79,17 +83,17 @@ def build_rth_profile(
     included_indices = {poc_index}
     included_volume = volume_by_price[poc]
     while included_volume < target_volume and len(included_indices) < len(ordered_prices):
-        boundary_indices = {
-            index
-            for index in (min(included_indices) - 1, max(included_indices) + 1)
-            if 0 <= index < len(ordered_prices)
-        }
-        selected_index = min(
-            boundary_indices,
-            key=lambda index: (-volume_by_price[ordered_prices[index]], ordered_prices[index]),
-        )
-        included_indices.add(selected_index)
-        included_volume += volume_by_price[ordered_prices[selected_index]]
+        left = min(included_indices) - 1
+        right = max(included_indices) + 1
+        if left >= 0 and right < len(ordered_prices):
+            included_indices.update((left, right))
+            included_volume += volume_by_price[ordered_prices[left]] + volume_by_price[ordered_prices[right]]
+        elif left >= 0:
+            included_indices.add(left)
+            included_volume += volume_by_price[ordered_prices[left]]
+        elif right < len(ordered_prices):
+            included_indices.add(right)
+            included_volume += volume_by_price[ordered_prices[right]]
 
     included_prices = [ordered_prices[index] for index in included_indices]
 
@@ -105,13 +109,20 @@ def build_rth_profile(
 
 def attach_previous_rth_profile(bars: pl.DataFrame) -> pl.DataFrame:
     """Attach the profile from the prior fully closed RTH session without leakage."""
-    required = {"session_date", "session_type", "close", "volume", "bar_closed"}
+    required = {"session_date", "session_type", "timestamp_ny", "close", "volume", "bar_closed"}
     missing = sorted(required - set(bars.columns))
     if missing:
         raise ValueError(f"required MNQ contract columns missing: {', '.join(missing)}")
 
     profiles: dict[date, dict[str, Any]] = {}
     rth = bars.filter((pl.col("session_type") == "rth") & pl.col("bar_closed"))
+    eligible_dates = (
+        rth.filter(pl.col("timestamp_ny").dt.time() == RTH_FINAL_BAR_START)
+        .get_column("session_date")
+        .unique()
+        .to_list()
+    )
+    rth = rth.filter(pl.col("session_date").is_in(eligible_dates))
     for session_date in rth.get_column("session_date").unique().sort().to_list():
         session_bars = rth.filter(pl.col("session_date") == session_date).select(
             pl.col("close").alias("price"), "volume"
