@@ -1274,7 +1274,7 @@ fig.update_yaxes(
 )
 show_plotly_with_alt(
     fig,
-    "A heatmap of PSI by feature and quarter on a logarithmic colour scale, with the crisis quarter far darker than the rest across every feature.",
+    "Four panels sharing a quarterly horizontal axis: mean PSI, cross-validated AUC from the domain classifier, maximum PSI, and the resulting alert state. Both PSI panels peak in the second quarter shown and fall back after it while staying above their two dashed thresholds, the AUC bars clear their thresholds in each of the four quarters, and each of the four alert markers sits in the drift state.",
 )
 
 # %% [markdown]
@@ -1491,7 +1491,7 @@ fig.update_xaxes(title_text="Market window", tickangle=-30, row=1, col=2)
 fig.update_yaxes(title_text="Cross-validated AUC", range=[0, 1], row=1, col=2)
 show_plotly_with_alt(
     fig,
-    "A heatmap of PSI by crypto feature and comparison window on a logarithmic scale, with the collapse window standing out sharply from the bull-market ones.",
+    "Two panels side by side over the same market windows. On the left a heatmap of PSI by crypto feature, with the two lower feature rows carrying the strongest colour and the bottom row strongest in the later windows; on the right the cross-validated domain AUC per window as bars against two dashed thresholds, the first bar below the upper threshold and the rest above both.",
 )
 
 # %% [markdown]
