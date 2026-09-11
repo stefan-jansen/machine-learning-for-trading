@@ -274,10 +274,11 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # checkpoints of one fit rather than across configurations, so it says what more training did to
 # this model rather than what a different model would have done.
 #
-# On a fifteen-minute horizon almost all of the target is noise, so the curve to expect is not a
-# rising one. A curve that climbs and then falls is the model beginning to fit the training
-# window; one that never rises is the architecture finding nothing this target rewards, which is
-# a result rather than a failure.
+# On a fifteen-minute horizon almost all of the target is noise, so the coefficient is small by
+# construction and the figure is drawn to show how it behaves across checkpoints rather than what
+# level it reaches. What more training did to this fit is a result: it belongs in the tagged cell
+# below, and the comparison against the other architectures belongs in
+# [`13_model_analysis`](13_model_analysis.ipynb).
 
 # %% tags=["results"]
 # Scoped to this population's own members. `catalog_rows` is the study's whole prediction
