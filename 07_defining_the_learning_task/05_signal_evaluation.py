@@ -490,9 +490,9 @@ show_plotly_with_alt(
         "longer navy mean is flatter still and stays inside about half that. Neither "
         "settles at a level away from zero anywhere in the sample. The right panel is a "
         "histogram of the same "
-        "daily values: a broad, roughly symmetric bell centred on zero, running from about "
-        "minus 0.8 to plus 0.8 with a peak count near 570, and a dashed red line marking "
-        "the mean sitting essentially on zero."
+        "daily values: a broad, roughly symmetric bell centred on zero and running out to "
+        "about plus and minus 0.8, with a dashed red line marking the mean sitting "
+        "essentially on the zero gridline."
     ),
 )
 
@@ -739,9 +739,9 @@ show_plotly_with_alt(
         "days. The left panel plots mean IC: the one-day and five-day bars hang below "
         "zero in amber, the five-day the longer of the two, and the twenty-one-day bar "
         "rises just above zero in navy. The whole vertical range spans less than one "
-        "hundredth of a correlation unit. The right panel plots ICIR on an axis reaching "
-        "0.5, where a dashed reference line sits; all three bars are so close to zero that "
-        "they read as a flat line along the axis, far below that reference."
+        "hundredth of a correlation unit. The right panel plots ICIR on an axis whose top "
+        "is a dashed reference line; all three bars are so close to zero that they read as "
+        "a flat line along the baseline, nowhere near that reference."
     ),
 )
 
@@ -1200,11 +1200,11 @@ show_plotly_with_alt(
     alt=(
         "Two panels covering the eight walk-forward test folds, whose start dates run "
         "from early 2012 to late 2013. The left panel is a bar per fold: seven bars stand "
-        "above zero in navy, the tallest reaching about 0.21, and one amber bar hangs "
-        "below zero at roughly minus 0.04. A dashed line marks the mean of the folds at "
-        "0.064, and a dotted line marks zero. The right panel is a histogram of those "
-        "eight values, sparse by construction, with most of the mass between zero and "
-        "0.1 and a single isolated bar out near 0.2."
+        "above zero in navy and one amber bar hangs below it, the negative fold being much "
+        "the shortest of the eight. A dashed line marks the fold mean, well above zero, "
+        "and a dotted line marks zero itself. The right panel is a histogram of those "
+        "eight values, sparse by construction, with most of the mass just above zero and a "
+        "single isolated bar far to the right."
     ),
 )
 
@@ -1387,10 +1387,9 @@ show_plotly_with_alt(
     fig,
     alt=(
         "A histogram of the block-permutation null for mean IC over the fold dates, drawn "
-        "in slate. It is a symmetric bell centred on zero, running from about minus 0.045 "
-        "to plus 0.045, with a peak count near 150. A solid red vertical line marks the "
-        "observed mean IC of 0.0637, standing well clear of the right-hand edge of the "
-        "null with no permuted value anywhere near it."
+        "in slate. It is a symmetric bell centred on zero, running out to roughly plus and "
+        "minus 0.045. A solid red vertical line marks the observed mean IC, standing well "
+        "clear of the right-hand edge of the null with no permuted value anywhere near it."
     ),
 )
 
@@ -1651,10 +1650,10 @@ show_plotly_with_alt(
     alt=(
         "Two panels. The left panel plots the ROC curve against the dashed random-guess "
         "diagonal; the two are indistinguishable, the solid curve tracing the diagonal "
-        "from corner to corner, and the legend reports an area under the curve of 0.498. "
-        "The right panel plots precision against recall: the curve is flat at about 0.59 "
-        "across the whole recall range and sits on the dashed prevalence line at 59.3%, "
-        "with an area of 0.590. Neither panel shows the score separating the classes."
+        "from corner to corner, and the legend reports its area. The right panel plots "
+        "precision against recall: the curve is flat across the whole recall range and "
+        "sits on the dashed prevalence line, which the annotation labels with the base "
+        "rate. Neither panel shows the score separating the classes."
     ),
 )
 
