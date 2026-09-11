@@ -1245,6 +1245,140 @@ def build_cot(source: Path, output: Path) -> list[Path]:
     return written
 
 
+# --- SEC filings, XBRL fundamentals and Form 4 --------------------------------
+#
+# Four fixtures that share a producer -- `data/equities/fundamentals/` and
+# `data/equities/positioning/form4_download.py` -- and the loaders in
+# `data/equities/loader.py` that read them.
+#
+# Three are production verbatim. Production's own SEC corpora are already the size
+# a fixture wants (the sp100 reference panels are one row per filing with the text
+# attached, the XBRL panel covers 20 CIKs), so a reduction would remove rows a
+# reader can see for no saving. The fourth, the sp500 10-Q panel, is 477 symbols in
+# production and is cut to the 13 the fixture carries.
+#
+# `equities/fundamentals/xbrl/filing_dates/` is not declared here. It is
+# `xbrl_download.py`'s own HTTP cache of accession -> filing_date, written and read
+# by that script alone; no loader, notebook or test opens it. It is deleted from
+# the fixture rather than declared.
+
+SEC_10K_REFERENCE = (
+    Path("equities") / "fundamentals" / "10k" / "sp100" / "reference" / "all_10k_filings.parquet"
+)
+SEC_8K_REFERENCE = (
+    Path("equities") / "fundamentals" / "8k" / "sp100" / "reference" / "all_8k_filings.parquet"
+)
+SEC_10Q_REFERENCE = (
+    Path("equities") / "fundamentals" / "10q" / "sp500" / "reference" / "all_10q_filings.parquet"
+)
+# The 13 the fixture carries. `load_sp500_10q_mda` takes an optional symbol filter
+# and defaults to all of them, so this list is what the fixture's readers see.
+SEC_10Q_SYMBOLS = (
+    "AAPL",
+    "AMZN",
+    "GOOG",
+    "GOOGL",
+    "JNJ",
+    "MSFT",
+    "NVDA",
+    "PG",
+    "TSLA",
+    "UNH",
+    "V",
+    "WMT",
+    "XOM",
+)
+XBRL_FUNDAMENTALS = Path("equities") / "fundamentals" / "xbrl" / "fundamentals.parquet"
+FORM4_DIR = Path("equities") / "positioning" / "form4"
+
+
+def _copy_verbatim(source: Path, output: Path, relative: Path, download: str) -> Path:
+    """Copy one production file into the fixture, unchanged."""
+    src = source / relative
+    if not src.exists():
+        raise FileNotFoundError(f"{relative} not found at {src}. Fetch it with {download}.")
+    dst = output / relative
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst)
+    return dst
+
+
+def build_sec_filing_references(source: Path, output: Path) -> list[Path]:
+    """Copy the sp100 10-K and 8-K panels whole; cut the sp500 10-Q panel to 13 symbols."""
+    download = "data/equities/fundamentals/filings_download.py"
+    written: list[Path] = []
+    for relative, form in ((SEC_10K_REFERENCE, "10-K"), (SEC_8K_REFERENCE, "8-K")):
+        dst = _copy_verbatim(source, output, relative, f"{download} --form {form} --universe sp100")
+        frame = pl.read_parquet(dst)
+        print(
+            f"    {relative.name}: {frame.height:,} filings, "
+            f"{frame['symbol'].n_unique()} symbols, copied verbatim"
+        )
+        written.append(dst)
+
+    src = source / SEC_10Q_REFERENCE
+    if not src.exists():
+        raise FileNotFoundError(
+            f"{SEC_10Q_REFERENCE} not found at {src}. Fetch it with "
+            f"{download} --form 10-Q --universe sp500."
+        )
+    frame = pl.read_parquet(src)
+    missing = sorted(set(SEC_10Q_SYMBOLS) - set(frame["symbol"].unique().to_list()))
+    if missing:
+        raise ValueError(
+            f"Production's sp500 10-Q panel carries no filings for {missing}. The fixture "
+            "declares them, so a narrower panel would ship a fixture short of its own budget."
+        )
+    reduced = frame.filter(pl.col("symbol").is_in(SEC_10Q_SYMBOLS))
+    dst = output / SEC_10Q_REFERENCE
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    reduced.write_parquet(dst)
+    print(
+        f"    {SEC_10Q_REFERENCE.name}: {reduced.height:,} of {frame.height:,} filings, "
+        f"{reduced['symbol'].n_unique()} of {frame['symbol'].n_unique()} symbols"
+    )
+    written.append(dst)
+    return written
+
+
+def build_xbrl_fundamentals(source: Path, output: Path) -> list[Path]:
+    """Copy the XBRL quarterly fundamentals panel verbatim."""
+    dst = _copy_verbatim(
+        source, output, XBRL_FUNDAMENTALS, "data/equities/fundamentals/xbrl_download.py"
+    )
+    frame = pl.read_parquet(dst)
+    print(
+        f"    fundamentals.parquet: {frame.height:,} rows, {frame['symbol'].n_unique()} symbols, "
+        "copied verbatim"
+    )
+    return [dst]
+
+
+def build_form4(source: Path, output: Path) -> list[Path]:
+    """Copy every Form 4 XML production carries, verbatim.
+
+    `04_fundamental_alternative_data/03_sec_form4_insider_transactions` enumerates
+    the ticker directories rather than naming one, so the fixture is whatever
+    production holds; it raises if that is nothing.
+    """
+    source_dir = source / FORM4_DIR
+    filings = sorted(source_dir.rglob("*.xml")) if source_dir.is_dir() else []
+    if not filings:
+        raise FileNotFoundError(
+            f"No Form 4 filings under {source_dir}. Fetch them with "
+            "data/equities/positioning/form4_download.py --ticker TSLA --count 20."
+        )
+    written: list[Path] = []
+    for filing in filings:
+        dst = output / FORM4_DIR / filing.relative_to(source_dir)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(filing, dst)
+        written.append(dst)
+    tickers = sorted({filing.relative_to(source_dir).parts[0] for filing in filings})
+    print(f"    form4/: {len(written)} filings for {', '.join(tickers)}, copied verbatim")
+    return written
+
+
 # --- NASDAQ ITCH messages and the ES individual contracts ---------------------
 #
 # Four fixture files under paths that `tests/generate_test_microstructure.py`
@@ -1513,6 +1647,41 @@ DATASETS: tuple[Dataset, ...] = (
         ),
         build=build_cot,
         owns=(COT_DIR,),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="sec_filing_references",
+        description=(
+            "the whole production sp100 10-K and 8-K reference panels, and the "
+            f"sp500 10-Q panel cut to {len(SEC_10Q_SYMBOLS)} symbols"
+        ),
+        build=build_sec_filing_references,
+        # Named individually: each sits in a reference/ directory alongside the
+        # per-filing artifacts filings_download.py writes, which --clean must not take.
+        owns=(SEC_10K_REFERENCE, SEC_8K_REFERENCE, SEC_10Q_REFERENCE),
+        budget={"sp100_10k_8k": "none", "sp500_10q_symbols": list(SEC_10Q_SYMBOLS)},
+        entities={SEC_10Q_REFERENCE.as_posix(): ("symbol", len(SEC_10Q_SYMBOLS))},
+    ),
+    Dataset(
+        name="xbrl_fundamentals",
+        description=(
+            "the whole production XBRL quarterly fundamentals panel, which covers "
+            "20 CIKs and is already fixture-sized"
+        ),
+        build=build_xbrl_fundamentals,
+        # Named individually: filing_dates/ sits beside it and is xbrl_download.py's
+        # own HTTP cache, not a fixture.
+        owns=(XBRL_FUNDAMENTALS,),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="form4",
+        description=(
+            "every Form 4 XML production carries, so the notebook that enumerates "
+            "the ticker directories sees under CI what a reader sees"
+        ),
+        build=build_form4,
+        owns=(FORM4_DIR,),
         budget={"subsample": "none"},
     ),
     Dataset(
