@@ -1,13 +1,18 @@
 # MNQ Baseline Validation Report
 
-**Status:** validation gate complete; research-only
+**Status:** mechanical validation complete; historical MNQ validation blocked; research-only
 
 ## Decision
 
-The Task 7 baseline gate is mechanically validated on the deterministic synthetic fixture.
-The fixture is not historical MNQ data and the results are not historical performance evidence.
-They cannot establish profitability, generalization, or live execution quality. No MES/MGC code
-is added.
+Task 7 mechanical validation is complete on the deterministic synthetic fixture. Historical MNQ
+validation is blocked because the fixture is not historical MNQ data and the checkout has no
+licensed/real MNQ historical sample or approved contract rollover policy. The results are not
+historical performance evidence and cannot establish profitability, generalization, or live
+execution quality.
+
+The MES/MGC extension gate is **NOT CLEARED**. It must remain blocked until an appropriate
+real/licensed MNQ sample and approved rollover policy are available and the MNQ workflow passes
+all stated gate criteria. No MES/MGC code is added.
 
 The checkout contains no licensed or real MNQ historical dataset and no approved MNQ contract
 rollover policy. The fixed sample is therefore the repository fixture
@@ -78,9 +83,26 @@ window so each signal can be evaluated independently.
 
 ## Walk-forward evaluation
 
-`walk_forward_evaluate` was run with three chronological train/test windows. Each window uses
-fixed configuration thresholds; training rows are reporting context only, and test data is not
-used for parameter selection.
+`walk_forward_evaluate` was run as three separate one-window calls: one July call, one September
+call, and one November call. `evaluation.py` rejects overlapping train/test windows when multiple
+windows are passed in one call, so the three regimes are not combined into one multi-window call.
+A separate one-window `walk_forward_evaluate` call was then used for the November holdout. Each
+call uses fixed configuration thresholds; training rows are reporting context only, and test data
+is not used for parameter selection.
+
+The expanding train contexts are intentional and explicit: July uses January-May context,
+September uses January-July context, and November uses January-September context. This records the
+chronological information available before each test segment while preserving the fixed-contract
+selection policy; it does not imply that parameters were fitted from the synthetic context.
+
+The reproducible call sequence is:
+
+```python
+walk_forward_evaluate(bars, [july_window], config)
+walk_forward_evaluate(bars, [september_window], config)
+walk_forward_evaluate(bars, [november_window], config)
+walk_forward_evaluate(bars, [holdout_window], config)
+```
 
 ### Three chronological regimes
 
@@ -94,6 +116,9 @@ used for parameter selection.
 isolated regime because the synthetic one-bar price movement produces `$9.00` gross PnL against
 `$45.00` modeled round-trip costs. This is a synthetic contract result, not a claim about actual
 MNQ transaction costs or tradability.
+
+`average_r` is gross PnL divided by gross stop risk; modeled costs are excluded from the R
+numerator.
 
 Per-setup metrics are identical in each regime because the fixture contains only the `10am`
 setup:
@@ -169,10 +194,11 @@ profitability claim.
 - One generated setup and one trade per regime provide no meaningful statistical sample.
 - The end-of-data close and generated price path are fixture mechanics, not modeled market fills.
 
-## MES/MGC extension gate
+## MES/MGC extension gate (NOT CLEARED)
 
-MES/MGC may be considered only after MNQ passes all of the following gates on an appropriate
-validated sample:
+The MES/MGC extension gate is **NOT CLEARED** by this synthetic report. It cannot be cleared until
+an appropriate real/licensed MNQ sample and approved rollover policy are available and that MNQ
+sample passes all of the following gates:
 
 1. **No lookahead failures:** every chronological evaluation has `lookahead_check == True`, with
    no train/test chronology violation or leakage finding.

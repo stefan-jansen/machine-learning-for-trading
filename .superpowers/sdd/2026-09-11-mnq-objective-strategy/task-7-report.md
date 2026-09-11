@@ -2,8 +2,9 @@
 
 ## Scope and status
 
-Task 7 ran the full repository and strategy validation gate, recorded the deterministic MNQ
-baseline, defined the MES/MGC extension gate, and documented the known limitations.
+Task 7 completed the repository checks and deterministic synthetic mechanics validation, recorded
+the MNQ baseline limitations, defined the MES/MGC extension gate, and documented why historical
+MNQ validation remains blocked.
 
 Changed deliverables:
 
@@ -97,7 +98,19 @@ per-setup metrics, and `lookahead_check`.
 
 The report explicitly separates these mechanical checks from performance evidence. The sample is
 synthetic/research-only and has no licensed or real MNQ history or rollover policy, so its metrics
-are not historical performance and cannot establish profitability.
+are not historical performance and cannot establish profitability. Mechanical validation is
+complete; historical MNQ validation is blocked, and the MES/MGC extension gate is **NOT CLEARED**
+until an appropriate real/licensed MNQ sample and approved rollover policy are available and pass
+the stated gate.
+
+The three chronological regimes were reproduced as three separate one-window
+`walk_forward_evaluate` calls because `evaluation.py` rejects overlapping train/test windows in a
+single multi-window call. A separate one-window call produced the November holdout. The expanding
+train contexts are reported to make the chronological information available before each test
+segment explicit; fixed thresholds mean they were not used for parameter selection.
+
+`average_r` is gross PnL divided by gross stop risk; modeled costs are excluded from the R
+numerator.
 
 ## Extension gate and limitations
 
@@ -118,10 +131,46 @@ absence of real MNQ data and an approved rollover policy.
 
 ## Report and repository checks
 
-Markdown/report consistency checks were run with a local Python assertion script. It verified the
-report path, required headings and limitation/gate phrases, the active configuration hash, the
-three regime labels, the holdout label, and the README report link. No `markdownlint` or
-`markdownlint-cli2` executable was available, so no Markdownlint result is claimed.
+The report-consistency check is reproducible from the repository root with this exact command. It
+verifies the report path, required status/gate/limitation phrases, the active configuration hash,
+the three regime labels, the separate-call wording, the holdout label, and the README report link:
+
+```bash
+uv run python - <<'PY'
+from pathlib import Path
+
+from research.mnq_strategy.config import StrategyConfig
+
+root = Path('.')
+readme = (root / 'README.md').read_text(encoding='utf-8')
+report = (root / 'research/reports/mnq-baseline-validation.md').read_text(encoding='utf-8')
+process = (root / '.superpowers/sdd/2026-09-11-mnq-objective-strategy/task-7-report.md').read_text(encoding='utf-8')
+required_report_phrases = [
+    'mechanical validation complete',
+    'Historical MNQ',
+    'validation is blocked',
+    'MES/MGC extension gate is **NOT CLEARED**',
+    'three separate one-window calls',
+    'average_r',
+    'appropriate real/licensed MNQ sample',
+    'approved rollover policy',
+    'July 2024',
+    'September 2024',
+    'November 2024',
+    'Holdout window',
+    'lookahead_check',
+]
+for phrase in required_report_phrases:
+    assert phrase in report, phrase
+assert 'research/reports/mnq-baseline-validation.md' in readme
+assert '**NOT CLEARED**' in readme
+assert StrategyConfig().config_hash in report
+assert 'separate one-window' in process
+print(f'report consistency: PASS ({len(required_report_phrases)} required phrases; hash/link/call checks passed)')
+PY
+```
+
+No Markdown-specific linter result is claimed.
 
 The following whitespace check was run:
 
@@ -146,3 +195,26 @@ and `docs/superpowers/`.
 
 Only `README.md` and the two Task 7 report files were staged for the concise conventional commit.
 The final status inspection was used to confirm that unrelated existing changes were not staged.
+
+## Final review fix
+
+The final review corrections were applied only to the three permitted files:
+
+- changed the report status and decision from an unqualified completion statement to mechanical
+  validation complete, historical MNQ validation blocked, and MES/MGC gate **NOT CLEARED**;
+- stated that an appropriate real/licensed MNQ sample and approved rollover policy are
+  prerequisites before the MES/MGC gate can clear;
+- documented the three separate one-window regime calls, the separate November holdout call, and
+  the reason for the expanding train contexts;
+- defined `average_r` as gross PnL divided by gross stop risk with modeled costs excluded from the
+  R numerator;
+- recorded the exact reproducible report-consistency assertion command above;
+- aligned the README gate and caveat wording with the blocked historical-validation status.
+
+Post-fix checks:
+
+- `uv run pytest tests/research -q`: `140 passed`, `0 failed`.
+- `uv run python scripts/verify_installation.py`: required checks passed, `149/155`; CUDA was
+  skipped on the CPU-only macOS host and five optional Docker-only packages remained absent.
+- The exact report-consistency command above: `PASS`.
+- `git diff --check`: completed without whitespace errors.

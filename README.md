@@ -375,12 +375,14 @@ credentials, broker/API access, or live market data by default. Its output does 
 profitability or establish live execution quality. The baseline validation report is at
 [research/reports/mnq-baseline-validation.md](research/reports/mnq-baseline-validation.md).
 
-The extension gate is intentionally narrow: MES or MGC work requires no lookahead failures,
-no controlled-backtest risk-limit breaches, stable results across at least three chronological
-regimes, and a holdout report covering costs and drawdown. Each instrument must first supply
-its own point value, tick size, session rules, data-quality checks, and fixed-contract
-configuration validation. No MES/MGC implementation is included here; real MNQ history and a
-rollover policy are also not available in this checkout.
+The synthetic workflow's mechanical validation is complete, but historical MNQ validation is
+blocked: real/licensed MNQ history and an approved rollover policy are not available in this
+checkout. The MES/MGC extension gate is **NOT CLEARED**. MES or MGC work requires an appropriate
+real/licensed MNQ sample and approved rollover policy to be available first, then no lookahead
+failures, no controlled-backtest risk-limit breaches, stable results across at least three
+chronological regimes, and a holdout report covering costs and drawdown. Each instrument must
+also supply its own point value, tick size, session rules, data-quality checks, and fixed-contract
+configuration validation. No MES/MGC implementation is included here.
 
 ### Docker images
 
