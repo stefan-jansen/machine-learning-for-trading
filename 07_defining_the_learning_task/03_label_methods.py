@@ -238,7 +238,7 @@ fig = make_subplots(
         "Distribution of Anchor Differences",
     ],
     row_heights=[0.6, 0.4],
-    vertical_spacing=0.15,
+    vertical_spacing=0.22,
 )
 
 # Raw daily differences (light) with 63-day rolling mean overlay
@@ -300,8 +300,9 @@ show_plotly_with_alt(
         "next-open-to-open 21-day SPY return, 2015 to 2024. The top panel plots the "
         "daily difference as a thin grey line that oscillates within roughly plus or "
         "minus two percent, widening to plus or minus ten percent around the March 2020 "
-        "crash, with an amber 63-day moving average that stays pinned to the zero line "
-        "throughout. The bottom panel is a histogram of the same differences: a tall "
+        "crash, with an amber 63-day moving average that stays close to the zero line, "
+        "its largest departure a shallow dip through 2020 and 2021 that never reaches one "
+        "percent. The bottom panel is a histogram of the same differences: a tall "
         "narrow peak centred on zero, roughly symmetric, with most observations inside "
         "plus or minus two percent and thin tails reaching eight percent."
     ),
@@ -518,7 +519,7 @@ show_plotly_with_alt(
         "Three flat lines across 2015 to 2024 showing the share of ETFs in each "
         "cross-sectional label class on each date. The neutral class sits just under "
         "0.6 and the two extreme classes sit just above 0.2, where they coincide exactly "
-        "and plot as one line. Every line is horizontal apart from a few one-pixel steps "
+        "and plot as one line. The lines are horizontal apart from a few one-pixel steps "
         "around 2016, 2018 and 2019 where the number of ETFs with a forward return "
         "changes and the quintile cut lands on a different count."
     ),
@@ -801,7 +802,8 @@ if "barrier_hit" in labels_tb.columns:
             "take-profit line at 215.25 well above the path and a dashed red stop line at "
             "208.92 well below it. The navy price line wanders between 210 and 213.2 for the "
             "whole twenty-bar window without approaching either barrier, and a copper cross "
-            "marks the exit at the final bar, where the vertical dotted time barrier sits."
+            "marks the exit at the final bar, where the vertical dotted time barrier sits. "
+            "The closest approach is to the stop, roughly a point away near the end."
         ),
     }
 
@@ -1075,7 +1077,7 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     alt=(
-        "Two overlaid histograms on one axis of the average uniqueness of 500 labels "
+        "Two overlaid histograms on one axis of the average uniqueness of the labels "
         "drawn by naive random sampling in slate and by sequential bootstrap in amber, "
         "with a dashed vertical line at each mean. Both are right-skewed over the same "
         "range from about 0.04 to 0.52 with a mode near 0.09, and they overlap almost "
@@ -1319,9 +1321,9 @@ if horizon_col is not None:
         fig,
         alt=(
             "Two panels. The left panel is a histogram of the window length the scan "
-            "selects for each SPY bar, from five to twenty. Counts sit near 100 for every "
-            "window from six to nineteen, with a small rise to about 160 at five and a "
-            "single dominant spike of roughly 800 at twenty, the longest window offered. "
+            "selects for each SPY bar, from five to twenty. The bars are near-level across "
+            "the windows from six to nineteen, a little taller at five, and dwarfed by a "
+            "single dominant spike at twenty, the longest window offered. "
             "The right panel overlays the absolute t-statistic of the selected window for "
             "SPY in navy and for a driftless random walk built from SPY's own demeaned "
             "returns in amber. The two distributions sit almost on top of each other: both "
@@ -1454,8 +1456,9 @@ show_plotly_with_alt(
         "to one, to a bet size on the vertical axis. The dotted slate linear mapping is a "
         "straight line from minus one to plus one crossing zero at a probability of 0.5. "
         "The navy sigmoid at scale five is an S through the same crossing point: steeper "
-        "than the straight line through the middle and flatter at the ends, where it "
-        "reaches only about plus or minus 0.85. The amber discrete mapping is a step that "
+        "than the straight line through the middle and flatter at the ends, where it stops "
+        "short of the full range the linear mapping reaches. The amber discrete mapping is "
+        "a step that "
         "sits at zero below 0.5 and jumps to one above it."
     ),
 )
