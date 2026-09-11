@@ -301,8 +301,8 @@ show_plotly_with_alt(
         "daily difference as a thin grey line that oscillates within roughly plus or "
         "minus two percent, widening to plus or minus ten percent around the March 2020 "
         "crash, with an amber 63-day moving average that stays close to the zero line, "
-        "its largest departure a shallow dip through 2020 and 2021 that never reaches one "
-        "percent. The bottom panel is a histogram of the same differences: a tall "
+        "its largest excursion in either direction too shallow to reach one percent. The "
+        "bottom panel is a histogram of the same differences: a tall "
         "narrow peak centred on zero, roughly symmetric, with most observations inside "
         "plus or minus two percent and thin tails reaching eight percent."
     ),
@@ -1327,10 +1327,10 @@ if horizon_col is not None:
             "The right panel overlays the absolute t-statistic of the selected window for "
             "SPY in navy and for a driftless random walk built from SPY's own demeaned "
             "returns in amber. The two distributions sit almost on top of each other: both "
-            "rise steeply from 1.96, peak between five and seven, and trail off past "
-            "twenty. The dashed red line at 1.96 stands at the extreme left edge of both, "
-            "with almost no mass to its left. A single observation from the driftless path "
-            "falls beyond the plotted range and is noted on the axis."
+            "climb steeply from the left edge of the axis, peak between five and seven, "
+            "and trail off past twenty. The dashed red critical-value line stands at that "
+            "left edge with almost no mass to its left. A single observation from the "
+            "driftless path falls beyond the plotted range and is noted on the axis."
         ),
     )
 
