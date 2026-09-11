@@ -1337,16 +1337,26 @@
   # universe.
   #
   # CANDIDATE_CONFIG is overridden for the reason given under 02: the fixture holds a
-  # different slice of the linear grid. The shipped default, ridge_a100.0, demonstrates
-  # the case the gate exists for - an improvement that is positive and below the
-  # threshold, +0.185 against a required 0.20 on production. The fixture cannot supply
-  # it, and of what it does hold, ridge_a100000.0 is the one that clears the hurdle
-  # (+0.730) while ridge_a10000000.0 misses it by so much that the minimum-effect
-  # threshold does no work. CI therefore exercises the promotion path and production
-  # demonstrates the near miss. Raise this alongside the fixture.
+  # different slice of the linear grid, and ridge_a100.0 is not in it. Production's
+  # default candidate demonstrates the case the gate exists for - an improvement that
+  # is positive and falls short of the required threshold - so what is worth covering
+  # here is the other branch, a candidate that clears all five criteria.
+  #
+  # ridge_a10000000.0 is the one that does. Measured 2026-09-10 against the shipped
+  # fixture at TOP_K: 10, it promotes on +3.49 Sharpe improvement with every similarity
+  # and drawdown criterion met. The previous pin, ridge_a100000.0, does not: it fails on
+  # Sharpe improvement at +0.18 against the required 0.20, which is the same criterion
+  # and the same direction production fails on, so CI was covering the rejection path
+  # twice and the promotion path not at all. Of the fixture's remaining linear configs,
+  # ols is the incumbent and ridge_a0.001 has a registry row whose predictions parquet
+  # was never sampled, so it resolves to nothing.
+  #
+  # Nothing asserts the verdict, in this notebook or in the harness, so a fixture rebuild
+  # that moves either model's predictions will silently change which branch CI covers.
+  # Re-measure both configs when the fixture is rebuilt.
   parameters:
     TOP_K: 10
-    CANDIDATE_CONFIG: ridge_a100000.0
+    CANDIDATE_CONFIG: ridge_a10000000.0
   timeout: 300
 26_mlops_governance/04_circuit_breakers:
   timeout: 300

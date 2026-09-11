@@ -158,15 +158,19 @@ class PredictionIdentity:
 
 
 # %% [markdown]
-# The connection is opened read-only and immutable. Reviewing a candidate reads the case
-# study's result record and must not be able to write to it, and SQLite will enforce that if
-# it is asked to.
+# The connection is opened read-only, by `mode=ro` on the URI and `PRAGMA query_only` on the
+# connection. Reviewing a candidate reads the case study's result record and must not be able
+# to write to it, and SQLite will enforce that if it is asked to. The URI deliberately leaves
+# out `immutable=1`, which promises something else: that the database cannot change while it
+# is open. The registry is what every sweep writes to, and an immutable connection skips
+# locking and ignores the write-ahead log, so it reads whatever the main file held before the
+# most recent writes - a superseded row, or a table that appears not to exist.
 
 
 # %%
 def open_registry_readonly(path: Path) -> sqlite3.Connection:
-    """Open an immutable, query-only SQLite connection."""
-    uri = f"file:{path.resolve()}?mode=ro&immutable=1"
+    """Open a read-only, query-only SQLite connection."""
+    uri = f"file:{path.resolve()}?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
     connection.execute("PRAGMA query_only=ON")
     return connection
