@@ -73,6 +73,8 @@ from utils.style import (  # importing utils.style sets the ml4t Plotly template
 # %% tags=["parameters"]
 SEED = 42
 START_DATE = "2015-01-01"
+# The cut the volume figure draws and the spike diagnostic applies, in z-score units.
+VOLUME_SPIKE_CUT = 2.0
 
 # %% [markdown]
 # ## Feature Discovery with ml4t-engineer
@@ -367,18 +369,37 @@ show_plotly_with_alt(
         "close against its 21-day simple moving average: a dip in March and April, then a "
         "climb to the end of the year. The middle panel fills the raw distance between the "
         "two in dollars around a dashed zero line, reaching about minus 55 dollars at the "
-        "April low and plus 30 in June. The bottom panel fills the same distance divided by "
-        "ATR, in a teal that tracks the middle panel's shape exactly but on an axis running "
-        "roughly minus 4.5 to plus 3 rather than in dollars."
+        "April low and plus 35 in May. The bottom panel fills the same distance divided by "
+        "ATR, in a teal that keeps the middle panel's sign and zero crossings on an axis "
+        "running about minus 4.8 to plus 3.2 rather than in dollars, but with the peaks at "
+        "different heights: its deepest trough is the April low as in the middle panel, "
+        "while its highest point is in September rather than May."
     ),
 )
 
+# %%
+# What the ATR divisor does to the curve, rather than what it is assumed to do.
+_win = ma_df.tail(n)
+_atr, _raw, _scaled = _win["atr_21"], _win["ma_dist_raw"], _win["ma_dist_scaled"]
+print(
+    f"ATR(21) over the window: {_atr.min():.2f} to {_atr.max():.2f}, a {_atr.max() / _atr.min():.1f}x spread"
+)
+print(f"days the two panels agree on sign: {(_raw.sign() == _scaled.sign()).mean():.3f}")
+print(f"largest positive distance in dollars:   {_win['timestamp'][_raw.arg_max()]}")
+print(f"largest positive distance in ATR units: {_win['timestamp'][_scaled.arg_max()]}")
+
 # %% [markdown]
-# The middle and bottom panels have the same shape because they are the same quantity; only
-# the unit differs. That is the point of the scaling. A dollar distance cannot be compared
-# across assets - it is larger for a more expensive one and larger again for a more volatile
-# one - while a distance in ATR units says how far the price has moved relative to how far
-# it usually moves, which means the same thing on any instrument.
+# The bottom panel keeps the middle panel's sign on every day of the window and crosses zero
+# on the same dates, but it is not the same curve redrawn. ATR itself moves over the window by
+# the spread printed above, so each day is divided by a different number and the relative
+# heights change: the largest positive distance in dollars and the largest in ATR units fall
+# in different months, because a smaller dollar move during a quiet stretch is the larger one
+# once measured against that stretch's typical range.
+#
+# That is what the scaling is for. A dollar distance cannot be compared across assets or
+# across regimes - it is larger for a more expensive instrument and larger again for a more
+# volatile one - while a distance in ATR units says how far the price has moved relative to
+# how far it usually moves, which means the same thing on any instrument.
 
 
 # %% [markdown]
@@ -910,8 +931,8 @@ fig.add_trace(
     col=1,
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=3, col=1)
-fig.add_hline(y=2, line_dash="dash", line_color=COLORS["negative"], row=3, col=1)
-fig.add_hline(y=-2, line_dash="dash", line_color=COLORS["negative"], row=3, col=1)
+fig.add_hline(y=VOLUME_SPIKE_CUT, line_dash="dash", line_color=COLORS["negative"], row=3, col=1)
+fig.add_hline(y=-VOLUME_SPIKE_CUT, line_dash="dash", line_color=COLORS["negative"], row=3, col=1)
 
 fig.update_yaxes(title_text="Price ($)", row=1, col=1)
 fig.update_yaxes(title_text="Rel. volume (×avg)", row=2, col=1)
@@ -932,11 +953,32 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# The two lower panels carry the same information in different units, and the z-score is
-# the one that gives a threshold a fixed meaning. Relative volume is a ratio, so what
-# counts as a spike depends on how dispersed that ratio is for the asset in hand; a
-# z-score puts the cut at a number of standard deviations, and a rule written against it
-# means the same thing on any instrument.
+# The two lower panels are different transformations, so the same numeric cut does not select
+# the same days. Measure that disagreement rather than assume it away.
+
+# %%
+_v = rel_vol_df.tail(n).drop_nulls(["rel_volume", "volume_zscore"])
+_z_hit = _v["volume_zscore"] > VOLUME_SPIKE_CUT
+_r_hit = _v["rel_volume"] > VOLUME_SPIKE_CUT
+print(f"z-score above the cut:        {_z_hit.sum()} days")
+print(f"relative volume above the cut: {_r_hit.sum()} days")
+print(f"flagged by both:               {(_z_hit & _r_hit).sum()} days")
+_near = _v.filter((pl.col("volume_zscore") - VOLUME_SPIKE_CUT).abs() < 0.1)
+print(
+    f"relative volume on days whose z-score sits at the cut: "
+    f"{_near['rel_volume'].min():.2f} to {_near['rel_volume'].max():.2f}"
+)
+
+# %% [markdown]
+# The two lower panels are not one quantity in two units. Relative volume divides raw volume
+# by its own rolling mean; the z-score standardizes the **logarithm** of volume, which pulls
+# in the long right tail that volume always has. The counts printed above are what that costs:
+# the same numeric cut applied to each selects overlapping but different sets of days, and the
+# relative-volume level corresponding to a z-score at the cut is a range rather than a number.
+#
+# The z-score is the one worth writing a rule against. A cut expressed in standard deviations
+# of log volume means the same thing on an instrument whose volume is more dispersed, while a
+# ratio threshold does not.
 
 # %% [markdown]
 # ### VWAP Distance
@@ -1169,7 +1211,7 @@ risk_df.select(
 # %% [markdown]
 # | Risk Feature | Interpretation | Trading Use |
 # |-------------|----------------|-------------|
-# | **VaR** | Loss the worst tail of days does not exceed, at the configured level | Position sizing threshold |
+# | **VaR** | Loss threshold that the worst tail of days exceeds, at the configured level | Position sizing threshold |
 # | **CVaR** | Expected loss beyond VaR | Tail risk penalty |
 # | **Downside Deviation** | Volatility of negative returns only | Sortino ratio denominator |
 # | **Tail Ratio** | Right tail / left tail size | Asymmetry of return distribution |
