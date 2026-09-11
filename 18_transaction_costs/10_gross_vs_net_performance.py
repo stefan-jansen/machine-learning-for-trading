@@ -27,7 +27,7 @@
 # - Compute net Sharpe under a parameterised cost stack
 # - Compare three archetypes driven by real ETF return series under a common cost stack
 #
-# **Book Reference:** Chapter 18: Section 18.8 (Practical Guardrails: When Costs Kill a Strategy)
+# **Book Reference:** Chapter 18: Section 18.8 (Designing practical cost guardrails)
 #
 # **Prerequisites:** Read [`01_cost_taxonomy`](01_cost_taxonomy.ipynb) for the cost stack and
 # [`09_frequency_tradeoff`](09_frequency_tradeoff.ipynb) for turnover-driven breakeven logic.

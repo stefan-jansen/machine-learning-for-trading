@@ -32,7 +32,7 @@
 # - Quantify how transaction-cost drag, charged at `COST_BPS` per side, separates
 #   high-turnover ML strategies from low-turnover baselines
 #
-# **Book reference**: Section 11.6 - Linear Models Across Nine Case Studies
+# **Book reference**: Section 11.6 - Case study insights
 # (the chapter synthesis paragraph on IC vs net Sharpe).
 #
 # **Prerequisites**

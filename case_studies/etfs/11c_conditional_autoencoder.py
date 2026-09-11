@@ -55,7 +55,7 @@
 #   learning from one that has begun fitting its training window.
 # - Say why the training device is part of a model's identity rather than a note about how it ran.
 #
-# **Book reference**: Chapter 14, Section 14.6 (Nonlinear conditional factor models). Chapter 6,
+# **Book reference**: Chapter 14, Section 14.6 (The conditional autoencoder). Chapter 6,
 # Section 6.7 (Search accounting and run logging) introduces the run log this notebook writes to.
 #
 # **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and

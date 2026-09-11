@@ -46,7 +46,7 @@
 # ## Cross-References
 # - **Upstream**: Chapter 3 (ETF data loading)
 # - **Downstream**: Chapter 16 (factor investing), Chapter 18 (factor-based backtesting)
-# - **Related**: [`02_eigenportfolios`](02_eigenportfolios.ipynb) (stock-level PCA), Section 9.4 (HMM regimes)
+# - **Related**: [`02_eigenportfolios`](02_eigenportfolios.ipynb) (stock-level PCA), Section 9.5 (Regime features)
 #
 # ## Data Source
 # ETF Universe parquet (canonical data, no API calls)

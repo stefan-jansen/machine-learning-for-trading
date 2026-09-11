@@ -28,7 +28,7 @@
 # - Build cross-dataset comparison tables
 # - Export summary DataFrames for downstream notebooks (02–06)
 #
-# **Book Reference**: Chapter 20, Section 20.1 (The Nine Case Studies)
+# **Book Reference**: Chapter 20, Section 20.1 (First-pass results across nine case studies)
 #
 # **Prerequisites**: Case studies must have run Ch16–19 backtests.
 

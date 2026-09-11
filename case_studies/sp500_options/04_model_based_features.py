@@ -60,7 +60,7 @@
 # recorded beside it. There is no `fold` column: what a value was fitted on is decided by the refit
 # schedule in `setup.yaml`, not by which fold reads it.
 #
-# **Book reference**: Chapter 9, Section 9.3 (Volatility Models)
+# **Book reference**: Chapter 9, Section 9.3 (Volatility features)
 #
 # **Prerequisites**: [`02_labels`](02_labels.ipynb),
 # [`03_financial_features`](03_financial_features.ipynb)

@@ -14,11 +14,11 @@ The chapter explains why text classification is not enough once the practitioner
 
 ## Sections
 
-### 22.1 Introduction: The Generative Leap Beyond Feature Extraction
+### 22.1 From Feature Extraction to Generation
 
 This section explains why text classification is not enough once the practitioner's task becomes open-ended analysis rather than fixed-label prediction. It positions LLMs as a shift from extracting features to answering analyst-style questions, but immediately frames hallucination as the central obstacle in finance. Readers should care because it sets up the chapter's core claim: generative AI only becomes usable in high-stakes financial settings when it is grounded in verifiable evidence rather than trusted as an oracle.
 
-### 22.2 The Solution: Grounding LLMs with Retrieval-Augmented Generation
+### 22.2 Grounding LLMs with Retrieval-Augmented Generation
 
 This section introduces RAG as the architectural answer to hallucination and lays out the index, retrieve, generate pipeline in clear engineering terms. It also distinguishes the appealing simplicity of the baseline design from the much harder production reality in financial documents, where naive pipelines fail quickly. Readers should care because this is the conceptual backbone of the chapter: the model is valuable not because it "knows," but because it can synthesize over retrieved evidence.
 
@@ -53,7 +53,7 @@ This section treats RAG as a system that must be measured and debugged, not admi
 - [`04_ragas_evaluation`](04_ragas_evaluation.ipynb) — This notebook implements a finance-oriented evaluation harness that...
 - [`08_rag_security`](08_rag_security.ipynb) — This notebook demonstrates attack and defense evaluation for document-grounded finance assistants, a critical concern when RAG systems operate on untrusted or adversarial document corpora.
 
-### 22.8 From Theory to Practice: Applications and Strategic Choices
+### 22.8 Applications and Strategic Choices
 
 This section anchors the architecture in concrete financial use cases, especially a 10-K due diligence assistant and an ESG analysis comparison. It also gives the clearest strategic boundary in the chapter: fine-tuning is for repeatable label-producing skills, while RAG is for evidence-grounded reasoning over changing documents. Readers should care because this section translates technical design choices into organizational decisions about what kind of AI workflow they are actually building.
 
@@ -61,7 +61,7 @@ This section anchors the architecture in concrete financial use cases, especiall
 - [`06_esg_rag_vs_finetune`](06_esg_rag_vs_finetune.ipynb) — This notebook compares two approaches to ESG (Environmental, Social, Governance) analysis: Uses finbert_pipeline data.
 - [`07_institutional_holdings_graph`](07_institutional_holdings_graph.ipynb) — Build a bipartite institution-stock graph from the 13F holdings artifact and derive co-ownership similarity, institutional momentum, and crowding signals for alpha research.
 
-### 22.9 The Next Frontier: Introduction to Agentic Frameworks
+### 22.9 Introducing Agentic Frameworks
 
 This section positions RAG not as the endpoint, but as one tool inside broader multi-step agent workflows. It introduces the controller, tool, and memory pattern, then shows how grounded document retrieval fits into a larger architecture that may also use code, APIs, and databases. Readers should care because it opens the path from cited question-answering to goal-directed analytical workflows while keeping grounding as a core control mechanism.
 

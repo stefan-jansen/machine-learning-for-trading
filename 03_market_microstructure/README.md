@@ -13,7 +13,7 @@ The chapter explains why market data cannot be treated as a neutral price series
 
 ## Sections
 
-### 3.1 Microstructure: The DNA of Price Formation
+### 3.1 How Microstructure Impacts Price Formation
 
 This section explains why market data cannot be treated as a neutral price series. It shows how spreads, depth, resiliency, order types, and intraday trading regimes shape both execution quality and the meaning of observed trades and quotes. For readers building trading systems, this is the section that turns "price data" into an economic object with frictions, incentives, and timing effects.
 
@@ -54,7 +54,7 @@ This section separates the continuous and jump components of intraday returns us
 
 - [`18_algoseek_jump_detection`](18_algoseek_jump_detection.ipynb) — Decomposes daily realized variance into continuous (bipower) and jump components on AlgoSeek minute bars; applies the Lee–Mykland nonparametric test to time individual jumps with a multiple-testing-correct critical value; compares with a naive |z|>4 rule that misses most jumps because a single daily volatility ignores time-of-day shape; emits a per-symbol-day jump-feature panel.
 
-### 3.6 Data Quality and Sessionization
+### 3.6 Microstructure Data Quality and Sessionization
 
 This section focuses on intraday failure modes that quietly corrupt research: sequencing errors, timestamp confusion, stale quotes, invalid book transitions, bad qualifiers, and session-boundary mistakes. It is especially useful because it frames data quality as invariants and auditability rather than generic cleaning, giving readers a practical QA mindset for microstructure work.
 

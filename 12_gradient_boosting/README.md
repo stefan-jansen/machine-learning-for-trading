@@ -24,7 +24,7 @@ This section gives readers the conceptual bridge from single trees to GBMs. It e
 
 - [`01_ensemble_foundations`](01_ensemble_foundations.ipynb) — Benchmarks RF vs XGBoost/LightGBM/CatBoost on the Chen-Pelger-Zhu academic firm characteristics panel; quantifies the GBM-over-bagging advantage and the small spread across boosting libraries. _Runtime: ~6 min._
 
-### 12.2 The Workhorse: Gradient Boosting Machines
+### 12.2 Gradient Boosting Machines
 
 This is the operational core of the chapter. It explains the shared boosting framework, why GBMs fit tabular financial data so well, and how XGBoost, LightGBM, and CatBoost differ in regularization, speed, categorical handling, GPU behavior, and deployment tradeoffs. It also moves beyond library comparison into decisions practitioners actually face: when ranking matters more than point forecasts, when monotonic constraints improve robustness, and why native feature importance is not enough.
 
@@ -54,7 +54,7 @@ This section positions explainability as part of the model workflow rather than 
 - [`10_shap_nlp_sentiment`](10_shap_nlp_sentiment.ipynb) — SHAP token-level attribution on FinBERT sentiment classification; GPU recommended for transformer inference.
 - [`11_conformal_gbm`](11_conformal_gbm.ipynb) — Conformal prediction intervals for GBM regression (split conformal, QR-conformal, CQR) with empirical coverage diagnostics.
 
-### 12.6 GBMs Across Nine Asset Classes
+### 12.6 Case Study Insights
 
 This section provides the empirical payoff for the chapter. Instead of treating GBMs as abstract best practice, it shows where they help across the book's case studies, where linear models still win, which losses and tree sizes tend to work, how horizon and label design can matter as much as model class, and why validation results remain fragile without holdout confirmation. It gives the chapter its most concrete message: nonlinear models often help, but the real edge often comes from matching model, label, horizon, and evaluation design.
 
