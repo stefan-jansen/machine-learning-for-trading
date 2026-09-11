@@ -590,3 +590,89 @@ def test_the_refusal_runs_after_papermill_injects_its_overrides() -> None:
         "these refuse a reduced canonical run from inside the parameters cell, which papermill "
         f"overwrites after: the guard reads the default and never fires: {too_early}"
     )
+
+
+# `ensure_backtest_spec` normalizes a spec carried forward from an earlier stage rather than
+# building one, and it had no `traded_universe` parameter, so the 21 call sites that reduce a
+# panel on that path - every `*_holdout_backtest`, plus `16_risk_management` and `17_costs`
+# across several case studies - had a reduction that reached `backtest_hash` through nothing
+# (ml4t/agent-workspace#1119). The four tests below hold the same two halves the
+# `build_backtest_spec` group above holds: a declaration gets its own identity, and no
+# declaration is byte-identical to before the parameter existed.
+
+
+def _ensure_kwargs() -> dict:
+    return dict(
+        prices=_prices(["A", "B", "C", "D"]),
+        prediction_hash="pred1",
+        initial_cash=100_000.0,
+    )
+
+
+def _ensure(strategy_spec: dict, **kwargs) -> dict:
+    import case_studies.utils.backtest_loaders as bl
+    from case_studies.utils.backtest_presets import ensure_backtest_spec
+
+    config = bl.get_backtest_config("us_firm_characteristics")
+    return ensure_backtest_spec(
+        "us_firm_characteristics", config, strategy_spec, **_ensure_kwargs(), **kwargs
+    )
+
+
+def test_a_carried_forward_spec_can_declare_the_universe_it_trades() -> None:
+    """The holdout path: the spec is already canonical, so it takes the passthrough branch."""
+    from copy import deepcopy
+
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    without = _ensure(deepcopy(SPEC))
+    declared = _ensure(deepcopy(SPEC), traded_universe=_declaration(["A", "C"]))
+
+    assert "traded_universe" not in without["strategy"]["signal"]
+    assert declared["strategy"]["signal"]["traded_universe"] == _declaration(["A", "C"])
+    assert backtest_hash_from_parts("pred1", without) != backtest_hash_from_parts("pred1", declared)
+
+
+def test_a_projected_spec_can_declare_the_universe_it_trades() -> None:
+    """The other branch: a flat strategy_spec projected into the canonical envelope."""
+    flat = {
+        "signal": {"method": "equal_weight_top_k", "top_k": 2, "long_short": False},
+        "execution": {"mode": "vectorized", "cadence": "daily", "step": 1},
+    }
+    from copy import deepcopy
+
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    without = _ensure(deepcopy(flat))
+    declared = _ensure(deepcopy(flat), traded_universe=_declaration(["A", "C"]))
+
+    assert "traded_universe" not in without["strategy"]["signal"]
+    assert declared["strategy"]["signal"]["traded_universe"] == _declaration(["A", "C"])
+    assert backtest_hash_from_parts("pred1", without) != backtest_hash_from_parts("pred1", declared)
+
+
+def test_ensure_backtest_spec_declaring_nothing_is_what_it_was() -> None:
+    """The compatibility half. All 21 existing call sites pass nothing and must not re-key."""
+    from copy import deepcopy
+
+    from case_studies.utils.backtest_presets import serializable_backtest_spec
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    without = _ensure(deepcopy(SPEC))
+    explicit_none = _ensure(deepcopy(SPEC), traded_universe=None)
+
+    assert serializable_backtest_spec(without) == serializable_backtest_spec(explicit_none)
+    assert backtest_hash_from_parts("pred1", without) == backtest_hash_from_parts(
+        "pred1", explicit_none
+    )
+
+
+def test_two_universes_of_the_same_size_do_not_hash_alike_on_this_path() -> None:
+    """The digest covers the symbol list, so {A, C} and {A, D} are two different portfolios."""
+    from copy import deepcopy
+
+    from case_studies.utils.registry.specs import backtest_hash_from_parts
+
+    ac = _ensure(deepcopy(SPEC), traded_universe=_declaration(["A", "C"]))
+    ad = _ensure(deepcopy(SPEC), traded_universe=_declaration(["A", "D"]))
+    assert backtest_hash_from_parts("pred1", ac) != backtest_hash_from_parts("pred1", ad)
