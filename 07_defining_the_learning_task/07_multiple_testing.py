@@ -1505,13 +1505,13 @@ display(mintrl_df)
 # **Interpretation**: read across a row, not down a column. Every row lengthens as the
 # search widens, and the rows do not lengthen at the same rate.
 #
-# The lowest Sharpe in the table already needs more than a decade of daily data with no
-# search at all, and once even a handful of candidates have been tried it cannot be
-# confirmed at any length - which is what `never` in the table means, the required record
-# growing faster than the evidence a longer record supplies. The next row up is
-# confirmable in a couple of years unsearched, needs longer than a career after a handful
-# of candidates, and reaches `never` after a hundred. Only the top row stays inside a
-# working career all the way across.
+# The lowest-Sharpe row already needs more than a decade of daily data with no search at
+# all, and once even a handful of candidates have been tried it cannot be confirmed at any
+# length - which is what `never` in the table means, the required record growing faster
+# than the evidence a longer record supplies. The next higher Sharpe is confirmable in a
+# couple of years unsearched, needs longer than a career after a handful of candidates,
+# and reaches `never` after a hundred. Only the highest-Sharpe row stays inside a working
+# career all the way across.
 #
 # The columns differ only because the trial Sharpes differ. That is the whole mechanism:
 # the FWER correction prices the *search*, so a search over candidates that all score
