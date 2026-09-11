@@ -482,6 +482,16 @@ def manual_dml_timeseries(
         Keys: theta, se_iid, se_hac, t_stat_iid, t_stat_hac, p_value_hac,
         n_obs, n_periods, hac_maxlags, covariance_type. If return_residuals:
         also Y_res, T_res.
+
+        `covariance_type` is "driscoll_kraay" when groups were supplied,
+        "newey_west" when they were not, and "failed" when the robust
+        covariance did not produce a usable one. On "failed", `se_hac`,
+        `t_stat_hac` and `p_value_hac` are NaN and `hac_maxlags` is 0;
+        `se_iid` still carries the HC0 standard error under its own name.
+        The NaN is deliberate: a fallback that returns HC0 under the name
+        `se_hac` reports a smaller standard error and a smaller p-value than
+        the correct one, and every caller that does not read
+        `covariance_type` takes it for a robust result.
     """
     # Pinned here, where the nuisance models are actually fitted, so that every caller is
     # covered: run_dml_analysis, the six case-study DML stages that call it directly, and
@@ -538,7 +548,11 @@ def manual_dml_timeseries(
             "n_obs": n_valid,
             "n_periods": n_periods,
             "hac_maxlags": 0,
-            "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
+            # Nothing was estimated on this path, so naming the estimator that would
+            # have run reports a success that did not happen. The invariant the whole
+            # dict now holds: `covariance_type == "failed"` exactly when `se_hac` is
+            # not a robust standard error.
+            "covariance_type": "failed",
         }
         if n_valid < 50:
             if return_residuals:
@@ -568,27 +582,84 @@ def manual_dml_timeseries(
         # cross-sectional observations as extra time periods and understates risk.
         # Driscoll-Kraay aggregates the score by decision time and remains robust to
         # general cross-sectional dependence.
-        se_hac = se_iid
-        try:
-            if valid_groups is not None:
-                time_codes = pd.factorize(valid_groups, sort=False)[0]
-                robust = ols_iid.get_robustcov_results(
-                    cov_type="hac-groupsum",
-                    time=time_codes,
-                    maxlags=hac_maxlags,
-                    use_correction="hac",
-                    df_correction=False,
+        #
+        # `covariance_type` is the field a reader and a registry query use to decide what
+        # `se_hac` is, so it is assigned from what happened rather than from which branch
+        # was intended. It used to be set unconditionally at the bottom of this function,
+        # which meant a run that fell back to HC0 still reported a successful
+        # Driscoll-Kraay - and `se_hac` still carried a number, seeded from `se_iid`.
+        # HC0 on an overlapping panel label is the estimator this chain exists to
+        # replace, so that fallback understated the standard error in the direction of
+        # significance under a name that said it was robust.
+        covariance_type = "driscoll_kraay" if groups is not None else "newey_west"
+        se_hac = np.nan
+        if valid_groups is not None and n_periods < 2:
+            # A groupsum HAC over a single decision time is not an estimator: one group
+            # score, no lag structure to estimate. statsmodels does not raise on it - it
+            # returns a variance at the rounding floor. Measured end to end against
+            # this function on `origin/main`, at n_periods = 1 over 60 rows:
+            # se_iid = 0.1237, se_hac = 3.69e-16, t_stat_hac = 2.28e15,
+            # p_value_hac = 2.80e-16, covariance_type = "driscoll_kraay", and
+            # `register_causal_run`'s finiteness check accepted all of it. The
+            # `n_valid >= 50` guard above does not bound this, because sixty entities
+            # sharing one timestamp satisfies it. Two periods is also where the
+            # bandwidth cap becomes self-consistent: `max(1, n_periods // 2)` floors
+            # the bandwidth at one lag even when the sample holds none.
+            covariance_type = "failed"
+            warnings.warn(
+                f"manual_dml_timeseries: Driscoll-Kraay needs at least two decision "
+                f"times; got {n_periods} over {n_valid} rows. Reporting se_hac, "
+                f"t_stat_hac and p_value_hac as NaN; se_iid carries the HC0 standard "
+                f"error under its own name.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        else:
+            try:
+                if valid_groups is not None:
+                    time_codes = pd.factorize(valid_groups, sort=False)[0]
+                    robust = ols_iid.get_robustcov_results(
+                        cov_type="hac-groupsum",
+                        time=time_codes,
+                        maxlags=hac_maxlags,
+                        use_correction="hac",
+                        df_correction=False,
+                    )
+                else:
+                    robust = ols_iid.get_robustcov_results(
+                        cov_type="HAC",
+                        maxlags=hac_maxlags,
+                        use_correction=True,
+                    )
+                cov = robust.cov_params()
+                variance = cov.iloc[1, 1] if hasattr(cov, "iloc") else cov[1, 1]
+                if not np.isfinite(variance) or variance <= 0:
+                    # Raised into the handler below rather than returned, so that a
+                    # covariance which comes back unusable without raising is reported
+                    # the same way as one that raises. Without this the estimator name
+                    # would say driscoll_kraay while se_hac was NaN.
+                    raise ValueError(
+                        f"robust covariance produced a non-positive variance: {variance!r}"
+                    )
+                se_hac = np.sqrt(variance)
+            except (np.linalg.LinAlgError, ValueError) as exc:
+                # Narrow, because `except Exception` also swallowed every programming
+                # error in these lines and degraded it silently to HC0. These two are
+                # what a singular or ill-conditioned fit raises; anything else here is
+                # a defect in this function and propagates.
+                covariance_type = "failed"
+                warnings.warn(
+                    f"manual_dml_timeseries: robust covariance failed "
+                    f"({type(exc).__name__}: {exc}). Reporting se_hac, t_stat_hac and "
+                    f"p_value_hac as NaN; se_iid carries the HC0 standard error under "
+                    f"its own name.",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
-            else:
-                robust = ols_iid.get_robustcov_results(
-                    cov_type="HAC",
-                    maxlags=hac_maxlags,
-                    use_correction=True,
-                )
-            cov = robust.cov_params()
-            se_hac = np.sqrt(cov.iloc[1, 1] if hasattr(cov, "iloc") else cov[1, 1])
-        except Exception:
-            pass  # Fall back to HC0 standard errors on numerical failure
+
+        if covariance_type == "failed":
+            # The bandwidth that was computed is not a bandwidth that was applied.
+            hac_maxlags = 0
 
         t_stat_hac = theta / se_hac if se_hac > 0 else np.nan
         p_value_hac = (
@@ -607,7 +678,7 @@ def manual_dml_timeseries(
             "n_obs": n_valid,
             "n_periods": n_periods,
             "hac_maxlags": hac_maxlags,
-            "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
+            "covariance_type": covariance_type,
         }
 
         if return_residuals:
@@ -1129,7 +1200,12 @@ def format_dml_summary(results: dict) -> str:
         f"Second-stage rows: {dml.get('n_obs', results['n_obs']):,}",
         f"Second-stage decision times: {dml.get('n_periods', results['n_obs']):,}",
         f"Covariance: {dml.get('covariance_type', 'newey_west').replace('_', '-').title()}",
-        f"HAC bandwidth: {hac_lags} lags (max of horizon-1 and cube-root)",
+        (
+            "HAC bandwidth: not applied; the robust covariance did not produce a "
+            "usable estimate and SE (HAC) below is NaN"
+            if dml.get("covariance_type") == "failed"
+            else f"HAC bandwidth: {hac_lags} lags (max of horizon-1 and cube-root)"
+        ),
         "",
         f"Naive OLS rows:    {results.get('naive_n_obs', results['n_obs']):,}",
         f"Naive OLS effect:  {results['naive_effect']:.6f}",
@@ -1860,6 +1936,10 @@ def run_resolved_causal_request(
         n_obs=int(dml["n_obs"]),
         dml_effect=float(dml["theta"]),
         dml_se_hac=float(dml["se_hac"]),
+        # Which estimator that standard error came from. The isfinite guard above means
+        # this path only registers a robust one, but the row could not say which of the
+        # two it was, and a guard is not a record.
+        covariance_type=str(dml["covariance_type"]),
         p_value_hac=float(results["p_value_hac"]),
         naive_effect=float(results["naive_effect"]),
         confounding_bias_pct=float(results["confounding_bias_pct"]),
@@ -2018,6 +2098,9 @@ def register_causal_run(
         n_obs=int(dml_result.get("n_obs", 0)),
         dml_effect=float(dml_result.get("theta", 0.0)),
         dml_se_hac=float(dml_result.get("se_hac", 0.0)),
+        covariance_type=(
+            str(dml_result["covariance_type"]) if "covariance_type" in dml_result else None
+        ),
         p_value_hac=float(p_value_hac) if p_value_hac is not None else None,
         naive_effect=float(results.get("naive_effect", 0.0)),
         confounding_bias_pct=float(results.get("confounding_bias_pct", 0.0)),

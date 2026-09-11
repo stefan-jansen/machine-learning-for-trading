@@ -176,6 +176,13 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     n_obs            INTEGER,
     dml_effect       REAL,
     dml_se_hac       REAL,
+    -- Which estimator produced dml_se_hac: "driscoll_kraay", "newey_west", or
+    -- "failed". Without it the row cannot say what its own standard error is, and
+    -- the two robust estimators differ by whether the caller supplied decision-time
+    -- groups. manual_dml_timeseries used to seed se_hac with the HC0 value and report
+    -- a successful Driscoll-Kraay whatever happened, so a fallback was indistinguishable
+    -- from a robust result in the row, in the p-value, and in the prose.
+    covariance_type  TEXT,
     p_value_hac      REAL,
     naive_effect     REAL,
     confounding_bias_pct REAL,
@@ -918,6 +925,14 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         db, "causal_runs", "refutation_placebo_t_json"
     ):
         db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_placebo_t_json TEXT")
+
+    # Which covariance estimator produced dml_se_hac. Additive and outside the causal
+    # computation specification, so it moves no causal hash and invalidates no registered
+    # row. A row written before this column carries NULL, which is the truthful answer:
+    # nothing recorded it at the time, and the number cannot be re-attributed after the
+    # fact because the fallback returned an HC0 value under the robust name.
+    if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "covariance_type"):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN covariance_type TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:
