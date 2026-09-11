@@ -109,7 +109,12 @@ WORKSPACE: str = ""
 # withholds it where there is nothing to retire, which is what makes one declaration right for
 # both. Passing it as a run-time override instead cannot work: the provenance gate requires the
 # committed notebook to be the source executed clean, so an override-only value is never stamped.
-SUPERSEDES_CAUSAL: str = "6f50892349b9"
+# Retired by this run: the block-permutation refutation now compares the HAC t-statistic
+# rather than the raw effect, so CAUSAL_RUNNER_VERSION moved and every causal identity with
+# it. The rows named here hold a p-value computed on the shrunken placebo effects; this run
+# supersedes them rather than correcting them, because the statistic is different, not the
+# arithmetic. Read out of each registry's current canonical identity per label, 2026-09-10.
+SUPERSEDES_CAUSAL: str = "aa9ef9f7264a"
 
 # %% [markdown]
 # ## 1. Declaring the request
@@ -259,13 +264,20 @@ with pl.Config(tbl_rows=_settled.height, fmt_str_lengths=60):
 # price of the longer block, and it is the right way round: a refutation that under-rejects is a
 # weaker claim, not a false one.
 #
-# **An earlier registered estimate for this label used the shorter of the two.** It permuted the
+# **An estimate registered two generations back used the shorter of the two.** It permuted the
 # treatment in blocks of 21 observations against a construction window of 126, which is close to an
 # independent shuffle of a column whose values are anything but. That narrows the placebo
-# distribution, so its empirical p-value read as more refutation than the evidence supported. The
-# row is retired rather than corrected - the fit was valid for the block it declared, and the block
-# was the wrong one - and `SUPERSEDES_CAUSAL` above names it. Section 4 reads the current
-# diagnostics knowing the previous ones were measured against a null that was too tight.
+# distribution, so its empirical p-value read as more refutation than the evidence supported. It
+# was retired rather than corrected - the fit was valid for the block it declared, and the block
+# was the wrong one - by the run this one supersedes, not by this one.
+#
+# **`SUPERSEDES_CAUSAL` above names that successor**, the 126-block fit, and this run retires it
+# for a different reason: the refutation now compares HAC t-statistics rather than raw effects.
+# Block-permuting the treatment frees it from the controls, so its residual keeps nearly all its
+# variance, and that variance is the denominator of the second-stage effect. Every placebo effect
+# was divided by a larger number than the observed one, which narrowed the placebo distribution in
+# the direction that makes a refutation read as passed. Section 4 reads the current diagnostics
+# knowing both earlier nulls were too tight, for two unrelated reasons.
 
 # %% [markdown]
 # ## 3. Estimating and registering

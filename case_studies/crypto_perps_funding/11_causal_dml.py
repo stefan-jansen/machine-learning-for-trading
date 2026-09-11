@@ -106,19 +106,25 @@ LABEL = "fwd_ret_8h"
 CONFIG_NAME = "dml"
 PREVIEW_REDUCTIONS = {}
 OVERRIDES = {}
-# The causal identity this run retires, empty by default because a reader has nothing to
-# retire. `run_log/` is not shipped, so a first run meets an empty registry, and a
-# predecessor named here that is not in it is rejected at the registering write - after the
-# DML fit and every placebo refit have been paid for.
+# The causal identity this run retires. A reader's clone has nothing to retire - `run_log/` is
+# not shipped, so a first run meets an empty registry - and `causal_supersedes` withholds the
+# declaration against a registry that does not hold it, which is why one committed value is
+# right for both. A predecessor named against a registry that *does* hold rows but not this one
+# is rejected at the registering write, after the DML fit and every placebo refit are paid for.
 #
-# It is still needed on the machine that holds the chain. A causal identity hashes the whole
-# of `case_studies/utils/causal.py`, so any edit to that file moves it, and `CausalResult.one`
-# resolves a label to exactly one canonical identity: a re-run that does not name what it
-# replaces leaves two live and the next notebook fails with "resolved to 2 identities". Pass
-# it for that one-time repair instead of committing it:
-#
-#   papermill 11_causal_dml.ipynb out.ipynb -p SUPERSEDES_CAUSAL <the hash being retired>
-SUPERSEDES_CAUSAL: str = ""
+# The source component of a causal identity is `CAUSAL_RUNNER_VERSION`, a declared integer in
+# `case_studies/utils/causal.py`; nothing hashes the file. So an edit to the estimator moves no
+# identity unless that constant is raised by hand, and an edit that changes a registered value
+# without raising it leaves the next run to hit the cache and serve the old number under new
+# code. Once it is raised, `CausalResult.one` resolves a label to exactly one canonical
+# identity, so a re-run that does not name what it replaces leaves two live and the next
+# notebook fails with "resolved to 2 identities".
+# Retired by this run: the block-permutation refutation now compares the HAC t-statistic
+# rather than the raw effect, so CAUSAL_RUNNER_VERSION moved and every causal identity with
+# it. The rows named here hold a p-value computed on the shrunken placebo effects; this run
+# supersedes them rather than correcting them, because the statistic is different, not the
+# arithmetic. Read out of each registry's current canonical identity per label, 2026-09-10.
+SUPERSEDES_CAUSAL: str = "025f6c2f4e3b"
 
 # %% [markdown]
 # ## 1. Resolve the estimand and the refutation contract
@@ -179,9 +185,9 @@ pl.DataFrame(
 # whole procedure is repeated once per placebo draw.
 #
 # The check below refuses a result whose specification is not the one that was resolved. That is
-# not defensive coding: a causal identity hashes the whole of `case_studies/utils/causal.py`, so an
-# edit to that file mid-run would produce a result describing a contract that no longer exists, and
-# the notebook downstream would resolve the label to two live identities and stop.
+# not defensive coding: the resolved specification carries the estimand, the fold geometry and the
+# refutation contract, and a result that does not match it describes a contract that no longer
+# exists. The notebook downstream would then resolve the label to two live identities and stop.
 
 # %% tags=["results"]
 result = resolved.run()

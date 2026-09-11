@@ -118,21 +118,27 @@ FORCE_RETRAIN = False
 # is the production path. WORKSPACE is the other half: a preview has nowhere else to write.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
-# The three identities this run retires, one per label. Sizing the placebo block by the
-# treatment window rather than the label buffer moves `refutation.block_size`, which is part
-# of the causal identity, so every label resolves to a new hash and the registry refuses a
-# second current identity per label without being told which one it replaces. These are the
-# blocks-of-1/5/21 fits from 2026-08-21, whose p-values this run supersedes rather than
-# corrects: they measured a placebo that had already destroyed the dependence it was meant
-# to preserve.
+# The three identities this run retires, one per label. `CausalResult.one` resolves a label to
+# exactly one canonical identity, so the registry refuses a second without being told which one
+# it replaces.
 #
-# A reader's clone holds no causal rows at all, so `causal_supersedes` withholds these
-# against a registry that does not have them and the reader registers a first identity.
-# That resolution has to happen against the registry rather than by leaving the default
-# empty: `run-production-notebook.sh` executes with no parameter overrides, so a value
-# supplied only at run time could never be stamped.
+# These are the fits that *corrected* the placebo block: sizing it by the treatment window
+# rather than the label buffer, after the blocks-of-1/5/21 fits of 2026-08-21 had measured a
+# placebo that already destroyed the dependence it was meant to preserve. That correction is
+# two generations back and is not what moves the hash here.
+#
+# A reader's clone holds no causal rows at all, so `causal_supersedes` withholds these against
+# a registry that does not have them and the reader registers a first identity. That resolution
+# has to happen against the registry rather than by leaving the default empty:
+# `run-production-notebook.sh` executes with no parameter overrides, so a value supplied only at
+# run time could never be stamped.
+# Retired by this run: the block-permutation refutation now compares the HAC t-statistic
+# rather than the raw effect, so CAUSAL_RUNNER_VERSION moved and every causal identity with
+# it. The rows named here hold a p-value computed on the shrunken placebo effects; this run
+# supersedes them rather than correcting them, because the statistic is different, not the
+# arithmetic. Read out of each registry's current canonical identity per label, 2026-09-10.
 SUPERSEDES_CAUSAL: str = (
-    '{"fwd_ret_1d": "25f8bdd775de", "fwd_ret_5d": "c797f741134a", "fwd_ret_21d": "3547657669ca"}'
+    '{"fwd_ret_1d": "22bbd3a1e04c", "fwd_ret_5d": "66e5787d22e8", "fwd_ret_21d": "633664501fda"}'
 )
 
 # %% [markdown]

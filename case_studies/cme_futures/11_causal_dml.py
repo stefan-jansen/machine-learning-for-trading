@@ -127,7 +127,12 @@ from case_studies.research import supersedes_for
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
 PREVIEW_REDUCTIONS: dict = {}
-SUPERSEDES_CAUSAL: str = ""
+# Retired by this run: the block-permutation refutation now compares the HAC t-statistic
+# rather than the raw effect, so CAUSAL_RUNNER_VERSION moved and every causal identity with
+# it. The rows named here hold a p-value computed on the shrunken placebo effects; this run
+# supersedes them rather than correcting them, because the statistic is different, not the
+# arithmetic. Read out of each registry's current canonical identity per label, 2026-09-10.
+SUPERSEDES_CAUSAL: str = '{"fwd_ret_5d": "4abb82b8141c", "fwd_ret_21d": "ac5c1a480d24"}'
 
 # %% [markdown]
 # ## Resolve the estimands

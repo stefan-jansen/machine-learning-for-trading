@@ -85,21 +85,25 @@ FORCE_RETRAIN = False
 # production path. WORKSPACE is the other half - a preview has nowhere else to write.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
-# Empty because this registry holds no *current* causal identity for the label, not because
-# nothing came before. `b47bd0ec208a` is the capped fit of 2026-08-26 - 37,240 rows, 9.9% of
-# the panel this request resolves - and it was written by the previous notebook under a spec
-# with no `identity_version`, so `current_causal_identities` does not return it and no reader
-# resolves it. There is nothing to retire: it is stranded rather than superseded, and naming it
-# would fail the write for declaring a predecessor that is not current.
+# `b47bd0ec208a` is not the hash named here. That is the capped fit of 2026-08-26 - 37,240
+# rows, 9.9% of the panel this request resolves - written under a spec with no
+# `identity_version`, so `current_causal_identities` does not return it and no reader resolves
+# it. It is stranded rather than superseded, and naming it would fail the write for declaring a
+# predecessor that is not current. `18f777683c40` is the full-panel row that followed it and is
+# current, so that is the one this run retires.
 #
-# Declare the hash here once this run leaves a current identity and a later change moves it -
-# a refit under a changed block size, fold count or population - or registration refuses the
-# write after the fit and all 100 placebo refits have been paid for. `causal_supersedes` then
-# withholds the declaration against a reader's clone, which holds no causal rows at all, so one
-# committed value is right for both. That resolution has to happen against the registry rather
-# than at run time: `run-production-notebook.sh` executes with no parameter overrides, so a
-# value supplied only as an override could never be stamped.
-SUPERSEDES_CAUSAL: str = ""
+# The value has to be resolved against the registry rather than supplied at run time:
+# `run-production-notebook.sh` executes with no parameter overrides, so a hash given only as an
+# override could never be stamped. `causal_supersedes` withholds the declaration against a
+# reader's clone, which holds no causal rows at all, so one committed value is right for both.
+# Get it wrong and registration refuses the write after the fit and all 100 placebo refits have
+# been paid for.
+# Retired by this run: the block-permutation refutation now compares the HAC t-statistic
+# rather than the raw effect, so CAUSAL_RUNNER_VERSION moved and every causal identity with
+# it. The rows named here hold a p-value computed on the shrunken placebo effects; this run
+# supersedes them rather than correcting them, because the statistic is different, not the
+# arithmetic. Read out of each registry's current canonical identity per label, 2026-09-10.
+SUPERSEDES_CAUSAL: str = "18f777683c40"
 
 # %% [markdown]
 # ## Resolve the estimand and analysis population
