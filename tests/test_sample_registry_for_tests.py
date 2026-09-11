@@ -172,16 +172,40 @@ def test_a_registry_without_these_tables_still_samples(tmp_path: Path) -> None:
     assert stats["status"] == "OK"
 
 
+PARAMETERS_CELL = '# %% tags=["parameters"]'
+
+
+def _parameters_cell(notebook_py: Path) -> str | None:
+    """The source of a percent-format notebook's parameters cell, if it declares one.
+
+    Papermill replaces assignments in that cell and nowhere else, so a ``*_CONFIG``
+    defined further down the notebook is not a parameter and must not be read as one.
+    The cell runs from the tagged marker to the next ``# %%`` at the start of a line.
+    """
+    lines = notebook_py.read_text(encoding="utf-8").splitlines()
+    try:
+        opened = lines.index(PARAMETERS_CELL)
+    except ValueError:
+        return None
+    body = lines[opened + 1 :]
+    for offset, line in enumerate(body):
+        if line.startswith("# %%"):
+            return "\n".join(body[:offset])
+    return "\n".join(body)
+
+
 def _pinned_parameters_of(notebook_py: Path) -> tuple[str | None, dict[str, str]]:
     """A notebook's CASE_STUDY_ID and the ``*_CONFIG`` names its parameters cell assigns.
 
-    Both are read as module-level string constants, which is what the parameters cell of
-    a percent-format notebook compiles to and what papermill replaces at run time.
+    Both are read as string constants assigned in that cell, which is what papermill
+    replaces at run time.
     """
-    tree = ast.parse(notebook_py.read_text(encoding="utf-8"))
+    cell = _parameters_cell(notebook_py)
+    if cell is None:
+        return None, {}
     case_study_id: str | None = None
     configs: dict[str, str] = {}
-    for node in tree.body:
+    for node in ast.parse(cell).body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
