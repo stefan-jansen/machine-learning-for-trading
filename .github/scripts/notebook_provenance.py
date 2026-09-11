@@ -453,10 +453,29 @@ def paired_py(nb_path: Path) -> Path | None:
     return cand if cand.exists() else None
 
 
-def git_blob(path: Path) -> str:
-    """git blob SHA-1 of the file's current content (working tree)."""
+def git_blob(path: Path, *, write: bool = False) -> str:
+    """git blob SHA-1 of the file's current content (working tree).
+
+    ``write=True`` also puts the object in the store, and every caller that records the hash
+    **in a stamp** passes it. A stamp names a blob so that a later command can fetch it and
+    compare code cells; hashing without storing writes down the name of something that does
+    not exist yet, and the object only appears when the ``.py`` is staged or committed.
+
+    Until then every command that resolves the stamp fails, and the message it fails with says
+    "Re-run it" - which is the most expensive possible answer to a missing loose object. Two
+    bands hit it the same day on 2026-09-11, and the second form is the one that bites twice:
+    a successful ``sync-prose`` re-stamps to the new blob, so the next sync in the same session
+    refuses on the sha the previous one just wrote. ``nb-run`` executes the working tree, so an
+    executed ``.py`` that was never committed at the version that ran is the normal mid-task
+    state, not an error.
+
+    A comparison does not need the object stored, so ``check`` and ``library_digest`` leave it
+    off rather than writing a loose object per source file on every sweep. An unreferenced blob
+    is pruned by ``git gc`` after its grace period, which is long after the ``.py`` it describes
+    has been committed and made it reachable.
+    """
     return subprocess.run(
-        ["git", "hash-object", str(path)],
+        ["git", "hash-object", *(["-w"] if write else []), str(path)],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -1133,7 +1152,7 @@ def stamp_notebook(
     if not allow_unchanged_outputs and (reason := unwritten_run(nb, py)):
         raise SystemExit(f"refusing to stamp {display_path(nb_path)}: {reason}")
     stamp = {
-        "source_py_blob": git_blob(py),
+        "source_py_blob": git_blob(py, write=True),
         # What the run produced, and the repository code that produced it. Neither is
         # covered by source_py_blob, and each was a way a superseded result reached
         # main with every check green: outputs from an earlier run under an untouched
@@ -1533,8 +1552,12 @@ def sync_prose(nb_path: Path) -> str:
     )
     if old.returncode != 0:
         raise SystemExit(
-            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
-            "so the code cells cannot be compared. Re-run it."
+            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, so "
+            "the code cells cannot be compared. This is NOT a reason to re-run: it means the .py "
+            "that was executed was never stored, which is the normal state for a run against an "
+            "uncommitted working tree. Reconstruct that source, check it hashes to the sha above "
+            "with `git hash-object <file>`, then `git hash-object -w <file>` to put it in the "
+            "store. Stamps written from here on store the blob, so this cannot recur for them."
         )
     # Alt literals are NOT blanked here. This command keeps the outputs, so an alt the
     # output metadata does not carry would be stamped as current while rendering the old
@@ -1596,7 +1619,7 @@ def sync_prose(nb_path: Path) -> str:
         )
     nb = json.loads(nb_path.read_text(encoding="utf-8"))
     stamp = dict(stamp)
-    stamp["source_py_blob"] = git_blob(py)
+    stamp["source_py_blob"] = git_blob(py, write=True)
     stamp["notes"] = (
         f"prose synced from the .py at {datetime.now(UTC).isoformat()} without re-executing; "
         f"every code cell is identical to blob {stamped_blob[:12]}"
@@ -1697,8 +1720,12 @@ def sync_alt(nb_path: Path) -> str:
     )
     if old.returncode != 0:
         raise SystemExit(
-            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
-            "so the code cells cannot be compared. Re-run it."
+            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, so "
+            "the code cells cannot be compared. This is NOT a reason to re-run: it means the .py "
+            "that was executed was never stored, which is the normal state for a run against an "
+            "uncommitted working tree. Reconstruct that source, check it hashes to the sha above "
+            "with `git hash-object <file>`, then `git hash-object -w <file>` to put it in the "
+            "store. Stamps written from here on store the blob, so this cannot recur for them."
         )
     old_source = old.stdout
     before = code_cells_only(_comparable(old_source, blank_alts=True))
@@ -1819,7 +1846,7 @@ def sync_alt(nb_path: Path) -> str:
         )
 
     stamp = dict(stamp)
-    stamp["source_py_blob"] = git_blob(py)
+    stamp["source_py_blob"] = git_blob(py, write=True)
     stamp["notes"] = (
         f"alt text synced from the .py at {datetime.now(UTC).isoformat()} without re-executing; "
         f"every code cell is identical to blob {stamped_blob[:12]} once alt literals are blanked, "

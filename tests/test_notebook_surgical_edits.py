@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -185,3 +186,40 @@ def test_prose_reports_a_cells_tags(tmp_path: Path, capsys: pytest.CaptureFixtur
     args = type("Args", (), {"notebooks": [str(py)], "all": False})()
     notebook_provenance._cmd_prose(args)
     assert 'tags=["results"]' in capsys.readouterr().out
+
+
+# --- the stamped blob has to exist for any of the above to be reachable ---------------
+
+
+def _in_object_store(sha: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", sha], cwd=REPO_ROOT, capture_output=True
+        ).returncode
+        == 0
+    )
+
+
+def test_a_recorded_blob_is_in_the_object_store(tmp_path: Path) -> None:
+    """Every classifier above fetches the stamped blob, so recording one that is not stored
+    makes the whole cheap path unreachable - and the message it fails with says "Re-run it".
+
+    ``nb-run`` executes the working tree, so an executed ``.py`` that was never committed at
+    the version that ran is the normal mid-task state. The second form bites twice: a
+    successful sync re-stamps to the new blob, so the next sync in the same session refuses on
+    the sha the previous one just wrote. Two bands hit it independently on 2026-09-11.
+    """
+    # Unique content per run. `git hash-object` hashes content, not paths, so a fixed body
+    # would be left in the store by the first run and the "not stored" half would pass
+    # vacuously ever after - a test that cannot fail on the second invocation.
+    py = _py(tmp_path, f"{EXECUTED}\n# never committed: {uuid.uuid4()}\n")
+    assert not _in_object_store(notebook_provenance.git_blob(py))
+    assert _in_object_store(notebook_provenance.git_blob(py, write=True))
+
+
+def test_a_stored_blob_resolves_for_the_classifiers(tmp_path: Path) -> None:
+    """The end the storing exists for: hash one version, edit, and classify against it."""
+    py = _py(tmp_path, EXECUTED)
+    stamped = notebook_provenance.git_blob(py, write=True)
+    py.write_text(ALT_PLUS_MARKDOWN, encoding="utf-8")
+    assert drift_is_alt_and_prose_only(stamped, py)
