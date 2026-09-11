@@ -45,6 +45,11 @@
 # Everything below is arranged to make one thing vary. The strategy, the bars, the parameters and the
 # fill convention are held fixed across the two runs so that a difference in output has one candidate
 # explanation left, which is the engine.
+#
+# One warning filter is installed with the imports. The broker adapters pull in websockets' legacy
+# module, which deprecates itself on import; it is the library's business rather than this
+# notebook's and nothing in the result depends on it. The other import-time deprecation, from
+# `nest_asyncio`, is filtered inside `async_utils.run_async` where the call that triggers it lives.
 
 # %%
 """Verify backtest-to-live signal parity with a single strategy class."""
@@ -61,10 +66,6 @@ import pandas as pd
 import polars as pl
 from async_utils import run_async
 
-# The broker adapters pull in websockets' legacy module, which deprecates itself on import. It
-# is the library's business rather than this notebook's and nothing in the result depends on it.
-# The other import-time deprecation, from nest_asyncio, is filtered inside `async_utils.run_async`
-# where the call that triggers it lives.
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"websockets\.legacy")
 
 from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, Strategy
@@ -81,33 +82,6 @@ logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-import asyncio
-import logging
-from collections.abc import AsyncIterator
-from datetime import datetime
-from typing import Any
-
-import pandas as pd
-import polars as pl
-from async_utils import run_async
-
-# ml4t.backtest imports
-from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, Strategy
-from ml4t.backtest.types import Order, OrderSide, OrderStatus, OrderType, Position
-
-# ml4t.live imports
-from ml4t.live import (
-    LiveEngine,
-    VirtualPortfolio,
-)
-
-from data import load_etfs
-
-# Configure logging for live mode
-logging.basicConfig(
-    level=logging.WARNING,  # Reduce noise for demo
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 
 # %% [markdown]
 # ## 1. Settings
@@ -122,9 +96,10 @@ logging.basicConfig(
 # conventional pairing and nothing here depends on it; the parity claim holds or fails at any
 # setting, which is the point.
 #
-# `MAX_SYMBOLS` caps how many of the three ETFs are loaded. Zero means all of them, and continuous
-# integration sets it lower to keep the run short. The strategy trades only SPY either way; the
-# other two are loaded so the data path carries more than one symbol.
+# `MAX_SYMBOLS` caps how many of the three ETFs are loaded, and zero means all of them. It exists so
+# a shorter run can be requested without editing the notebook. The strategy trades only SPY at any
+# setting; the other two are loaded so the data path carries more than one symbol, which is what
+# makes the feed's per-symbol handling part of what the comparison covers.
 #
 # `INITIAL_CASH` sizes the account. It scales the printed portfolio values and changes nothing about
 # which signals fire, since the strategy trades a fixed hundred shares.
@@ -213,12 +188,12 @@ class DualMAStrategy(Strategy):
     property the rest of the notebook tests rather than assumes.
 
     Attributes:
-        fast_period: Fast MA lookback (default: 10)
-        slow_period: Slow MA lookback (default: 30)
+        fast_period: Sessions in the shorter average
+        slow_period: Sessions in the longer average
         signal_log: Records all signals for verification
     """
 
-    def __init__(self, symbol: str, fast_period: int = 10, slow_period: int = 30):
+    def __init__(self, symbol: str, fast_period: int, slow_period: int):
         self.symbol = symbol
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -451,8 +426,15 @@ class SimulatedBroker:
             side = OrderSide.BUY if quantity > 0 else OrderSide.SELL
             quantity = abs(quantity)
 
-        # Get fill price
-        price = limit_price or self._current_prices.get(asset, 100.0)
+        if limit_price is not None:
+            price = limit_price
+        elif asset in self._current_prices:
+            price = self._current_prices[asset]
+        else:
+            raise KeyError(
+                f"No price for {asset}: the feed has not delivered a bar for it. "
+                "Filling at a default would put a price into the tape that no bar carried."
+            )
 
         self._order_count += 1
         fill_timestamp = self._current_timestamp or datetime.min
@@ -491,8 +473,13 @@ class SimulatedBroker:
 # %% [markdown]
 # ### Historical Replay Feed
 #
-# The historical replay feed is the notebook's stand-in for a real streaming source. Its job is to preserve
-# live-engine semantics while holding the market data constant.
+# The historical replay feed is the notebook's stand-in for a real streaming source. Its job is to
+# preserve live-engine semantics while holding the market data constant.
+#
+# A missing bar raises here rather than being skipped. The parity claim rests on both engines
+# reading the same tape, so a feed that quietly dropped a symbol on some dates would hand the live
+# engine a shorter history, move its moving averages, and report the difference as an engine
+# disagreement.
 
 
 # %%
@@ -552,32 +539,22 @@ class HistoricalReplayFeed:
         date = self._dates[self._index]
         self._index += 1
 
-        # Build bar data
+        timestamp = date.to_pydatetime() if hasattr(date, "to_pydatetime") else date
         data: dict[str, dict[str, Any]] = {}
         for symbol in self._symbols:
-            try:
-                bar = {
-                    "open": float(self._data["Open"].loc[date, symbol]),
-                    "high": float(self._data["High"].loc[date, symbol]),
-                    "low": float(self._data["Low"].loc[date, symbol]),
-                    "close": float(self._data["Close"].loc[date, symbol]),
-                    "volume": float(self._data["Volume"].loc[date, symbol]),
-                }
-                data[symbol] = bar
-
-                # Update broker prices for fills
-                if self._broker:
-                    timestamp = date.to_pydatetime() if hasattr(date, "to_pydatetime") else date
-                    self._broker.update_price(symbol, bar["close"], timestamp)
-            except (KeyError, ValueError):
-                pass
+            bar = {
+                field.lower(): float(self._data[field.title()].loc[date, symbol])
+                for field in ("open", "high", "low", "close", "volume")
+            }
+            data[symbol] = bar
+            if self._broker:
+                self._broker.update_price(symbol, bar["close"], timestamp)
 
         self._stats["bars_emitted"] += 1
 
-        # Small delay to simulate real-time (optional, can be 0)
+        # Yield to the event loop, as a real feed would while waiting on the socket.
         await asyncio.sleep(0)
 
-        timestamp = date.to_pydatetime() if hasattr(date, "to_pydatetime") else date
         return timestamp, data, {}
 
 
@@ -751,10 +728,10 @@ live_log
 # %% [markdown]
 # ## Where the Strategy Traded
 #
-# The tables above show five signals of nine. The question they cannot answer is where the crossovers
-# fell across the year, which is a judgement about a shape: whether the strategy traded steadily or
-# clustered around a few reversals, and whether the two engines fired at the same moments or merely
-# the same number of times.
+# The tables above show the first rows of each log. The question they cannot answer is where the
+# crossovers fell across the year, which is a judgement about a shape: whether the strategy traded
+# steadily or clustered around a few reversals, and whether the two engines fired at the same
+# moments or merely the same number of times.
 #
 # Drawing the year answers both. The two moving averages cross where the signals sit, and each
 # engine's markers are drawn separately: filled for the backtest, hollow rings on top for the live
@@ -774,8 +751,10 @@ def _marker_series(signals: list[dict], side: str) -> tuple[list, list]:
 
 
 fig, ax = plt.subplots()
+# The close recedes: it is the backdrop the averages are read against, and drawing it in the same
+# dark as the fast average makes the two indistinguishable at this line width.
 ax.plot(
-    spy_close.index, spy_close.to_numpy(), color=COLORS["neutral"], linewidth=1, label="SPY close"
+    spy_close.index, spy_close.to_numpy(), color=COLORS["recede"], linewidth=1, label="SPY close"
 )
 ax.plot(
     fast_line.index,
@@ -812,11 +791,7 @@ ax.set_xlabel("Date")
 ax.set_ylabel("SPY close (USD)")
 add_message_title(
     ax,
-    (
-        "Both engines traded the same crossovers on the same days"
-        if matches == len(backtest_signals)
-        else "The two engines disagree about when to trade"
-    ),
+    "SPY close, its two moving averages, and each engine's signals",
     subtitle="Filled markers are the backtest, hollow rings the live replay",
 )
 ax.legend(loc="lower right", fontsize=8)
@@ -826,9 +801,9 @@ show_with_alt(
     f"averages. {len(backtest_signals)} crossover signals are marked, buys pointing up and sells "
     "pointing down, each with a hollow ring drawn from the live replay's own signal list. "
     + (
-        "Every ring sits on a marker, so the two engines traded the same days at the same prices."
+        "Every ring sits on a marker."
         if matches == len(backtest_signals)
-        else f"{len(backtest_signals) - matches} of them do not coincide."
+        else "Some rings stand alone, with no marker underneath."
     ),
 )
 
