@@ -950,9 +950,12 @@ if pairs_strategy.zscore_history:
 #
 # ### Three Drawdown Zones
 #
-# | Zone | Drawdown | Behavior |
-# |------|----------|----------|
-# | **Normal** | above the caution threshold | Full sizing; the multiplier recovers toward one |
+# Drawdown is measured as a positive loss fraction from the running peak, so a larger number is
+# a worse position and the zones are read upwards from zero.
+#
+# | Zone | Drawdown from the peak | Behavior |
+# |------|------------------------|----------|
+# | **Normal** | below the caution threshold | Full sizing; the multiplier recovers toward one |
 # | **Caution** | between the two thresholds | Reduced sizing, interpolated linearly to zero |
 # | **Halt** | past the halt threshold | No new entries; the multiplier is zero |
 #
