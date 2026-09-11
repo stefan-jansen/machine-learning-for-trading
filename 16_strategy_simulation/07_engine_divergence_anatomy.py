@@ -82,7 +82,7 @@ from validation.adapters.ml4t_adapter import (
 from validation.adapters.vectorbt_adapter import run_vectorbt
 from validation.weights import load_case_study_data
 
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY = "etfs"
@@ -394,7 +394,7 @@ axes[0].legend()
 axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 add_message_title(
     axes[0],
-    "Whole-share rounding costs trades before it costs return",
+    "Equity under fractional and whole-share sizing",
     subtitle="ETF linear-model signals, one configuration field changed from the reference",
 )
 
@@ -404,7 +404,15 @@ axes[1].set_ylabel("Fractional minus whole (%)")
 axes[1].set_xlabel("Date")
 
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis from 2016 to 2024. The upper panel plots portfolio "
+    "value under fractional sizing in navy and under whole-share sizing as a dashed grey line; "
+    "the two overlay so closely that only one curve is visible, rising from a million to about "
+    "1.8 million. The lower panel is fractional minus whole as a percentage: it swings between "
+    "about -0.4 and +0.5 percent through 2016, then stays positive and drifts up to roughly +0.7 "
+    "percent by 2024.",
+)
 
 print(
     f"\nFinal value difference: ${val_diff_int:,.0f} ({val_diff_int / r_baseline.final_value:.3%})"
@@ -535,11 +543,17 @@ ax.set_ylabel("Equity-curve gap (bps)")
 ax.set_xlabel("Date")
 add_message_title(
     ax,
-    "Holding back cash for fees costs more the longer it is held back",
+    "Equity gap from holding cash back for fees",
     subtitle="Reference equity minus headroom equity, in basis points of reference equity",
 )
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Filled area chart of the reference equity minus the headroom equity, in basis points of "
+    "reference equity, with a dashed zero line. The gap is noisy and crosses zero through 2016 "
+    "and early 2017, then stays positive and climbs steadily to roughly 70 basis points by 2024. "
+    "Cash held back for fees costs a widening amount the longer it is held back.",
+)
 
 print(f"\nFinal value difference: ${val_diff_hd:,.0f} ({val_diff_hd / r_baseline.final_value:.3%})")
 
@@ -622,13 +636,20 @@ ax.set_ylabel("Portfolio value (USD)")
 ax.set_xlabel("Date")
 add_message_title(
     ax,
-    "One strategy, four execution profiles, four track records",
+    "Portfolio value under four execution profiles",
     subtitle="Same signals and same commission rate throughout; only execution assumptions differ",
 )
 ax.legend()
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Line chart of portfolio value from 2016 to 2024 under four execution profiles: the "
+    "controlled reference, a backtrader profile, a vectorbt profile and VectorBT itself, drawn in "
+    "navy and amber with different dash patterns. All four trace the same path, from about a "
+    "million to roughly 1.8 million with a sharp drawdown in early 2020, and separate by a band "
+    "far thinner than the curve's own daily variation.",
+)
 
 # %% [markdown]
 # Two of these four fill at the same close the signal was read from, which is not a chronology any
@@ -698,12 +719,19 @@ for bar, val in zip(bars, values, strict=True):
 ax.set_xlabel("Impact on final value (% of reference)")
 add_message_title(
     ax,
-    "The one-factor effects do not add up to the combined effect",
+    "Impact on final value, one configuration field at a time",
     subtitle="Each bar is the reference minus one variant, as a percentage of reference final value",
 )
 zero_line(ax, axis="x")
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bar chart of the impact on final value as a percentage of the reference, one bar "
+    "per configuration field plus their combination, each labelled with its value. Commission "
+    "headroom and share rounding are each worth roughly six tenths of a percent, fill ordering is "
+    "exactly zero, and the combined change is larger than either single one but smaller than "
+    "their sum.",
+)
 
 # %%
 sum_individual = sum(effects.values())
@@ -832,7 +860,7 @@ axes[0].legend()
 axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 add_message_title(
     axes[0],
-    "Rebalance mode moves the result far less than timing or sizing",
+    "Portfolio value under three rebalance modes",
     subtitle="Same-bar close fills throughout, which is not a tradable chronology",
 )
 
@@ -847,7 +875,14 @@ axes[1].set_xlabel("Date")
 axes[1].legend(fontsize=9)
 
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
+    "snapshot, incremental and hybrid rebalance modes in navy, dashed navy and dotted amber; the "
+    "three overlay throughout. The lower panel is the incremental-minus-snapshot gap as a "
+    "percentage, which rises from zero to about 0.012 percent by 2024, two orders of magnitude "
+    "smaller than the gaps the sizing and headroom fields produced.",
+)
 
 
 # %% [markdown]

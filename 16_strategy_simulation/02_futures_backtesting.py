@@ -19,8 +19,9 @@
 # **Docker image**: `ml4t`
 #
 # This notebook introduces futures-specific backtesting mechanics using the
-# **ml4t-backtest** engine. It is an in-sample teaching simulation, not a sealed
-# holdout estimate or a deployable roll implementation.
+# **ml4t-backtest** engine. Every date it reports was also used to build the rule, so nothing
+# here is an out-of-sample estimate, and the roll handling is illustrative rather than
+# deployable.
 #
 # | Aspect | Equities | Futures |
 # |--------|----------|---------|
@@ -52,7 +53,6 @@
 # %%
 """Futures backtesting with multiplier-aware simulation in ml4t-backtest."""
 
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -60,8 +60,6 @@ import plotly.graph_objects as go
 import polars as pl
 import yaml
 from IPython.display import Markdown, display
-
-warnings.filterwarnings("ignore")
 
 # Data loading
 # ml4t-backtest imports
@@ -79,7 +77,7 @@ from ml4t.backtest.config import CommissionType, SlippageType
 
 from data import load_cme_futures
 from utils.paths import REPO_ROOT
-from utils.style import COLOR_CYCLER, COLORS
+from utils.style import COLOR_CYCLER, COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -253,16 +251,19 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=(
-        f"Point values span {min(DEMO_SPECS[p].multiplier for p in PRODUCTS):,.0f} to "
-        f"{max(DEMO_SPECS[p].multiplier for p in PRODUCTS):,.0f} USD per point"
-    ),
+    title="Contract multiplier by product, US dollars per point",
     xaxis_title="Product",
     yaxis_title="Multiplier ($)",
     yaxis_type="log",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bar chart of contract multiplier by product on a logarithmic dollar axis, each bar labelled "
+    "with its value. ES and ZC are the smallest at 50 dollars per point, GC is 100, CL and ZN are "
+    "1,000, and 6E towers over the rest at 125,000. The range spans more than three orders of "
+    "magnitude, which is why a point move cannot be read as a dollar move without the multiplier.",
+)
 
 # %% [markdown]
 # ## 3. Prepare Data for DataFeed
@@ -348,14 +349,21 @@ for product in PRODUCTS:
     )
 
 fig.update_layout(
-    title=f"The {LOOKBACK}-session momentum ranks diverge across the six products",
+    title=f"Trailing {LOOKBACK}-session return by product",
     xaxis_title="Date",
-    yaxis_title="Return",
+    yaxis_title="Trailing return",
     yaxis_tickformat=".0%",
     height=450,
     legend=dict(orientation="h", yanchor="bottom", y=1.02),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of each product's trailing return over the sample, one line per product. Five of "
+    "the six stay within roughly plus or minus 40 percent throughout. Crude oil is the exception: "
+    "it falls to about -75 percent in the first half of 2020 and spikes to nearly +200 percent "
+    "that summer, and reaches about +75 percent again in early 2022. The dispersion the ranking "
+    "trades on comes mostly from that one product.",
+)
 
 # %% [markdown]
 # ## 5. Futures Momentum Strategy
@@ -473,8 +481,8 @@ class FuturesMomentumStrategy(Strategy):
 #
 # The `BacktestConfig` controls all behavioral settings. For futures:
 #
-# - `CommissionType.PER_CONTRACT` with `commission_per_share=2.00` models
-#   an illustrative **$2 per contract per fill side**, not a broker quote
+# - `CommissionType.PER_CONTRACT` charges an illustrative **two dollars per contract per fill
+#   side**, which is a round teaching number rather than a broker quote
 # - `allow_short_selling=True` enables short positions
 # - `allow_leverage=True` activates the per-product margin percentages in `ContractSpec`
 # - 5 bps percentage slippage is a simplifying common-unit assumption; a production futures
@@ -627,7 +635,7 @@ display(
 # %% [markdown]
 # ## 8. Without Multipliers - The Error
 #
-# A controlled counterfactual replaces every broker multiplier with 1.0 while replaying the exact
+# A controlled counterfactual replaces every broker multiplier with one while replaying the exact
 # target-contract schedule produced by the multiplier-aware run. This prevents the counterfactual's
 # different equity path from feeding back into sizing. The counterfactual changes the engine's
 # position valuation, margin basis, and point-to-dollar P&L conversion, not the intended orders.
@@ -716,14 +724,21 @@ fig.add_trace(
 fig.add_hline(y=INITIAL_CASH, line_dash="dot", line_color=COLORS["neutral"])
 
 fig.update_layout(
-    title="Contract multipliers materially change the same target-contract path",
+    title="Equity under broker multipliers and under unit multipliers",
     xaxis_title="Date",
     yaxis_title="Portfolio Value ($)",
     yaxis_tickformat="$,.0f",
     height=450,
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of portfolio value in dollars from an initial ten million. The multiplier-aware "
+    "run, solid navy, swings between about 8.5 and 13.8 million and ends near 9.6 million. The "
+    "unit-multiplier counterfactual, dashed grey, is visually flat on the same axis because "
+    "replacing every multiplier with one shrinks each point move to a rounding error against the "
+    "capital base.",
+)
 
 # %% [markdown]
 #
@@ -741,8 +756,11 @@ display(
 # %% [markdown]
 # ## 9. Sector Attribution
 #
-# Futures span multiple asset classes. We map each product to its sector and compute P&L
-# contribution without assuming those sectors are uncorrelated.
+# Futures span multiple asset classes. Each product is mapped to its sector and its realized P&L
+# summed within the sector. In this six-product demonstration every sector holds exactly one
+# product, so the chart below relabels per-product P&L rather than aggregating across a sector;
+# the grouping earns its keep only on a universe wide enough for a sector to hold several
+# products. Nothing here assumes the sectors are uncorrelated.
 
 # %%
 SECTOR_MAP = {
@@ -784,13 +802,20 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title="Sector attribution reveals concentration in the six-product run",
+    title="Realized P&L by sector",
     xaxis_title="Sector",
     yaxis_title="Total P&L ($)",
     yaxis_tickformat="$,.0f",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bar chart of realized profit and loss by sector, each bar labelled with its dollar value and "
+    "coloured green above zero and red below. Metals and FX are positive at roughly +630,000 and "
+    "+510,000 dollars; Rates is near zero; Energy, Equity Index and Agriculture are negative, the "
+    "largest loss being Agriculture at about -1.25 million. Each sector holds one product in this "
+    "demonstration.",
+)
 
 # %% [markdown]
 #

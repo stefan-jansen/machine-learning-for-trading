@@ -55,7 +55,7 @@
 #
 # - **Long Entry**: RSI < 30 (oversold)
 # - **Exit**: RSI > 70 (overbought)
-# - **Position Size**: 95% of capital per trade
+# - **Position Size**: 95 percent of capital per trade
 # - **Transaction Costs**: 10 bps commission + 5 bps slippage
 
 # %% [markdown]
@@ -84,7 +84,7 @@ from plotly.subplots import make_subplots
 
 from data import load_crypto_perps
 from utils.paths import get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides for CI
@@ -234,7 +234,7 @@ _ = fig.add_hline(y=RSI_UPPER, line_dash="dash", line_color=COLORS["negative"], 
 fig.update_layout(
     height=600,
     title=(
-        "RSI thresholds isolate BTC price extremes"
+        "BTC/USDT close and its RSI, with the entry and exit thresholds marked"
         "<br><sup>14-day simple rolling gain/loss means; UTC daily bars</sup>"
     ),
     showlegend=True,
@@ -242,7 +242,14 @@ fig.update_layout(
     yaxis_title="Price (USDT)",
     yaxis2_title="RSI",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels on a shared date axis from 2020 to late 2023. The upper panel is the "
+    "BTC/USDT daily close, rising from under 10,000 to a peak near 67,000 in late 2021 and "
+    "trading between roughly 16,000 and 45,000 afterwards. The lower panel is the RSI in amber "
+    "with dashed lines at the entry and exit thresholds, crossing both many times a year "
+    "throughout the sample.",
+)
 
 # %% [markdown]
 # ## 3. Define Strategy Class
@@ -250,10 +257,11 @@ fig.show()
 # The `Strategy` class is the heart of ml4t-backtest. You subclass it and implement
 # the `on_data()` method, which is called for each bar during the backtest.
 #
-# ### Strategy Best Practices
+# ### Two conventions the subclass has to follow
 #
-# 1. **Initialize parameters in `__init__`**: Pass strategy parameters (thresholds,
-#    lookbacks) to `__init__`, not hard-coded in `on_data()`.
+# 1. **Take the parameters as constructor arguments.** Thresholds and lookbacks are passed in
+#    when the strategy is constructed, so the same class can be run at another setting without
+#    editing it. A value written directly into `on_data()` can only be changed by editing code.
 #
 # 2. **Use `broker.get_position()` for position checks**: Returns `None` if no position,
 #    or a `Position` object with `quantity`, `entry_price`, `unrealized_pnl`.
@@ -327,11 +335,13 @@ class RSIMeanReversionStrategy(Strategy):
 # the UTC close, submit the order, and fill at the next UTC day's open. Other strategies require
 # their own latency argument rather than a universal mode choice.
 
+# %% [markdown]
+# `DataFeed` combines the OHLCV prices with the context frame the strategy reads its indicators
+# from. The price frame must carry `timestamp`, `symbol`, `open`, `high`, `low`, `close` and
+# `volume`; the context frame is optional, its columns reach the strategy as a context dictionary,
+# and its `timestamp` column has to align with the price frame's.
+
 # %%
-# DataFeed combines OHLCV prices with context data (indicators).
-# - prices_df: Required columns: timestamp, symbol, open, high, low, close, volume
-# - context_df: Optional. Columns are passed to strategy via context dict.
-#   Must have 'timestamp' column aligned with prices_df.
 feed = DataFeed(
     prices_df=prices_df,
     context_df=context_df,
@@ -392,7 +402,8 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# The full sample is descriptive rather than a sealed holdout. The next cell injects the current
+# The full sample is descriptive: every date it reports was also used to choose the rule. The
+# next cell injects the current
 # result so the interpretation cannot drift when data or engine semantics change.
 
 # %%
@@ -446,7 +457,7 @@ print(f"Saved daily returns artifact: {daily_returns_path.name}")
 
 # %% [markdown]
 # A three-observation CME example shows why an overnight session boundary differs from a calendar
-# boundary. The observation after 17:00 CT belongs to the following session label.
+# boundary. The observation after 17:00 CT carries the following session's label.
 
 # %%
 cme_equity_demo = [
@@ -507,7 +518,7 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ## 6.1 Reconcile the Trade Log and Execution Costs
+# ## Reconcile the Trade Log and Execution Costs
 #
 # The engine records slipped entry and exit prices. To recover P&L before modeled execution costs,
 # remove entry and exit slippage from those fill prices, then subtract slippage dollars and
@@ -596,7 +607,7 @@ fig = go.Figure(
 )
 fig.update_layout(
     title=(
-        "The RSI rule alternates between BTC exposure and cash"
+        "Portfolio value under the RSI rule"
         "<br><sup>Portfolio value net of configured fees and slippage; full sample</sup>"
     ),
     xaxis_title="Date",
@@ -604,7 +615,13 @@ fig.update_layout(
     height=450,
     hovermode="x unified",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of portfolio value in USDT from a 100,000 start. Long flat stretches, where the "
+    "rule holds cash, separate short active stretches: the path drops to about 57,000 in early "
+    "2020, steps up through 2020, peaks near 124,000 in early 2021, falls to about 44,000 in "
+    "mid-2022 and ends near 74,000.",
+)
 
 # %%
 drawdown_pct = ec.drawdown_series() * 100
@@ -621,7 +638,7 @@ fig_dd = go.Figure(
 )
 fig_dd.update_layout(
     title=(
-        "Drawdowns reveal the path hidden by terminal return"
+        "Drawdown of the RSI portfolio from its running peak"
         "<br><sup>Close-to-close peak-to-trough loss; net, full sample</sup>"
     ),
     xaxis_title="Date",
@@ -630,14 +647,20 @@ fig_dd.update_layout(
     height=400,
     hovermode="x unified",
 )
-fig_dd.show()
+show_plotly_with_alt(
+    fig_dd,
+    "Filled drawdown chart from the running peak, zero at the top and losses below. The curve "
+    "reaches about -45 percent in early 2020, returns to zero in early 2021, then falls again and "
+    "spends all of 2022 between -40 and -65 percent, ending near -40 percent.",
+)
 
 # %% [markdown]
 # ## 8. Compare to Buy-and-Hold Benchmark
 #
 # A benchmark is useful only under a comparable protocol. The buy-and-hold strategy below uses the
-# same engine, 95% signal-time target, next-open execution, fractional units, fee and slippage rates,
-# crypto annualization, and sample. Its single entry remains open at the sample end.
+# same engine, the same signal-time target weight, next-open execution, fractional units, fee and
+# slippage rates, crypto annualization, and sample. Its single entry remains open at the sample
+# end.
 
 
 # %%
@@ -729,7 +752,7 @@ fig.add_trace(
 )
 fig.update_layout(
     title=(
-        f"{return_leader} leads the protocol-matched exposure comparison"
+        "Portfolio value, RSI rule against buy-and-hold on one protocol"
         "<br><sup>Portfolio value; same engine, allocation, next-open fills, and costs</sup>"
     ),
     xaxis_title="Date",
@@ -740,14 +763,22 @@ fig.update_layout(
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     hovermode="x unified",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Portfolio value on a logarithmic axis for the RSI rule in solid navy and buy-and-hold in "
+    "dashed grey, both run through the same engine, allocation, next-open fills and costs from a "
+    "100,000 start. Buy-and-hold reaches roughly 900,000 at the late-2021 peak and ends near "
+    "600,000; the RSI rule stays between about 44,000 and 124,000 for the whole sample. The log "
+    "axis is what lets both fit on one panel.",
+)
 
 # %% [markdown]
 # ## 9. MFE/MAE Analysis
 #
 # Maximum favorable excursion (MFE) and maximum adverse excursion (MAE) expose each closed trade's
-# path between entry and exit. The full-sample levels below are retrospective diagnostics. Without
-# a sealed validation sample, they are not optimized stop-loss or take-profit recommendations.
+# path between entry and exit. The full-sample levels below are retrospective diagnostics: they
+# are read off the same trades that produced them, so they are not stop-loss or take-profit
+# recommendations.
 
 # %%
 mfe_analyzer = MAEMFEAnalyzer(closed_trades)
@@ -755,8 +786,8 @@ levels = mfe_analyzer.optimal_exit_levels()
 excursion_df = trades_df.with_row_index("trade_id", offset=1)
 
 # %% [markdown]
-# Bars show the best and worst marked return reached during each trade; diamonds show the terminal
-# realized return. The chart keeps adverse excursions below zero.
+# Bars show the highest and lowest marked return reached during each trade; diamonds show the
+# terminal realized return. The chart keeps adverse excursions below zero.
 
 # %%
 fig = go.Figure()
@@ -788,7 +819,7 @@ fig.add_trace(
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], line_width=1)
 fig.update_layout(
     title=(
-        "Trade excursions expose the paths hidden by realized returns"
+        "Favorable and adverse excursion against realized return, by closed trade"
         "<br><sup>Closed RSI round trips; full-sample retrospective diagnostic</sup>"
     ),
     xaxis_title="Closed Trade Number",
@@ -796,7 +827,14 @@ fig.update_layout(
     barmode="relative",
     height=450,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bar chart over the closed round trips, one pair of bars per trade: maximum favorable "
+    "excursion in green above zero, maximum adverse excursion in red below, with the realized "
+    "return marked as a black diamond. Every trade ran further in both directions than it "
+    "finished, several adverse excursions reach -40 percent or worse, and most realized returns "
+    "sit well inside the band their own trade travelled.",
+)
 
 # %%
 display(
@@ -816,10 +854,10 @@ display(
 # RSI, prior-close decision timing, next-open fill convention, fractional units, and percentage
 # costs. One deliberate sizing detail remains visible:
 #
-# - **VectorBT** resolves the 95% percentage size at the execution row's open.
-# - **ml4t-backtest** converts the 95% signal-time target into units at the decision close, queues
+# - **VectorBT** resolves the percentage size at the execution row's open.
+# - **ml4t-backtest** converts the same signal-time target into units at the decision close, queues
 #   those units, and fills them at the next open. An overnight gap therefore moves the realized
-#   fill-time weight away from exactly 95%.
+#   fill-time weight away from the target.
 #
 # Headline differences alone cannot identify a cause. Notebook 06 isolates engine conventions under
 # a dedicated parity contract rather than attributing any residual gap after the fact.
@@ -861,8 +899,8 @@ assumptions realistic.
 ### 2. Event ordering is part of the strategy definition
 
 The {RSI_PERIOD}-day close-derived RSI is observed after the UTC day closes. `NEXT_BAR` then fills
-the queued fractional order at the next open. The 95% target is converted to units at signal time,
-so an overnight gap can move the realized fill-time weight.
+the queued fractional order at the next open. The target weight is converted to units at signal
+time, so an overnight gap can move the realized fill-time weight.
 
 ### 3. Accounting should reconcile independently
 

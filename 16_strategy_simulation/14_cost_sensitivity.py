@@ -67,7 +67,14 @@ from _etf_baseline import (
 )
 from ml4t.diagnostic.visualization.backtest.cost_attribution import plot_cost_sensitivity
 
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
+from utils.style import (
+    COLORS,
+    FIGSIZE,
+    add_message_title,
+    show_plotly_with_alt,
+    show_with_alt,
+    zero_line,
+)
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides for CI
@@ -215,10 +222,18 @@ axes[1].legend(frameon=False)
 
 add_message_title(
     axes[0],
-    "The penalty is linear in cost, and small at any realistic fee",
+    "Sharpe ratio and growth rate against cost per traded leg",
     subtitle="Same strategy and same weights at every cost; only the fee changes",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels of the cost sweep, both with cost per traded leg on the horizontal axis and a "
+    "dashed line at the baseline fee. The left panel is the Sharpe ratio, falling in a straight "
+    "line from about 0.77 at zero cost to slightly below zero at 200 basis points. The right "
+    "panel is the growth rate in percent per year, falling the same way from about 8.4 to -1.9, "
+    "with a dotted line marking where it crosses zero. The baseline fee sits at the far left of "
+    "both, where the curves are still near their zero-cost values.",
+)
 
 # %% [markdown]
 # ## 5. Turnover as the multiplier
@@ -259,12 +274,14 @@ print(f"Drag the simulator actually charged: {realized_drag_pct:.2f}% per year")
 # gross return series rather than by re-simulating. It is one call instead of a loop, and it is an
 # approximation - the comparison printed with it is how much of one.
 
+# %% [markdown]
+# The dollar figures below are measured from the starting capital rather than from each run's
+# first closing equity. That first close already contains a session's return and, in the net run,
+# the opening commission, so measuring from it would give the two runs different bases and drop
+# the difference into the path effect, which is the reconciling residual and so cannot report it.
+
 # %%
 result_net = results_by_cost[fee_bp]
-# From INITIAL_CASH, not from each run's first CLOSING equity: that first close already
-# contains a session's return and, in the net run, the opening commission, so measuring
-# from it gives the two runs different bases and drops the difference into
-# path_effect_dollars, which is the reconciling residual and so cannot report it.
 gross_pnl_dollars = float(result_gross.equity.iloc[-1]) - INITIAL_CASH
 net_pnl_dollars = float(result_net.equity.iloc[-1]) - INITIAL_CASH
 commission_dollars = float((result_net.trades_dollar * DEFAULT_FEES).sum())
@@ -277,17 +294,28 @@ waterfall = go.Figure(
         x=["Gross PnL", "Commissions", "Compounding/path effect", "Net PnL"],
         y=[gross_pnl_dollars, -commission_dollars, -path_effect_dollars, net_pnl_dollars],
         connector={"line": {"color": COLORS["neutral"]}},
+        # Plotly's waterfall defaults are its own blue and red, not the house palette.
+        decreasing={"marker": {"color": COLORS["copper"]}},
+        increasing={"marker": {"color": COLORS["blue"]}},
+        totals={"marker": {"color": COLORS["blue"]}},
     )
 )
 waterfall.update_layout(
     title=(
-        "Fees are only part of what fees cost"
+        "Gross to net profit and loss, in dollars"
         "<br><sup>Dollars over the whole sample, at the baseline fee</sup>"
     ),
     yaxis_title="Profit and loss (USD)",
     showlegend=False,
 )
-waterfall.show()
+show_plotly_with_alt(
+    waterfall,
+    "Waterfall chart in dollars over the whole sample. Gross profit and loss starts near 207,000, "
+    "a commissions bar takes off about 6,000, a compounding and path-effect bar takes off a "
+    "further 4,000 or so, and net profit and loss closes near 197,000. The second deduction is "
+    "roughly two thirds the size of the first, so the fees paid are not the whole of what the "
+    "fees cost.",
+)
 
 # %%
 gross_returns_pl = pl.from_pandas(result_gross.returns.rename("returns").reset_index()).get_column(
@@ -302,7 +330,14 @@ sensitivity = plot_cost_sensitivity(
     cost_multipliers=[bp / (DEFAULT_FEES * 10_000) for bp in COST_GRID_BP],
     title="Cost sensitivity from the gross return series",
 )
-sensitivity.show()
+show_plotly_with_alt(
+    sensitivity,
+    "Two panels from the library's cost-sensitivity helper, Sharpe on the left and CAGR on the "
+    "right, both against transaction cost in basis points with a marker at the current cost. Both "
+    "fall close to linearly, and a dotted line marks the break-even cost the helper computes. Its "
+    "shape matches the re-simulated sweep above but its zero crossing sits at a different cost, "
+    "because it deducts a uniform daily drag instead of re-running the strategy.",
+)
 
 # %% [markdown]
 # The library figure has the same shape and does not have the same zero crossing, because it

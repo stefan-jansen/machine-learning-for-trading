@@ -58,15 +58,12 @@
 """Compare fixed, rolling-percentile, and cross-sectional signal conversion."""
 
 import sqlite3
-import warnings
 from pathlib import Path
 
 import plotly.graph_objects as go
 import polars as pl
 import yaml
 from plotly.subplots import make_subplots
-
-warnings.filterwarnings("ignore")
 
 # %%
 from case_studies.utils.signals import (
@@ -75,7 +72,7 @@ from case_studies.utils.signals import (
     rolling_percentile_signal,
 )
 from utils.paths import get_case_study_dir, get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 CASE_STUDIES = {
     "crypto_perps_funding": "Crypto perpetuals",
@@ -458,12 +455,19 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title="A zero cutoff produces model-specific activation rates",
+    title="Signal rate under a zero cutoff, by prediction set",
     xaxis_title="Registered prediction set",
     yaxis_title="Signal rate (%)",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bar chart of signal rate in percent for the two registered prediction sets under a zero "
+    "cutoff. Crypto perpetuals sit near 54 percent and ETFs near 46, each bar labelled with its "
+    "value. A rule that fires on any positive prediction is on about half the time in both sets, "
+    "so the cutoff is describing the sign distribution of the predictions rather than selecting "
+    "anything.",
+)
 
 # %% [markdown]
 # ## 6. Trailing rules across the grid
@@ -500,12 +504,20 @@ for case_study in CASE_STUDIES:
     )
 
 fig.update_layout(
-    title="Crypto rules change state more often than their activation rate implies",
+    title="State-transition rate against signal rate, one point per rule",
     xaxis_title="Share of observations with a signal (%)",
     yaxis_title="Share of observations that change state (%)",
     height=450,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Scatter plot with signal rate on the horizontal axis and the share of observations that "
+    "change state on the vertical, one point per rule, coloured navy for crypto perpetuals and "
+    "amber for ETFs. The two sets separate cleanly: at any given signal rate the crypto points "
+    "sit roughly ten percentage points higher in transition rate than the ETF points, and the "
+    "crypto points climb steeply with signal rate while the ETF points stay flat between about 9 "
+    "and 19 percent.",
+)
 
 # %% [markdown]
 # ## 7. The three methods at one cutoff
@@ -582,7 +594,7 @@ for case_study in CASE_STUDIES:
         col=2,
     )
 fig.update_layout(
-    title="Relative rules sharply reduce activation versus a zero cutoff",
+    title="Signal rate and state-transition rate by signal method",
     barmode="group",
     height=430,
     margin=dict(t=100, r=140),
@@ -592,7 +604,14 @@ fig.update_xaxes(title_text="Signal method", row=1, col=1)
 fig.update_xaxes(title_text="Signal method", row=1, col=2)
 fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bar panels comparing three signal methods, navy for crypto perpetuals and amber for "
+    "ETFs. On signal rate the fixed zero cutoff is far the highest for both sets, near 54 and 46 "
+    "percent, while the trailing and cross-sectional percentile rules sit between 9 and 15 "
+    "percent. On state-transition rate the same ordering holds and the crypto bars are the taller "
+    "ones under every method.",
+)
 
 # %% [markdown]
 # ## 8. What the lookback length buys
@@ -648,7 +667,7 @@ for case_study in CASE_STUDIES:
         col=2,
     )
 fig.update_layout(
-    title="Longer lookbacks reduce state-transition frequency",
+    title="Signal rate and state-transition rate by lookback length",
     height=400,
     margin=dict(t=100, r=140),
     legend=dict(x=1.02, y=1.0, xanchor="left", yanchor="top"),
@@ -657,7 +676,14 @@ fig.update_xaxes(title_text="Lookback (observations)", row=1, col=1)
 fig.update_xaxes(title_text="Lookback (observations)", row=1, col=2)
 fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two line panels against lookback length in observations, navy for crypto perpetuals and "
+    "amber for ETFs. On signal rate the ETF line rises from about 13.2 to 14.7 percent as the "
+    "lookback lengthens while the crypto line is flat near 9.6. On state-transition rate both "
+    "fall, but the ETF line drops from 14 to 11 percent and the crypto line only from 16.5 to "
+    "15.7.",
+)
 
 # %% [markdown]
 # ## 9. What the cutoff buys
@@ -703,7 +729,7 @@ for case_study in CASE_STUDIES:
     )
 
 fig.update_layout(
-    title="Higher percentile cutoffs reduce signals and state changes",
+    title="Signal rate and state-transition rate by percentile cutoff",
     height=400,
     margin=dict(t=100, r=140),
     legend=dict(x=1.02, y=1.0, xanchor="left", yanchor="top"),
@@ -712,7 +738,14 @@ fig.update_xaxes(title_text="Percentile", row=1, col=1)
 fig.update_xaxes(title_text="Percentile", row=1, col=2)
 fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two line panels against the percentile cutoff from 75 to 95, navy for crypto perpetuals and "
+    "amber for ETFs. Signal rate falls close to linearly in both sets, from roughly 24 and 27 "
+    "percent down to 5 and 7. State-transition rate also falls in both, but from a much higher "
+    "starting point for crypto, 33 percent against 19, and the two lines converge near 10 percent "
+    "at the 95th percentile.",
+)
 
 # %% [markdown]
 # ## 10. The grid, summarized

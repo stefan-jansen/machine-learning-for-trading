@@ -60,7 +60,7 @@ from ml4t.diagnostic.metrics import sharpe_ratio
 
 from data import load_etfs, load_macro
 from utils import ML4T_DATA_PATH
-from utils.style import COLORS, add_message_title, format_pct_axis
+from utils.style import COLORS, add_message_title, format_pct_axis, show_with_alt
 
 # %% tags=["parameters"]
 START_DATE = "2010-01-01"
@@ -453,11 +453,19 @@ format_pct_axis(axes[1], axis="x")
 
 add_message_title(
     axes[0],
-    "Four conditions, four different strategies",
+    "Sharpe ratio and drawdown by volatility and trend state",
     subtitle="Dashed line is the pooled figure across all active days",
 )
 fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two horizontal bar panels sharing a state axis with one bar per volatility and trend state, "
+    "each state in its own colour, and a dashed line marking the pooled figure across all active "
+    "days. On annualized Sharpe, Recovery is highest near 1.5 and Caution near 1.25, both above "
+    "the pooled line; Crisis is about 0.65 and Risk-on far the lowest at about 0.15. On drawdown "
+    "along each state's own path the ordering is different: Crisis is deepest at roughly -23 "
+    "percent, Risk-on next at about -18, and every state is shallower than the pooled figure.",
+)
 
 # %% [markdown]
 # The dashed line on each panel is the pooled figure, so the length of a bar past it is what the
@@ -526,10 +534,17 @@ format_pct_axis(ax, axis="x")
 ax.legend(frameon=False)
 add_message_title(
     ax,
-    "The crisis tail is not fatter than the tail of an ordinary day",
+    "Daily return distribution, crisis days against all active days",
     subtitle="Dashed lines mark each sample's 95% conditional value at risk",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Two step histograms of daily strategy return on a shared axis, all active days outlined in "
+    "navy and crisis days in red, with each sample's 95 percent conditional value at risk marked "
+    "by a dashed vertical line of its own colour. The two distributions have the same shape and "
+    "nearly the same centre, the crisis one is slightly taller at the mode, and the two dashed "
+    "lines sit almost on top of each other just below -1.5 percent.",
+)
 
 # %%
 print(f"Crisis days:                 {len(crisis_returns):,}")
@@ -594,10 +609,16 @@ ax.set_ylabel("Volatility and trend state")
 format_pct_axis(ax, axis="x")
 add_message_title(
     ax,
-    "The worst drawdown was not accumulated evenly across conditions",
+    "Contribution to the worst drawdown, by state",
     subtitle=f"Peak {dates[peak_index]} to trough {dates[trough_index]}; contributions sum exactly",
 )
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal bar chart of each state's additive log-return contribution to the worst drawdown, "
+    "all bars negative and drawn in red. Crisis contributes the most at about -18 percent, "
+    "Risk-on about -13.5, Caution about -4 and Recovery under -2. The peak and trough dates are "
+    "named in the subtitle and the four contributions sum to the whole decline.",
+)
 
 # %%
 print(f"Worst drawdown: {dates[peak_index]} to {dates[trough_index]}, {drawdown[trough_index]:.1%}")

@@ -61,7 +61,7 @@ from plotly.subplots import make_subplots
 from scipy import stats
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -132,11 +132,8 @@ def _format_dsr_result(
     return {
         "dsr": probability,
         "z_score": z_score,
-        # `sf` rather than `1 - cdf`: the DSR is the cdf and is wanted as such, but the
-        # p-value is its tail, and subtracting a probability near one from one keeps only the
-        # digits that survive the cancellation. Measured: at z = 8 the subtraction gives
-        # 6.66e-16 against a true 6.22e-16, and from z = 9 it returns exactly 0 where the
-        # tail is 1.13e-19. A p-value of 0 is the one value a reader cannot interpret.
+        # `sf` rather than `1 - cdf`: subtracting a probability near one from one keeps
+        # only the digits that survive the cancellation, and from z = 9 it returns exactly 0.
         "p_value": float(stats.norm.sf(z_score)),
         "expected_max_sharpe": expected_max_annual,
         "adjusted_sharpe": observed_sharpe - expected_max_annual,
@@ -344,12 +341,19 @@ fig.add_vline(
 )
 
 fig.update_layout(
-    title="Testing enough strategies with no edge produces an impressive one",
+    title="Distribution of observed Sharpe ratios across the tested strategies",
     xaxis_title="Observed Sharpe Ratio",
     yaxis_title="Count",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Histogram of the observed Sharpe ratios from the simulated strategies, with a dashed "
+    "vertical line at the true Sharpe of zero and a second dashed line at the sample maximum near "
+    "2.47. The distribution is centred on zero and roughly symmetric, spanning about -2.5 to "
+    "+2.5, and the maximum sits in its right tail. Every strategy in the histogram has no edge by "
+    "construction.",
+)
 
 # %% [markdown]
 # ## 2. What the correction costs a good-looking strategy
@@ -428,7 +432,7 @@ fig.add_hline(
     annotation_text="50-50 chance",
 )
 fig.update_layout(
-    title="The same Sharpe becomes less convincing the harder it was looked for",
+    title="Deflated Sharpe probability against the number of strategies tested",
     xaxis_title="Number of Strategies Tested",
     yaxis_title="DSR probability (%)",
     xaxis_type="log",
@@ -440,7 +444,13 @@ fig.update_xaxes(
     tickvals=_n_trials_ticks,
     ticktext=[str(t) for t in _n_trials_ticks],
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of the deflated Sharpe probability in percent against the number of strategies "
+    "tested on a logarithmic axis, with dashed reference lines at 95 percent and at 50. One "
+    "observed Sharpe is held fixed throughout. The curve falls from about 97 percent at a single "
+    "strategy through the 50 percent line at roughly a dozen, to about 7 percent at 500.",
+)
 
 # %% [markdown]
 # ## 3. The same result in three units
@@ -503,7 +513,6 @@ for skew in skewness_values:
 nonnorm_df = pl.DataFrame(results_matrix)
 
 # %%
-# Create heatmap - pivot the data
 pivot = nonnorm_df.pivot(on="kurtosis", index="skewness", values="dsr_probability")
 skew_col = pivot.get_column("skewness").to_list()
 kurt_cols = [c for c in pivot.columns if c != "skewness"]
@@ -514,7 +523,10 @@ fig = go.Figure(
         z=z_values,
         x=[f"k={k}" for k in kurt_cols],
         y=[f"s={s:.1f}" for s in skew_col],
-        colorscale=ml4t_diverging(),
+        # Sequential, not diverging: the deflated probability has no meaningful midpoint
+        # for a diverging scale to sit on, and a red-to-green ramp would read the higher
+        # cells as the better ones, which is a verdict this grid does not carry.
+        colorscale=[[0, COLORS["silver"]], [1, COLORS["blue"]]],
         colorbar={"title": "DSR %"},
         text=np.round(z_values, 1),
         texttemplate="%{text}%",
@@ -523,12 +535,19 @@ fig = go.Figure(
 )
 
 fig.update_layout(
-    title="Skewness and kurtosis move the deflated probability very little here",
+    title="Deflated Sharpe probability by skewness and kurtosis",
     xaxis_title="Kurtosis",
     yaxis_title="Skewness",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of the deflated Sharpe probability in percent over a grid of skewness and kurtosis "
+    "settings, each cell labelled. Every value lies between 11.6 and 15.2 percent. Reading across "
+    "a row, kurtosis moves the probability by about a tenth of a point; reading down a column, "
+    "skewness moves it by three and a half points, from 15.2 at the most negative skew to 11.6 at "
+    "the most positive.",
+)
 
 # %% [markdown]
 # ## 5. Selecting the largest Sharpe from variants that all work equally well
@@ -719,12 +738,18 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title="Two corrections, two different shapes of penalty",
+    title="Adjusted against observed Sharpe ratio, under two corrections",
     xaxis_title="Observed Sharpe Ratio",
     yaxis_title="Adjusted Sharpe Ratio",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of adjusted against observed Sharpe ratio. The dashed grey line is the unadjusted "
+    "identity; the amber RAS line and the navy DSR line both run parallel below it, each a "
+    "roughly constant distance down. The DSR penalty is the larger of the two and pushes the "
+    "adjusted value below zero for every observed Sharpe under about 1.6.",
+)
 
 # %% [markdown]
 # ## 7. Choosing between them, and what a threshold implies
@@ -1006,7 +1031,7 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title="Stable edge keeps PBO at 0% across partition counts",
+    title="Backtest overfitting probability and combination count, by block count",
     xaxis_title="Number of CSCV blocks",
     height=400,
 )
@@ -1020,7 +1045,14 @@ fig.update_yaxes(
     ticktext=["6", "20", "70", "252", "924", "12.9k"],
     secondary_y=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Dual-axis line chart against the number of CSCV blocks. On the left axis the backtest "
+    "overfitting probability sits flat on zero for every block count, with a dashed reference "
+    "line at 50 percent well above it. On the right axis, which is logarithmic, the number of "
+    "combinations climbs from 6 at four blocks to 12,900 at sixteen. The two lines share a panel "
+    "and measure unrelated quantities.",
+)
 
 # %% [markdown]
 # ### DSR and PBO answer different questions

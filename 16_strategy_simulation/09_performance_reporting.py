@@ -56,6 +56,8 @@
 # %%
 """Build an auditable performance report from protocol-matched BTC backtests."""
 
+import re
+
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
@@ -73,7 +75,7 @@ from ml4t.diagnostic.visualization.portfolio import (
 )
 
 from data import load_crypto_perps
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, ml4t_diverging, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -538,7 +540,7 @@ for trace in fig.data:
     )
 fig.update_layout(
     title=(
-        "An RSI rule and buy-and-hold over the same bars and the same costs"
+        "Cumulative return, RSI rule against buy-and-hold"
         f"<br><sup>Net cumulative return; both target {POSITION_SIZE:.0%} of equity and fill at "
         "the next open</sup>"
     ),
@@ -546,7 +548,14 @@ fig.update_layout(
     height=500,
     margin={"r": 105},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of net cumulative return in percent for two rules on the same bars and costs, "
+    "direct-labelled at the right. Buy-and-hold, dashed, rises to about 600 percent in early "
+    "2021, peaks above 600 again in late 2021, falls under 100 by late 2022 and recovers to "
+    "roughly 370 by the end. The RSI rule stays in a band of about plus or minus 60 percent for "
+    "the whole sample and ends around -25 percent.",
+)
 
 # %% [markdown]
 # ## 4. How much of the time capital was at risk
@@ -616,7 +625,7 @@ fig.add_trace(
 )
 fig.update_layout(
     title=(
-        "Gross and net exposure coincide for the long-only rule"
+        "Gross and net exposure over the sample"
         "<br><sup>Position value divided by contemporaneous equity; net backtest</sup>"
     ),
     xaxis_title="Date",
@@ -625,7 +634,13 @@ fig.update_layout(
     height=420,
     hovermode="x unified",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Step chart of gross exposure, solid navy, and net exposure, dotted amber, as a share of "
+    "equity. The two lines sit exactly on top of each other for the whole sample because the rule "
+    "is long-only, and the path is square: either near the target share of equity or at zero, "
+    "with roughly a dozen active stretches spread across four years.",
+)
 
 # %% [markdown]
 # ## 5. What the completed round trips looked like
@@ -892,14 +907,21 @@ fig.data[0].opacity = 0.3
 fig.data[1].marker.color = COLORS["negative"]
 fig.update_layout(
     title=(
-        "Time under water, not just the depth of the worst fall"
+        "Drawdown from the high-water mark"
         "<br><sup>Net peak-to-trough return; zero is the high-water mark</sup>"
     ),
     xaxis_title="Date",
     yaxis_title="Drawdown (%)",
     height=360,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Filled drawdown chart from the high-water mark, zero at the top. The rule is under water for "
+    "almost the entire sample: it reaches about -45 percent in early 2020, returns to zero only "
+    "in the first months of 2021, then falls to a marked low near -67 percent in mid-2022 and is "
+    "still about -40 percent at the end. The flat segments are the stretches with no position, "
+    "where the drawdown cannot recover because nothing is at risk.",
+)
 
 # %%
 rolling = analysis_net.compute_rolling_metrics(windows=[ROLLING_WINDOW_DAYS], metrics=["sharpe"])
@@ -909,29 +931,52 @@ for shape in fig.layout.shapes:
     shape.line.color = COLORS["neutral"]
 for annotation in fig.layout.annotations:
     annotation.font.color = COLORS["neutral"]
+# The library labels its two reference lines "Good (1.0)" and "Excellent (2.0)". Those are
+# verdicts on a rule this notebook has not judged, and a reader cannot argue with a word printed
+# on an axis, so the levels stay and the adjectives go. The level is read back out of the label
+# rather than off the shape: the figure carries three horizontal lines and only two of them are
+# annotated, so the two lists do not correspond position by position.
+for annotation in fig.layout.annotations:
+    level = re.search(r"\(([\d.]+)\)", annotation.text or "")
+    if level:
+        annotation.text = f"Sharpe {level.group(1)}"
 fig.update_layout(
     title=(
-        "Risk-adjusted performance varies across the sample"
+        "Rolling Sharpe ratio over the sample"
         f"<br><sup>{ROLLING_WINDOW_DAYS}-day rolling Sharpe, annualized on a 365-day year</sup>"
     ),
     xaxis_title="Date",
     yaxis_title="Rolling Sharpe ratio",
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of the rolling Sharpe ratio with dashed reference lines at 1.0 and 2.0. The "
+    "series begins a year into the sample, spikes above 2.5 in early 2021, falls through zero in "
+    "late 2021 and spends 2022 between 0 and -1, then climbs back to roughly 1.5 through the "
+    "second half of 2023. The same rule sits on both sides of every reference level depending on "
+    "which year the window covers.",
+)
 
 # %%
 fig = plot_monthly_returns_heatmap(analysis_net)
 fig.data[0].colorscale = ml4t_diverging()
 fig.update_layout(
     title=(
-        "Monthly outcomes are concentrated in active-position windows"
+        "Return by calendar month and year"
         "<br><sup>Net calendar-month return; annual column compounds monthly observations</sup>"
     ),
     xaxis_title="Month",
     yaxis_title="Year",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Heatmap of net return by calendar month and year with an annual column at the right, on a "
+    "diverging scale where green is positive and red negative, each cell labelled. Many cells are "
+    "exactly zero, the months with no position. The extremes are concentrated: -33.9 percent in "
+    "May 2021, -35.0 in June 2022 and +34.0 for 2023 as a whole, against annual figures of -16.0, "
+    "-0.6 and -33.4 for the three preceding years.",
+)
 
 # %%
 fig = go.Figure()
@@ -955,7 +1000,7 @@ fig.add_vline(
 )
 fig.update_layout(
     title=(
-        "Daily returns combine many flat days with a heavy active tail"
+        "Distribution of daily returns"
         "<br><sup>Net calendar-day returns; vertical line marks the empirical 95% VaR</sup>"
     ),
     xaxis_title="Daily return (%)",
@@ -964,7 +1009,13 @@ fig.update_layout(
     bargap=0.04,
     height=420,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Histogram of daily net returns with a dotted red vertical line at the empirical 95 percent "
+    "value at risk. One bar at zero holds close to a thousand days, the flat days with no "
+    "position, and the rest of the mass is a short, wide skirt reaching past -30 percent on the "
+    "left and about +10 on the right. The distribution is two populations rather than one.",
+)
 
 # %% [markdown]
 # ## 8. The report itself

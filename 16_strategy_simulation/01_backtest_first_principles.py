@@ -65,9 +65,6 @@
 """Backtesting first principles with point-in-time signals and next-open execution."""
 
 import hashlib
-import warnings
-
-warnings.filterwarnings("ignore")
 
 import numpy as np
 import plotly.graph_objects as go
@@ -78,7 +75,7 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs, load_macro
 from utils import ML4T_DATA_PATH
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 START_DATE = "2010-01-01"
@@ -343,7 +340,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=f"The {TOP_N} highest scores are the funds the rule would hold",
+    title="Trailing risk-adjusted momentum by fund, last session of the sample",
     xaxis_title=f"{LOOKBACK_PERIOD}-session return per unit of annualized volatility",
     yaxis_title="ETF symbol",
     height=430,
@@ -351,7 +348,14 @@ fig.update_layout(
     showlegend=False,
 )
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bar chart of the ten ETFs' trailing risk-adjusted momentum on the last session of "
+    "the sample, sorted with the highest at the top. QQQ, SPY and GLD lead and are drawn in navy "
+    "as the three a risk-on month would buy; six funds sit between them and zero; TLT is the only "
+    "fund with a negative score. The three leaders are close enough together that their order is "
+    "not well separated.",
+)
 
 # %% [markdown]
 # ## 5. Generate target weights that were tradable when the period began
@@ -442,14 +446,23 @@ fig.add_trace(
     col=1,
 )
 fig.update_layout(
-    title="The portfolio sits in bonds whenever the spread is under the threshold",
+    title="The 10Y-2Y spread and the target weights it produced",
     height=700,
     showlegend=False,
 )
 fig.update_yaxes(title_text="Spread (percentage points)", row=1, col=1)
 fig.update_yaxes(title_text="ETF symbol", row=2, col=1)
 fig.update_xaxes(title_text="Date", row=2, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis from 2010 to 2023. The upper panel is the 10Y-2Y "
+    "Treasury spread in percentage points with a dashed line at the risk-off threshold: the "
+    "spread falls from about three points in 2010, crosses the threshold from below around 2019, "
+    "and spends 2022 and 2023 inverted. The lower panel is a heatmap of target weight by fund and "
+    "date; the AGG and TLT rows are dark through the stretches where the spread sits under the "
+    "threshold, and the equity rows carry the lighter one-third weights of the risk-on months in "
+    "between.",
+)
 
 # %% [markdown]
 # ## 7. The fundamental return equation
@@ -668,7 +681,13 @@ fig.update_layout(
     height=500,
 )
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of cumulative net return in percent for the ETF momentum portfolio, in solid "
+    "navy, and the 60/40 benchmark, dashed grey, both starting at zero in 2010. The two track "
+    "each other closely for the whole sample; momentum runs modestly ahead from 2012 to the 2021 "
+    "peak near 280 percent, then gives more back through 2022 and finishes below the benchmark.",
+)
 
 # %% [markdown]
 # Drawdown is measured from the running peak, with zero at the top and losses below.
@@ -710,7 +729,13 @@ fig.update_layout(
     height=420,
 )
 fig.update_yaxes(range=[min(strategy_dd.min(), benchmark_dd.min()) * 110, 0])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Underwater chart of each portfolio's drawdown from its own running peak, zero at the top. "
+    "Momentum is a filled navy area and the 60/40 benchmark a dashed grey line. Both stay within "
+    "about 10 percent for most of the sample and both fall through 2022, where momentum reaches "
+    "about -31 percent against the benchmark's -22.",
+)
 
 # %% [markdown]
 # ## 12. Compare performance by contemporaneous regime
@@ -772,7 +797,13 @@ fig.update_yaxes(title_text="Mean daily return (bps)", row=1, col=1)
 fig.update_yaxes(title_text="Annualized volatility (%)", row=1, col=2)
 fig.update_xaxes(title_text="Yield-curve regime", row=1, col=1)
 fig.update_xaxes(title_text="Yield-curve regime", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bar panels comparing the momentum strategy's realized daily returns by contemporaneous "
+    "yield-curve state. Mean daily return is about 4 basis points on risk-on days against under 2 "
+    "on risk-off days; annualized volatility is close on both, near 12 percent risk-on and 10 "
+    "percent risk-off.",
+)
 
 # %% [markdown]
 # ## 13. Reconcile with `ml4t-diagnostic`
