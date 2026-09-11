@@ -111,7 +111,20 @@ CONFIG_NAMES: list[str] = []
 DIAGNOSTIC_CONFIG_NAMES = ["ols"]
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
-SUPERSEDES_SETS: dict = {}
+
+# A candidate set is sealed once written, so a run whose members differ from the recorded
+# generation has to name the set it replaces, keyed by the full set name because that is what
+# the refusal prints. These two moved when 04_model_based_features was rebuilt at production
+# scale on 2026-09-10: every stage-06 training run registered before that pinned the superseded
+# `model_based` artifact, so the whole catalog refitted and both 2026-08-18 generations went
+# stale. `fwd_ret_5d` and `fwd_ret_21d` have no recorded generation and need no entry.
+# Resolved through `candidate_set_supersedes` rather than passed straight to `freeze`, because a
+# reader's clean clone has no generation to supersede and `create` refuses a first version that
+# claims to replace one.
+SUPERSEDES_SETS: dict = {
+    "us-equities-fwd-ret-1d-linear-v1": "454f73021f33",
+    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "29155b2c69f1",
+}
 
 # %%
 study = open_study("us_equities_panel", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
