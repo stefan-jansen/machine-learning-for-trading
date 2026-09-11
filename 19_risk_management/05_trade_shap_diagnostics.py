@@ -655,7 +655,7 @@ display(
 #   The yield slope and the volatility index are both revised rarely, but the panel is not
 #   point-in-time and no macro conclusion should be drawn from it.
 # - No cost is charged. The expected-return buffer screens small forecasts but is not a cost model,
-#   and 746 overnight round trips would pay a great deal more than it.
+#   and 620 overnight round trips would pay a great deal more than it.
 # - The worst trades are selected by realized loss, which is an outcome. A set of trades chosen
 #   that way contains the model's genuine failures and also its unlucky correct calls, and SHAP
 #   cannot separate the two.

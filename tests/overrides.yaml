@@ -931,6 +931,7 @@
   # nowhere - not in CI, not on the workstation, and its last render came from a container
   # whose kaleido had no Chrome, so its figures carried no text. `LGB_DEVICE` now defaults to
   # "cpu" and the fit asserts the booster honoured it. ml4t/agent-workspace#862.
+  # Measured 12s end to end on the workstation, so 300 is ample.
   timeout: 300
 19_risk_management/06_stress_testing:
   timeout: 300
@@ -938,7 +939,8 @@
   # Moved to CPU 2026-09-11, same reason as 05. It also carried a fail-closed
   # `torch.cuda.is_available()` gate that had nothing to do with what the notebook computes -
   # no tensor is ever built here - so torch is gone from it entirely. `LGB_DEVICE` defaults to
-  # "cpu" and every fold plus the final fit is checked against it.
+  # "cpu" and every fold plus the final fit is checked against it. Measured 26s end to end on
+  # the workstation across two runs, so 300 is ample.
   timeout: 300
 19_risk_management/08_ml_exit_signals:
   # `LGB_DEVICE` defaults to "cpu" and the run asserts the booster honoured whatever was

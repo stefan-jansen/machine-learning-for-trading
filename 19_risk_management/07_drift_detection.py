@@ -993,7 +993,7 @@ def plot_domain_classifier_results(result: DomainClassifierResult):
     fig.update_layout(
         title=(
             "Which features let a classifier tell the two samples apart"
-            "<br><sup>Split counts from the cross-validated domain classifier</sup>"
+            "<br><sup>Split counts from the final all-row domain classifier</sup>"
         ),
         xaxis_title="LightGBM split count",
         yaxis_title="Feature",
