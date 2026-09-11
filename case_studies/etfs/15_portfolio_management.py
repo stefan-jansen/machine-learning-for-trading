@@ -401,9 +401,9 @@ fig.update_layout(
 _span = ordered["avg_sharpe"]
 show_plotly_with_alt(
     fig,
-    "Horizontal bar chart of the mean Sharpe ratio of every allocation-stage backtest, one bar per "
-    f"weighting scheme, with a dashed line at zero. Counted from the frame: {ordered.height} "
-    f"allocators, mean Sharpe from {_span.min():+.3f} to {_span.max():+.3f}.",
+    "Horizontal bar chart of mean Sharpe by weighting scheme, one bar per allocator, over the "
+    "allocation backtests for the prediction sets this sweep advanced, ordered by that mean, "
+    "with a dashed line at zero.",
 )
 
 # %% [markdown]
