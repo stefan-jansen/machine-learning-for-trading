@@ -82,7 +82,7 @@
   tier: weekly
   timeout: 300
   skip_blocker:
-    absent_fixture_path: equities/market/microstructure/nasdaq_itch/raw
+    absent_fixture_path: equities/market/microstructure/nasdaq_itch/raw/*
 03_market_microstructure/02_itch_lob_reconstruction:
   # The ITCH fixture's add messages are a head-of-day subsample and all fall before the
   # opening auction, so the production 09:30 window would reconstruct an empty book.
@@ -115,7 +115,7 @@
   tier: weekly
   timeout: 300
   skip_blocker:
-    absent_fixture_path: equities/market/microstructure/iex/deep/raw
+    absent_fixture_path: equities/market/microstructure/iex/deep/*.pcap.gz
 03_market_microstructure/11_algoseek_taq_eda:
   timeout: 300
 03_market_microstructure/12_algoseek_taq_lob_reconstruction:

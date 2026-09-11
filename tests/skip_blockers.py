@@ -124,6 +124,14 @@ def blocker_unmet_reason(declaration: dict) -> str | None:
         if root is None:
             raise UndecidableHere("no ML4T_DATA_PATH to measure against")
         relative = str(declaration[kind])
+        # A glob, because the condition is usually "no file of this shape" rather than "this
+        # exact path is missing", and the two differ where it matters: the IEX notebook reads
+        # `iex/deep/*.pcap.gz` through `load_iex_hist(get_raw_files=True)`, so a declaration
+        # naming a `raw/` directory it never opens would stay unmet after the captures landed.
+        if any(char in relative for char in "*?["):
+            if not any(root.glob(relative)):
+                return f"the CI fixture carries no file matching {relative}"
+            return None
         if not (root / relative).exists():
             return f"the CI fixture carries no {relative}"
         return None

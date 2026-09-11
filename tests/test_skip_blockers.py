@@ -139,6 +139,8 @@ def test_declaration_has_not_outlived_its_reason(key, populated_data_dir, seeded
     [
         ({"absent_fixture_path": "no/such/fixture/file.parquet"}, True),
         ({"absent_fixture_path": "etfs/market/etf_universe.parquet"}, False),
+        ({"absent_fixture_path": "equities/market/microstructure/iex/deep/*.pcap.gz"}, True),
+        ({"absent_fixture_path": "etfs/market/*.parquet"}, False),
     ],
 )
 def test_fixture_path_evaluator_reports_both_outcomes(
