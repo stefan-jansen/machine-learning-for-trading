@@ -156,6 +156,11 @@ class CausalResult:
                     if "refutation_placebo_json" in columns
                     else "NULL AS refutation_placebo_json"
                 )
+                placebo_t_column = (
+                    "refutation_placebo_t_json"
+                    if "refutation_placebo_t_json" in columns
+                    else "NULL AS refutation_placebo_t_json"
+                )
                 frozen_column = (
                     "refutation_frozen_fraction"
                     if "refutation_frozen_fraction" in columns
@@ -164,7 +169,7 @@ class CausalResult:
                 row = db.execute(
                     "SELECT n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
                     f"confounding_bias_pct, refutation_p, {draws_column}, spec_json, "
-                    f"{placebo_column}, {frozen_column} "
+                    f"{placebo_column}, {placebo_t_column}, {frozen_column} "
                     "FROM causal_runs WHERE causal_hash = ?",
                     (causal_hash,),
                 ).fetchone()
@@ -190,13 +195,23 @@ class CausalResult:
                     # not there. An empty list rather than None when the column exists
                     # but the run predates it, so callers need one check, not two.
                     "placebo_effects": json.loads(row[9]) if row[9] else [],
+                    # The draws refutation_p is actually computed on since
+                    # ml4t/agent-workspace#1120. Empty means the p-value on this row was
+                    # computed the old way, on raw thetas, and is anti-conservative: a
+                    # permuted treatment is no longer predictable from the controls, so
+                    # its residual keeps its variance, the second stage divides by a
+                    # larger number, and every placebo theta is shrunk toward zero
+                    # whether or not there is anything to find. A caller that wants to
+                    # render the distribution behind the verdict must use these and not
+                    # `placebo_effects`, and must say so when they are missing.
+                    "placebo_t_stats": json.loads(row[10]) if row[10] else [],
                     # The diagnostic the refutation's own warning tells the reader to
                     # weigh the p-value against. It reaches a reader only from here: the
                     # warning fires while the fit runs, and a re-run that hits the cache
                     # performs no fit. None rather than 0.0 when the column is absent or
                     # the refutation recorded none - zero asserts that permutation moved
                     # every row, which is the opposite of not knowing.
-                    "placebo_frozen_fraction": row[10],
+                    "placebo_frozen_fraction": row[11],
                     # Derived here so every reader gets the same verdict from the same
                     # rule. A p-value alone cannot say whether the draws could have
                     # rejected at all, so a caller that re-applies a bare threshold

@@ -344,41 +344,62 @@ summary = pl.DataFrame(
 summary
 
 # %% [markdown]
-# ### The observed effect against its placebos
+# ### The observed t-statistic against its placebos
 #
-# The permutation test asks how often the same estimator recovers an effect this large from
-# data whose treatment has been shuffled in blocks - which keeps the panel's shape but
-# destroys the treatment's alignment with the outcome. The two significance readings answer
-# different questions and can disagree. The Newey-West p-value asks whether the effect is
-# distinguishable from zero under a parametric model of the errors; the permutation p-value
+# The permutation test asks how often the same estimator recovers a HAC t-statistic this large
+# from data whose treatment has been shuffled in blocks - which keeps the panel's shape but
+# destroys the treatment's alignment with the outcome. It compares t-statistics rather than
+# effects because a shuffled treatment is no longer predictable from the controls: its residual
+# keeps nearly all its variance, that variance is the denominator of the second-stage effect, and
+# so every placebo effect is divided by a larger number than the observed one. The two significance
+# readings answer different questions and can disagree. The Newey-West p-value asks whether the
+# effect is distinguishable from zero under a parametric model of the errors; the permutation p-value
 # needs no such model, but can only reject in proportion to the draws run. When the
 # permutation test does not corroborate the parametric one, the parametric standard error is
 # the reading to distrust: it rests on an assumption about the errors that the shuffle does
 # not need.
 
 # %%
-placebo = np.asarray(metrics.get("placebo_effects") or [], dtype=float)
-if placebo.size:
+# The distribution is drawn on the t-statistic, which is also the scale the p-value above
+# is computed on. Plotting the raw effects would put a narrower distribution beside a
+# p-value that did not come from it: a permuted treatment is no longer predictable from
+# the controls, so its residual keeps its variance, the second stage divides by a larger
+# number, and every placebo effect is pulled toward zero whether or not there is anything
+# to find. Dividing each draw by its own standard error is what removes that.
+placebo_t = np.asarray(metrics.get("placebo_t_stats") or [], dtype=float)
+if placebo_t.size:
+    observed_t = float(metrics["dml_effect"]) / float(metrics["dml_se_hac"])
     fig = go.Figure()
-    fig.add_histogram(x=placebo, nbinsx=30, name="Placebo effects", marker_color=COLORS["blue"])
+    fig.add_histogram(
+        x=placebo_t, nbinsx=30, name="Placebo t-statistics", marker_color=COLORS["blue"]
+    )
     fig.add_vline(
-        x=float(metrics["dml_effect"]),
+        x=observed_t,
         line_color=COLORS["amber"],
         line_width=2,
         annotation_text="observed",
     )
     fig.update_layout(
-        title="Observed effect against its block-permutation placebos",
-        xaxis_title="Treatment effect",
+        title="Observed t-statistic against its block-permutation placebos",
+        xaxis_title="HAC t-statistic",
         yaxis_title="Placebo replications",
     )
     show_plotly_with_alt(
         fig,
-        "Histogram of block-permutation placebo treatment effects with the observed DML "
-        "effect marked, showing where the estimate falls in the null distribution.",
+        "Histogram of block-permutation placebo HAC t-statistics with the observed DML "
+        "t-statistic marked, showing where the estimate falls in the null distribution.",
+    )
+    print(
+        f"Placebo t-statistics: {placebo_t.size} draws, "
+        f"mean {placebo_t.mean():+.3f}, sd {placebo_t.std():.3f}. "
+        f"Observed {observed_t:+.3f}."
     )
 else:
-    print("No placebo draws are stored on this row, so there is no null distribution to show.")
+    print(
+        "No placebo t-statistics are stored on this row, so there is no null distribution "
+        "to show. A row registered before the refutation moved onto the t scale carries "
+        "placebo effects only, and its stored p-value is not comparable with this figure."
+    )
 
 # %% [markdown]
 # ## Key takeaways

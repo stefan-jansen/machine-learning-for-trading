@@ -60,15 +60,23 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 LABEL = ""
 CONFIG_NAME = ""
-# The causal identity this run retires, as a bare hash. `_causal_source_identity` hashes
-# `case_studies/utils/causal.py` whole, so any edit to that file gives the same fit a new
-# identity, and a second current identity for one label makes `CausalResult.one`
-# unresolvable. Registration refuses the write rather than leaving the ambiguity for a
-# downstream notebook to hit hours later, so a refit has to say here which identity it
-# replaces. Empty means the fit must leave exactly one current identity on its own.
+# The causal identity this run retires, as a bare hash. The source component of that identity
+# is `CAUSAL_RUNNER_VERSION`, a declared integer in `case_studies/utils/causal.py`; nothing
+# hashes the file itself. So an edit to the estimator moves the identity only if that constant
+# is raised by hand, and an edit that changes a registered value without raising it leaves the
+# next run to hit the cache and serve the old number under the new code. Once it is raised the
+# same fit resolves to a new identity, and two current identities for one label make
+# `CausalResult.one` unresolvable. Registration refuses the write rather than leaving the
+# ambiguity for a downstream notebook to hit hours later, so a refit has to say here which
+# identity it replaces. Empty means the fit must leave exactly one current identity on its own.
 # Papermill passes parameters through as strings, which is why this is a str and not a
 # mapping.
-SUPERSEDES_CAUSAL: str = ""
+# Retired by this run: the block-permutation refutation now compares the HAC t-statistic
+# rather than the raw effect, so CAUSAL_RUNNER_VERSION moved and every causal identity with
+# it. The rows named here hold a p-value computed on the shrunken placebo effects; this run
+# supersedes them rather than correcting them, because the statistic is different, not the
+# arithmetic. Read out of each registry's current canonical identity per label, 2026-09-10.
+SUPERSEDES_CAUSAL: str = "96b84e61bab8"
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)

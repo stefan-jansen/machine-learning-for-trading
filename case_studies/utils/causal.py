@@ -29,7 +29,14 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 # Fixed rather than derived from the host: a value like -1 varies with the machine, so a
 # result would not be identity-stable across the readers' hardware.
 DML_THREAD_LIMIT = 1
-CAUSAL_RUNNER_VERSION = 1
+# 1 -> 2 on 2026-09-10: the block-permutation refutation moved from comparing raw effects
+# to comparing HAC t-statistics (ml4t/agent-workspace#1120). That changes a registered
+# value, so it has to move the identity - and causal rows have no migration path, so every
+# causal row in every case study refits rather than being re-keyed. That is the intended
+# cost: a stored refutation_p computed on raw effects is anti-conservative, always in the
+# direction of "Passes", and there is no arithmetic that converts one into the other
+# because the t-scale draws were never recorded.
+CAUSAL_RUNNER_VERSION = 2
 
 import hashlib
 import importlib.metadata
@@ -757,18 +764,25 @@ def empirical_permutation_p(placebo_effects: np.ndarray, observed_effect: float)
     no finite number of permutations can support. With ``n`` placebo draws the
     smallest p-value the test can report is ``1 / (n + 1)``.
 
+    The statistic is the caller's choice and this function does not care which, but
+    `run_dml_analysis` passes t-statistics rather than raw effects, and the difference is
+    not cosmetic: a permuted treatment is no longer predictable from the controls, so
+    ``var(T_res)`` - the second stage's whole denominator - inflates, and every placebo
+    theta is shrunk toward zero by arithmetic. Comparing thetas therefore measures a
+    narrower distribution than the null it stands for. See ml4t/agent-workspace#1120.
+
     Parameters
     ----------
     placebo_effects : np.ndarray
-        Treatment effects from the successful placebo permutations.
+        The statistic from each successful placebo permutation.
     observed_effect : float
-        The treatment effect estimated on the unpermuted data.
+        The same statistic computed on the unpermuted data.
 
     Returns
     -------
     float
         The fraction of the permutation distribution at least as extreme as the
-        observed effect in absolute value, in ``(0, 1]``.
+        observed value in absolute value, in ``(0, 1]``.
     """
     placebo = np.asarray(placebo_effects, dtype=float)
     at_least_as_extreme = int(np.sum(np.abs(placebo) >= abs(observed_effect)))
@@ -962,6 +976,7 @@ def run_dml_analysis(
 
         # Block permutation refutation
         placebo_effects = []
+        placebo_t_stats = []
         placebo_n_obs = []
         unchanged_draws = 0
         moved_fractions: list[float] = []
@@ -998,12 +1013,13 @@ def run_dml_analysis(
                 model_t=model_t,
                 thread_limit=thread_limit,
             )
-            if not np.isnan(perm_result["theta"]):
+            if not np.isnan(perm_result["theta"]) and np.isfinite(perm_result["t_stat_hac"]):
                 if perm_result["n_obs"] != dml["n_obs"]:
                     raise RuntimeError(
                         "Observed and placebo DML statistics use different second-stage samples"
                     )
                 placebo_effects.append(perm_result["theta"])
+                placebo_t_stats.append(float(perm_result["t_stat_hac"]))
                 placebo_n_obs.append(int(perm_result["n_obs"]))
 
         frozen_fraction = float(short_frozen.mean()) if short_frozen.size else 0.0
@@ -1014,18 +1030,65 @@ def run_dml_analysis(
 
         refutation = {}
         if len(placebo_effects) >= MIN_PLACEBO_DRAWS:
+            # THE TEST IS ON THE T-STATISTIC, NOT ON THETA, and the difference is not
+            # cosmetic: comparing thetas made this refutation anti-conservative on every
+            # run ever recorded (ml4t/agent-workspace#1120).
+            #
+            # DML's second stage regresses the residualized outcome on the residualized
+            # treatment, so var(T_res) is the estimator's whole denominator. Permuting the
+            # treatment also frees it from the controls: the first stage can no longer
+            # predict it, its residual keeps essentially all of its variance, and the
+            # placebo estimator therefore divides by a much larger number than the observed
+            # one does. A placebo theta comes out smaller than the observed theta by
+            # arithmetic, whether or not there is any alignment to find - so the permutation
+            # distribution is narrower than the null it is supposed to represent, and the
+            # observed effect looks extreme against it more often than it should. The bias
+            # runs one way, toward "Passes", so no stored value is safe to read as evidence.
+            #
+            # Measured on a synthetic panel with theta EXACTLY ZERO by construction, so
+            # every rejection is a false positive that needs no interpretation:
+            #
+            #   var(T_res)/var(T)     observed 0.100   placebo mean 1.132   -> 11.4x
+            #   placebo theta sd / observed se_hac                             0.167
+            #   empirical p on raw effects                                    0.0164
+            #   empirical p on t-statistics                                   0.5902
+            #   placebo t distribution                        mean 0.017, sd 1.069
+            #
+            # The same ratio measured 10.9x on the crypto_perps_funding panel, which is a
+            # different dataset entirely. The t-statistic is what cancels the denominator:
+            # each draw divides by its own standard error, and what is left is the
+            # alignment the refutation is about. Its null comes out centred on zero with
+            # unit spread without anyone tuning for it, which is the calibration a
+            # permutation test is supposed to have.
+            #
+            # `placebo_effects` stays in this dict, and no notebook plots it any more - the three
+            # that draw the permutation distribution all read `placebo_t_stats`, because that is
+            # the scale the verdict is decided on. It is kept because the effect scale
+            # is the one a reader can interpret against the estimate, so a row carries both and
+            # the registry schema says the same. `placebo_t_stats` is what `empirical_p`,
+            # `z_score`, `placebo_mean` and `placebo_std` describe. `refutation_statistic` names
+            # the scale in this dict, for a caller holding the fit; it is not registered and
+            # `CausalResult.metrics` does not expose it, so what tells a reader of a stored row
+            # which comparison produced its p-value is `refutation_placebo_t_json` being
+            # non-NULL.
             placebo_arr = np.array(placebo_effects)
-            p_mean = np.mean(placebo_arr)
-            p_std = np.std(placebo_arr)
-            z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
-            emp_p = empirical_permutation_p(placebo_arr, dml_effect)
-            ref_class = classify_refutation(emp_p, len(placebo_effects))
+            placebo_t_arr = np.array(placebo_t_stats)
+            observed_t = float(dml["t_stat_hac"])
+            p_mean = float(np.mean(placebo_t_arr))
+            p_std = float(np.std(placebo_t_arr))
+            z = (observed_t - p_mean) / p_std if p_std > 0 else np.inf
+            emp_p = empirical_permutation_p(placebo_t_arr, observed_t)
+            ref_class = classify_refutation(emp_p, len(placebo_t_stats))
             refutation = {
+                "refutation_statistic": "t_stat_hac",
                 "z_score": z,
                 "empirical_p": emp_p,
                 "placebo_mean": p_mean,
                 "placebo_std": p_std,
-                "n_successful": len(placebo_effects),
+                "observed_t_stat": observed_t,
+                "placebo_effect_mean": float(np.mean(placebo_arr)),
+                "placebo_effect_std": float(np.std(placebo_arr)),
+                "n_successful": len(placebo_t_stats),
                 "placebo_frozen_fraction": frozen_fraction,
                 "placebo_remainder_fraction": remainder_fraction,
                 "placebo_moved_fraction": float(np.mean(moved_fractions))
@@ -1034,6 +1097,7 @@ def run_dml_analysis(
                 "n_folds": n_folds,
                 "placebo_n_obs": placebo_n_obs,
                 "placebo_effects": placebo_effects,
+                "placebo_t_stats": placebo_t_stats,
                 "refutation_class": ref_class,
             }
 
@@ -1083,7 +1147,9 @@ def format_dml_summary(results: dict) -> str:
         ref_class = ref.get("refutation_class", classify_refutation(ref["empirical_p"]))
         lines += [
             "",
-            "Refutation (block permutation):",
+            "Refutation (block permutation, on the HAC t-statistic):",
+            f"  Observed t:   {ref.get('observed_t_stat', float('nan')):+.2f}",
+            f"  Placebo t:    mean {ref['placebo_mean']:+.2f}, sd {ref['placebo_std']:.2f}",
             f"  Z-score:      {ref['z_score']:.2f}",
             f"  Empirical p:  {ref['empirical_p']:.4f}",
             f"  Classification: {ref_class}",
@@ -1656,6 +1722,23 @@ def _placebo_draws_json(refutation: dict) -> str | None:
     return json.dumps([float(value) for value in draws])
 
 
+def _placebo_t_stats_json(refutation: dict) -> str | None:
+    """Serialize the placebo t-statistics, or None when there are none.
+
+    These are the draws ``refutation_p`` is computed on since
+    ml4t/agent-workspace#1120. The thetas serialized above are still worth storing - a
+    reader wants the effect scale - but a figure drawn from them no longer shows the
+    distribution the p-value came from, because permuting the treatment inflates
+    ``var(T_res)`` and shrinks every placebo theta toward zero by arithmetic. Two
+    quantities, two columns; a row carrying thetas and no t-statistics is one whose
+    p-value predates the correction, and that is worth being able to see.
+    """
+    draws = refutation.get("placebo_t_stats")
+    if not draws:
+        return None
+    return json.dumps([float(value) for value in draws])
+
+
 def run_resolved_causal_request(
     study: Study,
     spec: dict[str, Any],
@@ -1783,6 +1866,7 @@ def run_resolved_causal_request(
         refutation_p=float(refutation_p) if refutation_p is not None else None,
         refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         refutation_placebo_json=_placebo_draws_json(refutation),
+        refutation_placebo_t_json=_placebo_t_stats_json(refutation),
         # The share of treatment rows the permutation could not move. The runner warns
         # that it has to be read alongside the p-value, and that warning fires only when
         # the fit executes - which on this path is exactly the branch above, where a cache
@@ -1940,6 +2024,7 @@ def register_causal_run(
         refutation_p=float(refutation_p) if refutation_p is not None else None,
         refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         refutation_placebo_json=_placebo_draws_json(ref),
+        refutation_placebo_t_json=_placebo_t_stats_json(ref),
         refutation_frozen_fraction=_frozen_fraction(ref),
         spec_json=canonical_json(spec),
         notebook=notebook,

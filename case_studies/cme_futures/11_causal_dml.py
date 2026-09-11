@@ -91,25 +91,44 @@
 # the result is a confidence interval that is too narrow and a t-statistic that is too large.
 # The HAC estimator does not fix the estimate - it corrects what may be claimed about it.
 #
-# ### Why the placebo block is one bar here, and not 252
+# ### Why the label buffer sizes the placebo block here, and not the treatment
 #
 # The refutation permutes the treatment in contiguous blocks and re-runs the whole estimation,
 # building a distribution of effects under the hypothesis that the treatment does nothing. The
-# block has to be long enough to preserve whatever serial dependence the real treatment has, or
-# the placebo is a weaker opponent than the truth and every p-value looks significant.
+# block has to be long enough to preserve whatever serial dependence the data has, or the
+# placebo is a weaker opponent than the truth and every p-value looks significant.
+#
+# Two separate scales create that dependence, and the block spans the longer of them:
+# `block_size = max(label_buffer, treatment_window)`. The overlapping labels span the label
+# horizon, and the treatment's own construction window spans itself.
 #
 # `causal.treatment_window` is 1 for this case study, and the reason is a property of the
 # construction rather than a judgement. `carry_pct` is
 # `(c0_price - c1_price) / c0_price * 12`, computed from two prices at the same timestamp.
-# Nothing rolls, nothing averages, no window is spanned - so one value carries no dependence of
-# its own and a one-bar block destroys nothing the refutation needs.
+# Nothing rolls, nothing averages, no window is spanned. The label buffer is therefore the
+# binding scale here: the registered blocks are 5 periods for `fwd_ret_5d` and 21 for
+# `fwd_ret_21d`, and each row records its own `block_size` beside a `block_size_basis` of
+# `label_buffer` saying which of the two set it.
+#
+# **A one-bar construction window is not a claim that the column is serially independent**, and
+# the two are worth keeping apart. The declared window says how many bars the formula reads;
+# the column's empirical persistence is a separate quantity and is much larger here.
+# `12_model_analysis` measures it from the feature panel rather than asserting it, on one row per
+# product-session because that is the unit the block counts, pooling the autocorrelation within
+# product with each product demeaned first. Compare each block against the autocorrelation at
+# that lag: 0.52 at the 5 sessions used for `fwd_ret_5d`, 0.14 at the 21 used for
+# `fwd_ret_21d`, and indistinguishable from zero by lag 63. The 5-session block leaves real
+# dependence unpreserved and narrows that label's placebo distribution by some amount neither
+# notebook quantifies; the 21-session block spans most of it. The narrowing bears mainly on one
+# of the two refutations here, not equally on both.
 #
 # The contrast with a rolling treatment is worth holding onto, because it is where this is
 # usually got wrong. A treatment built from a 252-session window overlaps its neighbours in 251
-# of them, and permuting it in short blocks shreds that overlap; the placebo distribution
-# narrows, and the p-value collapses toward zero whether or not the effect is real. The number
-# is declared in `setup.yaml` and derived from how the column is built, because inferring it
-# from a window list would put a wrong number behind a right-looking one.
+# of them, and a block sized by a 21-day label buffer would shred that overlap; the placebo
+# distribution narrows, and the p-value collapses toward zero whether or not the effect is
+# real. That is the case the `max` exists for. The number is declared in `setup.yaml` and
+# derived from how the column is built, because inferring it from a window list would put a
+# wrong number behind a right-looking one.
 
 # %%
 """Fit the declared CME futures double-machine-learning requests."""
@@ -121,13 +140,18 @@ from case_studies.cme_futures.research_workflow import (
     open_study,
     product_universe_table,
 )
-from case_studies.research import supersedes_for
+from case_studies.research import causal_supersedes
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
 PREVIEW_REDUCTIONS: dict = {}
-SUPERSEDES_CAUSAL: str = ""
+# Retired by this run: the block-permutation refutation now compares the HAC t-statistic
+# rather than the raw effect, so CAUSAL_RUNNER_VERSION moved and every causal identity with
+# it. The rows named here hold a p-value computed on the shrunken placebo effects; this run
+# supersedes them rather than correcting them, because the statistic is different, not the
+# arithmetic. Read out of each registry's current canonical identity per label, 2026-09-10.
+SUPERSEDES_CAUSAL: str = '{"fwd_ret_5d": "4abb82b8141c", "fwd_ret_21d": "ac5c1a480d24"}'
 
 # %% [markdown]
 # ## Resolve the estimands
@@ -157,7 +181,13 @@ requests = tuple(
         label=label,
         execution_tier=EXECUTION_TIER,
         preview_reductions=PREVIEW_REDUCTIONS,
-        supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=list(ALL_LABELS)),
+        supersedes=causal_supersedes(
+            study,
+            SUPERSEDES_CAUSAL,
+            label,
+            labels=list(ALL_LABELS),
+            execution_tier=EXECUTION_TIER,
+        ),
     ).resolve()
     for label in ALL_LABELS
 )

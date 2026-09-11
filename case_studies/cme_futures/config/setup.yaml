@@ -440,7 +440,11 @@ causal:
   # one. Derived from the construction, not chosen:
   #
   # `(c0_price - c1_price) / c0_price * 12` in 04_model_based_features, from two prices at
-  # the same timestamp. Nothing rolls, so the column carries no dependence of its own.
+  # the same timestamp. Nothing rolls, so the construction window spans one bar, which is what
+  # this field declares. It is not a claim that the column is serially independent: carry_pct is
+  # highly persistent, and 12_model_analysis measures that profile. Where the construction window
+  # is the shorter of the two scales, as it is here, the label buffer is what sizes the block -
+  # `block_size = max(label_buffer, treatment_window)`.
   treatment_window: 1
   confounders: [vol_21d, momentum_composite, carry_rank]
   method: walk_forward_dml

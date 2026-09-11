@@ -1598,8 +1598,10 @@ else:
 #
 # **The two diagnostics can disagree, and reading them as one number is the error to avoid.**
 # Panel-robust inference asks whether the coefficient is distinguishable from zero. The block
-# permutation asks whether its magnitude is unusual once the treatment-outcome timing is
-# disturbed. A coefficient can be indistinguishable from zero under the first and unusual under
+# permutation asks whether its HAC t-statistic is unusual once the treatment-outcome timing is
+# disturbed - the t-statistic and not the magnitude, because a permuted treatment keeps the residual
+# variance that forms the effect's denominator, so comparing magnitudes narrows the null toward a
+# pass. A coefficient can be indistinguishable from zero under the first and unusual under
 # the second, because they are testing different things, and neither of them tests unobserved
 # confounding.
 #

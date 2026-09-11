@@ -82,7 +82,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
-from case_studies.research import open_study, supersedes_for
+from case_studies.research import causal_supersedes, open_study
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -203,7 +203,9 @@ request = study.causal(
     overrides={"nuisance_params": dict(NUISANCE_OVERRIDES)} if NUISANCE_OVERRIDES else {},
     execution_tier=EXECUTION_TIER,
     preview_reductions=preview_reductions,
-    supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=[label]),
+    supersedes=causal_supersedes(
+        study, SUPERSEDES_CAUSAL, label, labels=[label], execution_tier=EXECUTION_TIER
+    ),
 )
 resolved = request.resolve()
 
@@ -296,43 +298,57 @@ result_table
 #
 # The refutation p-value above is one number read off the distribution below. Each draw is the
 # whole estimate redone with the treatment permuted in blocks within each stock, so the draws are
-# what the effect looks like when the treatment's real timing has been destroyed and everything
+# what the estimator produces when the treatment's real timing has been destroyed and everything
 # else - the confounders, the folds, the nuisance models - is left alone.
 #
-# What to read: where the observed effect sits relative to the bulk of the draws. Far out in a
-# tail means an effect this size is not something the construction produces by itself. Inside the
-# bulk means it is, and no amount of the estimate's own precision changes that. The spread of the
-# draws is also worth looking at on its own - a wide placebo distribution says this estimand is
-# hard to pin down at this sample size, whatever the point estimate came out at.
+# **The draws are HAC t-statistics, not effects.** Permuting the treatment frees it from the
+# controls, so the first stage can no longer predict it and its residual keeps nearly all its
+# variance - and that variance is the denominator of the second-stage effect. On the effect scale
+# every placebo is divided by a larger number than the observed estimate, so the placebo
+# distribution comes out narrower than the null it stands for and always in the direction that
+# makes a refutation read as passed. Dividing each draw by its own standard error cancels that.
+#
+# What to read: where the observed t-statistic sits relative to the bulk of the draws. Far out in
+# a tail means a statistic this size is not something the construction produces by itself. Inside
+# the bulk means it is. Do not read the spread as precision: t-scale draws come out near unit
+# spread whatever the sample size, which is the calibration a permutation test should have and is
+# not a statement about how well this estimand is pinned down.
 
 # %% tags=["results"]
-placebo_effects = [float(value) for value in result.metrics.get("placebo_effects") or []]
-if not placebo_effects:
+# The draws are read on the t-statistic, which is the scale the p-value above is computed
+# on. On the effect scale the permutation distribution is not the null it looks like: a
+# permuted treatment is no longer predictable from the confounders, so its residual keeps
+# its variance, the second stage divides by a larger number, and every placebo effect is
+# pulled toward zero whether or not there is anything to find. Each draw dividing by its
+# own standard error is what removes that, and it is why the count below can be compared
+# with the p-value beside it.
+placebo_t_stats = [float(value) for value in result.metrics.get("placebo_t_stats") or []]
+if not placebo_t_stats:
     raise RuntimeError(
-        "the causal result registered no placebo draws, so the refutation p-value above has "
-        "nothing behind it"
+        "the causal result registered no placebo t-statistics, so the refutation p-value "
+        "above has nothing behind it on the scale it was computed on"
     )
-observed_effect = float(result.metrics["dml_effect"])
+observed_t = float(result.metrics["dml_effect"]) / float(result.metrics["dml_se_hac"])
 
 fig, ax = plt.subplots(figsize=FIGSIZE["single"])
-ax.hist(placebo_effects, bins=25, color=COLORS["recede"], edgecolor="none")
-ax.axvline(observed_effect, color=COLORS["blue"], lw=1.6)
-ax.set_xlabel("Estimated effect")
+ax.hist(placebo_t_stats, bins=25, color=COLORS["recede"], edgecolor="none")
+ax.axvline(observed_t, color=COLORS["blue"], lw=1.6)
+ax.set_xlabel("HAC t-statistic")
 ax.set_ylabel("Permuted draws")
 add_message_title(
     ax,
-    "Effect estimated from block-permuted treatments",
-    subtitle="Block-permuted refits, with the observed effect marked",
+    "t-statistic estimated from block-permuted treatments",
+    subtitle="Block-permuted refits, with the observed t-statistic marked",
 )
-# The alt text counts rather than asserts. Whether the observed effect is extreme is the whole
+# The alt text counts rather than asserts. Whether the observed estimate is extreme is the whole
 # question, so it is read off the draws instead of being described.
-_more_extreme = sum(abs(value) >= abs(observed_effect) for value in placebo_effects)
+_more_extreme = sum(abs(value) >= abs(observed_t) for value in placebo_t_stats)
 show_with_alt(
     fig,
-    "A histogram of the effect estimated from block-permuted treatments, with a vertical line at "
-    "the effect estimated from the real one. Counted from the draws, "
-    f"{_more_extreme} of {len(placebo_effects)} permutations produced an effect at least as large "
-    "in absolute value as the observed one.",
+    "A histogram of the HAC t-statistic estimated from block-permuted treatments, with a vertical "
+    "line at the t-statistic estimated from the real one. Counted from the draws, "
+    f"{_more_extreme} of {len(placebo_t_stats)} permutations produced a t-statistic at least as "
+    "large in absolute value as the observed one.",
 )
 
 # %% [markdown]
