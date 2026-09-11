@@ -122,7 +122,7 @@ def _momentum_direction(rows: list[dict[str, Any]], index: int) -> str | None:
 def detect_midnight_rejection(bars: pl.DataFrame) -> pl.DataFrame:
     """Detect the first closed-bar rejection of the exact 00:00 New York open."""
     _validate_bars(bars)
-    result = _output(bars, "rejection")
+    result = _output(bars, "midnight_rejection")
     rows = bars.to_dicts()
     levels: dict[Any, tuple[datetime, float]] = {}
     for row in rows:

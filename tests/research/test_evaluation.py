@@ -56,7 +56,7 @@ def _metric_fixture() -> pl.DataFrame:
     outcomes = ("target", "stop", "target")
     for index, outcome in enumerate(outcomes):
         signal_time = datetime(2024, 7, 1 + index, 10, 0)
-        rows.append(_row(signal_time, signal=True, direction="long", setup="metric"))
+        rows.append(_row(signal_time, signal=True, direction="long", setup="10am"))
         rows.append(
             _row(
                 signal_time + timedelta(minutes=5),
@@ -70,11 +70,7 @@ def _metric_fixture() -> pl.DataFrame:
 
 
 def _config() -> StrategyConfig:
-    return StrategyConfig(
-        min_contracts=4,
-        max_contracts=4,
-        cost_model=CostModel(commission_per_contract=0.0, slippage_points=0.0),
-    )
+    return StrategyConfig()
 
 
 def test_walk_forward_keeps_test_window_out_of_parameter_selection():
@@ -90,7 +86,8 @@ def test_walk_forward_keeps_test_window_out_of_parameter_selection():
     report = walk_forward_evaluate(_metric_fixture(), windows=windows, config=_config())
 
     assert report["test_results"]
-    assert report["lookahead_check"] is True
+    assert report["chronology_check"] is True
+    assert report["signal_provenance_check"] == "not_available"
     assert report["selection_policy"]["threshold_selection"] == "fixed_config_only"
     assert report["selection_policy"]["test_data_used_for_selection"] is False
 
@@ -105,7 +102,7 @@ def test_walk_forward_supports_multiple_chronological_windows():
 
     assert report["selection_policy"]["window_count"] == 2
     assert len(report["windows"]) == 2
-    assert report["lookahead_check"] is True
+    assert report["chronology_check"] is True
 
 
 def test_walk_forward_normalizes_utc_timestamp_before_date_window_masking():
@@ -113,7 +110,7 @@ def test_walk_forward_normalizes_utc_timestamp_before_date_window_masking():
         {
             "timestamp": [
                 datetime(2024, 6, 30, 23, 30),
-                datetime(2024, 7, 1, 0, 30),
+                datetime(2024, 6, 30, 23, 35),
                 datetime(2024, 7, 1, 14, 0),
             ],
             "open": [100.0, 100.0, 100.0],
@@ -141,8 +138,21 @@ def test_walk_forward_normalizes_utc_timestamp_before_date_window_masking():
 
     assert report["windows"][0]["train_rows"] == 2
     assert report["windows"][0]["test_rows"] == 1
-    assert report["lookahead_check"] is True
+    assert report["chronology_check"] is True
     assert report["test_results"] == []
+
+
+def test_walk_forward_rejects_irregular_cadence():
+    bars = _metric_fixture().with_columns(
+        pl.when(pl.arange(0, pl.len()) == 2)
+        .then(pl.col("timestamp_ny") + timedelta(minutes=37))
+        .otherwise(pl.col("timestamp_ny"))
+        .alias("timestamp_ny")
+    )
+    window = WalkForwardWindow("2024-06-01", "2024-06-30", "2024-07-01", "2024-07-31")
+
+    with pytest.raises(ValueError, match="5-minute|cadence"):
+        walk_forward_evaluate(bars, [window], _config())
 
 
 def test_walk_forward_report_calculates_trade_metrics_without_division_by_zero():
@@ -156,16 +166,16 @@ def test_walk_forward_report_calculates_trade_metrics_without_division_by_zero()
     report = walk_forward_evaluate(_metric_fixture(), [window], _config())
 
     assert report["trade_count"] == 3
-    assert report["net_pnl"] == pytest.approx(240.0)
-    assert report["expectancy"] == pytest.approx(80.0)
+    assert report["net_pnl"] == pytest.approx(405.0)
+    assert report["expectancy"] == pytest.approx(135.0)
     assert report["win_rate"] == pytest.approx(2.0 / 3.0)
-    assert report["profit_factor"] == pytest.approx(4.0)
-    assert report["max_drawdown"] == pytest.approx(80.0)
+    assert report["profit_factor"] == pytest.approx(2.8)
+    assert report["max_drawdown"] == pytest.approx(225.0)
     assert report["daily_loss_breaches"] == 0
     assert report["consecutive_loss_breaches"] == 0
     assert report["average_r"] == pytest.approx(1.0)
-    assert report["cost_share"] == pytest.approx(0.0)
-    assert report["per_setup"]["metric"]["trade_count"] == 3
+    assert report["cost_share"] == pytest.approx(0.25)
+    assert report["per_setup"]["10am"]["trade_count"] == 3
     assert report["config_hash"] == _config().config_hash
 
 
@@ -173,7 +183,7 @@ def test_walk_forward_resets_loss_streak_at_each_session_date():
     rows = []
     for index, session_day in enumerate((date(2024, 7, 1), date(2024, 7, 2))):
         signal_time = datetime.combine(session_day, datetime.min.time()).replace(hour=10)
-        rows.append(_row(signal_time, signal=True, direction="long", setup="loss"))
+        rows.append(_row(signal_time, signal=True, direction="long", setup="10am"))
         rows.append(
             _row(
                 signal_time + timedelta(minutes=5),

@@ -47,7 +47,7 @@ class RiskDecision:
 
 
 MNQ_POINT_VALUE = 2.0  # USD per point per contract
-MAX_TOTAL_RISK = 250.0  # USD
+MAX_TOTAL_RISK = 250.0  # USD; acceptance is strict under this ceiling
 MIN_CONTRACTS = 4
 MAX_CONTRACTS = 10
 
@@ -79,6 +79,9 @@ def calculate_position_size(
 
     Raises:
         ValueError: If stop_points <= 0, costs negative, or requested_contracts not in [4, 10].
+
+    Total risk must be strictly less than ``MAX_TOTAL_RISK``. Equality at
+    ``$250.00`` is rejected by the fixed MNQ v1 contract.
     """
     if not math.isfinite(stop_points) or stop_points <= 0:
         raise ValueError("stop_points must be > 0")
@@ -132,10 +135,20 @@ class DailyRiskGuard:
     """
 
     def __init__(self, max_daily_loss: float = 400.0, max_consecutive_losses: int = 2) -> None:
-        if not math.isfinite(max_daily_loss):
-            raise ValueError("max_daily_loss must be finite")
-        if not math.isfinite(max_consecutive_losses):
-            raise ValueError("max_consecutive_losses must be finite")
+        if isinstance(max_daily_loss, bool) or not isinstance(max_daily_loss, (int, float)):
+            raise ValueError("max_daily_loss must be a positive finite integer limit")
+        if (
+            not math.isfinite(float(max_daily_loss))
+            or max_daily_loss <= 0
+            or float(max_daily_loss).is_integer() is False
+        ):
+            raise ValueError("max_daily_loss must be a positive finite integer limit")
+        if (
+            isinstance(max_consecutive_losses, bool)
+            or not isinstance(max_consecutive_losses, int)
+            or max_consecutive_losses <= 0
+        ):
+            raise ValueError("max_consecutive_losses must be a positive integer")
         self.max_daily_loss = max_daily_loss
         self.max_consecutive_losses = max_consecutive_losses
         self._daily_pnl = 0.0
@@ -156,6 +169,8 @@ class DailyRiskGuard:
         Args:
             pnl: Realized profit/loss in USD (negative for loss).
         """
+        if not isinstance(pnl, (int, float)) or not math.isfinite(float(pnl)):
+            raise ValueError("pnl must be finite")
         self._daily_pnl += pnl
         if self._daily_pnl <= -self.max_daily_loss:
             self._daily_loss_limit_reached = True

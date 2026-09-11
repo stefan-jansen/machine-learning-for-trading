@@ -9,6 +9,11 @@ from typing import Any
 import polars as pl
 
 from .config import StrategyConfig
+from .data_contract import (
+    add_cme_session_dates,
+    normalize_timestamp_columns,
+    validate_five_minute_cadence,
+)
 from .risk import DailyRiskGuard, RiskDecision, calculate_position_size
 
 RESULT_COLUMNS = (
@@ -35,6 +40,7 @@ RESULT_COLUMNS = (
 )
 
 _REQUIRED_COLUMNS = {"open", "high", "low", "close", "bar_closed", "signal", "direction"}
+_ALLOWED_SETUP_IDS = {"midnight_rejection", "lvn_break_retest", "10am"}
 
 
 @dataclass
@@ -63,42 +69,7 @@ def _timestamp_dtype(frame: pl.DataFrame) -> pl.DataType:
 
 def _coerce_timestamp_column(frame: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
     """Ensure a timezone-aware New York timestamp column is available."""
-    result = frame
-    if "timestamp_ny" not in result.columns:
-        if "timestamp" not in result.columns:
-            raise ValueError("required input column missing: timestamp_ny")
-        result = result.with_columns(pl.col("timestamp").alias("timestamp_ny"))
-
-    timestamp_dtype = result.schema["timestamp_ny"]
-    if timestamp_dtype == pl.Date:
-        result = result.with_columns(pl.col("timestamp_ny").cast(pl.Datetime))
-        timestamp_dtype = result.schema["timestamp_ny"]
-    if timestamp_dtype == pl.Utf8:
-        try:
-            result = result.with_columns(
-                pl.col("timestamp_ny").str.to_datetime(strict=True).alias("timestamp_ny")
-            )
-        except (pl.exceptions.ComputeError, ValueError) as exc:
-            raise ValueError("timestamp_ny contains invalid datetime values") from exc
-        timestamp_dtype = result.schema["timestamp_ny"]
-    if not isinstance(timestamp_dtype, pl.Datetime):
-        try:
-            result = result.with_columns(
-                pl.col("timestamp_ny").cast(pl.Datetime, strict=True).alias("timestamp_ny")
-            )
-        except (pl.exceptions.ComputeError, ValueError) as exc:
-            raise ValueError("timestamp_ny must contain datetime values") from exc
-        timestamp_dtype = result.schema["timestamp_ny"]
-
-    if timestamp_dtype.time_zone is None:
-        result = result.with_columns(
-            pl.col("timestamp_ny").dt.replace_time_zone(config.timezone).alias("timestamp_ny")
-        )
-    elif timestamp_dtype.time_zone != config.timezone:
-        result = result.with_columns(
-            pl.col("timestamp_ny").dt.convert_time_zone(config.timezone).alias("timestamp_ny")
-        )
-    return result
+    return normalize_timestamp_columns(frame, config.timezone)
 
 
 def _prepare_bars(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
@@ -121,10 +92,8 @@ def _prepare_bars(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
             result = result.with_columns(pl.col("setup").alias("signal_type"))
         else:
             result = result.with_columns(pl.lit(None, dtype=pl.Utf8).alias("signal_type"))
-    if "session_date" not in result.columns:
-        result = result.with_columns(pl.col("timestamp_ny").dt.date().alias("session_date"))
-    else:
-        result = result.with_columns(pl.col("session_date").cast(pl.Date, strict=True))
+    result = add_cme_session_dates(result)
+    validate_five_minute_cadence(result, "timestamp_ny")
 
     result = result.sort("timestamp_ny")
     timestamps = result["timestamp_ny"].to_list()
@@ -398,6 +367,9 @@ def run_backtest(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
         setup = row.get("signal_type") or "unknown"
         next_index = index + 1
         next_time = rows[next_index]["timestamp_ny"] if next_index < len(rows) else None
+        if setup not in _ALLOWED_SETUP_IDS:
+            results.append(_rejected_row(row, next_time, setup, "unsupported_signal_type"))
+            continue
         if position is not None:
             results.append(_rejected_row(row, next_time, setup, "position_already_open"))
             continue

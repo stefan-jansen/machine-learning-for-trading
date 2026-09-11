@@ -11,6 +11,11 @@ import polars as pl
 
 from .backtest import run_backtest
 from .config import StrategyConfig
+from .data_contract import (
+    add_cme_session_dates,
+    normalize_timestamp_columns,
+    validate_five_minute_cadence,
+)
 
 
 @dataclass(frozen=True)
@@ -112,40 +117,11 @@ def _as_comparable(
 
 def _normalize_evaluation_bars(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
     """Normalize the selected timestamp before chronology or window masking."""
-    timestamp_column = "timestamp_ny" if "timestamp_ny" in bars.columns else "timestamp"
-    if timestamp_column not in bars.columns:
-        raise ValueError("required input column missing: timestamp_ny")
-
-    result = bars.clone()
-    dtype = result.schema[timestamp_column]
-    if dtype == pl.Utf8:
-        try:
-            result = result.with_columns(
-                pl.col(timestamp_column).str.to_datetime(strict=True).alias(timestamp_column)
-            )
-        except (pl.exceptions.ComputeError, ValueError) as exc:
-            raise ValueError(f"{timestamp_column} contains invalid datetime values") from exc
-        dtype = result.schema[timestamp_column]
-    if not isinstance(dtype, pl.Datetime):
-        try:
-            result = result.with_columns(
-                pl.col(timestamp_column).cast(pl.Datetime, strict=True).alias(timestamp_column)
-            )
-        except (pl.exceptions.ComputeError, ValueError) as exc:
-            raise ValueError(f"{timestamp_column} must contain datetime values") from exc
-        dtype = result.schema[timestamp_column]
-    if result[timestamp_column].null_count():
-        raise ValueError(f"{timestamp_column} must not contain null values")
-
-    expression = pl.col(timestamp_column)
-    if dtype.time_zone is None:
-        source_timezone = "UTC" if timestamp_column == "timestamp" else config.timezone
-        expression = expression.dt.replace_time_zone(source_timezone)
-    expression = expression.dt.convert_time_zone(config.timezone)
-    return result.with_columns(
-        expression.alias("_normalized_timestamp"),
-        expression.alias("timestamp_ny"),
-    )
+    result = normalize_timestamp_columns(bars, config.timezone)
+    if result["timestamp_ny"].null_count():
+        raise ValueError("timestamp_ny must not contain null values")
+    result = add_cme_session_dates(result)
+    return result.with_columns(pl.col("timestamp_ny").alias("_normalized_timestamp"))
 
 
 def _within_boundaries(
@@ -330,6 +306,7 @@ def walk_forward_evaluate(
         raise ValueError("walk-forward input timestamps must be datetime values")
     if normalized_timestamps != sorted(normalized_timestamps):
         raise ValueError("walk-forward input must be chronological")
+    validate_five_minute_cadence(normalized_bars, "timestamp_ny")
 
     test_frames: list[pl.DataFrame] = []
     window_reports: list[dict[str, Any]] = []
@@ -374,9 +351,9 @@ def walk_forward_evaluate(
         all_results = _empty_results_from_bars(bars, config)
     all_results = all_results.sort("signal_time")
     metrics = _metrics(all_results, config)
-    lookahead_checks: list[bool] = []
+    chronology_checks: list[bool] = []
     for window in windows:
-        lookahead_checks.append(
+        chronology_checks.append(
             _compare_boundaries(
                 window.train_end,
                 window.test_start,
@@ -384,9 +361,9 @@ def walk_forward_evaluate(
             )
             < 0
         )
-    lookahead_check = (
+    chronology_check = (
         config.validate_fixed_contract()
-        and all(lookahead_checks)
+        and all(chronology_checks)
         and all(
             report["train_last_timestamp"] is None
             or report["test_first_timestamp"] is None
@@ -398,7 +375,8 @@ def walk_forward_evaluate(
         "test_results": all_results.to_dicts(),
         **metrics,
         "config_hash": config.config_hash,
-        "lookahead_check": bool(lookahead_check),
+        "chronology_check": bool(chronology_check),
+        "signal_provenance_check": "not_available",
         "windows": window_reports,
         "selection_policy": {
             "threshold_selection": "fixed_config_only",

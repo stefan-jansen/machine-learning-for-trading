@@ -142,7 +142,7 @@ def make_overlapping_signals_fixture() -> pl.DataFrame:
             100.50,
             signal=True,
             direction="long",
-            signal_type="rejection",
+            signal_type="midnight_rejection",
             entry_time=first_entry,
             entry_window_start=first_entry,
             entry_window_end=first_window_end,
@@ -162,7 +162,7 @@ def make_overlapping_signals_fixture() -> pl.DataFrame:
             entry_window_end=second_window_end,
         ),
         _row(second_entry, 100.75, 101.00, 100.25, 100.50),
-        _row(second_entry + timedelta(minutes=10), 100.50, 100.75, 100.00, 100.25),
+        _row(second_entry + timedelta(minutes=5), 100.50, 100.75, 100.00, 100.25),
     ]
     return _canonical_frame(rows)
 
@@ -293,16 +293,21 @@ def make_cost_fixture() -> pl.DataFrame:
 def make_daily_guard_fixture() -> pl.DataFrame:
     """Return three trades with two consecutive losses for guard tests."""
     rows = []
-    for index, pnl in enumerate((-200.0, -200.0, 100.0)):
-        signal_time = datetime(2024, 1, 12, 10, index * 10)
+    base = datetime(2024, 1, 12, 10, 0)
+    for index, outcome in enumerate(("loss", "loss", "win")):
+        signal_time = base + timedelta(minutes=index * 10)
         entry_time = signal_time + timedelta(minutes=5)
+        if outcome == "loss":
+            high, low, close = 100.25, 89.0, 95.0
+        else:
+            high, low, close = 101.0, 99.75, 100.75
         rows.extend(
             [
                 _row(
                     signal_time,
                     100,
-                    100.25,
-                    99.75,
+                    100.5,
+                    99.5,
                     100,
                     signal=True,
                     direction="long",
@@ -311,14 +316,11 @@ def make_daily_guard_fixture() -> pl.DataFrame:
                     entry_window_start=entry_time,
                     entry_window_end=entry_time,
                 ),
-                _row(entry_time, 100, 100.25, 99.75, 100, volume=100),
+                _row(entry_time, 100, high, low, close, volume=100),
             ]
         )
     frame = _canonical_frame(rows)
-    return frame.with_columns(
-        pl.col("session_date").alias("trade_date"),
-        pl.Series("net_pnl", [pnl for pnl in (-200.0, -200.0, 100.0) for _ in range(2)]),
-    )
+    return frame
 
 
 __all__ = [

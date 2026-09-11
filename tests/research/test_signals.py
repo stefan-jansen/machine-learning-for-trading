@@ -257,7 +257,7 @@ def test_combine_allows_only_approved_setups_and_uses_precedence():
     combined = combine_allowed_signals(_frame(_midnight_rejection_rows()))
     rows = combined.filter(pl.col("signal"))
     assert rows.height == 1
-    assert rows["signal_type"][0] == "rejection"
+    assert rows["signal_type"][0] == "midnight_rejection"
     assert rejection.filter(pl.col("signal")).height == 1
 
     momentum_only = _frame(_momentum_rows())

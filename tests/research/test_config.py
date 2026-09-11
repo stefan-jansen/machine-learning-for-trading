@@ -22,6 +22,7 @@ from research.mnq_strategy.fixtures import (
     make_session_transition_fixture,
     make_stop_target_fixture,
 )
+from research.mnq_strategy.risk import CostModel
 from research.mnq_strategy.signals import (
     detect_10am_confirmation,
     detect_lvn_break_retest,
@@ -206,6 +207,73 @@ def test_config_rejects_signal_threshold_drift_before_backtest_execution():
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("instrument", "MES"),
+        ("timezone", "UTC"),
+        ("bar_minutes", 1),
+        ("value_area_fraction", 0.50),
+        ("min_contracts", 3),
+        ("max_contracts", 9),
+        ("max_trade_risk", 249.0),
+        ("daily_stop", 401.0),
+        ("max_consecutive_losses", 3),
+        ("point_value", 1.0),
+        ("stop_points", 5.0),
+        ("target_points", 25.0),
+    ],
+)
+def test_validate_fixed_contract_rejects_mnq_v1_identity_overrides(field, value):
+    config = StrategyConfig(**{field: value})
+
+    with pytest.raises(ValueError, match=field):
+        config.validate_fixed_contract()
+
+
+def test_validate_fixed_contract_rejects_session_and_cost_overrides():
+    for boundary_name, boundary_value in (
+        ("rth_start", "09:35"),
+        ("rth_end", "15:55"),
+        ("maintenance_start", "15:55"),
+        ("maintenance_end", "17:55"),
+        ("overnight_start", "17:55"),
+    ):
+        boundaries = dict(StrategyConfig().session_boundaries)
+        boundaries[boundary_name] = boundary_value
+        with pytest.raises(ValueError, match="session[_ ]boundaries"):
+            StrategyConfig(session_boundaries=boundaries).validate_fixed_contract()
+
+    for cost_model in (
+        CostModel(commission_per_contract=0.0, slippage_points=0.50),
+        CostModel(commission_per_contract=1.50, slippage_points=0.0),
+    ):
+        config = StrategyConfig(cost_model=cost_model)
+        with pytest.raises(ValueError, match="cost_model"):
+            config.validate_fixed_contract()
+
+
+def test_config_hash_changes_for_every_active_identity_component():
+    default = StrategyConfig()
+    overrides = [
+        {"instrument": "MES"},
+        {"timezone": "UTC"},
+        {"bar_minutes": 1},
+        {"value_area_fraction": 0.50},
+        {"min_contracts": 3},
+        {"max_contracts": 9},
+        {"max_trade_risk": 249.0},
+        {"daily_stop": 401.0},
+        {"max_consecutive_losses": 3},
+        {"point_value": 1.0},
+        {"stop_points": 5.0, "target_points": 25.0},
+        {"cost_model": CostModel(commission_per_contract=0.0, slippage_points=0.50)},
+    ]
+
+    for override in overrides:
+        assert StrategyConfig(**override).config_hash != default.config_hash
+
+
+@pytest.mark.parametrize(
     "fixture_factory",
     [
         make_confirmed_signal_fixture,
@@ -352,4 +420,3 @@ def test_supplementary_execution_fixtures_include_explicit_trade_fields():
     assert guard_signals["direction"].null_count() == 0
     assert guard_signals["signal_type"].null_count() == 0
     assert guard_signals["entry_time"].null_count() == 0
-    assert guard_signals["net_pnl"].to_list() == [-200.0, -200.0, 100.0]

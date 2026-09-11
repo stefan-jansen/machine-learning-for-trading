@@ -13,10 +13,10 @@ from research.mnq_strategy.config import StrategyConfig
 from research.mnq_strategy.fixtures import (
     make_confirmed_signal_fixture,
     make_cost_fixture,
+    make_daily_guard_fixture,
     make_overlapping_signals_fixture,
     make_stop_target_fixture,
 )
-from research.mnq_strategy.risk import CostModel
 
 NEW_YORK = "America/New_York"
 
@@ -59,22 +59,38 @@ def _row(
     }
 
 
-def _four_contract_config(**overrides) -> StrategyConfig:
-    values = {
-        "min_contracts": 4,
-        "max_contracts": 4,
-        "cost_model": CostModel(commission_per_contract=0.0, slippage_points=0.0),
-    }
-    values.update(overrides)
-    return StrategyConfig(**values)
-
-
 def test_entry_is_first_price_after_confirmation_close():
     result = run_backtest(make_confirmed_signal_fixture(), StrategyConfig())
 
     assert result.height == 1
     assert result["entry_time"][0] > result["signal_time"][0]
     assert result["entry_price"][0] == 100.25
+
+
+def test_backtest_rejects_irregular_five_minute_cadence_before_execution():
+    bars = _bars(
+        [
+            _row(datetime(2024, 1, 8, 10, 0), signal=True, direction="long", setup="10am"),
+            _row(datetime(2024, 1, 8, 10, 37), open_=100.0, close=101.0),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="5-minute|cadence"):
+        run_backtest(bars, StrategyConfig())
+
+
+def test_momentum_signal_is_rejected_without_execution():
+    bars = _bars(
+        [
+            _row(datetime(2024, 1, 8, 10, 0), signal=True, direction="long", setup="momentum"),
+            _row(datetime(2024, 1, 8, 10, 5), open_=100.0, close=101.0),
+        ]
+    )
+
+    result = run_backtest(bars, StrategyConfig())
+
+    assert result.filter(pl.col("status") == "closed").is_empty()
+    assert result["rejection_reason"].to_list() == ["unsupported_signal_type"]
 
 
 def test_only_closed_signal_rows_are_consumed():
@@ -88,7 +104,8 @@ def test_only_closed_signal_rows_are_consumed():
 
 
 def test_one_position_at_a_time_rejects_overlapping_entry_window():
-    result = run_backtest(make_overlapping_signals_fixture(), _four_contract_config())
+    bars = make_overlapping_signals_fixture()
+    result = run_backtest(bars.with_columns(pl.lit(True).alias("bar_closed")), StrategyConfig())
 
     assert result.filter(pl.col("status") == "closed").height == 1
     rejected = result.filter(pl.col("rejection_reason") == "position_already_open")
@@ -117,11 +134,11 @@ def test_long_trade_uses_direction_aware_pnl():
         ]
     )
 
-    result = run_backtest(bars, _four_contract_config())
+    result = run_backtest(bars, StrategyConfig())
 
     assert result["exit_reason"][0] == "end_of_data"
-    assert result["gross_pnl"][0] == pytest.approx(8.0)
-    assert result["net_pnl"][0] == pytest.approx(8.0)
+    assert result["gross_pnl"][0] == pytest.approx(18.0)
+    assert result["net_pnl"][0] == pytest.approx(-27.0)
 
 
 def test_short_trade_uses_direction_aware_pnl():
@@ -133,9 +150,9 @@ def test_short_trade_uses_direction_aware_pnl():
         ]
     )
 
-    result = run_backtest(bars, _four_contract_config())
+    result = run_backtest(bars, StrategyConfig())
 
-    assert result["gross_pnl"][0] == pytest.approx(8.0)
+    assert result["gross_pnl"][0] == pytest.approx(18.0)
     assert result["stop"][0] == pytest.approx(110.0)
     assert result["target"][0] == pytest.approx(80.0)
 
@@ -147,7 +164,7 @@ def test_short_trade_uses_direction_aware_pnl():
     ],
 )
 def test_both_stop_and_target_touched_resolves_stop_first(fixture, direction, expected_exit):
-    result = run_backtest(fixture(), _four_contract_config())
+    result = run_backtest(fixture(), StrategyConfig())
 
     assert result["direction"][0] == direction
     assert result["exit_price"][0] == pytest.approx(expected_exit)
@@ -169,7 +186,7 @@ def test_short_both_stop_and_target_touched_resolves_stop_first():
         ]
     )
 
-    result = run_backtest(bars, _four_contract_config())
+    result = run_backtest(bars, StrategyConfig())
 
     assert result["exit_price"][0] == pytest.approx(110.0)
     assert result["exit_reason"][0] == "stop_loss"
@@ -178,14 +195,14 @@ def test_short_both_stop_and_target_touched_resolves_stop_first():
 def test_costs_are_reported_separately_from_raw_entry_price():
     result = run_backtest(
         make_cost_fixture(),
-        StrategyConfig(min_contracts=4, max_contracts=4),
+        StrategyConfig(),
     )
 
     assert result["entry_price"][0] == 100.25
     assert result["adjusted_entry_price"][0] == 100.75
-    assert result["total_costs"][0] == pytest.approx(20.0)
-    assert result["gross_pnl"][0] == pytest.approx(4.0)
-    assert result["net_pnl"][0] == pytest.approx(-16.0)
+    assert result["total_costs"][0] == pytest.approx(45.0)
+    assert result["gross_pnl"][0] == pytest.approx(9.0)
+    assert result["net_pnl"][0] == pytest.approx(-36.0)
 
 
 def test_unclosed_next_bar_cannot_be_used_as_entry():
@@ -196,7 +213,7 @@ def test_unclosed_next_bar_cannot_be_used_as_entry():
         .alias("bar_closed")
     )
 
-    result = run_backtest(bars, _four_contract_config())
+    result = run_backtest(bars, StrategyConfig())
 
     assert result.height == 1
     assert result["status"][0] == "rejected"
@@ -221,7 +238,7 @@ def test_unclosed_bar_cannot_trigger_an_ohlc_exit_or_end_of_data_fill():
         ]
     )
 
-    result = run_backtest(bars, _four_contract_config())
+    result = run_backtest(bars, StrategyConfig())
 
     assert result["exit_reason"][0] == "end_of_data"
     assert result["exit_time"][0].hour == 5
@@ -230,21 +247,17 @@ def test_unclosed_bar_cannot_trigger_an_ohlc_exit_or_end_of_data_fill():
 
 
 def test_non_mnq_point_value_is_rejected_before_execution():
-    config = _four_contract_config(point_value=1.0)
+    config = StrategyConfig(point_value=1.0)
 
     with pytest.raises(ValueError, match="point_value"):
         run_backtest(make_confirmed_signal_fixture(), config)
 
 
-def test_position_size_rejection_is_emitted_as_a_row():
-    config = _four_contract_config(stop_points=31.25, target_points=40.0)
+def test_non_fixed_stop_distance_is_rejected_before_execution():
+    config = StrategyConfig(stop_points=31.25, target_points=40.0)
 
-    result = run_backtest(make_confirmed_signal_fixture(), config)
-
-    assert result.height == 1
-    assert result["status"][0] == "rejected"
-    assert result["contracts"][0] == 0
-    assert result["rejection_reason"][0] == "position_size_rejected"
+    with pytest.raises(ValueError, match="stop_points"):
+        run_backtest(make_confirmed_signal_fixture(), config)
 
 
 def test_daily_guard_latches_after_two_realized_losses():
@@ -266,10 +279,19 @@ def test_daily_guard_latches_after_two_realized_losses():
 
     result = run_backtest(
         _bars(rows),
-        _four_contract_config(daily_stop=100.0, max_consecutive_losses=2),
+        StrategyConfig(),
     )
 
     assert result.filter(pl.col("status") == "closed").height == 2
+    assert result.filter(pl.col("rejection_reason") == "daily_loss_limit").height == 1
+
+
+def test_daily_guard_fixture_realizes_two_losses_before_rejecting_third_signal():
+    result = run_backtest(make_daily_guard_fixture(), StrategyConfig())
+
+    closed = result.filter(pl.col("status") == "closed")
+    assert closed.height == 2
+    assert closed["net_pnl"].to_list() == [-225.0, -225.0]
     assert result.filter(pl.col("rejection_reason") == "daily_loss_limit").height == 1
 
 
@@ -298,7 +320,7 @@ def test_signal_on_last_bar_is_rejected_without_an_entry_observation():
         )
     )
 
-    result = run_backtest(bars, _four_contract_config())
+    result = run_backtest(bars, StrategyConfig())
 
     assert result["status"][0] == "rejected"
     assert result["rejection_reason"][0] == "no_eligible_entry_bar"

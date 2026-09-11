@@ -169,19 +169,42 @@ class StrategyConfig:
         return serialized
 
     def validate_fixed_contract(self) -> bool:
-        """Ensure fixed signal thresholds match the Task 3 implementation."""
+        """Ensure the complete MNQ v1 identity matches the approved contract."""
         expected = {
+            "instrument": "MNQ",
+            "timezone": "America/New_York",
+            "bar_minutes": 5,
+            "value_area_fraction": 0.40,
+            "min_contracts": MIN_CONTRACTS,
+            "max_contracts": MAX_CONTRACTS,
+            "max_trade_risk": 250.0,
+            "daily_stop": 400.0,
+            "max_consecutive_losses": 2,
             "point_value": MNQ_POINT_VALUE,
+            "stop_points": 10.0,
+            "target_points": 20.0,
             "rejection_wick_ratio": signals.REJECTION_WICK_RATIO,
             "rejection_close_pct": signals.REJECTION_CLOSE_PCT,
             "momentum_body_range": signals.MOMENTUM_BODY_RANGE,
             "momentum_close_pct": signals.MOMENTUM_CLOSE_PCT,
             "momentum_lookback": signals.MOMENTUM_LOOKBACK,
             "momentum_multiplier": signals.MOMENTUM_MULT,
+            "lvn_percentile": LVN_PERCENTILE,
         }
         actual = {name: getattr(self, name) for name in expected}
-        actual["lvn_percentile"] = self.lvn_percentile
-        expected["lvn_percentile"] = LVN_PERCENTILE
+        expected["session_boundaries"] = {
+            "rth_start": "09:30",
+            "rth_end": "16:00",
+            "maintenance_start": "16:00",
+            "maintenance_end": "18:00",
+            "overnight_start": "18:00",
+        }
+        actual["session_boundaries"] = dict(self.session_boundaries)
+        expected["cost_model"] = {
+            "commission_per_contract": 1.50,
+            "slippage_points": 0.50,
+        }
+        actual["cost_model"] = asdict(self.cost_model)
         differences = {
             name: (actual[name], expected[name])
             for name in expected

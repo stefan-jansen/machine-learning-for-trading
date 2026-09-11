@@ -45,13 +45,16 @@ or exchange data gaps.
 ## Fixed configuration
 
 `StrategyConfig()` was used without parameter tuning. `config.validate_fixed_contract()` returned
-`True` before both `run_backtest` and `walk_forward_evaluate` execution.
+`True` before both `run_backtest` and `walk_forward_evaluate` execution. The full active
+configuration identity, including instrument/session/risk/bracket/cost fields, is included in the
+configuration hash.
 
 | Field | Value |
 |---|---:|
 | `instrument` | `MNQ` |
 | `timezone` | `America/New_York` |
 | `bar_minutes` | `5` |
+| `value_area_fraction` | `0.40` |
 | `point_value` | `$2.00/point/contract` |
 | `min_contracts` / `max_contracts` | `4` / `10` |
 | `max_trade_risk` | `$250.00` |
@@ -60,12 +63,14 @@ or exchange data gaps.
 | `stop_points` / `target_points` | `10.0` / `20.0` |
 | Commission | `$1.50` per contract per side |
 | Slippage | `0.50` points per side |
+| Session boundaries | RTH `09:30-16:00`; maintenance `16:00-18:00`; overnight starts `18:00` |
 | Signal selection | Fixed contract thresholds only; no test-data selection |
 | Configuration SHA-256 | `95524d8d563c8c03cf966112a4f10e3d9d5fbdfbe078fbc20de9b4c597443daf` |
 
 The default cost-aware sizing selects 9 contracts for the 10-point stop under the configured
 risk ceiling. A round trip costs `$45.00` for 9 contracts: `$27.00` commission plus `$18.00`
-slippage.
+slippage. The `$250.00` total-risk rule is strict: a trade is accepted only when total risk is
+strictly less than `$250.00`; equality is rejected.
 
 ## Mechanical backtest validation
 
@@ -80,6 +85,14 @@ slippage.
 That full-frame output is an execution-order and cost-contract check, not the performance sample
 used for regime metrics. The chronological regime and holdout reports below isolate each test
 window so each signal can be evaluated independently.
+
+### Executable daily guard evidence
+
+`make_daily_guard_fixture()` contains only canonical bars and signal rows. Running it through
+`run_backtest(bars, StrategyConfig())` produces two closed stop-loss trades at `-$225.00` net
+each (including modeled costs), followed by one rejected signal with the stable reason
+`daily_loss_limit`. The fixture's synthetic `net_pnl` column is not used because it no longer
+exists; the outcomes are realized by the configured OHLC path.
 
 ## Walk-forward evaluation
 
@@ -106,11 +119,11 @@ walk_forward_evaluate(bars, [holdout_window], config)
 
 ### Three chronological regimes
 
-| Regime | Train window | Test window | Train rows | Test rows | Trades | Net PnL | Expectancy | Win rate | Profit factor | Max drawdown | Cost share | Daily breaches | Consecutive breaches | Average R | Lookahead |
+| Regime | Train window | Test window | Train rows | Test rows | Trades | Net PnL | Expectancy | Win rate | Profit factor | Max drawdown | Cost share | Daily breaches | Consecutive breaches | Average R | Chronology | Signal provenance |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| July 2024 | 2024-01-01 to 2024-05-31 | 2024-07-01 to 2024-07-31 | 6 | 2 | 1 | -$36.00 | -$36.00 | 0.0% | 0.00 | $36.00 | 5.00x / 500.0% | 0 | 0 | 0.05 | `True` |
-| September 2024 | 2024-01-01 to 2024-07-31 | 2024-09-01 to 2024-09-30 | 8 | 2 | 1 | -$36.00 | -$36.00 | 0.0% | 0.00 | $36.00 | 5.00x / 500.0% | 0 | 0 | 0.05 | `True` |
-| November 2024 | 2024-01-01 to 2024-09-30 | 2024-11-01 to 2024-11-30 | 10 | 2 | 1 | -$36.00 | -$36.00 | 0.0% | 0.00 | $36.00 | 5.00x / 500.0% | 0 | 0 | 0.05 | `True` |
+| July 2024 | 2024-01-01 to 2024-05-31 | 2024-07-01 to 2024-07-31 | 6 | 2 | 1 | -$36.00 | -$36.00 | 0.0% | 0.00 | $36.00 | 5.00x / 500.0% | 0 | 0 | 0.05 | `True` | `not_available` |
+| September 2024 | 2024-01-01 to 2024-07-31 | 2024-09-01 to 2024-09-30 | 8 | 2 | 1 | -$36.00 | -$36.00 | 0.0% | 0.00 | $36.00 | 5.00x / 500.0% | 0 | 0 | 0.05 | `True` | `not_available` |
+| November 2024 | 2024-01-01 to 2024-09-30 | 2024-11-01 to 2024-11-30 | 10 | 2 | 1 | -$36.00 | -$36.00 | 0.0% | 0.00 | $36.00 | 5.00x / 500.0% | 0 | 0 | 0.05 | `True` | `not_available` |
 
 `cost_share` is the evaluator's `costs / abs(gross PnL)` ratio. It is `5.00` (500%) in each
 isolated regime because the synthetic one-bar price movement produces `$9.00` gross PnL against
@@ -140,7 +153,8 @@ Across all three isolated test windows, the aggregate report is:
 - daily loss breaches: `0`
 - consecutive-loss breaches: `0`
 - average R: `0.05`
-- `lookahead_check`: `True`
+- `chronology_check`: `True`
+- `signal_provenance_check`: `not_available`
 - configuration hash: `95524d8d563c8c03cf966112a4f10e3d9d5fbdfbe078fbc20de9b4c597443daf`
 
 The three isolated windows are mechanically stable in their identical synthetic output, but that
@@ -165,7 +179,8 @@ holdout from `2024-11-01` through `2024-11-30`.
 | Consecutive-loss breaches | `0` |
 | Average R | `0.05` |
 | Per-setup `10am` | 1 trade; `-$36.00`; `0.0%` wins; `0.05` average R |
-| `lookahead_check` | `True` |
+| `chronology_check` | `True` |
+| `signal_provenance_check` | `not_available` |
 | Configuration hash | `95524d8d563c8c03cf966112a4f10e3d9d5fbdfbe078fbc20de9b4c597443daf` |
 
 The holdout includes modeled costs and drawdown as required by the extension gate. Its negative
@@ -183,7 +198,8 @@ profitability claim.
 - modeled commission and slippage carried into net PnL;
 - daily and consecutive-loss breach accounting;
 - per-setup reporting;
-- `lookahead_check == True` for all reported windows;
+- `chronology_check == True` for all reported windows;
+- signal-level provenance evidence is not available, so the report does not claim full no-lookahead proof;
 - no controlled-backtest risk-limit breaches in the synthetic regime or holdout reports.
 
 **Performance evidence not established:**
@@ -200,8 +216,9 @@ The MES/MGC extension gate is **NOT CLEARED** by this synthetic report. It canno
 an appropriate real/licensed MNQ sample and approved rollover policy are available and that MNQ
 sample passes all of the following gates:
 
-1. **No lookahead failures:** every chronological evaluation has `lookahead_check == True`, with
-   no train/test chronology violation or leakage finding.
+1. **No chronology failures:** every chronological evaluation has `chronology_check == True`, with
+   no train/test chronology violation. Signal-level provenance remains a separate, unavailable
+   evidence item in this synthetic report.
 2. **No controlled-backtest risk-limit breaches:** daily and consecutive-loss risk breach counts
    remain zero in the controlled backtest.
 3. **Stable chronological evidence:** results remain stable across at least three chronological
@@ -241,8 +258,13 @@ Run from the repository root:
 ```bash
 uv run pytest tests/research -q
 uv run python scripts/verify_installation.py
+uv run jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=120 \
+  research/notebooks/mnq_objective_strategy_validation.ipynb \
+  --output /tmp/mnq_objective_strategy_validation.executed.ipynb
 ```
 
 The deterministic report path uses `StrategyConfig`,
 `config.validate_fixed_contract()`, `make_multi_month_fixture`, `run_backtest`, and
-`walk_forward_evaluate`, with the exact windows and metrics recorded above.
+`walk_forward_evaluate`, with the exact windows and metrics recorded above. The notebook cell is
+the executable report-regeneration path; its synthetic status remains blocked for historical
+validation and does not clear MES/MGC.

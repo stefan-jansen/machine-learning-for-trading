@@ -232,6 +232,24 @@ def test_daily_guard_rejects_non_finite_thresholds(field, value):
         DailyRiskGuard(**{field: value})
 
 
+@pytest.mark.parametrize("value", [0, -1, 400.5, True])
+def test_daily_guard_rejects_nonpositive_daily_loss_limit(value):
+    with pytest.raises(ValueError):
+        DailyRiskGuard(max_daily_loss=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, 0.0, 2.0, True])
+def test_daily_guard_rejects_nonpositive_or_noninteger_consecutive_limit(value):
+    with pytest.raises(ValueError):
+        DailyRiskGuard(max_consecutive_losses=value)
+
+
+@pytest.mark.parametrize("pnl", [math.nan, math.inf, -math.inf])
+def test_daily_guard_rejects_nonfinite_recorded_pnl(pnl):
+    with pytest.raises(ValueError, match="pnl"):
+        DailyRiskGuard().record_trade(pnl)
+
+
 def test_default_cost_model_values():
     costs = CostModel()
     # Defaults should be recorded, not silently assumed
