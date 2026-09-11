@@ -493,7 +493,7 @@ print(screen_compare)
 # ### Reading the Screen's Effect
 #
 # Same slot design, same model family, validation window — the only difference
-# is the tradeable universe. On the full 114-name panel the design averages a
+# is the tradeable universe. On the full 113-name panel the design averages a
 # negative Sharpe and churns several thousand trades; on the cost-feasible
 # universe it averages positive and trades roughly an order of magnitude less.
 # The expensive tail was both the turnover source and the cost sink. Screening

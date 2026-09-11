@@ -19,7 +19,8 @@
 # **Chapter 16 — Strategy Simulation**
 #
 # This notebook translates Ch11–15 model outputs into backtested strategies for
-# the NASDAQ-100 microstructure case study: 15-minute bars across 114 stocks.
+# the NASDAQ-100 microstructure case study: 15-minute decisions across the 113
+# stocks of the declared 115 that carry prices.
 # The backtest runs through the **ml4t-backtest engine** using 15-minute OHLCV
 # bars constructed from AlgoSeek TAQ trade prices — the same data that supports
 # position-level risk controls, realistic execution simulation, and proper cost
@@ -305,12 +306,16 @@ _catalog = prediction_rows_at(CASE_DIR)
 # selecting on the catalog alone runs over both generations at once. It does not fail - it
 # succeeds over twice the population and freezes the mixture into every backtest downstream.
 #
-# Measured here on 2026-08-27: this registry records two supersedes edges, and the retired
-# generation of `nasdaq100_microstructure-gbm-validation-v1` lists 150 prediction identities
-# that no generation in force still lists. None of them is in the catalog *today*, because the
-# gbm rows have not been re-registered yet - so this join currently removes nothing. That is
-# the reason to land it now rather than after the first sweep: the day 07_gbm registers, the
-# filter goes from a no-op to the only thing standing between the sweep and both generations.
+# Measured against this registry on 2026-09-11: it records one supersedes edge, on
+# `nasdaq100_microstructure-linear-validation-v1`. That name's retired generation lists 61
+# prediction identities and its generation in force shares none of them, because a refit moves
+# every hash. None of the 61 is in the catalog, so this join removes nothing today, and every
+# one of the catalog's rows belongs to some declared population.
+#
+# A no-op is what this filter looks like whenever a refit takes the rows it retired out of the
+# catalog with it, which is what the linear refit did. It stops being one the first time a
+# generation is retired while its rows stay - and nothing here guarantees which of the two a
+# given refit will be, which is the reason to hold the join rather than to decide per refit.
 _retired = superseded_members_at(CASE_DIR)
 _admissible = _catalog.filter(
     pl.col("complete") & ~pl.col("prediction_hash").is_in(list(_retired))
@@ -766,7 +771,7 @@ if not trade_df.is_empty():
 # %% [markdown]
 # ## 4. The Cost-Feasible Carrier (Act 2)
 #
-# Act 1 established that ranking across all 114 names and rebalancing every bar
+# Act 1 established that ranking across all 113 names and rebalancing every bar
 # is cost-defeated. Act 2 applies the **cost-feasibility screen** from the
 # feasibility analysis (restrict to the cost-feasible universe — the
 # cheapest-to-trade names, frozen per split) and replaces every-bar rebalancing

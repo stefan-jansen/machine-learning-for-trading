@@ -23,7 +23,7 @@
 # rescue the every-bar strategy that Chapter 16 (Act 1) showed is cost-defeated?
 # Each combination re-sizes the top signal-stage predictions with `equal_weight`,
 # `score_weighted`, or `inverse_vol`, rebalancing every 15-minute bar across all
-# 114 names.
+# 113 names.
 #
 # The answer, established below, is that it cannot: every allocator lands deep in
 # negative territory. Allocator choice and concentration are **second-order** to
@@ -228,8 +228,8 @@ TRADED_UNIVERSE = traded_universe_declaration(prices) if MAX_SYMBOLS else None
 #   quantity it reads is a property of the price series. `allocator_lookback` in
 #   `config/setup.yaml` sets the window that volatility is estimated over, and it
 #   is counted in rows of the price frame rather than in decision bars: the frame
-#   is one-minute, and `_compute_rolling_vol` rolls over its rows without
-#   resampling, so 520 is **520 minutes - about 1.3 sessions**, not the month a
+#   is one-minute, and the allocator rolls over its rows without resampling, so
+#   520 is **520 minutes - about 1.3 sessions**, not the month a
 #   fifteen-minute reading of it would give. It is the one setting that decides
 #   how quickly a name's size responds to its own volatility, and at 1.3 sessions
 #   it responds fast.
@@ -257,7 +257,7 @@ TRADED_UNIVERSE = traded_universe_declaration(prices) if MAX_SYMBOLS else None
 # declare them, and it is a no-op here.
 #
 # **`TOP_K` is the other axis, and it decides concentration rather than
-# weighting.** It is a count per leg, so the book holds up to `2 * TOP_K` names.
+# weighting.** It is a count per leg, so the book holds at most `2 * TOP_K` names.
 # A small `TOP_K` bets each leg on the extreme of the ranking, where the model is
 # most confident and least diversified; a large one walks both legs in towards
 # the middle of the cross-section, where the ranking barely separates names.

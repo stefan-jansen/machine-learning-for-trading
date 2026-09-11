@@ -20,8 +20,9 @@
 # microstructure case study and answers a single question: **which learned
 # signals are real, stable, and worth taking into a backtest?**
 #
-# This is the highest-frequency case study in the book. The universe spans
-# 114 NASDAQ-100 constituents at 15-minute bar frequency, where the
+# This is the highest-frequency case study in the book. The declared universe
+# is 115 NASDAQ-100 constituents and 113 of them carry prices and predictions,
+# at 15-minute decision frequency, where the
 # prediction target (`fwd_ret_15m`) is the next 15-minute return. The
 # fundamental question here is different from daily case studies: at
 # intraday horizons, does microstructure information - order flow
@@ -576,9 +577,10 @@ if best_preds.height > 0 and fold_ranges.height > 0:
 # %% [markdown]
 # With only 2 walk-forward folds, each covering 6 months of 15-minute
 # bars, the validation evidence is inherently thin. Each fold contains
-# roughly $114 \times 26 \times 126 \approx 374{,}000$ predictions
-# (114 stocks × 26 bars/day × ~126 trading days), so per-fold sample
-# size is large. But the temporal diversity is minimal - both folds
+# about 3.2 million predictions each, counted from the registry rather than
+# from a bar count: the panel is one-minute, so a fold holds roughly 32,400
+# distinct timestamps and not the 3,276 a fifteen-minute reading would give.
+# Per-fold sample size is therefore large. But the temporal diversity is minimal - both folds
 # fall within the 2020–2021 period, which was dominated by COVID
 # recovery, meme-stock volatility, and an unprecedented retail trading
 # surge. Whether patterns learned here generalize to more normal market
@@ -1245,7 +1247,7 @@ plot_regime_bars(regime_df)
 #
 # Latent factor models were **not trained** for the NASDAQ-100
 # microstructure case study. At 15-minute frequency, the cross-section
-# of 114 stocks lacks the fundamental heterogeneity that factor models
+# of 113 stocks lacks the fundamental heterogeneity that factor models
 # require - these are all large-cap US tech stocks with highly
 # correlated microstructure dynamics. PCA or CAE applied to intraday
 # microstructure features would extract market-wide volatility modes,
@@ -1337,8 +1339,9 @@ for _label, _why in _unresolved.items():
 # label buffer rather than from the treatment's own window, and `signed_vol_share` declares no
 # window, so the block is not derived from the quantity it has to bound. A refutation built that
 # way passes by construction. `us_firm_characteristics` measured what that looks like on its own
-# treatment: p = 1.0000 at z = -13.89, with the placebos fourteen standard deviations above the
-# observed effect - a placebo distribution that cannot contain the truth is not evidence about it.
+# treatment: the placebo distribution sat wholly above the observed effect, many standard
+# deviations away, so the refutation returned a p-value of one - a placebo distribution that
+# cannot contain the truth is not evidence about it.
 # Read the column as unresolved until the treatment declares its window.
 #
 # The effect is measured per unit of the treatment, and treatment units are not
@@ -1556,7 +1559,7 @@ print(synthesis)
 #
 # ### What This Analysis Does Not Tell Us
 #
-# - **Execution feasibility**: 15-minute rebalancing across 114
+# - **Execution feasibility**: 15-minute rebalancing across 113
 #   stocks requires institutional-grade execution infrastructure.
 #   The market impact of simultaneously trading the top and bottom
 #   deciles may exceed the predicted edge.
@@ -1565,7 +1568,7 @@ print(synthesis)
 # - **Capacity**: even NASDAQ-100 stocks have limited intraday
 #   liquidity at the bar level. A \$10M strategy may face meaningful
 #   market impact; a \$100M strategy almost certainly would.
-# - **Survivorship bias**: the 114-stock universe was selected based
+# - **Survivorship bias**: the 115-stock universe was selected based
 #   on NASDAQ-100 membership, which is backward-looking.
 # - **2-fold limitation**: the strongest caveat. 2020--2021 was an
 #   extraordinary period (COVID, retail trading boom, meme stocks).
