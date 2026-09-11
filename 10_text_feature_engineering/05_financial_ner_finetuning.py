@@ -687,11 +687,12 @@ ax.legend(fontsize=7)
 
 show_with_alt(
     fig,
-    "A grouped bar chart with one pair of bars per entity type, the left bar of each pair "
-    "counting the entities in the test labels and the right bar counting those the model "
-    "predicted. The two bars of each pair are in different colors and are the same height as "
-    "each other, so no pair shows a gap between labeled and predicted. "
-    "The pairs differ from one another by up to a factor of three.",
+    "A grouped bar chart over the entity types present in the test split, with one pair of "
+    "bars per type: the left bar of each pair counts the entities in the test labels and the "
+    "right bar counts those the model predicted, the two distinguished by color and named in "
+    "the legend. Entity type runs along the horizontal axis and entity count up the vertical. "
+    "Drawn to set the entity mix the fine-tuned model recovers against the mix the labels "
+    "carry.",
 )
 
 # %% [markdown]
