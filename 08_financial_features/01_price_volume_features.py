@@ -56,7 +56,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 import numpy as np
 import plotly.graph_objects as go
@@ -774,42 +774,50 @@ vol_plot.select(
 ).write_parquet(_FIG_8_3_ARTIFACT)
 
 # %% [markdown]
-# Why the range estimators read low at the peaks: the share of daily variation that
-# happens between one close and the next open, which a within-session range cannot see.
+# Why the range estimators read low. Parkinson and Garman-Klass read the high, the low,
+# the open and the close of one session, so every price they touch is inside trading
+# hours: the jump from the previous close to this open is not in their inputs. They are
+# therefore estimating the volatility of the within-session return, while close-to-close
+# estimates the volatility of the whole daily return. The reference row below is that
+# within-session return volatility, computed directly and divided by the same denominator
+# as the estimators, so the comparison is against a measured quantity rather than an
+# assumption.
 
 # %%
-_gaps = spy.with_columns(
-    [
-        (pl.col("open").log() - pl.col("close").log().shift(1)).alias("overnight"),
-        (pl.col("close").log() - pl.col("close").log().shift(1)).alias("total"),
-    ]
-).drop_nulls(["overnight", "total"])
-_crisis = _gaps.filter(pl.col("timestamp").is_between(date(2020, 2, 15), date(2020, 4, 30)))
-_calm = _gaps.filter(pl.col("timestamp").is_between(date(2017, 1, 1), date(2017, 12, 31)))
-for _label, _sample in (("Feb-Apr 2020", _crisis), ("all of 2017", _calm)):
-    _share = _sample["overnight"].var() / _sample["total"].var()
-    print(f"{_label:<14} overnight share of daily return variance: {_share:.3f}")
+_ref = vol_compare_df.with_columns(
+    ((pl.col("close").log() - pl.col("open").log()).rolling_std(21) * np.sqrt(252)).alias(
+        "within_session"
+    )
+).drop_nulls([c for c, _l, _e, _i in ESTIMATORS] + ["within_session"])
+
+print(f"median ratio to the close-to-close estimator, over {len(_ref)} days:")
+for _col, _label, _eff, _inputs in ESTIMATORS:
+    print(f"  {_label:<32} {(_ref[_col] / _ref['vol_cc']).median():.3f}")
+print(
+    f"  {'within-session return volatility':<32} "
+    f"{(_ref['within_session'] / _ref['vol_cc']).median():.3f}"
+)
 
 print()
 _peak = vol_plot.filter(pl.col("vol_cc") == pl.col("vol_cc").max())
-print(f"at the close-to-close peak, {_peak['timestamp'][0]}:")
+print(f"the four estimators at the close-to-close peak, {_peak['timestamp'][0]}:")
 for _col, _label, _eff, _inputs in ESTIMATORS:
     print(f"  {_label:<16} {_peak[_col][0] * 100:>5.1f}%")
 
 # %% [markdown]
-# The separation at the peaks is not a question of efficiency. Parkinson and Garman-Klass
-# read the high, the low and the open of a session, so everything they measure happens
-# between the opening bell and the close. The overnight share printed above says how much
-# of the daily return variance that leaves out, and in the spring of 2020 it was the
-# majority of it: the market gapped between sessions rather than travelling within them,
-# so a within-session range understates the move by construction rather than by noise. A
-# more efficient estimator of the wrong quantity is still an estimator of the wrong
-# quantity.
+# Parkinson and Garman-Klass land on the within-session reference, not below
+# close-to-close by some amount of noise. That is the whole of the level difference: they
+# answer a different question, and they answer it accurately. Yang-Zhang sits at
+# close-to-close instead, because it carries an explicit overnight term alongside its range
+# terms, which is why it stays with close-to-close through the peak while the other two
+# fall away.
 #
-# Yang-Zhang carries an explicit overnight term alongside its range terms, which is why it
-# stays with close-to-close through the 2020 peak while the other two fall away. That is
-# the reason to prefer it as a default, and it matters most in exactly the periods a risk
-# model is built for.
+# The separation is therefore not a question of efficiency, and the distinction is worth
+# holding on to: efficiency says how much data an estimator needs to reach a given
+# precision, and it says nothing about what the estimator is precise about. A more
+# efficient estimator of the wrong quantity is still an estimator of the wrong quantity.
+# Choose the range estimators for their smoothness when the daily close-to-close return is
+# what you are modelling, and expect the level they report to be the session's.
 
 # %% [markdown]
 # ### Volatility-of-Volatility (Vol-of-Vol)
