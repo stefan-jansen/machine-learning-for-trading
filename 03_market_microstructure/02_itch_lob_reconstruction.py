@@ -165,6 +165,13 @@ assert symbol in stock_map, f"Symbol {symbol} not found in stock directory"
 symbol_locate = stock_map[symbol]
 print(f"Symbol {symbol} has stock_locate = {symbol_locate}")
 
+# %% [markdown]
+# Add orders arrive as two message types: `A` carries no member identifier and `F` does.
+# The reconstruction ignores the identifier, so the book is built from both. A trading
+# day always carries both, and `load_itch_messages` returns None for a type the store
+# does not hold, so an absent one means the store is partial - a parse stopped early, or
+# a reduced fixture - and the book is built from whichever is there.
+
 # %%
 # Add orders (A and F types) - have 'stock' column
 add_a = load_itch_messages(ITCH_DIR, "A", symbol=symbol, max_messages=MESSAGE_LIMIT)
@@ -181,7 +188,14 @@ common_cols = [
     "stock",
     "price",
 ]
-add_orders = pl.concat([add_a.select(common_cols), add_f.select(common_cols)])
+add_frames = [df.select(common_cols) for df in (add_a, add_f) if df is not None]
+assert add_frames, (
+    f"No add messages of either type for {symbol} in {ITCH_DIR}. The book cannot be built "
+    "without them; check that the parse wrote the A and F directories."
+)
+if add_f is None:
+    print("No F (add with attribution) messages in this store; building the book from A alone")
+add_orders = pl.concat(add_frames)
 
 # D, X, E, C, U messages don't have 'stock' column - use stock_locate filtering
 deletes = load_itch_messages(ITCH_DIR, "D", stock_locate=symbol_locate, max_messages=MESSAGE_LIMIT)

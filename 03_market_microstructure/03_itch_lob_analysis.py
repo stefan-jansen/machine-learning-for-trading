@@ -690,10 +690,13 @@ def compute_ofi(messages_dir: Path, symbol: str, freq: str) -> pl.DataFrame:
 
     # Aggregate additions and removals by time bucket
     add_pivot = _pivot_by_side(registry, freq, "shares", "bid_adds", "ask_adds")
+    # The empty case needs the bucket column typed. `pl.DataFrame({"bucket": []})` gives it
+    # Null, and a join against a datetime key then fails on the schema rather than
+    # returning the adds unchanged, which is what a session with no removals means.
     rem_pivot = (
         _pivot_by_side(removals, freq, "shares_removed", "bid_removes", "ask_removes")
         if not removals.is_empty()
-        else pl.DataFrame({"bucket": []})
+        else pl.DataFrame(schema={"bucket": add_pivot.schema["bucket"]})
     )
 
     # A bucket may hold adds with no removals, or removals with no adds, so the join keeps

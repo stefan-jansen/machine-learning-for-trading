@@ -91,6 +91,7 @@ MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
 
 # Input: Trade summary from notebook 05 (trading_activity_overview)
 TRADING_ACTIVITY_DIR = NASDAQ_ITCH_OUTPUT / "trading_activity"
+ENRICHED_DIR = NASDAQ_ITCH_OUTPUT / "enriched"
 
 print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
 print(f"Input directory (trade summary): {display_path(TRADING_ACTIVITY_DIR)}")
@@ -253,7 +254,7 @@ def load_add_cancel_for_ticker(base_dir: Path, ticker: str) -> tuple[pl.DataFram
 
     # Load cancels - prefer enriched X which has stock column
     cancel_df = pl.DataFrame()
-    enriched_x = base_dir / "enriched" / "X.parquet"
+    enriched_x = ENRICHED_DIR / "X.parquet"
     x_folder = base_dir / "X"
 
     if enriched_x.exists():
@@ -305,7 +306,7 @@ def analyze_order_flow_for_ticker(base_dir: Path, ticker: str) -> tuple[dict, pl
     # A raw X message names no ticker, so the partial-cancel share can only be computed
     # from the enriched file. Without it the filtered frame is empty and the share is
     # zero for want of data rather than for want of cancels, so the printer says which.
-    cancel_data_available = (base_dir / "enriched" / "X.parquet").exists()
+    cancel_data_available = (ENRICHED_DIR / "X.parquet").exists()
 
     results = {"ticker": ticker, "cancel_data_available": cancel_data_available}
 

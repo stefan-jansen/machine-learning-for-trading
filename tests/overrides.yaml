@@ -69,32 +69,27 @@
   requires_import: duckdb
 03_market_microstructure/01_itch_parser:
   skip: true
-  skip_reason: "Requires ~5GB raw ITCH binary download \u2014 tested locally only"
+  # This is the notebook that writes the parsed store the rest of the chapter reads, so
+  # it needs the raw feed, not the parsed fixture: a 6 GB compressed NASDAQ ITCH download
+  # that expands to 13 GB. The fixture set has no raw/ directory and is not going to.
+  skip_reason: "Parses the raw NASDAQ ITCH binary (6 GB compressed); the fixture set has no raw/ directory"
   tier: weekly
   timeout: 300
 03_market_microstructure/02_itch_lob_reconstruction:
-  skip: true
-  skip_reason: "Requires 01_itch_parser output (raw ITCH binary pipeline) \u2014 tested locally"
+  # The ITCH fixture's add messages are a head-of-day subsample and all fall before the
+  # opening auction, so the production 09:30 window would reconstruct an empty book.
+  parameters:
+    START_TIME: "04:00:00"
   timeout: 300
 03_market_microstructure/03_itch_lob_analysis:
-  skip: true
-  skip_reason: "Requires LOB snapshots from 02_itch_lob_reconstruction \u2014 tested locally"
   timeout: 300
 03_market_microstructure/04_itch_order_lifecycle_analysis:
-  skip: true
-  skip_reason: "Requires 01_itch_parser output (raw ITCH binary pipeline) \u2014 tested locally"
   timeout: 300
 03_market_microstructure/05_itch_trading_activity:
-  skip: true
-  skip_reason: "Requires 01_itch_parser output (raw ITCH binary pipeline) \u2014 tested locally"
   timeout: 300
 03_market_microstructure/06_itch_intraday_patterns:
-  skip: true
-  skip_reason: "Requires 05_itch_trading_activity's chapter outputs, and 05 is itself skipped \u2014 tested locally"
   timeout: 300
 03_market_microstructure/07_itch_stylized_facts:
-  skip: true
-  skip_reason: "Requires 05_itch_trading_activity's chapter outputs, and 05 is itself skipped \u2014 tested locally"
   timeout: 300
 03_market_microstructure/08_databento_lob_reconstruction:
   timeout: 300
@@ -102,7 +97,9 @@
   timeout: 300
 03_market_microstructure/10_iex_lob_reconstruction:
   skip: true
-  skip_reason: "Requires IEX HIST DEEP raw pcap download \u2014 tested locally only"
+  # The fixture ships iex/deep/parsed/ but no pcap: this notebook is the one that does the
+  # parsing, so the parsed form is not an input it can use.
+  skip_reason: "Parses raw IEX DEEP pcap; the fixture ships only the already-parsed output"
   tier: weekly
   timeout: 300
 03_market_microstructure/11_algoseek_taq_eda:
@@ -112,8 +109,6 @@
 03_market_microstructure/13_algoseek_minute_bars_eda:
   timeout: 300
 03_market_microstructure/14_itch_bar_sampling:
-  skip: true
-  skip_reason: "Requires trade messages from 01_itch_parser \u2014 tested locally"
   timeout: 300
 03_market_microstructure/15_itch_lee_ready:
   timeout: 300

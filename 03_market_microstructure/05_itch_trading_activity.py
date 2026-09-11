@@ -91,6 +91,7 @@ NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
 MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
 OUTPUT_DIR = NASDAQ_ITCH_OUTPUT / "trading_activity"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+ENRICHED_DIR = NASDAQ_ITCH_OUTPUT / "enriched"
 
 ROW_LIMIT = MAX_ROWS or None
 
@@ -127,10 +128,9 @@ if not HAS_MESSAGE_DATA:
 def count_parquet_rows(base_dir: Path) -> dict[str, int]:
     """Count rows per ITCH message type.
 
-    The parser writes one directory per message type. This notebook writes an `enriched`
-    directory beside them, and so do others, so only the single-letter codes the ITCH
-    specification defines are counted; otherwise a derived artifact appears in the chart
-    as though the venue had published it.
+    Only the single-letter codes the ITCH specification defines are counted, so a
+    directory some other tool left in the store cannot appear in the chart as though
+    the venue had published it.
 
     Args:
         base_dir: Directory containing subfolders like A/, C/, E/.
@@ -195,9 +195,12 @@ if HAS_MESSAGE_DATA:
 #
 # This enables filtering trades by stock symbol and analyzing execution quality.
 #
-# The result is written to `messages/enriched/` and read by `04_itch_order_lifecycle_analysis`,
-# `06_itch_intraday_patterns` and `07_itch_stylized_facts`, so the join runs once for the
-# whole chapter rather than four times.
+# The result is written to `output/ch03/nasdaq_itch/enriched/` and read by
+# `04_itch_order_lifecycle_analysis` and `07_itch_stylized_facts`, so the join runs once
+# for the whole chapter rather than three times. It goes under the chapter's output
+# directory rather than beside the parsed messages because it is derived here, and the
+# message store is whatever the reader has mounted at `ML4T_DATA_PATH` - a shared
+# checkout, a synced folder, a read-only mount.
 
 
 # %%
@@ -446,7 +449,7 @@ def _enrich_x_messages(
 
 
 # %%
-def enrich_execution_messages(message_dir: Path) -> dict[str, int]:
+def enrich_execution_messages(message_dir: Path, enriched_dir: Path) -> dict[str, int]:
     """
     Enrich E/C/X messages with stock symbol and order attributes.
 
@@ -455,10 +458,15 @@ def enrich_execution_messages(message_dir: Path) -> dict[str, int]:
     - Execution quality analysis (fill price vs limit price)
     - Fill rate analysis by order characteristics
 
+    Args:
+        message_dir: Parsed ITCH message store, read only.
+        enriched_dir: Where the enriched files are written. Under the chapter's output
+            directory, not beside the messages: this is derived data, and writing it
+            into the data root puts it in whatever the reader has mounted there.
+
     Returns count of enriched messages by type.
     """
-    enriched_dir = message_dir / "enriched"
-    enriched_dir.mkdir(exist_ok=True)
+    enriched_dir.mkdir(parents=True, exist_ok=True)
 
     stock_directory = _build_stock_directory(message_dir)
     if stock_directory is None:
@@ -494,17 +502,16 @@ def enrich_execution_messages(message_dir: Path) -> dict[str, int]:
 
 # %%
 if HAS_MESSAGE_DATA and (MESSAGE_DIR / "R").exists():
-    enriched_dir = MESSAGE_DIR / "enriched"
-    already_built = (enriched_dir / "E.parquet").exists()
+    already_built = (ENRICHED_DIR / "E.parquet").exists()
     if REBUILD_ENRICHED or not already_built:
         print("Running execution enrichment...")
-        enrichment_counts = enrich_execution_messages(MESSAGE_DIR)
+        enrichment_counts = enrich_execution_messages(MESSAGE_DIR, ENRICHED_DIR)
         print("\nEnrichment summary:")
         for msg_type, count in enrichment_counts.items():
             print(f"  {msg_type}: {count:,} messages")
     else:
         print(
-            f"Reusing the enriched files already in {display_path(enriched_dir)}; set "
+            f"Reusing the enriched files already in {display_path(ENRICHED_DIR)}; set "
             f"REBUILD_ENRICHED to rebuild them from the parsed messages."
         )
 
@@ -567,10 +574,10 @@ def _unify_columns(df: pl.DataFrame, msg_type: str) -> pl.DataFrame | None:
 
 # %%
 def _load_single_msg_type(
-    base_dir: Path, msg_type: str, max_rows: int | None
+    base_dir: Path, enriched_dir: Path, msg_type: str, max_rows: int | None
 ) -> pl.DataFrame | None:
     """Load a single ITCH execution message type (C, E, P, or Q)."""
-    enriched_file = base_dir / "enriched" / f"{msg_type}.parquet"
+    enriched_file = enriched_dir / f"{msg_type}.parquet"
     msg_folder = base_dir / msg_type
 
     try:
@@ -636,7 +643,9 @@ def _normalize_trades(trades: list[pl.DataFrame], type_counts: dict[str, int]) -
 
 
 # %%
-def load_executions(base_dir: Path, max_rows: int | None = None) -> pl.DataFrame:
+def load_executions(
+    base_dir: Path, enriched_dir: Path, max_rows: int | None = None
+) -> pl.DataFrame:
     """
     Load execution data from C, E, P, Q message types using Polars.
 
@@ -649,7 +658,7 @@ def load_executions(base_dir: Path, max_rows: int | None = None) -> pl.DataFrame
     type_counts = {}
 
     for msg_type in ["C", "E", "P", "Q"]:
-        df = _load_single_msg_type(base_dir, msg_type, max_rows)
+        df = _load_single_msg_type(base_dir, enriched_dir, msg_type, max_rows)
         if df is not None:
             type_counts[msg_type] = len(df)
             trades.append(df)
@@ -671,7 +680,7 @@ def load_executions(base_dir: Path, max_rows: int | None = None) -> pl.DataFrame
 
 # %%
 if HAS_MESSAGE_DATA:
-    trade_df = load_executions(MESSAGE_DIR, max_rows=ROW_LIMIT)
+    trade_df = load_executions(MESSAGE_DIR, ENRICHED_DIR, max_rows=ROW_LIMIT)
     print(f"\nLoaded {len(trade_df):,} trades total")
     print(trade_df.schema)
 

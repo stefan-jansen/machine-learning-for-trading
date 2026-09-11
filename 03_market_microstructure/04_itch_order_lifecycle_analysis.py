@@ -964,7 +964,7 @@ if (
 
 # %%
 # Filter on stock_locate inside the scan: the enriched files cover the whole venue.
-ENRICHED_DIR = MESSAGE_DIR / "enriched"
+ENRICHED_DIR = NASDAQ_ITCH_OUTPUT / "enriched"
 
 if ENRICHED_DIR.exists():
     enriched_e = None
@@ -1107,16 +1107,19 @@ if HAS_MESSAGE_DATA:
     print("Loading venue-wide order data (A+F, D, E messages)...")
     started = perf_counter()
 
-    # All Add orders (A + F) — no symbol filter
-    venue_adds_a = pl.scan_parquet(MESSAGE_DIR / "A" / "*.parquet").select(
-        pl.col("order_reference_number").alias("order"),
-        pl.col("timestamp").alias("submitted"),
-    )
-    venue_adds_f = pl.scan_parquet(MESSAGE_DIR / "F" / "*.parquet").select(
-        pl.col("order_reference_number").alias("order"),
-        pl.col("timestamp").alias("submitted"),
-    )
-    venue_adds = pl.concat([venue_adds_a, venue_adds_f])
+    # All Add orders (A + F) - no symbol filter. Section 2 above already builds from
+    # whichever of the two the store holds, and this pass has to agree with it: a full
+    # session carries both, a partial store need not.
+    venue_add_scans = [
+        pl.scan_parquet(MESSAGE_DIR / code / "*.parquet").select(
+            pl.col("order_reference_number").alias("order"),
+            pl.col("timestamp").alias("submitted"),
+        )
+        for code in ("A", "F")
+        if (MESSAGE_DIR / code).is_dir() and any((MESSAGE_DIR / code).glob("*.parquet"))
+    ]
+    assert venue_add_scans, f"No A or F add messages under {MESSAGE_DIR}"
+    venue_adds = pl.concat(venue_add_scans)
     venue_add_count = venue_adds.select(pl.len()).collect().item()
     print(f"Total Add orders (A+F): {venue_add_count:,} ({perf_counter() - started:.1f}s)")
 
@@ -1146,16 +1149,17 @@ if HAS_MESSAGE_DATA:
         f"Orders with delete events: {venue_cancelled:,} ({perf_counter() - cancel_started:.1f}s)"
     )
 
-    cancel_within_500ms = (cancel_seconds < 0.5).mean()
-    cancel_within_1s = (cancel_seconds < 1.0).mean()
-    cancel_within_10s = (cancel_seconds < 10.0).mean()
-    cancel_median = cancel_seconds.median()
-
-    print(f"\nTime to deletion (D only), venue-wide ({venue_cancelled:,} orders):")
-    print(f"  Within 500 ms:     {cancel_within_500ms:.1%}")
-    print(f"  Within 1 second:   {cancel_within_1s:.1%}")
-    print(f"  Within 10 seconds: {cancel_within_10s:.1%}")
-    print(f"  Median:            {cancel_median:.3f} s")
+    # An empty series means no add in this store was ever deleted, and every share below
+    # would be a proportion of nothing: polars returns None for the mean, which formats
+    # as a crash rather than as the absence it is.
+    if venue_cancelled:
+        print(f"\nTime to deletion (D only), venue-wide ({venue_cancelled:,} orders):")
+        print(f"  Within 500 ms:     {(cancel_seconds < 0.5).mean():.1%}")
+        print(f"  Within 1 second:   {(cancel_seconds < 1.0).mean():.1%}")
+        print(f"  Within 10 seconds: {(cancel_seconds < 10.0).mean():.1%}")
+        print(f"  Median:            {cancel_seconds.median():.3f} s")
+    else:
+        print("\nNo add in this store was deleted, so there is no time to deletion.")
     del venue_cancel_times, cancel_seconds
 
     # --- Time to Execution ---
@@ -1184,14 +1188,13 @@ if HAS_MESSAGE_DATA:
         f"Orders with execution events: {venue_executed:,} ({perf_counter() - exec_started:.1f}s)"
     )
 
-    exec_within_1ms = (exec_seconds < 0.001).mean()
-    exec_median = exec_seconds.median()
-    exec_over_40min = (exec_seconds > 2400).mean()
-
-    print(f"\nTime to first E fill, venue-wide ({venue_executed:,} orders):")
-    print(f"  Within 1 millisecond: {exec_within_1ms:.1%}")
-    print(f"  Median:               {exec_median:.3f} s")
-    print(f"  Over 40 minutes:      {exec_over_40min:.1%}")
+    if venue_executed:
+        print(f"\nTime to first E fill, venue-wide ({venue_executed:,} orders):")
+        print(f"  Within 1 millisecond: {(exec_seconds < 0.001).mean():.1%}")
+        print(f"  Median:               {exec_seconds.median():.3f} s")
+        print(f"  Over 40 minutes:      {(exec_seconds > 2400).mean():.1%}")
+    else:
+        print("\nNo add in this store was executed, so there is no time to first fill.")
     del venue_exec_times, exec_seconds
 
     print(f"\nTotal runtime: {perf_counter() - started:.1f}s")
