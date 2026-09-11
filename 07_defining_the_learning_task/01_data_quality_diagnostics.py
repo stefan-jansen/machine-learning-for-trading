@@ -74,13 +74,25 @@ from data import (
     load_fx_pairs,
     load_us_equities,
 )
-from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
+from utils.style import COLORS, show_plotly_with_alt  # activates the ml4t Plotly template
 
-warnings.filterwarnings("ignore")
-# Suppress chatty INFO logs from ml4t.diagnostic so output cells stay focused on results.
-logging.disable(logging.INFO)
 
-# %%
+def quiet_ml4t_logging() -> None:
+    """Keep ml4t.diagnostic's INFO narration out of the output cells.
+
+    Each of its modules builds a `DiagnosticLogger`, which sets INFO on its own leaf
+    logger and attaches its own stderr handler, so a level set on the `ml4t` parent
+    never reaches them. The leaves come into existence when their module is imported,
+    which is why this is called again after the two ml4t imports further down rather
+    than once here.
+    """
+    for name, logger in logging.root.manager.loggerDict.items():
+        if name.startswith("ml4t") and isinstance(logger, logging.Logger):
+            logger.setLevel(logging.WARNING)
+
+
+quiet_ml4t_logging()
+
 # %% tags=["parameters"]
 # Production defaults
 ETF_START_DATE = "2015-01-01"
@@ -92,16 +104,21 @@ FIRM_CHARACTERISTICS_START_DATE = "1990-01-01"
 
 
 # %% [markdown]
-# ## 1. Diagnostic Function Library
+# ## Diagnostic Function Library
 #
 # These functions are designed to be **reusable** across datasets and chapters.
 # They follow a consistent interface: input DataFrame, return diagnostic results.
 
 # %% [markdown]
-# ### 1.1 Index Integrity Check
+# ### Index Integrity Check
 #
 # Validates that the time index has correct dtype, monotonicity, and uniqueness.
 # For panel data, also checks that (date, symbol) pairs are unique.
+#
+# The monotonicity check reads each symbol's rows in the order they arrive. Sorting the
+# frame by symbol and time before asking whether time is sorted would return True for
+# every input, including a frame whose rows are in the wrong order - a check that cannot
+# fail is the defect this notebook exists to find, and it is an easy one to commit here.
 
 
 # %%
@@ -143,11 +160,8 @@ def check_index_integrity(
         results["unique_pairs"] = n_unique
         results["checks"]["unique_date_symbol"] = n_unique == len(df)
 
-        # Check monotonicity within each symbol, in the order the rows arrive.
-        # Sorting by [symbol, time] before asking whether time is sorted makes the
-        # check unfalsifiable - it would return True for any input, including a
-        # frame whose rows are in the wrong order. `maintain_order=True` keeps each
-        # group's rows in their original sequence so the comparison means something.
+        # `maintain_order=True` keeps each group's rows in their arrival sequence,
+        # which is what makes the comparison capable of failing.
         mono_check = df.group_by(symbol_col, maintain_order=True).agg(
             is_mono=(pl.col(time_col) == pl.col(time_col).sort()).all()
         )
@@ -178,7 +192,7 @@ def check_index_integrity(
 
 
 # %% [markdown]
-# ### 1.2 Duplicate Detection
+# ### Duplicate Detection
 #
 # Finds exact duplicates (identical rows) and near-duplicates (same index, different values).
 
@@ -242,7 +256,7 @@ def check_duplicates(
 
 
 # %% [markdown]
-# ### 1.3 Coverage Report
+# ### Coverage Report
 #
 # Analyzes missingness patterns by field, by asset, and by time period.
 
@@ -330,9 +344,15 @@ def coverage_report(
 
 
 # %% [markdown]
-# ### 1.4 Coverage Heatmap
+# ### Coverage Heatmap
 #
 # Visualizes data availability across time × asset for panel data.
+#
+# The pivot underneath emits one row per month that *has* data, so a month in which the
+# whole panel is missing - a vendor outage, an ingestion gap - would be absent from the
+# matrix rather than present as an all-zero row. Any count of "months missing for every
+# asset" taken off that matrix is therefore zero by construction. Reindexing onto a
+# continuous month range first is what makes the count capable of firing.
 
 
 # %%
@@ -394,13 +414,6 @@ def coverage_heatmap(
     ).sort("period")
 
     # Reindex onto a continuous month range before anything reads the matrix.
-    #
-    # The pivot emits one row per month that HAS data, so a month in which the whole
-    # panel is missing - a vendor outage, an ingestion gap - is simply absent from the
-    # matrix rather than present as an all-zero row. Any count of "months missing for
-    # every asset" taken off the un-reindexed matrix is therefore zero by
-    # construction, which is the same unfalsifiable-check defect this notebook exists
-    # to find, committed by the notebook itself.
     if len(pivot_df):
         full_months = pl.DataFrame(
             {
@@ -449,7 +462,7 @@ def coverage_heatmap(
 
 
 # %% [markdown]
-# ### 1.5 Distribution Summary
+# ### Distribution Summary
 #
 # Computes summary statistics and flags extreme values.
 
@@ -521,7 +534,7 @@ def distribution_summary(
 
 
 # %% [markdown]
-# ### 1.6 Outlier Flags
+# ### Outlier Flags
 #
 # Detects domain violations and spike anomalies (single-bar reversals).
 
@@ -533,6 +546,8 @@ def outlier_flags(
     volume_col: str | None = "volume",
     return_col: str | None = None,
     max_return_threshold: float = 2.0,
+    high_spike_ratio: float = 1.5,
+    low_spike_ratio: float = 0.5,
 ) -> dict[str, Any]:
     """Flag domain violations and spike anomalies.
 
@@ -541,7 +556,9 @@ def outlier_flags(
         price_cols: Price columns to check for domain violations
         volume_col: Volume column to check for negative values
         return_col: Return column to check for extreme spikes
-        max_return_threshold: Maximum plausible return (e.g., 2.0 = 200%)
+        max_return_threshold: Maximum plausible return, as a fraction of the prior price
+        high_spike_ratio: Flag a bar whose high exceeds this multiple of its close
+        low_spike_ratio: Flag a bar whose low falls below this multiple of its close
 
     Returns:
         Dictionary with outlier counts and examples
@@ -572,10 +589,9 @@ def outlier_flags(
             examples = df.filter(impossible).head(5)
             results["impossible_return_examples"] = examples.to_dicts()
 
-    # Spike detection: single-bar reversals
-    # A spike is when price moves sharply then reverts (e.g., OHLC where H > 2*C or L < C/2).
-    # Resolve the high/low/close names so roll-adjusted panels (adj_*) are covered too;
-    # the spike ratio is adjust-invariant (all OHLC in a bar share one adjustment factor).
+    # Resolve the high/low/close names so roll-adjusted panels (adj_*) are covered too:
+    # every OHLC field in a bar shares one adjustment factor, so the ratios below are
+    # adjust-invariant and the same thresholds apply to raw and adjusted panels alike.
     def _resolve(*names: str) -> str | None:
         return next((n for n in names if n in df.columns), None)
 
@@ -583,9 +599,8 @@ def outlier_flags(
     lo_col = _resolve("low", "adj_low")
     cl_col = _resolve("close", "adj_close")
     if hi_col and lo_col and cl_col:
-        # Detect bars where high is >50% above close
-        high_spike = df[hi_col] > df[cl_col] * 1.5
-        low_spike = df[lo_col] < df[cl_col] * 0.5
+        high_spike = df[hi_col] > df[cl_col] * high_spike_ratio
+        low_spike = df[lo_col] < df[cl_col] * low_spike_ratio
         n_spikes = (high_spike | low_spike).sum()
         results["flags"]["price_spikes"] = n_spikes
 
@@ -597,7 +612,7 @@ def outlier_flags(
 
 
 # %% [markdown]
-# ## 2. Dataset Registry
+# ## Dataset Registry
 #
 # Central registry mapping dataset names to loader functions and metadata.
 
@@ -688,7 +703,7 @@ DATASET_REGISTRY = {
 }
 
 # %% [markdown]
-# ## 3. Per-Dataset Diagnostics
+# ## Per-Dataset Diagnostics
 #
 # Run all diagnostics for each available dataset. Results are stored for the
 # summary dashboard.
@@ -716,7 +731,7 @@ def filter_from_start(df: pl.DataFrame, time_col: str, start_value: str) -> pl.D
 
 
 # %% [markdown]
-# ### 3.1 ETF Universe
+# ### ETF Universe
 #
 # Yahoo Finance data covering 100 ETFs across 9 asset classes. Key concerns:
 # adjustment artifacts from corporate actions and ticker changes.
@@ -788,10 +803,11 @@ if etfs is not None:
 # price anomalies.
 
 # %% [markdown]
-# ### 3.2 US Equities
+# ### US Equities
 #
-# Longest dataset (56 years) with survivorship-free panel. Key concerns:
-# penny stocks, stock splits, and delisting events.
+# The longest panel in the survey, and the only survivorship-free one. Key concerns:
+# penny stocks, stock splits, and delisting events. The loaded span starts at
+# `US_EQUITIES_START_DATE` rather than at the vendor's first year.
 
 # %%
 us_equities = load_dataset_safely(DATASET_REGISTRY["us_equities"]["loader"])
@@ -847,11 +863,11 @@ if us_equities is not None:
 # dataset ships a `split_ratio` column, so we do not have to guess - and checking
 # turns the reading around.
 #
-# A raw return is bounded below by $-1$: a price cannot fall by more than 100%. So a
-# symmetric-looking filter on $|r| > 1$ **can only ever fire on the upside**. A
-# reverse split, which multiplies the price, clears the threshold easily. A forward
-# split, which divides it, produces a return near $-0.5$ and is invisible to the
-# filter no matter how large the split.
+# A raw return is bounded below by $-1$, because a price cannot fall below zero. So a
+# symmetric-looking filter on $|r| > 1$ **can only ever fire on the upside**. A reverse
+# split, which multiplies the price, clears the threshold easily. A forward split, which
+# divides it, cannot reach $-1$ however large the split, so it is invisible to the filter
+# by construction rather than by accident.
 
 # %%
 if us_equities is not None:
@@ -911,14 +927,15 @@ if us_equities is not None:
         "outliers": outliers,
         "penny_stocks": len(penny),
         "extreme_returns": len(extreme_ret),
+        "extreme_return_min": extreme_ret["returns"].min(),
     }
 
 # %% [markdown]
-# US Equities is the dataset that most needs active cleaning. Penny stocks
-# ($<1) should be filtered to avoid microstructure noise dominating cross-sectional
-# models. Extreme returns (>100% daily) typically reflect stock splits or
-# data errors and require investigation. See `02_preprocessing_pipeline`
-# for the full cleaning pipeline.
+# US Equities is the dataset that most needs active cleaning. Penny stocks should be
+# filtered so microstructure noise does not dominate cross-sectional models, and the
+# rows the return threshold flags need investigating rather than deleting: the section
+# above shows they are not the corporate actions they look like. See
+# `02_preprocessing_pipeline` for the full cleaning pipeline.
 
 # %% [markdown]
 # ### Coverage Heatmap: US Equities
@@ -936,14 +953,25 @@ if us_equities is not None:
         time_col="timestamp",
         symbol_col="symbol",
         value_col="close",
-        title="US equities is survivorship-free: assets list and delist mid-panel",
+        title="US equities monthly coverage by asset, ordered by first month",
         max_symbols=50,
     )
     fig.update_layout(
         xaxis_title="Asset (sampled)",
         yaxis_title="Month",
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        alt=(
+            "Monthly coverage grid for a sample of US equities, months running up the "
+            "vertical axis and assets ordered left to right by the month each first "
+            "traded. Filled cells mark months in which the asset has data. The boundary "
+            "between filled and empty is a staircase rising to the right, so each column "
+            "begins later than the one to its left. Notches along the top edge mark "
+            "assets whose data stops before the panel ends. No row is empty across its "
+            "full width."
+        ),
+    )
 
 # %% [markdown]
 # Two things to read off it. The **staircase rising to the right** is the listing
@@ -995,7 +1023,7 @@ if us_equities is not None:
     print(f"  Interior gaps (absent, then back):    {_interior} cells")
 
 # %% [markdown]
-# ### 3.3 Crypto Perpetuals
+# ### Crypto Perpetuals
 #
 # 24/7 trading with 8-hour funding settlement cycles. Bars should
 # align exactly to 00:00, 08:00, 16:00 UTC.
@@ -1031,7 +1059,7 @@ if crypto_perps is not None:
     }
 
 # %% [markdown]
-# ### 3.4 Crypto Premium Index
+# ### Crypto Premium Index
 #
 # Premium index for funding arbitrage strategies. Same 8-hour frequency
 # as perpetuals; values represent the basis between spot and futures.
@@ -1059,7 +1087,7 @@ if crypto_premium is not None:
 # from the exchange) can create sudden coverage drops.
 
 # %% [markdown]
-# ### 3.5 CME Futures
+# ### CME Futures
 #
 # Session-aligned daily bars with roll continuity across contract months.
 
@@ -1089,10 +1117,13 @@ if cme_futures is not None:
     diagnostic_results["cme_futures"] = {"index": idx_check, "n_products": len(products)}
 
 # %% [markdown]
-# ### 3.6 FX Pairs
+# ### FX Pairs
 #
-# 4-hour bars with expected weekend gaps (market closes Friday 17:00 EST,
-# reopens Sunday 17:00 EST).
+# 4-hour bars with expected weekend gaps: the market closes Friday 17:00 EST and reopens
+# Sunday 17:00 EST. That reopen lands between 21:00 and 22:00 UTC depending on daylight
+# saving, so a Sunday bar at or after the reopen hour is ordinary market data rather than
+# an anomaly. Saturday bars, and Sunday bars earlier in the day, fall outside the trading
+# week and are the ones worth filtering.
 
 # %%
 fx_pairs = load_dataset_safely(DATASET_REGISTRY["fx_pairs"]["loader"])
@@ -1105,10 +1136,7 @@ if fx_pairs is not None:
     print(f"Loaded {len(fx_pairs):,} rows, {fx_pairs['symbol'].n_unique()} pairs")
 
     idx_check = check_index_integrity(fx_pairs, config["time_col"], config["symbol_col"])
-    # Polars dt.weekday() is ISO: Monday=1 ... Saturday=6, Sunday=7. The FX week
-    # reopens Sunday 17:00 EST, which lands at 21:00-22:00 UTC across daylight
-    # saving, so Sunday bars at or after 21:00 UTC are the legitimate weekly
-    # reopen. Saturday bars and Sunday-daytime bars are the true anomalies.
+    # Polars dt.weekday() is ISO: Monday=1 ... Saturday=6, Sunday=7.
     FX_REOPEN_HOUR_UTC = 21
     fx_pairs_with_weekday = fx_pairs.with_columns(
         weekday=pl.col("timestamp").dt.weekday(),
@@ -1151,7 +1179,7 @@ if fx_pairs is not None:
 # to filter.
 
 # %% [markdown]
-# ### 3.7 Firm Characteristics
+# ### Firm Characteristics
 #
 # Chen-Pelger-Zhu academic monthly panel with 46 pre-computed characteristics
 # (plus `ret`, `timestamp`, and a `split` indicator). Coverage is engineered
@@ -1188,16 +1216,15 @@ if firm_char is not None:
     }
 
 # %% [markdown]
-# The 10 sampled characteristics show 100% column-level coverage because the
-# upstream filter only retains firm-months with valid characteristic vectors.
-# The cost of that filter is in the row count: many small-cap firm-months are
-# excluded entirely, which is the right framing for §7.1's discussion of
-# "missing due to observed coverage rules". Downstream notebooks should not
-# attempt to reconstruct dropped rows; treat the panel as the authors' own
-# coverage rule applied at source.
+# The sampled characteristics show complete column-level coverage, because the upstream
+# filter only retains firm-months with valid characteristic vectors. The cost of that
+# filter is in the row count: many small-cap firm-months are excluded entirely, which is
+# the right framing for Section 7.1's discussion of "missing due to observed coverage
+# rules". Downstream notebooks should not attempt to reconstruct dropped rows; treat the
+# panel as the authors' own coverage rule applied at source.
 
 # %% [markdown]
-# ## 4. Summary Dashboard
+# ## Summary Dashboard
 #
 # Comparative view across all datasets.
 
@@ -1257,7 +1284,7 @@ summary_df
 # addresses with domain filters and spike detection.
 
 # %% [markdown]
-# ## 5. Normality Testing
+# ## Normality Testing
 #
 # The **Jarque-Bera test** jointly tests whether skewness and kurtosis match
 # a normal distribution. Financial returns almost always reject normality
@@ -1265,6 +1292,8 @@ summary_df
 
 # %%
 from ml4t.diagnostic.evaluation.distribution.tests import jarque_bera_test
+
+quiet_ml4t_logging()
 
 if "etfs" in diagnostic_results:
     etfs_returns = (
@@ -1290,7 +1319,7 @@ if "etfs" in diagnostic_results:
 # returns. See `02_preprocessing_pipeline` for winsorization in practice.
 
 # %% [markdown]
-# ### 5.1 Stationarity Quick Check
+# ### Stationarity Quick Check
 #
 # Prices are non-stationary (they trend); returns are typically stationary.
 # This validates using returns, not prices, as ML features and labels.
@@ -1298,6 +1327,14 @@ if "etfs" in diagnostic_results:
 
 # %%
 from ml4t.diagnostic.evaluation.stationarity import analyze_stationarity
+from statsmodels.tools.sm_exceptions import InterpolationWarning
+
+warnings.filterwarnings(
+    "ignore",
+    category=InterpolationWarning,
+    module=r"ml4t\.diagnostic\.evaluation\.stationarity\.kpss_test",
+)
+quiet_ml4t_logging()
 
 if "etfs" in diagnostic_results:
     spy_prices = etfs.filter(pl.col("symbol") == "SPY").sort("timestamp")["close"].to_numpy()
@@ -1309,33 +1346,60 @@ if "etfs" in diagnostic_results:
     print(f"SPY Returns - Consensus: {return_stat.consensus}")
 
 # %% [markdown]
-# Prices are non-stationary (unit root), returns are stationary - the
-# expected result. This validates the standard practice of using returns
-# (or differences) rather than levels as model inputs. Chapter 9 covers
+# Prices carry a unit root and returns do not, which is what the standard practice of
+# feeding models returns (or differences) rather than levels rests on. Chapter 9 covers
 # formal time series analysis including ADF, KPSS, and Phillips-Perron tests.
+#
+# KPSS reports its p-value from a lookup table, and a statistic outside that table's
+# range gets the nearest tabulated bound rather than an interpolated value. The cell
+# above silences the resulting `InterpolationWarning` for this one module: the consensus
+# label turns on which side of the critical value the statistic falls, not on the
+# p-value's fourth digit, so the clipping changes nothing that is read here.
 
 # %% [markdown]
-# ## 6. Key Findings
+# ## Key Findings
 #
 # Based on the diagnostic survey, the datasets fall into two groups:
 #
 # **Ready for direct use** (no structural cleaning needed):
 # - **ETFs** - complete OHLCV coverage; outlier flags reflect Yahoo adjustment artifacts.
 # - **Crypto perpetuals and premium** - complete coverage, 8-hour-aligned timestamps.
-# - **CME futures** - session-aligned bars across 30 products with no null closes.
+# - **CME futures** - session-aligned bars across every product, with no null closes.
 # - **Firm Characteristics** - column-level coverage is complete by construction;
 #   downstream models inherit the source paper's coverage rule.
 #
 # **Require active preprocessing** (see `02_preprocessing_pipeline`):
-# 1. **US Equities** - penny-stock filter (1.4% of rows below $1), extreme-return
-#    handling (837 rows above 100% daily moves, every one of them an *upward* move),
-#    and 2,739 price-spike bars. Corporate actions should be taken from `split_ratio`
-#    rather than inferred from return size; see the split analysis in §3.2.
-# 2. **FX Pairs** - of 11,344 weekend timestamps, 11,339 are legitimate Sunday
-#    reopen bars (at or after 21:00 UTC) that belong in the panel; only 5
-#    Saturday or Sunday-daytime bars are anomalies to filter before the
-#    spot-vs-forward analytics in §7.2.
+# 1. **US Equities** - a penny-stock filter, extreme-return handling, and price-spike
+#    review. Every row the return threshold flags is an *upward* move, so corporate
+#    actions should be taken from `split_ratio` rather than inferred from return size;
+#    see the split analysis under **US Equities** above.
+# 2. **FX Pairs** - almost every weekend timestamp is a Sunday reopen bar at or after
+#    the reopen hour and stays in the panel. Only the Saturday and Sunday-daytime bars
+#    are anomalies to filter before the spot-vs-forward analytics in Section 7.2.
 #
+# The two lists above are qualitative on purpose. The cell below sizes them from the
+# stored diagnostics, so the figures move with the run instead of ageing inside a
+# sentence.
+
+# %% tags=["results"]
+us_diag = diagnostic_results.get("us_equities")
+if us_diag is not None:
+    penny_pct = 100 * us_diag["penny_stocks"] / us_diag["index"]["n_rows"]
+    spike_bars = us_diag["outliers"]["flags"].get("price_spikes", 0)
+    print("US equities")
+    print(f"  rows below $1:              {us_diag['penny_stocks']:>10,}  ({penny_pct:.1f}%)")
+    print(f"  rows with |return| > 1:     {us_diag['extreme_returns']:>10,}")
+    print(f"  smallest such return:       {us_diag['extreme_return_min']:>+10.4f}")
+    print(f"  price-spike bars:           {spike_bars:>10,}")
+
+fx_diag = diagnostic_results.get("fx_pairs")
+if fx_diag is not None:
+    print("\nFX pairs")
+    print(f"  weekend timestamps:         {fx_diag['weekend_data']:>10,}")
+    print(f"  Sunday reopen, expected:    {fx_diag['reopen_bars']:>10,}")
+    print(f"  Saturday or Sunday daytime: {fx_diag['anomalous_weekend']:>10,}")
+
+# %% [markdown]
 # The next notebook applies these cleaning steps and demonstrates split-aware
 # preprocessing to prevent information leakage.
 

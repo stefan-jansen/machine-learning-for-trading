@@ -29,17 +29,22 @@
 #
 # ## Learning Objectives
 #
-# 1. Understand why selecting the best IC inflates estimates
+# 1. Understand why selecting the highest IC inflates the estimate
 # 2. Apply Benjamini-Hochberg FDR for discovery control
 # 3. Use Rademacher complexity (RAS) for correlated factors
 # 4. Build a practical pipeline: HAC p-values → BH → discoveries
 #
 # ## The Factor Zoo Problem
 #
-# Harvey, Liu & Zhu (2016) documented 300+ factors published by 2015.
-# At 5% significance: 300 × 0.05 = 15 false discoveries expected!
+# Harvey, Liu and Zhu (2016) counted several hundred factors published in the academic
+# literature by 2015. Testing that many candidates at a conventional significance level
+# means a double-digit number of false discoveries is the *expected* outcome even if not
+# one of the factors is real - the arithmetic is the candidate count times the level, and
+# it is printed later in this notebook against the parameters used here.
 #
-# Their recommendation: **t > 3.0** (not 2.0) for new factor discovery.
+# Their recommendation is a materially stricter t-statistic threshold for declaring a new
+# factor; the thresholds they propose are printed under **Harvey et al. (2016)
+# Thresholds** below.
 #
 # ## Prerequisites
 #
@@ -78,14 +83,19 @@ from plotly.subplots import make_subplots
 from scipy import stats
 
 from data import load_etfs
+from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # importing utils.style activates the ml4t Plotly template
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 SEED = 42
-OUTPUT_DIR = Path("07_defining_the_learning_task/output")
+# Resolved from the chapter, not the working directory: the runner sets cwd to the chapter
+# dir, so a repo-relative literal writes the publication artifact one level too deep and
+# the book figure pipeline keeps reading an older copy at the intended path.
+OUTPUT_DIR = get_chapter_dir(7) / "output"
 N_FACTORS = 100
 N_PERIODS = 252
 N_ASSETS = 50
@@ -97,6 +107,9 @@ N_PERIODS_ZOO = 1260
 N_ASSETS_ZOO = 100
 ETF_START_DATE = "2010-01-01"
 ETF_LABEL_HORIZON = 5  # drives both the fwd return and its HAC truncation
+# The synthetic panels draw each period independently, so their labels do not overlap.
+# Declaring a one-period horizon states that, rather than leaving the library to guess.
+NON_OVERLAPPING = 1
 N_RAD_ETF = 5000
 N_STRATEGIES_DSR = 50
 N_DAYS_DSR = 756
@@ -108,9 +121,9 @@ set_global_seeds(SEED)
 
 
 # %% [markdown] tags=[]
-# ## 1. The Selection Bias Problem
+# ## The Selection Bias Problem
 #
-# When testing N factors and selecting the best:
+# When testing N factors and keeping the highest-scoring one:
 # - **Observed IC**: max(IC₁, IC₂, ..., ICₙ)
 # - **True IC**: Often much lower
 #
@@ -214,13 +227,30 @@ fig.add_vline(
 )
 
 fig.update_layout(
-    title="Selecting the best of 100 pure-noise factors manufactures a positive IC",
+    title=f"Mean IC of {N_FACTORS} pure-noise factors, with the selected one marked",
     xaxis_title="Mean IC",
     yaxis_title="Count",
     height=350,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "A histogram of the mean IC of a hundred factors built entirely from noise, so "
+        "every one of them has a true IC of zero. The distribution is roughly symmetric "
+        "about the dotted line marking that true value, spanning about minus 0.02 to plus "
+        "0.02. An amber dashed line marks the factor with the highest IC, standing at the "
+        "extreme right edge of the distribution, well clear of the bulk and of the true "
+        "value the whole sample was drawn from."
+    ),
+)
+
+# %% [markdown] tags=[]
+# The distribution is centred on zero because that is the truth about every factor in it.
+# What the marked line shows is the maximum of a hundred draws from that distribution, and
+# a maximum is not an estimate of the thing being maximised over. Reporting the selected
+# factor's IC as its IC is the whole of the selection-bias problem: nothing was
+# mismeasured, and the number is still wrong, because the selection step is not in it.
 
 # %% [markdown] tags=[]
 # ### Publication Figure Artifact
@@ -306,7 +336,7 @@ figure_7_6_artifact = write_figure_7_6_artifact()
 print(f"Wrote publication figure artifact: {figure_7_6_artifact}")
 
 # %% [markdown] tags=[]
-# ## 2. Benjamini-Hochberg FDR Control
+# ## Benjamini-Hochberg FDR Control
 #
 # **False Discovery Rate (FDR)** controls the expected proportion of false
 # discoveries among rejections:
@@ -318,12 +348,22 @@ print(f"Wrote publication figure artifact: {figure_7_6_artifact}")
 # 2. Find largest k where p₍ₖ₎ ≤ (k/n) × α
 # 3. Reject hypotheses 1, 2, ..., k
 
+# %% [markdown] tags=[]
+# The p-values below are HAC-adjusted rather than naive. The correction procedures that
+# follow take p-values as given, so feeding them naive ones would leave the dependence
+# problem from `06_ic_inference` untouched and simply carry it through the correction.
+#
+# Every HAC call on a synthetic panel passes `NON_OVERLAPPING`, because these panels draw
+# each period independently and their labels therefore do not overlap. That is a claim
+# about the data, and it is worth making explicitly: omitting the argument leaves the
+# library to infer the bandwidth from sample size alone and to warn that it may be
+# anti-conservative, which is the right warning for real overlapping labels and the wrong
+# one here. The ETF search later in the notebook passes its actual horizon instead.
+
 # %% tags=[]
-# Compute HAC-adjusted p-values for each factor
-# IMPORTANT: Use HAC p-values, not naive t-stats
 p_values = []
 for f in range(n_factors):
-    hac_stats = compute_ic_hac_stats(ic_series_all[f])
+    hac_stats = compute_ic_hac_stats(ic_series_all[f], label_horizon=NON_OVERLAPPING)
     p_values.append(hac_stats["p_value"])
 
 p_values = np.array(p_values)
@@ -395,17 +435,30 @@ fig.add_trace(
 
 fig.update_layout(
     height=350,
-    title_text="BH-FDR keeps discoveries below the rank-scaled threshold line",
+    title_text="P-values of the noise factors, and the Benjamini-Hochberg threshold",
 )
-fig.update_xaxes(title_text="P-Value", row=1, col=1)
+fig.update_xaxes(title_text="P-value", row=1, col=1)
 fig.update_yaxes(title_text="Count", row=1, col=1)
 fig.update_xaxes(title_text="Rank", row=1, col=2)
-fig.update_yaxes(title_text="P-Value", row=1, col=2)
+fig.update_yaxes(title_text="P-value", row=1, col=2)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two panels. The left panel is a histogram of the p-values across the hundred "
+        "noise factors: roughly flat between zero and one, which is what a uniform "
+        "distribution under a true null looks like, with a dashed amber line at the "
+        "significance level near the left edge. The right panel plots the sorted p-values "
+        "against their rank as a rising curve from near zero to one, with the "
+        "Benjamini-Hochberg threshold drawn as a dashed amber line rising almost flat "
+        "along the bottom. The sorted curve sits above the threshold line everywhere "
+        "except at the very lowest ranks, so no p-value is far enough below it to be "
+        "declared a discovery."
+    ),
+)
 
 # %% [markdown] tags=[]
-# ### 2.1 Holm-Bonferroni FWER Control
+# ### Holm-Bonferroni FWER Control
 #
 # BH controls **FDR** (the expected proportion of false discoveries among rejections).
 # Holm-Bonferroni controls **FWER** (the probability of making *any* false discovery).
@@ -434,7 +487,7 @@ print(
 )
 
 # %% [markdown] tags=[]
-# ## 3. Rademacher Complexity (RAS)
+# ## Rademacher Complexity (RAS)
 #
 # When factors are correlated, Rademacher complexity provides a sharper bound
 # than assuming independence. The RAS (Rademacher Anti-Serum) adjustment
@@ -505,31 +558,35 @@ print(
 )
 
 # %% [markdown] tags=[]
-# A ratio near 100% means factors are nearly independent - the full multiple-testing
-# penalty applies. A ratio well below 100% signals correlation among candidates,
-# meaning the effective hypothesis count is lower than the nominal count.
+# A ratio near one means the factors are nearly independent and the full multiple-testing
+# penalty applies. A ratio well below one signals correlation among the candidates, so the
+# effective hypothesis count is lower than the nominal count.
+#
+# The RAS penalty is an absolute deduction - twice the Rademacher average plus the
+# estimation term - rather than a proportional shrinkage, so the cells below report both
+# components and the resulting lower bound. Significance follows the library's own
+# convention: an adjusted IC above zero.
+
+# %% [markdown] tags=[]
+# `kappa` is the bound the concentration (Hoeffding) term needs, and it bounds the
+# *per-period* IC observations that get averaged - not the averaged IC. That is the same
+# units confusion as the complexity term above, one term to the right, and it is easy to
+# make because the averaged ICs are tiny: their magnitudes invite a small kappa, while a
+# per-period Spearman IC is supported on the whole interval from minus one to one.
+#
+# **The reported bound uses the full Spearman support.** Hoeffding needs a bound fixed
+# *before* the data is seen. The observed sample maximum is a function of the same sample
+# the bound is being computed on, so substituting it does not give a conservative bound
+# with a smaller constant - it gives no valid coverage guarantee at all, and the
+# "significant" flag downstream would then mean nothing.
+#
+# The empirical maximum is computed too and shown beside it as a **sensitivity calculation
+# only**: the size of the estimation term if one were willing to assume the observed range
+# persists. No significance claim is read off that row. It is here because the gap between
+# the two is the honest cost of a distribution-free bound on one year of data, and that
+# cost is invisible if only one value is shown.
 
 # %% tags=[]
-# Apply the RAS adjustment.
-#
-# kappa is the bound the concentration (Hoeffding) term needs, and it bounds the
-# *per-period* IC observations that get averaged - not the averaged IC. This is the
-# same units confusion as the complexity above, one term to the right, and it is
-# easy to make because the averaged ICs are tiny: max |IC| = 0.022 invites
-# kappa=0.05, and a per-period Spearman IC is supported on [-1, 1].
-#
-# **The reported bound uses kappa = 1.0.** Hoeffding needs a bound fixed *before*
-# the data is seen. The observed sample maximum is a function of the same sample the
-# bound is being computed on, so substituting it does not give a conservative bound
-# with a smaller constant - it gives no valid coverage guarantee at all, and the
-# "significant" flag downstream would then mean nothing. The Spearman support
-# [-1, 1] is the bound that holds by construction.
-#
-# The empirical maximum is computed too, and shown next to it as a **sensitivity
-# calculation only** - the size of the estimation term if one were willing to assume
-# the observed range persists. No significance claim is read off that row. It is
-# here because the gap between the two is the honest cost of a distribution-free
-# bound on one year of data, and that cost is invisible if only one value is shown.
 KAPPA = 1.0  # Spearman IC support: valid without assumptions, and used for inference
 kappa_empirical = float(np.max(np.abs(ic_matrix)))  # sensitivity only, data-dependent
 
@@ -570,10 +627,7 @@ print(
 )
 adjusted_ics = ras.adjusted_values
 
-# The RAS penalty is an absolute deduction (2*R_hat plus the estimation term), not a
-# proportional shrinkage, so we report both components and the resulting lower bound.
-# Which of the two is larger depends on kappa, N and T, so it is printed rather than
-# described. Significance uses the library's own convention: adjusted_ic > 0.
+# Both components are printed: which dominates depends on kappa, N and T.
 n_positive_raw = int(np.sum(observed_ics > 0))
 
 print(
@@ -617,30 +671,45 @@ print(
 # set and that ordering changes.
 #
 # This paragraph has now been written wrong twice, in both directions, which is the
-# argument for printing the components instead of narrating them: an ordering
-# asserted in prose survives the re-run that invalidates it.
+# argument for printing the components instead of narrating them: an ordering asserted in
+# prose outlives the re-run that invalidates it.
 #
-# Read against the best observed IC, the total deduction is many times that IC -
-# enough to sink every candidate, which is correct, because every candidate here is
-# noise by construction.
+# Read against the largest observed IC, the total deduction is many times that IC -
+# enough to sink every candidate, which is correct, because every candidate here is noise
+# by construction.
 #
-# The point of putting the complexity in IC units is that the comparison is now a
-# statement about the data at all. On the standardized scale the search penalty alone
-# was 0.31, about sixteen times the largest IC in the set, and it would have rejected
-# everything no matter what the ICs were - a bound that returns the same verdict for
+# The point of putting the complexity in IC units is that the comparison becomes a
+# statement about the data at all. On the standardized scale the search penalty alone was
+# an order of magnitude larger than the largest IC in the set, printed above, and it would
+# have rejected everything whatever the ICs were. A bound that returns the same answer for
 # every input is not measuring anything.
 
 # %% [markdown] tags=[]
-# ## 4. Harvey et al. (2016) Thresholds
+# ## Harvey et al. (2016) Thresholds
 #
-# Based on the "factor zoo" of 300+ published factors, Harvey et al. recommend
-# stricter thresholds for new factor discovery:
-#
-# | Context | Threshold | Rationale |
-# |---------|-----------|-----------|
-# | Traditional | t > 2.0 | 5% significance, single test |
-# | Modern | t > 3.0 | Accounts for ~300 prior factors |
-# | Strict | t > 3.5 | For new factor discovery papers |
+# Based on the factor zoo of several hundred published factors, Harvey et al. recommend
+# stricter t-statistic thresholds for declaring a new factor than the one a single test
+# would use. They are declared and printed below rather than typed into prose, because the
+# cells that follow apply them and the two should not be able to drift apart.
+
+# %% tags=["results"]
+HARVEY_THRESHOLDS = (
+    ("traditional", 2.0, "the level a single test would use"),
+    ("modern", 3.0, "accounts for the factors already searched"),
+    ("strict", 3.5, "for a paper claiming a new factor"),
+)
+SINGLE_TEST_ALPHA = 0.05
+
+print(f"{'context':<14}{'t >':>6}   rationale")
+print("-" * 66)
+for label, threshold, rationale in HARVEY_THRESHOLDS:
+    print(f"{label:<14}{threshold:>6.1f}   {rationale}")
+
+print(
+    f"\nAt a {SINGLE_TEST_ALPHA:.0%} level, searching {N_FACTORS_ZOO} candidates that are "
+    f"all noise still yields\n{N_FACTORS_ZOO * SINGLE_TEST_ALPHA:.0f} expected "
+    f"'discoveries' - which is the reason the threshold moves."
+)
 
 # %% tags=[]
 # Simulate factor zoo scenario
@@ -676,7 +745,7 @@ for f in range(n_factors_zoo):
         ic = pooled_ic(factor_signals_zoo[t, :, f], forward_returns_zoo[t, :], method="spearman")
         ics.append(ic)
 
-    hac = compute_ic_hac_stats(ics)
+    hac = compute_ic_hac_stats(ics, label_horizon=NON_OVERLAPPING)
 
     zoo_results.append(
         {
@@ -824,16 +893,31 @@ fig.add_hline(
 fig.update_layout(
     height=400,
     barmode="stack",
-    title_text="Stricter thresholds trade true discoveries for fewer false positives",
+    title_text="Factor-zoo t-statistics, and discoveries by selection rule",
 )
-fig.update_xaxes(title_text="t-Statistic (HAC)", row=1, col=1)
+fig.update_xaxes(title_text="t-statistic (HAC)", row=1, col=1)
 fig.update_yaxes(title_text="Count", row=1, col=1)
 fig.update_yaxes(title_text="Count", row=1, col=2)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two panels. The left panel overlays the HAC t-statistics of the true factors and "
+        "the noise factors; the noise distribution is a tall bell centred on zero, the "
+        "true factors a low scatter reaching out to the right past a t of five, and "
+        "dashed vertical lines mark the several candidate thresholds. The right panel is "
+        "a stacked bar for each of four selection rules, splitting that rule's "
+        "discoveries into true positives and false positives, with a dotted line at the "
+        "number of factors that are genuinely non-null. The naive rule stands well above "
+        "that line with a large false-positive block on top. The Harvey threshold keeps "
+        "only a sliver of false positives, and the two correction procedures show none at "
+        "all - the strictest of them landing below the line, having given up several "
+        "genuine factors to get there."
+    ),
+)
 
 # %% [markdown] tags=[]
-# ## 5. Practical Pipeline
+# ## Practical Pipeline
 #
 # The recommended workflow for evaluating many factors:
 #
@@ -872,9 +956,10 @@ else:
     )
 
 # %% [markdown] tags=[]
-# ## 5.1 Exploration vs. Confirmation Pass
+# ### Exploration vs. Confirmation Pass
 #
-# Section 7.4 recommends splitting evaluation into two passes:
+# The chapter's *Separate exploration from confirmation* section recommends splitting
+# evaluation into two passes:
 #
 # 1. **Exploration**: screen all candidates on the first portion of data,
 #    promote based on fold stability rather than peak performance.
@@ -902,7 +987,7 @@ for f in range(n_factors_zoo):
         pooled_ic(explore_signals[t, :, f], explore_returns[t, :], method="spearman")
         for t in range(n_explore)
     ]
-    hac = compute_ic_hac_stats(ics)
+    hac = compute_ic_hac_stats(ics, label_horizon=NON_OVERLAPPING)
     explore_p_values[f] = hac["p_value"]
     explore_ics[f] = np.mean(ics)
 
@@ -921,7 +1006,7 @@ if len(promoted_idx) > 0:
             pooled_ic(confirm_signals[t, :, f], confirm_returns[t, :], method="spearman")
             for t in range(len(confirm_returns))
         ]
-        hac = compute_ic_hac_stats(ics)
+        hac = compute_ic_hac_stats(ics, label_horizon=NON_OVERLAPPING)
         confirm_p_values[i] = hac["p_value"]
         confirm_ics[i] = np.mean(ics)
 
@@ -958,10 +1043,17 @@ else:
 # candidates), so BH corrections are less aggressive. At the same time, using
 # held-out data prevents the double-dipping that inflates exploration-pass
 # discovery rates. This two-pass workflow is the practical implementation of
-# the "separate exploration from confirmation" principle in Section 7.4.
+# the "separate exploration from confirmation" principle the chapter sets out.
 
 # %% [markdown] tags=[]
-# ### 5.2 Applied Example: ETF Feature Search
+# ### Applied Example: ETF Feature Search
+#
+# The HAC call in the search below passes `label_horizon`, because the forward return is
+# sampled daily over a multi-day window and this IC series is therefore overlapping.
+# Without it the library picks the truncation from the sample size alone, which is the
+# defect `06_ic_inference` corrects. The synthetic factor zoos earlier in this notebook
+# draw their periods independently, so the automatic rule is right for those and only for
+# those.
 #
 # The synthetic simulations above use known ground truth to verify the
 # corrections work. Now we apply the same pipeline to real features on
@@ -1058,11 +1150,7 @@ for col, name in FEAT_COLS.items():
         if not np.isnan(rho):
             ics.append(rho)
 
-    # label_horizon, because `fwd_5d` is a 5-day forward return sampled daily and
-    # this IC series is therefore overlapping. Without it the library picks the
-    # truncation from the sample size alone, which is the defect `06_ic_inference`
-    # corrects; the three calls above are on synthetic zoos whose periods are drawn
-    # independently, so the automatic rule is right for those and only for those.
+    # Horizon-aware truncation; see the markdown above this cell.
     hac = compute_ic_hac_stats(ics, label_horizon=ETF_LABEL_HORIZON)
     etf_test_results.append(
         {"feature": name, "ic": hac["mean_ic"], "t_hac": hac["t_stat"], "p_hac": hac["p_value"]}
@@ -1129,28 +1217,45 @@ fig = go.Figure(
 )
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(
-    title="ETF Feature IC - no feature survives BH-FDR at alpha=0.05",
+    title="Mean IC of the searched ETF features, ordered by p-value",
     xaxis_title="Mean IC (HAC)",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "A horizontal bar chart of the mean HAC IC of each searched ETF feature, ordered "
+        "so the least significant sits at the top and the most significant at the bottom. "
+        "The bars are all the same neutral colour, because none of them was declared a "
+        "discovery. Magnitudes run from about minus 0.008 for a five-day momentum feature "
+        "to about plus 0.026 for a ten-day realized-volatility feature, and both signs "
+        "appear among the smallest bars at the top. A dashed line marks zero."
+    ),
+)
 
 # %% [markdown] tags=[]
-# The Rademacher ratio is well below 100%, reflecting the high correlation
-# among momentum variants - testing 6 lookbacks is not 6 independent trials.
-# Even with this milder effective penalty, most features do not survive BH-FDR
-# correction after HAC inference.
+# Every bar is drawn in the same colour because nothing cleared the threshold: the search
+# found no feature it could call a discovery at this false-discovery rate. The two largest
+# ICs are realized-volatility features and are not small in absolute terms, which is the
+# point worth sitting with - a respectable-looking IC on a searched set is not evidence,
+# and the correction is what says so.
+
+# %% [markdown] tags=[]
+# The Rademacher ratio printed above is well below one, reflecting the high correlation
+# among the momentum variants - testing six lookbacks is not six independent trials. Even
+# with that milder effective penalty, the features do not clear BH-FDR correction after
+# HAC inference.
 #
-# With 13 correlated momentum/reversal/volatility/volume features and HAC
-# inference, no feature survives BH-FDR at $\alpha = 0.05$ in the present
-# scan. Univariate bivariate-IC screening is one filter; Chapters 11–12
+# Across the correlated momentum, reversal, volatility and volume features in this scan,
+# and with HAC inference, no feature clears BH-FDR at the level set above.
+# Univariate bivariate-IC screening is one filter; Chapters 11-12
 # evaluate the same features in a multivariate setting where the relevant
 # question is conditional contribution to a fitted model, not single-feature
 # significance. The corrections here ensure that features *selected* for
 # that pipeline have not been promoted purely by selection bias.
 
 # %% [markdown] tags=[]
-# ## 6. Output: Discovery Report
+# ## Output: Discovery Report
 #
 # The JSON structure below is a template for production logging. Recording
 # the search-set size, correction method, and per-method discovery counts
@@ -1216,14 +1321,14 @@ discovery_report["rademacher_analysis"] = {
 print(json.dumps(discovery_report, indent=2))
 
 # %% [markdown] tags=[]
-# ## 7. Deflated Sharpe Ratio (DSR)
+# ## Deflated Sharpe Ratio (DSR)
 #
 # When the outcome is a strategy Sharpe ratio (not factor IC), the **Deflated Sharpe
 # Ratio** (Bailey & López de Prado, 2014) adjusts for selection bias among
 # multiple strategies tested.
 #
-# DSR answers: "Given that I tested N strategies and picked the best Sharpe,
-# what is the probability that this Sharpe is genuinely positive?"
+# DSR answers: "Given that I tested N strategies and kept the highest Sharpe, what is the
+# probability that this Sharpe is genuinely positive?"
 #
 # $$DSR = P\left[\hat{SR} > E\left[\max_{k \in K} SR_k\right] \mid H_0\right]$$
 
@@ -1266,25 +1371,27 @@ print(
 )
 
 # %% [markdown] tags=[]
-# **Every row above is on the annualized scale.** That matters more than it sounds:
-# the library returns `sharpe_ratio`, `expected_max_sharpe` and `deflated_sharpe`
-# per period and `sharpe_ratio_annualized` already annualized, so printing them in
-# one column without converting puts a $\sqrt{252} \approx 15.9$ factor between two
-# adjacent rows. The comparison the table invites - best Sharpe against the null's
-# expected maximum - is only meaningful once they are on the same scale.
+# **Every row above is on the annualized scale.** That matters more than it sounds: the
+# library returns `sharpe_ratio`, `expected_max_sharpe` and `deflated_sharpe` per period
+# and `sharpe_ratio_annualized` already annualized, so printing them in one column without
+# converting puts a factor of the square root of the trading year between two adjacent
+# rows. The comparison the table invites - the highest Sharpe against the null's expected
+# maximum - is only meaningful once they are on the same scale.
 #
-# Read that way, the result is stark. The best of 50 pure-noise strategies posts an
-# annualized Sharpe of about 1.3, and the expected maximum *under the null* is about
-# 1.2. Almost the entire apparent performance is selection. What remains after
-# deflation is a small excess, and the DSR probability of roughly 60% is far short of
-# the 95% needed to call it skill. `expected_max_sharpe` quantifies how good the best
-# strategy would look *even if none had skill*.
+# Read that way, the table above is stark. The highest-scoring of the pure-noise
+# strategies posts a respectable annualized Sharpe, and the expected maximum *under the
+# null* is barely below it. Almost the entire apparent performance is selection. What is
+# left after deflation is a small excess, and the DSR probability falls well short of any
+# conventional confidence level. `expected_max_sharpe` is the number that makes this
+# legible: it says how good the highest-scoring strategy would look *even if none of them
+# had any skill at all*.
 
 # %% [markdown] tags=[]
-# ## 8. Probability of Backtest Overfitting (PBO)
+# ## Probability of Backtest Overfitting (PBO)
 #
-# PBO (Bailey et al., 2017) estimates the probability that the best in-sample
-# strategy is worst out-of-sample. **PBO > 0.5 suggests severe overfitting.**
+# PBO (Bailey et al., 2017) estimates the probability that the strategy ranked first in
+# sample lands in the bottom half out of sample. A PBO above one half is conventionally
+# read as severe overfitting - with a caveat this notebook measures rather than states.
 #
 # The method uses combinatorial purged cross-validation (CPCV): split the data
 # into S groups, choose half as in-sample, the rest as out-of-sample, and
@@ -1330,28 +1437,36 @@ print(
 )
 
 # %% [markdown] tags=[]
-# The number to compare against here is **50%, not 0**. Strategy 0 was handed a
-# large in-sample advantage and nothing else - out of sample it is the same standard
-# normal as the other nineteen. So the in-sample winner is selected on noise, and its
-# out-of-sample rank is uniform: it lands below the median about half the time. A PBO
-# near 50% is the *correct* reading of a selection that carries no real edge, and the
-# median out-of-sample rank of about 9.5 out of 20 - dead centre - says the same
-# thing a second way.
+# The number to compare against here is **one half, not zero**. Strategy 0 was handed a
+# large in-sample advantage and nothing else - out of sample it is the same standard normal
+# as the other nineteen. So the strategy selected in sample is selected on noise, and its
+# out-of-sample rank is uniform: it lands below the median about half the time. A PBO near
+# one half is the *correct* reading of a selection that carries no real edge, and the
+# median out-of-sample rank printed above - dead centre of the field - says the same thing
+# a second way.
 #
-# This is why the "PBO > 0.5 suggests severe overfitting" rule of thumb needs care.
+# This is why the "PBO above one half means severe overfitting" rule of thumb needs care.
 # It is not a pass mark with a comfortable margin below it. A strategy whose edge is
-# entirely an artifact of selection sits *at* 50%, and the sampling error on a PBO
-# estimated from this many combinations is wide enough that a point estimate in the
-# forties is fully consistent with a strategy that has no edge at all. What would
-# actually be reassuring is a PBO close to zero, together with an in-sample winner
-# that stays near the top of the out-of-sample ranking.
+# entirely an artifact of selection sits *at* one half, and the sampling error on a PBO
+# estimated from this many combinations is wide enough that a point estimate somewhat
+# below it is fully consistent with a strategy that has no edge at all. What would
+# actually be reassuring is a PBO close to zero, together with a strategy that ranks
+# first in sample and stays near the top of the out-of-sample ranking.
 #
 # PBO is a powerful complement to DSR. While DSR focuses on Sharpe inflation,
 # PBO directly measures whether the in-sample best-performing configuration *degrades* out-of-sample.
 # See Chapter 16 for applying PBO with actual CPCV backtest splits.
 
 # %% [markdown] tags=[]
-# ## 9. Minimum Track Record Length (MinTRL)
+# The FWER adjustment in the table below is driven by how much the trial Sharpes disagree
+# with each other: if every candidate scored identically, searching more of them would
+# tell you nothing new. Setting the trial variance to zero therefore switches the
+# correction off and every column would print the single-test answer. The dispersion used
+# is the one the Deflated Sharpe search above actually exhibited, so the table reports the
+# cost of that search rather than of a hypothetical one.
+
+# %% [markdown] tags=[]
+# ## Minimum Track Record Length (MinTRL)
 #
 # How long must a track record be before we trust a Sharpe ratio?
 # `compute_min_trl()` gives the minimum number of observations needed for
@@ -1364,14 +1479,10 @@ print(
 sharpes = [0.5, 1.0, 1.5, 2.0]
 n_trials_list = [1, 10, 100]
 
-# The FWER adjustment is driven by how much the trial Sharpes disagree with each
-# other: if every candidate scored identically, searching more of them would tell
-# you nothing new. `variance_trials=0` therefore switches the correction off, and
-# every N column would print the single-test answer. We take the dispersion the
-# Section 7 search actually exhibited, so the table reports the cost of that search.
+# Dispersion taken from the DSR search above; see the markdown ahead of this cell.
 variance_trials_observed = dsr_result.variance_trials
 print(
-    f"Sharpe dispersion across the {n_strategies} strategies searched in Section 7: "
+    f"Sharpe dispersion across the {n_strategies} strategies searched for the DSR: "
     f"variance={variance_trials_observed:.6f} (per-period sd={np.sqrt(variance_trials_observed):.4f})"
 )
 
@@ -1401,24 +1512,27 @@ mintrl_df = pl.DataFrame(rows)
 display(mintrl_df)
 
 # %% [markdown] tags=[]
-# **Interpretation**: read across a row, not down a column. A Sharpe of 1.0 found
-# without searching needs a little under three years of daily data to confirm. The
-# *same* Sharpe, arrived at after trying ten candidates, needs a track record longer
-# than most funds survive; after a hundred candidates it cannot be confirmed at any
-# length, which is what `never` means - the required record grows faster than the
-# evidence a longer record supplies.
+# **Interpretation**: read across a row, not down a column. Every row lengthens as the
+# search widens, and the rows do not lengthen at the same rate.
 #
-# The columns differ only because the trial Sharpes differ. That is the whole
-# mechanism: the FWER correction prices the *search*, and a search over candidates
-# that all score alike costs nothing while a search over dispersed candidates is
-# expensive. Higher Sharpes buy back some room - at 2.0 the N=10 requirement is back
-# within a career - but the ordering never reverses.
+# The lowest-Sharpe row already needs more than a decade of daily data with no search at
+# all, and once even a handful of candidates have been tried it cannot be confirmed at any
+# length - which is what `never` in the table means, the required record growing faster
+# than the evidence a longer record supplies. The next higher Sharpe is confirmable in a
+# couple of years unsearched, needs longer than a career after a handful of candidates,
+# and reaches `never` after a hundred. Only the highest-Sharpe row stays inside a working
+# career all the way across.
+#
+# The columns differ only because the trial Sharpes differ. That is the whole mechanism:
+# the FWER correction prices the *search*, so a search over candidates that all score
+# alike costs nothing while a search over dispersed candidates is expensive. A higher
+# Sharpe buys back room, but the ordering across a row never reverses.
 #
 # This connects to NB06's track record planning for IC: both IC and Sharpe
 # require longer records than practitioners typically assume.
 
 # %% [markdown] tags=[]
-# ## 10. One-Call Production Alternative
+# ## One-Call Production Alternative
 #
 # `multiple_testing_summary()` wraps the manual HAC → BH/Holm pipeline into
 # a single call. Use it after you've computed per-factor test results.
@@ -1468,7 +1582,7 @@ display(summary_df)
 # | **Deflated Sharpe Ratio** | Adjusts best Sharpe for selection among N strategies |
 # | **PBO** | Probability that the IS best-performing config degrades worst OOS (Ch16 deep dive) |
 # | **MinTRL** | Minimum track record for Sharpe significance |
-# | **Harvey Threshold** | t > 3.0 for factor discovery in published literature |
+# | **Harvey Threshold** | A raised t-statistic bar for factor discovery in published literature |
 #
 # ### When to Use What
 #

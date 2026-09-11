@@ -31,7 +31,7 @@
 #
 # 1. Compute cross-sectional IC and understand its time series properties
 # 2. Interpret IC, ICIR, and HAC-adjusted significance
-# 3. Analyze quantile returns, spread, and monotonicity
+# 3. Analyze quantile returns, spread, and the monotonicity of the quantile ladder
 # 4. Understand horizon comparison with proper overlap warnings
 # 5. Measure turnover and signal half-life
 #
@@ -43,7 +43,7 @@
 # ## Prerequisites
 #
 # - `02_preprocessing_pipeline` - for split-aware preprocessing concepts that
-#   underpin fold-aware IC evaluation in §7.
+#   underpin fold-aware IC evaluation under **Fold-Aware Evaluation**.
 # - `03_label_methods` - supplies the forward-return labels used as `y_true`.
 # - Familiarity with rank correlations (Spearman) and walk-forward CV.
 
@@ -53,8 +53,6 @@
 from __future__ import annotations
 
 import json
-import warnings
-from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
@@ -77,14 +75,19 @@ from sklearn.metrics import (
 )
 
 from data import load_etfs
+from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # importing utils.style activates the ml4t Plotly template
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 SEED = 42
-OUTPUT_DIR = Path("07_defining_the_learning_task/output")
+# Resolved from the chapter, not the working directory: the runner sets cwd to the chapter
+# dir, so a repo-relative literal writes the publication artifact one level too deep and
+# the book figure pipeline keeps reading an older copy at the intended path.
+OUTPUT_DIR = get_chapter_dir(7) / "output"
 START_DATE = "2006-01-01"
 MAX_SYMBOLS = 0
 N_PERMUTATIONS = 1000
@@ -96,7 +99,7 @@ set_global_seeds(SEED)
 
 
 # %% [markdown]
-# ## 1. Data Contract
+# ## Data Contract
 #
 # Signal analysis requires two DataFrames with specific schemas:
 #
@@ -120,15 +123,16 @@ print(f"ETF universe: {etfs['symbol'].n_unique()} symbols, {len(etfs):,} rows")
 print(f"Date range: {etfs['timestamp'].min()} to {etfs['timestamp'].max()}")
 
 # %% [markdown]
-# ## 2. Preparing Factor and Price Panels
+# ## Preparing Factor and Price Panels
 #
 # We compute a simple momentum factor (21-day return) and prepare the data
 # in the format required by `analyze_signal()`.
 
-# %%
-# Compute momentum factor (21-day return)
-# This is a teaching example - production factors come from Ch8 feature pipelines
+# %% [markdown]
+# The factor below is a 21-day return, used here as a teaching example. Production factors
+# come from the Chapter 8 feature pipelines.
 
+# %%
 if START_DATE != "2006-01-01":
     etfs = etfs.filter(pl.col("timestamp") >= pl.lit(START_DATE).str.to_date())
 if MAX_SYMBOLS > 0:
@@ -154,7 +158,7 @@ print("Factor summary:")
 display(factor_df.select("factor").describe())
 
 # %%
-# Pre-compute forward returns - reused in fold-aware (§7) and binary (§9) sections
+# Forward returns, reused by the fold-aware and binary sections below.
 eval_df = (
     factor_df.join(prices_df, on=["timestamp", "symbol"], how="inner")
     .sort(["symbol", "timestamp"])
@@ -166,16 +170,20 @@ eval_df = (
 print(f"\nEvaluation panel: {eval_df.shape} (factor + 21D forward returns)")
 
 # %% [markdown]
-# ## 2.1 Correctness Screens
+# ### Correctness Screens
 #
 # Before evaluating predictive power, verify that the factor is usable under the
-# stated protocol. Section 7.3 prescribes four checks; we demonstrate coverage
+# stated protocol. The chapter's *Correctness screens* section prescribes four checks;
+# we demonstrate coverage
 # and staleness here. Timing/lag consistency and mask alignment become critical
 # with fundamental or third-party data (Chapters 8-10) but are trivially satisfied
 # for a price-derived momentum signal.
 
+# %% [markdown]
+# **Coverage** is the fraction of (date, asset) pairs carrying a non-null factor value,
+# reported overall and per date.
+
 # %%
-# Coverage: fraction of (date, asset) pairs with non-null factor values
 all_pairs = prices_df.select("timestamp", "symbol").unique()
 factor_pairs = factor_df.select("timestamp", "symbol").unique()
 coverage = len(factor_pairs) / len(all_pairs)
@@ -202,9 +210,12 @@ print(
 print("\nNote: Coverage < 100% is expected - momentum requires 21 days of history,")
 print("so new listings lack factor values during their first 21 trading days.")
 
+# %% [markdown]
+# **Staleness** asks whether the factor updates as often as its definition implies. A
+# price-derived momentum signal should take a new value every session, so a change rate
+# materially below one points at a data gap rather than at the signal.
+
 # %%
-# Staleness: verify that the factor updates at appropriate frequency
-# For a 21-day momentum signal, the factor should change daily
 staleness = (
     factor_df.sort(["symbol", "timestamp"])
     .with_columns(
@@ -230,7 +241,7 @@ else:
     print("[WARNING] Some assets show stale factor values - investigate data gaps.")
 
 # %% [markdown]
-# ## 3. Information Coefficient (IC) Analysis
+# ## Information Coefficient (IC) Analysis
 #
 # IC measures the **cross-sectional** rank correlation between signals and forward returns:
 #
@@ -329,75 +340,128 @@ print(
 # %% [markdown]
 # ### Interpreting an IC magnitude
 #
-# The right anchor for interpreting a mean IC is not the headline value but
-# the standard error of that mean, which is set by the number of periods
-# $T$ in the daily-IC series and by the dispersion of that series:
+# The right anchor for interpreting a mean IC is not the headline value but the standard
+# error of that mean, which is set by the number of periods $T$ in the daily-IC series and
+# by the dispersion of that series:
 #
 # $$\text{SE}(\bar{\text{IC}}) \approx \frac{\sigma_{\text{IC}}}{\sqrt{T}}$$
 #
-# The same point estimate $\bar{\text{IC}} = 0.02$ carries very different
-# evidence depending on $\sigma_{\text{IC}}$ and $T$:
+# A single point estimate therefore carries very different evidence depending on
+# $\sigma_{\text{IC}}$ and $T$. The cell below works the confidence interval for one
+# fixed $\bar{\text{IC}}$ under three sample-size and dispersion combinations, so the
+# arithmetic can be checked and re-run rather than read.
+
+# %% tags=["results"]
+IC_SCENARIO_MEAN = 0.02  # one headline IC, held fixed across the three scenarios
+IC_SCENARIOS = (
+    ("ten years, tight daily IC", 2_500, 0.05),
+    ("ten years, wide daily IC", 2_500, 0.30),
+    ("one year, wide daily IC", 250, 0.30),
+)
+Z_95 = 1.96
+
+print(f"Mean IC held at {IC_SCENARIO_MEAN} in every row; only T and sigma move.\n")
+print(f"{'scenario':<28}{'T':>7}{'sigma':>8}{'SE':>9}{'95% CI':>20}")
+print("-" * 72)
+for label, T, sigma in IC_SCENARIOS:
+    se = sigma / np.sqrt(T)
+    lo, hi = IC_SCENARIO_MEAN - Z_95 * se, IC_SCENARIO_MEAN + Z_95 * se
+    print(f"{label:<28}{T:>7,}{sigma:>8.2f}{se:>9.4f}{f'[{lo:+.3f}, {hi:+.3f}]':>20}")
+
+# %% [markdown]
+# The same headline number is comfortably above zero in the first row, above zero but
+# uninformative about the signal's tail behaviour in the second, and indistinguishable
+# from zero in the third. Reporting a daily-mean IC therefore requires the CI (or the
+# $t$-statistic) alongside, and ideally the dispersion of the daily series as well.
 #
-# - $T \approx 2{,}500$ daily IC values (about ten years) with
-#   $\sigma_{\text{IC}} = 0.05$ gives $\text{SE} = 0.001$ and a 95% CI
-#   of $[0.018, 0.022]$ - comfortably above zero.
-# - The same $T$ with $\sigma_{\text{IC}} = 0.30$ gives $\text{SE} = 0.006$
-#   and a CI of $[0.008, 0.032]$ - above zero, but the band is wide
-#   enough that the central value carries little information about the
-#   tail behaviour of the signal.
-# - $T \approx 250$ with $\sigma_{\text{IC}} = 0.30$ gives $\text{SE} = 0.019$
-#   and a CI of $[-0.017, 0.057]$ - indistinguishable from zero.
+# The **ICIR** $= \bar{\text{IC}} / \sigma_{\text{IC}}$ is the signal-level analog of an
+# information ratio: $t \approx \text{ICIR} \times \sqrt{T}$ for serially uncorrelated
+# daily IC, and a HAC-adjusted $t$ for the realistic correlated case.
 #
-# Reporting a daily-mean IC therefore requires the CI (or the
-# $t$-statistic) alongside, and ideally the dispersion of the daily
-# series as well. The **ICIR** $= \bar{\text{IC}} / \sigma_{\text{IC}}$
-# is the signal-level analog of an information ratio: $t \approx
-# \text{ICIR} \times \sqrt{T}$ for serially uncorrelated daily IC, and a
-# HAC-adjusted $t$ for the realistic correlated case. The ranges below
-# are typical magnitudes from the equity-factor literature on
-# multi-year daily-rebalanced cross-sectional studies; they are
-# starting points for the SE calculation above, not standalone verdicts.
-#
-# | $\bar{\text{IC}}$ | Typical interpretation (conditional on $T$ and $\sigma_{\text{IC}}$) |
-# |---|---|
-# | < 0.02 | At or below the daily-IC noise floor on multi-year samples - the SE alone often spans this range. |
-# | 0.02 – 0.04 | Detectable on 5–10 year samples with the dispersions seen in published studies; net P&L is a separate cost question. |
-# | 0.04 – 0.06 | Comparable to documented equity-factor effects (month-on-month momentum, short-term reversal). |
-# | 0.06 – 0.10 | Above most factor-zoo benchmarks; the cross-validation question is whether the magnitude survives expanding-window evaluation. |
-# | > 0.10 | Outside the published academic range; the prior is leakage or label corruption until ruled out. |
+# The bands printed next are typical magnitudes from the equity-factor literature on
+# multi-year daily-rebalanced cross-sectional studies. They are starting points for the SE
+# calculation above, not standalone readings, and they live in a declared table so the
+# code below can score against the same numbers the prose refers to.
+
+# %% tags=["results"]
+IC_BANDS = (
+    (
+        0.02,
+        "at or below the daily-IC noise floor on multi-year samples; the SE alone often spans it",
+    ),
+    (0.04, "detectable on 5-to-10-year samples at the dispersions seen in published studies"),
+    (
+        0.06,
+        "comparable to documented equity-factor effects such as momentum or short-term reversal",
+    ),
+    (
+        0.10,
+        "above most factor-zoo benchmarks; the question is whether it survives expanding-window evaluation",
+    ),
+    (
+        float("inf"),
+        "outside the published academic range; the prior is leakage or label corruption until ruled out",
+    ),
+)
+
+
+def ic_band(ic: float) -> str:
+    """Return the literature band an absolute mean IC falls into."""
+    for upper, description in IC_BANDS:
+        if abs(ic) < upper:
+            return description
+    return IC_BANDS[-1][1]
+
+
+print("Reference bands for |mean IC| (equity-factor literature):")
+lower = 0.0
+for upper, description in IC_BANDS:
+    edge = "and above" if upper == float("inf") else f"to {upper:.2f}"
+    print(f"  {lower:.2f} {edge:<12} {description}")
+    lower = upper
+
+print(f"\nThis factor's 21-day mean IC: {result.ic.get('21D', float('nan')):.4f}")
+print(f"  falls in: {ic_band(result.ic.get('21D', float('nan')))}")
+
+# %% [markdown]
+# The daily IC series is plotted at low opacity behind two rolling means. At this sample
+# size the raw series is a solid band and carries no readable structure on its own; what a
+# reader can act on is whether the smoothed level drifts away from zero, and the two
+# windows show whether an apparent drift is still there under a longer average.
 
 # %%
-# Visualize IC time series
 fig = make_subplots(
-    rows=1, cols=2, subplot_titles=["IC Time Series (21D)", "IC Distribution (21D)"]
+    rows=1, cols=2, subplot_titles=["Daily IC, 21-day horizon", "Distribution of daily IC"]
 )
 
 # Get 21D IC series
 ic_21d = result.ic_series.get("21D", [])
 if ic_21d:
-    # Time series
+    # Raw series as context only: 5,000 overlapping daily values plot as a solid band.
     fig.add_trace(
         go.Scatter(
-            y=ic_21d, mode="lines", name="Daily IC", line=dict(color=COLORS["blue"]), opacity=0.6
+            y=ic_21d,
+            mode="lines",
+            name="Daily IC",
+            line=dict(color=COLORS["neutral"], width=0.4),
+            opacity=0.25,
         ),
         row=1,
         col=1,
     )
 
-    # Rolling mean
-    window = 21
     ic_series = pl.Series(ic_21d)
-    rolling_ic = ic_series.rolling_mean(window_size=window).to_list()
-    fig.add_trace(
-        go.Scatter(
-            y=rolling_ic,
-            mode="lines",
-            name=f"{window}D Rolling Mean",
-            line=dict(color=COLORS["amber"], width=2),
-        ),
-        row=1,
-        col=1,
-    )
+    for window, color, width in ((63, COLORS["amber"], 1.5), (252, COLORS["blue"], 2.0)):
+        fig.add_trace(
+            go.Scatter(
+                y=ic_series.rolling_mean(window_size=window).to_list(),
+                mode="lines",
+                name=f"{window}-day mean",
+                line=dict(color=color, width=width),
+            ),
+            row=1,
+            col=1,
+        )
 
     fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=1, col=1)
 
@@ -411,12 +475,29 @@ if ic_21d:
     mean_ic = np.mean(ic_21d)
     fig.add_vline(x=mean_ic, line_dash="dash", line_color=COLORS["negative"], row=1, col=2)
 
-fig.update_xaxes(title_text="Trading day (chronological)", row=1, col=1)
+fig.update_xaxes(title_text="Trading day (index, chronological)", row=1, col=1)
 fig.update_yaxes(title_text="IC (Spearman)", row=1, col=1)
 fig.update_xaxes(title_text="IC", row=1, col=2)
 fig.update_yaxes(title_text="Count", row=1, col=2)
-fig.update_layout(height=350, showlegend=True)
-fig.show()
+fig.update_layout(
+    height=350, showlegend=True, title_text="Daily cross-sectional IC of the momentum factor"
+)
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two panels. The left panel plots the daily cross-sectional IC against a "
+        "chronological index of roughly five thousand trading days. The raw series is a "
+        "faint grey band filling the range from about minus 0.9 to plus 0.9 with no "
+        "visible trend, and two rolling means are drawn over it. The shorter amber mean "
+        "swings within roughly a fifth of a correlation unit either side of zero; the "
+        "longer navy mean is flatter still and stays inside about half that. Neither "
+        "settles at a level away from zero anywhere in the sample. The right panel is a "
+        "histogram of the same "
+        "daily values: a broad, roughly symmetric bell centred on zero and running out to "
+        "about plus and minus 0.8, with a dashed red line marking the mean sitting "
+        "essentially on the zero gridline."
+    ),
+)
 
 # %% [markdown]
 # ### Publication Figure Artifact
@@ -424,11 +505,12 @@ fig.show()
 # The book IC time-series figure reads a compact NumPy artifact so formatting
 # changes do not reload the ETF panel or recompute daily cross-sectional ICs.
 
+# %% [markdown]
+# The pairs below are sorted on the native timestamp rather than on its string form.
+# Lexicographic sorting of stringified dates is correct only for zero-padded ISO output
+# and would silently reorder the series under any other rendering.
+
 # %%
-# Collect (native timestamp, IC) pairs and sort on the actual timestamp dtype
-# rather than its string form - lexicographic sorting of stringified dates is
-# only correct for zero-padded ISO output and would silently reorder the series
-# under any other rendering.
 ic_pairs: list[tuple[object, float]] = []
 for date_df in eval_df.partition_by("timestamp"):
     if len(date_df) < 20:
@@ -462,7 +544,7 @@ np.savez(
 print(f"Wrote publication figure artifact: {figure_7_3_artifact}")
 
 # %% [markdown]
-# ## 4. Quantile Analysis
+# ## Quantile Analysis
 #
 # Examine returns by signal quantile to assess **monotonicity** (do higher signal
 # values lead to higher returns?) and **spread** (what's the return difference
@@ -520,8 +602,26 @@ for i in range(1, len(PERIODS) + 1):
 # Label the shared y-axis only on the first panel to avoid the title overlapping
 # the neighbouring panel's bars; each panel keeps its own (per-horizon) scale.
 fig.update_yaxes(title_text="Mean forward return", row=1, col=1)
-fig.update_layout(title="Higher signal quantiles do not earn higher forward returns", height=350)
-fig.show()
+fig.update_layout(title="Mean forward return by signal quantile, three horizons", height=350)
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Three bar panels, one per forward-return horizon, each showing the mean forward "
+        "return of the five signal quantiles from Q1 to Q5. Every bar in every panel is "
+        "positive, so all five quantiles earned money over the sample. The ordering does "
+        "not follow the signal: in the one-day panel Q1 is the tallest bar and Q4 the "
+        "shortest; in the five-day panel the bars fall from Q1 to Q4 and tick up at Q5; in "
+        "the twenty-one-day panel the five bars are nearly level with Q5 the lowest. "
+        "Each panel carries its own vertical scale, so the heights are comparable within a "
+        "panel and not across panels."
+    ),
+)
+
+# %% [markdown]
+# The bars do not rise with the quantile in any of the three panels, and in the shortest
+# horizon they fall - the bottom quantile of the signal earns the most. A long-short book
+# built the obvious way round would be short the better-performing leg. The spread and
+# monotonicity numbers below put figures on that, and the sign is the part to read first.
 
 # %%
 # Spread and monotonicity analysis
@@ -536,7 +636,7 @@ for period in PERIODS:
             "horizon": period_key,
             "spread_pct": round(spread * 100, 4),
             "t_stat": round(t_stat, 2),
-            "monotonicity_pct": round(mono * 100, 1),
+            "monotonicity_rho": round(mono, 3),
         }
     )
 
@@ -546,25 +646,59 @@ spread_summary
 # %% [markdown]
 # ### Monotonicity Interpretation
 #
-# Monotonicity measures how consistently returns increase (or decrease) across
-# quantiles. Perfect monotonicity (100%) means each quantile has higher returns
-# than the previous one.
+# `analyze_signal` reports monotonicity as the **Spearman rank correlation between the
+# quantile ranks and their mean returns**, so it runs from $-1$ to $+1$: $+1$ is a
+# perfectly increasing ladder of quantile returns, $-1$ a perfectly decreasing one, and
+# $0$ no rank association at all. It is a correlation, not a percentage, and is reported
+# as such below.
 #
-# | Monotonicity | Interpretation |
-# |--------------|----------------|
-# | > 80% | Strong, consistent signal |
-# | 60-80% | Moderate; may work for long-short |
-# | < 60% | Weak; consider non-linear models |
+# That is not the same statistic as the one the fold section computes further down, which
+# is the *fraction of adjacent quantile steps that move upward* and runs from $0$ to $1$.
+# The two answer the same question differently and do not share a scale; where both appear
+# they are named apart.
+#
+# The bands below score the **strength** of the ordering, so they read the magnitude. The
+# sign is a separate fact and the more important one here: a strongly ordered signal
+# pointing the wrong way is not a weak signal, it is an inverted one, and the two call for
+# opposite actions. The bands are kept in a declared table so the reading the prose gives
+# is the one the code applies.
+
+# %% tags=["results"]
+MONOTONICITY_BANDS = (
+    (0.60, "weak ordering; consider a non-linear model"),
+    (0.80, "moderate ordering; may work as a long-short book"),
+    (1.01, "strong, consistent ordering"),
+)
+
+
+def monotonicity_band(value: float) -> str:
+    """Return the strength convention the magnitude of a monotonicity rho falls into."""
+    for upper, description in MONOTONICITY_BANDS:
+        if abs(value) < upper:
+            return description
+    return MONOTONICITY_BANDS[-1][1]
+
+
+lower = 0.0
+print("Reference bands for |rho| (ordering strength; the sign is read separately):")
+for upper, description in MONOTONICITY_BANDS:
+    print(f"  {lower:.2f} to {min(upper, 1.0):.2f}  {description}")
+    lower = upper
+
+print()
+for period in PERIODS:
+    mono = result.monotonicity.get(f"{period}D", float("nan"))
+    direction = "as signalled" if mono > 0 else "inverted" if mono < 0 else "flat"
+    print(f"  {period}D: {mono:+.2f}  {direction}, {monotonicity_band(mono)}")
 
 # %% [markdown]
-# ## 5. Horizon Comparison
+# ## Horizon Comparison
 #
 # Compare IC across different forward return horizons to identify the optimal
 # holding period for the signal.
 
 # %%
-# Visualize IC by horizon
-fig = make_subplots(rows=1, cols=2, subplot_titles=["Mean IC by Horizon", "ICIR by Horizon"])
+fig = make_subplots(rows=1, cols=2, subplot_titles=["Mean IC by horizon", "ICIR by horizon"])
 
 horizons = list(PERIODS)
 ics = [result.ic.get(f"{h}D", float("nan")) for h in horizons]
@@ -598,8 +732,28 @@ fig.update_xaxes(title_text="Horizon", row=1, col=1)
 fig.update_yaxes(title_text="Mean IC", row=1, col=1)
 fig.update_xaxes(title_text="Horizon", row=1, col=2)
 fig.update_yaxes(title_text="ICIR", row=1, col=2)
-fig.update_layout(height=350, showlegend=False)
-fig.show()
+fig.update_layout(
+    height=350, showlegend=False, title_text="Mean IC and ICIR across the three evaluated horizons"
+)
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two bar panels over the same three horizons, one day, five days and twenty-one "
+        "days. The left panel plots mean IC: the one-day and five-day bars hang below "
+        "zero in amber, the five-day the longer of the two, and the twenty-one-day bar "
+        "rises just above zero in navy. The whole vertical range spans less than one "
+        "hundredth of a correlation unit. The right panel plots ICIR on an axis whose top "
+        "is a dashed reference line; all three bars are so close to zero that they read as "
+        "a flat line along the baseline, nowhere near that reference."
+    ),
+)
+
+# %% [markdown]
+# Read the two panels together. The left panel's bars change sign across horizons, which
+# invites a story about reversal giving way to momentum; the right panel says the whole
+# left panel is inside the noise, because an ICIR of essentially zero means the daily IC
+# series has a standard deviation orders of magnitude larger than its mean. The sign
+# pattern is not a finding at these magnitudes.
 
 # %% [markdown]
 # ### Overlapping Returns Warning
@@ -619,11 +773,17 @@ fig.show()
 # and be skeptical of IC that increases monotonically with horizon.
 
 # %% [markdown]
-# ### 5.1 IC Decay Analysis
+# ### IC Decay Analysis
 #
-# IC decay determines the optimal rebalancing frequency. A signal with 5-day
-# half-life should not be held for 21 days. We compute IC at finer granularity
-# to estimate the signal's useful life.
+# IC decay determines the optimal rebalancing frequency: a signal whose IC halves within a
+# week should not be held for a month. We compute IC on a finer horizon grid to estimate
+# the signal's useful life.
+#
+# The half-peak marker below is drawn only for a crossing that comes **after** the peak.
+# Searching from the shortest horizon instead puts the marker on the first grid point
+# whenever the profile rises, which is the opposite of decay and reads to a reader as
+# decay. Where IC never falls back within the grid - the peak being the longest horizon on
+# it - no marker is drawn at all.
 
 # %%
 # Compute IC across a finer horizon grid (single call - batches all horizons)
@@ -654,43 +814,56 @@ fig.add_trace(
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 
-# First horizon at which IC falls below half its peak - diagnostic only.
-# When IC reverses sign rather than decays monotonically (as is common for
-# short-horizon reversal signals), label the crossing as "IC falls below
-# half-peak" rather than "half-life" to avoid implying smooth decay.
-peak_ic = max(decay_ics)
+# The crossing search starts after the peak; see the markdown above this figure.
+peak_idx = int(np.argmax(decay_ics))
+peak_ic = decay_ics[peak_idx]
 half_ic = peak_ic / 2
-for i, ic in enumerate(decay_ics):
-    if ic < half_ic and peak_ic > 0:
-        crossing = decay_horizons[i]
-        fig.add_vline(
-            x=crossing,
-            line_dash="dot",
-            line_color=COLORS["negative"],
-            annotation_text=f"IC < ½·peak by day {crossing}",
-        )
-        break
+crossing = None
+if peak_ic > 0:
+    for i in range(peak_idx + 1, len(decay_ics)):
+        if decay_ics[i] < half_ic:
+            crossing = decay_horizons[i]
+            break
+if crossing is not None:
+    fig.add_vline(
+        x=crossing,
+        line_dash="dot",
+        line_color=COLORS["negative"],
+        annotation_text=f"IC below half its peak by day {crossing}",
+    )
 
 fig.update_layout(
-    title="Horizon IC profile: weak short-horizon reversal, flat thereafter",
-    xaxis_title="Forward Return Horizon (days)",
+    title="Mean IC against forward-return horizon",
+    xaxis_title="Forward return horizon (days)",
     yaxis_title="Mean IC (Spearman)",
     height=350,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "A line with markers showing mean IC against forward-return horizon over a grid "
+        "running from one to forty-two days. The whole vertical range spans less than "
+        "one hundredth of a correlation unit. The line starts negative at the shortest "
+        "horizons, reaches its lowest point around five days, climbs through the dashed "
+        "zero line between ten and fifteen days, dips slightly at twenty-one and ends at "
+        "its highest point at forty-two days. There is no peak followed by decay: the "
+        "profile is still rising where the grid stops."
+    ),
+)
 
 # %% [markdown]
 # **Interpretation**: The horizon-IC curve is the tool for choosing a rebalancing
-# frequency - for a cleanly decaying signal you rebalance near where IC peaks and
-# stop before it fades. This 21-day ETF momentum factor does *not* show that clean
-# decay: every horizon IC sits within ±0.006 and none is statistically distinct
-# from zero, with the short horizons even mildly negative (weak reversal) before
-# flattening out. The half-peak marker is therefore a mechanical diagnostic, not a
-# tradeable half-life here; the honest read is a factor with no exploitable
+# frequency - for a cleanly decaying signal you rebalance near where IC peaks and stop
+# before it fades. This factor does *not* show that decay. Every horizon IC printed above
+# sits within a few thousandths of zero, none is statistically distinct from zero, and the
+# profile is still rising at the longest horizon on the grid rather than falling away from
+# a peak. The half-peak marker is drawn only when a crossing exists *after* the peak, so
+# on this profile there is nothing to mark; a marker placed at the first horizon would
+# have described decay running backwards. The honest read is a factor with no exploitable
 # cross-sectional horizon structure on this universe.
 
 # %% [markdown]
-# ## 6. Turnover Analysis
+# ## Turnover Analysis
 #
 # High turnover erodes returns through transaction costs. A signal with high IC
 # but excessive turnover may not be profitable after costs.
@@ -731,8 +904,8 @@ if result.half_life:
 #
 # $$IC_{net} \approx IC - \frac{c \times \text{turnover}}{E[r]}$$
 #
-# Where $c$ is round-trip transaction cost and $E[r]$ is expected return.
-# For most equity strategies, turnover > 100%/month significantly erodes alpha.
+# Where $c$ is round-trip transaction cost and $E[r]$ is expected return. For most equity
+# strategies, turning the whole book over once a month or more erodes alpha materially.
 
 # %% [markdown]
 # ### Break-Even Cost Analysis
@@ -800,7 +973,8 @@ else:
 # %% [markdown]
 # ### Feasibility Guidelines
 #
-# Three checks for signal feasibility (from Section 7.3):
+# Three checks for signal feasibility, from the chapter's *Preliminary feasibility
+# checks* section:
 #
 # 1. **Turnover proxies**: Measure entry/exit rates in the top-k set (see above)
 # 2. **Break-even cost checks**: Compare spread to conservative cost estimates
@@ -811,7 +985,7 @@ else:
 # feature. Chapter 8 demonstrates this check with real case study data.
 
 # %% [markdown]
-# ## 7. Fold-Aware Evaluation
+# ## Fold-Aware Evaluation
 #
 # **Critical**: The IC computed above pools all dates into a single statistic. However,
 # real trading strategies are evaluated on **out-of-sample** data using walk-forward
@@ -827,11 +1001,12 @@ else:
 # The text emphasizes computing IC **per fold** and reporting the distribution of
 # fold-level statistics, not just their pooled mean.
 
+# %% [markdown]
+# The splits below use an expanding window: train on everything up to the split point,
+# test on the period that follows.
+
+
 # %%
-# Define walk-forward splits
-# We use expanding window: train on all data up to split point, test on next period
-
-
 def create_walk_forward_splits(
     dates: list, n_splits: int = 5, min_train_pct: float = 0.2, test_periods: int = 63
 ) -> list[tuple[list, list]]:
@@ -892,7 +1067,7 @@ for i, (train_dates, test_dates) in enumerate(splits):
 # making predictions.
 
 # %%
-# Slice eval_df per fold (forward returns computed in §2)
+# Slice eval_df per fold; the forward returns were computed once above.
 fold_results = []
 evaluated_dates: list = []  # every date inside a test window - needed for a like-for-like IC
 
@@ -916,7 +1091,8 @@ for fold_idx, (train_dates, test_dates) in enumerate(splits):
 
     fold_ic = np.mean(ic_per_date)
 
-    # Quantile spread and monotonicity
+    # Quantile spread, and the adjacent-step ordering fraction (NOT the Spearman rho
+    # analyze_signal reports; see "Monotonicity Interpretation" above).
     test_with_q = test_data.with_columns(
         quantile=pl.col("factor")
         .rank()
@@ -930,9 +1106,9 @@ for fold_idx, (train_dates, test_dates) in enumerate(splits):
     # Monotonicity: fraction of consecutive quantiles in correct order
     if len(q_vals) >= 2:
         diffs = [q_vals[i + 1] - q_vals[i] for i in range(len(q_vals) - 1)]
-        fold_mono = sum(1 for d in diffs if d > 0) / len(diffs)
+        fold_step_frac = sum(1 for d in diffs if d > 0) / len(diffs)
     else:
-        fold_mono = float("nan")
+        fold_step_frac = float("nan")
 
     evaluated_dates.extend(test_dates)
     fold_results.append(
@@ -943,7 +1119,7 @@ for fold_idx, (train_dates, test_dates) in enumerate(splits):
             "n_obs": len(test_data),
             "ic": fold_ic,
             "spread": fold_spread,
-            "monotonicity": fold_mono,
+            "up_step_fraction": fold_step_frac,
         }
     )
 
@@ -968,15 +1144,14 @@ print(f"% Folds > 0:   {pct_positive:.0f}%")
 print(f"Fold ICIR:     {fold_ic_mean / fold_ic_std:.3f}" if fold_ic_std > 0 else "N/A")
 
 # %%
-# Visualize fold-level IC distribution (print-ready with fold date labels)
 fig = make_subplots(
     rows=1,
     cols=2,
-    subplot_titles=["Per-Fold IC (21D Horizon)", "Fold IC Distribution"],
+    subplot_titles=["IC by test fold", "Distribution of fold IC"],
     horizontal_spacing=0.15,
 )
 
-# Use fold test-start dates as x-axis labels for temporal context
+# Fold test-start dates as x-axis labels, for temporal context
 fold_labels = [r["test_start"][:7] for r in fold_results]  # YYYY-MM format
 
 # Colorblind-safe: blue for positive, amber for negative
@@ -1021,8 +1196,20 @@ fig.update_layout(
     height=400,
     showlegend=False,
     font=dict(size=12),
+    title_text="Out-of-sample IC across the walk-forward test folds",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two panels covering the eight walk-forward test folds, whose start dates run "
+        "from early 2012 to late 2013. The left panel is a bar per fold: seven bars stand "
+        "above zero in navy and one amber bar hangs below it, the negative fold being much "
+        "the shortest of the eight. A dashed line marks the fold mean, well above zero, "
+        "and a dotted line marks zero itself. The right panel is a histogram of those "
+        "eight values, sparse by construction, with most of the mass just above zero and a "
+        "single isolated bar far to the right."
+    ),
+)
 
 # %% [markdown]
 # ### Interpretation: Full-Sample vs Fold-Level IC
@@ -1033,9 +1220,10 @@ fig.show()
 #
 # That reading is only available if both statistics cover the **same dates**.
 # Ours do not. The full-sample IC averages every date in the panel. The fold-level
-# mean averages only dates inside a test window, and with `min_train_pct=0.3` and
-# eight 63-day folds those windows are roughly 500 consecutive dates near the
-# front of the sample. The two numbers describe different periods, so their
+# mean averages only dates inside a test window, and with the `min_train_pct` and fold
+# count set above those windows are a few hundred consecutive dates near the front of the
+# sample - the printout below gives the span and the share. The two numbers describe
+# different periods, so their
 # difference cannot be attributed to aggregation - or to leakage, which the folds
 # structurally cannot produce, since each fold's IC only ever touches its own test
 # dates.
@@ -1085,9 +1273,9 @@ else:
     print("[READ] The gap survives on identical dates, so it is an aggregation effect.")
 
 # %% [markdown]
-# ## 7.1 Within-Time Permutation Test
+# ### Within-Time Permutation Test
 #
-# The text (Section 7.3) recommends a **within-time permutation test** as a
+# The chapter recommends a **within-time permutation test** as a
 # null-distribution benchmark: break the feature-label pairing while preserving the
 # structure of the data, then ask how often chance alone reproduces the observed IC.
 # Two details decide whether the answer means anything.
@@ -1192,46 +1380,88 @@ fig.add_vline(
     annotation_text=f"Observed IC={observed_ic_mean:.4f}",
 )
 fig.update_layout(
-    title="Within its own window, the factor ranks better than a dependence-aware null",
+    title="Block-permutation null for mean IC, against the observed value",
     xaxis_title="Mean IC (block-permuted, fold dates only)",
     yaxis_title="Count",
     height=350,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "A histogram of the block-permutation null for mean IC over the fold dates, drawn "
+        "in slate. It is a symmetric bell centred on zero, running out to roughly plus and "
+        "minus 0.045. A solid red vertical line marks the observed mean IC, standing well "
+        "clear of the right-hand edge of the null with no permuted value anywhere near it."
+    ),
+)
+
+# %% [markdown]
+# The claim that the block null is the honest one is checkable: rerun the same permutation
+# with a block of a single session, which is exactly the independent within-date shuffle,
+# and compare the two null widths on identical dates.
+
+# %% tags=["results"]
+naive_ics = []
+for _ in range(n_permutations):
+    ic_per_date = []
+    for i, f_ranks in enumerate(factor_ranks_by_group):
+        keys = rng.permutation(n_symbols)  # a fresh relabeling every date
+        order = np.argsort(keys[symbols_by_group[i]], kind="stable")
+        corr = np.corrcoef(f_ranks, return_ranks_by_group[i][order])[0, 1]
+        if not np.isnan(corr):
+            ic_per_date.append(corr)
+    if ic_per_date:
+        naive_ics.append(np.mean(ic_per_date))
+naive_ics = np.array(naive_ics)
+
+naive_p = (int(np.sum(naive_ics >= observed_ic_mean)) + 1) / (len(naive_ics) + 1)
+print("=== Null width: independent within-date shuffle vs block permutation ===\n")
+print(f"  independent shuffle  std {naive_ics.std():.4f}   one-sided p {naive_p:.4f}")
+print(
+    f"  block of {BLOCK_SESSIONS} sessions  std {permuted_ics.std():.4f}   one-sided p {p_value_perm:.4f}"
+)
+print(f"\n  ratio of null widths: {permuted_ics.std() / naive_ics.std():.1f}x, on identical dates")
 
 # %% [markdown]
 # **Interpretation**: over the fold window, the observed IC sits outside every block
-# permutation, so the factor ranked ETFs better than chance *in 2012-2014*. That is
-# the only claim the test supports, and it is worth being precise about why.
+# permutation, so the factor ranked ETFs better than chance *in the years those folds
+# cover*. That is the only claim the test supports, and it is worth being precise about
+# why.
 #
-# Read it against §3, which scored the same factor at IC 0.0008 with a HAC
-# $t = 0.19$ over the full sample. These are not opposing verdicts about one
-# quantity - they are two different windows, as the decomposition above showed: the
-# entire full-sample-vs-fold gap was a period effect, with aggregation contributing
-# 0.0000. The factor worked in the folds' two years and does nothing over twenty.
-# The folds are not a verdict on the signal; they are a verdict on 2012-2014.
+# Read it against the full-sample IC printed under **Information Coefficient (IC)
+# Analysis**, which is indistinguishable from zero with a HAC $t$ well under one. These
+# are not opposing readings of one quantity - they are two different windows, as the
+# decomposition above showed: the entire full-sample-versus-fold gap was a period effect,
+# and the aggregation term rounded to nothing. The factor worked in the folds' two years
+# and does nothing over the full panel. The folds say something about those years, not
+# about the signal.
 #
 # Two lessons generalize past this factor:
 #
-# - **A window that flatters the signal is the default outcome, not a surprise.**
-#   `min_train_pct=0.3` with eight 63-day folds evaluates the first 10% of the
-#   panel and never scores 2014 onward. A fold scheme that leaves most of the
-#   sample unevaluated cannot support a claim about the sample.
-# - **A null must be as dependent as the data.** Independent within-date shuffling
-#   put the null's standard deviation near 0.0015; blocking at the label horizon
-#   puts it near 0.0145 - roughly ten times wider, on identical dates. The first
-#   null would have called almost any factor significant, which is what a null this
-#   narrow always does.
+# - **A window that flatters the signal is the default outcome, not a surprise.** The
+#   `min_train_pct` and fold count set above evaluate only the front of the panel and
+#   never score its last decade - the coverage share is printed with the decomposition. A
+#   fold scheme that leaves most of the sample unevaluated cannot support a claim about
+#   the sample.
+# - **A null must be as dependent as the data.** The comparison printed just above puts a
+#   number on it: shuffling assets independently each date gives a null several times
+#   narrower than blocking at the label horizon, on identical dates. Both nulls reject
+#   here, and at this permutation count both p-values sit on the floor, so the p-value is
+#   not what separates them - the width is. A null understated by that factor is the
+#   difference between rejecting and not rejecting for any factor whose IC lands near the
+#   boundary rather than far outside it, which is where most candidate factors land.
 #
-# The rest of the evidence points the other way, and §4 already showed it: the
-# full-sample quintile spread is **negative** at every horizon and monotonicity is
-# -90%, meaning Q1 out-earns Q5. Cross-sectional 21-day ETF momentum is a
-# **reversal** signal over this panel. A single favorable window does not overturn
-# that; it illustrates how easily a fold scheme can hide it.
+# The rest of the evidence points the other way, and the quantile analysis already showed
+# it: the full-sample quintile spread is **negative** at every horizon, and monotonicity is
+# negative at every horizon too - strongly so at the short ones, where the ordering is
+# nearly perfect with its sign reversed. The bottom quintile out-earns the top.
+# Cross-sectional 21-day ETF momentum is a **reversal** signal over this panel. A single
+# favorable window does not overturn that; it illustrates how easily a fold scheme can
+# hide it.
 
 # %% [markdown]
-# ## 8. Factor Scorecard Output
+# ## Factor Scorecard Output
 #
 # Export a structured summary for downstream use, including both global and
 # fold-level statistics.
@@ -1281,7 +1511,7 @@ print("\n=== Factor Scorecard ===\n")
 print(json.dumps(scorecard, indent=2))
 
 # %% [markdown]
-# ## 9. Binary Label Evaluation
+# ## Binary Label Evaluation
 #
 # When labels are binary (e.g., "positive return" vs "negative return"), we evaluate
 # using classification metrics rather than IC. The feature acts as a **score** that
@@ -1293,8 +1523,7 @@ print(json.dumps(scorecard, indent=2))
 # - **Confusion matrix**: TP, FP, TN, FN at a chosen threshold
 
 # %%
-# Create binary labels from forward returns (reuse eval_df from §2)
-# Positive = return > 0, Negative = return <= 0
+# Positive = return > 0, negative = return <= 0.
 binary_df = eval_df.with_columns(
     pl.when(pl.col("fwd_21d") > 0).then(1).otherwise(0).alias("binary_label")
 )
@@ -1311,15 +1540,17 @@ y_score = y_score[mask]
 print(f"Binary evaluation: {len(y_true):,} samples")
 print(f"Class balance: {y_true.mean():.1%} positive")
 
+# %% [markdown]
+# The ROC and precision-recall sweeps below are built by hand rather than taken from
+# sklearn's curve helpers, for an environment reason recorded in the code comment: the
+# library path fails under the pin this project carries. The manual sweep is deterministic
+# and agrees with the library to well inside plotting resolution.
+
 # %%
-# Manual argsort+cumsum sweep over the full 466k-row score array.
-# Avoids sklearn 1.6.1's _binary_clf_curve, which raises IndexError on
-# state-dependent runs of this array under econml 0.16's sklearn<1.7
-# pin; the underlying failure mode is uncharacterized, the manual path
-# is bit-for-bit deterministic and faster than the bisect-style sklearn
-# implementation at this size.
 roc_auc = roc_auc_score(y_true, y_score)
 
+# sklearn's _binary_clf_curve raises IndexError on state-dependent runs of this array
+# under the sklearn pin econml imposes; the failure mode is uncharacterized.
 _order = np.argsort(-y_score, kind="mergesort")
 # int64 promotion guards np.cumsum from int32 overflow at 466k samples.
 _yt_sorted = y_true[_order].astype(np.int64)
@@ -1357,8 +1588,7 @@ else:
     print("  Interpretation: AUC at or near 0.5 - score does not separate the two classes")
 
 # %%
-# Visualize ROC and PR curves (print-ready, colorblind-safe)
-fig = make_subplots(rows=1, cols=2, subplot_titles=["ROC Curve", "Precision-Recall Curve"])
+fig = make_subplots(rows=1, cols=2, subplot_titles=["ROC curve", "Precision-recall curve"])
 
 # ROC curve
 fig.add_trace(
@@ -1416,8 +1646,19 @@ fig.update_layout(
     height=400,
     showlegend=True,
     font=dict(size=12),
+    title_text="Threshold-free separation of positive from negative forward returns",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two panels. The left panel plots the ROC curve against the dashed random-guess "
+        "diagonal; the two are indistinguishable, the solid curve tracing the diagonal "
+        "from corner to corner, and the legend reports its area. The right panel plots "
+        "precision against recall: the curve is flat across the whole recall range and "
+        "sits on the dashed prevalence line, which the annotation labels with the base "
+        "rate. Neither panel shows the score separating the classes."
+    ),
+)
 
 # %%
 # Confusion matrix at median threshold
@@ -1447,7 +1688,7 @@ print(f"  Recall:    {recall_at_thresh:.1%}")
 print(f"  F1 Score:  {f1:.3f}")
 
 # %% [markdown]
-# ### 9.1 Library Binary Metrics
+# ### Library Binary Metrics
 #
 # Point estimates of precision/recall are noisy. `ml4t-diagnostic` provides
 # `binary_classification_report()` with Wilson confidence intervals and
@@ -1489,7 +1730,7 @@ print("especially when proportions are near 0 or 1.")
 #
 # | Metric | What It Measures | Trading Interpretation |
 # |--------|------------------|------------------------|
-# | **ROC AUC** | Ranking quality | > 0.55 shows signal |
+# | **ROC AUC** | Ranking quality | Against the no-skill diagonal, with a confidence interval |
 # | **PR AUC** | Precision at various recalls | Use when positives are rare |
 # | **Precision** | % of predicted positives correct | Matters for trade entry |
 # | **Recall** | % of actual positives found | Matters for opportunity cost |
@@ -1557,23 +1798,28 @@ if fold_auc_results:
 #
 # ### Key Metrics for Signal Evaluation
 #
-# | Metric | What It Measures | Good Range |
-# |--------|------------------|------------|
-# | **IC** | Cross-sectional predictability | > 0.03 (weak), > 0.05 (good) |
-# | **ICIR** | Risk-adjusted IC (mean/std) | > 0.5 |
-# | **Fold ICIR** | IC stability across OOS folds | > 0.3 |
-# | **Spread** | Top-bottom quantile difference | Depends on costs |
-# | **Monotonicity** | Quantile ordering consistency | > 80% |
-# | **Turnover** | Signal stability | < 50%/period for daily signals |
-# | **Half-life** | Signal decay rate | Matches rebalancing frequency |
+# | Metric | What It Measures | How to read it |
+# |--------|------------------|----------------|
+# | **IC** | Cross-sectional predictability | Against its own standard error; the literature bands are printed under *Interpreting an IC magnitude* |
+# | **ICIR** | Risk-adjusted IC (mean/std) | Together with IC; a near-zero ICIR says the mean is inside the daily dispersion |
+# | **Fold ICIR** | IC stability across test folds | Alongside which dates the folds actually cover |
+# | **Spread** | Top-bottom quantile difference | Sign first, then size against costs |
+# | **Monotonicity** | Spearman rho of quantile rank against mean return | Magnitude against the bands printed under *Monotonicity Interpretation*; sign first |
+# | **Turnover** | Signal stability | Against the break-even cost computed above |
+# | **Half-life** | Signal decay rate | Only where the horizon profile actually decays |
 #
 # ### Fold-Aware Evaluation (Critical)
 #
 # Always compute metrics **per fold** using walk-forward validation:
-# 1. Create expanding-window or rolling-window splits
-# 2. Compute IC (or AUC) on each test fold
-# 3. Report the **distribution** of fold-level metrics, not just pooled values
-# 4. Check that global IC ≈ fold-level mean IC (large gaps suggest overfitting)
+#
+# 1. Create expanding-window or rolling-window splits.
+# 2. Compute IC (or AUC) on each test fold.
+# 3. Report the **distribution** of fold-level metrics, not just pooled values.
+# 4. Before reading a gap between the pooled and fold-level figures, recompute the pooled
+#    statistic **on the fold dates only**. This notebook's own decomposition showed the
+#    whole gap was a period effect: the folds covered a favourable stretch near the front
+#    of the panel, and nothing about aggregation or overfitting was involved. A gap
+#    between two statistics computed over different dates is not evidence of either.
 #
 # ### API Reference
 #
@@ -1593,7 +1839,7 @@ if fold_auc_results:
 # result.ic_ir           # ICIR by period
 # result.quantile_returns # Returns by quantile
 # result.spread          # Top-bottom spread
-# result.monotonicity    # Quantile ordering
+# result.monotonicity    # Spearman rho of quantile rank vs mean return, in [-1, 1]
 # result.turnover        # Signal turnover
 # result.summary()       # Human-readable summary
 # ```

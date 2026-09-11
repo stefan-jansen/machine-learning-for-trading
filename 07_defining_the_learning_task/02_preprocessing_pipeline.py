@@ -59,7 +59,6 @@ from __future__ import annotations
 
 import pickle
 import tempfile
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -81,8 +80,7 @@ from data import (
     load_us_equities,
 )
 from utils.reproducibility import set_global_seeds
-
-warnings.filterwarnings("ignore")
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults
@@ -115,13 +113,13 @@ def filter_from_start(df: pl.DataFrame, time_col: str, start_value: str) -> pl.D
 
 
 # %% [markdown]
-# ## 1. Preprocessing Utilities
+# ## Preprocessing Utilities
 #
 # Reusable functions for common data cleaning operations.
 
 
 # %% [markdown]
-# ### 1.1 Remove Duplicates
+# ### Remove Duplicates
 #
 # Handles exact duplicates and near-duplicates with configurable strategy.
 
@@ -162,7 +160,7 @@ def remove_duplicates(
 
 
 # %% [markdown]
-# ### 1.2 Fill Expected Gaps
+# ### Fill Expected Gaps
 #
 # Distinguishes between expected gaps (weekends, holidays) and unexpected gaps.
 
@@ -215,7 +213,7 @@ def fill_expected_gaps(
 
 
 # %% [markdown]
-# ### 1.3 Apply Domain Filters
+# ### Apply Domain Filters
 #
 # Remove rows with impossible values (negative prices, zero volume, etc.)
 
@@ -254,7 +252,7 @@ def apply_domain_filters(
 
 
 # %% [markdown]
-# ### 1.4 Spike Filter
+# ### Spike Filter
 #
 # Detect and flag single-bar price reversals (potential data errors).
 
@@ -338,7 +336,7 @@ def spike_filter(
 
 
 # %% [markdown]
-# ### 1.5 Winsorize Panel
+# ### Winsorize Panel
 #
 # Clip extreme values at percentile thresholds, respecting panel structure.
 
@@ -396,7 +394,7 @@ def winsorize_panel(
 
 
 # %% [markdown]
-# ## 2. SplitAwarePreprocessor
+# ## SplitAwarePreprocessor
 #
 # The key pedagogical artifact: a preprocessing class that **learns parameters
 # on training data only** and applies them to validation/test data.
@@ -539,11 +537,11 @@ class SplitAwarePreprocessor:
 
 
 # %% [markdown]
-# ## 3. US Equities Deep Clean
+# ## US Equities Deep Clean
 #
-# The most complex dataset and the best teaching vehicle for preprocessing.
-# We apply four sequential cleaning steps: penny stock filter, domain
-# validation, extreme return removal, and spike detection.
+# The most complex dataset here, and the one where every cleaning step has something to
+# remove. We apply four sequential steps: penny stock filter, domain validation, extreme
+# return removal, and spike detection.
 
 # %%
 us_equities = None
@@ -598,18 +596,42 @@ if us_equities is not None:
             print(f"{rule}: removed {count:,} rows")
 
 # %% [markdown]
-# ### Step 3: Extreme returns
+# ### Step 3: Implausibly large one-day moves
 #
-# Daily returns exceeding 200% typically indicate stock splits or data errors.
+# A raw return is bounded below by $-1$, so a threshold on $|r|$ set above 1 can only ever
+# fire on the upside. `01_data_quality_diagnostics` works that through on this same panel:
+# the rule catches most reverse splits and essentially no forward ones, and forward splits
+# are the large majority.
+#
+# Read the two directions separately, because they do not agree here. Most of the rows this
+# step removes *are* split days - the cell prints how many, from `split_ratio` itself - so
+# the rule is reasonably precise about what it takes out. What it cannot do is find splits,
+# because the kind that divides the price can never clear the threshold. A filter you
+# cannot use as a detector is still a usable filter, and that is all this step is: it drops
+# implausibly large upward jumps before anything fits a scaler. The smallest return it
+# removes cannot be negative for any threshold at or above 1, and this one is well above.
 
 # %%
+MAX_ABS_DAILY_RETURN = 2.0
+
 if us_equities is not None:
     cleaned = cleaned.sort(["symbol", "timestamp"]).with_columns(
         returns=pl.col("close").pct_change().over("symbol")
     )
-    extreme_returns = cleaned.filter(pl.col("returns").abs() > 2.0)
-    print(f"Extreme returns (>200%): {len(extreme_returns):,} rows")
-    cleaned = cleaned.filter(pl.col("returns").is_null() | (pl.col("returns").abs() <= 2.0))
+    extreme_returns = cleaned.filter(pl.col("returns").abs() > MAX_ABS_DAILY_RETURN)
+    on_a_split_day = extreme_returns.filter(
+        (pl.col("split_ratio") != 1) & pl.col("split_ratio").is_not_null()
+    ).height
+    smallest_removed = extreme_returns["returns"].min()
+    print(f"Rows with |return| > {MAX_ABS_DAILY_RETURN}: {len(extreme_returns):,}")
+    print(f"  that split_ratio records as a split: {on_a_split_day:,}")
+    if smallest_removed is None:
+        print("  smallest return removed:             none, the filter removed nothing")
+    else:
+        print(f"  smallest return removed:             {smallest_removed:+.4f}")
+    cleaned = cleaned.filter(
+        pl.col("returns").is_null() | (pl.col("returns").abs() <= MAX_ABS_DAILY_RETURN)
+    )
 
 # %% [markdown]
 # ### Step 4: Spike detection
@@ -654,14 +676,32 @@ if us_equities is not None:
     axes[1].set_title("Winsorized Returns (1st/99th)")
     axes[1].set_xlabel("Daily Return")
 
-    fig.suptitle("Winsorization clips the 1st/99th tails and leaves the bulk unchanged")
-    fig.tight_layout()
-    fig.show()
+    fig.suptitle("US equities daily returns, raw and winsorized at the 1st/99th")
+    show_with_alt(
+        fig,
+        alt=(
+            "Two histograms of daily returns side by side on identical bins and a shared "
+            "count axis, raw on the left and winsorized at the 1st and 99th percentiles "
+            "on the right. Both are sharply peaked at zero with a very tall narrow spike "
+            "exactly at zero. The left panel's thin tails run out to the edges of the "
+            "range; in the right panel they stop, and a narrow spike stands at each "
+            "clipping bound where that tail mass has been piled up. The central bulk is "
+            "indistinguishable between the two."
+        ),
+    )
 
 # %% [markdown]
-# Winsorization clips the extreme tails without distorting the bulk of the
-# distribution. The 1st/99th percentile bounds remove genuine outliers while
-# preserving the fat-tailed shape that characterizes equity returns.
+# The bulk of the distribution is untouched. What moves is the far tail, and it does not
+# move by being discarded: winsorizing reassigns every row past the 1st or 99th percentile
+# onto that percentile, which is why the right panel grows a narrow spike at each bound
+# where the left panel has a thin tail. The fat-tailed shape is intact *inside* the bounds
+# and gone outside them, replaced by two point masses. That is the trade the method
+# makes - a scaler fitted on the clipped series is no longer dragged by a handful of
+# extreme days, and in exchange the series can no longer say how extreme those days were.
+#
+# Both panels also carry a tall spike at exactly zero. Those are days on which the close
+# did not move at all. They are a property of the raw panel, not of anything winsorizing
+# did to it.
 
 # %% [markdown]
 # ### Cleaned US Equities Summary
@@ -680,7 +720,7 @@ if us_equities is not None:
 
 
 # %% [markdown]
-# ## 4. ETF Universe Cleanup
+# ## ETF Universe Cleanup
 #
 # Yahoo Finance data has specific issues: adjustment artifacts from splits
 # and distributions, ticker changes, and occasional data gaps.
@@ -749,7 +789,7 @@ if etfs is not None:
 
 
 # %% [markdown]
-# ## 5. Cross-Dataset Alignment Demo
+# ## Cross-Dataset Alignment Demo
 #
 # When combining datasets with different frequencies (daily equities with
 # monthly characteristics, or 8-hour crypto bars), alignment must preserve
@@ -757,7 +797,7 @@ if etfs is not None:
 
 
 # %% [markdown]
-# ### 5.1 Crypto Spot + Perps Alignment
+# ### Crypto Spot and Perps Alignment
 #
 # Aligning 8-hour bars for basis computation: the premium index
 # captures the funding rate differential between spot and perpetual futures.
@@ -795,7 +835,7 @@ if crypto_perps is not None and crypto_premium is not None:
 # to percentage points for readability.
 
 # %% [markdown]
-# ### 5.2 Equity + Firm Characteristics As-Of Join
+# ### Equity and Firm Characteristics As-Of Join
 #
 # Monthly characteristics must be joined to daily prices using point-in-time
 # logic: each daily observation gets the most recent monthly snapshot.
@@ -832,7 +872,7 @@ if firm_char is not None:
 
 
 # %% [markdown]
-# ## 6. Categorical Encoding Demo
+# ## Categorical Encoding Demo
 #
 # Section 7.1 discusses categorical encodings (one-hot, ordinal, hashing).
 # The key constraint: **fit the encoder on training data only** so that
@@ -880,7 +920,7 @@ print(f"Encoding (all zeros): {utilities_encoded[0] if n_utilities > 0 else 'N/A
 
 
 # %% [markdown]
-# ## 7. Split-Aware Preprocessing Demo
+# ## Split-Aware Preprocessing Demo
 #
 # The critical lesson: **preprocessing parameters must be learned on training
 # data only**. Fitting on the full dataset leaks future information into the
@@ -888,7 +928,7 @@ print(f"Encoding (all zeros): {utilities_encoded[0] if n_utilities > 0 else 'N/A
 
 
 # %% [markdown]
-# ### 7.1 Correct Approach: Fit on Train Only
+# ### Correct Approach: Fit on Train Only
 
 # %%
 n_train, n_test = 1000, 200
@@ -948,13 +988,14 @@ print(
 
 
 # %% [markdown]
-# ### 7.2 WRONG Approach: Fit on Full Data (Leakage Demo)
+# ### Wrong Approach: Fit on Full Data (Leakage Demo)
 #
-# What happens when we cheat and fit on all data including the test set?
+# What happens when we cheat and fit on all data including the test set? The preprocessor
+# below is configured exactly like the correct one - same winsorize limits, same scaled
+# column - so the fit data is the only thing that differs, and the leakage effect is the
+# only thing the comparison can be measuring.
 
 # %%
-# Same configuration as the correct preprocessor (winsorize + scale) so the
-# only difference is the fit data - this isolates the leakage effect.
 full_data = pl.concat([train_df, test_df])
 leaky_preprocessor = SplitAwarePreprocessor(
     scale_cols=["returns"],
@@ -988,7 +1029,9 @@ leaky_test_processed = leaky_preprocessor.transform(test_df)
 # %% [markdown]
 # ### Leakage comparison figure
 #
-# Visualize how the two scaling approaches produce different test-set distributions.
+# Visualize how the two scaling approaches produce different test-set distributions. The
+# two panels share their bins and both axes, so the only thing that can differ between
+# them is the fit data - not the binning.
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True, sharey=True)
@@ -996,8 +1039,6 @@ fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True, sharey=True)
 correct_vals = test_processed["returns"].to_numpy()
 leaky_vals = leaky_test_processed["returns"].to_numpy()
 
-# Identical bins and shared axes so the two panels are directly comparable -
-# the only difference should be the leakage-induced shift, not the binning.
 bin_edges = np.linspace(
     min(correct_vals.min(), leaky_vals.min()),
     max(correct_vals.max(), leaky_vals.max()),
@@ -1029,9 +1070,17 @@ axes[1].set_title("Leaky: Full-Data Fit")
 axes[1].set_xlabel("Scaled Return")
 axes[1].legend()
 
-fig.suptitle("Full-data leakage shifts the scaled test distribution only slightly")
-fig.tight_layout()
-fig.show()
+fig.suptitle("Scaled test returns under a train-only and a full-data scaler fit")
+show_with_alt(
+    fig,
+    alt=(
+        "Two histograms of the scaled test returns on identical bins and shared axes, the "
+        "train-only fit on the left and the full-data fit on the right, each with a dashed "
+        "vertical line at its own mean and that mean in the legend. The two distributions "
+        "have the same overall spread and the two mean lines both sit just above zero, "
+        "close enough that the shift is visible only by reading the legend."
+    ),
+)
 
 # %% [markdown]
 # With everything else held equal (both panels winsorized, identical bins and
@@ -1042,7 +1091,7 @@ fig.show()
 
 
 # %% [markdown]
-# ### 7.3 Walk-Forward Refit Demo
+# ### Walk-Forward Refit Demo
 #
 # In walk-forward evaluation (Chapter 6), the preprocessor must be **refit
 # at each fold boundary** using only data available up to that point.
@@ -1092,7 +1141,7 @@ fold_summary
 
 
 # %% [markdown]
-# ### 7.4 Preprocessor Serialization Demo
+# ### Preprocessor Serialization Demo
 #
 # Demonstrate save/load round-trip. Note: `pickle` is used here for
 # simplicity. For production systems, prefer `ml4t-engineer` serialization.
@@ -1106,7 +1155,7 @@ with tempfile.NamedTemporaryFile(suffix=".pkl", delete=True) as tmp:
 
 
 # %% [markdown]
-# ### 7.5 Production Alternative: ml4t-engineer
+# ### Production Alternative: ml4t-engineer
 #
 # The manual `SplitAwarePreprocessor` above teaches the principle. In
 # practice, use the tested library version which provides the same
@@ -1140,7 +1189,7 @@ print(f"\nManual vs library difference: {abs(manual_test_mean - lib_test_mean):.
 # (sample vs population).
 
 # %% [markdown]
-# ## 8. Final Verification
+# ## Final Verification
 #
 # Quick quality check on the cleaned data (in-memory, not persisted).
 

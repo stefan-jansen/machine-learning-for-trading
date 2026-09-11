@@ -52,7 +52,6 @@
 # %%
 from __future__ import annotations
 
-import warnings
 from datetime import datetime
 
 import numpy as np
@@ -64,14 +63,12 @@ from ml4t.engineer.core.registry import get_registry
 
 from data import load_etfs
 
-warnings.filterwarnings("ignore")
-
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides for CI
 SPY_START_DATE = "2015-01-01"
 
 # %% [markdown]
-# ## 1. ml4t-data: Unified Data Loaders
+# ## ml4t-data: Unified Data Loaders
 #
 # The `data` module provides consistent interfaces for all seven
 # datasets introduced in Chapter 2. Each loader returns a Polars DataFrame
@@ -93,7 +90,7 @@ spy = etfs.filter(
 print(f"SPY: {len(spy):,} rows from {spy['timestamp'].min()} to {spy['timestamp'].max()}")
 
 # %% [markdown]
-# ## 2. ml4t-engineer: Feature Registry
+# ## ml4t-engineer: Feature Registry
 #
 # The `ml4t-engineer` library provides 120+ pre-built features with
 # consistent naming, validation against reference implementations (TA-Lib
@@ -117,7 +114,7 @@ for cat, feats in sorted(categories.items()):
     print(f"  {cat:20s}: {len(feats):3d}  ({examples}{suffix})")
 
 # %% [markdown]
-# ### 2.1 Feature Metadata
+# ### Feature Metadata
 #
 # Each registry entry carries its default parameters, input requirements, and
 # a description, plus a closed-form formula where a standard one exists (about
@@ -137,7 +134,7 @@ for feature_name in ["rsi", "atr", "garman_klass_volatility"]:
     print(f"Input type:  {meta.input_type}")
 
 # %% [markdown]
-# ## 3. Config-Driven Feature Computation
+# ## Config-Driven Feature Computation
 #
 # `compute_features()` accepts three input formats, from simplest to most
 # reproducible:
@@ -147,7 +144,7 @@ for feature_name in ["rsi", "atr", "garman_klass_volatility"]:
 # 3. **YAML config** - stored configuration for pipelines
 
 # %% [markdown]
-# ### 3.1 Simple Feature List
+# ### Simple Feature List
 
 # %%
 result = compute_features(spy, ["rsi", "sma", "ema", "atr"])
@@ -157,7 +154,7 @@ print(f"Computed {len(new_cols)} features: {new_cols}")
 display(result.select(["timestamp", "close"] + new_cols).tail(5))
 
 # %% [markdown]
-# ### 3.2 Parameterized Features
+# ### Parameterized Features
 #
 # A list of dicts sets explicit parameters per feature. Each feature name
 # resolves to one output column per call, so a single call holds one parameter
@@ -165,10 +162,12 @@ display(result.select(["timestamp", "close"] + new_cols).tail(5))
 # common multi-timeframe setup), call `compute_features` once per parameter set
 # and suffix the columns before joining.
 
+# %% [markdown]
+# Each entry below names one feature with an explicit parameter set. Bollinger bands take
+# their two deviations separately, following TA-Lib, so the upper and lower band need not
+# sit the same distance from the moving average.
+
 # %%
-# Distinct features, each with an explicit parameter set. Bollinger bands take the
-# two deviations separately, following TA-Lib, so the upper and lower band need not
-# sit the same distance from the moving average:
 parameterized = [
     {"name": "rsi", "params": {"period": 10}},
     {"name": "atr", "params": {"period": 20}},
@@ -195,7 +194,7 @@ print(f"Multi-horizon RSI columns: {rsi_cols}")
 display(rsi_multi.tail(5))
 
 # %% [markdown]
-# ### 3.3 YAML Configuration (Production)
+# ### YAML Configuration (Production)
 #
 # For reproducibility across notebooks and case studies, store feature
 # configurations in YAML:
@@ -220,7 +219,7 @@ display(rsi_multi.tail(5))
 # Load with: `compute_features(df, config_path="features.yaml")`
 
 # %% [markdown]
-# ## 4. Validation: Library vs Manual
+# ## Validation: Library vs Manual
 #
 # The library uses Wilder's smoothing (matching TA-Lib) while a naive
 # implementation might use EWM span. Let's compare to understand the
@@ -279,7 +278,7 @@ print("Differences are due to smoothing method (EWM span vs Wilder's).")
 # | Cross-validation with TA-Lib | Non-standard variations |
 
 # %% [markdown]
-# ## 5. ml4t-diagnostic: Feature Evaluation (Preview)
+# ## ml4t-diagnostic: Feature Evaluation (Preview)
 #
 # The third library, `ml4t-diagnostic`, closes the loop: once a feature is
 # computed, `analyze_signal()` measures whether it predicts forward returns in
@@ -329,14 +328,12 @@ for horizon in ("1D", "5D", "21D"):
 # glue code in between.
 
 # %% [markdown]
-# ## 6. Key Polars Patterns for Feature Engineering
+# ## Key Polars Patterns for Feature Engineering
 #
-# These three patterns appear in 90% of feature engineering code.
-# The `09_pandas_polars_benchmark` notebook provides full performance
-# comparisons.
+# These three patterns account for most of the feature-engineering code in this book.
 
 # %% [markdown]
-# ### 6.1 GroupBy + Rolling via `.over()`
+# ### GroupBy + Rolling via `.over()`
 #
 # Polars' `.over()` expression is the window function syntax - parallel
 # and significantly faster than pandas' `groupby().transform()`.
@@ -360,7 +357,7 @@ display(features.select(["symbol", "timestamp", "close", "ret_1d", "vol_21d"]).t
 # for parallel execution - never chain separate calls.
 
 # %% [markdown]
-# ### 6.2 ASOF Joins (Point-in-Time Matching)
+# ### ASOF Joins (Point-in-Time Matching)
 #
 # ASOF joins match by the closest timestamp. Critical for:
 # - Trade-quote matching
@@ -391,15 +388,14 @@ display(matched.head(5))
 # `strategy="backward"` for point-in-time safety.
 
 # %% [markdown]
-# ### 6.3 Lazy Evaluation (Large File Processing)
+# ### Lazy Evaluation (Large File Processing)
 #
 # For large files, `scan_parquet()` pushes filters to the storage layer.
 # Here we demonstrate this using a loader to first get the data, then
 # showing the lazy API pattern with `LazyFrame`.
 
 # %%
-# Demonstrate lazy API pattern with in-memory data
-# (In production, use pl.scan_parquet on the actual file)
+# In production this would start from pl.scan_parquet on the file itself.
 spy_lazy = (
     load_etfs(symbols=["SPY"], start_date="2020-01-01")
     .lazy()
