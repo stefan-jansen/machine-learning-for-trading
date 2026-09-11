@@ -47,6 +47,8 @@
 # %%
 """Single-asset RSI mean-reversion strategy using vectorized backtesting."""
 
+import math
+
 import plotly.graph_objects as go
 import polars as pl
 import vectorbt as vbt
@@ -185,18 +187,21 @@ fig.update_layout(
     yaxis2_title="RSI",
 )
 _rsi_clean = rsi_series.dropna()
-_crossings = int(
-    ((_rsi_clean < RSI_LOWER) != (_rsi_clean < RSI_LOWER).shift(1)).sum()
-    + ((_rsi_clean > RSI_UPPER) != (_rsi_clean > RSI_UPPER).shift(1)).sum()
-)
+_below = _rsi_clean < RSI_LOWER
+_above = _rsi_clean > RSI_UPPER
+_cross_counts = (
+    (_below != _below.shift(1)).astype(int) + (_above != _above.shift(1)).astype(int)
+).iloc[1:]
+_crossings = int(_cross_counts.sum())
+_first_half_crossings = int(_cross_counts.iloc[: len(_cross_counts) // 2].sum())
 show_plotly_with_alt(
     fig,
     f"Two stacked panels on a shared date axis from {close.index[0].date()} to "
     f"{close.index[-1].date()}. The upper panel is the BTC/USDT daily close, running from "
     f"{close.min():,.0f} to {close.max():,.0f}. The lower panel is the {RSI_WINDOW}-period RSI "
     f"in amber with dashed lines at {RSI_LOWER} and {RSI_UPPER}; it crosses one threshold or the "
-    f"other {_crossings} times over {len(_rsi_clean):,} sessions, spread across the whole "
-    "sample rather than concentrated in one regime.",
+    f"other {_crossings} times over {len(_rsi_clean):,} sessions, {_first_half_crossings} of "
+    "them in the first half of the sample.",
 )
 
 # %% [markdown]
@@ -601,13 +606,24 @@ fig.update_layout(
     yaxis_title="Upper Threshold",
     height=500,
 )
+_columns = {
+    lower: [row[i] for row in heatmap_z if math.isfinite(row[i])]
+    for i, lower in enumerate(lower_thresholds)
+}
+_column_means = {lower: sum(vals) / len(vals) for lower, vals in _columns.items() if vals}
+_strongest = max(_column_means, key=lambda k: _column_means[k])
+_nearest_zero = min(_column_means, key=lambda k: abs(_column_means[k]))
+_cells = [v for vals in _columns.values() for v in vals]
+_negative_cells = sum(1 for v in _cells if v < 0)
 show_plotly_with_alt(
     fig,
     "Heatmap of in-sample Sharpe ratio over the RSI threshold grid, lower threshold on the "
     "horizontal axis and upper threshold on the vertical, on a diverging scale centred at zero. "
-    "Every cell in the lower-threshold-20 column is the deepest green in the grid and the four "
-    "differ little from each other; the rest of the surface is pale, with the 25 column closest "
-    "to zero. No cell is negative.",
+    f"The strongest column is lower threshold {_strongest}, averaging "
+    f"{_column_means[_strongest]:.2f} over its {len(_columns[_strongest])} cells; the column "
+    f"nearest zero is {_nearest_zero} at {_column_means[_nearest_zero]:.2f}. The surface spans "
+    f"{min(_cells):.2f} to {max(_cells):.2f}, with {_negative_cells} of {len(_cells)} cells "
+    "below zero.",
 )
 
 # %% [markdown]

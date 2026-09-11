@@ -537,7 +537,8 @@ fig.update_layout(
     yaxis_title="Array minus sequential equity (USD)",
     height=400,
 )
-_sign_changes = int(((diff_series > 0) != (diff_series > 0).shift(1)).iloc[1:].sum())
+_nonzero_diff = diff_series[diff_series.abs() > 0]
+_sign_changes = int(((_nonzero_diff > 0) != (_nonzero_diff > 0).shift(1)).iloc[1:].sum())
 show_plotly_with_alt(
     fig,
     "Line chart of array equity minus sequential equity in US dollars, with a dashed zero line. "

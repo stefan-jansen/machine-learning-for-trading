@@ -547,13 +547,21 @@ add_message_title(
     subtitle="Reference equity minus headroom equity, in basis points of reference equity",
 )
 fig.tight_layout()
+_nonzero_gap = diff_hd_bps[diff_hd_bps.abs() > 0]
+_gap_flips = ((_nonzero_gap > 0) != (_nonzero_gap > 0).shift(1)).iloc[1:].to_numpy()
+_flip_positions = [i for i, flipped in enumerate(_gap_flips) if flipped]
+_flip_note = (
+    f"changing sign {len(_flip_positions)} times, the last of them "
+    f"{(_flip_positions[-1] + 1) / len(_gap_flips):.0%} of the way through the sample"
+    if _flip_positions
+    else "never changing sign"
+)
 show_with_alt(
     fig,
     "Filled area chart of the reference equity minus the headroom equity, in basis points of "
     f"reference equity, with a dashed zero line. The gap runs from {diff_hd_bps.min():.0f} to "
-    f"{diff_hd_bps.max():.0f} basis points and ends at {diff_hd_bps.iloc[-1]:.0f}, changing sign "
-    f"{int(((diff_hd_bps > 0) != (diff_hd_bps > 0).shift(1)).iloc[1:].sum())} times, all of them "
-    "early. Cash held back for fees costs a widening amount the longer it is held back.",
+    f"{diff_hd_bps.max():.0f} basis points and ends at {diff_hd_bps.iloc[-1]:.0f}, "
+    f"{_flip_note}. Cash held back for fees costs a widening amount the longer it is held back.",
 )
 
 print(f"\nFinal value difference: ${val_diff_hd:,.0f} ({val_diff_hd / r_baseline.final_value:.3%})")

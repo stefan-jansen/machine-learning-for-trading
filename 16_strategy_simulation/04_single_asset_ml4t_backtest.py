@@ -64,6 +64,7 @@
 # %%
 """Single-asset event-driven backtest with explicit timing, sizing, and cost accounting."""
 
+import itertools
 from datetime import datetime
 
 import numpy as np
@@ -619,7 +620,7 @@ fig.update_layout(
     hovermode="x unified",
 )
 _equity = list(ec.values)
-_flat = sum(1 for a, b in zip(_equity, _equity[1:], strict=True) if a == b)
+_flat = sum(1 for a, b in itertools.pairwise(_equity) if a == b)
 show_plotly_with_alt(
     fig,
     f"Line chart of portfolio value in USDT from a {INITIAL_CASH:,.0f} start. Long flat "

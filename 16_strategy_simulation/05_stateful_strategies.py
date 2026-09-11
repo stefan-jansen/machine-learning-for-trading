@@ -931,6 +931,8 @@ if pairs_strategy.zscore_history:
     fig.update_yaxes(title_text="KRE / XLF", row=2, col=1)
     fig.update_yaxes(title_text="Z-Score", row=3, col=1)
     fig.update_xaxes(title_text="Date", row=3, col=1)
+    _inside_band = [abs(z) > pairs_strategy.entry_zscore for z in z_vals]
+    _entry_crossings = sum(1 for a, b in itertools.pairwise(_inside_band) if a != b)
     show_plotly_with_alt(
         fig,
         f"Three stacked panels on a shared date axis over {len(dates):,} sessions. The top panel "
@@ -940,7 +942,7 @@ if pairs_strategy.zscore_history:
         f"which runs from {(close_b / close_a).min():.2f} to {(close_b / close_a).max():.2f}. "
         "The bottom panel is the ratio's rolling z-score with dashed entry bands and dotted exit "
         f"bands; it spans {min(z_vals):.2f} to {max(z_vals):.2f} and crosses the entry bands "
-        f"{sum(1 for a, b in zip(z_vals, z_vals[1:], strict=True) if (abs(a) > pairs_strategy.entry_zscore) != (abs(b) > pairs_strategy.entry_zscore))} "
+        f"{_entry_crossings} "
         "times. A level shift in the ratio does not pin the z-score, because the rolling window "
         "re-centres on the new level.",
     )

@@ -56,6 +56,7 @@
 # %%
 """Build an auditable performance report from protocol-matched BTC backtests."""
 
+import itertools
 import re
 
 import numpy as np
@@ -950,10 +951,17 @@ for shape in fig.layout.shapes:
 for annotation in fig.layout.annotations:
     annotation.font.color = COLORS["neutral"]
 # Read the level back out of the label, not off the shape: three lines, two annotations.
+_reference_levels = []
 for annotation in fig.layout.annotations:
     level = re.search(r"\(([\d.]+)\)", annotation.text or "")
     if level:
         annotation.text = f"Sharpe {level.group(1)}"
+        _reference_levels.append(level.group(1))
+_level_note = (
+    f"dashed reference lines at {' and '.join(_reference_levels)}"
+    if _reference_levels
+    else "dashed reference lines"
+)
 fig.update_layout(
     title=(
         "Rolling Sharpe ratio over the sample"
@@ -964,11 +972,12 @@ fig.update_layout(
     height=420,
 )
 _roll = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
-_crossings = sum(1 for a, b in zip(_roll, _roll[1:], strict=True) if (a > 0) != (b > 0))
+_roll_signs = [v > 0 for v in _roll if v != 0]
+_crossings = sum(1 for a, b in itertools.pairwise(_roll_signs) if a != b)
 show_plotly_with_alt(
     fig,
-    f"Line chart of the {ROLLING_WINDOW_DAYS}-day rolling Sharpe ratio with dashed reference "
-    "lines at 1.0 and 2.0. The series starts one window into the sample, because that is the "
+    f"Line chart of the {ROLLING_WINDOW_DAYS}-day rolling Sharpe ratio with {_level_note}. "
+    "The series starts one window into the sample, because that is the "
     f"first date a full window exists. It ranges from {min(_roll):.2f} to {max(_roll):.2f} and "
     f"changes sign {_crossings} times. One rule therefore sits on both sides of every reference "
     "level, depending only on which stretch of the sample the window covers.",

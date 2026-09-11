@@ -1054,12 +1054,15 @@ fig.update_yaxes(
     ticktext=[f"{n:,}" for n in pbo_blocks_df["n_combinations"].to_list()],
     secondary_y=True,
 )
+_pbo_max = pbo_blocks_df["pbo"].max() * 100
+_reference_side = "above" if _pbo_max < 50 else "below"
 show_plotly_with_alt(
     fig,
     "Dual-axis line chart against the number of CSCV blocks. On the left axis the backtest "
     f"overfitting probability runs from {pbo_blocks_df['pbo'].min() * 100:.0f} to "
-    f"{pbo_blocks_df['pbo'].max() * 100:.0f} percent, with a dashed reference line at 50 well "
-    "above it. On the right axis, which is logarithmic, the number of combinations climbs from "
+    f"{_pbo_max:.0f} percent, with a dashed reference line at 50, {abs(50 - _pbo_max):.0f} "
+    f"points {_reference_side} the highest value plotted. On the right axis, which is "
+    "logarithmic, the number of combinations climbs from "
     f"{pbo_blocks_df['n_combinations'].min():,} to "
     f"{pbo_blocks_df['n_combinations'].max():,}. The two lines share a panel and measure "
     "unrelated quantities, so their crossing means nothing.",
