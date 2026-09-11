@@ -388,11 +388,16 @@ display(
 # calibrated. Measured on twelve synthetic panels with the true effect fixed at exactly
 # zero, highly persistent AR(1) confounders that strongly predict the treatment, and forty
 # placebo draws each: at the conventional five percent level the raw-effect comparison
-# rejects on eleven of the twelve and the t-statistic comparison on five, and eleven of the
-# twelve observed t-statistics are negative against a true effect of zero. The measurement
-# is on ml4t/agent-workspace#1120. An estimate that is itself biased sits far from its own
-# permutation null and the permutation reports that distance correctly, so what the column
-# below reports is that distance rather than whether the estimate is sound.
+# rejects the permutation null on eleven of the twelve and the t-statistic comparison on
+# five, and eleven of the twelve observed t-statistics are negative against a true effect
+# of zero. A rejection is what the column below records as `Passes`, so on those panels the
+# column reads `Passes` for an effect that is exactly zero. The measurement is on
+# ml4t/agent-workspace#1120.
+#
+# The other label carries no more weight. `Fails` says only that the observed statistic was
+# not distinguishable from the permutation distribution, which is as easily a short sample
+# as an unbiased estimate. Either way the column reports the distance between an estimate
+# and its own permutation null, and a biased estimate sits far from that null too.
 
 # %%
 HAC_SIG = "HAC clears"
