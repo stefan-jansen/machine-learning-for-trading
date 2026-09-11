@@ -108,7 +108,7 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from data import load_etfs, load_macro
-from utils.paths import display_path, get_case_study_dir, get_output_dir
+from utils.paths import display_path, get_case_study_dir, get_output_dir, registry_readonly_uri
 from utils.style import COLORS, add_message_title, show_with_alt
 
 # basicConfig is a no-op once a handler exists, and importing the feature libraries installs one,
@@ -229,15 +229,19 @@ print(f"Features: {features.shape}, {len(fc)} feature columns")
 #
 # The pin names a **configuration**, not a training hash. A refit re-keys the hash while selecting
 # the same configuration, so a hash pin would fire on runs where nothing had changed.
+#
+# `registry_readonly_uri` opens the registry with `mode=ro` and adds `immutable=1` only where it
+# is true. A live registry is a WAL database that sweeps write to concurrently, and an immutable
+# connection ignores the -wal file and reads the pre-WAL main file, which would show up here as
+# a stale leader or as a table that appears not to exist. A downloaded artifact bundle is the
+# other case: its tree is left unwritable, and there the flag is what lets a WAL reader open the
+# file at all.
 
 # %%
 etfs_dir = get_case_study_dir("etfs")
 labels_path = etfs_dir / "labels" / f"{PRIMARY_LABEL}.parquet"
 registry_path = etfs_dir / "run_log" / "registry.db"
-# Read-only, but not `immutable=1`: the registry is a WAL database that sweeps write to
-# concurrently, and an immutable connection ignores the -wal file and reads the pre-WAL main
-# file, which shows up here as a stale leader or as a table that appears not to exist.
-registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro"
+registry_uri = registry_readonly_uri(registry_path)
 with sqlite3.connect(registry_uri, uri=True) as conn:
     winner = conn.execute(
         """SELECT tr.config_name, tr.spec_json, pm.ic_mean

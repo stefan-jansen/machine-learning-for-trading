@@ -64,7 +64,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 from demo_artifacts import normalize_demo_predictions
 
-from utils.paths import display_path, get_case_study_dir, get_output_dir
+from utils.paths import display_path, get_case_study_dir, get_output_dir, registry_readonly_uri
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% [markdown]
@@ -94,18 +94,19 @@ EXPORT_PATH = get_output_dir(25, "quantconnect_export") / "ml4t_qc_predictions.j
 
 
 # %% [markdown]
-# The registry is opened read-only, and deliberately not with `immutable=1`. That flag promises
-# SQLite the database cannot change while it is open, which lets it skip locking and WAL recovery.
-# That holds for a released case directory and not for a live one a sweep may be writing, and an
-# immutable read of a database with an uncheckpointed write-ahead log sees the pre-WAL main file:
-# a stale configuration selected silently, or a table that appears not to exist.
+# The registry is opened read-only by `mode=ro`. `immutable=1` is a separate promise - that the
+# database cannot change while it is open, which lets SQLite skip locking and WAL recovery - and
+# an immutable read of a database with an uncheckpointed write-ahead log sees the pre-WAL main
+# file: a stale configuration selected silently, or a table that appears not to exist. The
+# promise holds for a downloaded artifact bundle, whose tree is left unwritable, and not for a
+# live case directory a sweep may be writing. `registry_readonly_uri` decides from the directory.
 
 # %%
 case_study_dir = get_case_study_dir("etfs")
 registry_path = case_study_dir / "run_log" / "registry.db"
 registry_hash_before = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 
-registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro"
+registry_uri = registry_readonly_uri(registry_path)
 with sqlite3.connect(registry_uri, uri=True) as conn:
     winner = conn.execute(
         """SELECT ps.training_hash, br.backtest_hash, br.stage, bm.sharpe
