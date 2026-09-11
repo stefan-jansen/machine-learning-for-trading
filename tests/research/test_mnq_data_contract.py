@@ -117,6 +117,21 @@ def test_rejects_non_five_minute_input(bad_timestamps):
         normalize_mnq_bars(frame)
 
 
+def test_rejects_valid_aligned_ten_minute_gap():
+    frame = make_session_fixture().with_columns(
+        pl.Series(
+            "timestamp",
+            [
+                datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc),
+                datetime(2026, 1, 5, 14, 40, tzinfo=timezone.utc),
+            ],
+        ),
+        pl.lit(True).alias("bar_closed"),
+    )
+    with pytest.raises(ValueError, match="cadence"):
+        normalize_mnq_bars(frame)
+
+
 def test_rejects_missing_columns_closed_status_and_invalid_timestamp():
     frame = make_session_fixture()
     with pytest.raises(ValueError, match="bar_closed"):
@@ -127,3 +142,10 @@ def test_rejects_missing_columns_closed_status_and_invalid_timestamp():
     invalid = invalid.with_columns(pl.lit(True).alias("bar_closed"))
     with pytest.raises(ValueError, match="invalid datetime"):
         normalize_mnq_bars(invalid)
+
+
+@pytest.mark.parametrize("bar_closed", [[2, 0], ["true", "false"]])
+def test_rejects_non_boolean_closed_status(bar_closed):
+    frame = make_session_fixture().with_columns(pl.Series("bar_closed", bar_closed))
+    with pytest.raises(ValueError, match="explicit boolean"):
+        normalize_mnq_bars(frame)

@@ -78,7 +78,7 @@ def _validate_five_minute_contract(frame: pl.DataFrame) -> None:
     deltas = [later - earlier for earlier, later in zip(timestamps, timestamps[1:])]
     if any(delta <= timedelta(0) for delta in deltas):
         raise ValueError("MNQ timestamps must be strictly increasing")
-    if any(delta.total_seconds() % BAR_INTERVAL.total_seconds() for delta in deltas):
+    if any(delta != BAR_INTERVAL for delta in deltas):
         raise ValueError("MNQ input contains irregular, non-5-minute cadence")
 
 
@@ -128,10 +128,11 @@ def normalize_mnq_bars(frame: pl.DataFrame | "pd.DataFrame") -> pl.DataFrame:
         raise ValueError("required input column missing: bar_closed")
 
     result = _normalize_timestamp(result)
-    _validate_five_minute_contract(result)
-    result = result.with_columns(pl.col("bar_closed").cast(pl.Boolean))
+    if result.schema["bar_closed"] != pl.Boolean:
+        raise ValueError("bar_closed must contain only explicit boolean values")
     if result.get_column("bar_closed").null_count():
         raise ValueError("bar_closed must contain only explicit boolean values")
+    _validate_five_minute_contract(result)
     result = result.filter(pl.col("bar_closed"))
 
     result = assign_new_york_sessions(result)
