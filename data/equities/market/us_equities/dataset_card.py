@@ -266,9 +266,10 @@ if profile_path.exists():
 else:
     print(f"No profile at {profile_path}")
     print(
-        "A profile is written by the loader that builds the dataset, through\n"
-        "ml4t.data.storage.data_profile. There is no separate profile-generating\n"
-        "script; rebuild the dataset and its loader writes one."
+        "Profiles are written next to the data by whatever builds the dataset - the\n"
+        "download script in this directory, or the ml4t-data loader it drives - through\n"
+        "ml4t.data.storage.data_profile. There is no separate profile-generating script,\n"
+        "and nothing in this notebook writes one."
     )
 
 # %% [markdown]
