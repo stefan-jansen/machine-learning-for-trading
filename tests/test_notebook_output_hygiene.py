@@ -32,6 +32,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
@@ -121,6 +123,55 @@ def test_an_already_rewritten_path_is_not_rewritten_again() -> None:
     """
     nested = "~/.claude/jobs/7c96381e/tmp/dpgan_final_out.ipynb"
     assert sanitize_text(nested) == (nested, 0)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The absolute spelling, which a fresh render produces.
+        ("/home/stefan/ml4t/public-teach-e/10_text/out.parquet", "10_text/out.parquet"),
+        (
+            "/home/runner/ml4t/public/16_strategy_simulation/fig.png",
+            "16_strategy_simulation/fig.png",
+        ),
+        # The `~/` spelling, which the generic `~/ml4t/` rule has been producing
+        # since worktrees came in and which nothing downstream could see.
+        ("~/ml4t/public-s6-us_equities_panel/out.parquet", "out.parquet"),
+        (
+            "~/ml4t/public/16_strategy_simulation/output/fig.png",
+            "16_strategy_simulation/output/fig.png",
+        ),
+        ("~/ml4t/public-teach-b6/a/b.csv", "a/b.csv"),
+        ("Saved summary to: ~/ml4t/public-gpu-flags/x.parquet", "Saved summary to: x.parquet"),
+    ],
+)
+def test_a_worktree_root_is_rewritten_in_both_spellings(text: str, expected: str) -> None:
+    """A worktree is a repo root, so its paths come out repo-relative.
+
+    The second spelling is the one that matters here. `~/ml4t/public-teach-e/x` is
+    what the generic `/home/[^/]+/ml4t/` rule produced from the first, and neither
+    this module's CI guard nor `nbcheck` could match it - both look for the
+    `/home/` form. So the leak was detectable right up until the tool whose job is
+    to remove it ran, and undetectable afterwards.
+    """
+    assert sanitize_text(text) == (expected, 1)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # `public` has to be a whole path segment. A bare `public[^/]*` eats this.
+        "~/ml4t/publications/paper.pdf",
+        # A sibling of the worktrees, not one of them.
+        "~/ml4t/case_studies/etfs/run_log/registry.db",
+        "~/ml4t/",
+        # No trailing slash, so it is not a path prefix and has nothing to strip.
+        "~/ml4t/public",
+        "the public filings dataset",
+    ],
+)
+def test_a_worktree_rule_does_not_eat_its_neighbours(text: str) -> None:
+    assert sanitize_text(text) == (text, 0)
 
 
 def test_the_sanitizer_reports_a_string_it_cannot_safely_rewrite() -> None:

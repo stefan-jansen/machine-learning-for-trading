@@ -1629,6 +1629,90 @@ def sync_prose(nb_path: Path) -> str:
     return stamp["source_py_blob"]
 
 
+def sync_paths(nb_path: Path) -> str:
+    """Re-stamp a notebook whose only change is the path sanitizer's rewrite.
+
+    `sanitize_notebook_paths.py` rewrites machine-specific paths out of cell outputs, and
+    a path in an output is hashed by `outputs_digest`, so a sanitize reads as stale. None
+    of the existing tiers covers it: `sync-prose` refuses because the outputs moved,
+    `sync-alt` writes alt text, and a figure title is a code change.
+
+    A re-run is the wrong answer here, and not merely an expensive one. Re-executing
+    cannot remove a worktree path from an output - it writes the *current* worktree's path
+    instead - so the gate would be demanding the one action that reintroduces the defect.
+    That is the same argument `VOLATILE_OUTPUT_KEYS` makes for figure `alt`: re-executing
+    cannot change the image either.
+
+    Decidable rather than trusted. This does not accept "the author says it was only
+    paths". It reads the committed notebook, applies the sanitizer to it, and requires the
+    result to equal the file on disk exactly. Anything else - a number that moved, a cell
+    that was edited, a figure that was regenerated - fails that comparison and is refused.
+    The stamp keeps its `source_py_blob`, `executed_at` and `executor`, because the `.py`
+    did not change and the outputs are still the ones that run produced.
+    """
+    rel = nb_path.relative_to(REPO_ROOT)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from sanitize_notebook_paths import sanitize_notebook
+
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    stamp = nb.get("metadata", {}).get(STAMP_KEY)
+    if not stamp:
+        raise SystemExit(
+            f"{rel} carries no provenance stamp, so there is no executed state to preserve."
+        )
+
+    # Already folded in. A batch that stops halfway must be resumable, and without this
+    # the second pass refuses every notebook the first one finished - the stamp on disk is
+    # correctly no longer the one at HEAD, which is exactly what the check below rejects.
+    if stamp.get("outputs_digest") == outputs_digest(nb):
+        return stamp["outputs_digest"]
+
+    committed = subprocess.run(
+        ["git", "show", f"HEAD:{rel}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if committed.returncode != 0:
+        raise SystemExit(
+            f"{rel} is not committed at HEAD, so there is nothing to compare the rewrite "
+            "against. This command folds in a sanitize of an already-committed notebook."
+        )
+
+    old = json.loads(committed.stdout)
+    old_stamp = old.get("metadata", {}).get(STAMP_KEY) or {}
+    if old_stamp.get("outputs_digest") != stamp.get("outputs_digest"):
+        raise SystemExit(
+            f"{rel}: the stamp on disk is not the one at HEAD, so this working copy carries "
+            "more than a sanitize. Refusing rather than stamping over it."
+        )
+    if outputs_digest(old) != old_stamp.get("outputs_digest"):
+        raise SystemExit(
+            f"{rel}: the committed notebook's outputs already disagree with its own stamp, so "
+            "it was stale before this rewrite. That is a re-run, not a sanitize."
+        )
+
+    expected_raw, _replaced, _skipped = sanitize_notebook(committed.stdout)
+    if json.loads(expected_raw) != nb:
+        raise SystemExit(
+            f"{rel}: the file on disk is not the committed notebook with its paths sanitized, "
+            "so something else changed too. Refusing - this command cannot tell a moved number "
+            "from a moved path, so it insists the two agree exactly."
+        )
+
+    stamp = dict(stamp)
+    stamp["outputs_digest"] = outputs_digest(nb)
+    stamp["notes"] = (
+        f"machine-specific paths sanitized out of the outputs at "
+        f"{datetime.now(UTC).isoformat()} without re-executing; every other byte of every "
+        f"output is identical to the run stamped at {stamp.get('executed_at', 'unknown')}"
+    )
+    nb.setdefault("metadata", {})[STAMP_KEY] = stamp
+    nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    return stamp["outputs_digest"]
+
+
 def _splice_alt(
     old_segments: tuple[str, ...], new_segments: tuple[str, ...], carried: str
 ) -> str | None:
@@ -1927,6 +2011,16 @@ def _cmd_sync_alt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sync_paths(args: argparse.Namespace) -> int:
+    for name in args.notebooks:
+        path = Path(name).resolve()
+        if path.suffix == ".py":
+            path = path.with_suffix(".ipynb")
+        digest = sync_paths(path)
+        print(f"paths synced {path.relative_to(REPO_ROOT)}: outputs_digest={digest[:12]}")
+    return 0
+
+
 def _cmd_sync_prose(args: argparse.Namespace) -> int:
     for name in args.notebooks:
         path = Path(name).resolve()
@@ -2212,6 +2306,20 @@ def main() -> int:
     )
     yp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
     yp.set_defaults(func=_cmd_sync_prose)
+
+    sp = sub.add_parser(
+        "sync-paths",
+        help="fold the path sanitizer's rewrite into the executed .ipynb, keeping its outputs",
+        description=(
+            "For a notebook whose only change is `sanitize_notebook_paths.py` rewriting a "
+            "machine-specific path out of a cell output. Re-running cannot fix that - it "
+            "writes the current worktree's path instead - so the stamp keeps its executed_at "
+            "and executor and only outputs_digest moves. Refuses unless the file on disk is "
+            "exactly the committed notebook with the sanitizer applied."
+        ),
+    )
+    sp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
+    sp.set_defaults(func=_cmd_sync_paths)
 
     pp = sub.add_parser(
         "prose",
