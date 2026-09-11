@@ -78,7 +78,6 @@
 # ## Setup
 
 # %%
-import itertools
 from datetime import datetime
 
 import numpy as np
@@ -441,25 +440,17 @@ if kelly_strategy.size_history:
         height=400,
     )
     # A prefix count, not a total: the helper can return the base again later.
-    _sizes = kelly_strategy.size_history
-    _leading_base = len(
-        list(itertools.takewhile(lambda size: size == kelly_strategy.base_size, _sizes))
-    )
-    _rest = _sizes[_leading_base:]
-    _tail = (
-        f"every one of the remaining {len(_rest)} comes out at {_rest[0]:.0%}"
-        if _rest and min(_rest) == max(_rest)
-        else f"the remaining {len(_rest)} range from {min(_rest):.0%} to {max(_rest):.0%}"
-        if _rest
-        else "no entry leaves it"
-    )
     show_plotly_with_alt(
         fig,
-        "Line chart of the Kelly target fraction of equity against trade number, with a dashed "
-        f"line at the base target of {kelly_strategy.base_size:.0%}. The first {_leading_base} "
-        f"of {len(_sizes)} entries sit exactly on it, which is what the sizing helper returns "
-        "while fewer than the required number of trades have closed and while the closed ones "
-        f"are all wins or all losses. After that the formula applies and {_tail}.",
+        (
+            "Line chart of the Kelly target fraction of equity against trade number, one point per "
+            "entry in the order the trades were taken, with a dashed horizontal line at the "
+            "configured base target. The sizing helper returns the base target until enough "
+            "trades have closed to estimate a win rate and a payoff ratio, and until the closed "
+            "trades include both a win and a loss; past that point the Kelly formula sets the "
+            "fraction. Drawn against trade number rather than date because the sizing changes on "
+            "trade events, not on the calendar."
+        ),
     )
 
 # %%
@@ -931,23 +922,16 @@ if pairs_strategy.zscore_history:
     fig.update_yaxes(title_text="KRE / XLF", row=2, col=1)
     fig.update_yaxes(title_text="Z-Score", row=3, col=1)
     fig.update_xaxes(title_text="Date", row=3, col=1)
-    _above_upper = [z > pairs_strategy.entry_zscore for z in z_vals]
-    _below_lower = [z < -pairs_strategy.entry_zscore for z in z_vals]
-    _entry_crossings = sum(1 for a, b in itertools.pairwise(_above_upper) if a != b) + sum(
-        1 for a, b in itertools.pairwise(_below_lower) if a != b
-    )
     show_plotly_with_alt(
         fig,
-        f"Three stacked panels on a shared date axis over {len(dates):,} sessions. The top panel "
-        f"is the {PAIR_A} and {PAIR_B} closing prices: {PAIR_A} runs from {close_a.min():,.0f} "
-        f"to {close_a.max():,.0f} and {PAIR_B} from {close_b.min():,.0f} to {close_b.max():,.0f}, "
-        "so one of the pair moves far more than the other. The middle panel is their ratio, "
-        f"which runs from {(close_b / close_a).min():.2f} to {(close_b / close_a).max():.2f}. "
-        "The bottom panel is the ratio's rolling z-score with dashed entry bands and dotted exit "
-        f"bands; it spans {min(z_vals):.2f} to {max(z_vals):.2f} and crosses the entry bands "
-        f"{_entry_crossings} "
-        "times. A level shift in the ratio does not pin the z-score, because the rolling window "
-        "re-centres on the new level.",
+        (
+            f"Three stacked panels on a shared date axis. The top panel is the {PAIR_A} and "
+            f"{PAIR_B} closing prices on one axis. The middle panel is their ratio. The bottom "
+            "panel is that ratio's rolling z-score, with dashed lines at the entry bands and "
+            "dotted lines at the exit bands. The z-score is taken over a rolling window rather "
+            "than the whole sample, so it re-centres as the ratio's level moves, and the three "
+            "panels are stacked to show the same dates through each transform the rule applies."
+        ),
     )
 
 # %% [markdown]
@@ -1266,17 +1250,14 @@ if cb_strategy.multiplier_history and cb_strategy.drawdown_history:
     fig.update_xaxes(title_text="Date", row=3, col=1)
     show_plotly_with_alt(
         fig,
-        f"Three stacked panels on a shared date axis over {n:,} sessions. The top panel holds "
-        "two equity curves from the same signals: the unprotected one, dashed, recovers and goes "
-        "on to a new high, while the protected one, solid, is flat from the breach onwards. The "
-        f"middle panel is the protected rule's drawdown, which reaches {min(dd_pct):.1f} percent "
-        f"against dashed lines at {-100 * cb_strategy.caution_threshold:.0f} and "
-        f"{-100 * cb_strategy.halt_threshold:.0f}, crossing both in one move. The bottom panel "
-        "is the sizing multiplier, which ends at "
-        f"{cb_strategy.multiplier_history[n - 1]:.2f} and spends "
-        f"{sum(1 for m in cb_strategy.multiplier_history[:n] if m == 0) / n:.0%} of the sample "
-        "at zero: a halted strategy takes no new entries, so it cannot earn its way back above "
-        "the threshold that halted it.",
+        (
+            "Three stacked panels on a shared date axis. The top panel holds two equity curves "
+            "built from the same signals, one with the circuit breaker active and one without, so "
+            "the only difference between them is the breaker. The middle panel is the protected "
+            "rule's drawdown against dashed lines at the caution and halt thresholds, measured as "
+            "a positive loss from the running peak. The bottom panel is the sizing multiplier the "
+            "breaker applies, which is the mechanism connecting the other two panels."
+        ),
     )
 
 # %% [markdown]

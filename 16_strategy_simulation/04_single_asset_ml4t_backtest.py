@@ -64,7 +64,6 @@
 # %%
 """Single-asset event-driven backtest with explicit timing, sizing, and cost accounting."""
 
-import itertools
 from datetime import datetime
 
 import numpy as np
@@ -228,6 +227,8 @@ fig.add_trace(
 
 # Add RSI threshold lines
 fig.add_hline(y=RSI_LOWER, line_dash="dash", line_color=COLORS["positive"], row=2, col=1)
+# Assigned, not bare: add_hline returns the figure, and a bare call as the cell's last
+# statement makes Jupyter render it as an extra output with no alt text.
 _ = fig.add_hline(y=RSI_UPPER, line_dash="dash", line_color=COLORS["negative"], row=2, col=1)
 
 # %%
@@ -243,16 +244,15 @@ fig.update_layout(
     yaxis_title="Price (USDT)",
     yaxis2_title="RSI",
 )
-_close = prices_df["close"]
-_rsi = context_df["rsi"].drop_nulls()
 show_plotly_with_alt(
     fig,
-    f"Two stacked panels on a shared date axis over {len(_close):,} daily bars. The upper panel "
-    f"is the BTC/USDT close, running from {_close.min():,.0f} to {_close.max():,.0f}. The lower "
-    f"panel is the {RSI_PERIOD}-period RSI in amber with dashed lines at {RSI_LOWER} and "
-    f"{RSI_UPPER}; it spends {float((_rsi < RSI_LOWER).mean()):.0%} of its sessions below the "
-    f"entry threshold and {float((_rsi > RSI_UPPER).mean()):.0%} above the exit threshold, so "
-    "both are crossed repeatedly rather than reached once.",
+    (
+        "Two stacked panels on a shared date axis. The upper panel is the BTC/USDT close in "
+        f"USDT. The lower panel is the {RSI_PERIOD}-period RSI computed from those closes, in "
+        "amber, with dashed horizontal lines at the entry and exit thresholds. Same "
+        "construction as the vectorized notebook's first figure, drawn here so the two "
+        "engines can be compared on an identical starting point."
+    ),
 )
 
 # %% [markdown]
@@ -619,14 +619,14 @@ fig.update_layout(
     height=450,
     hovermode="x unified",
 )
-_equity = list(ec.values)
-_flat = sum(1 for a, b in itertools.pairwise(_equity) if a == b)
 show_plotly_with_alt(
     fig,
-    f"Line chart of portfolio value in USDT from a {INITIAL_CASH:,.0f} start. Long flat "
-    "stretches, where the rule holds cash, separate short active ones: "
-    f"{_flat:,} of {len(_equity):,} sessions show no change. The path runs from "
-    f"{min(_equity):,.0f} to {max(_equity):,.0f} and ends at {_equity[-1]:,.0f}.",
+    (
+        "Line chart of the RSI rule's portfolio value in USDT over the sample, starting from "
+        "the configured initial cash, as the event-driven engine computes it. The rule holds "
+        "cash between an exit and the next entry, so the series is flat on every session it "
+        "is not invested."
+    ),
 )
 
 # %%
@@ -653,12 +653,13 @@ fig_dd.update_layout(
     height=400,
     hovermode="x unified",
 )
-_dd = [float(v) for v in drawdown_pct]
 show_plotly_with_alt(
     fig_dd,
-    "Filled drawdown chart from the running peak, zero at the top and losses below. The curve "
-    f"reaches {min(_dd):.1f} percent at its worst and ends at {_dd[-1]:.1f}, and the rule is "
-    f"below its own peak on {sum(1 for v in _dd if v < 0) / len(_dd):.0%} of sessions.",
+    (
+        "Filled drawdown chart measured from the portfolio's own running peak, zero at the "
+        "top and losses below, in percent. Each point is the distance from the highest value "
+        "reached up to that date."
+    ),
 )
 
 # %% [markdown]
@@ -770,14 +771,16 @@ fig.update_layout(
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     hovermode="x unified",
 )
-_bh = list(benchmark_ec.values)
 show_plotly_with_alt(
     fig,
-    "Portfolio value on a logarithmic axis for the RSI rule in solid navy and buy-and-hold in "
-    "dashed grey, both run through the same engine, allocation, next-open fills and costs from "
-    f"a {INITIAL_CASH:,.0f} start. Buy-and-hold runs from {min(_bh):,.0f} to {max(_bh):,.0f} and "
-    f"ends at {_bh[-1]:,.0f}; the RSI rule runs from {min(_equity):,.0f} to {max(_equity):,.0f} "
-    f"and ends at {_equity[-1]:,.0f}. The log axis is what lets both fit on one panel.",
+    (
+        "Portfolio value for the RSI rule in solid navy and buy-and-hold in dashed grey, on a "
+        "logarithmic axis. Both are run through the same engine with the same allocation, the "
+        "same next-open fills and the same costs, from the same starting capital, so the only "
+        "difference between them is the entry and exit rule. The axis is logarithmic so that "
+        "equal proportional moves are equal distances on the page whatever each series' "
+        "level, which is what lets two curves of different magnitude share a panel."
+    ),
 )
 
 # %% [markdown]
@@ -835,18 +838,16 @@ fig.update_layout(
     barmode="relative",
     height=450,
 )
-_mfe = (excursion_df["mfe"] * 100).to_list()
-_mae = (excursion_df["mae"] * 100).to_list()
-_realized = (excursion_df["pnl_percent"] * 100).to_list()
-_inside = sum(1 for f, a, r in zip(_mfe, _mae, _realized, strict=True) if a <= r <= f)
 show_plotly_with_alt(
     fig,
-    f"Bar chart over the {len(_mfe)} closed round trips, one pair of bars per trade: maximum "
-    "favorable excursion above zero, maximum adverse excursion below, with the realized return "
-    f"marked as a diamond. Favorable excursions reach {max(_mfe):.0f} percent at most and "
-    f"adverse ones {min(_mae):.0f} percent at worst. {_inside} of the {len(_mfe)} realized "
-    "returns fall between their own trade's two extremes, which is the point: each trade "
-    "travelled further in both directions than where it closed.",
+    (
+        "Bar chart over the closed round trips, one pair of bars per trade in the order they "
+        "closed: maximum favorable excursion above zero, maximum adverse excursion below, "
+        "with the realized return marked as a diamond. The two excursions are the best and "
+        "worst unrealized returns reached while the trade was open, so each pair brackets the "
+        "diamond between them. Drawn to separate what a trade did while it was open from what "
+        "it settled at."
+    ),
 )
 
 # %%

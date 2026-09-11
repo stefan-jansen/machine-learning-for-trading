@@ -328,11 +328,13 @@ fig.update_layout(
 
 show_plotly_with_alt(
     fig,
-    f"Bar chart of the estimated Rademacher complexity for {len(strategies)} candidate-class "
-    f"structures, with a dashed red line marking Massart's bound at {massart_bound:.3f}. "
-    + ", ".join(f"{name} {value:.3f}" for name, value in zip(strategies, R_values, strict=True))
-    + ". The more variation the candidates share, the less the class can fit by chance, and only "
-    "the independent case approaches the bound.",
+    (
+        f"Bar chart of the estimated Rademacher complexity for {len(strategies)} candidate-"
+        "class structures, one bar per structure, with a dashed red line marking Massart's "
+        "bound for a finite class of this size. The bound depends only on the candidate "
+        "count, so it is the same for every bar and is what each estimate is being read "
+        "against."
+    ),
 )
 
 # %% [markdown]
@@ -486,13 +488,13 @@ fig.update_yaxes(title_text="Candidate count", row=1, col=2)
 
 show_plotly_with_alt(
     fig,
-    f"Two panels over the sweep of {SWEEP_CANDIDATES:,} correlated candidates. The left panel "
-    "scatters the RAS lower bound against the observed Sharpe with a dashed no-adjustment "
-    f"diagonal. Observed Sharpe ratios span {observed_sharpe.min():.2f} to "
-    f"{observed_sharpe.max():.2f}; their lower bounds span {adjusted_sharpe.min():.2f} to "
-    f"{adjusted_sharpe.max():.2f}, so every marker sits far below the diagonal and "
-    f"{int((adjusted_sharpe > 0).sum())} of them clear zero. The right panel overlays the two as "
-    "histograms: two narrow spikes with nothing between them.",
+    (
+        f"Two panels over a sweep of {SWEEP_CANDIDATES:,} correlated candidates. The left "
+        "panel scatters the RAS lower bound against the observed Sharpe, one point per "
+        "candidate, with a dashed diagonal marking no adjustment. The right panel is the "
+        "distribution of the adjustment itself. Correlated rather than independent "
+        "candidates, because that is the case the Rademacher bound is meant to handle."
+    ),
 )
 
 # %% [markdown]

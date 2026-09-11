@@ -348,23 +348,17 @@ fig.update_layout(
     showlegend=False,
 )
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
-_scores = latest_scores["momentum_score"].to_list()
-_n_held = len(latest_top)
-_gap_in_top = _scores[0] - _scores[_n_held - 1] if _n_held else 0.0
-_selection_note = (
-    f"They are spread over {_gap_in_top:.2f} among themselves against "
-    f"{_scores[_n_held - 1] - _scores[_n_held]:.2f} between the last of them and the first fund "
-    "left out, so what the chart shows is the size of the gap the selection rests on rather "
-    "than a clean break"
-    if 0 < _n_held < len(_scores)
-    else f"They are spread over {_gap_in_top:.2f} among themselves, with no fund left out"
-)
 show_plotly_with_alt(
     fig,
-    f"Horizontal bar chart of the {len(_scores)} funds' trailing risk-adjusted momentum on "
-    f"{dates[-1]}, sorted with the highest at the top and spanning {min(_scores):.2f} to "
-    f"{max(_scores):.2f}. The top {_n_held} are drawn in navy as the ones a risk-on month would "
-    f"buy: {', '.join(latest_top)}. {_selection_note}.",
+    (
+        "Horizontal bar chart of one trailing momentum score per fund, drawn for the last "
+        "session of the sample so the ranking the monthly rule acts on is visible directly. "
+        f"The score is a fund's return over the trailing {LOOKBACK_PERIOD}-session window "
+        "divided by its annualized volatility over that same window, so the axis is return "
+        "per unit of risk rather than return. Funds are sorted with the highest score at the "
+        "top, the ones the rule would hold are drawn in navy and the rest in grey, and a "
+        "dashed vertical line marks zero."
+    ),
 )
 
 # %% [markdown]
@@ -465,20 +459,17 @@ fig.update_layout(
 fig.update_yaxes(title_text="Spread (percentage points)", row=1, col=1)
 fig.update_yaxes(title_text="ETF symbol", row=2, col=1)
 fig.update_xaxes(title_text="Date", row=2, col=1)
-_defensive_columns = [ETF_SYMBOLS.index(symbol) for symbol in DEFENSIVE_MIX]
-_defensive_on = execution_weights[:, _defensive_columns].sum(axis=1) > 0.5
-_defensive_when_below = float(_defensive_on[~regime].mean()) if (~regime).any() else 0.0
 show_plotly_with_alt(
     fig,
-    f"Two stacked panels sharing a date axis from {dates[0]} to {dates[-1]}. The upper panel is "
-    "the 10Y-2Y Treasury spread in percentage points with a dashed line at the risk-off "
-    f"threshold; the spread runs from {yield_curve_slope.min() * 100:.2f} to "
-    f"{yield_curve_slope.max() * 100:.2f} points and sits above the threshold on "
-    f"{risk_on_share:.0%} of days. The lower panel is a heatmap of target weight by fund and "
-    "date. The defensive rows are dark on "
-    f"{_defensive_when_below:.0%} of the sessions whose spread is below the threshold rather "
-    "than on all of them: the regime is read at a month end and the weights fill on the next "
-    "session, so a crossing inside a month changes nothing until the next rebalance.",
+    (
+        "Two stacked panels sharing a date axis. The upper panel is the 10Y-2Y Treasury "
+        "spread in percentage points, with a dashed horizontal line at the risk-off "
+        "threshold. The lower panel is a heatmap of target weight by fund and date, one row "
+        "per fund, dated to the session each weight fills on rather than the session that "
+        "produced it. Drawn so the two panels can be read against each other with that shift "
+        "already applied: the regime is read at a month end and the weights it produces are "
+        "executed at the next open."
+    ),
 )
 
 # %% [markdown]
@@ -698,19 +689,16 @@ fig.update_layout(
     height=500,
 )
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
-_lead = "ahead of" if strategy_cum[-1] > benchmark_cum[-1] else "behind"
-_widest_gap = float(np.abs(strategy_cum - benchmark_cum).max()) * 100
 show_plotly_with_alt(
     fig,
-    "Line chart of cumulative net return in percent for the ETF momentum portfolio, in solid "
-    f"navy, and the 60/40 benchmark, dashed grey, both measured against the {INITIAL_CASH:,.0f} "
-    f"of starting capital. Neither begins at zero: on {dates[0]} momentum is already at "
-    f"{strategy_cum[0] * 100:.2f} percent and the benchmark at {benchmark_cum[0] * 100:.2f}, "
-    "which is the first session's return net of the fees paid to open. Momentum peaks at "
-    f"{strategy_cum.max() * 100:.0f} percent and ends at {strategy_cum[-1] * 100:.0f}; the "
-    f"benchmark peaks at {benchmark_cum.max() * 100:.0f} and ends at "
-    f"{benchmark_cum[-1] * 100:.0f}, so momentum finishes {_lead} it, and the widest the two "
-    f"are ever apart is {_widest_gap:.0f} points.",
+    (
+        "Line chart of cumulative net return for the ETF momentum portfolio in solid navy "
+        "against the 60/40 benchmark in dashed grey. Both are measured against the same "
+        "starting capital and carry the same per-trade costs, and both begin at the first "
+        "session's close rather than at zero, so each point is growth on the capital "
+        "committed at the start. Drawn to put the rule's whole path beside the passive "
+        "alternative it has to beat."
+    ),
 )
 
 # %% [markdown]
@@ -755,12 +743,13 @@ fig.update_layout(
 fig.update_yaxes(range=[min(strategy_dd.min(), benchmark_dd.min()) * 110, 0])
 show_plotly_with_alt(
     fig,
-    "Underwater chart of each portfolio's drawdown from its own running peak, zero at the top. "
-    "Momentum is a filled navy area and the 60/40 benchmark a dashed grey line. Momentum's worst "
-    f"fall is {strategy_dd.min() * 100:.0f} percent against the benchmark's "
-    f"{benchmark_dd.min() * 100:.0f}; momentum's low is dated {dates[int(strategy_dd.argmin())]} "
-    f"and the benchmark's {dates[int(benchmark_dd.argmin())]}, so the chart says whether the "
-    "deeper fall is the same episode or a different one.",
+    (
+        "Underwater chart of each portfolio's drawdown from its own running peak, zero at the "
+        "top and losses below, the momentum rule as a filled navy area and the 60/40 "
+        "benchmark as a dashed grey line. Each series is measured against its own peak rather "
+        "than a shared one, so the question the panel answers is how far below its own "
+        "high-water mark each portfolio was on a given date, independently of the other."
+    ),
 )
 
 # %% [markdown]
@@ -823,19 +812,16 @@ fig.update_yaxes(title_text="Mean daily return (bps)", row=1, col=1)
 fig.update_yaxes(title_text="Annualized volatility (%)", row=1, col=2)
 fig.update_xaxes(title_text="Yield-curve regime", row=1, col=1)
 fig.update_xaxes(title_text="Yield-curve regime", row=1, col=2)
-_ret_bps = regime_metrics["mean_daily_return_bps"].to_list()
-_vol_pct = regime_metrics["annualized_volatility_pct"].to_list()
-_regimes = regime_metrics["regime"].to_list()
 show_plotly_with_alt(
     fig,
-    "Two bar panels comparing the momentum strategy's realized daily returns by contemporaneous "
-    "yield-curve state. Mean daily return is "
-    + ", ".join(
-        f"{r:.1f} basis points in {name}" for name, r in zip(_regimes, _ret_bps, strict=True)
-    )
-    + "; annualized volatility is "
-    + ", ".join(f"{v:.1f} percent in {name}" for name, v in zip(_regimes, _vol_pct, strict=True))
-    + ". The return panel separates the states much more than the volatility panel does.",
+    (
+        "Two bar panels splitting the momentum rule's realized daily returns by the state of "
+        "the yield curve on the same session. The left panel is mean daily return in basis "
+        "points, the right annualized volatility in percent, and the horizontal axis of both "
+        "is the curve regime. Drawn as two panels because a regime split asks two separate "
+        "questions: whether the state changes what the rule earns, and whether it changes how "
+        "much the rule moves."
+    ),
 )
 
 # %% [markdown]

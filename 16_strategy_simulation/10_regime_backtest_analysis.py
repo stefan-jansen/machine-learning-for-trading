@@ -458,20 +458,13 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "Two horizontal bar panels sharing a state axis with one bar per volatility and trend state, "
-    "each state in its own colour, and a dashed line marking the pooled figure across all active "
-    "days. Annualized Sharpe by state: "
-    + ", ".join(
-        f"{name} {value:.2f}"
-        for name, value in zip(state_labels, regime_summary["sharpe"], strict=True)
-    )
-    + f", against {overall['sharpe']:.2f} pooled. Drawdown along each state's own path: "
-    + ", ".join(
-        f"{name} {value:.0%}"
-        for name, value in zip(state_labels, regime_summary["maximum_drawdown"], strict=True)
-    )
-    + f", against {overall['maximum_drawdown']:.0%} pooled. The two panels do not order the "
-    "states the same way, which is the reason to read both.",
+    (
+        "Two horizontal bar panels sharing a state axis, one bar per volatility and trend "
+        "state, each state in its own colour, with a dashed line marking the pooled figure "
+        "across all active days. The left panel is annualized Sharpe by state and the right "
+        "the maximum drawdown reached within each state. The pooled line is drawn on both so "
+        "each state can be read against the aggregate it is part of."
+    ),
 )
 
 # %% [markdown]
@@ -546,13 +539,13 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "Two step histograms of daily strategy return on a shared axis, all active days outlined in "
-    f"navy ({len(overall_returns):,} days) and crisis days in red ({len(crisis_returns):,}), "
-    "with each sample's 95 percent conditional value at risk marked by a dashed vertical line of "
-    f"its own colour. The two conditional values sit at {crisis_cvar_95:.2%} for crisis days and "
-    f"{overall_cvar_95:.2%} for all active days, a difference of "
-    f"{(crisis_cvar_95 - overall_cvar_95) * 10_000:.0f} basis points, so the two dashed lines "
-    "are almost on top of each other and the crisis tail is not the fatter one.",
+    (
+        "Two step histograms of daily strategy return on a shared axis, all active days "
+        "outlined in navy and crisis days in red, with each sample's 95 percent conditional "
+        "value at risk marked by a dashed vertical line in its own colour. Crisis days are a "
+        "subset of the active days rather than a disjoint sample, so the red distribution is "
+        "drawn from observations the navy one also contains."
+    ),
 )
 
 # %%
@@ -623,15 +616,12 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "Horizontal bar chart of each state's additive log-return contribution to the worst drawdown, "
-    "every bar negative. Reading them from the largest contribution to the smallest: "
-    + ", ".join(
-        f"{row['regime']} {row['log_return_contribution']:.1%}"
-        for row in attribution.sort("log_return_contribution").iter_rows(named=True)
-    )
-    + f". The episode runs from {dates[peak_index]} to {dates[trough_index]} and the "
-    "contributions sum to its whole decline, which the assertion above checks. A longer bar can "
-    "be a more common state rather than a worse one.",
+    (
+        "Horizontal bar chart of each state's additive contribution to the worst drawdown, in "
+        "log return, one bar per state. Log returns are used because they add across "
+        "sessions, which is what allows the drawdown to be decomposed by state at all; the "
+        "same decomposition in simple returns would not sum to the total."
+    ),
 )
 
 # %%

@@ -300,10 +300,11 @@ print(f"Expected best, extreme-value formula:       {gumbel_expected_max:.3f}")
 # above the expectation rather than on it. The extreme-value expression is the expected maximum,
 # and it is the one the deflated Sharpe ratio uses internally.
 #
-# Both sit above the maximum this particular batch produced, which is the third thing worth
-# noticing. The largest of a hundred draws is itself a random variable with a wide distribution,
-# so a single batch landing below its own expectation is ordinary. The correction is built on the
-# expectation, not on what one batch happened to do.
+# Neither is a prediction about the batch printed above, which is the third thing worth noticing.
+# The largest of a hundred draws is itself a random variable with a wide distribution, so a single
+# batch landing on either side of its own expectation is ordinary. The correction is built on the
+# expectation, not on what one batch happened to do, so the maximum printed here is not evidence
+# for or against either expression.
 #
 # The variance of Sharpe ratios across trials is printed for the same reason: it is an input to
 # the correction, not a description of the output. Its true value here is fixed by the record
@@ -348,11 +349,13 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    f"Histogram of the {NULL_STRATEGIES:,} observed Sharpe ratios from strategies simulated with "
-    "no edge at all, with a dashed vertical line at the true Sharpe of zero and a second at the "
-    f"sample maximum of {results['max_sharpe']:.2f}. The distribution is centred on zero and "
-    f"spans {results['min_sharpe']:.2f} to {results['max_sharpe']:.2f}, so searching this many "
-    "worthless strategies produces one that looks good.",
+    (
+        f"Histogram of the observed Sharpe ratios from {NULL_STRATEGIES:,} strategies "
+        "simulated with no edge at all, with a dashed vertical line at the true Sharpe of "
+        "zero and a second at the largest value the sample produced. Every strategy here has "
+        "the same true Sharpe by construction, so the spread is sampling noise and the "
+        "maximum is what selecting the best of this many produces from noise alone."
+    ),
 )
 
 # %% [markdown]
@@ -446,13 +449,13 @@ fig.update_xaxes(
 )
 show_plotly_with_alt(
     fig,
-    f"Line chart of the deflated Sharpe probability in percent against the number of strategies "
-    "tested, on a logarithmic axis, with dashed reference lines at 95 percent and at 50. One "
-    f"observed Sharpe of {SELECTED_SHARPE} is held fixed throughout. The curve falls from "
-    f"{dsr_df['dsr_probability'].max() * 100:.0f} percent at "
-    f"{dsr_df['n_trials'].min():,} strategies to "
-    f"{dsr_df['dsr_probability'].min() * 100:.0f} percent at {dsr_df['n_trials'].max():,}. The "
-    "estimate never moved; only the number of strategies it was chosen from did.",
+    (
+        "Line chart of the deflated Sharpe probability in percent against the number of "
+        "strategies tested, on a logarithmic horizontal axis, with dashed reference lines at "
+        "95 percent and at 50. One observed Sharpe is held fixed across the whole curve and "
+        "only the trial count varies, so the curve is the deflation alone rather than a "
+        "change in the estimate."
+    ),
 )
 
 # %% [markdown]
@@ -545,12 +548,13 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Heatmap of the deflated Sharpe probability in percent over a grid of skewness and kurtosis "
-    f"settings, each cell labelled. Every value lies between {z_values.min():.1f} and "
-    f"{z_values.max():.1f} percent. Within a row, changing kurtosis moves it by at most "
-    f"{max(row.max() - row.min() for row in z_values):.1f} points; within a column, changing "
-    f"skewness moves it by up to {max(col.max() - col.min() for col in z_values.T):.1f}. "
-    "Skewness is the one that matters here, and neither is large.",
+    (
+        "Heatmap of the deflated Sharpe probability in percent over a grid of skewness and "
+        "kurtosis settings, one cell per pair, each labelled. The observed Sharpe, sample "
+        "length and trial count are held fixed across the grid, so the surface isolates what "
+        "the two non-normality corrections do on their own. Rows and columns are the two "
+        "moments, so a row reads as one moment varying and a column as the other."
+    ),
 )
 
 # %% [markdown]
@@ -749,13 +753,14 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of adjusted against observed Sharpe ratio. The dashed grey line is the "
-    "unadjusted identity; the RAS and DSR lines both run below it. Over the plotted range the "
-    f"DSR penalty runs from {observed_range[0] - dsr_adjusted_list[0]:.2f} to "
-    f"{observed_range[-1] - dsr_adjusted_list[-1]:.2f} and the RAS penalty from "
-    f"{observed_range[0] - ras_adjusted_list[0]:.2f} to "
-    f"{observed_range[-1] - ras_adjusted_list[-1]:.2f}, so both are close to a constant shift "
-    "rather than a change of slope. The two corrections differ in size, not in shape.",
+    (
+        "Line chart of adjusted against observed Sharpe ratio, with the RAS and DSR "
+        "adjustments as separate lines and a dashed grey diagonal marking no adjustment at "
+        "all. Both adjustments are applied to the same observed values on the horizontal "
+        "axis, so vertical distance from the diagonal is each method's penalty at that "
+        "observation. Drawn against the identity because the two methods are otherwise on "
+        "different scales."
+    ),
 )
 
 # %% [markdown]
@@ -1054,18 +1059,15 @@ fig.update_yaxes(
     ticktext=[f"{n:,}" for n in pbo_blocks_df["n_combinations"].to_list()],
     secondary_y=True,
 )
-_pbo_max = pbo_blocks_df["pbo"].max() * 100
-_reference_side = "above" if _pbo_max < 50 else "below"
 show_plotly_with_alt(
     fig,
-    "Dual-axis line chart against the number of CSCV blocks. On the left axis the backtest "
-    f"overfitting probability runs from {pbo_blocks_df['pbo'].min() * 100:.0f} to "
-    f"{_pbo_max:.0f} percent, with a dashed reference line at 50, {abs(50 - _pbo_max):.0f} "
-    f"points {_reference_side} the highest value plotted. On the right axis, which is "
-    "logarithmic, the number of combinations climbs from "
-    f"{pbo_blocks_df['n_combinations'].min():,} to "
-    f"{pbo_blocks_df['n_combinations'].max():,}. The two lines share a panel and measure "
-    "unrelated quantities, so their crossing means nothing.",
+    (
+        "Dual-axis line chart against the number of CSCV blocks. The left axis carries the "
+        "backtest overfitting probability in percent with a dashed reference line at 50; the "
+        "right, logarithmic, axis carries the number of train/test combinations the block "
+        "count produces. The two series share a panel because both are consequences of the "
+        "same block count, and they measure unrelated quantities."
+    ),
 )
 
 # %% [markdown]

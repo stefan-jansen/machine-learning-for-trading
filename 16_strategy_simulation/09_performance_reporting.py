@@ -560,10 +560,11 @@ _curve_phrase = "; ".join(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of net cumulative return in percent for two rules on the same bars and the same "
-    f"costs, direct-labelled at the right. {_curve_phrase}. The axis one of them needs is wide "
-    "enough that the other reads as flat, which is why the smaller line's own losses are not "
-    "legible here and the drawdown chart below is the one that shows them.",
+    (
+        "Line chart of net cumulative return in percent for two rules run on the same bars "
+        "with the same costs, each direct-labelled at the right rather than in a legend. Both "
+        "share one linear axis, so the taller series sets the scale for both."
+    ),
 )
 
 # %% [markdown]
@@ -643,15 +644,15 @@ fig.update_layout(
     height=420,
     hovermode="x unified",
 )
-_gross = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
-_flat_share = sum(1 for v in _gross if v == 0) / len(_gross) if _gross else 0.0
 show_plotly_with_alt(
     fig,
-    "Step chart of gross exposure, solid navy, and net exposure, dotted amber, as a share of "
-    "equity. The two lines sit exactly on top of each other for the whole sample, because the "
-    "rule is long-only and a long-only book has the same gross and net. The path is square "
-    f"rather than smooth: exposure is either at zero or near its target, and it is at zero on "
-    f"{_flat_share:.0%} of the sample's days.",
+    (
+        "Step chart of gross exposure in solid navy and net exposure in dotted amber, each as "
+        "a share of equity, against date. Gross counts position value regardless of "
+        "direction and net counts it signed, so the two separate only when a book holds both "
+        "sides. Drawn as steps rather than a line because exposure changes at fills and holds "
+        "between them."
+    ),
 )
 
 # %% [markdown]
@@ -926,19 +927,14 @@ fig.update_layout(
     yaxis_title="Drawdown",
     height=360,
 )
-_dd = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
-_dd_note = (
-    f"The rule is below its own high-water mark on "
-    f"{sum(1 for v in _dd if v < 0) / len(_dd):.0%} of the sample's days, reaches "
-    f"{min(_dd):.1%} at its worst and ends at {_dd[-1]:.1%}"
-    if _dd
-    else "The chart has no plotted days"
-)
 show_plotly_with_alt(
     fig,
-    "Filled drawdown chart from the high-water mark, zero at the top and losses below. "
-    f"{_dd_note}. The flat segments are the stretches with no position, where the drawdown can "
-    "neither deepen nor recover because nothing is at risk.",
+    (
+        "Filled drawdown chart from the high-water mark, zero at the top and losses below, "
+        "against date. Each point is the distance from the highest portfolio value reached up "
+        "to that date, so the series is flat wherever the rule holds no position and nothing "
+        "is at risk."
+    ),
 )
 
 # %% [markdown]
@@ -955,17 +951,10 @@ for shape in fig.layout.shapes:
 for annotation in fig.layout.annotations:
     annotation.font.color = COLORS["neutral"]
 # Read the level back out of the label, not off the shape: three lines, two annotations.
-_reference_levels = []
 for annotation in fig.layout.annotations:
     level = re.search(r"\(([\d.]+)\)", annotation.text or "")
     if level:
         annotation.text = f"Sharpe {level.group(1)}"
-        _reference_levels.append(level.group(1))
-_level_note = (
-    f"dashed reference lines at {' and '.join(_reference_levels)}"
-    if _reference_levels
-    else "dashed reference lines"
-)
 fig.update_layout(
     title=(
         "Rolling Sharpe ratio over the sample"
@@ -978,17 +967,16 @@ fig.update_layout(
 _roll = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
 _roll_signs = [v > 0 for v in _roll if v != 0]
 _crossings = sum(1 for a, b in itertools.pairwise(_roll_signs) if a != b)
-_roll_note = (
-    f"It ranges from {min(_roll):.2f} to {max(_roll):.2f} and changes sign {_crossings} times"
-    if _roll
-    else "No window in this sample is long enough to plot"
-)
 show_plotly_with_alt(
     fig,
-    f"Line chart of the {ROLLING_WINDOW_DAYS}-day rolling Sharpe ratio with {_level_note}. "
-    "The series starts one window into the sample, because that is the "
-    f"first date a full window exists. {_roll_note}. One rule therefore sits on both sides of "
-    "every reference level, depending only on which stretch of the sample the window covers.",
+    (
+        f"Line chart of the {ROLLING_WINDOW_DAYS}-day rolling Sharpe ratio against date, with "
+        "dashed horizontal reference lines at the library's two conventional levels. The "
+        "series starts one window into the sample, because that is the first date a full "
+        "window exists. Each point is computed from that window alone, so the line says what "
+        "the same rule would have looked like to someone measuring over a window ending "
+        "there."
+    ),
 )
 
 # %%
@@ -1009,33 +997,16 @@ _months = [
     for i in _month_columns
     if row[i] is not None and np.isfinite(row[i])
 ]
-_annual_column = [i for i, label in enumerate(fig.data[0].x) if label == "Annual"]
-_annual = [
-    float(row[i])
-    for row in fig.data[0].z
-    for i in _annual_column
-    if row[i] is not None and np.isfinite(row[i])
-]
 _zero_months = sum(1 for v in _months if v == 0)
-_month_note = (
-    f"{_zero_months} of the {len(_months)} monthly cells are exactly zero, the months the rule "
-    f"held no position, and the rest run from {min(_months):.1%} to {max(_months):.1%}, so the "
-    "months that are not flat are large in both directions rather than a gentle spread around "
-    "the mean"
-    if _months
-    else "the heatmap has no monthly cells"
-)
-_annual_note = (
-    f" The annual column compounds each row and runs from {min(_annual):.1%} to "
-    f"{max(_annual):.1%} over {len(_annual)} years."
-    if _annual
-    else ""
-)
 show_plotly_with_alt(
     fig,
-    "Heatmap of net return by calendar month and year with an annual column at the right, on a "
-    "diverging scale where positive is green and negative red, each cell labelled. "
-    f"{_month_note}.{_annual_note}",
+    (
+        "Heatmap of net return by calendar month and year, one row per year and one column "
+        "per month, with a compounded annual column at the right, on a diverging scale where "
+        "positive is green and negative red and each cell is labelled. The annual column is "
+        "the product of its row's months, so it is a different quantity from the cells beside "
+        "it and is placed apart for that reason."
+    ),
 )
 
 # %%
@@ -1073,11 +1044,12 @@ _daily = daily_returns["net_return"].to_list()
 _flat_days = sum(1 for r in _daily if r == 0)
 show_plotly_with_alt(
     fig,
-    "Histogram of daily net returns with a dotted red vertical line at the empirical 95 percent "
-    f"value at risk of {dist.var_95:.2%}. A single bar at zero holds the {_flat_days:,} flat "
-    f"days out of {len(_daily):,}, the days the rule held no position, and the remaining mass is "
-    f"a short, wide skirt running from {min(_daily):.1%} to {max(_daily):.1%}. The chart shows "
-    "two populations rather than one distribution.",
+    (
+        "Histogram of daily net returns with a dotted red vertical line at the empirical "
+        "95 percent value at risk and a thin line at zero. The rule is out of the market on "
+        "many sessions, so a zero return is a distinct outcome rather than a small one, and "
+        "it collects in the bar at zero rather than spreading across neighbouring bins."
+    ),
 )
 
 # %% [markdown]

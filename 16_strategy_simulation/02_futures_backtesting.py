@@ -257,14 +257,16 @@ fig.update_layout(
     yaxis_type="log",
     height=400,
 )
-_mults = {p: DEMO_SPECS[p].multiplier for p in PRODUCTS}
-_mult_phrase = ", ".join(f"{p} {m:,.0f}" for p, m in sorted(_mults.items(), key=lambda kv: kv[1]))
 show_plotly_with_alt(
     fig,
-    "Bar chart of contract multiplier by product on a logarithmic dollar axis, each bar labelled "
-    f"with its value. From the smallest to the largest: {_mult_phrase} dollars per point. The "
-    f"range spans a factor of {max(_mults.values()) / min(_mults.values()):,.0f}, which is why a "
-    "point move cannot be read as a dollar move without the multiplier.",
+    (
+        "Bar chart of contract multiplier by product, one bar per product, on a logarithmic "
+        "dollar axis with each bar labelled by its own multiplier. The axis is logarithmic "
+        "because the multipliers are set by each contract's specification rather than by "
+        "anything comparable across products, and a linear axis would put most of them on the "
+        "baseline. Drawn to establish what has to be applied before a point move in any of "
+        "these products can be read as a dollar move."
+    ),
 )
 
 # %% [markdown]
@@ -375,11 +377,13 @@ _widest = max(_ranges, key=lambda k: (_ranges[k][1] or 0) - (_ranges[k][0] or 0)
 _lo, _hi = _ranges[_widest]
 show_plotly_with_alt(
     fig,
-    "Line chart of each product's trailing return over the sample, one line per product. The "
-    f"widest is {_widest}, which spans {_lo:.0%} to {_hi:.0%}; the other "
-    f"{len(PRODUCTS) - 1} products move over visibly narrower ranges. The dispersion a "
-    "cross-sectional ranking trades on comes mostly from whichever product is having its own "
-    "episode, which is one product here.",
+    (
+        f"Line chart of each product's trailing {LOOKBACK}-session return over the sample, one "
+        "line per product on a shared date axis. Returns rather than prices, so products "
+        "whose price levels differ by orders of magnitude can share an axis at all. Drawn "
+        "because this is the quantity a cross-sectional ranking sorts on: what the rule "
+        "compares each month is these lines' values on one date."
+    ),
 )
 
 # %% [markdown]
@@ -751,16 +755,16 @@ fig.update_layout(
 # The description reads its numbers off the plotted series rather than naming the ones this
 # run happened to produce: INITIAL_CASH is a papermill parameter, so a test-mode run plots a
 # different capital base and any hard-coded figure here would contradict its own chart.
-_aware = list(ec_with.values)
-_counter = list(ec_without.values)
 show_plotly_with_alt(
     fig,
-    f"Line chart of portfolio value in dollars from an initial ${INITIAL_CASH:,.0f}. The "
-    f"multiplier-aware run, solid navy, swings between ${min(_aware):,.0f} and "
-    f"${max(_aware):,.0f} and ends at ${_aware[-1]:,.0f}. The unit-multiplier counterfactual, "
-    f"dashed grey, stays within ${min(_counter):,.0f} to ${max(_counter):,.0f} and reads as a "
-    "flat line on the same axis, because replacing every multiplier with one shrinks each point "
-    "move to a rounding error against the capital base.",
+    (
+        "Line chart of portfolio value in dollars for two runs of the same strategy on the "
+        "same signals. The solid navy line applies each contract's real multiplier; the "
+        "dashed grey line is a counterfactual in which every multiplier is replaced by one "
+        "and nothing else is changed. Both start from the same capital and share an axis. "
+        "Drawn as a pair because the multiplier is the only difference between them, so the "
+        "panel isolates what that one field does to a futures backtest."
+    ),
 )
 
 # %% [markdown]
@@ -831,16 +835,16 @@ fig.update_layout(
     yaxis_tickformat="$,.0f",
     height=400,
 )
-_sector_rows = sector_pnl.sort("total_pnl", descending=True).iter_rows(named=True)
-_sector_phrase = ", ".join(f"{r['sector']} {format_usd(r['total_pnl'])}" for r in _sector_rows)
-_n_positive = int((sector_pnl["total_pnl"] > 0).sum())
 show_plotly_with_alt(
     fig,
-    "Bar chart of realized profit and loss by sector, each bar labelled with its dollar value and "
-    "coloured green above zero and red below. Reading the bars from the largest gain to the "
-    f"largest loss: {_sector_phrase}. {_n_positive} of {sector_pnl.height} sectors finished "
-    "positive. Each sector holds one product in this demonstration, so the chart relabels "
-    "per-product P&L rather than aggregating within a sector.",
+    (
+        "Bar chart of realized profit and loss by sector, one bar per sector, each labelled "
+        "with its dollar value and coloured green above zero and red below. Sectors are "
+        "ordered by their value rather than alphabetically. Each sector holds a single "
+        "product in this demonstration, so the chart relabels per-product profit and loss by "
+        "the sector its product belongs to rather than aggregating several products within a "
+        "sector."
+    ),
 )
 
 # %% [markdown]

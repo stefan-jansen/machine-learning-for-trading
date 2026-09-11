@@ -227,15 +227,13 @@ add_message_title(
 )
 show_with_alt(
     fig,
-    "Two panels of the cost sweep, both with cost per traded leg on the horizontal axis and a "
-    "dashed line at the baseline fee. The left panel is the Sharpe ratio, falling close to a "
-    f"straight line from {sweep['sharpe'].iloc[0]:.2f} at "
-    f"{sweep['cost_bp_per_leg'].iloc[0]:.0f} basis points to {sweep['sharpe'].iloc[-1]:.2f} at "
-    f"{sweep['cost_bp_per_leg'].iloc[-1]:.0f}. The right panel is the growth rate in percent per "
-    f"year, falling the same way from {sweep['cagr'].iloc[0] * 100:.1f} to "
-    f"{sweep['cagr'].iloc[-1] * 100:.1f}, with a dotted line at the break-even cost of "
-    f"{break_even_bp:.0f} basis points. The baseline fee of {DEFAULT_FEES * 10_000:.0f} sits "
-    "near the left edge of both panels.",
+    "Two panels of the cost sweep, drawn to isolate what the fee alone does to a strategy's "
+    "headline numbers: the same signals and the same weights are replayed at every cost level, "
+    "so nothing varies across the sweep but the charge per traded leg. That charge, in basis "
+    "points, is the horizontal axis of both panels. The left panel is the Sharpe ratio and the "
+    "right the compound growth rate in percent per year. Each carries a dashed vertical line at "
+    "the baseline fee the rest of the chapter uses; the right panel also carries a dotted line "
+    "at the break-even cost, the fee at which the growth rate reaches zero.",
 )
 
 # %% [markdown]
@@ -313,12 +311,13 @@ waterfall.update_layout(
 )
 show_plotly_with_alt(
     waterfall,
-    f"Waterfall chart in dollars over the whole sample. Gross profit and loss opens at "
-    f"{gross_pnl_dollars:,.0f}, a commissions bar takes off {commission_dollars:,.0f}, a "
-    f"compounding-and-path-effect bar takes off a further {path_effect_dollars:,.0f}, and net "
-    f"profit and loss closes at {net_pnl_dollars:,.0f}. The second deduction is "
-    f"{path_effect_dollars / commission_dollars:.0%} of the first, so the fees paid are not the "
-    "whole of what the fees cost.",
+    (
+        "Waterfall chart in dollars over the whole sample, opening at gross profit and loss "
+        "and closing at net. The intermediate bars are commissions and the combined "
+        "compounding and path effect, each drawn as a decrease from the running total. The "
+        "path effect is separated from commissions because it is not a charge: it is what "
+        "paying the charge earlier does to everything compounded after it."
+    ),
 )
 
 # %%
@@ -336,13 +335,13 @@ sensitivity = plot_cost_sensitivity(
 )
 show_plotly_with_alt(
     sensitivity,
-    "Two panels from the library's cost-sensitivity helper, Sharpe on the left and growth rate "
-    "on the right, both against transaction cost in basis points with a marker at the current "
-    "cost. Both fall close to linearly and a dotted line marks the break-even cost the helper "
-    f"computes. Compare that with the {break_even_bp:.0f} basis points the re-simulated sweep "
-    "above reports: the shapes match and the zero crossings do not, because the helper deducts a "
-    "uniform daily drag from the gross return series instead of running the strategy at each "
-    "fee.",
+    (
+        "Two panels from the library's cost-sensitivity helper, Sharpe ratio on the left and "
+        "growth rate on the right, both against transaction cost in basis points, with a "
+        "marker at the cost the rest of the notebook uses and a dotted line at the "
+        "break-even cost the helper computes. Drawn to be read against the notebook's own "
+        "sweep above, which asks the same question with its own code."
+    ),
 )
 
 # %% [markdown]

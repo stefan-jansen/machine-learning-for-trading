@@ -405,12 +405,13 @@ axes[1].set_xlabel("Date")
 
 show_with_alt(
     fig,
-    "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
-    "fractional sizing in navy and under whole-share sizing as a dashed grey line; the two "
-    f"overlay so closely that only one curve is visible, running from {eq_base.min():,.0f} to "
-    f"{eq_base.max():,.0f}. The lower panel is fractional minus whole as a percentage, which "
-    f"runs from {diff_int.min():.2f} to {diff_int.max():.2f} percent and ends at "
-    f"{diff_int.iloc[-1]:.2f} - a gap the upper panel cannot show at all.",
+    (
+        "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
+        "fractional sizing in navy and under whole-share sizing as a dashed grey line. The "
+        "lower panel is fractional minus whole as a percentage of the fractional run, with a "
+        "line at zero. The two runs differ in one configuration field and nothing else, so "
+        "the lower panel isolates what rounding an order to whole shares costs."
+    ),
 )
 
 print(
@@ -545,23 +546,16 @@ add_message_title(
     "Equity gap from holding cash back for fees",
     subtitle="Reference equity minus headroom equity, in basis points of reference equity",
 )
-_nonzero_gap = diff_hd_bps[diff_hd_bps.abs() > 0]
-_flipped = ((_nonzero_gap > 0) != (_nonzero_gap > 0).shift(1)).iloc[1:]
 # Dropping the zeros is right for counting reversals and wrong for locating them: position
 # in the zero-free subset is not position in the plotted series. Map back through the index.
-_flip_at = [diff_hd_bps.index.get_loc(stamp) for stamp in _flipped.index[_flipped.to_numpy()]]
-_flip_note = (
-    f"changing sign {len(_flip_at)} times, the last of them "
-    f"{(_flip_at[-1] + 1) / len(diff_hd_bps):.0%} of the way through the sample"
-    if _flip_at
-    else "never changing sign"
-)
 show_with_alt(
     fig,
-    "Filled area chart of the reference equity minus the headroom equity, in basis points of "
-    f"reference equity, with a dashed zero line. The gap runs from {diff_hd_bps.min():.0f} to "
-    f"{diff_hd_bps.max():.0f} basis points and ends at {diff_hd_bps.iloc[-1]:.0f}, "
-    f"{_flip_note}. Cash held back for fees costs a widening amount the longer it is held back.",
+    (
+        "Filled area chart of the reference equity minus the headroom equity, in basis points "
+        "of reference equity, against date, with a dashed line at zero. The headroom run "
+        "holds a fraction of capital back to cover fees and is otherwise identical, so the "
+        "area is the cost of that buffer expressed against the run that does not hold it."
+    ),
 )
 
 print(f"\nFinal value difference: ${val_diff_hd:,.0f} ({val_diff_hd / r_baseline.final_value:.3%})")
@@ -652,12 +646,13 @@ ax.legend()
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 show_with_alt(
     fig,
-    f"Line chart of portfolio value under {len(all_results)} execution profiles - "
-    f"{', '.join(all_labels)} - drawn in navy and amber with different dash patterns. All of "
-    f"them trace the same path, ending between {min(profile_values):,.0f} and "
-    f"{max(profile_values):,.0f}. That spread is {profile_spread_pct:.2f} percent of the final "
-    "value, so the curves separate by a band far thinner than the curve's own variation and the "
-    "chart cannot be read to rank them.",
+    (
+        f"Line chart of portfolio value under {len(all_results)} execution profiles - "
+        f"{', '.join(all_labels)} - drawn in navy and amber with different dash patterns on "
+        "one axis. Each profile is a different set of fill and cost conventions applied to "
+        "the same signals and the same prices. Drawn together so the profiles can be compared "
+        "against each other and against the level they are all a fraction of."
+    ),
 )
 
 # %% [markdown]
@@ -734,14 +729,13 @@ add_message_title(
 zero_line(ax, axis="x")
 show_with_alt(
     fig,
-    "Horizontal bar chart of the impact on final value as a percentage of the reference, one bar "
-    "per configuration field plus their combination, each labelled with its value. The single "
-    "fields measure "
-    + ", ".join(
-        f"{label.replace(chr(10), ' ')} {value:+.2f} percent" for label, value in effects.items()
-    )
-    + f"; the combined change is {combined:+.2f} percent against a sum of "
-    f"{sum(effects.values()):+.2f}, so the fields interact rather than add.",
+    (
+        "Horizontal bar chart of the impact on final portfolio value as a percentage of the "
+        "reference run, one bar per configuration field changed on its own plus one for all "
+        "of them changed together, each bar labelled with its own value. The single-field "
+        "bars and the combined bar are computed the same way, which is what allows the "
+        "combined effect to be read against the sum of the parts."
+    ),
 )
 
 # %%
@@ -887,13 +881,14 @@ axes[1].legend(fontsize=9)
 
 show_with_alt(
     fig,
-    "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
-    "snapshot, incremental and hybrid rebalance modes in navy, dashed navy and dotted amber; the "
-    "three overlay throughout. The lower panel is the incremental-minus-snapshot gap as a "
-    f"percentage, which runs from {diff_is.min():.4f} to {diff_is.max():.4f} percent and ends at "
-    f"{diff_is.iloc[-1]:.4f}. Set that against the {diff_int.iloc[-1]:.2f} percent the sizing "
-    "field produced on the same strategy: rebalance mode is the smallest of the choices measured "
-    "here by two orders of magnitude.",
+    (
+        "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
+        "the snapshot, incremental and hybrid rebalance modes in navy, dashed navy and dotted "
+        "amber. The lower panel is the incremental-minus-snapshot gap as a percentage of the "
+        "snapshot run. The three modes differ in when the target weights are recomputed "
+        "against the book, and the lower panel is drawn on its own scale because the gap is "
+        "orders of magnitude smaller than the level above it."
+    ),
 )
 
 

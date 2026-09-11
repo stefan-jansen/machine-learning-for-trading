@@ -47,8 +47,6 @@
 # %%
 """Single-asset RSI mean-reversion strategy using vectorized backtesting."""
 
-import math
-
 import plotly.graph_objects as go
 import polars as pl
 import vectorbt as vbt
@@ -186,22 +184,15 @@ fig.update_layout(
     yaxis_title="Price (USDT)",
     yaxis2_title="RSI",
 )
-_rsi_clean = rsi_series.dropna()
-_below = _rsi_clean < RSI_LOWER
-_above = _rsi_clean > RSI_UPPER
-_cross_counts = (
-    (_below != _below.shift(1)).astype(int) + (_above != _above.shift(1)).astype(int)
-).iloc[1:]
-_crossings = int(_cross_counts.sum())
-_first_half_crossings = int(_cross_counts.iloc[: len(_cross_counts) // 2].sum())
 show_plotly_with_alt(
     fig,
-    f"Two stacked panels on a shared date axis from {close.index[0].date()} to "
-    f"{close.index[-1].date()}. The upper panel is the BTC/USDT daily close, running from "
-    f"{close.min():,.0f} to {close.max():,.0f}. The lower panel is the {RSI_WINDOW}-period RSI "
-    f"in amber with dashed lines at {RSI_LOWER} and {RSI_UPPER}; it crosses one threshold or the "
-    f"other {_crossings} times over {len(_rsi_clean):,} sessions, {_first_half_crossings} of "
-    "them in the first half of the sample.",
+    (
+        "Two stacked panels on a shared date axis. The upper panel is the BTC/USDT daily "
+        f"close in USDT. The lower panel is the {RSI_WINDOW}-period RSI computed from those "
+        "same closes, in amber, with dashed horizontal lines at the entry and exit "
+        "thresholds. Stacked on one date axis so the indicator and the thresholds that act on "
+        "it can be read against the price history they are derived from."
+    ),
 )
 
 # %% [markdown]
@@ -335,14 +326,15 @@ fig.update_layout(
     height=450,
     hovermode="x unified",
 )
-_flat_days = int((portfolio_value.diff() == 0).sum())
 show_plotly_with_alt(
     fig,
-    f"Line chart of portfolio value in USDT from a {INITIAL_CASH:,.0f} start. The path is made "
-    "of long flat stretches where the rule holds no position, separated by short active ones: "
-    f"{_flat_days:,} of {len(portfolio_value):,} sessions show no change at all. It runs from "
-    f"{portfolio_value.min():,.0f} to {portfolio_value.max():,.0f} and ends at "
-    f"{portfolio_value.iloc[-1]:,.0f}.",
+    (
+        "Line chart of the RSI rule's portfolio value in USDT over the sample, starting from "
+        "the configured initial cash. The rule is in the market only between an entry and its "
+        "exit, so the series is flat wherever it holds no position and moves only on the "
+        "sessions it is invested. Drawn to show the shape of a rule that trades "
+        "intermittently rather than holding continuously."
+    ),
 )
 
 # %%
@@ -369,14 +361,15 @@ fig_dd.update_layout(
     height=400,
     hovermode="x unified",
 )
-_under = float((portfolio_drawdown < 0).mean())
 show_plotly_with_alt(
     fig_dd,
-    "Filled drawdown chart of the RSI portfolio from its running peak, zero at the top and "
-    f"losses below. The curve reaches {portfolio_drawdown.min():.1f} percent at its worst and "
-    f"ends at {portfolio_drawdown.iloc[-1]:.1f}. The rule is below its own peak on "
-    f"{_under:.0%} of sessions, so the sample is mostly spent recovering rather than making new "
-    "highs.",
+    (
+        "Filled drawdown chart of the RSI portfolio measured from its own running peak, zero "
+        "at the top and losses below, in percent. Each point is the distance from the highest "
+        "portfolio value reached up to that date, so the series returns to zero only on a new "
+        "high. Drawn beside the equity curve above because the same path answers a different "
+        "question when it is measured against its own maximum."
+    ),
 )
 
 # %% [markdown]
@@ -492,12 +485,13 @@ fig.update_layout(
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], line_width=1)
 show_plotly_with_alt(
     fig,
-    "Cumulative return in percent for the RSI rule in solid navy and buy-and-hold in dashed "
-    f"grey, on matched capital and costs. Buy-and-hold runs from {bh_cum.min():.0f} to "
-    f"{bh_cum.max():.0f} percent and ends at {bh_cum.iloc[-1]:.0f}. The RSI rule runs from "
-    f"{strategy_cum.min():.0f} to {strategy_cum.max():.0f} and ends at "
-    f"{strategy_cum.iloc[-1]:.0f}. On an axis wide enough for the first the second reads as "
-    "flat, which understates how much of its capital it actually lost.",
+    (
+        "Cumulative return in percent for the RSI rule in solid navy and buy-and-hold in "
+        "dashed grey, on one linear axis. Both are run on the same bars, from the same "
+        "capital, and net of the same fees and slippage, so the only difference between them "
+        "is when each is in the market. Drawn on a shared axis, which is what makes the two "
+        "directly comparable and also what compresses the smaller of them."
+    ),
 )
 
 # %% [markdown]
@@ -606,24 +600,16 @@ fig.update_layout(
     yaxis_title="Upper Threshold",
     height=500,
 )
-_columns = {
-    lower: [row[i] for row in heatmap_z if math.isfinite(row[i])]
-    for i, lower in enumerate(lower_thresholds)
-}
-_column_means = {lower: sum(vals) / len(vals) for lower, vals in _columns.items() if vals}
-_strongest = max(_column_means, key=lambda k: _column_means[k])
-_nearest_zero = min(_column_means, key=lambda k: abs(_column_means[k]))
-_cells = [v for vals in _columns.values() for v in vals]
-_negative_cells = sum(1 for v in _cells if v < 0)
 show_plotly_with_alt(
     fig,
-    "Heatmap of in-sample Sharpe ratio over the RSI threshold grid, lower threshold on the "
-    "horizontal axis and upper threshold on the vertical, on a diverging scale centred at zero. "
-    f"The strongest column is lower threshold {_strongest}, averaging "
-    f"{_column_means[_strongest]:.2f} over its {len(_columns[_strongest])} cells; the column "
-    f"nearest zero is {_nearest_zero} at {_column_means[_nearest_zero]:.2f}. The surface spans "
-    f"{min(_cells):.2f} to {max(_cells):.2f}, with {_negative_cells} of {len(_cells)} cells "
-    "below zero.",
+    (
+        "Heatmap of in-sample Sharpe ratio over the RSI threshold grid, lower threshold on "
+        "the horizontal axis and upper threshold on the vertical, one cell per pair, on a "
+        f"diverging colour scale centred at zero. The RSI window is held at {RSI_WINDOW} "
+        "throughout, so the surface varies in the two thresholds alone. Every cell is scored "
+        "on the whole sample with no holdout, which is what makes this a sensitivity surface "
+        "rather than a selection procedure."
+    ),
 )
 
 # %% [markdown]

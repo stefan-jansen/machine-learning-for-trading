@@ -497,12 +497,14 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of portfolio equity in US dollars for the same strategy under two simulators, "
-    f"both starting at {INITIAL_CASH:,.0f}. The solid navy array-arithmetic curve and the dashed "
-    "sequential-engine curve follow the same path and the same turning points: the array run "
-    f"peaks at {equity_vbt.max():,.0f} and ends at {equity_vbt.iloc[-1]:,.0f}, the sequential run "
-    f"peaks at {equity_ml4t.max():,.0f} and ends at {equity_ml4t.iloc[-1]:,.0f}. The two differ "
-    f"by {ending_gap:,.0f} at the end, which is too small to separate them on this axis.",
+    (
+        "Line chart of portfolio equity in US dollars for one strategy under two simulators, "
+        "the array-arithmetic run in solid navy and the sequential-engine run in dashed grey, "
+        "both from the same starting capital on one axis. The two consume the same weights "
+        "and the same prices; what differs is that one applies the weights as vectorized "
+        "arithmetic over the whole panel and the other steps through sessions in order. Drawn "
+        "on a shared axis to show what that difference in method does to the level."
+    ),
 )
 
 # %%
@@ -541,11 +543,12 @@ _nonzero_diff = diff_series[diff_series.abs() > 0]
 _sign_changes = int(((_nonzero_diff > 0) != (_nonzero_diff > 0).shift(1)).iloc[1:].sum())
 show_plotly_with_alt(
     fig,
-    "Line chart of array equity minus sequential equity in US dollars, with a dashed zero line. "
-    f"The difference runs from {diff_series.min():,.0f} to {diff_series.max():,.0f} and ends at "
-    f"{diff_series.iloc[-1]:,.0f}, changing sign {_sign_changes} times over "
-    f"{len(diff_series):,} sessions. A difference that stays on one side of zero and grows is a "
-    "drift that compounds, not noise that cancels.",
+    (
+        "Line chart of array equity minus sequential equity in US dollars against date, with "
+        "a dashed line at zero. Above the line the arithmetic run is ahead and below it the "
+        "engine is. Drawn as a difference rather than as two curves because the gap is small "
+        "against the level, and a difference is the only way to see its shape over time."
+    ),
 )
 
 # %% [markdown]

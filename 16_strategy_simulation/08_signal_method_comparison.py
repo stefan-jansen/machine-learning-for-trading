@@ -462,15 +462,12 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Bar chart of signal rate in percent for the registered prediction sets under a zero cutoff, "
-    "each bar labelled with its value: "
-    + ", ".join(
-        f"{CASE_STUDIES[cs]} {rate * 100:.1f} percent"
-        for cs, rate in zip(fixed_results["case_study"], fixed_results["signal_rate"], strict=True)
-    )
-    + ". A rule that fires on any positive prediction is on roughly half the time in both, so "
-    "the cutoff is describing the sign distribution of the predictions rather than selecting "
-    "anything.",
+    (
+        "Bar chart of signal rate, one bar per registered prediction set, for a fixed cutoff "
+        "at zero. Signal rate is the share of observations the rule would act on. Drawn as a "
+        "baseline for the rest of the notebook: this is what a fixed cutoff produces before "
+        "any percentile or lookback rule is applied."
+    ),
 )
 
 # %% [markdown]
@@ -507,12 +504,6 @@ for case_study in CASE_STUDIES:
         )
     )
 
-_grid = {
-    cs: comparison_df.filter(
-        (pl.col("case_study") == cs) & (pl.col("method") == "rolling_percentile")
-    )
-    for cs in CASE_STUDIES
-}
 
 fig.update_layout(
     title="State-transition rate against signal rate, one point per rule",
@@ -522,16 +513,13 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Scatter plot with signal rate on the horizontal axis and the share of observations that "
-    "change state on the vertical, one point per rule in the grid, one colour per prediction "
-    "set. Reading the transition rates: "
-    + ", ".join(
-        f"{CASE_STUDIES[cs]} spans {_grid[cs]['transition_rate'].min() * 100:.1f} to "
-        f"{_grid[cs]['transition_rate'].max() * 100:.1f} percent"
-        for cs in CASE_STUDIES
-    )
-    + ". The two sets occupy different bands rather than one trend, so a rule's transition rate "
-    "is not predictable from its signal rate alone.",
+    (
+        "Scatter plot with signal rate on the horizontal axis and the share of observations "
+        "that change state on the vertical, one point per rule in the grid and one colour per "
+        "prediction set. Both axes are shares of the same observation count, so a point's "
+        "position says how often a rule fires against how often it switches. Drawn as a "
+        "scatter because the grid sweeps two settings at once and neither is the axis."
+    ),
 )
 
 # %% [markdown]
@@ -621,14 +609,13 @@ fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
 show_plotly_with_alt(
     fig,
-    "Two bar panels comparing the three signal methods at one operating point, one colour per "
-    "prediction set, signal rate on the left and state-transition rate on the right. Signal rate "
-    f"runs from {operating_points['signal_rate'].min() * 100:.1f} to "
-    f"{operating_points['signal_rate'].max() * 100:.1f} percent across the six bars and "
-    f"state-transition rate from {operating_points['transition_rate'].min() * 100:.1f} to "
-    f"{operating_points['transition_rate'].max() * 100:.1f}. The fixed zero cutoff is the "
-    "highest bar of its panel in both sets; the two percentile rules are far lower and close to "
-    "each other.",
+    (
+        "Two bar panels comparing the three signal methods at one operating point, one colour "
+        "per prediction set, signal rate on the left and state-transition rate on the right. "
+        "The operating point is chosen to hold signal rate roughly equal across methods, so "
+        "the right panel asks what each method costs in turnover once it is held to the same "
+        "firing frequency."
+    ),
 )
 
 # %% [markdown]
@@ -713,10 +700,13 @@ _sentences = " ".join(
 )
 show_plotly_with_alt(
     fig,
-    "Two line panels against lookback length in observations, one line per prediction set, with "
-    "signal rate on the left and state-transition rate on the right. Reading each line from the "
-    f"shortest lookback in the grid to the longest: {_sentences} The two rates do not move "
-    "together, and they do not move the same way in the two sets.",
+    (
+        "Two line panels against lookback length in observations, one line per prediction "
+        "set, signal rate on the left and state-transition rate on the right. The lookback is "
+        "the window a trailing percentile is taken over, so this sweeps how much history the "
+        "rule re-centres on. Two panels because the lookback acts on both rates and they are "
+        "not the same quantity."
+    ),
 )
 
 # %% [markdown]
@@ -791,11 +781,13 @@ _pct_sentences = " ".join(
 )
 show_plotly_with_alt(
     fig,
-    f"Two line panels against the percentile cutoff, from {min(PERCENTILES)} to "
-    f"{max(PERCENTILES)}, one line per prediction set, with signal rate on the left and "
-    "state-transition rate on the right. Both rates fall in both sets as the cutoff rises. "
-    f"Reading each line from the lowest cutoff to the highest: {_pct_sentences} The two sets "
-    "start far apart on state-transition rate and converge at the top of the range.",
+    (
+        f"Two line panels against the percentile cutoff, swept from {min(PERCENTILES)} to "
+        f"{max(PERCENTILES)}, one line per prediction set, signal rate on the left and "
+        "state-transition rate on the right. The cutoff is the percentile of the trailing "
+        "window a score must exceed to fire. Drawn beside the lookback sweep so the two "
+        "settings of the same rule can be read the same way."
+    ),
 )
 
 # %% [markdown]

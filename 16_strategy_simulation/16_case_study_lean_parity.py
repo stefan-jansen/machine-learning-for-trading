@@ -241,10 +241,13 @@ ax.grid(axis="x", alpha=0.25)
 _ml4t_faster = int((plot_data["ml4t_seconds"] < plot_data["external_seconds"]).sum())
 show_with_alt(
     fig,
-    "Paired horizontal bars on a logarithmic seconds axis, one pair per strategy and engine, "
-    "with the external engine above and ML4T below in each pair. Read from the underlying "
-    f"frame: ML4T is the faster of the two in {_ml4t_faster} of {len(plot_data)} pairs, and the "
-    "direction is not the same across engines.",
+    (
+        "Paired horizontal bars on a logarithmic seconds axis, one pair per strategy and "
+        "engine, with the external engine above and ML4T below in each pair. The axis is "
+        "logarithmic so that runtimes of very different magnitude share one scale. Paired "
+        "rather than grouped by engine so each comparison is between two bars measuring the "
+        "same strategy."
+    ),
 )
 
 # %% [markdown]
