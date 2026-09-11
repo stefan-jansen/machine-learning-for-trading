@@ -10,9 +10,7 @@ import ast
 import sqlite3
 from pathlib import Path
 
-import yaml
-
-from tests.pm_helpers import OVERRIDES_PATH, REPO_ROOT, get_overrides, invocations_for
+from tests.pm_helpers import REPO_ROOT, get_overrides, invocations_for
 from tests.sample_registry_for_tests import (
     CASE_STUDY_IDS,
     CODE_CS_DIR,
@@ -174,62 +172,82 @@ def test_a_registry_without_these_tables_still_samples(tmp_path: Path) -> None:
     assert stats["status"] == "OK"
 
 
-def _case_study_of(notebook_py: Path) -> str | None:
-    """Return the CASE_STUDY_ID a notebook's parameters cell assigns, if it has one."""
+def _pinned_parameters_of(notebook_py: Path) -> tuple[str | None, dict[str, str]]:
+    """A notebook's CASE_STUDY_ID and the ``*_CONFIG`` names its parameters cell assigns.
+
+    Both are read as module-level string constants, which is what the parameters cell of
+    a percent-format notebook compiles to and what papermill replaces at run time.
+    """
     tree = ast.parse(notebook_py.read_text(encoding="utf-8"))
+    case_study_id: str | None = None
+    configs: dict[str, str] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
         value = node.value
-        if isinstance(target, ast.Name) and target.id == "CASE_STUDY_ID":
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                return value.value
-    return None
+        if not isinstance(target, ast.Name):
+            continue
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        if target.id == "CASE_STUDY_ID":
+            case_study_id = value.value
+        elif target.id.endswith("_CONFIG"):
+            configs[target.id] = value.value
+    return case_study_id, configs
 
 
-def test_every_config_an_override_names_is_declared_for_sampling() -> None:
-    """An override that names a configuration the sampler does not carry fails only in CI.
+def test_every_config_a_pinned_notebook_runs_with_is_declared_for_sampling() -> None:
+    """A configuration the sampler does not carry fails only in CI, halfway through a run.
 
     PINNED_PREDICTION_CONFIGS is what puts a configuration's predictions parquet in the
-    fixture, and `tests/overrides.yaml` is what a notebook is actually run with there.
-    Nothing couples them: _resolve_pinned_hashes checks the declaration against production,
-    where every configuration exists, so an override naming one the declaration omits
-    resolves a registry row with no artifact behind it and the notebook raises mid-run.
-    That has happened once already, to 26_mlops_governance/02_online_drift_detection.
+    fixture. Nothing couples it to what the notebooks actually ask for: _resolve_pinned_hashes
+    checks the declaration against production, where every configuration exists, so a name
+    the declaration omits resolves a registry row with no artifact behind it and the notebook
+    raises mid-run. That has happened once already, to
+    26_mlops_governance/02_online_drift_detection.
 
-    Every invocation is enumerated through ``invocations_for`` rather than by reading
-    ``parameters``: an entry moved to the ``invocations`` shape would otherwise drop out
-    of this check silently, and a dropped entry looks exactly like a passing one.
+    Both sources of a name are checked: the ``*_CONFIG`` defaults in the notebook's own
+    parameters cell, and whatever `tests/overrides.yaml` replaces them with. A default is
+    checked even where an override currently replaces it, because the declaration is meant
+    to carry it - that is what lets an override be deleted once a regenerated fixture holds
+    every pinned configuration. Runs are enumerated through
+    ``invocations_for`` rather than by reading ``parameters``, so an entry moved to the
+    ``invocations`` shape is validated rather than silently dropped - and a dropped entry
+    looks exactly like a passing one.
     """
-    overrides = yaml.safe_load(OVERRIDES_PATH.read_text(encoding="utf-8"))
     checked: list[str] = []
-    for key in overrides:
+    for notebook_py in sorted(REPO_ROOT.rglob("*.py")):
+        if any(part.startswith(".") for part in notebook_py.parts):
+            continue
+        text = notebook_py.read_text(encoding="utf-8")
+        if "CASE_STUDY_ID" not in text:
+            continue
+        case_study_id, defaults = _pinned_parameters_of(notebook_py)
+        declared = PINNED_PREDICTION_CONFIGS.get(case_study_id or "")
+        if not declared:
+            continue
+
+        key = notebook_py.relative_to(REPO_ROOT).with_suffix("").as_posix()
+        names = {config for _family, _label, config, _split in declared}
         for run in invocations_for(get_overrides(key), key=key):
-            named = {
-                value
+            named = set(defaults.items()) | {
+                (name, value)
                 for name, value in run.parameters.items()
                 if name.endswith("_CONFIG") and isinstance(value, str)
             }
             if not named:
                 continue
-            notebook_py = REPO_ROOT / f"{key}.py"
-            if not notebook_py.is_file():
-                continue
-            case_study_id = _case_study_of(notebook_py)
-            declared = PINNED_PREDICTION_CONFIGS.get(case_study_id or "")
-            if not declared:
-                continue
             where = f"{key} [{run.id}]" if run.id else key
-            missing = named - {config for _family, _label, config, _split in declared}
+            missing = {f"{name}={value}" for name, value in named if value not in names}
             assert not missing, (
-                f"{where} overrides a configuration the fixture is not built to carry: "
+                f"{where} names a configuration the fixture is not built to carry: "
                 f"{sorted(missing)}. Add it to PINNED_PREDICTION_CONFIGS[{case_study_id!r}] "
-                "in tests/sample_registry_for_tests.py, or override to one already there."
+                "in tests/sample_registry_for_tests.py, or name one already there."
             )
             checked.append(where)
 
     assert checked, (
-        "no override names a *_CONFIG for a case study in PINNED_PREDICTION_CONFIGS, "
+        "no notebook names a *_CONFIG for a case study in PINNED_PREDICTION_CONFIGS, "
         "so this check covered nothing"
     )
