@@ -212,6 +212,17 @@ replaces = load_itch_messages(ITCH_DIR, "U", stock_locate=symbol_locate, max_mes
 # P messages (trades) have 'stock' column
 trades = load_itch_messages(ITCH_DIR, "P", symbol=symbol, max_messages=MESSAGE_LIMIT)
 
+
+def n_messages(frame: pl.DataFrame | None) -> int:
+    """Message count, 0 for a type the store does not hold."""
+    return 0 if frame is None else len(frame)
+
+
+def until(frame: pl.DataFrame | None, cutoff: datetime) -> pl.DataFrame | None:
+    """Messages up to `cutoff`, passing an absent type through as None."""
+    return None if frame is None else frame.filter(pl.col("timestamp") <= cutoff)
+
+
 # %% [markdown]
 # ### Why the add messages are not enough on their own
 #
@@ -279,11 +290,11 @@ print(f"\nSymbol: {symbol}")
 print(f"Trading Date: {TRADING_DATE}")
 print("\nMessage counts:")
 print(f"  Add orders (A+F): {len(add_orders):,}")
-print(f"  Deletes (D): {len(deletes):,}")
-print(f"  Cancels (X): {len(cancels):,}")
-print(f"  Executions (E): {len(executions):,}")
-print(f"  Replaces (U): {len(replaces) if replaces is not None else 0:,}")
-print(f"  Trades (P): {len(trades):,}")
+print(f"  Deletes (D): {n_messages(deletes):,}")
+print(f"  Cancels (X): {n_messages(cancels):,}")
+print(f"  Executions (E): {n_messages(executions):,}")
+print(f"  Replaces (U): {n_messages(replaces):,}")
+print(f"  Trades (P): {n_messages(trades):,}")
 
 # %% [markdown]
 # The first rows of the add messages show the fields the reconstruction reads:
@@ -361,21 +372,19 @@ start_time = datetime.strptime(f"{TRADING_DATE} {START_TIME}", "%Y-%m-%d %H:%M:%
 end_time = datetime.strptime(f"{TRADING_DATE} {END_TIME}", "%Y-%m-%d %H:%M:%S")
 
 add_all = add_orders.filter(pl.col("timestamp") <= end_time)
-del_all = deletes.filter(pl.col("timestamp") <= end_time)
-can_all = cancels.filter(pl.col("timestamp") <= end_time)
-exec_all = executions.filter(pl.col("timestamp") <= end_time)
-exec_c_all = (
-    executions_c.filter(pl.col("timestamp") <= end_time) if executions_c is not None else None
-)
-rep_all = replaces.filter(pl.col("timestamp") <= end_time) if replaces is not None else None
+del_all = until(deletes, end_time)
+can_all = until(cancels, end_time)
+exec_all = until(executions, end_time)
+exec_c_all = until(executions_c, end_time)
+rep_all = until(replaces, end_time)
 
 print(f"Messages for LOB reconstruction (up to {end_time.time()}):")
 print(f"  Add orders: {len(add_all):,}")
-print(f"  Deletes: {len(del_all):,}")
-print(f"  Cancels: {len(can_all):,}")
-print(f"  Executions (E): {len(exec_all):,}")
-print(f"  Executions (C): {len(exec_c_all) if exec_c_all is not None else 0:,}")
-print(f"  Replaces: {len(rep_all) if rep_all is not None else 0:,}")
+print(f"  Deletes: {n_messages(del_all):,}")
+print(f"  Cancels: {n_messages(can_all):,}")
+print(f"  Executions (E): {n_messages(exec_all):,}")
+print(f"  Executions (C): {n_messages(exec_c_all):,}")
+print(f"  Replaces: {n_messages(rep_all):,}")
 
 # %% [markdown]
 # The reconstruction runs the message loop in a compiled kernel and accumulates
