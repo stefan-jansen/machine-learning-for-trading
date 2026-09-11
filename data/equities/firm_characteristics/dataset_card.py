@@ -35,10 +35,6 @@
 """Firm Characteristics - download, explore, and update workflow."""
 
 import json
-import os
-import sys
-import zipfile
-from pathlib import Path
 
 import polars as pl
 
@@ -76,158 +72,39 @@ print("Source: https://github.com/jasonzy121/Deep_Learning_Asset_Pricing")
 # %% [markdown]
 # ## 3. Download Data
 #
-# The dataset is hosted on Google Drive via the GitHub repository.
-# Download can be automatic (with `gdown`) or manual.
+# `data/equities/firm_characteristics/download.py` is the only path that produces what
+# `load_firm_characteristics()` reads. It fetches the archive from the Google Drive folder
+# the paper's repository links, then converts the published `char/*.npz` tensors - not
+# `RetChar.csv` - into `equities/firm_characteristics/firm_characteristics_{train,valid,test,all}.parquet`.
+#
+# The tensors are what carry firm identity. Each block has a fixed anonymous firm axis whose
+# positions are persistent within the block, so the converter can emit a `symbol` column; the
+# CSV drops that axis and can only emit `permno`, which the loader rejects. A split offset keeps
+# the three blocks' identifier namespaces disjoint, because the archive publishes no mapping
+# between them.
+#
+# ```bash
+# uv run python data/equities/firm_characteristics/download.py           # fetch and convert
+# uv run python data/equities/firm_characteristics/download.py --check   # verify what is there
+# uv run python data/equities/firm_characteristics/download.py --convert # convert an existing archive
+# ```
+#
+# This card used to carry a second downloader of its own, writing
+# `firm_characteristics_{all,train,test}.parquet` into an `academic/` directory from
+# `RetChar.csv`. Nothing read that directory and the loader rejects that schema, so the files
+# it produced were unreachable whichever way a reader arrived at them.
 
 # %%
-# Google Drive file ID for the data archive
-GDRIVE_FILE_ID = "1nYHpJ2lNm-qDX5iq18-HaL1H6z7lPGVi"
-GITHUB_REPO = "https://github.com/jasonzy121/Deep_Learning_Asset_Pricing"
+from utils import ML4T_DATA_PATH
+from utils.paths import display_path
 
+parquet_dir = ML4T_DATA_PATH / "equities" / "firm_characteristics"
+present = sorted(path.name for path in parquet_dir.glob("firm_characteristics_*.parquet"))
 
-def download_firm_characteristics(dry_run: bool = False, force: bool = False, convert: bool = True):
-    """Download Chen-Pelger-Zhu firm characteristics dataset.
-
-    Args:
-        dry_run: If True, show what would be downloaded without doing it
-        force: If True, re-download even if data exists
-        convert: If True, convert CSV to parquet after download
-    """
-    from utils import ML4T_DATA_PATH
-
-    output_dir = ML4T_DATA_PATH / "academic"
-    dl_dir = output_dir / "dl_asset_pricing"
-    parquet_path = output_dir / "firm_characteristics_all.parquet"
-
-    print("=== Firm Characteristics Download ===")
-    print("Dataset: Chen-Pelger-Zhu (2020)")
-    print("Coverage: 1967-1989 (train), 2000-2016 (test)")
-    print("Features: 94 firm characteristics + returns")
-    print("Estimated size: ~1.5 GB (archive), ~258 MB (parquet)")
-    print(f"Output: {output_dir}")
-
-    if dry_run:
-        print("\n[DRY RUN] Would download:")
-        print("  - data.zip from Google Drive (~1.5 GB)")
-        print(f"  - Extract to: {dl_dir}")
-        print(f"  - Convert to parquet: {parquet_path}")
-        print("\nManual download:")
-        print(f"  1. Go to: {GITHUB_REPO}")
-        print("  2. Download data.zip from Google Drive link")
-        print(f"  3. Extract to: {dl_dir}")
-        return
-
-    # Check existing
-    if parquet_path.exists() and not force:
-        existing = pl.read_parquet(parquet_path)
-        print(f"\nData already exists ({len(existing):,} rows).")
-        print("Use force=True to re-download.")
-        return
-
-    # Try automatic download with gdown
-    try:
-        import gdown
-    except ImportError:
-        print("\nWARNING: gdown not installed for automatic download")
-        print("Install with: pip install gdown")
-        print("\nManual download instructions:")
-        print(f"  1. Go to: {GITHUB_REPO}")
-        print("  2. Download data.zip from Google Drive link")
-        print(f"  3. Extract to: {dl_dir}")
-        print("  4. Run: download_firm_characteristics(convert=True)")
-        return
-
-    dl_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = dl_dir / "data.zip"
-
-    print("\nDownloading from Google Drive...")
-    url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
-    gdown.download(url, str(zip_path), quiet=False)
-
-    if not zip_path.exists():
-        print("ERROR: Download failed")
-        return
-
-    print("\nExtracting archive...")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(dl_dir)
-
-    # Cleanup zip
-    zip_path.unlink()
-
-    print("Download complete!")
-
-    # Convert to parquet
-    if convert:
-        _convert_to_parquet(output_dir)
-
-
-def _convert_to_parquet(output_dir: Path):
-    """Convert RetChar.csv to parquet format with train/test splits."""
-    dl_dir = output_dir / "dl_asset_pricing"
-    retchar_path = dl_dir / "RetChar.csv"
-
-    if not retchar_path.exists():
-        # Try nested path
-        nested_path = dl_dir / "data" / "RetChar.csv"
-        if nested_path.exists():
-            retchar_path = nested_path
-        else:
-            print(f"ERROR: RetChar.csv not found at {retchar_path}")
-            return
-
-    print("\nConverting to parquet format...")
-
-    # Read CSV
-    df = pl.read_csv(retchar_path)
-    print(f"  Loaded {len(df):,} rows, {len(df.columns)} columns")
-
-    # Date is in YYYYMMDD format (integer)
-    df = df.with_columns(
-        pl.col("Date").cast(pl.Utf8).str.to_date("%Y%m%d").alias("date"),
-        pl.col("Date").cast(pl.Utf8).str.slice(0, 4).cast(pl.Int32).alias("year"),
-    )
-
-    # Rename permno column if it exists differently
-    if "Permno" in df.columns:
-        df = df.rename({"Permno": "permno"})
-    if "RET" in df.columns:
-        df = df.rename({"RET": "ret"})
-
-    # Create splits based on paper
-    train_df = df.filter(pl.col("year") < 1990)
-    test_df = df.filter(pl.col("year") >= 2000)
-
-    # Drop helper columns
-    train_df = train_df.drop(["Date", "year"])
-    test_df = test_df.drop(["Date", "year"])
-    all_df = df.drop(["Date", "year"])
-
-    # Save parquet files
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    all_df.write_parquet(output_dir / "firm_characteristics_all.parquet")
-    train_df.write_parquet(output_dir / "firm_characteristics_train.parquet")
-    test_df.write_parquet(output_dir / "firm_characteristics_test.parquet")
-
-    print("  Created:")
-    print(f"    firm_characteristics_all.parquet: {len(all_df):,} rows")
-    print(f"    firm_characteristics_train.parquet: {len(train_df):,} rows (1967-1989)")
-    print(f"    firm_characteristics_test.parquet: {len(test_df):,} rows (2000-2016)")
-
-
-# %% [markdown]
-# ### Download
-
-# %%
-# Uncomment to download
-# download_firm_characteristics()
-
-# %% [markdown]
-# ### Dry Run (Preview)
-
-# %%
-download_firm_characteristics(dry_run=True)
+print("=== Firm Characteristics Download ===")
+print("Downloader: data/equities/firm_characteristics/download.py")
+print(f"Writes to:  {display_path(parquet_dir)}")
+print(f"Present:    {present or 'nothing yet - run the downloader'}")
 
 # %% [markdown]
 # ## 4. Load and Explore
@@ -292,7 +169,9 @@ yearly
 from utils import ML4T_DATA_PATH
 
 # Check for existing profile
-profile_path = ML4T_DATA_PATH / "academic" / "firm_characteristics_profile.json"
+profile_path = (
+    ML4T_DATA_PATH / "equities" / "firm_characteristics" / "firm_characteristics_profile.json"
+)
 
 if profile_path.exists():
     profile = json.loads(profile_path.read_text())
@@ -301,7 +180,7 @@ if profile_path.exists():
     print(f"Columns: {profile['columns']}")
     print(f"Memory: {profile['memory_mb']:.1f} MB")
 else:
-    print(f"Profile not found at {profile_path}")
+    print(f"Profile not found at {display_path(profile_path)}")
     print("Generate with: python generate_profiles.py --dataset firm_characteristics")
 
 # %% [markdown]

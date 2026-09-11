@@ -9,20 +9,23 @@ able to rebuild it and every test still pass - which is how 149 of 327 files got
 there.
 
 A file with no producer cannot be regenerated when production moves, cannot be
-checked against production, and cannot be explained: three of them turned out to be
-byte-identical copies of each other at pre-migration paths that nothing reads, and
-one holds the whole FinancialPhraseBank corpus under a filename that promises the
-unanimous subset.
+checked against production, and cannot be explained. The backlog turned up three
+files byte-identical to each other at pre-migration paths that nothing reads, one
+holding the whole FinancialPhraseBank corpus under a filename that promises the
+unanimous subset, an options panel built from a different universe than the one its
+loader documents - so four of the eight symbols a chapter-8 notebook asks for came
+back empty under CI - and a 20,000-row trade-only panel at `nasdaq100_taq/`, which
+no code resolves at all: `load_nasdaq100_taq` reads `trade_and_quotes/symbol=*`.
 
-`UNPRODUCED` is the remaining backlog, and it is a ratchet: a new fixture file with
-no producer fails immediately, and a file that gains one has to leave the list. It
-only shrinks.
+`UNPRODUCED` is down to that last one, and it is the ratchet: a new fixture file with
+no producer fails immediately, an exemption has to be named here, and a file that
+gains a producer has to leave the list. It only shrinks.
 
-Two producers are declared. `create_test_data.py` derives from production and each
-`Dataset` names what it owns; `generate_test_microstructure.py` is synthetic and
-`generate_all` returns what it writes. A third, `generate_skip_data.py`, declares
-nothing at all - its outputs are in `UNPRODUCED` below, and one of them,
-`enrich_adv_columns`, writes back into two files `create_test_data.py` owns.
+Two producers are declared, and two is the whole list. `create_test_data.py` derives
+from production and each `Dataset` names what it owns; `generate_test_microstructure.py`
+is synthetic and `generate_all` returns what it writes. `generate_skip_data.py` used to
+be a third, writing two paths into the fixture and declaring neither; both turned out to
+be paths no loader resolves, so it was cut back to `intermediates/` instead of declared.
 """
 
 from __future__ import annotations
@@ -41,50 +44,17 @@ import generate_test_microstructure as generator  # noqa: E402
 
 from tests.create_test_data import DATASETS  # noqa: E402
 
-# Fixture files that no declared producer writes. Grouped by top-level directory,
-# which is mechanical; the triage of what each one needs is on the tracker, because
-# it is a judgement that goes stale and a comment here would not be re-checked.
-UNPRODUCED = frozenset(
-    {
-        # academic/ - 3
-        "academic/firm_characteristics_all.parquet",
-        "academic/firm_characteristics_test.parquet",
-        "academic/firm_characteristics_train.parquet",
-        # alternative/ - 4
-        "alternative/institutional/13f_expanded/institutional_holdings.parquet",
-        "alternative/institutional/13f_expanded/stock_features.parquet",
-        "alternative/text/financial_phrasebank/sentences_allagree.parquet",
-        "alternative/text/sp500_10q_mda.parquet",
-        # autonomous_agents/ - 3
-        "autonomous_agents/operator_artifacts/run_20260504T201005.json",
-        "autonomous_agents/operator_artifacts/run_etfs_20260504T223150.json",
-        "autonomous_agents/operator_artifacts/run_us_firm_characteristics_20260504T225521.json",
-        # crypto/ - 6
-        # equities/ - 9
-        "equities/market/microstructure/iex/deep/parsed/path_signatures/data.parquet",
-        "equities/market/microstructure/nasdaq100_taq/data.parquet",
-        "equities/market/microstructure/nasdaq_itch/messages/enriched/C.parquet",
-        "equities/market/microstructure/nasdaq_itch/messages/enriched/E.parquet",
-        "equities/market/microstructure/nasdaq_itch/messages/enriched/X.parquet",
-        "equities/market/sp500/options_eda/year=2019.parquet",
-        "equities/market/sp500/options_eda/year=2020.parquet",
-        "equities/market/sp500/sp500.csv",
-        "equities/positioning/13f/bulk/2024Q3/institutional_holdings.parquet",
-        # factors/ - 38
-        # institutional/ - 1
-        "institutional/13f/institutional_holdings.parquet",
-        # macro/ - 7
-        # prediction_markets/ - 1
-        "prediction_markets/polymarket_events.parquet",
-        # sec_filings/ - 6
-        "sec_filings/sp100/10k/AAPL/2023.parquet",
-        "sec_filings/sp100/10k/AAPL/2024.parquet",
-        "sec_filings/sp100/10k/GOOG/2023.parquet",
-        "sec_filings/sp100/10k/GOOG/2024.parquet",
-        "sec_filings/sp100/10k/MSFT/2023.parquet",
-        "sec_filings/sp100/10k/MSFT/2024.parquet",
-    }
-)
+# One file is left, and it is a deletion rather than a declaration: no code resolves
+# `nasdaq100_taq/`. `load_nasdaq100_taq` reads `trade_and_quotes/symbol=*`, which
+# `generate_test_microstructure.py` writes, and both chapter-3 TAQ notebooks reach the
+# data through that loader. The file itself is 20,000 rows evenly spaced 117 seconds
+# apart, five symbols over twenty March 2020 sessions, `event_type` "trade" on every
+# row and no quote events at all - so it is neither the AlgoSeek tick sample the
+# `nasdaq100_taq` name promises nor anything the Lee-Ready section could be run on.
+# It stays here for one more change: removing it from this list and deleting it from
+# the fixture cannot be done in one commit, because whichever half lands first turns
+# a test red on every branch that has not merged the other.
+UNPRODUCED = frozenset({"equities/market/microstructure/nasdaq100_taq/data.parquet"})
 
 
 def _owned_by_a_dataset(on_disk: set[str]) -> set[str]:
