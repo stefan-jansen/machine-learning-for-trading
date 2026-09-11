@@ -97,12 +97,19 @@ SUPERSEDES_ALLOCATION_BACKTESTS: str = "e487eb0d75db"
 
 # A candidate set is sealed once written, so a run whose members differ from the recorded
 # generation has to name the set it replaces - the same shape 15_risk_management and 16_costs
-# already carry, and keyed by the full set name because that is what the refusal prints. These
-# three moved when 10a_dl_lstm registered the lstm_h64 checkpoints the training menu declares:
-# the equal-weight baselines went from 1,452 to 1,572, so every label's candidate set gained
-# the 40 backtests riding the new predictions. Resolved through `candidate_set_supersedes`
-# rather than passed straight to `create`, because a reader's clean clone has no generation to
-# supersede and `create` refuses a first version that claims to replace one.
+# already carry, and keyed by the full set name because that is what the refusal prints.
+# Resolved through `candidate_set_supersedes` rather than passed straight to `create`, because
+# a reader's clean clone has no generation to supersede and `create` refuses a first version
+# that claims to replace one.
+#
+# These hashes name the generation each set is at now, not one it replaced. All three lineages
+# were reset and restarted rather than superseded: each live head carries `supersedes_hash`
+# NULL, so it is generation one under its name and the values this comment previously named
+# are in no lineage the registry holds. A membership move - which is what the earlier note
+# described, the equal-weight baselines going from 1,452 to 1,572 when 10a_dl_lstm registered
+# the lstm_h64 checkpoints - would have left the old hash as the head's `supersedes_hash`. It
+# is not there, so that was a different event from the one these hashes came through, and the
+# old values are not recoverable from the registry or from the name.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
     "fx_pairs:fwd_ret_1d:equal-weight-candidates": "77b9631c7f13",
     "fx_pairs:fwd_ret_5d:equal-weight-candidates": "1c6a3826af9f",

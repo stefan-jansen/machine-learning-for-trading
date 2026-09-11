@@ -128,8 +128,8 @@ holdout_fold = holdout_spec["computation"]["cv"]["folds"][0]
 pl.DataFrame(
     {
         "field": [
-            "carrier backtest",
-            "carrier stage",
+            "selected backtest",
+            "selected stage",
             "validation Sharpe",
             "family",
             "configuration",

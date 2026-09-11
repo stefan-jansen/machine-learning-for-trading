@@ -269,7 +269,7 @@ sp500_sample = dm.batch_load(
     symbols=sp500[:5],
     start="2024-06-01",
     end="2024-12-31",
-    provider="yahoo",
+    provider=DEMO_PROVIDER,
 )
 print(
     f"S&P 500 sample: {sp500_sample.shape[0]:,} rows, {sp500_sample['symbol'].n_unique()} symbols"
@@ -458,7 +458,7 @@ show_plotly_with_alt(
 # Fetch every bar since the last stored one, up to the last complete session.
 for symbol in symbols:
     rows = update_through_last_complete_bar(
-        dm_stored, storage, symbol, provider="yahoo", lookback_days=7
+        dm_stored, storage, symbol, provider=DEMO_PROVIDER, lookback_days=7
     )
     print(f"  Updated {symbol} → {rows} rows")
 
@@ -593,7 +593,7 @@ def production_pipeline(
 
     stored = {}
     for symbol in symbols:
-        stored[symbol] = manager.load(symbol, start, end, provider="yahoo")
+        stored[symbol] = manager.load(symbol, start, end, provider=DEMO_PROVIDER)
     print(f"Fetched: {len(stored)} symbols")
 
     validator = OHLCVValidator(max_return_threshold=0.5)

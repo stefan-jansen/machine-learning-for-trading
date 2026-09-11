@@ -532,6 +532,96 @@ def check_notebook_is_current(report: Report, case_study: str, notebook: str | N
     )
 
 
+def check_supersedes_declarations(report: Report, case_study: str, notebook: str | None) -> None:
+    """Every `SUPERSEDES_*` literal this run may read must still name a generation that exists.
+
+    A literal naming a hash the registry no longer holds is withheld by
+    `population_supersedes`, and `create` then refuses the write. That refusal lands at the
+    freeze, *after* the fits are paid for, which is exactly what this gate exists to prevent.
+    It is also invisible until then: an unchanged re-run matches on members and never reads
+    the declaration, so the literal can sit dead through any number of green runs and fail
+    the first one that moves the set's membership - the refit the notebook exists for.
+
+    `scripts/check_supersedes_literals.py` has been able to answer this since #944, and
+    nothing called it before a run. It cannot live in CI: the check needs `run_log/`, which
+    is gitignored, so CI has no registry to ask. Here it has one.
+
+    Reports a failure when the checker cannot be imported rather than passing, for the reason
+    `check_notebook_prose` gives: a gate that passes when it did not run is worse than none.
+    """
+    try:
+        # This module's own directory, not `REPO_ROOT`: the checker is a sibling file, and
+        # that stays true whatever tree is under check.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from check_supersedes_literals import _registry_for, check_case_study
+
+        from utils.paths import get_case_study_dir
+    except Exception as error:  # noqa: BLE001 - the reason is reported, not raised
+        report.add(
+            "supersedes literals name live generations",
+            False,
+            f"could not load scripts/check_supersedes_literals.py: {error}",
+        )
+        return
+
+    # The checker's own default is `~/ml4t/artifacts/case_studies`, which is where the
+    # `run_log/` symlink happens to point in a standard checkout and nowhere else. Resolve
+    # the registry the way `check_registry_ready` does instead, so a run under
+    # `ML4T_OUTPUT_DIR` or a relocated `CASE_STUDIES_DIR` is checked against the registry it
+    # will actually write, rather than against a stranger's.
+    artifacts_root = get_case_study_dir(case_study, create=False).parent
+    registry = _registry_for(case_study, artifacts_root)
+    if not registry.exists():
+        # A missing registry is not "no dead declaration". `check_case_study` records it as a
+        # `no-registry` finding, which is not `stale`, so letting it through would report the
+        # green this check exists to withhold.
+        report.add(
+            "supersedes literals name live generations",
+            False,
+            f"no registry at {registry}, so no declaration was checked",
+        )
+        return
+
+    try:
+        findings = check_case_study(case_study, repo_root=REPO_ROOT, artifacts_root=artifacts_root)
+    except Exception as error:  # noqa: BLE001
+        report.add(
+            "supersedes literals name live generations",
+            False,
+            f"the checker raised against {case_study}: {error}",
+        )
+        return
+
+    stale = [f for f in findings if f.is_stale]
+    # Scoped to the notebook being run when one is named. A dead literal in a sibling
+    # notebook is somebody else's run to fix and must not block this one.
+    if notebook is not None:
+        stale = [f for f in stale if f.notebook == f"{notebook}.py"]
+
+    scope = f"{case_study}/{notebook}.py" if notebook else case_study
+    if not stale:
+        report.add(
+            "supersedes literals name live generations",
+            True,
+            f"no dead declaration in {scope}",
+            checked=len(findings),
+        )
+        return
+
+    lines = [
+        f"{f.notebook}:{f.parameter} = {f.declared!r}"
+        + (f" -> paste {f.remedy!r}" if f.remedy else " -> no head to paste; look")
+        for f in stale
+    ]
+    report.add(
+        "supersedes literals name live generations",
+        False,
+        f"{len(stale)} dead declaration(s) in {scope}, each of which refuses the write at "
+        f"the freeze once membership moves: " + "; ".join(lines),
+        stale=[asdict(f) for f in stale],
+    )
+
+
 def check_notebook_prose(report: Report, case_study: str, notebook: str | None) -> None:
     """The notebook's prose and figure titles must pass the standard before it is executed.
 
@@ -618,6 +708,7 @@ def main() -> int:
     check_registry_ready(report, args.case_study)
     check_notebook_is_current(report, args.case_study, args.notebook)
     check_notebook_prose(report, args.case_study, args.notebook)
+    check_supersedes_declarations(report, args.case_study, args.notebook)
 
     study = open_study(args.case_study, execution_tier="canonical")
     configs = load_model_configs(study, args.family, labels=[args.label])

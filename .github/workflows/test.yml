@@ -727,20 +727,26 @@ jobs:
       #
       # test_awaiting_rebuild, test_cme_futures_research and
       # test_cross_sectional_ic_mean are here for the same reason, having been
-      # committed to tests/ without any job naming them. Every job in this file
-      # selects by explicit path, so a file nobody lists never runs. It matters
-      # most for test_awaiting_rebuild: what it holds is that a skip expires
-      # when the input it waits for arrives, and a skip mechanism whose expiry
-      # check never runs is just a permanent skip.
+      # committed to tests/ without any job naming them. That was written when
+      # every step in this job selected by explicit path; the "Every other test
+      # file" step below has swept the rest of tests/ by subtraction since
+      # 2026-08-24, so an unnamed file now runs. What naming a file here still
+      # buys is the per-file record of what its guard was written for, and a -v
+      # failure before the sweep. It matters most for test_awaiting_rebuild: what
+      # it holds is that a skip expires when the input it waits for arrives, and a
+      # skip mechanism whose expiry check never runs is just a permanent skip.
       #
-      # test_one_producer_per_fixture_file arrived the same way and is added here
-      # on 2026-09-11, with test_every_fixture_file_has_a_producer added to
-      # test-unit-data, where the fixture checkout it enumerates exists. Both were
-      # written as the gate on whether every CI fixture file has a producer and
-      # neither was named by any job, so the gate has been passing vacuously since
-      # it landed. This one reads only the producers' own declarations and needs no
-      # fixture; the other one does, and skips without it, which is why they are
-      # split across two jobs rather than both added here.
+      # test_one_producer_per_fixture_file and
+      # test_fixture_builders_require_their_inputs are named on 2026-09-11 for
+      # that record. Both were already passing in the sweep.
+      #
+      # Their companion test_every_fixture_file_has_a_producer went to
+      # test-unit-data instead, and that one was a real gap rather than a missing
+      # record: it enumerates the fixture checkout, so here it collected and then
+      # skipped all four of its tests on "not a test-data checkout (no
+      # manifest.json)" from the day it landed. A skip is not a pass and this job
+      # does not fail on one. test-unit-data has the checkout and fails on any
+      # skip, which is what makes the gate mean something.
       - name: Run shared case-study helper tests
         env:
           PYTHONPATH: ${{ github.workspace }}
