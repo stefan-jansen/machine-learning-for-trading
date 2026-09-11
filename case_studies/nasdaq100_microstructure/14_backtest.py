@@ -525,7 +525,33 @@ def run_arms(rows, arms, pass_name):
             backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
 
             if backtest_hash in planned:
+                # Recorded, not just counted. A skipped cell is a cell of this pass whose
+                # result is already in the registry, and pass 2 ranks on the pass-1 cells
+                # rather than on the subset this invocation happened to compute.
                 tally["skipped"] += 1
+                out.append(
+                    {
+                        "prediction_hash": pred_hash,
+                        "source": source,
+                        "family": pred_row["family"],
+                        "config_name": pred_row["config_name"],
+                        "ic_mean": ic_mean,
+                        "signal_method": scheme["name"],
+                        "universe": "full" if universe is None else universe,
+                        "pass": pass_name,
+                        "backtest_hash": backtest_hash,
+                        "ran": False,
+                        # The metrics of a skipped cell are in the registry, not here, and
+                        # the two halves of `out` have to share a schema for polars to
+                        # build one frame from them.
+                        "sharpe": None,
+                        "total_return": None,
+                        "max_drawdown": None,
+                        "cagr": None,
+                        "volatility": None,
+                        "num_trades": None,
+                    }
+                )
                 continue
             planned.add(backtest_hash)
             pending_schemes.append((idx, scheme, universe, spec))
@@ -545,6 +571,7 @@ def run_arms(rows, arms, pass_name):
                 "signal_method": scheme["name"],
                 "universe": "full" if universe is None else universe,
                 "pass": pass_name,
+                "ran": True,
             }
             try:
                 result = run_backtest(
@@ -620,9 +647,28 @@ baseline_results = run_arms(pred_index, baseline_arms, "Pass 1 (baseline)")
 # the price of not running the cross-product.
 
 # %%
+# The Sharpe comes from the registry and not from `baseline_results`, although pass 1 just
+# produced both. A cell whose identity was already registered is skipped rather than re-run -
+# that is what makes this sweep resumable - and a skipped cell computes no metrics for this
+# invocation to hold. Ranking on what this invocation computed would therefore rank on
+# whatever pass 1 had left to do: the whole pass on a first run, a fragment of it after an
+# interruption, and nothing at all on a re-run of a finished sweep, which would silently move
+# the selection or empty it. The registry holds every pass-1 cell either way.
+_cells = (
+    pl.DataFrame(baseline_results).select("prediction_hash", "backtest_hash").drop_nulls()
+    if baseline_results
+    else pl.DataFrame(schema={"prediction_hash": pl.String, "backtest_hash": pl.String})
+)
 pass2_index = pred_index.head(0)
-if mechanism_arms and baseline_results:
-    _scored = pl.DataFrame(baseline_results).drop_nulls("sharpe")
+if mechanism_arms and not _cells.is_empty():
+    _conn = sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db"))
+    _metrics = pl.read_database(
+        "SELECT backtest_hash, sharpe FROM backtest_metrics",
+        connection=_conn,
+        schema_overrides={"sharpe": pl.Float64},
+    )
+    _conn.close()
+    _scored = _cells.join(_metrics, on="backtest_hash", how="inner").drop_nulls("sharpe")
     if not _scored.is_empty():
         _ranked = (
             _scored.group_by("prediction_hash")
@@ -635,23 +681,22 @@ if mechanism_arms and baseline_results:
         )
         print(
             _ranked.join(
-                _scored.select("prediction_hash", "source", "family").unique(
-                    subset="prediction_hash"
-                ),
+                pred_index.select("prediction_hash", "source", "family"),
                 on="prediction_hash",
                 how="left",
             ).select("source", "family", "best_sharpe")
         )
 
 if mechanism_arms and pass2_index.is_empty():
-    # Every pass-1 backtest failed or was skipped, and pass 2 would run over nothing while
-    # the sweep reported success. On a re-run every pass-1 cell is legitimately skipped, so
-    # this is a warning rather than a raise - `FORCE_REBACKTEST` re-scores them.
-    print(
-        "  No pass-1 result carries a Sharpe, so pass 2 has nothing to select. On a re-run "
-        "this is expected: the pass-1 cells were already registered and were skipped.",
-        flush=True,
+    # Pass 1 registered no metric for any of its cells, so pass 2 has nothing to select and
+    # would run over an empty frame while the sweep reported success.
+    msg = (
+        f"pass 1 ran {len(_cells)} grid cells for {LABEL} and the registry holds a Sharpe "
+        "for none of them, so the mechanism grid has nothing to select. Either every "
+        "pass-1 backtest failed, or the metrics were written to a different registry than "
+        f"{CASE_DIR / 'run_log' / 'registry.db'}."
     )
+    raise RuntimeError(msg)
 
 # %%
 mechanism_results = run_arms(pass2_index, mechanism_arms, "Pass 2 (mechanism)")
