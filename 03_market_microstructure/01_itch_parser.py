@@ -149,6 +149,22 @@ if not raw_present:
         "uv run python data/equities/market/microstructure/nasdaq_itch_download.py"
     )
 
+
+def message_type_dirs() -> list[Path]:
+    """Parsed message-type subdirectories, one uppercase letter each.
+
+    Empty before Section 4 has run: `messages/` itself does not exist on a machine that
+    has never parsed, so every cell that lists message types goes through here.
+    """
+    if not MESSAGE_DIR.exists():
+        return []
+    return [
+        d
+        for d in sorted(MESSAGE_DIR.iterdir())
+        if d.is_dir() and len(d.name) == 1 and d.name.isupper()
+    ]
+
+
 # %% [markdown]
 # ## 1. Message Specifications
 #
@@ -233,15 +249,7 @@ for f in raw_files:
     print(f"  {f.name} ({f.stat().st_size / 1e9:.2f} GB)")
 
 # Step 2: Parsed messages (single uppercase letter = message type)
-parsed_types = (
-    [
-        d
-        for d in sorted(MESSAGE_DIR.iterdir())
-        if d.is_dir() and len(d.name) == 1 and d.name.isupper()
-    ]
-    if MESSAGE_DIR.exists()
-    else []
-)
+parsed_types = message_type_dirs()
 parsed_with_data = [d for d in parsed_types if list(d.glob("*.parquet"))]
 print(f"Parsed message types: {len(parsed_with_data)}")
 for msg_dir in parsed_with_data:
@@ -518,36 +526,30 @@ else:
 
 # %%
 # Message type distribution — use lazy scan to count without loading all data
+written = [d for d in message_type_dirs() if list(d.glob("*.parquet"))]
 print("Parsed Message Types:")
 print("-" * 50)
-for msg_dir in sorted(MESSAGE_DIR.iterdir()):
-    if (
-        msg_dir.is_dir()
-        and len(msg_dir.name) == 1
-        and msg_dir.name.isupper()
-        and list(msg_dir.glob("*.parquet"))
-    ):
-        count = pl.scan_parquet(msg_dir / "*.parquet").select(pl.len()).collect().item()
-        name = MESSAGE_SPECS.get(msg_dir.name, {}).get("name", "Unknown")
-        print(f"  {msg_dir.name} ({name:25}): {count:>12,} messages")
+if not written:
+    print("  Nothing parsed yet - Section 4 writes these from the raw binary.")
+for msg_dir in written:
+    count = pl.scan_parquet(msg_dir / "*.parquet").select(pl.len()).collect().item()
+    name = MESSAGE_SPECS.get(msg_dir.name, {}).get("name", "Unknown")
+    print(f"  {msg_dir.name} ({name:25}): {count:>12,} messages")
 
 # %%
 # Schema compatibility check — verify we can read each message type
+written = [d for d in message_type_dirs() if list(d.glob("*.parquet"))]
 print("Schema Compatibility Check:")
 print("-" * 50)
-for msg_dir in sorted(MESSAGE_DIR.iterdir()):
-    if (
-        msg_dir.is_dir()
-        and len(msg_dir.name) == 1
-        and msg_dir.name.isupper()
-        and list(msg_dir.glob("*.parquet"))
-    ):
-        try:
-            sample = pl.scan_parquet(msg_dir / "*.parquet").head(5).collect()
-            name = MESSAGE_SPECS.get(msg_dir.name, {}).get("name", "Unknown")
-            print(f"  [OK] {msg_dir.name} ({name:25}): cols={list(sample.columns)[:4]}...")
-        except Exception as e:
-            print(f"  [FAIL] {msg_dir.name}: {e}")
+if not written:
+    print("  Nothing parsed yet - Section 4 writes these from the raw binary.")
+for msg_dir in written:
+    try:
+        sample = pl.scan_parquet(msg_dir / "*.parquet").head(5).collect()
+        name = MESSAGE_SPECS.get(msg_dir.name, {}).get("name", "Unknown")
+        print(f"  [OK] {msg_dir.name} ({name:25}): cols={list(sample.columns)[:4]}...")
+    except Exception as e:
+        print(f"  [FAIL] {msg_dir.name}: {e}")
 
 # %% [markdown]
 # ## 6. Production Parsing with Rust
