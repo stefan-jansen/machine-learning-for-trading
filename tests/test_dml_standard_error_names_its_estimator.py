@@ -235,3 +235,87 @@ def test_too_few_rows_to_fit_does_not_name_an_estimator() -> None:
     assert result["n_obs"] < 50
     assert result["covariance_type"] == FAILED
     _assert_invariant(result)
+
+
+def test_a_failed_observed_covariance_withholds_the_refutation_verdict(monkeypatch) -> None:
+    """The regression the NaN introduces, and the reason the guard is not optional.
+
+    `empirical_permutation_p` counts placebo draws at least as extreme as the observed
+    one. Every `>=` comparison against NaN is False, so a NaN observed t-statistic scores
+    zero placebos as extreme and the test returns the smallest p-value it can produce,
+    `1 / (n + 1)`. Measured with the guard removed and 24 draws: `empirical_p = 0.04`,
+    `observed_t_stat = nan`, `refutation_class = "Passes"` - a published verdict that the
+    effect survives permutation, computed against an undefined observed statistic. The
+    placebo fits themselves succeed, so nothing else in the run looks wrong.
+
+    The draw count matters to what the failure looks like. `classify_refutation` returns
+    "Underpowered" whenever `1 / (n + 1) >= 0.05`, so below 20 successful draws the same
+    defect is masked by the underpowered answer. The case studies run 100.
+
+    `run_resolved_causal_request` refuses the fit at its finiteness check before this
+    reaches a registry. The chapter-15 notebooks call `run_dml_analysis` directly and do
+    not, which is who would have read the verdict.
+    """
+    import pandas as pd
+
+    from case_studies.utils import causal
+
+    real = causal.manual_dml_timeseries
+    calls = {"n": 0}
+
+    def observed_fails_placebos_succeed(*args, **kwargs):
+        result = real(*args, **kwargs)
+        calls["n"] += 1
+        if calls["n"] > 1:
+            return result
+        # Only the observed fit loses its covariance; every placebo draw keeps its own.
+        return {
+            **result,
+            "se_hac": np.nan,
+            "t_stat_hac": np.nan,
+            "p_value_hac": np.nan,
+            "covariance_type": FAILED,
+            "hac_maxlags": 0,
+        }
+
+    monkeypatch.setattr(causal, "manual_dml_timeseries", observed_fails_placebos_succeed)
+
+    rng = np.random.default_rng(7)
+    n_periods, n_entities = 120, 8
+    timestamps = pd.to_datetime("2020-01-01") + pd.to_timedelta(
+        np.repeat(np.arange(n_periods), n_entities), unit="D"
+    )
+    n = timestamps.size
+    treatment = rng.normal(size=n)
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": np.tile([f"e{i}" for i in range(n_entities)], n_periods),
+            "treat": treatment,
+            "conf": rng.normal(size=n),
+            "outcome": treatment + rng.normal(size=n),
+        }
+    )
+
+    with pytest.warns(RuntimeWarning, match="observed t-statistic is not finite"):
+        results = causal.run_dml_analysis(
+            frame,
+            "treat",
+            "outcome",
+            ["conf"],
+            n_folds=3,
+            embargo=1,
+            n_placebo=24,
+            block_size=5,
+            horizon=1,
+            time_col="timestamp",
+            entity_col="symbol",
+            model_y=DummyRegressor(),
+            model_t=DummyRegressor(),
+        )
+
+    assert calls["n"] > 1, "the placebo draws must have run, or the test proves nothing"
+    assert results["dml_result"]["covariance_type"] == FAILED
+    # No verdict at all, rather than the minimum p-value the comparison would have
+    # produced against NaN.
+    assert results["refutation"] == {}

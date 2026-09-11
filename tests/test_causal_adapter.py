@@ -325,9 +325,11 @@ def test_run_dml_analysis_pins_the_naive_ols_too(monkeypatch) -> None:
             "theta": 0.02,
             "se_hac": 0.01,
             "n_obs": n,
-            "t_stat": 2.0,
+            # `t_stat_hac` and not `t_stat`, and no `hac_lags`: neither of those names is
+            # in what `manual_dml_timeseries` returns, so the stub was answering to a
+            # shape the code under test never sees.
+            "t_stat_hac": 2.0,
             "p_value_hac": 0.04,
-            "hac_lags": 1,
             "n_entities": 1,
             "n_periods": n,
             "hac_maxlags": 1,

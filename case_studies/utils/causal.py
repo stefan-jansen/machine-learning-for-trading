@@ -990,8 +990,10 @@ def run_dml_analysis(
             raise ValueError(f"Outcome '{outcome_col}' has near-zero variance")
 
         if hac_maxlags is None and horizon is None:
-            import warnings
-
+            # `warnings` is imported at module scope. A local `import warnings` here made
+            # the name local to the whole function, so any other warnings.warn in
+            # run_dml_analysis raised UnboundLocalError whenever this branch was not
+            # taken - which is every caller that passes a horizon.
             warnings.warn(
                 "run_dml_analysis: no horizon or hac_maxlags given; the second-stage "
                 "HAC bandwidth falls back to the horizon-blind cube-root rule, which "
@@ -1100,7 +1102,31 @@ def run_dml_analysis(
         )
 
         refutation = {}
-        if len(placebo_effects) >= MIN_PLACEBO_DRAWS:
+        observed_t = float(dml["t_stat_hac"])
+        if not np.isfinite(observed_t):
+            # The draws are fine; the statistic they would be compared against is not.
+            # `empirical_permutation_p` counts placebos at least as extreme as the
+            # observed one, and every `>=` against NaN is False, so the comparison would
+            # return the smallest p-value the test can produce - 1/(n+1) - and publish
+            # "Passes" on an undefined observed statistic. The permutation p-value is the
+            # one number in this dict that is not a diagnostic, so the answer is to
+            # withhold the verdict rather than to qualify it: `refutation` stays empty,
+            # which is the shape a caller already handles for too few draws, and
+            # `covariance_type` on the fit says which of the two happened.
+            #
+            # `run_resolved_causal_request` refuses the run before this matters. Direct
+            # callers of `run_dml_analysis` - the chapter-15 notebooks - do not, and they
+            # are the ones who would have read the verdict.
+            warnings.warn(
+                f"run_dml_analysis: the observed t-statistic is not finite "
+                f"(covariance_type={dml.get('covariance_type')!r}), so the "
+                f"{len(placebo_t_stats)} placebo draws have nothing to be compared "
+                f"against. Reporting no refutation rather than a verdict computed "
+                f"against NaN.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif len(placebo_effects) >= MIN_PLACEBO_DRAWS:
             # THE TEST IS ON THE T-STATISTIC, NOT ON THETA, and the difference is not
             # cosmetic: comparing thetas made this refutation anti-conservative on every
             # run ever recorded (ml4t/agent-workspace#1120).
@@ -1144,7 +1170,6 @@ def run_dml_analysis(
             # non-NULL.
             placebo_arr = np.array(placebo_effects)
             placebo_t_arr = np.array(placebo_t_stats)
-            observed_t = float(dml["t_stat_hac"])
             p_mean = float(np.mean(placebo_t_arr))
             p_std = float(np.std(placebo_t_arr))
             z = (observed_t - p_mean) / p_std if p_std > 0 else np.inf
