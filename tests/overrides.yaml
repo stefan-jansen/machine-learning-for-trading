@@ -59,8 +59,20 @@
   tier: weekly
   timeout: 300
 02_financial_data_universe/18_data_management:
+  # Every fetch in this notebook goes through DEMO_PROVIDER, which is "yahoo" for the
+  # reader. CI reads the deterministic mock provider instead: a live vendor made this
+  # job red three times (a null 'open' on the current session's placeholder bar, twice,
+  # and a rate-limited fetch reported as an invalid symbol), and none of those reds were
+  # about the storage and validation code the notebook teaches.
+  parameters:
+    DEMO_PROVIDER: mock
   timeout: 300
 02_financial_data_universe/19_incremental_updates:
+  # Same reason as 18: the incremental-update logic is what this job checks, and it does
+  # not need a live vendor to run. The retreat past an unpublished bar is what the
+  # notebook's own committed output demonstrates, against real Yahoo.
+  parameters:
+    DEMO_PROVIDER: mock
   timeout: 300
 02_financial_data_universe/20_storage_benchmark_file:
   timeout: 300
