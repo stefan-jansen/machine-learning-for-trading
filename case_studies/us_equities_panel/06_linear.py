@@ -130,17 +130,19 @@ SUPERSEDES_POPULATION: str = ""
 # that moves their members is refused at the freeze, which is after the fit. That refusal cost
 # 78 minutes of cold fitting once already.
 #
-# A literal here does NOT have to be re-typed after every successful run, and re-typing it is
-# the mistake. `candidate_set_supersedes` accepts the declared hash when it is either the tip
-# or what the tip supersedes, and those two mean different things: naming what the tip
-# supersedes is the re-run, and resolves to the set already published; naming the tip itself is
-# the refit, and publishes a generation over it. The two fwd_ret_1d entries name generation 1
-# while generation 2 (55d64275dfd6, ed1840bfaeb8) is in force, which is the re-run - correct
-# whenever this notebook re-runs with the members it last published. Advancing them to the tip
-# would declare a refit and write a third generation with identical members.
+# A literal here names the generation in force, and it is re-typed whenever that generation
+# moves. The two arms of `candidate_set_supersedes` are not two equally good declarations:
+# `create` matches on the member list before it reads the declaration at all, so naming the tip
+# on an unchanged re-run writes nothing, while naming what the tip replaced raises
+# "must explicitly supersedes <tip>" as soon as the members do move - at the freeze, after the
+# fit. The tip is therefore correct on both the re-run and the refit and the predecessor is
+# correct on only one of them, so there is no run on which the predecessor is the better
+# declaration. Reproduced against `CandidateSet.create` and `OfficialPopulation.create` on
+# 2026-09-11; the guard is `same_list` in research/population.py and the `bound is not None`
+# branch in research/comparison.py.
 SUPERSEDES_SETS: dict = {
-    "us-equities-fwd-ret-1d-linear-v1": "454f73021f33",
-    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "29155b2c69f1",
+    "us-equities-fwd-ret-1d-linear-v1": "55d64275dfd6",
+    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "ed1840bfaeb8",
     "us-equities-fwd-ret-5d-linear-v1": "e7b744f380d5",
     "us-equities-fwd-ret-5d-linear-diagnostics-v1": "5514968cd0bb",
     "us-equities-fwd-ret-21d-linear-v1": "6e8179623f0a",
