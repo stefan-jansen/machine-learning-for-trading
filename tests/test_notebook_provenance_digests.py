@@ -28,6 +28,7 @@ failed - 423 of them at the time this landed.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,6 +36,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
+
+pytestmark = pytest.mark.usefixtures("tmp_repo")
 
 import notebook_provenance  # noqa: E402
 from notebook_provenance import (  # noqa: E402

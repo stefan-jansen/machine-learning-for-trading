@@ -9,6 +9,7 @@ Two modes of operation:
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Mapping
@@ -667,3 +668,19 @@ def clean_env():
     yield os.environ
     os.environ.clear()
     os.environ.update(saved_env)
+
+
+@pytest.fixture
+def tmp_repo(tmp_path):
+    """Make a stand-in ``REPO_ROOT`` a real repository.
+
+    Stamping a notebook stores the blob it names - ``source_py_blob`` exists so that a later
+    command can fetch that blob and compare code cells, and a hash recorded without storing the
+    object names something that is not there. Storing it needs somewhere to store it, so a test
+    that stands ``REPO_ROOT`` on a directory has to stand it on a repository.
+
+    Opt in per module with ``pytestmark = pytest.mark.usefixtures("tmp_repo")`` rather than
+    autouse here, so the rest of the suite does not pay for a ``git init`` it never reads.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    return tmp_path
