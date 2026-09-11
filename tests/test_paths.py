@@ -315,6 +315,17 @@ class TestRegistryReadonlyUri:
         ):
             reader.execute("INSERT INTO training_runs VALUES ('gbm')")
 
+    def test_a_question_mark_in_the_path_is_not_read_as_uri_syntax(self, tmp_path: Path) -> None:
+        """A raw f-string would end the path at the `?` and open a different file, or none."""
+        awkward = tmp_path / "run?log#1"
+        awkward.mkdir()
+        registry = _wal_registry(awkward)
+
+        with closing(sqlite3.connect(registry_readonly_uri(registry), uri=True)) as reader:
+            names = {row[0] for row in reader.execute("SELECT config_name FROM training_runs")}
+
+        assert names == {"ols"}
+
     def test_an_installed_bundle_is_readable_from_an_unwritable_tree(self, tmp_path: Path) -> None:
         """A WAL reader must create the -shm sidecar unless told the file cannot change."""
         run_log = tmp_path / "run_log"

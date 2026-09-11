@@ -383,7 +383,9 @@ def registry_readonly_uri(registry: Path | str) -> str:
     same condition that makes the promise true.
     """
     path = Path(registry).resolve()
-    uri = f"file:{path}?mode=ro"
+    # `as_uri()` percent-encodes the path. Interpolating it raw would let a checkout whose
+    # path contains `?` or `#` be read as URI syntax and open some other file, or none.
+    uri = f"{path.as_uri()}?mode=ro"
     if not os.access(path.parent, os.W_OK):
         uri += "&immutable=1"
     return uri

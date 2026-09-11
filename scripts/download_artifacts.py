@@ -194,6 +194,17 @@ def _verify_run_log(run_log: Path) -> None:
             raise ValueError(f"artifact checksum mismatch: {relative}")
 
     registry = run_log / "registry.db"
+    # A bundle that ships an uncheckpointed write-ahead log cannot be read correctly once it is
+    # installed: the tree is left unwritable, so `mode=ro` cannot create the `-shm` sidecar it
+    # needs to replay the log, and `immutable=1` reads the pre-WAL main file instead - which can
+    # be missing the tables entirely. Neither the checksums nor the integrity check below would
+    # notice, because both describe the files as shipped. Refuse the bundle instead.
+    wal = registry.with_name(registry.name + "-wal")
+    if wal.is_file() and wal.stat().st_size > 0:
+        raise ValueError("Bundle ships an uncheckpointed registry write-ahead log")
+
+    # Nothing is writing this tree - it was just extracted and checksum-verified - so the
+    # integrity check reads the main file directly.
     uri = f"file:{registry.resolve()}?mode=ro&immutable=1"
     with sqlite3.connect(uri, uri=True) as connection:
         integrity = connection.execute("PRAGMA integrity_check").fetchone()

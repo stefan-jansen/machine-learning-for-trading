@@ -465,7 +465,9 @@ def _forecast_one(forecaster, question: ForecastQuestion) -> ForecastResult:
         question.question, summaries, cutoff_date=cutoff
     )
     post_debate = (1 - DEBATE_WEIGHT) * aggregate_p + DEBATE_WEIGHT * midpoint
-    final_p, confidence = _blend_final_probability(post_debate, supervisor)
+    final_p, confidence = _blend_final_probability(
+        post_debate, supervisor, medium_weight=SUPERVISOR_MEDIUM_WEIGHT
+    )
     tokens = sum((agent.token_usage for agent in agents), start=TokenUsage())
     tokens = tokens + debate.token_usage + supervisor.token_usage
     return ForecastResult(
