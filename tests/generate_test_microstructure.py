@@ -11,13 +11,16 @@ Usage:
     uv run python tests/generate_test_microstructure.py --output-root DIR
     uv run python tests/generate_test_microstructure.py            # writes the live fixture
 
-**Four of its twenty outputs no longer reproduce what is on disk**, so running it
-without checking first destroys real data. Measured 2026-09-11: it writes 345 rows
-to `futures/market/individual/ES/data.parquet` where the fixture carries 19,361 that
-are byte-identical to production, and 20, 3 and 3 rows to the ITCH `A`, `P` and `R`
-message files where the fixture carries 2,500, 2,500 and 5. Someone widened those
-four and did not update this script. `--check` reports the disagreement and writes
-nothing; run it before the bare form.
+It owns sixteen files. Four more that it used to write are production-sourced and
+belong to `create_test_data.py` instead: the ITCH `A`, `P` and `R` message files and
+`futures/market/individual/ES/data.parquet`. Those were widened from production on
+2026-05-06 and 2026-05-17 and this script was not updated, so for four months, running
+it overwrote 19,361 real ES bars with 345 synthetic ones and 2,500 real ITCH adds and
+trades with 20 and 3. `PRODUCTION_SOURCED` now names them and `_write` refuses them,
+so the two producers no longer contend for the same path.
+
+`--check` regenerates to a scratch directory and reports any output that stopped
+reproducing the fixture, writing nothing. It exits non-zero when one disagrees.
 """
 
 import argparse
@@ -52,6 +55,33 @@ GENERATED_ROOTS: tuple[str, ...] = (
     "prediction_markets",
 )
 
+# Paths that live under `GENERATED_ROOTS` but that this module must not write: the
+# fixture takes them from production, and `build_nasdaq_itch_messages` and
+# `build_individual_futures_es` in create_test_data.py own them.
+#
+# The frames are still *built* here, for two reasons. The synthetic `D`, `E`, `X`, `C`
+# and `U` messages are keyed to the `A` block's order references, timestamps and share
+# counts, so deleting it would leave them referencing nothing. And the `A` and ES blocks
+# draw from the seeded module-level `RNG`, whose position every later output depends on,
+# so dropping the draws would move the bytes of all sixteen files this module does own.
+PRODUCTION_SOURCED: frozenset[str] = frozenset(
+    {
+        "equities/market/microstructure/nasdaq_itch/messages/A/part-000000.parquet",
+        "equities/market/microstructure/nasdaq_itch/messages/P/part-000000.parquet",
+        "equities/market/microstructure/nasdaq_itch/messages/R/part-000000.parquet",
+        "futures/market/individual/ES/data.parquet",
+    }
+)
+
+
+def _write(frame: pl.DataFrame, path: Path, root: Path) -> bool:
+    """Write ``frame`` to ``path`` unless production owns it. Returns whether it wrote."""
+    if path.relative_to(root).as_posix() in PRODUCTION_SOURCED:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_parquet(path)
+    return True
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 1. ITCH Parsed Messages (for NB 02-10)
@@ -72,7 +102,6 @@ def generate_itch_messages(root: Path = TEST_DATA_ROOT) -> None:
 
     # ── R (Stock Directory) ──────────────────────────────────────────────
     r_dir = itch_dir / "R"
-    r_dir.mkdir(parents=True, exist_ok=True)
     r_df = pl.DataFrame(
         {
             "stock_locate": pl.Series([1, 2, 3], dtype=pl.UInt16),
@@ -98,7 +127,7 @@ def generate_itch_messages(root: Path = TEST_DATA_ROOT) -> None:
             "inverse_indicator": ["N", "N", "N"],
         }
     ).cast({"timestamp": pl.Datetime("ns")})
-    r_df.write_parquet(r_dir / "part-000000.parquet")
+    _write(r_df, r_dir / "part-000000.parquet", root)
 
     # ── S (System Event) ─────────────────────────────────────────────────
     s_dir = itch_dir / "S"
@@ -121,7 +150,6 @@ def generate_itch_messages(root: Path = TEST_DATA_ROOT) -> None:
     # ── A (Add Order) ────────────────────────────────────────────────────
     # 20 orders for AAPL (stock_locate=1), spanning 10:00 to 15:00
     a_dir = itch_dir / "A"
-    a_dir.mkdir(parents=True, exist_ok=True)
 
     n_orders = 20
     base_price_aapl = 320.0  # AAPL price circa Jan 2020
@@ -155,7 +183,7 @@ def generate_itch_messages(root: Path = TEST_DATA_ROOT) -> None:
             "price": pl.Series([int(p * 10000) for p in prices], dtype=pl.UInt32),
         }
     ).cast({"timestamp": pl.Datetime("ns")})
-    a_df.write_parquet(a_dir / "part-000000.parquet")
+    _write(a_df, a_dir / "part-000000.parquet", root)
 
     # ── D (Order Delete) ─────────────────────────────────────────────────
     d_dir = itch_dir / "D"
@@ -235,7 +263,6 @@ def generate_itch_messages(root: Path = TEST_DATA_ROOT) -> None:
 
     # ── P (Non-Cross Trade) ──────────────────────────────────────────────
     p_dir = itch_dir / "P"
-    p_dir.mkdir(parents=True, exist_ok=True)
     p_df = pl.DataFrame(
         {
             "stock_locate": pl.Series([1, 1, 1], dtype=pl.UInt16),
@@ -253,7 +280,7 @@ def generate_itch_messages(root: Path = TEST_DATA_ROOT) -> None:
             "match_number": pl.Series([7001, 7002, 7003], dtype=pl.UInt64),
         }
     ).cast({"timestamp": pl.Datetime("ns")})
-    p_df.write_parquet(p_dir / "part-000000.parquet")
+    _write(p_df, p_dir / "part-000000.parquet", root)
 
     # ── U (Order Replace) ────────────────────────────────────────────────
     u_dir = itch_dir / "U"
@@ -279,9 +306,14 @@ def generate_itch_messages(root: Path = TEST_DATA_ROOT) -> None:
 
     print(f"  ITCH messages written to {itch_dir}")
     for sub in sorted(itch_dir.iterdir()):
-        if sub.is_dir() and sub.name != "enriched":
-            n = pl.scan_parquet(sub / "*.parquet").select(pl.len()).collect().item()
-            print(f"    {sub.name}/: {n} rows")
+        if not sub.is_dir() or sub.name == "enriched":
+            continue
+        target = sub / "part-000000.parquet"
+        if target.relative_to(root).as_posix() in PRODUCTION_SOURCED:
+            print(f"    {sub.name}/: production-sourced, left alone")
+            continue
+        n = pl.scan_parquet(sorted(sub.glob("*.parquet"))).select(pl.len()).collect().item()
+        print(f"    {sub.name}/: {n} rows")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -779,8 +811,11 @@ def generate_individual_futures(root: Path = TEST_DATA_ROOT) -> None:
             .sort("timestamp")
         )
 
-        df.write_parquet(prod_dir / "data.parquet")
-        print(f"  Futures individual {product}: {len(df)} rows -> {prod_dir / 'data.parquet'}")
+        out_file = prod_dir / "data.parquet"
+        if _write(df, out_file, root):
+            print(f"  Futures individual {product}: {len(df)} rows -> {out_file}")
+        else:
+            print(f"  Futures individual {product}: production-sourced, left alone")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -892,7 +927,13 @@ def generate_all(root: Path = TEST_DATA_ROOT, *, quiet: bool = False) -> list[Pa
     for relative in GENERATED_ROOTS:
         target = root / relative
         if target.is_dir():
-            written.extend(sorted(p for p in target.rglob("*") if p.is_file()))
+            written.extend(
+                sorted(
+                    p
+                    for p in target.rglob("*")
+                    if p.is_file() and p.relative_to(root).as_posix() not in PRODUCTION_SOURCED
+                )
+            )
         elif target.is_file():
             written.append(target)
     return written

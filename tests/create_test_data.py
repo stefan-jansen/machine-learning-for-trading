@@ -1203,6 +1203,98 @@ def build_cme_futures(source: Path, output: Path) -> list[Path]:
     return written
 
 
+# --- NASDAQ ITCH messages and the ES individual contracts ---------------------
+#
+# Four fixture files under paths that `tests/generate_test_microstructure.py`
+# otherwise fills with synthetic data. They were widened from production on
+# 2026-05-06 (ES, for the `timestamp`/`tenor`/`product` schema) and 2026-05-17
+# (ITCH `A`, `P`, `R`, to unblock 08_financial_features/02_microstructure_features),
+# and the generator was not told, so for four months the two producers wrote
+# different content to the same paths and whichever ran last won. The generator now
+# names them in its `PRODUCTION_SOURCED` set and refuses them; they are declared here.
+
+ITCH_MESSAGES = Path("equities") / "market" / "microstructure" / "nasdaq_itch" / "messages"
+# The five the fixture carries. Widening beyond them costs little, but
+# 02_microstructure_features asserts >= 100 AAPL trade rows and reads three of these
+# by name, so narrowing is what would break.
+ITCH_SYMBOLS = ("AAPL", "GOOGL", "MSFT", "NVDA", "TSLA")
+ITCH_ROWS_PER_SYMBOL = 500
+# `R` is the stock directory: one row per symbol, so it is taken whole rather than
+# capped. `A` and `P` are the message types a notebook reads.
+ITCH_MESSAGE_TYPES = ("A", "P", "R")
+
+ES_INDIVIDUAL = Path("futures") / "market" / "individual" / "ES" / "data.parquet"
+
+
+def build_nasdaq_itch_messages(source: Path, output: Path) -> list[Path]:
+    """Take the first ``ITCH_ROWS_PER_SYMBOL`` messages per symbol from production.
+
+    Production stores each message type as 43 parquet parts in timestamp order. The
+    reduction reads them in that order, keeps the head per symbol, and re-sorts by
+    timestamp, which is what makes the result a contiguous early slice of the
+    trading day rather than a sample scattered across it: a limit-order-book reader
+    needs the adds that precede an event, and a random sample supplies neither side.
+
+    `R` has one row per symbol and is taken whole.
+    """
+    written: list[Path] = []
+    for message_type in ITCH_MESSAGE_TYPES:
+        source_dir = source / ITCH_MESSAGES / message_type
+        parts = sorted(source_dir.glob("part-*.parquet"))
+        if not parts:
+            raise FileNotFoundError(
+                f"No ITCH {message_type} messages at {source_dir}. Parse them with "
+                "data/equities/market/microstructure/nasdaq_itch_download.py."
+            )
+        frame = pl.scan_parquet(parts).filter(pl.col("stock").is_in(ITCH_SYMBOLS)).collect()
+        missing = sorted(set(ITCH_SYMBOLS) - set(frame["stock"].unique().to_list()))
+        if missing:
+            raise ValueError(
+                f"Production ITCH {message_type} carries no messages for {missing}. "
+                "The fixture's consumers read those symbols by name."
+            )
+        columns = frame.columns
+        if message_type != "R":
+            frame = (
+                frame.group_by("stock", maintain_order=True)
+                .head(ITCH_ROWS_PER_SYMBOL)
+                .select(columns)
+                .sort("timestamp")
+            )
+        destination = output / ITCH_MESSAGES / message_type / "part-000000.parquet"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(destination)
+        print(f"    {message_type}/: {frame.height:,} rows, {frame['stock'].n_unique()} symbols")
+        written.append(destination)
+    return written
+
+
+def build_individual_futures_es(source: Path, output: Path) -> list[Path]:
+    """Copy the production ES individual-contract bars verbatim.
+
+    290 KB for ten years across every listed contract month. A reduction would have
+    to choose which months to keep, and the notebook that reads this file rolls
+    between them, so dropping any is dropping the thing it demonstrates.
+
+    CL and NQ sit beside this file and are synthetic, from
+    `tests/generate_test_microstructure.py`; production carries neither.
+    """
+    src = source / ES_INDIVIDUAL
+    if not src.exists():
+        raise FileNotFoundError(
+            f"ES individual contracts not found at {src}. Fetch them with "
+            "data/futures/market/cme_download.py."
+        )
+    dst = output / ES_INDIVIDUAL
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst)
+    rows = pl.scan_parquet(dst).select(pl.len()).collect().item()
+    print(
+        f"    ES/data.parquet: {rows:,} rows ({dst.stat().st_size / 1e6:.1f} MB), copied verbatim"
+    )
+    return [dst]
+
+
 DATASETS: tuple[Dataset, ...] = (
     Dataset(
         name="etfs",
@@ -1368,6 +1460,45 @@ DATASETS: tuple[Dataset, ...] = (
         # Named individually, not as the 13f/ directory: bulk/ sits beside them and
         # is produced elsewhere, so --clean must not take it.
         owns=tuple(Path("equities") / "positioning" / "13f" / name for name in _13F_FILES),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="nasdaq_itch_messages",
+        description=(
+            f"the first {ITCH_ROWS_PER_SYMBOL} production ITCH add-order and trade "
+            f"messages per symbol for {len(ITCH_SYMBOLS)} symbols, plus their stock "
+            "directory rows, as a contiguous slice of the open rather than a sample"
+        ),
+        build=build_nasdaq_itch_messages,
+        # Named individually, not as the messages/ directory: the other seven message
+        # types there are synthetic and come from tests/generate_test_microstructure.py,
+        # so --clean must not take them.
+        owns=tuple(
+            ITCH_MESSAGES / message_type / "part-000000.parquet"
+            for message_type in ITCH_MESSAGE_TYPES
+        ),
+        budget={
+            "symbols": list(ITCH_SYMBOLS),
+            "rows_per_symbol": ITCH_ROWS_PER_SYMBOL,
+            "message_types": list(ITCH_MESSAGE_TYPES),
+        },
+        entities={
+            (ITCH_MESSAGES / message_type / "part-000000.parquet").as_posix(): (
+                "stock",
+                len(ITCH_SYMBOLS),
+            )
+            for message_type in ITCH_MESSAGE_TYPES
+        },
+    ),
+    Dataset(
+        name="individual_futures_es",
+        description=(
+            "the whole production ES individual-contract panel, small enough to "
+            "ship intact and carrying every contract month the roll demonstrates"
+        ),
+        build=build_individual_futures_es,
+        # Named individually: CL and NQ sit in the same directory and are synthetic.
+        owns=(ES_INDIVIDUAL,),
         budget={"subsample": "none"},
     ),
 )
