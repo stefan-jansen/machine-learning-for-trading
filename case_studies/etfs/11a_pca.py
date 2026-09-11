@@ -53,7 +53,7 @@
 # - Read a model with no epochs and say why it still publishes a checkpoint.
 # - Read a population published for every declared label rather than only the traded one.
 #
-# **Book reference**: Chapter 13, Section 13.3 (PCA for algorithmic trading) and Chapter 14,
+# **Book reference**: Chapter 14, Section 14.2 (Extracting latent factors with PCA) and
 # Section 14.5 (Bridging economics and statistics with advanced models). Chapter 6, Section 6.7
 # (Search accounting and run logging) introduces the run log this notebook writes to.
 #
