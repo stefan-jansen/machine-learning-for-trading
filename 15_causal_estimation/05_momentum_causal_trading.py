@@ -1044,12 +1044,7 @@ print("\n" + "=" * 60)
 print("TRAIN AGAINST HOLDOUT")
 print("=" * 60)
 
-test_sharpes = {r["name"]: r["sharpe"] for r in results}
-
 print(f"\nMomentum IC: {train_ic:.4f} in training, {test_ic:.4f} in the holdout")
-print("\nHoldout Sharpe by strategy:")
-for name, sharpe in test_sharpes.items():
-    print(f"  {name:<12} {sharpe:>6.2f}")
 
 # %% [markdown] tags=[]
 # ### Reading the comparison

@@ -452,7 +452,10 @@ axes[1].barh(
 )
 axes[1].set_xlim(0, N_PCA_FACTORS)
 axes[1].set_xlabel("Selected PCA controls (count)")
-axes[1].legend(loc="lower right", frameon=False, fontsize=8)
+# The outcome LASSO retains all ten components for every candidate, so every navy bar spans
+# the full axis and no corner inside the panel is free. A key placed in one sits on a bar of
+# its own colour and cannot be read; it goes above the panel instead.
+axes[1].legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=2, frameon=False, fontsize=8)
 axes[1].invert_yaxis()
 
 add_message_title(
