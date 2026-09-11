@@ -370,28 +370,34 @@ if threshold_col:
         ),
     )
 
+# %% [markdown]
+# The cell below correlates the threshold the labeler actually produced - not a
+# re-derivation of it - against two quantities measured strictly backwards from each date,
+# so nothing in the comparison sees the future the threshold is trying to anticipate.
+
 # %% tags=["results"]
-# What the threshold actually tracks: trailing dispersion, and trailing drift as well.
-_diag = (
-    spy.select("timestamp", "close")
-    .with_columns(
-        fwd=(pl.col("close").shift(-HORIZON) / pl.col("close") - 1),
-        daily=(pl.col("close") / pl.col("close").shift(1) - 1),
+if threshold_col:
+    _diag = (
+        labels_ts_pct.select("timestamp", "close", threshold_col[0])
+        .with_columns(
+            daily=(pl.col("close") / pl.col("close").shift(1) - 1),
+            completed=(pl.col("close") / pl.col("close").shift(HORIZON) - 1),
+        )
+        .with_columns(
+            trailing_vol=pl.col("daily").rolling_std(252) * np.sqrt(252),
+            trailing_drift=pl.col("completed").rolling_mean(252),
+        )
+        .drop_nulls()
     )
-    .with_columns(
-        threshold=pl.col("fwd").rolling_quantile(0.75, window_size=252),
-        trailing_vol=pl.col("daily").rolling_std(252) * np.sqrt(252),
-        trailing_drift=pl.col("fwd").rolling_mean(252),
+    print(f"Rolling threshold ({threshold_col[0]}), correlation against:")
+    print(
+        "  trailing 1-year realized volatility:          "
+        f"{_diag.select(pl.corr(threshold_col[0], 'trailing_vol')).item():.2f}"
     )
-    .drop_nulls()
-)
-print("Rolling threshold, correlation against:")
-print(
-    f"  trailing 1-year realized volatility: {_diag.select(pl.corr('threshold', 'trailing_vol')).item():.2f}"
-)
-print(
-    f"  trailing 1-year mean {HORIZON}-day return: {_diag.select(pl.corr('threshold', 'trailing_drift')).item():.2f}"
-)
+    print(
+        f"  trailing 1-year mean completed {HORIZON}-day return: "
+        f"{_diag.select(pl.corr(threshold_col[0], 'trailing_drift')).item():.2f}"
+    )
 
 # %% [markdown]
 # The threshold is not a fixed return; it is whatever the top quartile of the last year
@@ -776,10 +782,11 @@ if "barrier_hit" in labels_tb.columns:
         "upper": (
             "One SPY trade entered at the close of 27 April 2020 near 264, with a dashed "
             "green take-profit line at 269.15 and a dashed red stop line at 261.23. The "
-            "navy price line rises across two bars and closes above the take-profit, where "
-            "a copper cross marks the booked exit at the barrier price. The remaining "
-            "eighteen bars of the holding window are drawn as a faint dotted grey line "
-            "that dips to 259 in early May and ends near 275, none of it part of the trade."
+            "navy price line rises across two bars to the take-profit, where a copper cross "
+            "marks the booked exit at 269.15. The remaining eighteen bars of the holding "
+            "window are drawn as a faint dotted grey line that falls below the stop level "
+            "in early May, recovers, and ends near 275 - none of it part of the trade, "
+            "though a position still open would have been stopped out on the way."
         ),
         "lower": (
             "One SPY trade entered at the close of 25 February 2020 near 286, with a dashed "
@@ -986,13 +993,15 @@ print(
 # one. An upper-barrier exit is booked at the take-profit when the close that triggered it
 # was already above it, so the label gives away part of the gain; a lower-barrier exit is
 # booked at the stop when the close that triggered it was well below, so the label hides
-# part of the loss.
-# Averaged over every barrier exit the label set is better than what those closes would
-# have paid, and the bias is asymmetric rather than a wash.
+# part of the loss. Averaged over every barrier exit the label set is better than what
+# those closes would have paid, and the bias is asymmetric rather than a wash.
 #
-# Passing `high_col`, `low_col` and `open_col` replaces the assumption with the bar's own
-# range and executes a gap-through at the open. That is the production setting, and the
-# difference above is what it is worth.
+# Read that as barrier-price against trigger-close accounting on a fixed set of exits, and
+# nothing more. It is **not** a measurement of what OHLC detection is worth: supplying
+# `high_col`, `low_col` and `open_col` changes which bar exits and which barrier is hit, not
+# only the price each exit is booked at, and an intrabar touch that does not gap still
+# executes at the barrier there too. Sizing that setting needs a second labeling run to
+# compare against, not a repricing of this one.
 
 # %% [markdown]
 # ### Sequential Bootstrap
@@ -1050,11 +1059,11 @@ fig.add_trace(
         x=seq_uniqueness,
         xbins=bins,
         name="Sequential",
-        marker_color=COLORS["blue"],
+        marker_color=COLORS["amber"],
         opacity=0.6,
     )
 )
-for values, color in ((naive_uniqueness, COLORS["neutral"]), (seq_uniqueness, COLORS["blue"])):
+for values, color in ((naive_uniqueness, COLORS["neutral"]), (seq_uniqueness, COLORS["amber"])):
     fig.add_vline(x=float(values.mean()), line_dash="dash", line_color=color, line_width=1.5)
 fig.update_layout(
     height=320,
@@ -1067,12 +1076,13 @@ show_plotly_with_alt(
     fig,
     alt=(
         "Two overlaid histograms on one axis of the average uniqueness of 500 labels "
-        "drawn by naive random sampling in grey and by sequential bootstrap in navy, with "
-        "a dashed vertical line at each mean. Both distributions are right-skewed over the "
-        "same range from about 0.05 to 0.5 with a mode near 0.09, and they overlap almost "
-        "everywhere. The sequential histogram is slightly thinner at the low end and "
-        "slightly heavier around 0.3, and its mean line sits just to the right of the "
-        "naive one - a separation far smaller than the spread of either distribution."
+        "drawn by naive random sampling in slate and by sequential bootstrap in amber, "
+        "with a dashed vertical line at each mean. Both are right-skewed over the same "
+        "range from about 0.04 to 0.52 with a mode near 0.09, and they overlap almost "
+        "everywhere. The naive histogram stands above the sequential one through the "
+        "crowded low end below 0.15, and the sequential one is the taller of the two from "
+        "about 0.25 outward. The two mean lines sit close together between 0.15 and 0.20, "
+        "a separation far smaller than the spread of either distribution."
     ),
 )
 
@@ -1211,15 +1221,17 @@ bonferroni_crit = sp_stats.norm.ppf(1 - ALPHA / (2 * N_CANDIDATES))
 
 # %% [markdown]
 # The null the t-statistic is compared against says: no trend. Rather than assume its
-# shape, build it. Shuffling the daily log returns destroys every trend while preserving
-# the return distribution exactly, and the resulting path is a random walk by construction.
-# Whatever the scan reports on it is what the method reports when there is nothing to find.
+# shape, build it. Subtract the sample mean from SPY's daily log returns and shuffle what
+# is left: the result has SPY's own return dispersion and shape, no drift, and no temporal
+# ordering, so no window of it contains a trend to find. Demeaning matters - a plain
+# shuffle would keep the decade's compounded gain and leave a real slope in every window.
+# Whatever the scan reports on this path is what the method reports when there is nothing
+# there.
 
 # %%
 _log_returns = np.diff(np.log(spy["close"].to_numpy()))
-_shuffled = np.log(spy["close"][0]) + np.concatenate(
-    [[0.0], np.cumsum(np.random.default_rng(SEED).permutation(_log_returns))]
-)
+_driftless = np.random.default_rng(SEED).permutation(_log_returns - _log_returns.mean())
+_shuffled = np.log(spy["close"][0]) + np.concatenate([[0.0], np.cumsum(_driftless)])
 spy_permuted = spy.with_columns(pl.Series("close", np.exp(_shuffled)))
 
 labels_permuted = trend_scanning_labels(
@@ -1238,10 +1250,7 @@ if horizon_col is not None:
     fig = make_subplots(
         rows=1,
         cols=2,
-        subplot_titles=[
-            "Window length selected by the scan",
-            "Absolute t-statistic: SPY vs a shuffled path",
-        ],
+        subplot_titles=["Selected window", "|t|: SPY vs driftless"],
     )
 
     selected_horizons = labels_trend[horizon_col].drop_nulls().cast(pl.Int32, strict=False)
@@ -1275,8 +1284,8 @@ if horizon_col is not None:
         go.Histogram(
             x=null_t.abs().to_numpy(),
             xbins=t_bins,
-            name="Shuffled returns",
-            marker_color=COLORS["neutral"],
+            name="Driftless path",
+            marker_color=COLORS["amber"],
             opacity=0.6,
         ),
         row=1,
@@ -1287,7 +1296,7 @@ if horizon_col is not None:
         line_dash="dash",
         line_color=COLORS["negative"],
         annotation_text="t=1.96",
-        annotation_position="top right",
+        annotation_position="bottom right",
         row=1,
         col=2,
     )
@@ -1304,7 +1313,7 @@ if horizon_col is not None:
         height=360,
         barmode="overlay",
         font=dict(size=12),
-        title_text="Trend scanning: selected window, and |t| against a shuffled path",
+        title_text="Trend scanning: selected window, and |t| against a driftless path",
     )
     show_plotly_with_alt(
         fig,
@@ -1314,11 +1323,12 @@ if horizon_col is not None:
             "window from six to nineteen, with a small rise to about 160 at five and a "
             "single dominant spike of roughly 800 at twenty, the longest window offered. "
             "The right panel overlays the absolute t-statistic of the selected window for "
-            "SPY in navy and for a path built from the same returns shuffled into random "
-            "order in grey. The two distributions sit almost on top of each other, both "
-            "centred near six and running past thirty, and both lie almost entirely to the "
-            "right of the dashed red line at 1.96. A single observation from the shuffled "
-            "path falls beyond the plotted range and is noted on the axis."
+            "SPY in navy and for a driftless random walk built from SPY's own demeaned "
+            "returns in amber. The two distributions sit almost on top of each other: both "
+            "rise steeply from 1.96, peak between five and seven, and trail off past "
+            "twenty. The dashed red line at 1.96 stands at the extreme left edge of both, "
+            "with almost no mass to its left. A single observation from the driftless path "
+            "falls beyond the plotted range and is noted on the axis."
         ),
     )
 
@@ -1344,19 +1354,20 @@ print(
     f" ({corrected_significant / len(raw_t):.1%})"
 )
 print(
-    f"Shuffled returns, significant at 5%: {null_significant:,} / {len(null_t):,}"
+    f"Driftless path, significant at 5%:   {null_significant:,} / {len(null_t):,}"
     f" ({null_significant / len(null_t):.1%})   <- a 5% test should reject 5% here"
 )
 print()
 print(f"Median |t|, SPY:                     {float(raw_t.abs().median()):.2f}")
-print(f"Median |t|, shuffled returns:        {float(null_t.abs().median()):.2f}")
+print(f"Median |t|, driftless path:          {float(null_t.abs().median()):.2f}")
 
 # %% [markdown]
-# The shuffled path has no trends in it and the scan calls almost every bar significant
-# anyway, at very nearly the rate it does on SPY and with a median absolute t-statistic of
-# the same size. A test that rejects this often under its own null is not measuring whether
-# a trend exists; it is measuring that the residuals of a regression on price levels are
-# autocorrelated, which they are whatever the prices do.
+# The driftless path has no trend in it anywhere, by construction, and the scan calls
+# almost every bar significant anyway - at a rate indistinguishable from SPY's, with a
+# median absolute t-statistic of the same size and a matching distribution out into the
+# tail. A test that rejects this often under a null it was built to accept is not measuring
+# whether a trend exists; it is measuring that the residuals of a regression on price levels
+# are autocorrelated, which they are whatever the prices do.
 #
 # Against that, the Bonferroni correction moves the rejection rate by a few percentage
 # points. It is doing what it claims - the reported t really is a maximum over sixteen
@@ -1415,10 +1426,10 @@ curves = prob_grid.with_columns(
 )
 
 fig = go.Figure()
-for name, color in (
-    ("linear", COLORS["neutral"]),
-    ("sigmoid", COLORS["blue"]),
-    ("discrete", COLORS["amber"]),
+for name, color, dash in (
+    ("linear", COLORS["neutral"], "dot"),
+    ("sigmoid", COLORS["blue"], "solid"),
+    ("discrete", COLORS["amber"], "solid"),
 ):
     fig.add_trace(
         go.Scatter(
@@ -1426,7 +1437,7 @@ for name, color in (
             y=curves[name].to_numpy(),
             mode="lines",
             name=name,
-            line=dict(color=color, width=2),
+            line=dict(color=color, width=2, dash=dash),
         )
     )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], line_width=0.8)
@@ -1440,11 +1451,11 @@ show_plotly_with_alt(
     fig,
     alt=(
         "Three curves mapping a meta-model probability on the horizontal axis, from zero "
-        "to one, to a bet size on the vertical axis. The grey linear mapping is a straight "
-        "line from minus one to plus one crossing zero at a probability of 0.5. The navy "
-        "sigmoid mapping at scale five is a gentle S through the same crossing point but "
-        "reaches only about plus or minus 0.85 at the ends, so at this scale it is flatter "
-        "than the linear one rather than sharper. The amber discrete mapping is a step that "
+        "to one, to a bet size on the vertical axis. The dotted slate linear mapping is a "
+        "straight line from minus one to plus one crossing zero at a probability of 0.5. "
+        "The navy sigmoid at scale five is an S through the same crossing point: steeper "
+        "than the straight line through the middle and flatter at the ends, where it "
+        "reaches only about plus or minus 0.85. The amber discrete mapping is a step that "
         "sits at zero below 0.5 and jumps to one above it."
     ),
 )
