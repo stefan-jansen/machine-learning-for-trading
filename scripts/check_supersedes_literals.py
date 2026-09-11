@@ -55,6 +55,23 @@ Usage::
     python scripts/check_supersedes_literals.py --json             # machine-readable
     python scripts/check_supersedes_literals.py --case-study etfs --require-declarations
 
+**A literal one generation behind is a refusal, not a pass.** The resolvers offer a declared
+hash when it is the tip OR when it is what the tip replaced, and the second arm made this script
+report "live: names what the tip of X replaced; a re-run resolves to it". That reading is true of
+an unchanged re-run and false of every other run: ``create`` accepts the tip and nothing else,
+so the run whose membership MOVES is refused at the freeze. On 2026-09-11 that was 19 of the 25
+literals this script called live, including the two in ``us_equities_panel/06_linear`` that had
+just cost 78 minutes of cold fitting - reproduced end to end against ``OfficialPopulation.create``
+and ``CandidateSet.create`` in ``tests/test_supersedes_declares_intent.py``. They are reported
+``behind`` and refuse exactly as ``stale`` does.
+
+**The repair this prints is ``"live"``, never the current hash.** Pasting the tip is correct
+until the next publish of whatever freezes that lineage, which is the loop these literals have
+been in since #944. ``SUPERSEDES_LIVE`` names the lineage rather than quoting a generation of it
+and is resolved against the registry at run time, so a declaration that carries it is reported
+``intent`` and has nothing left to go stale - and it is right on a reader's clean clone, where
+there is no generation and the resolvers withhold it.
+
 **What a stale literal does and does not cost, because the difference decides what this
 refuses.** ``OfficialPopulation.create`` reads the declared predecessor only when the member
 list has moved: an unchanged re-run matches on members and returns the published population
@@ -63,8 +80,8 @@ fires on the run whose membership changes, which is the refit a chain is queued 
 which is exactly the run that has already paid for its fit by the time it is refused. That
 is why this refuses rather than warns, and why the refusal is waivable by name.
 
-Exit status is 1 when a literal is dead AND the registry can name the head it should have
-named. `unresolved` - the hash is in no lineage and the notebook's population name cannot be
+Exit status is 1 when a literal is refused at the freeze - dead, or one generation behind -
+AND the registry can name the head it should have named. `unresolved` - the hash is in no lineage and the notebook's population name cannot be
 read without executing it - is reported and never blocks: refusing there would be the check
 asserting knowledge it does not have. A case study with no registry on disk is reported and
 does not fail either; that is a reader's clone. ``--allow-stale-supersedes`` waives the
@@ -84,6 +101,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from case_studies.research.population import SUPERSEDES_LIVE  # noqa: E402
 from case_studies.utils.registry.store import current_causal_identities  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +165,23 @@ def _declared_pairs(value: str | dict[str, str]) -> list[tuple[str | None, str]]
     return [(None, value)] if value else []
 
 
+# Every verdict this script can reach. Named once, because the corpus scan's allowlist was a
+# second copy of it and drifted: `undeclared` was added in #944 and never reached the test, which
+# skips wherever there is no registry - so the drift was invisible in CI by construction and the
+# scan asserted a status set two releases old on the one machine that runs it.
+STATUSES = (
+    "live",  # the declaration names the tip; a refit publishes over it
+    "intent",  # SUPERSEDES_LIVE: the lineage is named and the generation is looked up
+    "behind",  # names the generation the tip replaced; refused on a membership move
+    "stale",  # names no generation of a lineage that has one; refused
+    "superseded",  # causal only: no longer current, which an unchanged re-run is entitled to
+    "undeclared",  # a live generation no declaration in the case study names
+    "unresolved",  # in no lineage, and nothing here can say whether that is dead or first
+    "forked",  # two generations nothing supersedes; no defensible answer
+    "no-registry",  # a reader's clone
+)
+
+
 @dataclass
 class Finding:
     case_study: str
@@ -164,8 +199,36 @@ class Finding:
     label: str | None = None
 
     @property
-    def is_stale(self) -> bool:
-        return self.status == "stale"
+    def refused_at_the_freeze(self) -> bool:
+        """Whether ``create`` refuses this declaration on the run that moves its members.
+
+        Two statuses do, and reading only ``stale`` is how 19 of the corpus's 25 ``live``
+        verdicts were reported green while every one of them was a refusal. ``behind`` is the
+        common one: the literal names the generation the tip replaced, which the resolver offers
+        and ``create`` then rejects because it accepts the tip and nothing else.
+        """
+        return self.status in ("stale", "behind")
+
+
+def _intent_finding(case_study: str, notebook: str, parameter: str, name: str | None) -> Finding:
+    """A declaration that names the live generation instead of quoting a hash.
+
+    Nothing to classify and nothing that can decay. It is reported rather than dropped because
+    a name that appears nowhere in the output reads as a name nobody declared, which is the
+    absence this script exists to make visible.
+    """
+    return Finding(
+        case_study,
+        notebook,
+        SUPERSEDES_LIVE,
+        "intent",
+        f"names the live generation of {name!r} rather than a hash; nothing here goes stale"
+        if name
+        else "names the live generation of whatever lineage this notebook publishes under, "
+        "rather than a hash; nothing here goes stale",
+        parameter,
+        label=name,
+    )
 
 
 _POPULATION_NAME_ASSIGN = re.compile(
@@ -431,6 +494,9 @@ def _check_lineage_literal(
     db = sqlite3.connect(f"file:{registry}?mode=ro", uri=True)
     try:
         for name, declared in pairs:
+            if declared == SUPERSEDES_LIVE:
+                findings.append(_intent_finding(case_study, notebook.name, parameter, name))
+                continue
             owner = _owning_lineage(db, declared)
             if owner is None:
                 # Absent is not evidence on its own - a reset or a reader's empty registry
@@ -472,7 +538,7 @@ def _check_lineage_literal(
                             f"{name!r} is at {tip} (superseding {tip_supersedes}) and this "
                             "hash is in no lineage the registry holds",
                             parameter,
-                            tip,
+                            SUPERSEDES_LIVE,
                             name,
                         )
                     )
@@ -520,16 +586,20 @@ def _check_lineage_literal(
                 )
             elif declared == tip_supersedes:
                 status, detail = (
-                    "live",
-                    f"names what the tip of {owner_name!r} replaced; a re-run resolves to it",
+                    "behind",
+                    f"{owner_name!r} is at {tip} and this names the generation {tip} replaced. "
+                    "An unchanged re-run resolves to the tip and is fine; the run that MOVES "
+                    "its members is refused at the freeze, because create accepts the tip and "
+                    "nothing else",
                 )
+                remedy = SUPERSEDES_LIVE
             else:
                 status, detail = (
                     "stale",
                     f"{owner_name!r} is at {tip} (superseding {tip_supersedes}); this literal "
                     "is neither",
                 )
-                remedy = tip
+                remedy = SUPERSEDES_LIVE
             findings.append(
                 Finding(
                     case_study, notebook.name, declared, status, detail, parameter, remedy, name
@@ -672,7 +742,7 @@ def _undeclared_heads(case_study: str, registry: Path, notebooks: list[Path]) ->
                     f"study names it or its hash; {where}. The next run that moves its "
                     "members is refused at the freeze, after the fit",
                     "SUPERSEDES_SETS",
-                    tip,
+                    SUPERSEDES_LIVE,
                     name,
                 )
             )
@@ -707,6 +777,16 @@ def check_case_study(case_study: str, *, repo_root: Path, artifacts_root: Path) 
 
         declared = declared_by_name.get(_POPULATION_NAME, "")
         if not declared or not isinstance(declared, str):
+            continue
+
+        if declared == SUPERSEDES_LIVE:
+            # The one declaration this script does not have to read a name for. Every other
+            # population verdict needs `_population_name`, which is deliberately partial - a
+            # name built from an f-string or a module constant cannot be read without executing
+            # the notebook, and that is what leaves five of the corpus's literals unresolvable.
+            # The sentinel is resolved at run time against the name the call site already holds,
+            # so there is nothing here to look up and nothing that can drift.
+            findings.append(_intent_finding(case_study, notebook.name, _POPULATION_NAME, None))
             continue
 
         if not registry.exists():
@@ -757,7 +837,7 @@ def check_case_study(case_study: str, *, repo_root: Path, artifacts_root: Path) 
                             f"{statically_named!r} is at {tip} (superseding {tip_supersedes}) "
                             "and this hash is in no lineage the registry holds",
                             _POPULATION_NAME,
-                            tip,
+                            SUPERSEDES_LIVE,
                         )
                     )
                 else:
@@ -801,15 +881,19 @@ def check_case_study(case_study: str, *, repo_root: Path, artifacts_root: Path) 
             status, detail = "live", f"names the tip of {name!r}; a refit publishes over it"
         elif declared == tip_supersedes:
             status, detail = (
-                "live",
-                f"names what the tip of {name!r} replaced; a re-run resolves to it",
+                "behind",
+                f"{name!r} is at {tip} and this names the generation {tip} replaced. An "
+                "unchanged re-run resolves to the tip and is fine; the run that MOVES its "
+                "members is refused at the freeze, because create accepts the tip and nothing "
+                "else",
             )
+            remedy = SUPERSEDES_LIVE
         else:
             status, detail = (
                 "stale",
                 f"{name!r} is at {tip} (superseding {tip_supersedes}); this literal is neither",
             )
-            remedy = tip
+            remedy = SUPERSEDES_LIVE
         findings.append(
             Finding(case_study, notebook.name, declared, status, detail, _POPULATION_NAME, remedy)
         )
@@ -876,18 +960,22 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps([asdict(f) for f in findings], indent=1))
     else:
         for finding in findings:
-            mark = "STALE" if finding.is_stale else finding.status.upper()
-            print(f"{mark:<11} {finding.case_study}/{finding.notebook}  {finding.declared}")
+            print(
+                f"{finding.status.upper():<11} {finding.case_study}/{finding.notebook}  "
+                f"{finding.declared}"
+            )
             print(f"            {finding.detail}")
         undeclared_count = sum(f.status == "undeclared" for f in findings)
         checked = len(findings) - undeclared_count
-        stale = sum(f.is_stale for f in findings)
+        refused = sum(f.refused_at_the_freeze for f in findings)
+        behind = sum(f.status == "behind" for f in findings)
         print(
-            f"\n{checked} declared literal(s); {stale} stale; "
+            f"\n{checked} declared literal(s); {refused} refused at the freeze "
+            f"({behind} of them one generation behind); "
             f"{undeclared_count} live generation(s) declared nowhere"
         )
 
-    stale = [f for f in findings if f.is_stale]
+    stale = [f for f in findings if f.refused_at_the_freeze]
     unresolved = [f for f in findings if f.status == "unresolved"]
     undeclared = [f for f in findings if f.status == "undeclared"]
 
@@ -934,7 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
         # sanctioned way to commit that drops its outputs - a live render lost, unless a run
         # is coming anyway. Theirs is.
         print(
-            "\nA stale literal does not make any committed output wrong, and it does not "
+            "\nA refused literal does not make any committed output wrong, and it does not "
             "fail every run: an unchanged re-run returns the published population without "
             "ever reading it. It fails the run whose membership MOVES - which is the refit "
             "you are about to queue - after that run has paid for its fit:\n",
@@ -953,15 +1041,20 @@ def main(argv: list[str] | None = None) -> int:
                 fix = f'set it to "{finding.remedy}"'
             else:
                 fix = "look up the current identity for the label this notebook fits"
+            reading = "is dead" if finding.status == "stale" else "is one generation behind"
             print(
                 f"  case_studies/{finding.case_study}/{finding.notebook}\n"
-                f"      {finding.parameter} = {finding.declared!r} is dead\n"
+                f"      {finding.parameter} = {finding.declared!r} {reading}\n"
                 f"      {finding.detail}\n"
                 f"      fix: {fix}",
                 file=sys.stderr,
             )
         print(
-            "\nFix it now - you are about to pay for the run that re-renders the notebook "
+            '\nPaste "live" rather than the hash. A hash is a quotation of a value the '
+            "registry moves on every publish, so pasting the current one buys you until the "
+            'next run of whatever freezes it; "live" names the lineage instead and is '
+            "resolved against the registry at run time, so it is correct for a clean clone "
+            "too. Fix it now - you are about to pay for the run that re-renders the notebook "
             "you have to clear. If you know this run's membership is unchanged, so the "
             "literal is never read, pass --allow-stale-supersedes.",
             file=sys.stderr,
@@ -969,7 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if stale:
         print(
-            f"\n{len(stale)} stale literal(s) allowed by --allow-stale-supersedes.",
+            f"\n{len(stale)} refused literal(s) allowed by --allow-stale-supersedes.",
             file=sys.stderr,
         )
     return 0

@@ -36,6 +36,8 @@ checker = importlib.util.module_from_spec(_spec)
 sys.modules["check_supersedes_literals"] = checker
 _spec.loader.exec_module(checker)
 
+SUPERSEDES_LIVE = checker.SUPERSEDES_LIVE
+
 
 def _registry(tmp_path: Path, rows: list[tuple[str, str, str | None]]) -> Path:
     """A registry holding just the candidate-set lineage table the checker reads."""
@@ -99,10 +101,14 @@ def test_a_dict_states_its_own_lineage_names() -> None:
     ("declared", "status"),
     [
         # `candidate_set_supersedes` offers the hash when it is the head or what the head
-        # replaced, and withholds it otherwise (research/comparison.py:121).
+        # replaced (research/comparison.py), but `create` accepts only the head - so the
+        # second of those is `behind`: fine for an unchanged re-run, refused for the run that
+        # moves members. The repair for anything refused is the sentinel, not the head, since
+        # the head moves again at the next publish.
         ("55d6", "live"),
-        ("454f", "live"),
+        ("454f", "behind"),
         ("dead", "stale"),
+        (SUPERSEDES_LIVE, "intent"),
     ],
 )
 def test_a_candidate_set_literal_is_classified_by_the_resolvers_own_rule(
@@ -115,8 +121,10 @@ def test_a_candidate_set_literal_is_classified_by_the_resolvers_own_rule(
         "demo", Path("06_linear.py"), registry, "SUPERSEDES_SETS", [("demo-linear-v1", declared)]
     )
     assert [f.status for f in findings] == [status]
-    if status == "stale":
-        assert findings[0].remedy == "55d6"
+    assert findings[0].refused_at_the_freeze == (status in ("behind", "stale"))
+    if findings[0].refused_at_the_freeze:
+        assert findings[0].remedy == SUPERSEDES_LIVE
+        assert "55d6" in findings[0].detail
 
 
 def test_a_dead_hash_is_answered_with_the_head_because_the_dict_names_the_lineage(
@@ -133,7 +141,8 @@ def test_a_dead_hash_is_answered_with_the_head_because_the_dict_names_the_lineag
         "demo", Path("06_linear.py"), registry, "SUPERSEDES_SETS", [("demo-linear-v1", "gone")]
     )
     assert findings[0].status == "stale"
-    assert findings[0].remedy == "77ab"
+    assert findings[0].remedy == SUPERSEDES_LIVE
+    assert "77ab" in findings[0].detail
 
 
 # --- the missing declaration ----------------------------------------------------------
@@ -149,7 +158,8 @@ def test_a_live_generation_that_nothing_declares_is_reported(tmp_path: Path) -> 
 
     assert [f.status for f in findings] == ["undeclared"]
     assert findings[0].label == "demo-fwd_ret_5d-linear-v1"
-    assert findings[0].remedy == "e7b7"
+    assert findings[0].remedy == SUPERSEDES_LIVE
+    assert "e7b7" in findings[0].detail
     # Attributed through the f-string template, which is the only thing that can name a set
     # the dict does not: the missing entry is by definition not a key.
     assert findings[0].notebook == "06_linear.py"

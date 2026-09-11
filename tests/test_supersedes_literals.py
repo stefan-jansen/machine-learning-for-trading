@@ -23,8 +23,9 @@ from pathlib import Path
 
 import pytest
 
+from case_studies.research.population import SUPERSEDES_LIVE
 from case_studies.utils.registry.specs import IDENTITY_VERSION
-from scripts.check_supersedes_literals import check_all, check_case_study
+from scripts.check_supersedes_literals import STATUSES, check_all, check_case_study
 
 _SCHEMA = """
 CREATE TABLE causal_runs (
@@ -88,15 +89,39 @@ def test_a_literal_naming_the_tip_is_live(tree):
     assert [f.status for f in findings] == ["live"]
 
 
-def test_a_literal_naming_what_the_tip_replaced_is_live(tree):
-    """The re-run: the generation in force is the one this declaration produced."""
+def test_a_literal_naming_what_the_tip_replaced_refuses_the_freeze(tree):
+    """Reported `live` until 2026-09-11, and it is the state 19 of the corpus's 25 were in.
+
+    `population_supersedes` offers a hash that equals `current.supersedes`, which is why this
+    read as fine: the unchanged re-run resolves to the published generation and nothing fails.
+    Every other run does fail. `create` accepts the tip and nothing else, so the run whose
+    membership moves is refused at the freeze, after the fit - which is the run a chain is
+    queued for. `tests/test_supersedes_declares_intent.py` is that refusal end to end.
+    """
     repo, artifacts = tree
     _notebook(repo, "etfs", "07_gbm", "aaaa", "etfs-gbm-v1")
     _registry(artifacts, "etfs", [("aaaa", "etfs-gbm-v1", None), ("bbbb", "etfs-gbm-v1", "aaaa")])
 
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
-    assert [f.status for f in findings] == ["live"]
+    assert [f.status for f in findings] == ["behind"]
+    assert findings[0].refused_at_the_freeze
+    assert "bbbb" in findings[0].detail
+
+
+def test_a_sentinel_declaration_is_reported_and_never_refuses(tree):
+    """`SUPERSEDES_LIVE` names the lineage rather than a generation of it, so there is nothing
+    to classify and nothing that can go stale. It is still printed: a name that appears nowhere
+    in the output reads as a name nobody declared."""
+    repo, artifacts = tree
+    _notebook(repo, "etfs", "07_gbm", SUPERSEDES_LIVE, "etfs-gbm-v1")
+    _registry(artifacts, "etfs", [("aaaa", "etfs-gbm-v1", None), ("bbbb", "etfs-gbm-v1", "aaaa")])
+
+    findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
+
+    assert [f.status for f in findings] == ["intent"]
+    assert not findings[0].refused_at_the_freeze
+    assert _exit_status(repo, artifacts) == 0
 
 
 def test_a_literal_two_generations_behind_is_stale(tree):
@@ -115,7 +140,7 @@ def test_a_literal_two_generations_behind_is_stale(tree):
 
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
-    assert findings[0].is_stale
+    assert findings[0].refused_at_the_freeze
     assert "cccc" in findings[0].detail
 
 
@@ -127,7 +152,7 @@ def test_a_literal_naming_a_hash_the_registry_lost_is_stale(tree):
 
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
-    assert findings[0].is_stale
+    assert findings[0].refused_at_the_freeze
     assert "no lineage the registry holds" in findings[0].detail
 
 
@@ -171,7 +196,9 @@ def test_an_empty_registry_does_not_make_every_declaration_stale(tree):
 
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
-    assert not any(f.is_stale for f in findings), "an empty registry was read as staleness"
+    assert not any(f.refused_at_the_freeze for f in findings), (
+        "an empty registry was read as staleness"
+    )
     assert findings[0].status == "unresolved"
 
 
@@ -192,7 +219,7 @@ def test_no_registry_is_reported_and_does_not_fail(tree):
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
     assert [f.status for f in findings] == ["no-registry"]
-    assert not any(f.is_stale for f in findings)
+    assert not any(f.refused_at_the_freeze for f in findings)
 
 
 def test_a_forked_lineage_is_reported_rather_than_guessed_at(tree):
@@ -206,7 +233,7 @@ def test_a_forked_lineage_is_reported_rather_than_guessed_at(tree):
     assert [f.status for f in findings] == ["forked"]
 
 
-def test_exit_status_is_one_when_anything_is_stale(tree):
+def test_exit_status_is_one_when_anything_is_refused_at_the_freeze(tree):
     """The gate's contract: a queueing step reads the status, not the prose."""
     from scripts.check_supersedes_literals import main
 
@@ -229,9 +256,10 @@ def test_exit_status_is_one_when_anything_is_stale(tree):
 def test_the_scan_reads_the_real_corpus_without_falling_over():
     """The scanner against real registries, which the synthetic fixtures cannot stand in for.
 
-    It deliberately does NOT assert the corpus is clean. Six literals are stale as this is
-    written, and leaving them is the decision rather than an oversight: editing one makes the
-    paired `.ipynb` stale, and the only sanctioned way to commit that drops its outputs. That
+    It deliberately does NOT assert the corpus is clean. 27 literals are refused at the freeze
+    as this is written - 8 dead and 19 one generation behind - and leaving them is the decision
+    rather than an oversight: editing one makes the paired `.ipynb` stale, and the only
+    sanctioned way to commit that drops its outputs. That
     costs a live render in a `done` case study for a fault that bites nothing until those
     notebooks next execute - at which point the run restores the render for free. So the
     corpus is corrected by `scripts/check_supersedes_literals.py` refusing the chain at
@@ -250,19 +278,12 @@ def test_the_scan_reads_the_real_corpus_without_falling_over():
     if not any(f.status != "no-registry" for f in findings):
         pytest.skip("registries present but none holds an official_populations table")
 
-    # `undeclared` joined the set when `_undeclared_heads` did: a live generation that no
-    # declaration names at all, which `main()` reports separately and exits non-zero on under
-    # `--require-declarations`. It is a status the checker declares, not one it invented.
-    known = {
-        "live",
-        "stale",
-        "superseded",
-        "unresolved",
-        "forked",
-        "no-registry",
-        "undeclared",
-    }
-    unclassified = [f for f in findings if f.status not in known]
+    # Asked of the script rather than restated here. The literal set that used to sit at this
+    # line went stale once already: `undeclared` joined the checker when `_undeclared_heads`
+    # did and reached this allowlist only in #983, months later. It could only go stale
+    # unnoticed - this test skips wherever `run_log/` is absent, which is every CI run, so a
+    # second copy of the status list is checked on one machine and nowhere else.
+    unclassified = [f for f in findings if f.status not in STATUSES]
     assert not unclassified, f"unrecognised status: {unclassified}"
     assert all(f.detail for f in findings), "a finding with no explanation is not usable"
 
@@ -339,7 +360,9 @@ def test_a_retired_causal_identity_is_reported_but_does_not_fail(tree):
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
     assert findings[0].status == "superseded"
-    assert not findings[0].is_stale, "an unchanged re-run must not be reported as a failure"
+    assert not findings[0].refused_at_the_freeze, (
+        "an unchanged re-run must not be reported as a failure"
+    )
 
 
 def test_a_bare_causal_hash_the_registry_lost_is_unresolved(tree):
@@ -357,7 +380,7 @@ def test_a_bare_causal_hash_the_registry_lost_is_unresolved(tree):
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
     assert findings[0].status == "unresolved"
-    assert not findings[0].is_stale
+    assert not findings[0].refused_at_the_freeze
 
 
 def test_a_per_label_causal_hash_is_stale_when_that_label_already_resolves(tree):
@@ -369,7 +392,7 @@ def test_a_per_label_causal_hash_is_stale_when_that_label_already_resolves(tree)
 
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
-    assert findings[0].is_stale
+    assert findings[0].refused_at_the_freeze
     assert "placebo refit" in findings[0].detail
     assert findings[0].label == "fwd_ret_21d"
     assert findings[0].remedy == "aaaa"
@@ -440,7 +463,7 @@ def test_an_annotation_of_str_or_none_is_read(tree):
     findings = check_case_study("cme_futures", repo_root=repo, artifacts_root=artifacts)
 
     assert len(findings) == 1, "a `str | None` annotation was skipped"
-    assert findings[0].is_stale
+    assert findings[0].refused_at_the_freeze
 
 
 def test_a_parenthesised_multiline_declaration_is_read(tree):
@@ -503,15 +526,21 @@ def test_an_unresolved_declaration_never_blocks(tree):
     assert _exit_status(repo, artifacts) == 0
 
 
-def test_a_stale_finding_carries_the_hash_to_paste(tree):
-    """The message has to say what the fix is, not only that something is wrong."""
+def test_a_refused_finding_is_repaired_with_the_sentinel_not_the_current_hash(tree):
+    """The message has to say what the fix is, and the fix has to survive the next publish.
+
+    Pasting `aaaa` is correct until whatever freezes this lineage runs again, which is the loop
+    these literals have been in. The head still appears in `detail`, so a reader who wants to
+    know which generation they are replacing can see it.
+    """
     repo, artifacts = tree
     _notebook(repo, "etfs", "07_gbm", "gone", "etfs-gbm-v1")
     _registry(artifacts, "etfs", [("aaaa", "etfs-gbm-v1", None)])
 
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
-    assert findings[0].remedy == "aaaa"
+    assert findings[0].remedy == SUPERSEDES_LIVE
+    assert "aaaa" in findings[0].detail
 
 
 def test_a_per_label_causal_remedy_names_that_labels_current_identity(tree):
@@ -523,7 +552,7 @@ def test_a_per_label_causal_remedy_names_that_labels_current_identity(tree):
 
     findings = check_case_study("etfs", repo_root=repo, artifacts_root=artifacts)
 
-    assert findings[0].is_stale
+    assert findings[0].refused_at_the_freeze
     assert findings[0].remedy == "bbbb"
 
 
