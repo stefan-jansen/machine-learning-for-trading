@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from tests.pm_helpers import OVERRIDES_PATH, REPO_ROOT
+from tests.pm_helpers import OVERRIDES_PATH, REPO_ROOT, get_overrides, invocations_for
 from tests.sample_registry_for_tests import (
     CASE_STUDY_IDS,
     CODE_CS_DIR,
@@ -197,32 +197,37 @@ def test_every_config_an_override_names_is_declared_for_sampling() -> None:
     where every configuration exists, so an override naming one the declaration omits
     resolves a registry row with no artifact behind it and the notebook raises mid-run.
     That has happened once already, to 26_mlops_governance/02_online_drift_detection.
+
+    Every invocation is enumerated through ``invocations_for`` rather than by reading
+    ``parameters``: an entry moved to the ``invocations`` shape would otherwise drop out
+    of this check silently, and a dropped entry looks exactly like a passing one.
     """
     overrides = yaml.safe_load(OVERRIDES_PATH.read_text(encoding="utf-8"))
     checked: list[str] = []
-    for key, entry in overrides.items():
-        parameters = (entry or {}).get("parameters") or {}
-        named = {
-            value
-            for name, value in parameters.items()
-            if name.endswith("_CONFIG") and isinstance(value, str)
-        }
-        if not named:
-            continue
-        notebook_py = REPO_ROOT / f"{key}.py"
-        if not notebook_py.is_file():
-            continue
-        case_study_id = _case_study_of(notebook_py)
-        declared = PINNED_PREDICTION_CONFIGS.get(case_study_id or "")
-        if not declared:
-            continue
-        missing = named - {config for _family, _label, config, _split in declared}
-        assert not missing, (
-            f"{key} overrides a configuration the fixture is not built to carry: "
-            f"{sorted(missing)}. Add it to PINNED_PREDICTION_CONFIGS[{case_study_id!r}] "
-            "in tests/sample_registry_for_tests.py, or override to one already there."
-        )
-        checked.append(key)
+    for key in overrides:
+        for run in invocations_for(get_overrides(key), key=key):
+            named = {
+                value
+                for name, value in run.parameters.items()
+                if name.endswith("_CONFIG") and isinstance(value, str)
+            }
+            if not named:
+                continue
+            notebook_py = REPO_ROOT / f"{key}.py"
+            if not notebook_py.is_file():
+                continue
+            case_study_id = _case_study_of(notebook_py)
+            declared = PINNED_PREDICTION_CONFIGS.get(case_study_id or "")
+            if not declared:
+                continue
+            where = f"{key} [{run.id}]" if run.id else key
+            missing = named - {config for _family, _label, config, _split in declared}
+            assert not missing, (
+                f"{where} overrides a configuration the fixture is not built to carry: "
+                f"{sorted(missing)}. Add it to PINNED_PREDICTION_CONFIGS[{case_study_id!r}] "
+                "in tests/sample_registry_for_tests.py, or override to one already there."
+            )
+            checked.append(where)
 
     assert checked, (
         "no override names a *_CONFIG for a case study in PINNED_PREDICTION_CONFIGS, "
