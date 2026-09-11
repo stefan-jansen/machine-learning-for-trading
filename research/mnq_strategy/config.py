@@ -13,21 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import signals
 from .risk import MAX_CONTRACTS, MIN_CONTRACTS, MNQ_POINT_VALUE, CostModel
-
-
-class _ImmutableBoundaries(dict[str, str]):
-    """Mapping-compatible immutable session boundaries with clear errors."""
-
-    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("session_boundaries is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
+from .volume_profile import LVN_PERCENTILE
 
 
 def _validate_finite(name: str, value: float) -> None:
@@ -72,7 +58,7 @@ class StrategyConfig:
     target_points: float = 20.0
 
     session_boundaries: dict[str, str] = field(
-        default_factory=lambda: _ImmutableBoundaries(
+        default_factory=lambda: MappingProxyType(
             {
                 "rth_start": "09:30",
                 "rth_end": "16:00",
@@ -152,12 +138,14 @@ class StrategyConfig:
             raise ValueError("session_boundaries must define the approved session times")
         parsed_boundaries: dict[str, time] = {}
         for name, value in self.session_boundaries.items():
-            if not isinstance(value, str):
+            if not isinstance(value, str) or len(value) != 5:
                 raise ValueError("session_boundaries must use HH:MM strings")
             try:
                 parsed_boundaries[name] = time.fromisoformat(value)
             except ValueError as exc:
                 raise ValueError(f"invalid session boundary {name}: expected HH:MM") from exc
+            if parsed_boundaries[name].strftime("%H:%M") != value:
+                raise ValueError(f"invalid session boundary {name}: expected HH:MM")
         if not (
             parsed_boundaries["rth_start"] < parsed_boundaries["rth_end"]
             and parsed_boundaries["rth_end"] == parsed_boundaries["maintenance_start"]
@@ -166,7 +154,7 @@ class StrategyConfig:
         ):
             raise ValueError("session boundaries must be ordered and contiguous")
         object.__setattr__(
-            self, "session_boundaries", _ImmutableBoundaries(self.session_boundaries)
+            self, "session_boundaries", MappingProxyType(dict(self.session_boundaries))
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,7 +180,7 @@ class StrategyConfig:
         }
         actual = {name: getattr(self, name) for name in expected}
         actual["lvn_percentile"] = self.lvn_percentile
-        expected["lvn_percentile"] = 0.25
+        expected["lvn_percentile"] = LVN_PERCENTILE
         differences = {
             name: (actual[name], expected[name])
             for name in expected
