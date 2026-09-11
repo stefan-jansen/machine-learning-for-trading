@@ -654,6 +654,46 @@ backtest:
         - {name: time_exit_20,    type: time_exit,     bars: 20}
         - {name: time_exit_40,    type: time_exit,     bars: 40}
 
+# The mean-forecast ensemble this case study features, and the only thing in the repository
+# that produces `family: ensemble` rows. Declared rather than assembled in the notebook
+# because the member set is what the ensemble *is*: change the rule and it is a different
+# object under the same name.
+#
+# The lesson this case study ends on is that choosing among a family's configurations on a
+# validation window does not carry to a later window, while the family itself does. An object
+# that makes no choice is what shows it, and that object has to be registered like a model so
+# the backtest stage, the cohort comparison and the holdout all read it the way they read one.
+ensemble:
+  # The family averaged, and the rule that decides which of its configurations are in.
+  #
+  # 31 leaves is the boundary between the regularized presets and the one that is not:
+  # `leaves_7`, `leaves_15` and `leaves_31` carry `lambda_l1`, `lambda_l2`, `bagging_fraction`
+  # and `feature_fraction`; `default` carries none of them and trains at LightGBM's own
+  # default of 31 leaves; `leaves_63` is the only configuration above the line. The rule keeps
+  # twelve of the fifteen for each continuous label - three losses across four leaf counts.
+  #
+  # A count is not declared here on purpose. The rule is the declaration and the members are
+  # resolved from what is registered, so a configuration added to `config/training/*.yaml`
+  # joins the ensemble and a number written down here could only disagree with it.
+  member_family: gbm
+  max_num_leaves: 31
+  method: mean_forecast
+  config_name: gbm_mean_leaves31
+  # Each member enters at its last checkpoint. Taking the checkpoint with the best validation
+  # metric would select on the window the ensemble is then measured on, which is the thing
+  # the ensemble exists not to do.
+  checkpoint: last
+  # The entry scheme the ensemble is backtested on, by the name `get_entry_schemes_for`
+  # gives it: 10 slots, an 8-hour maximum hold, a 0.90 entry quantile, no signal exit, on the
+  # 210-bar execution window. `14_backtest.py` Act 2 reads the carrier by `slots == 10` and
+  # `entry_q == 0.9` literally, so this arm and that filter have to agree.
+  #
+  # One arm and not the grid: the ensemble is not a sweep participant. It is the object the
+  # chapter carries, backtested on the design the sweep already chose, and putting it through
+  # the sweep would make it one more configuration to select among.
+  featured_scheme: slot_l_lq90_s10_h480_noexit_b210
+  universe_filter: cost_feasible
+
 # The model specification 04_model_based_features estimates under. Declared here rather than
 # typed into the notebook so that a window is one number in one place, readable without opening
 # the code that consumes it.

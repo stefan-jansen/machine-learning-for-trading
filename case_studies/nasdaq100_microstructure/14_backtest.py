@@ -41,6 +41,7 @@
 # %%
 """Ch16 Backtest & Signal Evaluation — NASDAQ-100 Microstructure case study."""
 
+import json
 import sqlite3
 import time
 
@@ -63,12 +64,22 @@ from case_studies.utils.backtest_runner import (
     run_backtest,
     run_plumbing_test,
 )
+from case_studies.utils.ensemble import (
+    ensemble_training_spec,
+    load_ensemble_declaration,
+    mean_forecast,
+    resolve_members,
+)
 from case_studies.utils.notebook_contracts import excluded_families
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     load_existing_backtest_hashes,
     load_prediction_index,
     read_predictions,
+)
+from case_studies.utils.registry.registration import (
+    register_prediction_set,
+    register_training_run,
 )
 from case_studies.utils.sweep_config import (
     get_entry_schemes_for,
@@ -973,6 +984,170 @@ if not trade_df.is_empty():
 # purpose is to cut the cost of trading a cost-expensive tail has nothing to
 # choose between on a panel that still contains the tail. These backtests are
 # registered under `universe_filter='cost_feasible'` and are queried directly.
+
+# %% [markdown]
+# ### The forecast the chapter carries
+#
+# The strategy this chapter ends on does not trade one model. It trades the mean
+# of every regularized LightGBM forecast in the study - twelve configurations,
+# three losses across four leaf counts - as a single ordering.
+#
+# That object has to be built before it can be traded, and it is built here. The
+# members are resolved from what is registered rather than listed, each enters at
+# its last checkpoint, and the average is registered as a prediction set of its
+# own under `family='ensemble'`. Everything downstream then reads it exactly the
+# way it reads a model: the backtest below, the holdout notebooks, and the
+# cross-case-study comparison in `20_strategy_analysis`.
+#
+# Averaging is not a way of getting a better forecast, and normally it does not
+# produce one. What it produces is a forecast nobody chose. The rule that picks
+# it is fixed before the validation window is read, so the validation result is
+# a measurement of that rule rather than the best of the twelve results it could
+# have reported.
+#
+# Its last checkpoint and not its best one, for the same reason: a checkpoint
+# chosen on validation is a choice made on the window the result is then read on.
+
+# %%
+_ens = load_ensemble_declaration(CASE_STUDY_ID)
+ensemble_prediction_hash = None
+if _ens is None:
+    print("No ensemble declared for this case study.", flush=True)
+elif EXECUTION_TIER != "canonical":
+    # A preview training spec has to identity-cover its reductions, and this one has no
+    # reductions of its own to cover - it is an average of whatever the members are. The
+    # ensemble is a canonical-tier object; a preview run reads the canonical registry's
+    # rows if they are there and otherwise leaves Section 4's ensemble line empty.
+    print(f"Ensemble skipped: it is a canonical-tier object and this run is {EXECUTION_TIER}.")
+else:
+    _members = resolve_members(
+        CASE_DIR,
+        label=LABEL,
+        family=str(_ens["member_family"]),
+        split=SPLIT,
+        max_num_leaves=int(_ens["max_num_leaves"]),
+    )
+    _member_spec_json = sqlite3.connect(
+        f"file:{CASE_DIR / 'run_log' / 'registry.db'}?mode=ro", uri=True
+    )
+    try:
+        _row = _member_spec_json.execute(
+            "SELECT spec_json FROM training_runs WHERE training_hash = ?",
+            (_members["training_hash"][0],),
+        ).fetchone()
+    finally:
+        _member_spec_json.close()
+    _member_spec = json.loads(_row[0])
+    _task = (_member_spec.get("computation", {}).get("task") or {}).get("type")
+
+    if _task != "regression":
+        # Averaging class scores is a different construction from averaging forecasts - it
+        # needs the class values and the continuous column the classes were cut from, and
+        # the registry asks for both. The featured carrier is a continuous label, so the
+        # construction is not built rather than guessed at.
+        print(
+            f"Ensemble skipped for {LABEL}: its {_ens['member_family']} members are "
+            f"{_task} models, and a mean forecast is defined here for regression only.",
+            flush=True,
+        )
+    else:
+        print(
+            f"Ensemble members ({_members.height}, {_ens['member_family']} at "
+            f"<= {_ens['max_num_leaves']} leaves, last checkpoint):",
+            flush=True,
+        )
+        for _m in _members.iter_rows(named=True):
+            print(
+                f"  {_m['config_name']:22} leaves {_m['num_leaves']:>3}  "
+                f"checkpoint {_m['checkpoint_value']}",
+                flush=True,
+            )
+
+        _spec = ensemble_training_spec(
+            _row[0],
+            members=_members,
+            method=str(_ens["method"]),
+            config_name=str(_ens["config_name"]),
+            provenance={
+                "entry_point": "case_studies.utils.ensemble",
+                "notebook_path": "14_backtest",
+                "member_family": str(_ens["member_family"]),
+            },
+        )
+        _ens_training_hash = register_training_run(
+            CASE_STUDY_ID, _spec, case_dir=CASE_DIR, entry_point="14_backtest.py"
+        )
+        _averaged = mean_forecast(CASE_STUDY_ID, _members["prediction_hash"].to_list())
+        ensemble_prediction_hash = register_prediction_set(
+            CASE_STUDY_ID,
+            _ens_training_hash,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+            split=SPLIT,
+            predictions=_averaged,
+            expected_keys=_averaged.select("fold_id", "symbol", "timestamp"),
+            label=LABEL,
+            case_dir=CASE_DIR,
+        )
+        print(
+            f"\nEnsemble registered: {ensemble_prediction_hash} "
+            f"({_averaged.height:,} rows over {_averaged['fold_id'].n_unique()} folds)",
+            flush=True,
+        )
+
+# %% [markdown]
+# The ensemble is backtested on one entry scheme and not on the grid. It is the
+# object the chapter carries rather than another candidate to choose among, and
+# the design it is carried on is the one the sweep above already settled.
+
+# %%
+if ensemble_prediction_hash is not None:
+    _featured = _by_name.get(str(_ens["featured_scheme"]))
+    if _featured is None:
+        msg = (
+            f"ensemble.featured_scheme names {_ens['featured_scheme']!r}, which "
+            f"get_entry_schemes_for does not produce for {LABEL}. The declared slot grid "
+            "and this name have to agree."
+        )
+        raise KeyError(msg)
+    _signal = {
+        "method": _featured["method"],
+        "top_k": _featured.get("top_k", 20),
+        "long_short": bt_config.long_short,
+        "universe_filter": str(_ens["universe_filter"]),
+    }
+    _signal.update({k: v for k, v in _featured.items() if k not in ("name", "method")})
+    _spec_bt = build_backtest_spec(
+        CASE_STUDY_ID,
+        bt_config,
+        prices=prices,
+        traded_universe=TRADED_UNIVERSE,
+        prediction_hash=ensemble_prediction_hash,
+        initial_cash=bt_config.initial_cash,
+        chapter="ch16",
+        label=LABEL,
+        signal=_signal,
+    )
+    _result = run_backtest(
+        CASE_STUDY_ID,
+        ensemble_prediction_hash,
+        _spec_bt,
+        prices=prices,
+        predictions=normalize_prediction_columns(
+            read_predictions(CASE_STUDY_ID, ensemble_prediction_hash)
+        ),
+        label=LABEL,
+        register=True,
+        force_rebacktest=FORCE_REBACKTEST,
+        initial_cash=bt_config.initial_cash,
+        calendar=bt_config.calendar,
+    )
+    print(
+        f"Ensemble on {_featured['name']} / {_ens['universe_filter']}: "
+        f"Sharpe {_result.metrics['sharpe']:+.3f}, "
+        f"{_result.metrics.get('num_trades', 0):.0f} trades",
+        flush=True,
+    )
 
 # %%
 conn = sqlite3.connect(str(db_path))
