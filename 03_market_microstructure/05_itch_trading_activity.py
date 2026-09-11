@@ -266,73 +266,90 @@ def _build_order_attrs(message_dir: Path) -> pl.DataFrame | None:
 # alone. Resolving one hop is not enough: `A → U → U` leaves the second `U`'s parent
 # undefined until the first has been resolved, and a chain can run several deep.
 #
-# So the resolution repeats until a pass resolves nothing new. Each pass inherits side
-# and ticker from a parent that is now known, and takes the price from the `U` message
-# itself, since that is what the replacement is quoting at. Whatever is still unresolved
-# after the loop is reported rather than dropped in silence.
+# Following one hop per pass would need as many passes as the longest chain, and on a
+# full day that is roughly ten thousand: a market maker rewrites the same quote all
+# session. So the chain is collapsed by pointer doubling instead. Each pass replaces
+# every reference's recorded parent with *its* parent, halving the remaining depth, and a
+# chain of ten thousand closes in fourteen passes rather than ten thousand.
+#
+# Once every reference points at the add that started its chain, side and ticker come
+# from that add, and the price comes from the `U` message itself, since that is what the
+# replacement is quoting at. Whatever is still unresolved is reported rather than dropped
+# in silence.
+#
+# The pass cap stops a cycle. Each pass doubles the depth a pointer covers, so forty of
+# them reach a chain length no order book will ever produce, and a run that hits the cap
+# has found references pointing at each other rather than a very long chain.
 
 
 # %%
+MAX_REPLACEMENT_PASSES = 40
+
+
 def _apply_replacements(message_dir: Path, order_attrs: pl.DataFrame) -> pl.DataFrame:
     """Resolve U (Replace) chains so every new order reference inherits its attributes.
 
-    Repeats until a pass resolves nothing new, so a chain of replacements is followed to
-    its end rather than one hop deep.
+    Collapses each chain by pointer doubling, which costs a pass per doubling of the
+    depth rather than a pass per hop.
     """
     u_path = message_dir / "U"
     if not (u_path.exists() and list(u_path.glob("*.parquet"))):
         return order_attrs
 
     print("Processing U (Replace) messages for order lineage...")
-    pending = (
+    # One row per new reference: who it replaced, and what it quotes at. A reference the
+    # day issues twice would break the uniqueness the caller asserts, so keep the first.
+    links = (
         pl.scan_parquet(u_path / "*.parquet")
         .select(
-            "original_order_reference_number",
-            "new_order_reference_number",
+            pl.col("new_order_reference_number").alias("order_reference_number"),
+            pl.col("original_order_reference_number").alias("ancestor"),
             "price",
         )
         .collect()
+        .unique(subset="order_reference_number", keep="first")
     )
-    total_replacements = pending.height
+    total_replacements = links.height
 
-    resolved_rounds = 0
-    while pending.height:
-        newly = (
-            pending.join(
-                order_attrs.select("order_reference_number", "buy_sell_indicator", "stock"),
-                left_on="original_order_reference_number",
-                right_on="order_reference_number",
-                how="inner",
-            )
-            .select(
-                pl.col("new_order_reference_number").alias("order_reference_number"),
-                "price",
-                "buy_sell_indicator",
-                "stock",
-            )
-            .unique(subset="order_reference_number", keep="first")
+    passes = 0
+    while passes < MAX_REPLACEMENT_PASSES:
+        doubled = links.join(
+            links.select(
+                pl.col("order_reference_number").alias("ancestor"),
+                pl.col("ancestor").alias("grandparent"),
+            ),
+            on="ancestor",
+            how="left",
         )
-        if newly.is_empty():
+        # An ancestor that is itself a replaced reference still has further to go. When
+        # none is, every chain already points at the add that started it.
+        if not doubled["grandparent"].is_not_null().any():
             break
-        order_attrs = pl.concat([order_attrs, newly])
-        pending = pending.join(
-            newly.select("order_reference_number"),
-            left_on="new_order_reference_number",
-            right_on="order_reference_number",
-            how="anti",
+        links = doubled.select(
+            "order_reference_number",
+            pl.coalesce("grandparent", "ancestor").alias("ancestor"),
+            "price",
         )
-        resolved_rounds += 1
+        passes += 1
 
+    newly = links.join(
+        order_attrs.select("order_reference_number", "buy_sell_indicator", "stock"),
+        left_on="ancestor",
+        right_on="order_reference_number",
+        how="inner",
+    ).select("order_reference_number", "price", "buy_sell_indicator", "stock")
+
+    unresolved = total_replacements - newly.height
     print(
-        f"  {total_replacements - pending.height:,} of {total_replacements:,} replacements "
-        f"resolved over {resolved_rounds} pass(es)"
+        f"  {newly.height:,} of {total_replacements:,} replacements "
+        f"resolved over {passes} doubling pass(es)"
     )
-    if pending.height:
+    if unresolved:
         print(
-            f"  {pending.height:,} replacements name a parent this sample never saw and "
+            f"  {unresolved:,} replacements name a parent this sample never saw and "
             f"stay unattributed"
         )
-    return order_attrs
+    return pl.concat([order_attrs, newly])
 
 
 # %% [markdown]
