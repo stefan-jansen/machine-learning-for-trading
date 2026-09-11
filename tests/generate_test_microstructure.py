@@ -7,9 +7,20 @@ Writes to ~/ml4t/test-data/data/ which serves as ML4T_DATA_PATH
 in CI.
 
 Usage:
-    uv run python tests/generate_test_microstructure.py
+    uv run python tests/generate_test_microstructure.py --check
+    uv run python tests/generate_test_microstructure.py --output-root DIR
+    uv run python tests/generate_test_microstructure.py            # writes the live fixture
+
+**Four of its twenty outputs no longer reproduce what is on disk**, so running it
+without checking first destroys real data. Measured 2026-09-11: it writes 345 rows
+to `futures/market/individual/ES/data.parquet` where the fixture carries 19,361 that
+are byte-identical to production, and 20, 3 and 3 rows to the ITCH `A`, `P` and `R`
+message files where the fixture carries 2,500, 2,500 and 5. Someone widened those
+four and did not update this script. `--check` reports the disagreement and writes
+nothing; run it before the bare form.
 """
 
+import argparse
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -887,9 +898,51 @@ def generate_all(root: Path = TEST_DATA_ROOT, *, quiet: bool = False) -> list[Pa
     return written
 
 
-def main() -> None:
-    generate_all(TEST_DATA_ROOT)
+def main(argv: list[str] | None = None) -> int:
+    """Parse arguments before writing anything.
+
+    There was no parser here, so an unrecognized flag was ignored and the script ran:
+    `--help`, typed to find out what it did, silently overwrote four fixture files with
+    smaller synthetic ones. A parser makes an unknown flag an error instead of a write.
+    """
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=TEST_DATA_ROOT,
+        help=f"where to write (default: {TEST_DATA_ROOT})",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="generate to a scratch directory and report which outputs disagree with "
+        "--output-root, writing nothing to it",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.check:
+        generate_all(args.output_root)
+        return 0
+
+    import filecmp
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="generate-test-microstructure-") as scratch:
+        written = generate_all(Path(scratch), quiet=True)
+        disagree = []
+        for produced in written:
+            relative = produced.relative_to(scratch)
+            existing = args.output_root / relative
+            if not existing.exists():
+                disagree.append((relative, "absent"))
+            elif not filecmp.cmp(produced, existing, shallow=False):
+                disagree.append((relative, "differs"))
+
+    print(f"{len(written)} outputs, {len(written) - len(disagree)} reproduce {args.output_root}")
+    for relative, why in disagree:
+        print(f"  {why}: {relative}")
+    return 1 if disagree else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
