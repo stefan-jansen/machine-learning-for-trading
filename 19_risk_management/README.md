@@ -13,7 +13,7 @@ This opening section reframes risk management as part of system design rather th
 
 ## Sections
 
-### 19.1 Risk in the ML4T Workflow: From Backtest Winner to Tradable System
+### 19.1 Turning Your Backtest Winner into a Tradable System
 
 This opening section reframes risk management as part of system design rather than post hoc reporting. It explains why a strategy is not deployable until its limits, escalation rules, and governance artifacts are defined in advance, auditable, and point-in-time safe.
 
@@ -42,7 +42,7 @@ This section shifts the focus from point losses to lived investor experience. By
 - [`03_position_sizing_mae_mfe`](03_position_sizing_mae_mfe.ipynb) — This notebook demonstrates position sizing methods and MAE/MFE analysis for stop calibration. We implement fixed fractional and volatility-based sizing, then use trade excursion analysis to optimize stop placement.
 - [`10_ml4t_backtest_risk_demo`](10_ml4t_backtest_risk_demo.ipynb) — Demonstrates the ml4t.backtest.risk module—the library implementation of risk management concepts discussed in Chapter 19. This provides production-ready stop-loss rules, rule composition, and portfolio-level kill switches.
 
-### 19.5 Decomposing Risk: Factor, Sector, and Macro Exposure
+### 19.5 Decomposing Factor, Sector, and Macro Exposures
 
 This section asks where portfolio risk really comes from. It shows how factor, sector, geographic, and macro decomposition reveal whether performance reflects intended exposures, accidental bets, or risks that were never part of the original thesis.
 
@@ -65,7 +65,7 @@ This is the chapter's operational core for live implementation. It explains how 
 - [`09_deep_hedging`](09_deep_hedging.ipynb) — This notebook demonstrates deep hedging (Buehler et al., 2019): a neural network learns hedging positions that minimize CVaR of terminal PnL under transaction costs. Where Section 19.7 builds adaptive risk controls from rules (vol targeting, regime caps, stops), this notebook shows how the same risk objective can be optimized end-to-end by a neural network — bridging the gap between measurement (Section 19.3) and learned control.
 - [`11_systematic_risk_sweep`](11_systematic_risk_sweep.ipynb) — Demonstrates how to systematically optimize position-level exit rules (StopLoss, TakeProfit, TrailingStop) through 1D sweeps, 2D grid searches, and MAE/MFE-calibrated stops. Rather than hand-picking 3-5 configurations, we sweep the full parameter space and visualize Sharpe/Calmar trade-offs as heatmaps --- letting the data reveal the optimal risk regime.
 
-### 19.8 Kill Switches and Risk Governance
+### 19.8 Applying Kill Switches and Risk Governance
 
 This section turns metrics and controls into institutional process. It defines what failure conditions look like, how escalation should work, when re-research is required, and why drift detection and written risk governance are necessary for any strategy that is meant to survive contact with the market.
 

@@ -36,7 +36,7 @@
 # - Model the interaction between signal decay and transaction costs
 # - Use a persistence-cost scenario to explain when a faster signal may still be worth trading
 #
-# **Book Reference:** Chapter 18: Section 18.8 (Practical Guardrails)
+# **Book Reference:** Chapter 18: Section 18.8 (Designing practical cost guardrails)
 #
 # **Prerequisites:** Read [`01_cost_taxonomy`](01_cost_taxonomy.ipynb) for breakeven framing and
 # [`10_gross_vs_net_performance`](10_gross_vs_net_performance.ipynb) for the full net-of-cost waterfall.

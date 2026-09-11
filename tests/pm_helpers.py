@@ -1579,7 +1579,6 @@ def run_notebook(
     env_vars = {
         "MPLBACKEND": "Agg",
         "PLOTLY_RENDERER": "json",
-        "DISABLE_HPO": "1",
         **KERNEL_THREAD_CAPS,
     }
     if output_dir:

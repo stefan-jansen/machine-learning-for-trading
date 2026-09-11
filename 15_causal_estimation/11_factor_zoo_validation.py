@@ -30,8 +30,8 @@
 # - carry the selected union into an intercept-inclusive OLS regression with HAC inference;
 # - interpret what the exercise does and does not establish about the factor zoo.
 #
-# **Book references**: Chapter 14, Section 14.5 (Taming the Factor Zoo), and
-# Chapter 15, Section 15.3 (Double Machine Learning).
+# **Book references**: Chapter 14, Section 14.1 (Making the case for latent factors), and
+# Chapter 15, Section 15.4 (Isolating factor effects with DML).
 #
 # **Prerequisites**: [`01_pca_equity_sectors`](../14_latent_factors/01_pca_equity_sectors.ipynb)
 # and [`03_econml_dml`](03_econml_dml.ipynb).

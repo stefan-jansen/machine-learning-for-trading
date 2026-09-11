@@ -33,7 +33,7 @@ This section broadens the discussion from data categories to the practical reali
 - [`11_crypto_premium_analysis`](11_crypto_premium_analysis.ipynb) — This notebook demonstrates how to work with Binance perpetual futures premium index data - the foundation for funding rate arbitrage strategies. We load, explore, and analyze premium dynamics across major cryptocurrencies to identify potential arbitrage opportunities.
 - [`12_fx_pairs_eda`](12_fx_pairs_eda.ipynb) — This notebook introduces the FX dataset from OANDA. FX markets are OTC with no centralized exchange, so prices aggregate from multiple liquidity providers.
 
-### 2.3 Data Sourcing: The Due Diligence Framework
+### 2.3 A Due Diligence Framework for Data Sourcing
 
 This is the chapter's risk-control core. It explains that many apparent research successes are manufactured by data defects, then organizes due diligence around general quality dimensions, finance-specific failure modes, vendor evaluation, and internal governance. The section turns abstract warnings into operational rules: point-in-time correctness, survivorship handling, corporate action methodology, identifier integrity, legal rights, and reproducible versioning.
 
@@ -42,7 +42,7 @@ This is the chapter's risk-control core. It explains that many apparent research
 - [`15_survivorship_bias_detection`](15_survivorship_bias_detection.ipynb) — Survivorship bias is arguably the most dangerous form of data contamination in quantitative finance. This notebook uses real historical data from the US equities dataset (US Equities, originally Quandl WIKI) to demonstrate, detect, and quantify survivorship bias.
 - [`16_provider_comparison`](16_provider_comparison.ipynb) — ML4T Third Edition - Chapter 2: The Financial Data...
 
-### 2.4 Data Storage
+### 2.4 Storing Data
 
 This section translates data discipline into infrastructure decisions. Rather than promoting a single stack, it explains how storage choice depends on access patterns, scale, concurrency, and operational maturity, and it benchmarks the trade-offs among file formats, embedded engines, and server databases. It gives readers a practical default architecture for modern research workflows while also teaching when more complex systems are justified.
 
