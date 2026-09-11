@@ -26,14 +26,22 @@ condition is narrower: the sha on disk differs from what the registry's runs pin
 pre-flight that passes where registration refuses is a green light for a chain that will not
 run.
 
-**An artifact it cannot resolve is reported, not skipped.** The registry pins a sha per
-artifact NAME, and three names address a file this script can locate from the case study's
-own specs: ``financial``, ``model_based`` and ``label``. ``eval_label`` needs the
-classification mapping in ``config/setup.yaml`` and is resolved through the same function the
-loader uses. Anything else - the latent adapter records a ``files`` list rather than an
-``artifacts`` mapping (ml4t/agent-workspace#891) - is counted and named as unchecked, because
-a checker that answers green for what it did not look at is the failure this whole class is
-about.
+**What is NOT checked is reported, because a checker that answers green for what it did not
+look at is the failure this whole class is about.** Two things fall outside.
+
+An artifact NAME it cannot locate: three resolve from the case study's own specs
+(``financial``, ``model_based``, ``label``) and ``eval_label`` through the classification
+mapping the loader uses. Any other name is reported ``unresolved``.
+
+A training run whose spec records its inputs in a shape ``_input_artifact_shas`` does not
+read, reported ``unchecked`` per family. It reads ``computation.input_data_spec.artifacts``,
+and measured across the nine live registries on 2026-09-11 that misses 121 runs: 45
+``latent_factors`` runs record ``input_data_spec.files``, a list of ``{role, sha256}`` with a
+``sha256:`` prefix (ml4t/agent-workspace#891), and 76 ``deep_learning`` runs nest the payload
+one level deeper, at ``input_data_spec.input_data_spec.artifacts``. **Those runs are not
+vintage-checked by registration either**, so this script reports them rather than reading
+them: a pre-flight stricter than the rule it previews would refuse a chain registration would
+accept, which is a different failure and a worse one. The enforcement gap is filed separately.
 
 Usage::
 
@@ -58,6 +66,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from case_studies.utils.registry.registration import (  # noqa: E402
+    _declared_artifact_supersessions,
+    _input_artifact_shas,
     _registered_artifact_shas,
     input_artifact_vintage_conflicts,
 )
@@ -73,7 +83,15 @@ class Finding:
     case_study: str
     label: str
     artifact: str
-    status: str  # "current" | "superseded" | "undeclared" | "unresolved" | "absent"
+    # current            the runs for this label were fitted on the file that is on disk
+    # superseded         the disk vintage is pinned and every other pinned one is retired
+    # mixed              the disk vintage is pinned and another one is not retired
+    # accepted_replacement  the disk vintage is pinned by no run yet and retires every pinned one
+    # undeclared         registration would refuse this run
+    # unresolved         an artifact name this script cannot locate
+    # unchecked          a run whose inputs are recorded in a shape the rule does not read
+    # absent             pinned by a run and not on disk
+    status: str
     on_disk: str | None
     pinned: tuple[str, ...]
     detail: str
@@ -126,6 +144,51 @@ def _artifact_path(case_dir: Path, case_study: str, name: str, label: str) -> Pa
     return None
 
 
+def _unread_input_shapes(con: sqlite3.Connection, case_study: str) -> list[Finding]:
+    """Runs whose recorded inputs ``_input_artifact_shas`` returns nothing for.
+
+    Silence here would be the same defect one level up: the rule reads
+    ``computation.input_data_spec.artifacts``, two producers record somewhere else, and a
+    checker that only walks what the rule returns reports a registry of nothing but those
+    runs as entirely clean.
+    """
+    try:
+        rows = list(con.execute("SELECT family, label, spec_json FROM training_runs"))
+    except sqlite3.DatabaseError:
+        return []
+    unread: dict[tuple[str, str], int] = {}
+    for family, label, spec_json in rows:
+        if _input_artifact_shas(spec_json):
+            continue
+        try:
+            nested = (json.loads(spec_json) or {}).get("computation", {}).get("input_data_spec", {})
+        except (TypeError, ValueError):
+            nested = {}
+        if "files" in nested:
+            shape = "input_data_spec.files"
+        elif isinstance(nested.get("input_data_spec"), dict):
+            shape = "input_data_spec.input_data_spec.artifacts"
+        else:
+            shape = "no artifact shas recorded"
+        unread[(str(family), shape)] = unread.get((str(family), shape), 0) + 1
+    return [
+        Finding(
+            case_study=case_study,
+            label="",
+            artifact=family,
+            status="unchecked",
+            on_disk=None,
+            pinned=(),
+            detail=(
+                f"{count} {family} run(s) record their inputs at {shape}, which the vintage "
+                "rule does not read, so registration does not check their vintage either and "
+                "neither does this"
+            ),
+        )
+        for (family, shape), count in sorted(unread.items())
+    ]
+
+
 def check_case_study(
     case_study: str, *, artifacts_root: Path, digests: dict[Path, str] | None = None
 ) -> list[Finding]:
@@ -163,6 +226,7 @@ def check_case_study(
                     detail=f"registry unreadable: {exc}",
                 )
             ]
+        findings.extend(_unread_input_shapes(con, case_study))
         for label in labels:
             registered = _registered_artifact_shas(con, label=label)
             incoming: dict[str, str] = {}
@@ -220,22 +284,29 @@ def check_case_study(
                             detail=conflicts[name].message,
                         )
                     )
-                elif on_disk in pinned and len(pinned) > 1:
+                    continue
+                # Not a conflict, which leaves three distinguishable states. Lumping them
+                # under "current" claimed runs had been fitted on a file no run had touched,
+                # and --quiet then hid it.
+                retired = _declared_artifact_supersessions(con, artifact_name=name, sha256=on_disk)
+                others = tuple(sha for sha in pinned if sha != on_disk)
+                if on_disk not in pinned:
                     findings.append(
                         Finding(
                             case_study=case_study,
                             label=label,
                             artifact=name,
-                            status="superseded",
+                            status="accepted_replacement",
                             on_disk=on_disk,
                             pinned=pinned,
                             detail=(
-                                f"the registry holds {len(pinned)} vintages and the runs fitted "
-                                "on the others are retired by a declared supersession"
+                                "no run for this label was fitted on the file now on disk; "
+                                f"a declaration retires the {len(pinned)} vintage(s) that were, "
+                                "so registration accepts the next run"
                             ),
                         )
                     )
-                else:
+                elif not others:
                     findings.append(
                         Finding(
                             case_study=case_study,
@@ -245,6 +316,38 @@ def check_case_study(
                             on_disk=on_disk,
                             pinned=pinned,
                             detail="the runs registered for this label were fitted on this file",
+                        )
+                    )
+                elif all(sha in retired for sha in others):
+                    findings.append(
+                        Finding(
+                            case_study=case_study,
+                            label=label,
+                            artifact=name,
+                            status="superseded",
+                            on_disk=on_disk,
+                            pinned=pinned,
+                            detail=(
+                                f"the registry holds {len(pinned)} vintages, and a declaration "
+                                "retires every one the disk vintage replaced"
+                            ),
+                        )
+                    )
+                else:
+                    findings.append(
+                        Finding(
+                            case_study=case_study,
+                            label=label,
+                            artifact=name,
+                            status="mixed",
+                            on_disk=on_disk,
+                            pinned=pinned,
+                            detail=(
+                                f"the registry holds {len(pinned)} vintages and nothing retires "
+                                f"{', '.join(sha[:8] for sha in others if sha not in retired)}. "
+                                "Registration stays silent because the file on disk is one of "
+                                "them, so the mixture is already in the population"
+                            ),
                         )
                     )
     finally:
@@ -297,7 +400,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"            {finding.detail}")
         counts = {
             status: sum(f.status == status for f in findings)
-            for status in ("current", "superseded", "undeclared", "unresolved", "absent")
+            for status in (
+                "current",
+                "superseded",
+                "mixed",
+                "accepted_replacement",
+                "undeclared",
+                "unresolved",
+                "unchecked",
+                "absent",
+            )
         }
         print(
             f"{len(findings)} artifact/label pair(s): "
