@@ -4325,7 +4325,7 @@ requires-dist = [
     { name = "llama-index-vector-stores-chroma", specifier = ">=0.5.5" },
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "ml4t-backtest", specifier = ">=0.1.3" },
-    { name = "ml4t-data", specifier = ">=0.1.2" },
+    { name = "ml4t-data", specifier = ">=0.1.6" },
     { name = "ml4t-diagnostic", specifier = ">=0.1.4" },
     { name = "ml4t-engineer", specifier = ">=0.1.3" },
     { name = "ml4t-live", specifier = ">=0.1.0" },
@@ -4427,7 +4427,7 @@ wheels = [
 
 [[package]]
 name = "ml4t-data"
-version = "0.1.2"
+version = "0.1.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -4449,9 +4449,9 @@ dependencies = [
     { name = "structlog" },
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fa/3a/e49c4512f0ef3f4834959ecfe36de7ee17354c406258cc26b9232043c8b4/ml4t_data-0.1.2.tar.gz", hash = "sha256:f35b134435c61f5a686bf8837225ff83079bcf01106ffd2df19cda8da215d541", size = 770903, upload-time = "2026-08-10T16:41:18.543Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b5/73/d7d855a132f48b3a03994103d574b1c917a0bb5c4acc4d44211644867b73/ml4t_data-0.1.6.tar.gz", hash = "sha256:991e5d772652e785aa7718f90866c8cb7a446c440efa876b186ed8372f021092", size = 778252, upload-time = "2026-09-11T17:17:54.717Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/96/15a92fc69ec6ffbeaa470bcf1870ec32576969782725e381c26b84417842/ml4t_data-0.1.2-py3-none-any.whl", hash = "sha256:773dae5b8446e41904c36568d8cc5e6910b0be1a0390918a57e4197b1523aff6", size = 488360, upload-time = "2026-08-10T16:41:16.869Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/93/559c8fa0a60e30a8361231c1ab2b0b14a38fc7797f675c1caa7cf573762b/ml4t_data-0.1.6-py3-none-any.whl", hash = "sha256:473118d21abddd4a04b7402ab822f5c74fe69c45ddf087b20b032f286c2b7958", size = 490512, upload-time = "2026-09-11T17:17:53.014Z" },
 ]
 
 [[package]]
