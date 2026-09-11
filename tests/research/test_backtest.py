@@ -1,0 +1,249 @@
+"""Focused event-ordering and risk tests for the MNQ backtest."""
+
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+
+import polars as pl
+import pytest
+
+from research.mnq_strategy.backtest import run_backtest
+from research.mnq_strategy.config import StrategyConfig
+from research.mnq_strategy.fixtures import (
+    make_confirmed_signal_fixture,
+    make_cost_fixture,
+    make_overlapping_signals_fixture,
+    make_stop_target_fixture,
+)
+from research.mnq_strategy.risk import CostModel
+
+NEW_YORK = "America/New_York"
+
+
+def _bars(rows: list[dict]) -> pl.DataFrame:
+    frame = pl.DataFrame(rows)
+    return frame.with_columns(
+        pl.col("timestamp_ny").cast(pl.Datetime(time_zone=NEW_YORK)),
+        pl.col("session_date").cast(pl.Date),
+        pl.col("bar_closed").cast(pl.Boolean),
+        pl.col("signal").cast(pl.Boolean),
+        pl.col("direction").cast(pl.Utf8),
+        pl.col("signal_type").cast(pl.Utf8),
+    )
+
+
+def _row(
+    timestamp: datetime,
+    *,
+    open_: float = 100.0,
+    high: float = 100.5,
+    low: float = 99.5,
+    close: float = 100.0,
+    signal: bool = False,
+    direction: str | None = None,
+    setup: str | None = None,
+    bar_closed: bool = True,
+) -> dict:
+    return {
+        "timestamp_ny": timestamp,
+        "session_date": date.fromisoformat(timestamp.date().isoformat()),
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "bar_closed": bar_closed,
+        "signal": signal,
+        "direction": direction,
+        "signal_type": setup,
+    }
+
+
+def _four_contract_config(**overrides) -> StrategyConfig:
+    values = {
+        "min_contracts": 4,
+        "max_contracts": 4,
+        "cost_model": CostModel(commission_per_contract=0.0, slippage_points=0.0),
+    }
+    values.update(overrides)
+    return StrategyConfig(**values)
+
+
+def test_entry_is_first_price_after_confirmation_close():
+    result = run_backtest(make_confirmed_signal_fixture(), StrategyConfig())
+
+    assert result.height == 1
+    assert result["entry_time"][0] > result["signal_time"][0]
+    assert result["entry_price"][0] == 100.25
+
+
+def test_only_closed_signal_rows_are_consumed():
+    bars = make_confirmed_signal_fixture().with_columns(
+        pl.when(pl.col("signal")).then(False).otherwise(pl.col("bar_closed")).alias("bar_closed")
+    )
+
+    result = run_backtest(bars, StrategyConfig())
+
+    assert result.is_empty()
+
+
+def test_one_position_at_a_time_rejects_overlapping_entry_window():
+    result = run_backtest(make_overlapping_signals_fixture(), _four_contract_config())
+
+    assert result.filter(pl.col("status") == "closed").height == 1
+    rejected = result.filter(pl.col("rejection_reason") == "position_already_open")
+    assert rejected.height == 1
+
+
+def test_long_trade_uses_direction_aware_pnl():
+    signal_time = datetime(2024, 1, 8, 10, 0)
+    bars = _bars(
+        [
+            _row(signal_time, signal=True, direction="long", setup="10am"),
+            _row(signal_time + timedelta(minutes=5), open_=100.0, close=101.0),
+        ]
+    )
+
+    result = run_backtest(bars, _four_contract_config())
+
+    assert result["exit_reason"][0] == "end_of_data"
+    assert result["gross_pnl"][0] == pytest.approx(8.0)
+    assert result["net_pnl"][0] == pytest.approx(8.0)
+
+
+def test_short_trade_uses_direction_aware_pnl():
+    signal_time = datetime(2024, 1, 8, 10, 0)
+    bars = _bars(
+        [
+            _row(signal_time, signal=True, direction="short", setup="10am"),
+            _row(signal_time + timedelta(minutes=5), open_=100.0, close=99.0),
+        ]
+    )
+
+    result = run_backtest(bars, _four_contract_config())
+
+    assert result["gross_pnl"][0] == pytest.approx(8.0)
+    assert result["stop"][0] == pytest.approx(110.0)
+    assert result["target"][0] == pytest.approx(80.0)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "direction", "expected_exit"),
+    [
+        (make_stop_target_fixture, "long", 90.25),
+    ],
+)
+def test_both_stop_and_target_touched_resolves_stop_first(fixture, direction, expected_exit):
+    result = run_backtest(fixture(), _four_contract_config())
+
+    assert result["direction"][0] == direction
+    assert result["exit_price"][0] == pytest.approx(expected_exit)
+    assert result["exit_reason"][0] == "stop_loss"
+
+
+def test_short_both_stop_and_target_touched_resolves_stop_first():
+    signal_time = datetime(2024, 1, 8, 10, 0)
+    bars = _bars(
+        [
+            _row(signal_time, signal=True, direction="short", setup="10am"),
+            _row(
+                signal_time + timedelta(minutes=5),
+                open_=100.0,
+                high=120.0,
+                low=70.0,
+                close=100.0,
+            ),
+        ]
+    )
+
+    result = run_backtest(bars, _four_contract_config())
+
+    assert result["exit_price"][0] == pytest.approx(110.0)
+    assert result["exit_reason"][0] == "stop_loss"
+
+
+def test_costs_are_reported_separately_from_raw_entry_price():
+    result = run_backtest(
+        make_cost_fixture(),
+        StrategyConfig(min_contracts=4, max_contracts=4),
+    )
+
+    assert result["entry_price"][0] == 100.25
+    assert result["adjusted_entry_price"][0] == 100.75
+    assert result["total_costs"][0] == pytest.approx(20.0)
+    assert result["gross_pnl"][0] == pytest.approx(4.0)
+    assert result["net_pnl"][0] == pytest.approx(-16.0)
+
+
+def test_position_size_rejection_is_emitted_as_a_row():
+    config = _four_contract_config(stop_points=31.25, target_points=40.0)
+
+    result = run_backtest(make_confirmed_signal_fixture(), config)
+
+    assert result.height == 1
+    assert result["status"][0] == "rejected"
+    assert result["contracts"][0] == 0
+    assert result["rejection_reason"][0] == "position_size_rejected"
+
+
+def test_daily_guard_latches_after_two_realized_losses():
+    base = datetime(2024, 1, 8, 10, 0)
+    rows: list[dict] = []
+    for index in range(3):
+        signal_time = base + timedelta(minutes=index * 10)
+        entry_time = signal_time + timedelta(minutes=5)
+        rows.append(_row(signal_time, signal=True, direction="long", setup="10am"))
+        rows.append(
+            _row(
+                entry_time,
+                open_=100.0,
+                high=100.5,
+                low=89.0,
+                close=95.0,
+            )
+        )
+
+    result = run_backtest(
+        _bars(rows),
+        _four_contract_config(daily_stop=100.0, max_consecutive_losses=2),
+    )
+
+    assert result.filter(pl.col("status") == "closed").height == 2
+    assert result.filter(pl.col("rejection_reason") == "daily_loss_limit").height == 1
+
+
+def test_empty_and_signal_free_inputs_return_stable_empty_frame():
+    empty = make_confirmed_signal_fixture().head(0)
+    signal_free = make_confirmed_signal_fixture().with_columns(pl.lit(False).alias("signal"))
+
+    empty_result = run_backtest(empty, StrategyConfig())
+    signal_free_result = run_backtest(signal_free, StrategyConfig())
+
+    assert empty_result.is_empty()
+    assert signal_free_result.is_empty()
+    assert empty_result.schema == signal_free_result.schema
+    assert empty_result.schema["contracts"] == pl.Int64
+    assert empty_result.schema["signal_time"] == pl.Datetime(time_zone=NEW_YORK)
+
+
+def test_signal_on_last_bar_is_rejected_without_an_entry_observation():
+    bars = (
+        make_confirmed_signal_fixture()
+        .tail(1)
+        .with_columns(
+            pl.lit(True).alias("signal"),
+            pl.lit("long").alias("direction"),
+            pl.lit("10am").alias("signal_type"),
+        )
+    )
+
+    result = run_backtest(bars, _four_contract_config())
+
+    assert result["status"][0] == "rejected"
+    assert result["rejection_reason"][0] == "no_eligible_entry_bar"
+
+
+def test_fixed_signal_contract_is_validated_before_execution():
+    config = StrategyConfig(rejection_wick_ratio=2.1)
+
+    with pytest.raises(ValueError, match="fixed signal contract"):
+        run_backtest(make_confirmed_signal_fixture(), config)
