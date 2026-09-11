@@ -79,8 +79,9 @@
 #   `case_studies/fx_pairs/labels/fwd_ret_1d.parquet`.
 
 # %%
-"""FX Pairs Deployment Loop — train, predict, paper-trade, persist on IB."""
+"""FX Pairs Deployment Loop: train, predict, paper-trade, persist on IB."""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -97,7 +98,7 @@ from sklearn.preprocessing import StandardScaler
 from data import load_fx_pairs
 from utils.config import CASE_STUDIES_DIR
 from utils.paths import display_path, get_chapter_dir, get_output_dir
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 try:
     from ib_async import Forex
@@ -113,6 +114,11 @@ from ml4t.live.brokers.ib import IBBroker
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("fx_pairs_deployment")
 logging.getLogger("ml4t").setLevel(logging.WARNING)
+# ib_async logs IB status codes 2100-2199 ("Market data farm connection is OK") through
+# `Wrapper.error` at INFO, so basicConfig(INFO) writes fourteen of them into the connect
+# cell. Order-validation warnings and every error stay visible at WARNING and above.
+logging.getLogger("ib_async").setLevel(logging.WARNING)
+logging.getLogger("ml4t.live.brokers.ib").setLevel(logging.WARNING)
 
 
 def run_demo(awaitable):
@@ -131,13 +137,14 @@ IB_HOST = "127.0.0.1"
 IB_PORT = 7497  # TWS paper = 7497, Gateway paper = 4002
 IB_CLIENT_ID = 11
 IB_HISTORICAL_DURATION = "60 D"
+IB_CONNECT_TIMEOUT_S = 30.0  # a gateway that accepts the socket but never syncs must not hang
 SUBMIT_PAPER_ORDERS = False  # explicit opt-in only; publication execution is dry-run
 
 # %% [markdown]
 # ## 1. Setup and IB Connection
 #
 # A single TWS/Gateway session backs both data and execution. The notebook
-# fails loudly if the session is unreachable rather than degrading silently
+# fails loudly if the session is unreachable rather than degrading silently.
 # A deployment loop that hides its failure modes teaches the wrong lesson.
 
 # %%
@@ -211,17 +218,21 @@ print("\nConnecting to IB paper session ...")
 
 
 # %% [markdown]
-# The connection gate rejects unreachable services and any managed account that is not an IB paper account.
+# The connection gate rejects unreachable services and any managed account that is not an IB paper
+# account. The connect call carries a deadline because a gateway can accept the socket and then
+# never answer the position and order sync, which leaves the notebook waiting with no error and no
+# checklist. `12_ib_basket_rebalance_demo` bounds its connect the same way.
 
 
 # %%
 async def open_ib() -> IBBroker:
     broker = IBBroker(host=IB_HOST, port=IB_PORT, client_id=IB_CLIENT_ID)
     try:
-        await broker.connect()
+        await asyncio.wait_for(broker.connect(), timeout=IB_CONNECT_TIMEOUT_S)
     except Exception as exc:
         msg = (
-            f"Could not connect to IB at {IB_HOST}:{IB_PORT}: {exc}\n"
+            f"Could not connect to IB at {IB_HOST}:{IB_PORT} "
+            f"within {IB_CONNECT_TIMEOUT_S:.0f}s: {exc}\n"
             "Checklist:\n"
             "  1. Start TWS or IB Gateway and log into a paper account.\n"
             "  2. Configure → API → Settings: enable ActiveX/Socket Clients.\n"
@@ -550,8 +561,6 @@ async def fetch_one_pair(sym, contract):
 # %%
 async def fetch_all_pairs():
     """Fetch daily bars for the whole case-study universe in parallel."""
-    import asyncio
-
     syms_with_contracts = [
         (sym, qualified_contracts[sym]) for sym in CASE_STUDY_UNIVERSE if sym in qualified_contracts
     ]
@@ -589,7 +598,7 @@ if fetch_errors:
 
 if len(live_prices) == 0:
     raise RuntimeError(
-        "IB returned no bars for any pair — cannot continue. "
+        "IB returned no bars for any pair, so the cross-section cannot be built. "
         f"Check TWS market-data permissions. First 3 errors: {fetch_errors[:3]}"
     )
 
@@ -707,8 +716,13 @@ add_message_title(
     "Only positive FX forecasts qualify for the long basket",
     subtitle="Completed IB daily bars; green identifies eligible long positions",
 )
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal bar chart of the predicted one-day return for each FX pair in the live "
+    "cross-section, sorted by forecast, with a dashed line at zero. Colour marks the sign: "
+    "bars to the right of zero are the pairs eligible for the long basket, and the basket "
+    "is taken from that side.",
+)
 
 # %% [markdown]
 # ## 6. Plan IB Paper Orders
@@ -874,10 +888,12 @@ print("Disconnected from IB.")
 #    contract on the broker is the lightest mechanism for making that
 #    resolution explicit and reusable.
 # 3. **The deployment artefact is not the research artefact.** The
-#    Chapter 12 fx_pairs case study uses a 41-feature financial-feature
-#    pipeline; the deployment loop here uses an eight-feature subset
-#    that can be computed inline from raw OHLCV. Same data, same labels,
-#    different feature surface, different code path.
+#    Chapter 12 fx_pairs case study fits its models on the financial-feature
+#    matrix built in `case_studies/fx_pairs/03_financial_features`, which is
+#    far wider than what a deployment loop can recompute from a broker feed;
+#    the loop here uses an eight-feature subset computed inline from raw
+#    OHLCV. Same data, same labels, different feature surface, different
+#    code path.
 # 4. **IDEALPRO minimums and base-ccy semantics are real.** Quantities
 #    round to a 1k-base-ccy step. The notebook uses a fixed base-ccy
 #    quantity per leg rather than a USD notional, because Forex pair
