@@ -856,6 +856,35 @@ def empirical_permutation_p(placebo_effects: np.ndarray, observed_effect: float)
         observed value in absolute value, in ``(0, 1]``.
     """
     placebo = np.asarray(placebo_effects, dtype=float)
+    # Both sides have to be finite, and neither check is defensive - a NaN on either side
+    # silently biases the answer in the same direction, toward significance.
+    #
+    # `np.abs(x) >= abs(nan)` is False for every x, so a non-finite observed statistic
+    # scores zero placebos as extreme and this returns 1/(n+1), the smallest p-value the
+    # test can produce. Measured through `run_dml_analysis` with its own guard removed, 24
+    # draws, only the observed fit's covariance failing: empirical_p = 0.04, and
+    # `classify_refutation` published "Passes" against an undefined observed statistic.
+    # That guard covers `run_dml_analysis`; `15_causal_estimation/03_econml_dml.py` and
+    # `04_dml_crypto_regime.py` call this function directly and would not be covered by it.
+    #
+    # A NaN inside `placebo` fails its own comparison the same way and is counted as "not
+    # extreme", which shrinks the numerator. Both notebooks already append only finite
+    # draws, so this raises for no caller that exists; it is here because the filtering
+    # belongs to whoever builds the array and the failure is silent if they forget.
+    if not np.isfinite(observed_effect):
+        raise ValueError(
+            f"empirical_permutation_p needs a finite observed statistic, got "
+            f"{observed_effect!r}. Every comparison against it is False, so the p-value "
+            f"would be 1/(n+1) - the most significant value the test can report - with "
+            f"nothing to say it was not measured."
+        )
+    if placebo.size and not np.isfinite(placebo).all():
+        raise ValueError(
+            f"empirical_permutation_p needs finite placebo draws, got "
+            f"{int((~np.isfinite(placebo)).sum())} non-finite of {placebo.size}. They "
+            f"count as not extreme and shrink the p-value. Drop the failed draws and "
+            f"report how many there were."
+        )
     at_least_as_extreme = int(np.sum(np.abs(placebo) >= abs(observed_effect)))
     return (1.0 + at_least_as_extreme) / (1.0 + placebo.size)
 

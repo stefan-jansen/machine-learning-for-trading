@@ -319,3 +319,36 @@ def test_a_failed_observed_covariance_withholds_the_refutation_verdict(monkeypat
     # No verdict at all, rather than the minimum p-value the comparison would have
     # produced against NaN.
     assert results["refutation"] == {}
+
+
+def test_the_permutation_p_value_refuses_a_non_finite_observed_statistic() -> None:
+    """The same defect one layer down, where the chapter-15 notebooks reach it.
+
+    `run_dml_analysis`'s guard covers callers that go through it.
+    `15_causal_estimation/03_econml_dml.py:579` and `04_dml_crypto_regime.py:725` call
+    `empirical_permutation_p` directly with their own observed t-statistic, so they would
+    have published `1 / (n + 1)` - 0.0099 at their 100 draws, comfortably "Passes" - on a
+    fit whose covariance failed.
+    """
+    from case_studies.utils.causal import empirical_permutation_p
+
+    placebo = np.linspace(-2.0, 2.0, 40)
+
+    assert empirical_permutation_p(placebo, observed_effect=5.0) == pytest.approx(1 / 41)
+
+    with pytest.raises(ValueError, match="finite observed statistic"):
+        empirical_permutation_p(placebo, observed_effect=float("nan"))
+    with pytest.raises(ValueError, match="finite observed statistic"):
+        empirical_permutation_p(placebo, observed_effect=float("inf"))
+
+
+def test_the_permutation_p_value_refuses_non_finite_placebo_draws() -> None:
+    """A NaN draw fails its own comparison and is counted as not extreme, so it shrinks
+    the numerator. Both notebooks already append only finite draws; the filtering belongs
+    to whoever builds the array and the failure is silent if they forget."""
+    from case_studies.utils.causal import empirical_permutation_p
+
+    placebo = np.concatenate([np.linspace(-2.0, 2.0, 39), [np.nan]])
+
+    with pytest.raises(ValueError, match="2 non-finite of 40|1 non-finite of 40"):
+        empirical_permutation_p(placebo, observed_effect=0.5)
