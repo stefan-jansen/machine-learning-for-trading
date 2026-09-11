@@ -28,6 +28,17 @@ on any workstation that has run the models while the fixture the job runs agains
 nothing. Everything here is measured against the fixture: ``ML4T_DATA_PATH`` for files and the
 seeded ``ML4T_OUTPUT_DIR`` for registries.
 
+**A condition has to be a property of the FIXTURE, not of the workspace the job is building.**
+The blocker is evaluated at the moment the notebook's test runs, and a ``cs-*`` job runs a case
+study's stages in order into one workspace, so anything the earlier stages register is there by
+the time a late stage is reached. The first version of this declared
+``no_canonical_selection`` for the fx_pairs holdout notebooks; their standalone refusal was
+measured correctly, but in the job the stages above them register a selectable validation
+rank-1, the blocker expired mid-job, the skip lifted, and all three failed on the condition
+their ORIGINAL reason had named - a candidate set the fixture does not ship. A named set or
+population the fixture never carries is stable in a way "what the registry currently resolves"
+is not.
+
 Two kinds cannot be decided from inside the run and say so rather than pretending:
 ``external`` (a service, credential or device the runner does not have) and
 ``fixture_shortfall`` (a reduction that cannot carry what the notebook needs). Both are

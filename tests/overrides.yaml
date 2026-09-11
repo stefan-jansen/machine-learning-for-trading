@@ -2578,27 +2578,33 @@ case_studies/fx_pairs/16_costs:
   timeout: 900
 case_studies/fx_pairs/17_holdout_predictions:
   skip: true
-  skip_reason: "Refits the canonical validation selection on the holdout interval, and `resolve_canonical_rank1_lineage` refuses against the fixture registry: every one of the 143 ranked validation backtests for fx_pairs belongs to a superseded generation or to none the case study publishes. Measured 2026-09-11 against the seeded registry. The notebook takes no reduction that would change this: the configuration it refits is whichever one selection chose, and there is only one."
+  skip_reason: "Refits the canonical validation selection on the holdout interval, and cell 5 raises ValueError: candidate set name 'fx_pairs:holdout-candidates' resolved to 0 unsuperseded identities. The fixture registry ships no such set and a preview run cannot create one. Measured 2026-09-11 in the cs-fx_pairs job, with this skip lifted. The notebook takes no reduction that would change it: the configuration it refits is whichever one selection chose, and there is only one."
   timeout: 300
   skip_blocker:
-    no_canonical_selection:
+    absent_candidate_set:
       of: fx_pairs
+      names:
+        - fx_pairs:holdout-candidates
 case_studies/fx_pairs/18_holdout_backtest:
   skip: true
   skip_reason: "Replays the selected strategy against 17_holdout_predictions' output, so it is
     skipped for the same reason and would fail on the missing holdout prediction first."
   timeout: 300
   skip_blocker:
-    no_canonical_selection:
+    absent_candidate_set:
       of: fx_pairs
+      names:
+        - fx_pairs:holdout-candidates
 case_studies/fx_pairs/19_strategy_analysis:
   skip: true
   skip_reason: "Reads back the holdout lineage 17 and 18 produce; with those skipped there is
     nothing for it to resolve."
   timeout: 300
   skip_blocker:
-    no_canonical_selection:
+    absent_candidate_set:
       of: fx_pairs
+      names:
+        - fx_pairs:holdout-candidates
 # max_symbols stays 5 here. The arithmetic asks for 10 - top_k_grid [5, 10, 20] and
 # long-short, so the smallest declared concentration needs 2 x 5 = 10 disjoint names - and the
 # raw fixture could supply it: `data/equities/market/nasdaq100/minute_bars` carries 12 symbols,
