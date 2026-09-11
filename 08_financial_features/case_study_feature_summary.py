@@ -298,7 +298,7 @@ if evaluated:
             vertical_spacing=0.09,
             subplot_titles=(
                 f"{len(recurring)} prefixes recur across two or more asset classes",
-                "Specialized measures appearing in only one case study",
+                "Feature prefixes appearing in only one case study",
             ),
         )
         fig.add_trace(
@@ -359,9 +359,9 @@ if evaluated:
                 "prefix appear across several columns, while implied-volatility and "
                 "variance-premium prefixes appear only in the two options-bearing case "
                 "studies, and several prefixes near the bottom appear in one or two columns "
-                "only. The lower panel is a bar chart in amber counting the measures unique "
-                "to each case study, annotated with its count; each of the seven carries "
-                "some, with the equity ETF and futures studies carrying the most."
+                "only. The lower panel is a bar chart in amber counting the prefixes that "
+                "appear in one case study alone, annotated with its count; each of the "
+                "seven has some, with the equity ETF and futures studies carrying the most."
             ),
         )
     else:
@@ -465,6 +465,13 @@ else:
 # %%
 # Visualize breadth vs IC
 if evaluated and "breadth_data" in dir() and breadth_data:
+    # sizemode="area" is what makes the area proportional to the value. Plotly's default
+    # reads `size` as a diameter, so passing the ratio there makes the AREA scale with its
+    # square and overstates the spread between case studies by that power.
+    MAX_MARKER_DIAMETER = 60
+    _irs = [brow["estimated_ir"] for brow in breadth_data]
+    _sizeref = 2.0 * max(_irs) / (MAX_MARKER_DIAMETER**2)
+
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -474,7 +481,10 @@ if evaluated and "breadth_data" in dir() and breadth_data:
             text=[brow["case_study"] for brow in breadth_data],
             textposition="top center",
             marker=dict(
-                size=[brow["estimated_ir"] * 20 + 5 for brow in breadth_data],
+                size=_irs,
+                sizemode="area",
+                sizeref=_sizeref,
+                sizemin=4,
                 color=COLORS["blue"],
                 opacity=0.75,
                 line=dict(width=1, color=COLORS["slate"]),
