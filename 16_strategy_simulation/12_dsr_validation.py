@@ -544,9 +544,9 @@ show_plotly_with_alt(
     fig,
     "Heatmap of the deflated Sharpe probability in percent over a grid of skewness and kurtosis "
     "settings, each cell labelled. Every value lies between 11.6 and 15.2 percent. Reading across "
-    "a row, kurtosis moves the probability by about a tenth of a point; reading down a column, "
-    "skewness moves it by three and a half points, from 15.2 at the most negative skew to 11.6 at "
-    "the most positive.",
+    "a row, kurtosis moves the probability by two or three tenths of a point; reading down a "
+    "column, skewness moves it by three and a half points, from 15.2 at the most negative skew to "
+    "11.6 at the most positive.",
 )
 
 # %% [markdown]

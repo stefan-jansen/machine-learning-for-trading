@@ -728,8 +728,8 @@ show_with_alt(
     fig,
     "Horizontal bar chart of the impact on final value as a percentage of the reference, one bar "
     "per configuration field plus their combination, each labelled with its value. Commission "
-    "headroom and share rounding are each worth roughly six tenths of a percent, fill ordering is "
-    "exactly zero, and the combined change is larger than either single one but smaller than "
+    "headroom is worth about +0.67 percent and share rounding about +0.59, fill ordering is "
+    "exactly zero, and the combined change is larger than either single one but well short of "
     "their sum.",
 )
 
