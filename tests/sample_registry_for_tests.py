@@ -78,8 +78,10 @@ TOP_N_PER_GROUP = 3
 # hashes it named on 2026-09-09 were in no registry on this machine, so this function raised
 # on every case study that reached it and the notebooks pinning them could not run outside
 # CI. The notebooks now pin configuration names and resolve the hash, and so does this.
-# Four entries for two notebooks: each names one configuration by default and a second
-# under `tests/overrides.yaml`, and both overrides happen to name `ridge_a10000000.0`.
+# Four entries for two notebooks: each names an incumbent and a challenger by default,
+# `ols` is the shared incumbent, and both notebooks override the challenger to the same
+# `ridge_a10000000.0` under `tests/overrides.yaml`. Those override values are checked
+# against this declaration by test_sample_registry_for_tests.py.
 # 26/02's override exists only while this declaration is ahead of the deployed fixture, and
 # can be deleted once a regenerated `us_equities_panel` carries all four. 26/03's cannot:
 # its default candidate fails the promotion gate on production and the fixture's only

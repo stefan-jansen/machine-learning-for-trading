@@ -6,13 +6,18 @@ its source, and a production registry.db is 43-180 MB and gitignored. A wrong
 from, which is the one failure in this path that cannot be undone by re-running it.
 """
 
+import ast
 import sqlite3
 from pathlib import Path
 
+import yaml
+
+from tests.pm_helpers import OVERRIDES_PATH, REPO_ROOT
 from tests.sample_registry_for_tests import (
     CASE_STUDY_IDS,
     CODE_CS_DIR,
     DEFAULT_INTERMEDIATES_DIR,
+    PINNED_PREDICTION_CONFIGS,
     _populate_sample_db,
     rejected_output_root,
 )
@@ -167,3 +172,59 @@ def test_a_registry_without_these_tables_still_samples(tmp_path: Path) -> None:
 
     assert stats["causal_runs"] == 0
     assert stats["status"] == "OK"
+
+
+def _case_study_of(notebook_py: Path) -> str | None:
+    """Return the CASE_STUDY_ID a notebook's parameters cell assigns, if it has one."""
+    tree = ast.parse(notebook_py.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        value = node.value
+        if isinstance(target, ast.Name) and target.id == "CASE_STUDY_ID":
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return value.value
+    return None
+
+
+def test_every_config_an_override_names_is_declared_for_sampling() -> None:
+    """An override that names a configuration the sampler does not carry fails only in CI.
+
+    PINNED_PREDICTION_CONFIGS is what puts a configuration's predictions parquet in the
+    fixture, and `tests/overrides.yaml` is what a notebook is actually run with there.
+    Nothing couples them: _resolve_pinned_hashes checks the declaration against production,
+    where every configuration exists, so an override naming one the declaration omits
+    resolves a registry row with no artifact behind it and the notebook raises mid-run.
+    That has happened once already, to 26_mlops_governance/02_online_drift_detection.
+    """
+    overrides = yaml.safe_load(OVERRIDES_PATH.read_text(encoding="utf-8"))
+    checked: list[str] = []
+    for key, entry in overrides.items():
+        parameters = (entry or {}).get("parameters") or {}
+        named = {
+            value
+            for name, value in parameters.items()
+            if name.endswith("_CONFIG") and isinstance(value, str)
+        }
+        if not named:
+            continue
+        notebook_py = REPO_ROOT / f"{key}.py"
+        if not notebook_py.is_file():
+            continue
+        case_study_id = _case_study_of(notebook_py)
+        declared = PINNED_PREDICTION_CONFIGS.get(case_study_id or "")
+        if not declared:
+            continue
+        missing = named - {config for _family, _label, config, _split in declared}
+        assert not missing, (
+            f"{key} overrides a configuration the fixture is not built to carry: "
+            f"{sorted(missing)}. Add it to PINNED_PREDICTION_CONFIGS[{case_study_id!r}] "
+            "in tests/sample_registry_for_tests.py, or override to one already there."
+        )
+        checked.append(key)
+
+    assert checked, (
+        "no override names a *_CONFIG for a case study in PINNED_PREDICTION_CONFIGS, "
+        "so this check covered nothing"
+    )
