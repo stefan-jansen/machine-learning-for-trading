@@ -801,7 +801,7 @@ if "barrier_hit" in labels_tb.columns:
             "One SPY trade entered at the close of 1 June 2017 near 211, with a dashed green "
             "take-profit line at 215.25 well above the path and a dashed red stop line at "
             "208.92 well below it. The navy price line wanders between 210 and 213.2 for the "
-            "whole twenty-bar window without approaching either barrier, and a copper cross "
+            "whole twenty-bar window without touching either barrier, and a copper cross "
             "marks the exit at the final bar, where the vertical dotted time barrier sits. "
             "The closest approach is to the stop, roughly a point away near the end."
         ),
