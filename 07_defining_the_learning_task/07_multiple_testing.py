@@ -1502,18 +1502,21 @@ mintrl_df = pl.DataFrame(rows)
 display(mintrl_df)
 
 # %% [markdown] tags=[]
-# **Interpretation**: read across a row, not down a column. The lowest Sharpe in the
-# table, found without searching, needs a few years of daily data to confirm. The *same*
-# Sharpe, arrived at after a handful of candidates, needs a track record longer than most
-# funds last; after a hundred candidates it cannot be confirmed at any length, which is
-# what `never` in the table means - the required record grows faster than the evidence a
-# longer record supplies.
+# **Interpretation**: read across a row, not down a column. Every row lengthens as the
+# search widens, and the rows do not lengthen at the same rate.
+#
+# The lowest Sharpe in the table already needs more than a decade of daily data with no
+# search at all, and once even a handful of candidates have been tried it cannot be
+# confirmed at any length - which is what `never` in the table means, the required record
+# growing faster than the evidence a longer record supplies. The next row up is
+# confirmable in a couple of years unsearched, needs longer than a career after a handful
+# of candidates, and reaches `never` after a hundred. Only the top row stays inside a
+# working career all the way across.
 #
 # The columns differ only because the trial Sharpes differ. That is the whole mechanism:
 # the FWER correction prices the *search*, so a search over candidates that all score
 # alike costs nothing while a search over dispersed candidates is expensive. A higher
-# Sharpe buys back some room - the larger ones bring the ten-candidate requirement back
-# inside a working career - but the ordering across a row never reverses.
+# Sharpe buys back room, but the ordering across a row never reverses.
 #
 # This connects to NB06's track record planning for IC: both IC and Sharpe
 # require longer records than practitioners typically assume.
