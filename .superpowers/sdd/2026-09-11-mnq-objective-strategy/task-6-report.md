@@ -299,3 +299,55 @@ Observed results:
 The first format check correctly identified the edited notebook as needing formatting; Ruff format
 was run once, then the notebook validation, headless execution, lint, format, compile, and diff
 checks were rerun successfully.
+
+## Task 6 scoped review minor fix: equity chart observation axis
+
+### Finding and fix
+
+The added zero-equity baseline made the chart's `range(1, equity_curve.height + 1)` values and
+`Closed trade number` label misleading: the first plotted point was the baseline, not a closed
+trade. The notebook now uses `equity_observation = list(range(equity_curve.height))` for both
+plots and labels the shared x-axis `Equity observation`. Drawdown calculation and values are
+unchanged.
+
+### Verification
+
+```bash
+uv run python - <<'PY'
+import json
+from pathlib import Path
+import nbformat
+path = Path('research/notebooks/mnq_objective_strategy_validation.ipynb')
+nb = nbformat.read(path, as_version=4)
+nbformat.validate(nb)
+raw = json.loads(path.read_text(encoding='utf-8'))
+assert raw['nbformat'] == 4
+assert all('id' in cell for cell in raw['cells'])
+print(f'notebook validation: PASS ({len(nb.cells)} cells, nbformat {raw["nbformat"]}.{raw["nbformat_minor"]})')
+PY
+```
+
+Observed result: `notebook validation: PASS (11 cells, nbformat 4.5)`.
+
+```bash
+rm -f /tmp/mnq_objective_strategy_validation.executed.ipynb && \
+uv run jupyter nbconvert --to notebook --execute \
+  research/notebooks/mnq_objective_strategy_validation.ipynb \
+  --output-dir /tmp \
+  --output mnq_objective_strategy_validation.executed.ipynb
+uv run pytest tests/research -q
+uv run ruff check research/notebooks/mnq_objective_strategy_validation.ipynb
+uv run ruff format --check research/notebooks/mnq_objective_strategy_validation.ipynb
+uv run python -m compileall -q research/mnq_strategy
+git diff --check
+```
+
+Observed results:
+
+- Headless notebook execution passed and wrote the output outside the repository.
+- `tests/research`: `140 passed in 0.18s`.
+- Ruff check: `All checks passed!`.
+- Ruff format check: `1 file already formatted`.
+- Compileall completed without output or errors.
+- `git diff --check` completed without whitespace errors.
+- The existing notebook assertions still verify initial equity `0.0` and drawdown `36.0`.
