@@ -37,6 +37,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
+pytestmark = pytest.mark.usefixtures("tmp_repo")
+
 import notebook_provenance  # noqa: E402
 from notebook_provenance import (  # noqa: E402
     check_all,
@@ -45,19 +47,6 @@ from notebook_provenance import (  # noqa: E402
     repo_local_sources,
     stamp_notebook,
 )
-
-
-@pytest.fixture(autouse=True)
-def _tmp_repo(tmp_path: Path) -> None:
-    """Make the stand-in REPO_ROOT a real repository, because stamping now stores the blob.
-
-    `source_py_blob` names a blob so a later command can fetch it and compare code cells, and
-    `git hash-object` without `-w` writes down the name of something that is not in the store.
-    Every command that resolves the stamp then fails, with a message that says "Re-run it".
-    Storing it needs somewhere to store it, so the directory these tests stand REPO_ROOT on has
-    to be a repository rather than a bare directory - which is what it stands in for anyway.
-    """
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
 
 
 def _code_cell(source: str, outputs: list[dict], execution_count: int | None = 1) -> dict:
