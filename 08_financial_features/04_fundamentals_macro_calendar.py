@@ -615,21 +615,37 @@ macro_features = create_relative_value_features(macro_features)
 # ## Yield-Curve Slope Feature
 #
 # The yield-curve slope, the ten-year minus two-year spread, arrives as `t10y2y`. Two
-# transforms follow, with their windows declared as constants below the cell: an
+# transforms follow, with their windows declared as constants in the next cell: an
 # exponential moving average to smooth the daily series, and a rolling z-score so the
 # level is read against its own recent range rather than in absolute basis points.
+#
+# Both windows count **calendar** days, which is the thing to check before copying a
+# window length from a notebook that works on price bars. This macro panel carries a row
+# for every date, weekends and holidays included, because FRED series are forward-filled
+# onto a daily grid. A window of 250 rows on price bars is a trading year; the same 250
+# rows here reach back about eight months. The cell below asserts the grid spacing rather
+# than trusting it.
 
 # %%
-YC_EMA_SPAN = 5  # trading days, the smoothing applied to the daily spread
-YC_ZSCORE_WINDOW = 250  # trading days, roughly one year, for the regime-relative z-score
+# Named in calendar days because the macro panel is a calendar-day grid; see above.
+YC_EMA_SPAN_DAYS = 7  # one week of smoothing on the daily spread
+YC_ZSCORE_WINDOW_DAYS = 365  # one year, for the regime-relative z-score
+
+_gaps = macro_features["timestamp"].sort().diff().drop_nulls().dt.total_days().unique().to_list()
+print(f"spacing between macro rows, in days: {sorted(_gaps)}")
+if sorted(_gaps) != [1]:
+    raise ValueError(
+        "the macro panel is not on a one-calendar-day grid, so the window constants above "
+        f"do not mean what they say; observed gaps: {sorted(_gaps)}"
+    )
 
 macro_features = macro_features.with_columns(
-    pl.col("t10y2y").ewm_mean(span=YC_EMA_SPAN, ignore_nulls=True).alias("yc_slope_ema"),
+    pl.col("t10y2y").ewm_mean(span=YC_EMA_SPAN_DAYS, ignore_nulls=True).alias("yc_slope_ema"),
 ).with_columns(
     [
         (
-            (pl.col("yc_slope_ema") - pl.col("yc_slope_ema").rolling_mean(YC_ZSCORE_WINDOW))
-            / pl.col("yc_slope_ema").rolling_std(YC_ZSCORE_WINDOW).clip(EPSILON, None)
+            (pl.col("yc_slope_ema") - pl.col("yc_slope_ema").rolling_mean(YC_ZSCORE_WINDOW_DAYS))
+            / pl.col("yc_slope_ema").rolling_std(YC_ZSCORE_WINDOW_DAYS).clip(EPSILON, None)
         ).alias("yc_slope_zscore"),
     ]
 )
@@ -652,8 +668,8 @@ fig = make_subplots(
     shared_xaxes=True,
     vertical_spacing=0.08,
     subplot_titles=[
-        f"10Y-2Y spread and its {YC_EMA_SPAN}-day EMA",
-        f"{YC_ZSCORE_WINDOW}-day z-score of the EMA slope",
+        f"10Y-2Y spread and its {YC_EMA_SPAN_DAYS}-calendar-day EMA",
+        f"{YC_ZSCORE_WINDOW_DAYS}-calendar-day z-score of the EMA slope",
     ],
 )
 fig.add_trace(
@@ -671,7 +687,7 @@ fig.add_trace(
     go.Scatter(
         x=yc["timestamp"].to_list(),
         y=yc["yc_slope_ema"].to_list(),
-        name=f"{YC_EMA_SPAN}-day EMA",
+        name=f"{YC_EMA_SPAN_DAYS}-day EMA",
         line=dict(color=COLORS["blue"], width=2),
     ),
     row=1,
@@ -685,6 +701,9 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["copper"], row=1, col=1)
 _inv = yc.with_columns((pl.col("t10y2y") < 0).alias("inverted")).with_columns(
     (pl.col("inverted") != pl.col("inverted").shift(1)).fill_null(True).cum_sum().alias("episode")
 )
+# Half a day of padding each side, so a one-day episode is a visible band rather than a
+# zero-width rectangle that draws nothing.
+_pad = timedelta(hours=12)
 for _ep in (
     _inv.filter("inverted")
     .group_by("episode")
@@ -692,8 +711,8 @@ for _ep in (
     .iter_rows(named=True)
 ):
     fig.add_vrect(
-        x0=_ep["start"],
-        x1=_ep["end"],
+        x0=_ep["start"] - _pad,
+        x1=_ep["end"] + _pad,
         fillcolor=COLORS["copper"],
         opacity=0.12,
         line_width=0,
@@ -731,11 +750,11 @@ show_plotly_with_alt(
         "2000s, falls to around zero by the middle of that decade, peaks again around "
         "2010, then declines in steps to sit below zero for the last stretch before "
         "recovering at the right edge. Pale copper vertical bands shade the periods "
-        "where the spread is below zero: two narrow bands in the early and middle "
+        "where the spread is below zero: two narrow bands close together in the middle "
         "2000s, and one wide band covering most of the final years. The bottom panel "
-        "plots the same slope as a rolling z-score in standard deviations, oscillating "
-        "far more rapidly between dashed reference lines at plus and minus two, "
-        "crossing outside them repeatedly across the whole span."
+        "plots the same slope as a rolling z-score in standard deviations, which swings "
+        "much faster than the level above it and crosses outside the dashed reference "
+        "lines at plus and minus two repeatedly across the span."
     ),
 )
 
