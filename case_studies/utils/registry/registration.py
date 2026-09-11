@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -197,7 +198,39 @@ def _enforce_input_artifact_vintage(db, spec: dict) -> None:
     incoming = _input_artifact_shas(spec)
     if not incoming or not label:
         return
-    registered = _registered_artifact_shas(db, label=str(label))
+    for conflict in input_artifact_vintage_conflicts(db, label=str(label), incoming=incoming):
+        raise ValueError(conflict.message)
+
+
+@dataclass(frozen=True)
+class ArtifactVintageConflict:
+    """One artifact whose on-disk vintage the population does not carry and nothing retires."""
+
+    artifact_name: str
+    label: str
+    sha256: str
+    undeclared: tuple[str, ...]
+    message: str
+
+
+def input_artifact_vintage_conflicts(
+    db, *, label: str, incoming: dict[str, str]
+) -> list[ArtifactVintageConflict]:
+    """The refusals :func:`_enforce_input_artifact_vintage` would raise, as values.
+
+    Separated from the raise so the same question can be asked BEFORE a chain is queued.
+    The refusal costs a launch rather than a fit - ``register_training_run`` runs ahead of
+    the fit on every path - but it still stops the chain ten seconds in, and until
+    ``scripts/check_input_artifact_vintage.py`` existed the only warning was that stop
+    (ml4t/agent-workspace#1123).
+
+    The pre-flight has to ask THIS function rather than its own version of the comparison.
+    A check that re-implements the rule can disagree with it, and a pre-flight that passes
+    where registration refuses is worse than no pre-flight: it is a green light for a chain
+    that will not run.
+    """
+    conflicts: list[ArtifactVintageConflict] = []
+    registered = _registered_artifact_shas(db, label=label)
     for name, sha in incoming.items():
         known = registered.get(name)
         if not known or sha in known:
@@ -209,16 +242,26 @@ def _enforce_input_artifact_vintage(db, spec: dict) -> None:
         )
         if not undeclared:
             continue
-        raise ValueError(
-            f"input artifact {name!r} on disk hashes {sha}, but every training run "
-            f"registered for label {label!r} was fitted on {undeclared if len(undeclared) > 1 else undeclared[0]}. "
-            f"Registering this run would put two vintages of one artifact in the same "
-            f"population with nothing recording it. If the artifact was regenerated on "
-            f"purpose, declare it: declare_artifact_supersession(case_study, {name!r}, "
-            f"sha256={sha!r}, supersedes_sha256={undeclared[0]!r}). If it was not, the "
-            f"artifact on disk is not the one this population was built from - restore it "
-            f"rather than fitting on it."
+        conflicts.append(
+            ArtifactVintageConflict(
+                artifact_name=name,
+                label=label,
+                sha256=sha,
+                undeclared=tuple(undeclared),
+                message=(
+                    f"input artifact {name!r} on disk hashes {sha}, but every training run "
+                    f"registered for label {label!r} was fitted on "
+                    f"{undeclared if len(undeclared) > 1 else undeclared[0]}. "
+                    f"Registering this run would put two vintages of one artifact in the same "
+                    f"population with nothing recording it. If the artifact was regenerated on "
+                    f"purpose, declare it: declare_artifact_supersession(case_study, {name!r}, "
+                    f"sha256={sha!r}, supersedes_sha256={undeclared[0]!r}). If it was not, the "
+                    f"artifact on disk is not the one this population was built from - restore "
+                    f"it rather than fitting on it."
+                ),
+            )
         )
+    return conflicts
 
 
 def declare_artifact_supersession(
