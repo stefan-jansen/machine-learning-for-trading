@@ -17,13 +17,13 @@
 # # Feature Selection and Deduplication
 #
 # **Chapter 8: Feature Engineering**
-# **Section Reference**: 8.6 — Combining Features and Controlling Search
+# **Section Reference**: 8.6, Combining Features and Controlling Search
 #
 # **Docker image**: `ml4t`
 #
 # ## Purpose
 #
-# A feature engineering pipeline produces many candidates — different lookbacks,
+# A feature engineering pipeline produces many candidates: different lookbacks,
 # transforms, and interaction variants. This notebook demonstrates how to reduce
 # that set to a focused, production-ready collection using systematic selection
 # and deduplication.
@@ -45,8 +45,8 @@
 #
 # ## References
 #
-# - Harvey, Liu, and Zhu (2016) — Multiple testing in factor research
-# - Meinshausen and Bühlmann (2010) — Stability selection
+# - Harvey, Liu, and Zhu (2016), on multiple testing in factor research
+# - Meinshausen and Bühlmann (2010), on stability selection
 #
 # **Output**: Selected feature list for downstream Chapter 9 use
 
@@ -54,17 +54,13 @@
 # ## Setup
 
 # %% tags=[]
-"""Feature Selection and Deduplication — reduce feature candidates to a focused production-ready set."""
+"""Feature Selection and Deduplication: reduce feature candidates to a focused production set."""
 
 import warnings
 from datetime import date
 
-# This notebook fits a LightGBM model far below, at the ML-importance step, behind
-# a deferred `from lightgbm import ...`. That deferral cannot fix the OpenMP order:
-# ml4t.diagnostic pulls in scikit-learn here, and the first OpenMP runtime loaded
-# wins the process, so by then the race is already lost and macOS ARM64 segfaults.
-# The module-level import is what settles it, which is why it is here despite
-# nothing at module scope using the name.
+# Imported here, before scikit-learn, so LightGBM's OpenMP runtime loads first; the
+# ML-importance step far below defers its own import and that is too late to settle it.
 import lightgbm  # noqa: F401
 import matplotlib.pyplot as plt
 import numpy as np
@@ -76,24 +72,37 @@ from ml4t.diagnostic.metrics import pooled_ic
 from scipy.cluster.hierarchy import fcluster, leaves_list, linkage
 from scipy.spatial.distance import squareform
 
-warnings.filterwarnings("ignore")
+# Permutation importance predicts with a bare array while LightGBM always records feature
+# names, so each of its predictions warns. Named by message; other sklearn warnings stay.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names, but LGBMRegressor was fitted with feature names",
+    category=UserWarning,
+)
 
 from data import load_etfs
 from utils.paths import get_case_study_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 START_DATE = "2006-01-01"
 N_BOOTSTRAP = 50
 MAX_SYMBOLS = 0
 SEED = 42
+# Thresholds the steps below apply. Declared here so the figures, the printed tables and
+# the prose all read the same number.
+CORR_THRESHOLD = 0.9  # |r| above which two features count as redundant
+IC_THRESHOLD = 0.01  # |IC| below which a feature is treated as having no edge
+FDR_ALPHA = 0.05  # Benjamini-Hochberg false discovery rate
+BOOTSTRAP_SAMPLE_FRAC = 0.8  # rows drawn per bootstrap sample, with replacement
+STABILITY_MIN_POSITIVE_PCT = 80.0  # share of bootstrap samples whose IC must be positive
 
 # %% tags=[]
 set_global_seeds(SEED)
 
 # %% [markdown] tags=[]
-# ## 1. Load Features from ETF Case Study
+# ## Load Features from ETF Case Study
 #
 # The ETF case study produced features in `case_studies/etfs/features/`.
 
@@ -110,12 +119,16 @@ if not FEATURES_PATH.exists():
 features_df = pl.read_parquet(FEATURES_PATH)
 prices_df = load_etfs()
 
-# Holdout boundary: feature selection is a development decision, and the
-# sealed holdout (setup.yaml `evaluation.holdout_start`; see the rule in
-# 06_strategy_definition/02_cv_foundations) must not inform it. Every step
-# below — IC ranking, BH-FDR, stability selection, ML importance — sees only
-# pre-holdout rows, and the forward-return labels computed from the filtered
-# prices never span into the holdout.
+# %% [markdown] tags=[]
+# Feature selection is a development decision, so it must not see the holdout. The
+# boundary comes from the case study's own `setup.yaml` under `evaluation.holdout_start`,
+# and the rule it follows is set out in `06_strategy_definition/02_cv_foundations`.
+# Everything below reads pre-holdout rows only: the IC ranking, the multiple-testing
+# correction, the stability selection and the model importances alike. The forward-return
+# labels are computed from the already-filtered prices, so no label reaches across the
+# boundary either.
+
+# %% tags=[]
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 
@@ -151,15 +164,18 @@ labels_df = (
 
 print(f"Features: {features_df.shape}")
 print(f"Labels: {labels_df.shape}")
-print(f"Development window: {START_DATE} to {HOLDOUT_START} (holdout sealed)")
+print(f"Development window: {START_DATE} to {HOLDOUT_START}; the holdout is not read here")
 
 # %% tags=[]
 all_feature_cols = [c for c in features_df.columns if c not in ["timestamp", "symbol"]]
 
-# Replace non-finite feature values (e.g. 0/0 in short-window Sharpe ratios)
-# with nulls. Left in place they survive drop_nulls (which removes only nulls)
-# and propagate NaN through pl.corr and the panel correlation matrix, poisoning
-# the affected features' correlations and misgrouping them in the clustering.
+# %% [markdown] tags=[]
+# Non-finite feature values, such as the 0/0 a short-window Sharpe ratio can produce, are
+# replaced with nulls. Left as NaN they pass straight through `drop_nulls`, which removes
+# only nulls, and then propagate through `pl.corr` into the panel correlation matrix,
+# which both corrupts those features' correlations and misgroups them in the clustering.
+
+# %% tags=[]
 features_df = features_df.with_columns(
     [
         pl.when(pl.col(c).is_finite()).then(pl.col(c)).otherwise(None).alias(c)
@@ -172,7 +188,7 @@ for i, col in enumerate(all_feature_cols, 1):
     print(f"  {i:2d}. {col}")
 
 # %% [markdown] tags=[]
-# ## 2. Compute Information Coefficient (IC)
+# ## Compute Information Coefficient (IC)
 #
 # IC measures the Spearman rank correlation between features and forward returns.
 # We compute IC **cross-sectionally** (per date, then average). Pooled IC
@@ -189,26 +205,32 @@ analysis = features_df.join(
 print(f"Analysis dataset: {analysis.shape}")
 
 # %% tags=[]
-# Compute cross-sectional IC per date. Sort by timestamp: ``group_by`` does not
-# preserve order, and the Newey-West HAC t-stat below regresses each feature's
-# daily IC series on a constant with an autocovariance correction, which is only
-# meaningful on a chronologically ordered series.
+# %% [markdown] tags=[]
+# Cross-sectional IC is computed per date, then sorted by timestamp. The sort matters:
+# `group_by` does not preserve order, and the Newey-West t-statistic below regresses each
+# feature's daily IC series on a constant with an autocovariance correction, which means
+# something only on a chronologically ordered series.
+
+# %% tags=[]
 ic_by_date = (
     analysis.group_by("timestamp")
     .agg([pl.corr(col, "fwd_return_1m", method="spearman").alias(col) for col in all_feature_cols])
     .sort("timestamp")
 )
 
-# Summary statistics. The daily IC series is serially correlated (overlapping
-# information sets, slow-moving common factors). We report both the i.i.d.
-# t-stat and a Newey-West HAC t-stat from regressing the IC time series on a
-# constant. HAC is the headline used for the BH-FDR step in §5.
+# %% [markdown] tags=[]
+# The daily IC series is serially correlated, through overlapping information sets and
+# slow-moving common factors, so the cell below reports both the i.i.d. t-statistic and a
+# Newey-West one from regressing the IC series on a constant. The Newey-West figure is the
+# one the multiple-testing correction consumes.
 #
-# ``pl.corr`` returns a float NaN (not a null) on any date where a feature is
-# constant across symbols, so we filter each daily IC series on finiteness
-# rather than nulls. A feature whose cross-sectional IC is undefined on most
-# dates, or whose defined ICs have zero variance, is a date-level series with no
-# cross-sectional signal; we drop it from the ranking and every downstream step.
+# `pl.corr` returns a float NaN rather than a null on any date where a feature is constant
+# across symbols, so each daily IC series is filtered on finiteness rather than on nulls. A
+# feature whose cross-sectional IC is undefined on most dates, or whose defined ICs have no
+# variance, is a date-level series carrying no cross-sectional signal; it is dropped from
+# the ranking and from every step that follows.
+
+# %% tags=[]
 NW_MAXLAGS = 12
 MIN_IC_OBS = 20
 MIN_DEFINED_FRAC = 0.5
@@ -270,7 +292,7 @@ if excluded_features:
         f"Excluded {len(excluded_features)} features with no cross-sectional "
         f"variation (date-level series): {excluded_features}"
     )
-print(f"\nFeature IC Rankings (top 15) — Newey-West with {NW_MAXLAGS} lags:")
+print(f"\nFeature IC Rankings (top 15), Newey-West with {NW_MAXLAGS} lags:")
 ic_df.head(15)
 
 # %% tags=[]
@@ -283,19 +305,38 @@ ax.axvline(0, color="black", linewidth=0.5)
 # Reference line at the |IC| threshold used for the final selection in §6, so
 # the ranking chart and the selection step agree (features kept in §6 sit at or
 # beyond this line).
-ax.axvline(0.01, color="orange", linestyle="--", alpha=0.7, label="IC threshold (0.01)")
-ax.axvline(-0.01, color="orange", linestyle="--", alpha=0.7)
+ax.axvline(
+    IC_THRESHOLD, color="orange", linestyle="--", alpha=0.7, label=f"IC threshold ({IC_THRESHOLD})"
+)
+ax.axvline(-IC_THRESHOLD, color="orange", linestyle="--", alpha=0.7)
 ax.set_xlabel("Information Coefficient (Spearman)")
 ax.set_title("Feature IC Ranking")
 ax.legend()
-plt.show()
+show_with_alt(
+    fig,
+    (
+        "A horizontal bar chart ranking the candidate features by their cross-sectional "
+        "information coefficient, sorted from the largest positive at the top to the "
+        "most negative near the bottom, with feature names down the left edge. Bars "
+        "extending right from a solid zero line are green and those extending left are "
+        "red. Two dashed orange vertical lines mark the IC threshold either side of "
+        "zero, and a legend names them. The longest green bar belongs to the distance "
+        "from the fifty-two week low, followed by a normalised true range and a group "
+        "of volatility measures. The longest red bars belong to two momentum "
+        "acceleration features. Most bars in the lower half fall inside the dashed "
+        "lines, meaning the majority of candidates carry an IC smaller than the "
+        "threshold in absolute terms."
+    ),
+)
 
 # %% [markdown] tags=[]
-# ## 3. Correlation Filtering
+# ## Correlation Filtering
 #
 # Highly correlated features provide overlapping information. We compute
-# correlation on the full panel (all dates × symbols), then remove features
-# with |r| > 0.9 — keeping the one with higher IC in each redundant pair.
+# correlation on the full panel (all dates by symbols), then remove features whose
+# absolute correlation exceeds `CORR_THRESHOLD`, keeping the one with the higher IC in
+# each redundant pair. The threshold is declared in the parameters cell, and the printed
+# header repeats whatever it is set to.
 
 # %% tags=[]
 feature_matrix = features_df.select(all_feature_cols).drop_nulls()
@@ -314,7 +355,7 @@ def filter_correlated_features(
     corr_matrix: np.ndarray,
     feature_names: list[str],
     ic_scores: dict[str, float] | None = None,
-    threshold: float = 0.9,
+    threshold: float = CORR_THRESHOLD,
 ) -> tuple[list[str], list[str]]:
     """Remove highly correlated features, keeping the one with higher IC."""
     removed = set()
@@ -346,20 +387,20 @@ kept_after_corr, removed_by_corr = filter_correlated_features(
     corr_matrix=corr_np,
     feature_names=all_feature_cols,
     ic_scores=ic_scores,
-    threshold=0.9,
+    threshold=CORR_THRESHOLD,
 )
 
-print("Correlation Filtering (threshold=0.9):")
+print(f"Correlation Filtering (threshold={CORR_THRESHOLD}):")
 print(f"  Before: {len(all_feature_cols)} features")
 print(f"  After:  {len(kept_after_corr)} features")
 print(f"  Removed: {removed_by_corr}")
 
 # %% [markdown] tags=[]
-# ## 4. Clustering and Deduplication
+# ## Clustering and Deduplication
 #
-# Even after removing pairs above 0.9, many features remain near-duplicates.
+# Even after removing pairs above that threshold, many features remain near-duplicates.
 # Hierarchical clustering groups similar features so we can pick one
-# representative per cluster — preserving diversity across families while
+# representative per cluster, which preserves diversity across families while
 # removing redundancy within them.
 #
 # **Linkage choice**: We use **complete linkage** (not Ward) because Ward
@@ -368,9 +409,11 @@ print(f"  Removed: {removed_by_corr}")
 # this panel, where many features share moderate correlations; it yields compact
 # clusters whose members are mutually near-duplicate.
 
+# %% [markdown] tags=[]
+# Only features carrying a cross-sectional IC are clustered; the date-level series dropped
+# above have no cross-sectional correlation structure to group on.
+
 # %% tags=[]
-# Cluster only features that carry a cross-sectional IC; the date-level series
-# excluded from the ranking have no meaningful correlation structure to group.
 cluster_features = [f for f in kept_after_corr if f in ic_scores]
 
 # Build correlation matrix for the clustered features
@@ -411,7 +454,22 @@ sns.heatmap(
 ax.set_title("Feature Correlation (Clustered, Complete Linkage)")
 ax.tick_params(axis="both", labelsize=8)
 plt.setp(ax.get_xticklabels(), rotation=60, ha="right")
-plt.show()
+show_with_alt(
+    fig,
+    (
+        "A large square correlation heatmap of the surviving features, rows and columns "
+        "in the same clustered order, with a dark red diagonal where each feature "
+        "meets itself and a colour bar running from dark blue at minus one through "
+        "white at zero to dark red at plus one. Several red blocks sit along the "
+        "diagonal where groups of related features correlate strongly with one "
+        "another: a block of longer-horizon Sharpe ratios and return ranks at the top "
+        "left, a larger block of short-horizon returns and oscillators through the "
+        "middle, and a smaller group of drawdown and volatility measures at the bottom "
+        "right. Between the blocks the field is mostly pale, and a few features such "
+        "as the Hurst exponent and the choppiness index sit in near-white rows and "
+        "columns, correlating little with anything else."
+    ),
+)
 
 # %% [markdown] tags=[]
 # The block structure reveals which features are essentially measuring the
@@ -442,7 +500,7 @@ for c in range(1, N_CLUSTERS + 1):
 print(f"\nRepresentatives: {representatives}")
 
 # %% [markdown] tags=[]
-# ## 5. Multiple Testing Correction (BH-FDR)
+# ## Multiple Testing Correction (BH-FDR)
 #
 # With many features tested, some appear significant by chance.
 # Benjamini–Hochberg FDR controls the expected false discovery rate.
@@ -475,13 +533,13 @@ for col in all_feature_cols:
     ic_feature_names.append(col)
 
 if ic_pvalues:
-    bh_result = benjamini_hochberg_fdr(ic_pvalues, alpha=0.05, return_details=True)
+    bh_result = benjamini_hochberg_fdr(ic_pvalues, alpha=FDR_ALPHA, return_details=True)
 
-    n_significant_raw = sum(p < 0.05 for p in ic_pvalues)
+    n_significant_raw = sum(p < FDR_ALPHA for p in ic_pvalues)
     n_significant_fdr = sum(bh_result["rejected"])
 
     print(f"Features tested:                 {len(ic_pvalues)}")
-    print(f"Significant at p<0.05 (raw):     {n_significant_raw}")
+    print(f"Significant at p<{FDR_ALPHA} (raw):     {n_significant_raw}")
     print(f"Significant after BH-FDR:        {n_significant_fdr}")
     print(f"False discoveries prevented:     {n_significant_raw - n_significant_fdr}")
 
@@ -492,7 +550,7 @@ if ic_pvalues:
             print(f"  - {f}")
 
 # %% [markdown] tags=[]
-# ## 6. Selection Pipeline
+# ## Selection Pipeline
 #
 # Applying the steps in sequence: correlation filtering removes obvious
 # redundancy, clustering reduces each near-duplicate family to a single
@@ -501,7 +559,6 @@ if ic_pvalues:
 
 # %% tags=[]
 # IC filtering applied to the cluster representatives from §4
-IC_THRESHOLD = 0.01
 kept_after_ic = [f for f in representatives if abs(ic_scores[f]) >= IC_THRESHOLD]
 
 print(f"IC Filtering of representatives (|IC| >= {IC_THRESHOLD}):")
@@ -518,10 +575,18 @@ for i, f in enumerate(final_features, 1):
     print(f"  {i:2d}. {f} (IC={ic_scores[f]:.4f})")
 
 # %% [markdown] tags=[]
-# ## 7. Stability Selection via Bootstrap IC
+# ## Stability Selection via Bootstrap IC
 #
-# Stability selection tests whether features remain important across bootstrap
-# samples. Features that rank highly in >80% of samples are considered stable.
+# Stability selection asks whether a feature's IC keeps its sign under resampling, or
+# rests on a few periods. Each bootstrap sample draws rows with replacement and recomputes the
+# pooled IC, and the table reports, per feature, the mean IC across samples, its standard
+# deviation, their ratio as an information ratio, and the share of samples in which the IC
+# came out positive.
+#
+# That last column is the one with a rule attached. `STABILITY_MIN_POSITIVE_PCT` is
+# declared in the parameters cell and applied below, so the notebook prints which features
+# clear it rather than describing a cut it never makes. Sign consistency is a weaker claim
+# than "ranks highly", and it is the claim this resampling supports.
 #
 # > **Caveat**: The bootstrap below samples individual rows (date × symbol),
 # > pooling across dates. A more rigorous approach bootstraps by *date*
@@ -536,7 +601,7 @@ def bootstrap_ic(
     feature_cols: list[str],
     return_col: str = "fwd_return_1m",
     n_bootstrap: int = 50,
-    sample_frac: float = 0.8,
+    sample_frac: float = BOOTSTRAP_SAMPLE_FRAC,
 ) -> pl.DataFrame:
     """Compute IC across bootstrap samples to assess stability.
 
@@ -587,7 +652,17 @@ def bootstrap_ic(
 # %% tags=[]
 stability = bootstrap_ic(df=analysis, feature_cols=final_features, n_bootstrap=N_BOOTSTRAP)
 print(f"Stability Selection ({N_BOOTSTRAP} bootstrap samples):")
-stability
+print(stability)
+
+# Apply the declared cut rather than leaving it in the prose.
+stable_features = stability.filter(pl.col("positive_pct") >= STABILITY_MIN_POSITIVE_PCT)
+print()
+print(
+    f"features whose IC was positive in at least {STABILITY_MIN_POSITIVE_PCT:.0f}% of "
+    f"samples: {len(stable_features)} of {len(stability)}"
+)
+for _row in stable_features.iter_rows(named=True):
+    print(f"  {_row['feature']:<32} positive in {_row['positive_pct']:5.1f}% of samples")
 
 # %% tags=[]
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -606,10 +681,22 @@ ax.set_xlabel("Feature")
 ax.set_ylabel("Mean IC ± Std")
 ax.set_title("Feature IC Stability (Bootstrap)")
 plt.xticks(rotation=45, ha="right")
-plt.show()
+show_with_alt(
+    fig,
+    (
+        "An error-bar chart with the eight selected features along the horizontal axis, "
+        "their names angled, and mean bootstrap information coefficient on the "
+        "vertical axis against a solid line at zero. Each feature is a filled marker "
+        "with a short vertical bar for one standard deviation across bootstrap "
+        "samples; the bars are small enough that the ordering is unambiguous. The "
+        "features are sorted left to right from the highest mean to the lowest. The "
+        "leftmost four sit clearly above zero, led by the normalised true range, and "
+        "the rightmost four sit below it, ending with a Bollinger percent-b measure."
+    ),
+)
 
 # %% [markdown] tags=[]
-# ## 8. ML-Based Feature Importance
+# ## ML-Based Feature Importance
 #
 # Beyond IC ranking, ML models identify features with non-linear predictive
 # power. We fit a quick LightGBM model and compare its feature importance
@@ -619,7 +706,10 @@ plt.show()
 from ml4t.diagnostic.metrics import analyze_ml_importance
 
 ml_data = analysis.select(["timestamp", "symbol"] + final_features + ["fwd_return_1m"]).drop_nulls()
-X = ml_data.select(final_features).to_numpy()
+# Fit on a named frame rather than a bare array. LightGBM then records the real feature
+# names, permutation importance re-predicts with the same names, and the importances come
+# back labelled by feature instead of by column position.
+X = ml_data.select(final_features).to_pandas()
 y = ml_data["fwd_return_1m"].to_numpy()
 
 if len(X) > 100:
@@ -651,10 +741,18 @@ if len(X) > 100:
 # strongest candidates for production.
 
 # %% [markdown] tags=[]
-# ## 9. Post-Selection Verification
+# ## Post-Selection Verification
+
+# %% [markdown] tags=[]
+# The selection is supposed to leave features that are not near-duplicates of each other.
+# Whether it did is a number, not an assumption: the heatmap below shows every pairwise
+# correlation among the selected set and the cell prints the largest of them. Read that
+# against `CORR_THRESHOLD`, which is the only bar the filtering step actually enforced.
+# A maximum well below the threshold means the clustering removed more redundancy than the
+# pairwise filter alone would have; a maximum close to it means the surviving set still
+# contains a pair the filter was content to keep.
 
 # %% tags=[]
-# Verify low inter-correlation among selected features
 selected_matrix = features_df.select(final_features).drop_nulls()
 corr_after = selected_matrix.corr().to_numpy()
 
@@ -674,15 +772,29 @@ sns.heatmap(
     yticklabels=final_features,
     cbar_kws={"label": "Correlation"},
 )
-ax.set_title("Selected Features — Residual Correlation")
-plt.show()
+ax.set_title("Selected features: residual correlation")
+show_with_alt(
+    fig,
+    (
+        "A lower-triangular correlation heatmap of the eight selected features, each "
+        "cell annotated with its correlation to two decimal places and shaded from "
+        "blue through white to red by a colour bar spanning minus one to plus one. "
+        "The diagonal is dark red at one. Off the diagonal the shading is pale, with "
+        "the strongest pair being the two skip-recent momentum features, followed by "
+        "each of those against the distance from the fifty-two week low. The "
+        "remaining pairs sit near white, and several are mildly negative, including "
+        "the normalised true range against each momentum feature."
+    ),
+)
 
 np.fill_diagonal(corr_after, 0)
 max_corr = np.abs(corr_after).max()
-print(f"Max remaining correlation: {max_corr:.3f}")
+_i, _j = np.unravel_index(np.abs(corr_after).argmax(), corr_after.shape)
+print(f"Max remaining correlation: {max_corr:.3f} (threshold was {CORR_THRESHOLD})")
+print(f"  between {final_features[_i]} and {final_features[_j]}")
 
 # %% [markdown] tags=[]
-# ## 10. Selection Summary and Output
+# ## Selection Summary and Output
 
 # %% tags=[]
 print("=" * 60)
@@ -726,22 +838,23 @@ print(f"  - features_selected.parquet: {filtered_features.shape}")
 # %% [markdown] tags=[]
 # ## Key Takeaways
 #
-# 1. **Cross-sectional IC** is the correct method for factor evaluation —
+# 1. **Cross-sectional IC** is the correct method for factor evaluation, because
 #    pooled IC conflates time-series drift with predictive power
-# 2. **Correlation filtering** (|r| > 0.9) removes obvious redundancy;
+# 2. **Correlation filtering** at `CORR_THRESHOLD` removes obvious redundancy;
 #    **clustering** catches subtler near-duplicates within feature families
-# 3. **Use average or complete linkage** (not Ward) for correlation distances —
+# 3. **Use average or complete linkage** (not Ward) for correlation distances, because
 #    Ward assumes Euclidean geometry
 # 4. **BH-FDR with HAC-adjusted p-values** controls false discovery when
 #    screening many candidates. The p-values fed into BH-FDR come from the
 #    Newey-West t-statistic on each feature's daily IC series, not the
-#    i.i.d. t-stat, because daily ICs are serially correlated. Without
-#    multiple-testing correction, ~5% of null features appear significant
-#    at the 5% level by chance alone
-# 5. **Bootstrap stability** separates features with robust IC from those
-#    that depend on a few outlier periods
+#    i.i.d. t-stat, because daily ICs are serially correlated. Without a
+#    multiple-testing correction, a share of null features equal to the chosen level
+#    appears significant at that level by chance alone, which is what FDR_ALPHA both
+#    sets and corrects for
+# 5. **Bootstrap stability** separates features whose IC keeps its sign under resampling
+#    from those that depend on a few periods
 # 6. Features ranking high in both IC and ML importance are the strongest
 #    production candidates
 #
-# **Next**: `06_robustness_sensitivity` — parameter sensitivity and
+# **Next**: `06_robustness_sensitivity`, on parameter sensitivity and
 # regime-conditional analysis
