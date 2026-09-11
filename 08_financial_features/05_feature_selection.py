@@ -96,7 +96,7 @@ CORR_THRESHOLD = 0.9  # |r| above which two features count as redundant
 IC_THRESHOLD = 0.01  # |IC| below which a feature is treated as having no edge
 FDR_ALPHA = 0.05  # Benjamini-Hochberg false discovery rate
 BOOTSTRAP_SAMPLE_FRAC = 0.8  # rows drawn per bootstrap sample, with replacement
-STABILITY_MIN_POSITIVE_PCT = 80.0  # share of bootstrap samples whose IC must be positive
+STABILITY_MIN_SIGN_CONSISTENCY_PCT = 80.0  # share of bootstrap samples sharing one IC sign
 
 # %% tags=[]
 set_global_seeds(SEED)
@@ -302,9 +302,8 @@ ic_pd = ic_df.to_pandas().sort_values("ic_abs", ascending=True)
 colors = [COLORS["positive"] if ic > 0 else COLORS["negative"] for ic in ic_pd["ic"]]
 ax.barh(ic_pd["feature"], ic_pd["ic"], color=colors)
 ax.axvline(0, color="black", linewidth=0.5)
-# Reference line at the |IC| threshold used for the final selection in §6, so
-# the ranking chart and the selection step agree (features kept in §6 sit at or
-# beyond this line).
+# Reference line at the same |IC| threshold the selection step applies, so the chart and
+# that step agree: a feature it keeps sits at or beyond this line.
 ax.axvline(
     IC_THRESHOLD, color="orange", linestyle="--", alpha=0.7, label=f"IC threshold ({IC_THRESHOLD})"
 )
@@ -315,17 +314,19 @@ ax.legend()
 show_with_alt(
     fig,
     (
-        "A horizontal bar chart ranking the candidate features by their cross-sectional "
-        "information coefficient, sorted from the largest positive at the top to the "
-        "most negative near the bottom, with feature names down the left edge. Bars "
+        "A horizontal bar chart ranking the candidate features by the size of their "
+        "cross-sectional information coefficient, ordered by absolute value so the "
+        "strongest sit at the top whichever way they point and the near-zero ones at the "
+        "bottom, with feature names down the left edge. Bar direction carries the sign: "
+        "bars "
         "extending right from a solid zero line are green and those extending left are "
         "red. Two dashed orange vertical lines mark the IC threshold either side of "
         "zero, and a legend names them. The longest green bar belongs to the distance "
         "from the fifty-two week low, followed by a normalised true range and a group "
-        "of volatility measures. The longest red bars belong to two momentum "
-        "acceleration features. Most bars in the lower half fall inside the dashed "
-        "lines, meaning the majority of candidates carry an IC smaller than the "
-        "threshold in absolute terms."
+        "of volatility measures. Two momentum acceleration features carry the longest "
+        "red bars and sit high in the ordering because their coefficients are large and "
+        "negative. Bars in the lower half fall inside the dashed lines, so those "
+        "candidates carry an IC smaller than the threshold in absolute terms."
     ),
 )
 
@@ -577,16 +578,22 @@ for i, f in enumerate(final_features, 1):
 # %% [markdown] tags=[]
 # ## Stability Selection via Bootstrap IC
 #
-# Stability selection asks whether a feature's IC keeps its sign under resampling, or
-# rests on a few periods. Each bootstrap sample draws rows with replacement and recomputes the
-# pooled IC, and the table reports, per feature, the mean IC across samples, its standard
-# deviation, their ratio as an information ratio, and the share of samples in which the IC
-# came out positive.
+# Stability selection asks whether a feature's IC keeps one sign under resampling, or
+# rests on a few periods. Each bootstrap sample draws rows with replacement and recomputes
+# the pooled IC. The table reports, per feature, the mean IC across samples, its standard
+# deviation, their ratio as an information ratio, the share of samples in which the IC came
+# out positive, and the share that agreed on whichever sign the feature leans to.
 #
-# That last column is the one with a rule attached. `STABILITY_MIN_POSITIVE_PCT` is
-# declared in the parameters cell and applied below, so the notebook prints which features
-# clear it rather than describing a cut it never makes. Sign consistency is a weaker claim
-# than "ranks highly", and it is the claim this resampling supports.
+# The last of those carries the rule, and its difference from the one before it matters.
+# Everything upstream ranks on **absolute** IC: the cluster representative is the member
+# with the largest |IC|, and the IC filter keeps features on |IC| too. A feature with a
+# reliable negative edge is a feature, and inverting it costs nothing. A threshold on the
+# share of positive samples would fail exactly those, contradicting the selection that
+# produced the list. So the cut is on sign consistency, counting strictly positive and
+# strictly negative samples separately and taking whichever is larger.
+# `STABILITY_MIN_SIGN_CONSISTENCY_PCT` is declared in the parameters cell and applied
+# below, so the notebook prints which features clear it rather than describing a cut it
+# never makes.
 #
 # > **Caveat**: The bootstrap below samples individual rows (date × symbol),
 # > pooling across dates. A more rigorous approach bootstraps by *date*
@@ -639,12 +646,23 @@ def bootstrap_ic(
                 "ic_std": np.std(valid),
                 "ic_ir": np.mean(valid) / (np.std(valid) + 1e-8),
                 "positive_pct": np.mean(valid > 0) * 100,
+                # Whichever sign dominates, not "positive": see the note above the cell.
+                "sign_consistency_pct": max(np.mean(valid > 0), np.mean(valid < 0)) * 100,
+                "reference_sign": "positive" if np.mean(valid) > 0 else "negative",
             }
         )
 
     if not stability_data:
         return pl.DataFrame(
-            {"feature": [], "ic_mean": [], "ic_std": [], "ic_ir": [], "positive_pct": []}
+            {
+                "feature": [],
+                "ic_mean": [],
+                "ic_std": [],
+                "ic_ir": [],
+                "positive_pct": [],
+                "sign_consistency_pct": [],
+                "reference_sign": [],
+            }
         )
     return pl.DataFrame(stability_data).sort("ic_ir", descending=True)
 
@@ -655,14 +673,19 @@ print(f"Stability Selection ({N_BOOTSTRAP} bootstrap samples):")
 print(stability)
 
 # Apply the declared cut rather than leaving it in the prose.
-stable_features = stability.filter(pl.col("positive_pct") >= STABILITY_MIN_POSITIVE_PCT)
+stable_features = stability.filter(
+    pl.col("sign_consistency_pct") >= STABILITY_MIN_SIGN_CONSISTENCY_PCT
+)
 print()
 print(
-    f"features whose IC was positive in at least {STABILITY_MIN_POSITIVE_PCT:.0f}% of "
+    f"features holding one sign in at least {STABILITY_MIN_SIGN_CONSISTENCY_PCT:.0f}% of "
     f"samples: {len(stable_features)} of {len(stability)}"
 )
 for _row in stable_features.iter_rows(named=True):
-    print(f"  {_row['feature']:<32} positive in {_row['positive_pct']:5.1f}% of samples")
+    print(
+        f"  {_row['feature']:<32} {_row['reference_sign']:>8} in "
+        f"{_row['sign_consistency_pct']:5.1f}% of samples"
+    )
 
 # %% tags=[]
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -851,8 +874,9 @@ print(f"  - features_selected.parquet: {filtered_features.shape}")
 #    multiple-testing correction, a share of null features equal to the chosen level
 #    appears significant at that level by chance alone, which is what FDR_ALPHA both
 #    sets and corrects for
-# 5. **Bootstrap stability** separates features whose IC keeps its sign under resampling
-#    from those that depend on a few periods
+# 5. **Bootstrap stability** separates features whose IC keeps one sign under resampling
+#    from those that depend on a few periods. The sign it keeps need not be positive:
+#    the selection ranks on |IC| throughout
 # 6. Features ranking high in both IC and ML importance are the strongest
 #    production candidates
 #
