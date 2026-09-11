@@ -176,8 +176,10 @@ if (narrows or device != PUBLISHED_DEVICE) and not POPULATION_NAME:
 # four million near-identical overlapping sequences - neighbouring windows would share 59 of their
 # 60 observations. `modeling.dl.train_sequence_stride_horizons` in `config/setup.yaml` declares
 # the spacing instead: one window per label horizon, so consecutive windows of a symbol carry
-# labels that do not overlap - the window ending at t is scored on the return from t to t+H and
-# the next one starts at t+H. It is declared in horizons rather than in windows because the
+# labels that do not overlap. [`02_labels`](02_labels.ipynb) takes the decision on the bar
+# closing at t, enters on the next bar's VWAP and holds for the horizon from that fill, so two
+# decisions H observations apart have return intervals that abut rather than share bars - the
+# exit of one is the entry of the next. It is declared in horizons rather than in windows because the
 # horizon differs by label: `fwd_ret_5m` strides 5 observations, `fwd_ret_15m` 15 and
 # `fwd_ret_60m` 60, each spacing its own labels exactly, where a single window count could only
 # have been right for one of them. The spacing travels in the training identity; **how many
