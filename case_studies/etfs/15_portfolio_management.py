@@ -61,7 +61,7 @@ import warnings
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.research import open_study, split_unpublished_members
+from case_studies.research import open_study, reuse_disclosure, split_unpublished_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
@@ -319,8 +319,7 @@ for top_k in TOP_K_VALUES:
 
 print(
     f"\nSweep complete in {(time.monotonic() - sweep_start) / 60:.1f} minutes: "
-    f"{n_done - served - len(failures)} computed, {served} served from the registry, "
-    f"{len(failures)} failed"
+    f"{reuse_disclosure(n_done - served - len(failures), served, len(failures))}"
 )
 
 # What this sweep actually advanced, which is narrower than "every live prediction". The
@@ -397,14 +396,17 @@ fig.update_layout(
     title="Mean Sharpe by weighting scheme",
     height=380,
     width=800,
-    margin=dict(t=90),
+    # The left margin is explicit because the allocator names are the y tick labels and the
+    # longest of them ran off the canvas: the rendered PNG read "ormal_weighted" and
+    # "score_weighted". Plotly sizes the default margin before it lays the labels out.
+    margin=dict(t=90, l=150),
 )
 _span = ordered["avg_sharpe"]
 show_plotly_with_alt(
     fig,
-    "Horizontal bar chart of the mean Sharpe ratio of every allocation-stage backtest, one bar per "
-    f"weighting scheme, with a dashed line at zero. Counted from the frame: {ordered.height} "
-    f"allocators, mean Sharpe from {_span.min():+.3f} to {_span.max():+.3f}.",
+    "Horizontal bar chart of mean Sharpe by weighting scheme, one bar per allocator, over the "
+    "allocation backtests for the prediction sets this sweep advanced, ordered by that mean, "
+    "with a dashed line at zero.",
 )
 
 # %% [markdown]
