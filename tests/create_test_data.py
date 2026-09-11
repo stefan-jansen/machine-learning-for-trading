@@ -89,11 +89,6 @@ class Dataset:
             is the only place the drift shows: the manifest and the
             ``nasdaq100_minute_bars`` builder agreed with each other on six symbols
             while the fixture carried twelve, so comparing the two proved nothing.
-        irreplaceable: The fixture copy is the only copy, so ``--clean`` must not
-            remove it. Set this only for data that no source can regenerate -
-            redistributed samples whose tick files neither production nor this
-            workstation holds. Such a builder verifies what is there rather than
-            deriving it, and says so in its output.
     """
 
     name: str
@@ -102,7 +97,6 @@ class Dataset:
     owns: tuple[Path, ...]
     budget: dict[str, object] = field(default_factory=dict)
     entities: dict[str, tuple[str, int]] = field(default_factory=dict)
-    irreplaceable: bool = False
 
 
 # --- firm characteristics -----------------------------------------------------
@@ -2012,72 +2006,6 @@ def build_polymarket_events(source: Path, output: Path) -> list[Path]:
     return [dst]
 
 
-# --- AlgoSeek NASDAQ 100 TAQ --------------------------------------------------
-#
-# The one fixture with no source to reduce from. AlgoSeek publishes this sample
-# openly and permits its redistribution, and the copy in the test-data repo is the
-# only copy: neither the production tree nor this workstation holds the tick files
-# `data/equities/market/algoseek_convert.py` documents converting.
-#
-# So its declaration cannot be a builder. What it can be is a contract - the
-# schema, symbol, session and row count `03_market_microstructure/12_algoseek_taq_lob_reconstruction`
-# needs - checked against the file that is there, so a change to it is visible even
-# though a rebuild is not available. `irreplaceable` keeps `--clean` off it: for
-# every other dataset, deleting `owns` before the build is how a stale file is
-# prevented, and here it would delete the only copy of something nothing can
-# regenerate.
-
-NASDAQ100_TAQ = Path("equities") / "market" / "microstructure" / "nasdaq100_taq" / "data.parquet"
-NASDAQ100_TAQ_COLUMNS = ("timestamp", "symbol", "event_type", "price", "quantity", "exchange")
-NASDAQ100_TAQ_ROWS = 20_000
-NASDAQ100_TAQ_SYMBOL = "AAPL"
-NASDAQ100_TAQ_SESSION = date(2020, 3, 16)
-
-
-def build_nasdaq100_taq(source: Path, output: Path) -> list[Path]:
-    """Verify the redistributed AlgoSeek sample; copy it only if a source appears."""
-    src = source / NASDAQ100_TAQ
-    dst = output / NASDAQ100_TAQ
-    if src.exists():
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
-        origin = "copied from source"
-    elif dst.exists():
-        origin = "verified in place (no source; redistributed sample)"
-    else:
-        raise FileNotFoundError(
-            f"{NASDAQ100_TAQ} is absent from both {source} and {output}. It is "
-            "redistributed AlgoSeek data with no production copy, so it cannot be "
-            "rebuilt; restore it from the test-data repository's history."
-        )
-
-    frame = pl.read_parquet(dst)
-    if missing := [c for c in NASDAQ100_TAQ_COLUMNS if c not in frame.columns]:
-        raise ValueError(f"{NASDAQ100_TAQ} is missing {missing}; load_nasdaq100_taq reads them.")
-    if frame.height != NASDAQ100_TAQ_ROWS:
-        raise ValueError(
-            f"{NASDAQ100_TAQ} holds {frame.height:,} rows, not the {NASDAQ100_TAQ_ROWS:,} "
-            "recorded for this sample."
-        )
-    symbols = frame["symbol"].unique().to_list()
-    if symbols != [NASDAQ100_TAQ_SYMBOL]:
-        raise ValueError(
-            f"{NASDAQ100_TAQ} carries {symbols}, not [{NASDAQ100_TAQ_SYMBOL!r}]; "
-            "12_algoseek_taq_lob_reconstruction asks for that symbol by name."
-        )
-    sessions = frame.select(pl.col("timestamp").dt.date().unique())["timestamp"].to_list()
-    if sessions != [NASDAQ100_TAQ_SESSION]:
-        raise ValueError(
-            f"{NASDAQ100_TAQ} covers {sessions}, not [{NASDAQ100_TAQ_SESSION}]; "
-            "the notebook reconstructs one session."
-        )
-    print(
-        f"    nasdaq100_taq: {frame.height:,} events, {NASDAQ100_TAQ_SYMBOL} on "
-        f"{NASDAQ100_TAQ_SESSION}, {origin}"
-    )
-    return [dst]
-
-
 DATASETS: tuple[Dataset, ...] = (
     Dataset(
         name="etfs",
@@ -2435,19 +2363,6 @@ DATASETS: tuple[Dataset, ...] = (
         owns=(POLYMARKET,),
         budget={"subsample": "none"},
     ),
-    Dataset(
-        name="nasdaq100_taq",
-        description=(
-            f"{NASDAQ100_TAQ_ROWS:,} AlgoSeek TAQ events for {NASDAQ100_TAQ_SYMBOL} on "
-            f"{NASDAQ100_TAQ_SESSION}, redistributed by permission and verified rather "
-            "than rebuilt: no source exists to reduce from"
-        ),
-        build=build_nasdaq100_taq,
-        owns=(NASDAQ100_TAQ,),
-        budget={"subsample": "unknown - the sample as AlgoSeek published it"},
-        entities={NASDAQ100_TAQ.as_posix(): ("symbol", 1)},
-        irreplaceable=True,
-    ),
 )
 
 DATASETS_BY_NAME = {dataset.name: dataset for dataset in DATASETS}
@@ -2670,9 +2585,7 @@ def main() -> int:
     built: dict[str, list[Path]] = {}
     for dataset in selected:
         print(f"  {dataset.name}: {dataset.description}")
-        if args.clean and dataset.irreplaceable:
-            print("    --clean skipped: the fixture copy is the only copy")
-        elif args.clean:
+        if args.clean:
             for owned in dataset.owns:
                 target = output / owned
                 if target.is_dir():
