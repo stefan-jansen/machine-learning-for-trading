@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import plotly.graph_objects as go
 import polars as pl
@@ -656,6 +656,13 @@ macro_features = macro_features.with_columns(
 # the z-score, which restates the same slope relative to its own recent regime, so a
 # reading far from zero means the curve is unusual for this period rather than unusual in
 # absolute terms.
+#
+# The count of shaded episodes printed with the figure includes several that lasted a
+# single day. Those bands are drawn, and at this width they are narrower than a pixel:
+# twenty-five years across a nine-hundred-pixel figure leaves each day about a tenth of
+# one. Read the count rather than trying to find them, and note that an inversion lasting
+# one day is a fact about the series that a chart of this span cannot show, which is a
+# reason to keep the count beside the chart rather than to redraw it.
 
 # %%
 yc = macro_features.select(["timestamp", "t10y2y", "yc_slope_ema", "yc_slope_zscore"]).drop_nulls(
@@ -702,23 +709,33 @@ _inv = yc.with_columns((pl.col("t10y2y") < 0).alias("inverted")).with_columns(
     (pl.col("inverted") != pl.col("inverted").shift(1)).fill_null(True).cum_sum().alias("episode")
 )
 # Half a day of padding each side, so a one-day episode is a visible band rather than a
-# zero-width rectangle that draws nothing.
+# zero-width rectangle that draws nothing. Endpoints become datetimes first: these are
+# pl.Date, and date arithmetic keeps only the whole-day part of a timedelta.
 _pad = timedelta(hours=12)
-for _ep in (
+_episodes = (
     _inv.filter("inverted")
     .group_by("episode")
     .agg([pl.col("timestamp").min().alias("start"), pl.col("timestamp").max().alias("end")])
+    .sort("start")
     .iter_rows(named=True)
-):
+)
+_single_day = 0
+for _ep in _episodes:
+    _x0 = datetime.combine(_ep["start"], time.min) - _pad
+    _x1 = datetime.combine(_ep["end"], time.min) + _pad
+    if _x0 >= _x1:
+        raise ValueError(f"inversion band {_ep['start']}..{_ep['end']} has no width to draw")
+    _single_day += _ep["start"] == _ep["end"]
     fig.add_vrect(
-        x0=_ep["start"] - _pad,
-        x1=_ep["end"] + _pad,
+        x0=_x0,
+        x1=_x1,
         fillcolor=COLORS["copper"],
         opacity=0.12,
         line_width=0,
         row=1,
         col=1,
     )
+print(f"shaded inversion episodes, of which single-day: {_single_day}")
 
 fig.add_trace(
     go.Scatter(
