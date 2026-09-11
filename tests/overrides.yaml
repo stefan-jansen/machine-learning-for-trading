@@ -1238,9 +1238,18 @@
   timeout: 180
 25_live_trading/02_etfs_deployment_loop:
   parameters:
+    # The notebook asserts that the registry still leads with the configuration it pins. A
+    # fixture registry is a sample of production, so the leader of an `ORDER BY ic_mean DESC`
+    # over it is whichever run the sampler drew. Null reads as "report the observed value";
+    # the assertion still binds on a production run. Same reasoning as 06 above.
+    EXPECTED_RIDGE_CONFIG: null
     REFRESH_DATA: false
   skip: true
-  skip_reason: Requires running IB Gateway (not available in CI)
+  skip_reason:
+    Reads the ETFs case study's fwd_ret_21d labels and its registry, and stages a
+    basket for Alpaca paper equities. It opens no broker session by default
+    (SUBMIT_PAPER_ORDERS is false), so the earlier reason naming IB Gateway was
+    never this notebook's.
   tier: weekly
   timeout: 360
 25_live_trading/03_ib_paper_trading_demo:
