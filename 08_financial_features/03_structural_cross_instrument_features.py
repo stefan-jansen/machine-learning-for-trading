@@ -812,28 +812,39 @@ term_df.head(5)
 # %% [markdown]
 # ## Variance Risk Premium (IV - RV)
 #
-# The VRP is the difference between implied and realized volatility:
+# The VRP as computed here is the difference between a forward-looking implied volatility
+# and a trailing realized volatility:
 #
-# $$\text{VRP}_t = IV_{30,\text{atm}} - RV_{20}$$
+# $$\text{VRP}_t = IV_{30,\text{atm},t} - RV_{20,t}$$
 #
-# The usual one-line summary is that the VRP is positive, because volatility sellers earn
-# a premium for bearing risk. The cell below checks that on this sample, and the shape it
-# finds is worth more than the summary.
+# where $RV_{20,t}$ looks back over the twenty sessions ending at $t$. The realized leg is
+# built from split-adjusted closes; the note in `compute_vrp` says why that matters.
 #
-# Read three things off the output together: the share of days on which the premium is
-# positive, the median, and the mean. A premium that is positive on most days while its
-# mean sits below its median is not a steady income stream; it is a small positive most of
-# the time and an occasional loss large enough to move the average on its own. Compare the
-# most positive and most negative values printed to see how lopsided that is, and look
-# again at the bottom panel of the figure further down, where the fill is dominated by two
-# downward excursions that the rest of the series never approaches.
+# Be precise about what this quantity is before reading anything off it. It subtracts a
+# **trailing** twenty-day realized volatility from a **forward-looking** thirty-day
+# implied volatility, so the two terms describe different and barely overlapping windows.
+# It is a spread between two volatility measurements taken on the same day, and it is not
+# a return: nothing here buys or sells an option, and no position is held to expiry. The
+# quantity a volatility seller actually earns compares the implied volatility quoted at t
+# with the realized volatility over the *following* thirty days, which this feature does
+# not compute.
 #
-# That asymmetry is the point rather than a caveat to it. It is what makes selling
-# volatility look attractive on a backtest that has not met a crash, and it is why a
-# feature built from the VRP wants to be used as a state variable rather than as a
-# standalone signal. Note also that the share of positive days is not uniform across
-# names: check whether every symbol in the table is above a half before treating "the VRP
-# is positive" as something to rely on.
+# With that established, the cell below describes the spread's distribution. Read the
+# share of days on which it is positive together with the median and the mean. A spread
+# that is positive on most days while its mean sits below its median is left-skewed: small
+# positive values most of the time, and occasional negative values large enough to move
+# the average on their own. The most positive and most negative values printed say how
+# lopsided, and the bottom panel of the figure further down shows the same thing for one
+# name: a series near zero whose vertical extent is set by a single deep excursion.
+#
+# The skew is a property of the spread worth carrying forward, because it is what makes a
+# summary statistic misleading here: a mean and a median disagree about the sign, and
+# quoting either alone describes a different series. It also suggests treating a feature
+# built from this spread as a state variable rather than reading it as a signal at face
+# value. Whether selling volatility is profitable is a separate question that needs
+# the horizon-matched calculation above, not this table. Note too that the share of
+# positive days is not uniform across names: check whether every symbol is above a half
+# before treating "the spread is positive" as something to lean on.
 
 
 # %%
@@ -845,15 +856,30 @@ def compute_vrp(
     """
     Compute variance risk premium = ATM IV - realized vol.
 
-    iv_df must have columns: date, asset, iv_atm_30
-    equity_df must have columns: date, asset, close
+    iv_df must have columns: timestamp, symbol, iv_atm_30
+    equity_df must have columns: timestamp, symbol, close, adj_factor
+
+    Returns are taken from ``close * adj_factor``, not from ``close``. The bundled
+    daily bars carry the as-traded price and the cumulative split factor in separate
+    columns, so a raw close steps down by the split ratio on the ex-date: AAPL goes
+    from 499.23 to 129.04 on 2020-08-31, which enters a return series as a 74% fall
+    and then inflates every rolling window that contains it. Multiplying by
+    ``adj_factor`` first restores the continuous series, and that day becomes the
+    3% rise it was.
     """
-    # Compute annualized realized vol from equity close prices
+    if "adj_factor" not in equity_df.columns:
+        raise KeyError(
+            "equity_df needs adj_factor to build a split-continuous return series; "
+            f"got {sorted(equity_df.columns)}"
+        )
+
     rv = (
         equity_df.sort(["symbol", "timestamp"])
+        .with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj_close"))
         .with_columns(
             (
-                pl.col("close").pct_change().over("symbol").rolling_std(rv_window) * np.sqrt(252)
+                pl.col("adj_close").pct_change().over("symbol").rolling_std(rv_window)
+                * np.sqrt(252)
             ).alias("rv_20")
         )
         .select(["timestamp", "symbol", "rv_20"])
@@ -983,10 +1009,11 @@ show_plotly_with_alt(
         "its deepest trough near the end. The third plots the implied volatility term "
         "slope, the ratio of short-dated to long-dated volatility, crossing a dashed "
         "reference line at one repeatedly across the window. The bottom panel fills the "
-        "variance risk premium, implied minus realized volatility, around zero: the "
-        "series is close to the line for most of the window, and its shape is set by two "
-        "downward excursions, a moderate one in the spring of 2020 and a far deeper one "
-        "in the autumn that reaches the bottom of the axis."
+        "variance risk premium, implied volatility minus trailing realized volatility, "
+        "around a dashed zero line: it sits above the line through much of 2019 and "
+        "again from the autumn of 2020, dips below it in several short stretches, and "
+        "carries one pronounced downward excursion in the spring of 2020 that reaches "
+        "several times deeper than any other move in the panel."
     ),
 )
 
