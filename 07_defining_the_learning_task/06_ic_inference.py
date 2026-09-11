@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 
 import numpy as np
 import plotly.graph_objects as go
@@ -277,15 +278,26 @@ print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
 # not, the two will not agree - and the gap is then a property of the bandwidth, not of the
 # estimator families, which is what the side-by-side is there to establish. The bootstrap
 # section shows the two agreeing once both are horizon-aware.
+#
+# Calling the estimator without `label_horizon` raises a `UserWarning` saying the automatic
+# bandwidth may be anti-conservative for overlapping labels. That warning is the library
+# doing its job, and the call below triggers it on purpose; it is silenced for that one
+# call so it does not read as a defect in the run.
 
 # %%
 # Compute HAC-adjusted statistics
 hac_result = compute_ic_hac_stats(ic_series, label_horizon=LABEL_HORIZON)
 
-# The same estimator with the bandwidth left to the sample-size rule. This is
-# what the notebook used to report, and printing both is the only way the claim
-# above is checkable from the notebook rather than from its history.
-hac_auto = compute_ic_hac_stats(ic_series)
+# The same estimator with the bandwidth left to the sample-size rule. Omitting
+# label_horizon is deliberate here and the library warns about it, correctly; the warning
+# is silenced for this one call, by category and message, so it does not read as a defect.
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        category=UserWarning,
+        message="label_horizon was not provided.*",
+    )
+    hac_auto = compute_ic_hac_stats(ic_series)
 print("=== Bandwidth: sample-size rule vs label-horizon aware ===\n")
 print(
     f"  auto rule            L={hac_auto['effective_lags']:>3}  "
