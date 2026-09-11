@@ -11,10 +11,23 @@ interpreter with ``free(): invalid pointer`` before the fix.
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 import pytest
-from limit_orderbook import reconstruct_lob_with_ofi
+
+# Loaded by path rather than imported by name: chapter directories are number-prefixed
+# and are only on sys.path inside a notebook run, so `import limit_orderbook` resolves
+# for the notebooks beside it and for nothing under tests/.
+_MODULE_PATH = (
+    Path(__file__).resolve().parent.parent / "03_market_microstructure" / "limit_orderbook.py"
+)
+_spec = importlib.util.spec_from_file_location("ch03_limit_orderbook", _MODULE_PATH)
+limit_orderbook = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(limit_orderbook)
+reconstruct_lob_with_ofi = limit_orderbook.reconstruct_lob_with_ofi
 
 N_MESSAGES = 40_000
 SPAN_SECONDS = 3_600
