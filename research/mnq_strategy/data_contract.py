@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import time, timedelta
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -14,6 +14,8 @@ except ImportError:  # pragma: no cover - pandas is a project dependency
 
 
 NEW_YORK = ZoneInfo("America/New_York")
+UTC = ZoneInfo("UTC")
+BAR_INTERVAL = timedelta(minutes=5)
 REQUIRED_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
 OUTPUT_COLUMNS = (
     "timestamp",
@@ -40,9 +42,15 @@ def _as_polars(frame: pl.DataFrame | "pd.DataFrame") -> pl.DataFrame:
 def _normalize_timestamp(frame: pl.DataFrame) -> pl.DataFrame:
     timestamp = frame.schema["timestamp"]
     if timestamp == pl.Utf8:
-        frame = frame.with_columns(pl.col("timestamp").str.to_datetime())
+        try:
+            frame = frame.with_columns(pl.col("timestamp").str.to_datetime(strict=True))
+        except (pl.exceptions.ComputeError, ValueError) as exc:
+            raise ValueError("timestamp contains invalid datetime values") from exc
     elif timestamp != pl.Datetime:
-        frame = frame.with_columns(pl.col("timestamp").cast(pl.Datetime))
+        try:
+            frame = frame.with_columns(pl.col("timestamp").cast(pl.Datetime, strict=True))
+        except (pl.exceptions.ComputeError, ValueError) as exc:
+            raise ValueError("timestamp contains invalid datetime values") from exc
 
     # Naive source timestamps are interpreted as UTC; aware timestamps retain
     # their instant while being represented in a single canonical timezone.
@@ -52,6 +60,26 @@ def _normalize_timestamp(frame: pl.DataFrame) -> pl.DataFrame:
         else pl.col("timestamp").dt.convert_time_zone("UTC")
     )
     return frame
+
+
+def _validate_five_minute_contract(frame: pl.DataFrame) -> None:
+    timestamps = frame.get_column("timestamp").to_list()
+    if not timestamps:
+        return
+    if any(
+        value.second != 0
+        or value.microsecond != 0
+        or value.minute % 5 != 0
+        for value in timestamps
+    ):
+        raise ValueError("MNQ timestamps must align to exact 5-minute boundaries")
+    if len(timestamps) < 2:
+        return
+    deltas = [later - earlier for earlier, later in zip(timestamps, timestamps[1:])]
+    if any(delta <= timedelta(0) for delta in deltas):
+        raise ValueError("MNQ timestamps must be strictly increasing")
+    if any(delta.total_seconds() % BAR_INTERVAL.total_seconds() for delta in deltas):
+        raise ValueError("MNQ input contains irregular, non-5-minute cadence")
 
 
 def assign_new_york_sessions(frame: pl.DataFrame) -> pl.DataFrame:
@@ -74,8 +102,14 @@ def assign_new_york_sessions(frame: pl.DataFrame) -> pl.DataFrame:
         .otherwise(pl.lit("closed"))
         .alias("session_type")
     )
+    session_date = (
+        pl.when(local_time >= time(18))
+        .then(pl.col("timestamp_ny").dt.date() + pl.duration(days=1))
+        .otherwise(pl.col("timestamp_ny").dt.date())
+        .alias("session_date")
+    )
     return frame.with_columns(
-        pl.col("timestamp_ny").dt.date().alias("session_date"),
+        session_date,
         session_type,
     )
 
@@ -90,13 +124,15 @@ def normalize_mnq_bars(frame: pl.DataFrame | "pd.DataFrame") -> pl.DataFrame:
     missing = [column for column in REQUIRED_COLUMNS if column not in result.columns]
     if missing:
         raise ValueError(f"required input columns missing: {', '.join(missing)}")
+    if "bar_closed" not in result.columns:
+        raise ValueError("required input column missing: bar_closed")
 
     result = _normalize_timestamp(result)
-    if "bar_closed" not in result.columns:
-        result = result.with_columns(pl.lit(True).alias("bar_closed"))
-    else:
-        result = result.with_columns(pl.col("bar_closed").cast(pl.Boolean))
-        result = result.filter(pl.col("bar_closed"))
+    _validate_five_minute_contract(result)
+    result = result.with_columns(pl.col("bar_closed").cast(pl.Boolean))
+    if result.get_column("bar_closed").null_count():
+        raise ValueError("bar_closed must contain only explicit boolean values")
+    result = result.filter(pl.col("bar_closed"))
 
     result = assign_new_york_sessions(result)
     return result.select(OUTPUT_COLUMNS)
