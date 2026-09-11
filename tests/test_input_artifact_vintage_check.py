@@ -199,11 +199,18 @@ def test_two_pinned_vintages_are_only_superseded_when_a_declaration_retires_the_
     assert _statuses(retired)["model_based"] == "superseded"
 
 
-def test_runs_recording_inputs_in_a_shape_the_rule_does_not_read_are_reported(artifacts_root):
-    """The rule reads one location; two producers record elsewhere and are checked by nothing.
+def test_the_two_shapes_that_used_to_be_unchecked_are_now_checked(artifacts_root):
+    """What ml4t/agent-workspace#1137 changed, from this end.
 
-    A registry holding only those runs would otherwise report zero pairs and exit 0, which is
-    the silence this whole check exists to end.
+    These two specs used to come back `unchecked`, one per family, because
+    `_input_artifact_shas` read `computation.input_data_spec.artifacts` and nothing else -
+    so 119 registered runs across the nine live registries were vintage-checked by neither
+    registration nor this pre-flight. The rule reads all three shapes now, so both specs
+    produce ordinary per-artifact findings and neither family appears as unchecked.
+
+    Asserting the findings rather than only the absence: a widening that made
+    `_input_artifact_shas` return `{}` faster would also empty the unchecked list, and would
+    look identical here.
     """
     db = artifacts_root / CASE_STUDY / "run_log" / "registry.db"
     _registry(
@@ -216,12 +223,43 @@ def test_runs_recording_inputs_in_a_shape_the_rule_does_not_read_are_reported(ar
     )
 
     findings = check_case_study(CASE_STUDY, artifacts_root=artifacts_root)
+
+    assert not [f for f in findings if f.status == "unchecked"]
+    # The latent spec pins `financial` at a...a and `label` at b...b, the sequence spec pins
+    # `financial` at d...d, and none of those is what is on disk. Being reported at all is the
+    # change; the `sha256:` prefix on the latent side being stripped is why its pins compare
+    # against the same digests every other family records.
+    pinned = {sha for f in findings for sha in f.pinned}
+    assert {"a" * 64, "b" * 64, "d" * 64} <= pinned
+
+
+def test_a_spec_carrying_none_of_the_three_shapes_is_still_reported(artifacts_root):
+    """The unchecked category has to stay able to fire.
+
+    With all three shapes read nothing in the live registries reaches it, and a category that
+    cannot fire is the failure this whole check exists to end - it would report a registry of
+    nothing but unreadable runs as entirely clean. So: a spec recording its inputs nowhere the
+    rule looks is still counted and named.
+    """
+    db = artifacts_root / CASE_STUDY / "run_log" / "registry.db"
+    _registry(
+        db,
+        artifact_shas=_on_disk(artifacts_root),
+        extra_runs=[
+            (
+                "hash-opaque",
+                "some_future_family",
+                {"label": LABEL, "computation": {"input_data_spec": {"digest": "x" * 64}}},
+            )
+        ],
+    )
+
+    findings = check_case_study(CASE_STUDY, artifacts_root=artifacts_root)
     unchecked = {f.artifact: f.detail for f in findings if f.status == "unchecked"}
 
-    assert set(unchecked) == {"latent_factors", "deep_learning"}
-    assert "input_data_spec.files" in unchecked["latent_factors"]
-    assert "input_data_spec.input_data_spec.artifacts" in unchecked["deep_learning"]
-    # Reported, not fatal: registration accepts these runs, and a pre-flight stricter than the
+    assert set(unchecked) == {"some_future_family"}
+    assert "no artifact shas recorded" in unchecked["some_future_family"]
+    # Reported, not fatal: registration accepts such a run, and a pre-flight stricter than the
     # rule it previews would refuse a chain that would in fact register.
     assert not any(f.is_failure for f in findings)
 

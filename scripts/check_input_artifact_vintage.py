@@ -34,14 +34,19 @@ An artifact NAME it cannot locate: three resolve from the case study's own specs
 mapping the loader uses. Any other name is reported ``unresolved``.
 
 A training run whose spec records its inputs in a shape ``_input_artifact_shas`` does not
-read, reported ``unchecked`` per family. It reads ``computation.input_data_spec.artifacts``,
-and measured across the nine live registries on 2026-09-11 that misses 121 runs: 45
-``latent_factors`` runs record ``input_data_spec.files``, a list of ``{role, sha256}`` with a
-``sha256:`` prefix (ml4t/agent-workspace#891), and 76 ``deep_learning`` runs nest the payload
-one level deeper, at ``input_data_spec.input_data_spec.artifacts``. **Those runs are not
-vintage-checked by registration either**, so this script reports them rather than reading
-them: a pre-flight stricter than the rule it previews would refuse a chain registration would
-accept, which is a different failure and a worse one. The enforcement gap is filed separately.
+read, reported ``unchecked`` per family. Nothing in the nine live registries is in that state
+as of ml4t/agent-workspace#1137: the rule reads all three recorded shapes now - ``artifacts``,
+the ``deep_learning`` payload nested one level deeper at
+``input_data_spec.input_data_spec.artifacts``, and the ``latent_factors`` ``files`` list of
+``{role, sha256}`` with a ``sha256:`` prefix (ml4t/agent-workspace#891). Before that widening
+the two missed 119 runs, 77 sequence and 42 latent, which neither registration nor this
+script checked.
+
+The category stays, and stays able to fire, because that is the whole shape of this file: a
+checker that walks only what the rule returns would report a registry of nothing but
+unreadable runs as entirely clean. It is still reported rather than fatal - a pre-flight
+stricter than the rule it previews would refuse a chain registration would accept, which is a
+different failure and a worse one.
 
 Usage::
 
@@ -147,10 +152,14 @@ def _artifact_path(case_dir: Path, case_study: str, name: str, label: str) -> Pa
 def _unread_input_shapes(con: sqlite3.Connection, case_study: str) -> list[Finding]:
     """Runs whose recorded inputs ``_input_artifact_shas`` returns nothing for.
 
-    Silence here would be the same defect one level up: the rule reads
-    ``computation.input_data_spec.artifacts``, two producers record somewhere else, and a
-    checker that only walks what the rule returns reports a registry of nothing but those
-    runs as entirely clean.
+    Silence here would be the same defect one level up, and it was: the rule read
+    ``computation.input_data_spec.artifacts`` alone while two producers recorded somewhere
+    else, and a checker that only walks what the rule returns reports a registry of nothing
+    but those runs as entirely clean.
+
+    Written against what the rule RETURNS rather than against a list of shapes, so widening
+    the rule empties this by itself and a producer that invents a fourth shape lands here
+    without anyone editing it.
     """
     try:
         rows = list(con.execute("SELECT family, label, spec_json FROM training_runs"))

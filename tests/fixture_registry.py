@@ -77,33 +77,21 @@ def shipped_artifact_shas(case_dir: Path) -> dict[str, str]:
 def pinned_input_shas(spec_json: str | dict | None) -> dict[str, str]:
     """The ``{artifact name: sha256}`` a training run's spec pins, hex and unprefixed.
 
-    Mirrors ``case_studies/utils/registry/registration.py::_input_artifact_shas``, which
-    is what the vintage guard compares against, and tolerates the same spec shapes it
-    does: a spec that carries no ``computation.input_data_spec.artifacts`` block pins
-    nothing and is never stale.
+    Delegates to ``case_studies.utils.registry.registration._input_artifact_shas`` rather
+    than restating it. It used to restate it, and the two then had to be widened together
+    when the guard learned the ``deep_learning`` and ``latent_factors`` shapes
+    (ml4t/agent-workspace#1137); a mirror that has to be edited in step with its subject is
+    a mirror that will eventually not be. What this module must not do is import from
+    ``conftest`` or pytest - ``generate_intermediates.py`` runs it standalone - and
+    ``registration`` is neither, so the import is inside the function only to keep module
+    import cheap for a caller that never prunes.
+
+    The prefix stripping the ``files`` shape needs now happens there, so this is exactly
+    what the vintage guard compares against, by construction rather than by agreement.
     """
-    spec = spec_json
-    if isinstance(spec, str):
-        try:
-            spec = json.loads(spec)
-        except (TypeError, ValueError):
-            return {}
-    if not isinstance(spec, dict):
-        return {}
-    computation = spec.get("computation")
-    if not isinstance(computation, dict):
-        return {}
-    input_data_spec = computation.get("input_data_spec")
-    if not isinstance(input_data_spec, dict):
-        return {}
-    artifacts = input_data_spec.get("artifacts")
-    if not isinstance(artifacts, dict):
-        return {}
-    return {
-        str(name): str(record["sha256"]).removeprefix("sha256:")
-        for name, record in sorted(artifacts.items())
-        if isinstance(record, dict) and record.get("sha256")
-    }
+    from case_studies.utils.registry.registration import _input_artifact_shas
+
+    return _input_artifact_shas(spec_json)
 
 
 def stale_training_runs(db: sqlite3.Connection, case_dir: Path) -> dict[str, dict[str, str]]:
