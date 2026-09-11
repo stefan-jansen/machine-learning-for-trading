@@ -636,7 +636,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Bars of annualized factor contribution with confidence intervals. Some intervals straddle zero and others clear it.",
+    "Three cumulative contribution paths for one ETF over the sample, in percentage points. The excess-return line and the model-explained line rise together and stay close to each other, while the residual line runs flat near zero.",
 )
 
 # %%
@@ -777,7 +777,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "A heatmap of residual correlations between the ETFs after the factor model, with off-diagonal cells showing what the factors did not absorb.",
+    "Point estimates with horizontal confidence intervals, one row per factor. The market row sits well to the right of zero with an interval that clears it; the remaining rows sit on zero with intervals too narrow to separate from it at this scale.",
 )
 
 # %% [markdown]
@@ -852,7 +852,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Two lines of covariance condition number over time on a log axis, sample against shrunk. The shrunk series is lower and far less spiky throughout.",
+    "A heatmap of residual correlations between the ETFs after the factor model, with off-diagonal cells showing what the factors did not absorb.",
 )
 
 # %% [markdown]
@@ -930,7 +930,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Grouped bars of annualized contribution by factor coordinate under the original and rotated bases. Individual bars move substantially while their sum is unchanged.",
+    "Two lines of covariance condition number over time on a log axis, sample against shrunk. The shrunk series is lower and far less spiky throughout.",
 )
 
 # %% [markdown]
@@ -1023,7 +1023,7 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(height=430)
 show_plotly_with_alt(
     fig,
-    "Bars of risk contribution by factor from the library decomposition, with the market factor dominating and the residual share small.",
+    "Grouped bars of annualized contribution by factor coordinate under the original and rotated bases. Individual bars move substantially while their sum is unchanged.",
 )
 
 # %% [markdown]
