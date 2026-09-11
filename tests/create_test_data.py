@@ -13,13 +13,13 @@ from what was actually generated.
 
 ``tests/test_fixture_manifest_matches_builders.py`` checks each entry of the
 manifest against a declaration and against the data on disk. What it cannot check
-is a file no declaration mentions, and most of the test-data repo is still in that
-state: named neither by a ``Dataset.owns`` nor by ``manifest.json``. Such a fixture
-has no builder, no recorded budget and nothing comparing it to the datasets it has
-to join against - which is how the FNSPID news fixture came to sit entirely past
-the end of its own price panel (ml4t/agent-workspace#1116). Adding a declaration is
-how a fixture leaves that state; ml4t/agent-workspace#1117 carries the running
-count and the remaining groups.
+is a file no declaration mentions. A fixture in that state has no builder, no
+recorded budget and nothing comparing it to the datasets it has to join against -
+which is how the FNSPID news fixture came to sit entirely past the end of its own
+price panel, and how an options panel built from a different universe than its
+loader documents survived a year of green CI. ``UNPRODUCED`` in
+``tests/test_every_fixture_file_has_a_producer.py`` is what is left of that backlog,
+and it only shrinks.
 
 It is also not a from-empty rebuild of the fixture repo: it operates on a checkout
 of ml4t/third-edition-test-data and replaces the datasets it is asked for.
@@ -1662,6 +1662,350 @@ def build_crypto_onchain(source: Path, output: Path) -> list[Path]:
     )
 
 
+# --- S&P 500 options EDA ------------------------------------------------------
+#
+# A separate dataset from `sp500_options` above, at `sp500/options_eda/`, read by
+# `load_sp500_options_eda`. Four notebooks read it: 02/07 for chain structure, the
+# smile and the IV surface, 02/08 for Greeks on AAPL 2020, 02/09 for the
+# constant-maturity straddle series on AAPL 2019, and 08/03 for cross-instrument
+# features on all eight underlyings.
+#
+# The budget below is taken from those notebooks' own declared parameters, because
+# the fixture this replaces was narrower than every one of them and nothing said
+# so. It carried moneyness 0.95-1.05 and nothing past 45 days to maturity, against
+# 02/07's declarations:
+#
+#   CHAIN_BAND = (0.7, 1.3)   the smile's shape       - fixture covered 0.95-1.05
+#   SPREAD_BAND = (0.5, 1.5)  "what happens in the wings is its subject"
+#   WING_BAND = (0.9, 1.1)    splits near-the-money from away-from-the-money
+#   SURFACE_MAX_DAYS = 180    far expirations drawn as their own section
+#
+# So the smile had no smile, the wing analysis had no wings, "away from the money"
+# was empty, and the far-expiration section drew nothing - and the notebook passed,
+# every time, because each of those sections renders an empty frame rather than
+# raising. The symbol list was wrong in the same silent way: the fixture carried
+# AMD, GOOG and INTC and lacked BA, JPM, KO and XOM, so four of the eight symbols
+# `08_financial_features/03_structural_cross_instrument_features` names at its line
+# 73 came back empty.
+#
+# What is still reduced, and the two axes are chosen so that no declared parameter
+# lands outside the data:
+#
+#   - Contracts outside CHAIN_BAND. This clips SPREAD_BAND, which reaches to
+#     (0.5, 1.5); the section keeps real wings either side of WING_BAND, which is
+#     what it needs to have a subject, without the deep wings where quotes are
+#     stale and which are most of the row count.
+#   - Expirations beyond the nearest few. Both the near-dated chain and the far
+#     section are kept, because 02/07 draws them separately and a "nearest N" rule
+#     alone starves the far one: the sixth-nearest expiration is never more than
+#     120 days out.
+#
+# Sessions are never reduced. 02/09 builds a daily series by picking one straddle
+# per day inside a 25-35 day window, so a session stride would thin the series that
+# notebook is about.
+
+SP500_OPTIONS_EDA_DIR = SP500_DIR / "options_eda"
+SP500_OPTIONS_EDA_YEARS = (2019, 2020)
+SP500_OPTIONS_EDA_SYMBOLS = ("AAPL", "AMZN", "BA", "GOOGL", "JPM", "KO", "MSFT", "XOM")
+# 02/07's CHAIN_BAND, SURFACE_MAX_DAYS and WING_BAND, named here so the budget and
+# the notebook move together.
+SP500_OPTIONS_EDA_BAND = (0.7, 1.3)
+SP500_OPTIONS_EDA_FAR_DAYS = 180
+SP500_OPTIONS_EDA_WING_BAND = (0.9, 1.1)
+SP500_OPTIONS_EDA_NEAR_EXPIRATIONS = 6
+SP500_OPTIONS_EDA_FAR_EXPIRATIONS = 2
+# 02/09's DTE_WINDOW, and the symbol and year it demonstrates on. Asserted rather
+# than assumed: the reduction is keyed on expiration, so it is exactly the kind of
+# budget that can starve that notebook's selection while every other consumer still
+# looks healthy.
+SP500_OPTIONS_EDA_DTE_WINDOW = (25, 35)
+SP500_OPTIONS_EDA_DEMO = ("AAPL", 2019)
+
+
+def build_sp500_options_eda(source: Path, output: Path) -> list[Path]:
+    """Reduce the production chains on moneyness and expiration, never on session.
+
+    The ``year`` column production carries is dropped. ``load_sp500_options_eda``
+    scans ``year=*.parquet`` with ``hive_partitioning=True``, so the partition key
+    comes from the path; a column of the same name in the file is a second source
+    for it.
+    """
+    out_dir = output / SP500_OPTIONS_EDA_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    keep = list(SP500_OPTIONS_EDA_SYMBOLS)
+    low, high = SP500_OPTIONS_EDA_BAND
+    written: list[Path] = []
+
+    for year in SP500_OPTIONS_EDA_YEARS:
+        src = source / SP500_OPTIONS_EDA_DIR / f"year={year}.parquet"
+        if not src.exists():
+            raise FileNotFoundError(
+                f"{src} not found. Build it with data/equities/market/sp500/build_options_eda.py."
+            )
+        full = pl.scan_parquet(src).filter(pl.col("symbol").is_in(keep))
+        if absent := sorted(
+            set(keep) - set(full.select("symbol").unique().collect()["symbol"].to_list())
+        ):
+            raise ValueError(
+                f"Production's {year} chain carries no rows for {absent}. The fixture "
+                "declares all eight underlyings and a chapter-8 notebook asks for them "
+                "by name, so a narrower source would reintroduce the gap this builder "
+                "exists to close."
+            )
+        banded = full.filter((pl.col("strike") / pl.col("underlying_price")).is_between(low, high))
+
+        def _nearest(frame: pl.LazyFrame, keep_ranks: int) -> pl.LazyFrame:
+            return (
+                frame.with_columns(
+                    pl.col("expiration").rank("dense").over("symbol", "date").alias("_rank")
+                )
+                .filter(pl.col("_rank") <= keep_ranks)
+                .drop("_rank")
+            )
+
+        near = _nearest(
+            banded.filter(pl.col("days_to_maturity") <= SP500_OPTIONS_EDA_FAR_DAYS),
+            SP500_OPTIONS_EDA_NEAR_EXPIRATIONS,
+        )
+        far = _nearest(
+            banded.filter(pl.col("days_to_maturity") > SP500_OPTIONS_EDA_FAR_DAYS),
+            SP500_OPTIONS_EDA_FAR_EXPIRATIONS,
+        )
+        reduced = (
+            pl.concat([near, far])
+            .collect()
+            .drop("year", strict=False)
+            .sort("date", "symbol", "expiration", "call_put", "strike")
+        )
+        _require_every_declared_band_reaches_data(reduced, year)
+        written.append(_write_options_eda_part(reduced, out_dir, year))
+
+    _require_constant_maturity_window(out_dir)
+    return written
+
+
+def _write_options_eda_part(frame: pl.DataFrame, out_dir: Path, year: int) -> Path:
+    dst = out_dir / f"year={year}.parquet"
+    frame.write_parquet(dst)
+    print(
+        f"    year={year}: {frame.height:,} rows, {frame['symbol'].n_unique()} symbols, "
+        f"{frame['date'].n_unique()} sessions, {frame['expiration'].n_unique()} expirations "
+        f"({dst.stat().st_size / 1e6:.1f} MB)"
+    )
+    return dst
+
+
+def _require_every_declared_band_reaches_data(frame: pl.DataFrame, year: int) -> None:
+    """Each of 02/07's declared bands has to have rows on both of its sides.
+
+    This is the check the previous fixture would have failed. A band that lands
+    entirely inside the data, or entirely outside it, renders an empty frame and
+    the notebook reports a clean run either way.
+    """
+    moneyness = frame["strike"] / frame["underlying_price"]
+    wing_low, wing_high = SP500_OPTIONS_EDA_WING_BAND
+    checks = {
+        f"below the {wing_low} wing": int((moneyness < wing_low).sum()),
+        f"above the {wing_high} wing": int((moneyness > wing_high).sum()),
+        f"beyond {SP500_OPTIONS_EDA_FAR_DAYS} days to maturity": int(
+            (frame["days_to_maturity"] > SP500_OPTIONS_EDA_FAR_DAYS).sum()
+        ),
+    }
+    if empty := sorted(name for name, count in checks.items() if not count):
+        raise ValueError(
+            f"{year}: the reduction leaves nothing {' or '.join(empty)}. "
+            "02_financial_data_universe/07_sp500_options_eda declares WING_BAND and "
+            "SURFACE_MAX_DAYS to separate those regions, and a section with nothing on "
+            "one side of its own boundary renders empty rather than failing."
+        )
+    print(
+        "      declared bands reached: "
+        + ", ".join(f"{name} {count:,}" for name, count in checks.items())
+    )
+
+
+def _require_constant_maturity_window(out_dir: Path) -> None:
+    """Every session of the 02/09 demo must offer a contract inside its DTE window.
+
+    The notebook builds a daily series by picking, each day, the straddle closest to
+    30 days and 50 delta. An expiration cap that leaves some sessions with nothing
+    in the 25-35 day window does not fail the notebook - it silently shortens the
+    series the whole notebook is about.
+    """
+    symbol, year = SP500_OPTIONS_EDA_DEMO
+    low, high = SP500_OPTIONS_EDA_DTE_WINDOW
+    frame = pl.read_parquet(out_dir / f"year={year}.parquet").filter(pl.col("symbol") == symbol)
+    in_window = frame.filter(pl.col("days_to_maturity").is_between(low, high))
+    sessions = frame["date"].n_unique()
+    missing = sessions - in_window["date"].n_unique()
+    if missing:
+        raise ValueError(
+            f"{missing} of {sessions} {symbol} {year} sessions carry no contract with "
+            f"{low}-{high} days to maturity, which is the window "
+            "02_financial_data_universe/09_options_continuous selects in."
+        )
+    print(f"    {symbol} {year}: all {sessions} sessions offer a {low}-{high} DTE contract")
+
+
+# --- 13F bulk holdings --------------------------------------------------------
+#
+# The full-universe quarterly archive, distinct from the curated ten-institution
+# panel above. `04_fundamental_alternative_data/10_institutional_holdings_13f`
+# reads one quarter and ranks managers by reported value, so the reduction has to
+# keep whole filings and has to keep more managers than the notebook ranks.
+#
+# 600 is not a new choice: filtering production to the 600 CIKs with the largest
+# total reported value reproduces the fixture that was already there, row for row
+# (1,327,852 rows, 743 filings, 21,388 securities). The rule had not been written
+# down, which is the whole of what this declaration adds.
+
+_13F_BULK_QUARTER = "2024Q3"
+_13F_BULK_MANAGERS = 600
+_13F_BULK = (
+    Path("equities")
+    / "positioning"
+    / "13f"
+    / "bulk"
+    / _13F_BULK_QUARTER
+    / "institutional_holdings.parquet"
+)
+# The notebook's declared TOP_N and CO_OWNERSHIP_UNIVERSE. Keeping more managers
+# than it ranks is what makes its ranking the true one rather than an artifact of
+# the fixture's size.
+_13F_BULK_NOTEBOOK_TOP_N = 500
+
+
+def build_13f_bulk_holdings(source: Path, output: Path) -> list[Path]:
+    """Keep every position of the 600 managers reporting the most value."""
+    src = source / _13F_BULK
+    if not src.exists():
+        raise FileNotFoundError(
+            f"{_13F_BULK} not found at {src}. Fetch it with "
+            f"data/equities/positioning/13f_download.py --mode bulk --quarters {_13F_BULK_QUARTER}."
+        )
+    full = pl.read_parquet(src)
+    ranked = (
+        full.group_by("cik")
+        .agg(pl.col("value_thousands").sum().alias("reported_value"))
+        .sort(["reported_value", "cik"], descending=[True, False])
+        .head(_13F_BULK_MANAGERS)
+    )
+    if ranked.height < _13F_BULK_MANAGERS:
+        raise ValueError(
+            f"Production's {_13F_BULK_QUARTER} archive carries {ranked.height} managers, "
+            f"fewer than the {_13F_BULK_MANAGERS} this fixture declares."
+        )
+    reduced = full.filter(pl.col("cik").is_in(ranked["cik"].implode()))
+
+    # Two sections of the notebook depend on rows a naive top-N could drop, and
+    # both would render as an empty table rather than an error.
+    repeat_filers = (
+        reduced.group_by("cik")
+        .agg(pl.col("accession_no").n_unique().alias("filings"))
+        .filter(pl.col("filings") > 1)
+    )
+    if not repeat_filers.height:
+        raise ValueError(
+            "No manager in the reduced set filed more than once in the window, so "
+            "the 'one filing per manager' section has nothing to demonstrate."
+        )
+    implied = (
+        reduced.filter(pl.col("shares") > 0)
+        .with_columns((pl.col("value_thousands") / pl.col("shares")).alias("implied_price"))
+        .group_by("accession_no")
+        .agg(pl.col("implied_price").median().alias("median_implied_price"))
+    )
+    unbelievable = implied.filter(~pl.col("median_implied_price").is_between(1.0, 10_000.0))
+    if not unbelievable.height:
+        raise ValueError(
+            "Every filing in the reduced set implies a believable price per share, so "
+            "the screening section screens nothing out."
+        )
+
+    dst = output / _13F_BULK
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    reduced.write_parquet(dst)
+    print(
+        f"    {_13F_BULK_QUARTER}: {reduced.height:,} of {full.height:,} positions, "
+        f"{reduced['cik'].n_unique()} of {full['cik'].n_unique():,} managers "
+        f"(notebook ranks {_13F_BULK_NOTEBOOK_TOP_N}), "
+        f"{reduced['accession_no'].n_unique()} filings, {repeat_filers.height} of them "
+        f"repeat filers, {unbelievable.height} failing the implied-price screen"
+    )
+    return [dst]
+
+
+# --- Financial Phrasebank -----------------------------------------------------
+#
+# `sentences_allagree.parquet` is the subset of Malo et al. (2014) that every
+# annotator labelled the same way. The fixture held 4,846 rows, which is the whole
+# corpus at 50% agreement, under the filename that promises the 2,264 unanimous
+# ones. `10_text_feature_engineering/04_bert_finetuning` fine-tunes on this file,
+# so CI trained on 2,582 sentences the annotators disagreed about, each carrying
+# whatever label the corpus assigned.
+#
+# `load_financial_phrasebank(agreement=...)` looks like it would have caught that
+# and does not: it filters on an `agreement` column, and neither production's file
+# nor the fixture's has one, so the argument has never selected anything. What
+# makes production correct is that its file already holds the unanimous subset.
+# Copying it is therefore the fix, and no reduction applies.
+
+PHRASEBANK_DIR = Path("alternative") / "text" / "financial_phrasebank"
+PHRASEBANK = PHRASEBANK_DIR / "sentences_allagree.parquet"
+PHRASEBANK_ROWS = 2264
+PHRASEBANK_LABELS = 3
+
+
+def build_financial_phrasebank(source: Path, output: Path) -> list[Path]:
+    """Copy the unanimous-agreement subset, verbatim."""
+    dst = _copy_verbatim(
+        source,
+        output,
+        PHRASEBANK,
+        "the download script in data/alternative/text/README.md",
+    )
+    frame = pl.read_parquet(dst)
+    if frame.height != PHRASEBANK_ROWS:
+        raise ValueError(
+            f"Production's {PHRASEBANK.name} holds {frame.height:,} rows, not the "
+            f"{PHRASEBANK_ROWS:,} unanimous sentences the filename promises. The corpus "
+            "at lower agreement levels is a different dataset and belongs in a "
+            "differently named file."
+        )
+    if (labels := frame["label"].n_unique()) != PHRASEBANK_LABELS:
+        raise ValueError(
+            f"{PHRASEBANK.name} carries {labels} distinct labels, not {PHRASEBANK_LABELS}; "
+            "a sentiment fixture missing a class trains and scores on a different task."
+        )
+    print(f"    {PHRASEBANK.name}: {frame.height:,} sentences, {labels} labels, copied verbatim")
+    return [dst]
+
+
+# --- Polymarket events --------------------------------------------------------
+#
+# 22 rows in production and three in the fixture, which is smaller than the panel
+# `13_polymarket_prediction_markets` groups by category. Copied whole instead: the
+# file is 5 KB.
+
+POLYMARKET = Path("prediction_markets") / "polymarket_events.parquet"
+
+
+def build_polymarket_events(source: Path, output: Path) -> list[Path]:
+    """Copy the production Polymarket event panel, verbatim."""
+    dst = _copy_verbatim(
+        source,
+        output,
+        POLYMARKET,
+        "data/prediction_markets/download.py --provider polymarket",
+    )
+    frame = pl.read_parquet(dst)
+    print(
+        f"    {POLYMARKET.name}: {frame.height} events, "
+        f"{frame['symbol'].n_unique()} markets, copied verbatim"
+    )
+    return [dst]
+
+
 DATASETS: tuple[Dataset, ...] = (
     Dataset(
         name="etfs",
@@ -1949,6 +2293,74 @@ DATASETS: tuple[Dataset, ...] = (
         description="the DefiLlama TVL and CoinGecko on-chain series, copied verbatim",
         build=build_crypto_onchain,
         owns=(ONCHAIN_DIR,),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="sp500_options_eda",
+        description=(
+            f"the {len(SP500_OPTIONS_EDA_SYMBOLS)} production underlyings over "
+            f"{SP500_OPTIONS_EDA_YEARS[0]}-{SP500_OPTIONS_EDA_YEARS[-1]}, every session, "
+            f"moneyness {SP500_OPTIONS_EDA_BAND[0]}-{SP500_OPTIONS_EDA_BAND[1]}, the "
+            f"nearest {SP500_OPTIONS_EDA_NEAR_EXPIRATIONS} expirations plus "
+            f"{SP500_OPTIONS_EDA_FAR_EXPIRATIONS} beyond "
+            f"{SP500_OPTIONS_EDA_FAR_DAYS} days"
+        ),
+        build=build_sp500_options_eda,
+        owns=tuple(
+            SP500_OPTIONS_EDA_DIR / f"year={year}.parquet" for year in SP500_OPTIONS_EDA_YEARS
+        ),
+        budget={
+            "symbols": list(SP500_OPTIONS_EDA_SYMBOLS),
+            "sessions": "none - every trading day is kept",
+            "moneyness_band": list(SP500_OPTIONS_EDA_BAND),
+            "near_expirations_per_session": SP500_OPTIONS_EDA_NEAR_EXPIRATIONS,
+            "far_expirations_per_session": SP500_OPTIONS_EDA_FAR_EXPIRATIONS,
+            "far_threshold_days": SP500_OPTIONS_EDA_FAR_DAYS,
+            "dte_window_required": list(SP500_OPTIONS_EDA_DTE_WINDOW),
+            "clips": (
+                "07_sp500_options_eda's SPREAD_BAND (0.5, 1.5) is clipped to the "
+                "moneyness band; the deep wings are stale quotes and most of the rows"
+            ),
+        },
+        entities={
+            (SP500_OPTIONS_EDA_DIR / f"year={year}.parquet").as_posix(): (
+                "symbol",
+                len(SP500_OPTIONS_EDA_SYMBOLS),
+            )
+            for year in SP500_OPTIONS_EDA_YEARS
+        },
+    ),
+    Dataset(
+        name="institutional_holdings_13f_bulk",
+        description=(
+            f"every position of the {_13F_BULK_MANAGERS} managers reporting the most "
+            f"value in the {_13F_BULK_QUARTER} filing window, whole filings only"
+        ),
+        build=build_13f_bulk_holdings,
+        owns=(_13F_BULK,),
+        budget={
+            "quarter": _13F_BULK_QUARTER,
+            "managers": _13F_BULK_MANAGERS,
+            "notebook_ranks": _13F_BULK_NOTEBOOK_TOP_N,
+            "filings": "whole - a manager keeps every position it reported",
+        },
+        entities={_13F_BULK.as_posix(): ("cik", _13F_BULK_MANAGERS)},
+    ),
+    Dataset(
+        name="financial_phrasebank",
+        description=(
+            f"the {PHRASEBANK_ROWS:,} sentences every annotator labelled the same way, "
+            "copied verbatim - which is the whole of what the filename promises"
+        ),
+        build=build_financial_phrasebank,
+        owns=(PHRASEBANK,),
+        budget={"subsample": "none", "agreement": "100% (unanimous)"},
+    ),
+    Dataset(
+        name="polymarket_events",
+        description="the whole production Polymarket event panel, copied verbatim",
+        build=build_polymarket_events,
+        owns=(POLYMARKET,),
         budget={"subsample": "none"},
     ),
 )
