@@ -1049,8 +1049,12 @@ def _rank_on_common_support_where_a_conformal_candidate_is_present(
         No re-ranking ran - there was no conformal candidate in the field - so the
         registered ``sharpe`` is the only Sharpe there is and is what a caller should read.
     ``comparison_ruined is True``
-        Re-ranking ran and :func:`rank_returns_on_common_support` found this candidate's
-        path stopped at ruin, so it carries no Sharpe at all. **Falling back to the
+        Re-ranking ran and :func:`rank_returns_on_common_support` returned no Sharpe for
+        this candidate. That producer folds two states into one ``None`` deliberately - a
+        path stopped at ruin, and a degenerate series whose Sharpe is NaN - because the
+        consequence is the same: there is no number to rank on. The name follows the case
+        that occurs; on ``us_firm_characteristics`` all 46 are genuine ruin, equity through
+        zero, read off the return paths rather than off any registry column. **Falling back to the
         registered ``sharpe`` here is what the ruin rule exists to prevent**: that number
         is computed on a balance that no longer exists, and reading it lets a bankrupt
         path compare as a solvent one. The candidate stays on the frame, ordered below
