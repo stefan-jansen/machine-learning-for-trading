@@ -148,8 +148,10 @@ yields.tail(3)
 # %% [markdown]
 # The chart below is drawn on the recent window rather than the full panel, because the
 # tightening cycle is the episode the rest of this notebook refers back to. The annotations mark
-# the two decisions that bound it, the first and the last increase of the cycle, and each is
-# placed only if the window actually contains that date.
+# the decisions that bound it, the first and the last increase of the cycle. An annotation has
+# nothing to point at once the window opens after its date, so each is placed only where the
+# window contains it. The cell after the figure prints each yield on those two days, and says so
+# where the window excludes one, so a missing annotation has its explanation beside it.
 
 # %%
 yields_recent = yields.filter(pl.col("timestamp") >= pl.lit(RECENT_START).str.to_date())
@@ -196,22 +198,24 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Line chart of the two-year and ten-year Treasury yields over the recent window, in percent "
-    "per year, against a shared date axis. Annotations mark the first and last policy increases "
-    "of the tightening cycle.",
+    "per year, against a shared date axis. The first and last policy increases of the tightening "
+    "cycle are annotated where the window contains them.",
 )
 
 # %%
-# What the cycle did to each yield, rather than leaving it to the eye.
+# A date the window excludes is reported, not skipped in silence.
 for _label, _at in (("first increase", "2022-03-16"), ("last increase", "2023-07-26")):
     _row = yields_recent.filter(pl.col("timestamp") == pl.lit(_at).str.to_date())
     if len(_row):
         print(
             f"{_label:<16} {_at}   2-year {_row['dgs2'][0]:.2f}%   10-year {_row['dgs10'][0]:.2f}%"
         )
+    else:
+        print(f"{_label:<16} {_at}   outside the plotted window, so it carries no annotation")
 
 # %% [markdown] tags=["results"]
-# The two rows printed above are the yields on the days the cycle began and ended, and they are
-# why the short end is worth watching separately: the policy rate is the thing being set, and the
+# The rows printed above are the yields on the days the cycle began and ended, and they are why
+# the short end is worth watching separately: the policy rate is the thing being set, and the
 # two-year tracks expectations about it over a horizon short enough for those expectations to
 # dominate, so it is the leg that moves further. Where the two-year ends the cycle above the
 # ten-year, that is the inversion Part 5 makes its subject.
@@ -297,8 +301,8 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Filled line chart of the VIX over the recent window, in annualized percent volatility, "
-    "with dashed horizontal rules at the conventional band levels and annotations at named "
-    "market episodes.",
+    "with dashed horizontal rules at the conventional band levels. Named market episodes are "
+    "annotated where the window contains their dates.",
 )
 
 # %% [markdown]
