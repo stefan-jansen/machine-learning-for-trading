@@ -117,13 +117,31 @@ SUPERSEDES_POPULATION: str = ""
 # the refusal prints. These two moved when 04_model_based_features was rebuilt at production
 # scale on 2026-09-10: every stage-06 training run registered before that pinned the superseded
 # `model_based` artifact, so the whole catalog refitted and both 2026-08-18 generations went
-# stale. `fwd_ret_5d` and `fwd_ret_21d` have no recorded generation and need no entry.
+# stale.
 # Resolved through `candidate_set_supersedes` rather than passed straight to `freeze`, because a
 # reader's clean clone has no generation to supersede and `create` refuses a first version that
 # claims to replace one.
+#
+# The four `fwd_ret_5d` and `fwd_ret_21d` entries were added 2026-09-11, and the comment they
+# replace - "have no recorded generation and need no entry" - was true when it was written and
+# stopped being true when this notebook ran. The 2026-09-10 run created all six sets; the two
+# `fwd_ret_1d` ones already had a generation to supersede and were the only two that needed
+# declaring to get that run published. The other four are now gen 1 and live, so the NEXT run
+# that moves their members is refused at the freeze, which is after the fit. That refusal cost
+# 78 minutes of cold fitting once already.
+#
+# The two fwd_ret_1d hashes moved on 2026-09-11 for the same reason and were missed: that run
+# published generation 2 (55d64275dfd6 and ed1840bfaeb8), so the generation-1 hashes this file
+# still named would have been refused on the next run. Read the live generation out of
+# `candidate_set_names` before trusting a literal here; every literal in this dict goes stale
+# the moment the notebook it sits in succeeds.
 SUPERSEDES_SETS: dict = {
-    "us-equities-fwd-ret-1d-linear-v1": "454f73021f33",
-    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "29155b2c69f1",
+    "us-equities-fwd-ret-1d-linear-v1": "55d64275dfd6",
+    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "ed1840bfaeb8",
+    "us-equities-fwd-ret-5d-linear-v1": "e7b744f380d5",
+    "us-equities-fwd-ret-5d-linear-diagnostics-v1": "5514968cd0bb",
+    "us-equities-fwd-ret-21d-linear-v1": "6e8179623f0a",
+    "us-equities-fwd-ret-21d-linear-diagnostics-v1": "636c1c2425aa",
 }
 
 # %%
