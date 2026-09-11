@@ -214,11 +214,13 @@ for _label, _at in (("first increase", "2022-03-16"), ("last increase", "2023-07
         print(f"{_label:<16} {_at}   outside the plotted window, so it carries no annotation")
 
 # %% [markdown] tags=["results"]
-# The rows printed above are the yields on the days the cycle began and ended, and they are why
-# the short end is worth watching separately: the policy rate is the thing being set, and the
-# two-year tracks expectations about it over a horizon short enough for those expectations to
-# dominate, so it is the leg that moves further. Where the two-year ends the cycle above the
-# ten-year, that is the inversion Part 5 makes its subject.
+# Where the window contains both dates, the rows printed above are the yields on the days the
+# cycle began and ended, and the pair is why the short end is worth watching separately: the
+# policy rate is the thing being set, and the two-year tracks expectations about it over a
+# horizon short enough for those expectations to dominate, so it is the leg that moves further.
+# Where the two-year ends the cycle above the ten-year, that is the inversion Part 5 makes its
+# subject. Where a row reports its date as excluded instead, the window opens after that end of
+# the cycle and there is no pair to compare; widen it by moving `RECENT_START` back.
 
 # %% [markdown]
 # ## 4. The VIX

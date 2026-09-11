@@ -188,9 +188,10 @@ show_plotly_with_alt(
 # the share held by everything else is visible rather than assumed away.
 #
 # The residual bar is an aggregate over every chain not loaded separately, so it is reported
-# apart from the named chains rather than ranked among them as if it were one. Under a
-# single-chain `CHAINS` the residual is the bigger bar, and calling it the largest would read as
-# one chain holding the sector.
+# apart from the named chains rather than ranked among them as if it were one. Whenever the
+# chains loaded hold less than half the total between them the residual is the longest bar, and
+# ranking it alongside them would report an aggregate over hundreds of chains as though one
+# chain held the sector.
 
 # %%
 chain_tvl = {}
