@@ -95,13 +95,83 @@ def _sampling_reduced(spec_json: str | None) -> bool:
     return False
 
 
+def _artifacts_mapping(artifacts: object) -> dict[str, str]:
+    """``{name: {"sha256": ...}}`` as a flat mapping, dropping records that pin nothing.
+
+    The ``sha256:`` prefix is stripped here as well as in :func:`_files_mapping`, because a
+    prefixed digest compared against a bare one can never match and the guard would pass such
+    a run in silence. All 3,359 records in the nine live registries are bare, so this changes
+    nothing today - but ``darts_forecasting.py`` already builds a record as
+    ``{"dataset": ..., "sha256": f"sha256:{...}"}``, and ``tests/fixture_registry.py`` has
+    been stripping the prefix on this shape since before it delegated here.
+    """
+    if not isinstance(artifacts, dict):
+        return {}
+    return {
+        str(name): str(record["sha256"]).removeprefix("sha256:")
+        for name, record in sorted(artifacts.items())
+        if isinstance(record, dict) and record.get("sha256")
+    }
+
+
+#: The latent adapter's ``files`` roles that name the same artifact under a different word.
+#: The guard compares per NAME, so ``evaluation_label`` and ``eval_label`` would never be
+#: compared to each other however wide the reader got - the same file pinned twice, checked
+#: never. Measured across the nine live registries before this was added: the only case is
+#: ``us_firm_characteristics/fwd_class_1m``, where the four latent runs pin 04c53aa6a847 as
+#: ``evaluation_label`` and the gbm, linear and tabular_dl runs pin that same sha as
+#: ``eval_label``. Every eval-label sha agrees within its label, so folding the names
+#: together refuses nothing that registers today.
+_FILES_ROLE_ALIASES = {"evaluation_label": "eval_label"}
+
+
+def _files_mapping(files: object) -> dict[str, str]:
+    """A ``files`` list of ``{role, sha256}`` as the same mapping, keyed by role.
+
+    The ``sha256:`` prefix is stripped so a latent run's pin compares against the bare digest
+    every other family records, and a role in ``_FILES_ROLE_ALIASES`` is renamed to the word
+    the other families use. Two records naming one role would be a spec defect rather than a
+    legitimate second vintage, so the later one is not allowed to win silently.
+    """
+    if not isinstance(files, list):
+        return {}
+    mapping: dict[str, str] = {}
+    for record in files:
+        if not isinstance(record, dict):
+            continue
+        role, sha = record.get("role"), record.get("sha256")
+        if not role or not sha:
+            continue
+        digest = str(sha).removeprefix("sha256:")
+        name = _FILES_ROLE_ALIASES.get(str(role), str(role))
+        if mapping.setdefault(name, digest) != digest:
+            raise ValueError(
+                f"input_data_spec.files pins two shas for role {role!r}: "
+                f"{mapping[name]} and {digest}"
+            )
+    return dict(sorted(mapping.items()))
+
+
 def _input_artifact_shas(spec: dict | str | None) -> dict[str, str]:
     """The whole-file sha256 a training spec pins per input artifact.
 
-    ``computation.input_data_spec.artifacts`` is what six of the seven producers build from
-    ``mds.input_lineage``; the latent adapter records a ``files`` list instead
-    (ml4t/agent-workspace#891) and reaches this as an empty mapping, which is a weaker check
-    for that family rather than a wrong one.
+    Three shapes, because the producers write three and reading only one left 119 of the
+    1,156 registered runs vintage-checked by nothing at all (ml4t/agent-workspace#1137):
+
+    - ``computation.input_data_spec.artifacts``, what ``gbm``, ``linear`` and ``tabular_dl``
+      build from ``mds.input_lineage``.
+    - ``computation.input_data_spec.input_data_spec.artifacts``. ``deep_learning`` builds its
+      payload as ``{"input_data_spec": mds.input_lineage, ...}``
+      (``case_studies/utils/deep_learning.py``), so the same mapping ends up one level down.
+      A nesting slip, not a different contract.
+    - ``computation.input_data_spec.files``, a list of ``{role, sha256}`` with a ``sha256:``
+      prefix, which is what the latent adapter records (ml4t/agent-workspace#891).
+
+    Reading all three is what makes ``_enforce_input_artifact_vintage`` cover the population
+    it claims to. Measured across the nine live registries before the widening landed: the
+    119 newly-read runs introduce no conflict the rule would refuse - every (label, artifact)
+    pair they pin already agrees with itself - so this changes what is checked from here on
+    without retroactively refusing anything already registered.
     """
     if isinstance(spec, str):
         try:
@@ -116,14 +186,12 @@ def _input_artifact_shas(spec: dict | str | None) -> dict[str, str]:
     input_data_spec = computation.get("input_data_spec")
     if not isinstance(input_data_spec, dict):
         return {}
-    artifacts = input_data_spec.get("artifacts")
-    if not isinstance(artifacts, dict):
-        return {}
-    return {
-        str(name): str(record["sha256"])
-        for name, record in sorted(artifacts.items())
-        if isinstance(record, dict) and record.get("sha256")
-    }
+    if mapping := _artifacts_mapping(input_data_spec.get("artifacts")):
+        return mapping
+    nested = input_data_spec.get("input_data_spec")
+    if isinstance(nested, dict) and (mapping := _artifacts_mapping(nested.get("artifacts"))):
+        return mapping
+    return _files_mapping(input_data_spec.get("files"))
 
 
 def _registered_artifact_shas(db, *, label: str) -> dict[str, set[str]]:
