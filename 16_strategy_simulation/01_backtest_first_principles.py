@@ -425,7 +425,9 @@ print(f"Next-open rebalances, including the opening purchase: {rebalance_at_open
 # colors as lines, and because what the reader is judging is a pattern of presence and absence
 # rather than a level. Dark bands on the AGG and TLT rows are the defensive months; a dark band on
 # three equity rows at once is a momentum rotation. The dashed line on the top panel is the
-# threshold, and every stretch below it should line up with bonds below.
+# threshold, and a stretch below it should be followed by bonds - followed, not matched,
+# because the regime is read at a month end and the weights it produces fill on the next
+# session.
 
 # %%
 fig = make_subplots(
@@ -463,6 +465,9 @@ fig.update_layout(
 fig.update_yaxes(title_text="Spread (percentage points)", row=1, col=1)
 fig.update_yaxes(title_text="ETF symbol", row=2, col=1)
 fig.update_xaxes(title_text="Date", row=2, col=1)
+_defensive_columns = [ETF_SYMBOLS.index(symbol) for symbol in DEFENSIVE_MIX]
+_defensive_on = execution_weights[:, _defensive_columns].sum(axis=1) > 0.5
+_defensive_when_below = float(_defensive_on[~regime].mean()) if (~regime).any() else 0.0
 show_plotly_with_alt(
     fig,
     f"Two stacked panels sharing a date axis from {dates[0]} to {dates[-1]}. The upper panel is "
@@ -470,9 +475,10 @@ show_plotly_with_alt(
     f"threshold; the spread runs from {yield_curve_slope.min() * 100:.2f} to "
     f"{yield_curve_slope.max() * 100:.2f} points and sits above the threshold on "
     f"{risk_on_share:.0%} of days. The lower panel is a heatmap of target weight by fund and "
-    "date: the defensive rows are dark through every stretch where the spread is under the "
-    "threshold, and the equity rows carry the lighter equal weights of the risk-on months in "
-    "between.",
+    "date. The defensive rows are dark on "
+    f"{_defensive_when_below:.0%} of the sessions whose spread is below the threshold rather "
+    "than on all of them: the regime is read at a month end and the weights fill on the next "
+    "session, so a crossing inside a month changes nothing until the next rebalance.",
 )
 
 # %% [markdown]
@@ -693,14 +699,18 @@ fig.update_layout(
 )
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
 _lead = "ahead of" if strategy_cum[-1] > benchmark_cum[-1] else "behind"
+_widest_gap = float(np.abs(strategy_cum - benchmark_cum).max()) * 100
 show_plotly_with_alt(
     fig,
     "Line chart of cumulative net return in percent for the ETF momentum portfolio, in solid "
-    f"navy, and the 60/40 benchmark, dashed grey, both starting at zero on {dates[0]}. The two "
-    f"track each other closely throughout. Momentum peaks at {strategy_cum.max() * 100:.0f} "
-    f"percent and ends at {strategy_cum[-1] * 100:.0f}; the benchmark peaks at "
-    f"{benchmark_cum.max() * 100:.0f} and ends at {benchmark_cum[-1] * 100:.0f}, so momentum "
-    f"finishes {_lead} it.",
+    f"navy, and the 60/40 benchmark, dashed grey, both measured against the {INITIAL_CASH:,.0f} "
+    f"of starting capital. Neither begins at zero: on {dates[0]} momentum is already at "
+    f"{strategy_cum[0] * 100:.2f} percent and the benchmark at {benchmark_cum[0] * 100:.2f}, "
+    "which is the first session's return net of the fees paid to open. Momentum peaks at "
+    f"{strategy_cum.max() * 100:.0f} percent and ends at {strategy_cum[-1] * 100:.0f}; the "
+    f"benchmark peaks at {benchmark_cum.max() * 100:.0f} and ends at "
+    f"{benchmark_cum[-1] * 100:.0f}, so momentum finishes {_lead} it, and the widest the two "
+    f"are ever apart is {_widest_gap:.0f} points.",
 )
 
 # %% [markdown]

@@ -931,8 +931,11 @@ if pairs_strategy.zscore_history:
     fig.update_yaxes(title_text="KRE / XLF", row=2, col=1)
     fig.update_yaxes(title_text="Z-Score", row=3, col=1)
     fig.update_xaxes(title_text="Date", row=3, col=1)
-    _inside_band = [abs(z) > pairs_strategy.entry_zscore for z in z_vals]
-    _entry_crossings = sum(1 for a, b in itertools.pairwise(_inside_band) if a != b)
+    _above_upper = [z > pairs_strategy.entry_zscore for z in z_vals]
+    _below_lower = [z < -pairs_strategy.entry_zscore for z in z_vals]
+    _entry_crossings = sum(1 for a, b in itertools.pairwise(_above_upper) if a != b) + sum(
+        1 for a, b in itertools.pairwise(_below_lower) if a != b
+    )
     show_plotly_with_alt(
         fig,
         f"Three stacked panels on a shared date axis over {len(dates):,} sessions. The top panel "
