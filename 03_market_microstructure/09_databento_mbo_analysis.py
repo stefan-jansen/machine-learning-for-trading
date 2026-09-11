@@ -324,7 +324,7 @@ if sample_df is not None and len(sample_df) > 0:
 
         show_with_alt(
             fig,
-            "Two stacked panels sharing a time axis over one hour of trading. The upper plots the mid price as a line. The lower plots book pressure as a line about a zero line, with the area above it shaded for buy pressure and the area below shaded in red for sell pressure.",
+            "Two stacked panels sharing a time axis over one hour of trading. The upper plots individual trade prices as small points. The lower plots book pressure as a line about a zero line, with the area above it shaded for buy pressure and the area below shaded in red for sell pressure.",
         )
 
         # Statistics
@@ -513,7 +513,6 @@ def process_day_to_bars(
     # Derived features
     bars = bars.with_columns(
         [
-            ((pl.col("high") + pl.col("low")) / 2).alias("mid_price"),
             (pl.col("close") / pl.col("open") - 1).alias("return"),
             pl.when(pl.col("buy_volume") + pl.col("sell_volume") > 0)
             .then(
@@ -587,19 +586,19 @@ def compute_markouts(
     for h in horizons:
         # Standard markout: price change from now to h minutes ahead
         result = result.with_columns(
-            (pl.col("mid_price").shift(-h).over("session_date") / pl.col("mid_price") - 1).alias(
+            (pl.col("mid_quote").shift(-h).over("session_date") / pl.col("mid_quote") - 1).alias(
                 f"markout_{h}"
             )
         )
 
         # Latency-adjusted: assumes 1-bar execution delay
-        p1 = pl.col("mid_price").shift(-latency_bars).over("session_date")
-        p2 = pl.col("mid_price").shift(-h).over("session_date")
+        p1 = pl.col("mid_quote").shift(-latency_bars).over("session_date")
+        p2 = pl.col("mid_quote").shift(-h).over("session_date")
         result = result.with_columns((p2 / p1 - 1).alias(f"markout_{h}_adj"))
 
         # Executable markout: a long pays the ask at decision time and exits at
-        # the bid h bars later — the round trip a marketable order realizes.
-        # Its gap to the midpoint markout is exactly the spread the book charges.
+        # the bid h bars later, the round trip a marketable order realizes. Its gap to
+        # the midpoint markout is the half-spread paid on entry plus the one paid on exit.
         ask_now = pl.col("best_ask")
         bid_future = pl.col("best_bid").shift(-h).over("session_date")
         result = result.with_columns((bid_future / ask_now - 1).alias(f"markout_{h}_exec"))
@@ -762,8 +761,8 @@ if multi_day is not None and len(multi_day) > 0:
 #   while the order is in flight.
 # - **Executable (bid/ask)**: a long pays the **ask** at decision time and
 #   exits at the **bid** *h* bars later. The gap to the midpoint markout is the
-#   spread the book charges — the friction §3.3 warns turns a statistical
-#   signal into negative trading P&L at sub-minute horizons.
+#   half-spread paid on entry plus the half-spread paid on exit, the friction §3.3
+#   warns turns a statistical signal into negative trading P&L at sub-minute horizons.
 #
 # Reading the three together shows where the edge goes: latency erodes it, and
 # the spread can erase it outright.
@@ -831,7 +830,7 @@ if multi_day is not None and len(multi_day) > 0:
     fig.suptitle(f"{SYMBOL}: midpoint and executable markouts at four horizons", fontsize=12)
     show_with_alt(
         fig,
-        f"Four panels in a two-by-two grid, one per forward horizon, for {SYMBOL}. Each overlays two distributions of returns in basis points: the markout measured on the quote midpoint, and the markout an order that crossed the spread would have realised. The gap between the two distributions is the spread being paid.",
+        f"Four panels in a two-by-two grid, one per forward horizon, for {SYMBOL}. Each overlays two distributions of returns in basis points: the markout measured on the quote midpoint, and the markout an order that crossed the spread would have realised. The gap between the two distributions is the half-spread paid on entry plus the one paid on exit.",
     )
 
     print("=== Mean markout by type (bps) ===")

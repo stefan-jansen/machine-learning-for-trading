@@ -556,7 +556,9 @@ def load_order_registry(messages_dir: Path, symbol: str) -> pl.DataFrame:
 #
 # Three message types take shares off the book: `D` deletes what is left of an order, `X`
 # cancels part of one, and `E` executes against one. `D` carries no share count, because
-# it removes whatever remained, so its size is recovered from the registry.
+# it removes whatever remained: its size is the original add less the cancels and
+# executions that came before it. Charging a delete the full original size would count a
+# partially filled order twice, once for the fill and again for the remainder.
 
 
 # %%
@@ -642,20 +644,26 @@ def _pivot_by_side(
 
 # %%
 def _enrich_removals(removals: pl.DataFrame, registry: pl.DataFrame) -> pl.DataFrame:
-    """Join removals with registry to get side and shares; fill missing shares_removed."""
+    """Join removals with the registry and size each delete at the shares still resting."""
     removals = removals.join(
         registry.select(["order_reference_number", "side", "shares"]),
         on="order_reference_number",
         how="left",
     )
-    # Use shares from registry for deletes (full removal)
     if "shares_removed" not in removals.columns:
-        removals = removals.with_columns(pl.col("shares").alias("shares_removed"))
-    else:
-        removals = removals.with_columns(
-            pl.coalesce("shares_removed", "shares").alias("shares_removed")
-        )
-    return removals
+        removals = removals.with_columns(pl.lit(None, dtype=pl.Int64).alias("shares_removed"))
+
+    # Shares already taken off this order by earlier cancels and executions.
+    sized = pl.col("shares_removed").fill_null(0).cast(pl.Int64)
+    removals = removals.sort(["order_reference_number", "timestamp"]).with_columns(
+        (sized.cum_sum() - sized).over("order_reference_number").alias("removed_before")
+    )
+    return removals.with_columns(
+        pl.when(pl.col("shares_removed").is_null())
+        .then((pl.col("shares").cast(pl.Int64) - pl.col("removed_before")).clip(lower_bound=0))
+        .otherwise(pl.col("shares_removed").cast(pl.Int64))
+        .alias("shares_removed")
+    ).drop("removed_before")
 
 
 # %% [markdown]
