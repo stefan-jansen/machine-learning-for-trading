@@ -312,8 +312,9 @@ show_plotly_with_alt(
 # ## Key takeaways
 #
 # 1. **A checkpoint is part of a configuration, not a detail of how it was fitted.** Scoring one
-#    fit at twenty points produces twenty candidates, and keeping the best of them after seeing
-#    the results is a selection decision. Selection happens in
+#    fit at twenty points produces twenty candidates, and keeping whichever of them scores
+#    highest on this page would be a selection decision taken on the wrong statistic: the
+#    curve below is an information coefficient, and selection is validation backtest Sharpe in
 #    [`14_backtest`](14_backtest.ipynb), over the population published here.
 #
 # 2. **How many windows are drawn is part of the model.** On a minute panel the cap decides what
@@ -325,5 +326,6 @@ show_plotly_with_alt(
 #
 # **Known limitations.** The window is fixed at sixty observations, so nothing earlier than the
 # trailing hour reaches the model whatever the architecture can represent. The declared sequence
-# cap is a compute budget rather than a derived quantity - `config/setup.yaml` says so, and
-# ml4t/agent-workspace#1015 is where that argument goes.
+# cap is a compute budget rather than a quantity derived from the data - `config/setup.yaml`
+# says so - so the same declared count covers a different share of the panel whenever the
+# panel's size changes.
