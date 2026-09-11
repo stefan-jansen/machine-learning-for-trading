@@ -350,6 +350,30 @@ file sets the variable inside the container. See
 **[running notebooks](docs/running-notebooks.md)** for the first-notebook walkthrough, case-study
 pipelines, Papermill parameters, and the experiment workflow.
 
+### MNQ objective strategy research workflow
+
+The MNQ objective-strategy validation notebook uses deterministic in-memory fixture data by
+default. Run these commands from the repository root:
+
+```bash
+# Focused configuration and fixture tests
+uv run pytest tests/research/test_config.py -q
+
+# Full MNQ research test suite
+uv run pytest tests/research -q
+
+# Headless notebook smoke execution; output is written outside the repository
+uv run jupyter nbconvert --to notebook --execute \
+  research/notebooks/mnq_objective_strategy_validation.ipynb \
+  --output-dir /tmp \
+  --output mnq_objective_strategy_validation.executed.ipynb
+```
+
+The notebook is a research-only smoke workflow. It uses synthetic fixture data unless you
+explicitly replace it with a locally normalized MNQ file, and it requires no downloads,
+credentials, broker/API access, or live market data by default. Its output does not claim
+profitability or establish live execution quality.
+
 ### Docker images
 
 Most notebooks run on the default **ml4t** image; a few need a specialized one, and each such notebook says so in its
