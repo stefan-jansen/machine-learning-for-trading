@@ -1052,33 +1052,53 @@
   tier: weekly
   timeout: 300
 22_rag_financial_research/02_domain_embeddings_comparison:
+  # Was skipped as "Requires RAG infrastructure (chromadb + embedding models) not
+  # provisioned in CI". It imports no chromadb, and chromadb is a core dependency
+  # (pyproject.toml `dependencies`), not an extra, so it is provisioned everywhere.
+  # What actually stopped it is `REQUIRE_GPU`, a declared parameter defaulting to
+  # True that nothing here set: the guard raises before any model loads. With
+  # REQUIRE_GPU false it passes on the CPU path with CUDA_VISIBLE_DEVICES="".
+  # Stays weekly for the one external thing that is real: it pulls
+  # BAAI/bge-large-en-v1.5 (~1.3 GB) and all-MiniLM-L6-v2 from HuggingFace at run
+  # time. The local pass was against a warm HF cache, so it is not a CI cost.
+  # ml4t/agent-workspace#1118.
   parameters:
     MAX_DOCUMENTS: 50
     MAX_QUERIES: 10
     USE_LOCAL_MODELS_ONLY: true
-  skip: true
-  skip_reason: Requires RAG infrastructure (chromadb + embedding models) not provisioned in CI
+    REQUIRE_GPU: false
   tier: weekly
   timeout: 300
 22_rag_financial_research/03_hybrid_retrieval:
+  # Same false reason as 02, same cause: `REQUIRE_GPU` defaulted True and nothing
+  # set it. Passes on CPU in 63s (warm HF cache, so not a CI cost). Stays weekly
+  # because it downloads all-MiniLM-L6-v2 and cross-encoder/ms-marco-MiniLM-L-6-v2.
+  # ml4t/agent-workspace#1118.
   parameters:
     MAX_DOCUMENTS: 50
     MAX_QUERIES: 10
     TOP_K: 5
-  skip: true
-  skip_reason: Requires RAG infrastructure (chromadb + embedding models) not provisioned in CI
+    REQUIRE_GPU: false
   tier: weekly
   timeout: 300
 22_rag_financial_research/04_ragas_evaluation:
+  # Was skipped as "Requires OpenAI API access for ragas evaluator LLM". It has no
+  # LLM client and no ragas import: the metrics are token overlap computed locally,
+  # which is the weakness 08_rag_security's prose says this notebook measures. It
+  # also carried tier: weekly, a second gate that would have kept it out of the
+  # per-commit run even with the skip gone. Both removed; 04 and 08 together pass in
+  # 38s against the CI fixture. ml4t/agent-workspace#1118.
   parameters:
     MAX_SAMPLES: 10
-  skip: true
-  skip_reason: Requires OpenAI API access for ragas evaluator LLM
-  tier: weekly
   timeout: 300
 22_rag_financial_research/05_10k_rag_assistant:
-  skip: true
-  skip_reason: Requires RAG infrastructure (chromadb + embedding models) not provisioned in CI
+  # Same false reason as 02. This one does import chromadb - and chromadb is a core
+  # dependency, so "not provisioned in CI" was wrong about the one package it names.
+  # `REQUIRE_GPU` defaulted True and nothing set it. RUN_LIVE_LLM defaults False, so
+  # no OpenAI call is reached. Passes on CPU in 81s (warm HF cache). Stays weekly for
+  # the HuggingFaceEmbedding download. ml4t/agent-workspace#1118.
+  parameters:
+    REQUIRE_GPU: false
   tier: weekly
   timeout: 300
 22_rag_financial_research/06_esg_rag_vs_finetune:
@@ -1097,6 +1117,9 @@
     NUM_QUARTERS: 2
   timeout: 300
 22_rag_financial_research/08_rag_security:
+  # Was skipped as "Requires RAG infrastructure (chromadb + embedding models) not
+  # provisioned in CI". It imports neither, and carried tier: weekly as well. Both
+  # removed. ml4t/agent-workspace#1118.
   # MAX_ATTACK_CASES is a cap that must not bind: the notebook raises on any
   # value between one and the fixture count, because dropping a fixture drops
   # an attack class and the two policies would then be compared on different
@@ -1104,9 +1127,6 @@
   # made six. 0 means all of them and cannot go stale as fixtures are added.
   parameters:
     MAX_ATTACK_CASES: 0
-  skip: true
-  skip_reason: Requires RAG infrastructure (chromadb + embedding models) not provisioned in CI
-  tier: weekly
   timeout: 300
 23_knowledge_graphs/08_8k_event_extraction:
   docker_env: ml4t+neo4j+gpu
