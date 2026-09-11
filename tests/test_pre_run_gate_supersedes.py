@@ -118,7 +118,34 @@ def test_a_live_literal_in_the_redirected_registry_passes(redirected):
     check = _run()
 
     assert check.passed
-    assert "no dead declaration" in check.detail
+    assert "no refused declaration" in check.detail
+
+
+def test_a_literal_one_generation_behind_the_head_is_refused(redirected):
+    """The verdict this gate used to report green, and the one that cost the fit.
+
+    `population_supersedes` offers a declared hash that equals `current.supersedes`, so a
+    literal one generation back resolves to something - and `create` then rejects it, because
+    it accepts the tip and nothing else. Reading only `is_stale` passed every declaration in
+    this state: 19 of the corpus's 48 on 2026-09-11, including the two in
+    `us_equities_panel/06_linear` that had just cost 78 minutes of cold fitting.
+    """
+    repo, artifacts = redirected
+    _registry(
+        artifacts,
+        [
+            ("gen1", "universe", None),
+            ("gen2", "universe", "gen1"),
+            ("gen3", "universe", "gen2"),
+        ],
+    )
+    _notebook(repo, declared="gen2")
+
+    check = _run()
+
+    assert not check.passed
+    assert "gen2" in check.detail
+    assert "'live'" in check.detail, "the repair has to be the sentinel, not the moving head"
 
 
 def test_no_registry_is_reported_rather_than_passed(redirected):
