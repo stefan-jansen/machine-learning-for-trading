@@ -685,10 +685,13 @@ _ends = {
     )
     for cs in CASE_STUDIES
 }
+# `if sig` rather than assuming a row: the grid is a parameter and a prediction set short
+# enough to support none of its lookbacks contributes no line to plot and no sentence here.
 _sentences = " ".join(
     f"{name}: signal rate {sig[0] * 100:.1f} to {sig[-1] * 100:.1f} percent across the grid, "
     f"state-transition rate {tr[0] * 100:.1f} to {tr[-1] * 100:.1f} percent."
     for name, (sig, tr) in _ends.items()
+    if sig and tr
 )
 show_plotly_with_alt(
     fig,
@@ -766,6 +769,7 @@ _pct_sentences = " ".join(
     f"{name}: signal rate {sig[0] * 100:.1f} down to {sig[-1] * 100:.1f} percent, "
     f"state-transition rate {tr[0] * 100:.1f} down to {tr[-1] * 100:.1f} percent."
     for name, (sig, tr) in _pct_ends.items()
+    if sig and tr
 )
 show_plotly_with_alt(
     fig,
