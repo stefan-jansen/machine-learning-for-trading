@@ -56,7 +56,6 @@
 
 from __future__ import annotations
 
-import warnings
 from datetime import datetime
 
 import numpy as np
@@ -65,16 +64,18 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from utils.paths import get_chapter_dir
-from utils.style import COLORS  # importing utils.style sets the ml4t Plotly template as default
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # importing utils.style sets the ml4t Plotly template as default
+    COLORS,
+    show_plotly_with_alt,
+    show_with_alt,
+)
 
 # %% tags=["parameters"]
 SEED = 42
 START_DATE = "2015-01-01"
 
 # %% [markdown]
-# ## 0. Feature Discovery with ml4t-engineer
+# ## Feature Discovery with ml4t-engineer
 #
 # Before building features manually, let's see what the `ml4t-engineer` library
 # offers. The registry provides 120 pre-built, validated features that the
@@ -141,7 +142,7 @@ result.select(["timestamp", "close"] + new_cols).tail(5)
 # pipelines.
 
 # %% [markdown]
-# ## 1. Data Loading and Sorting
+# ## Data Loading and Sorting
 #
 # **Critical**: All rolling/window operations require chronological ordering.
 # We establish sorting once at data load, not implicitly per operation.
@@ -165,7 +166,7 @@ print(f"Cross-sectional universe: {len(cs_etfs):,} rows, {cs_etfs['symbol'].n_un
 print(f"Date range: {spy['timestamp'].min()} to {spy['timestamp'].max()}")
 
 # %% [markdown]
-# ## 2. Returns and Horizons
+# ## Returns and Horizons
 #
 # Returns are the foundation of all momentum features. Key variants:
 #
@@ -177,7 +178,7 @@ print(f"Date range: {spy['timestamp'].min()} to {spy['timestamp'].max()}")
 # | Cumulative | $\sum_{i=0}^{h} r_{t-i}$ | Multi-period signals |
 
 # %% [markdown]
-# ### 2.1 Manual Implementation (Teaching)
+# ### Manual Implementation (Teaching)
 #
 # Understanding the mechanics of return computation.
 
@@ -209,7 +210,7 @@ print("Return features computed:")
 returns_df.select(["timestamp", "close", "ret_1d", "ret_5d", "ret_21d"]).tail(10)
 
 # %% [markdown]
-# ### 2.2 Skip-1 Momentum
+# ### Skip-1 Momentum
 #
 # Skip the most recent day to avoid microstructure reversals (bid-ask bounce).
 #
@@ -233,13 +234,13 @@ correlation = skip1_df.drop_nulls().select(
 print(f"Correlation between standard and skip-1 momentum: {correlation[0, 0]:.4f}")
 
 # %% [markdown]
-# **Interpretation**: A correlation of ~0.97 confirms the two series carry
-# very similar information at the 21-day horizon. The skip-1 variant removes
+# **Interpretation**: the correlation printed above is close enough to one that the two
+# series carry very similar information at this horizon. The skip-1 variant removes
 # the last day's microstructure noise (bid-ask bounce), so it is preferred for
 # daily-rebalanced strategies where the most recent close is noisiest.
 
 # %% [markdown]
-# ### 2.3 Session-Based Returns
+# ### Session-Based Returns
 #
 # Decomposing returns into overnight (gap) and intraday components:
 #
@@ -269,7 +270,7 @@ session_df.select(
 ).tail(10)
 
 # %% [markdown]
-# ## 3. Trend and Reversal Features
+# ## Trend and Reversal Features
 #
 # These features capture where price is relative to historical patterns.
 #
@@ -280,7 +281,7 @@ session_df.select(
 # | Short-term Reversal | Mean reversion | Oversold/overbought |
 
 # %% [markdown]
-# ### 3.1 MA Distance (Volatility-Scaled)
+# ### MA Distance (Volatility-Scaled)
 #
 # Raw MA distance varies with price level. Scaling by volatility creates
 # a standardized signal comparable across assets and time.
@@ -358,14 +359,30 @@ fig.update_yaxes(title_text="Price ($)", row=1, col=1)
 fig.update_yaxes(title_text="Distance ($)", row=2, col=1)
 fig.update_yaxes(title_text="Distance (ATR units)", row=3, col=1)
 fig.update_xaxes(title_text="Date", row=3, col=1)
-fig.update_layout(
-    height=600, title="Volatility-scaling standardizes MA distance for cross-asset comparison"
+fig.update_layout(height=600, title="SPY close, raw MA distance, and MA distance in ATR units")
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Three stacked panels sharing a date axis across 2025. The top panel plots the SPY "
+        "close against its 21-day simple moving average: a dip in March and April, then a "
+        "climb to the end of the year. The middle panel fills the raw distance between the "
+        "two in dollars around a dashed zero line, reaching about minus 55 dollars at the "
+        "April low and plus 30 in June. The bottom panel fills the same distance divided by "
+        "ATR, in a teal that tracks the middle panel's shape exactly but on an axis running "
+        "roughly minus 4.5 to plus 3 rather than in dollars."
+    ),
 )
-fig.show()
+
+# %% [markdown]
+# The middle and bottom panels have the same shape because they are the same quantity; only
+# the unit differs. That is the point of the scaling. A dollar distance cannot be compared
+# across assets - it is larger for a more expensive one and larger again for a more volatile
+# one - while a distance in ATR units says how far the price has moved relative to how far
+# it usually moves, which means the same thing on any instrument.
 
 
 # %% [markdown]
-# ### 3.2 Rolling Regression Slope
+# ### Rolling Regression Slope
 #
 # OLS slope over a rolling window measures trend strength more robustly than
 # endpoint-to-endpoint returns: it uses all intermediate prices and is less
@@ -401,10 +418,10 @@ print("Rolling regression slope (normalized %-change over 21d):")
 slope_df.select(["timestamp", "close", "slope_21d"]).tail(10)
 
 # %% [markdown]
-# ### 3.3 Short-Term Reversal
+# ### Short-Term Reversal
 #
-# Recent underperformers tend to outperform in the short term (1-5 days).
-# This is the complement to momentum.
+# Over a horizon of a few days, the assets that fell most recently tend to rise, and the
+# reverse. This is the complement to momentum.
 #
 # $$\text{Reversal} = -r_{1d}$$
 
@@ -425,17 +442,18 @@ print("Short-term reversal features:")
 reversal_df.select(["timestamp", "close", "ret_1d", "reversal_1d"]).tail(10)
 
 # %% [markdown]
-# ### 3.4 Directional Persistence: Distance to MA in ATR Units
+# ### Directional Persistence: Distance to MA in ATR Units
 #
-# This extends the vol-scaled MA distance from §3.1 with different parameters
-# and interpretation. Where §3.1 uses SMA(21)/ATR(21) to measure *current*
-# deviation, here MA(50)/ATR(14) captures *directional persistence* — how
-# far price has trended away from a slower anchor.
+# This extends the vol-scaled MA distance from **MA Distance (Volatility-Scaled)** above,
+# with different parameters and a different reading. There a fast moving average over a
+# matching ATR window measures *current* deviation; here a slower anchor over a shorter
+# ATR window captures *directional persistence* - how far price has trended away from
+# that anchor.
 #
-# $$\text{dist\_to\_ma\_atr} = \frac{P_t - MA_{50}}{ATR_{14}}$$
+# $$\text{dist-to-ma-atr} = \frac{P_t - MA_{50}}{ATR_{14}}$$
 #
-# ATR is used here for normalization (price-denominated), not as a volatility
-# estimator — see §4 for the distinction.
+# ATR is used here for normalization, in price units, rather than as a volatility
+# estimator. **Volatility Features** below draws that distinction.
 
 # %%
 dist_ma_df = spy.with_columns(
@@ -458,7 +476,7 @@ dist_ma_df.select(["timestamp", "close", "ma_50", "atr_14", "dist_to_ma_atr"]).t
 # (conditioning faster signals on trend context).
 
 # %% [markdown]
-# ## 4. Volatility Features
+# ## Volatility Features
 #
 # Volatility is essential for:
 # - **Risk scaling**: Adjust signals by volatility
@@ -475,7 +493,7 @@ dist_ma_df.select(["timestamp", "close", "ma_50", "atr_14", "dist_to_ma_atr"]).t
 # | Yang-Zhang | ~8–14× | Best overall |
 
 # %% [markdown]
-# ### 4.1 Realized Volatility (Close-to-Close)
+# ### Realized Volatility (Close-to-Close)
 #
 # $$\sigma_{CC} = \sqrt{252} \times \text{std}(r_t)$$
 
@@ -499,7 +517,7 @@ print("Volatility comparison:")
 vol_df.select(["timestamp", "close", "vol_cc_21", "vol_yz_21"]).tail(10)
 
 # %% [markdown]
-# ### 4.2 Range-Based Estimators
+# ### Range-Based Estimators
 #
 # Range-based estimators use OHLC data for much higher efficiency than
 # close-to-close. Key formulas:
@@ -510,7 +528,7 @@ vol_df.select(["timestamp", "close", "vol_cc_21", "vol_yz_21"]).tail(10)
 #
 # **Garman-Klass (1980)** — adds open-close information:
 #
-# $$\hat{\sigma}^2_{GK} = 0.5 (\ln H_t - \ln L_t)^2 - (2\ln 2 - 1)(\ln C_t - \ln O_t)^2$$
+# $$\hat{\sigma}^2_{GK} = \tfrac{1}{2} (\ln H_t - \ln L_t)^2 - (2\ln 2 - 1)(\ln C_t - \ln O_t)^2$$
 #
 # | Estimator | Efficiency vs CC | Data Required |
 # |-----------|-----------------|---------------|
@@ -559,8 +577,13 @@ vol_compare_df = spy.with_columns(
     ]
 )
 
+# %% [markdown]
+# The four panels below share one vertical range. Plotly's `shared_yaxes` ties panels
+# within a row and not across rows, so without an explicit range the top and bottom rows
+# rescale independently and the estimator with the smallest spread is drawn as tall as the
+# one with the largest - which is the comparison this figure exists to make.
+
 # %%
-# 4-panel comparison
 n = 504  # Last ~2 years for visualization
 fig = make_subplots(
     rows=2,
@@ -588,17 +611,39 @@ for idx, (col, name) in enumerate(
 
 fig.update_yaxes(title_text="Annualized volatility", col=1)
 fig.update_xaxes(title_text="Date", row=2)
+_vol_max = max(
+    float(max(v for v in vol_compare_df[col].to_list()[-n:] if v is not None))
+    for col in ("vol_cc", "vol_parkinson", "vol_gk", "vol_yz")
+)
+fig.update_yaxes(range=[0, _vol_max * 1.05])
 fig.update_layout(
     height=500,
-    title="Range estimators track SPY volatility more smoothly than close-to-close",
+    title="Four volatility estimators on SPY, on one scale",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Four small-multiple panels of annualized SPY volatility over the same two years, "
+        "one per estimator, drawn on a single shared vertical range from zero. All four "
+        "trace the same broad shape: a quiet level under 0.15 for most of the span, a "
+        "bump in mid-2024, and a tall spike in the first half of 2025. The close-to-close "
+        "panel reaches the highest peak and is visibly the noisiest line of the four; "
+        "Parkinson and Garman-Klass peak lower and run smoother; Yang-Zhang sits between "
+        "them, near the close-to-close peak height but with far less day-to-day jitter."
+    ),
+)
 
 # %% [markdown]
-# **Interpretation**: Range-based estimators (Parkinson, GK, YZ) are smoother
-# and more responsive than close-to-close. During high-volatility events
-# (e.g., March 2020), the range-based estimators capture intraday dynamics
-# that CC misses. Yang-Zhang is preferred for most applications.
+# **Interpretation**: on one scale the ordering is legible. Close-to-close sits highest
+# and is the most jagged of the four; the range-based estimators are both lower and
+# smoother, because a day's high-low range carries more information about that day's
+# variation than its two endpoints do. Yang-Zhang, which uses all four prices, tracks
+# close-to-close closely at the peaks while keeping the range estimators' smoothness,
+# which is why it is the usual default.
+#
+# This panel covers only the last two years. The overlaid figure below runs the full
+# history, where a much larger volatility event makes the same comparison at a scale this
+# window does not contain.
 
 # %% [markdown]
 # ### Four OHLC Estimators Overlaid
@@ -641,7 +686,19 @@ ax.legend(frameon=False, fontsize=8, loc="upper left")
 ax.set_zorder(ax2.get_zorder() + 1)
 ax.patch.set_visible(False)
 
-plt.show()
+show_with_alt(
+    fig_mpl,
+    alt=(
+        "A decade of annualized rolling volatility for SPY with four estimators overlaid "
+        "in different line styles, the legend naming each with its efficiency relative to "
+        "close-to-close. The four lines move together throughout, rising and falling with "
+        "the same events; the close-to-close line is consistently the highest and the most "
+        "jagged, and Parkinson and Garman-Klass sit lowest. A tall spike near 95 percent "
+        "dominates early 2020, with smaller peaks around 40 percent in 2015 and above 50 "
+        "in 2025. Behind them the SPY close is shaded in pale grey against a second axis "
+        "on the right, climbing from under 200 to near 700 dollars over the same span."
+    ),
+)
 
 # Persist source data so the book figure script can re-render at print resolution
 # without re-executing this notebook.
@@ -657,7 +714,7 @@ vol_plot.select(
 ).write_parquet(_FIG_8_3_ARTIFACT)
 
 # %% [markdown]
-# ### 4.3 Volatility-of-Volatility (Vol-of-Vol)
+# ### Volatility-of-Volatility (Vol-of-Vol)
 #
 # Second moment of volatility — useful for detecting unstable regimes.
 
@@ -677,7 +734,7 @@ print("Vol-of-vol (last 10 rows):")
 vov_df.select(["timestamp", "vol", "vol_of_vol"]).tail(10)
 
 # %% [markdown]
-# ### 4.4 Volatility State Features
+# ### Volatility State Features
 #
 # Volatility state features transform continuous vol into conditioning variables:
 #
@@ -730,7 +787,7 @@ print("Volatility state features:")
 vol_state_df.select(["timestamp", "vol_ratio", "vol_percentile", "vol_decile"]).tail(10)
 
 # %% [markdown]
-# ### 4.5 Price-Derived Regime Indicators
+# ### Price-Derived Regime Indicators
 #
 # `ml4t-engineer` provides rolling statistical tests that detect market regime
 # changes without relying on parametric models (HMM, GARCH are in Chapter 9):
@@ -770,7 +827,7 @@ regime_ind_df.select(
 # Parametric regime models (HMM, Markov-switching GARCH) appear in Chapter 9.
 
 # %% [markdown]
-# ## 5. Volume and Liquidity Features
+# ## Volume and Liquidity Features
 #
 # Volume features proxy for:
 # - **Attention**: High volume = information event
@@ -778,7 +835,7 @@ regime_ind_df.select(
 # - **Conviction**: Volume confirms price moves
 
 # %% [markdown]
-# ### 5.1 Dollar Volume
+# ### Dollar Volume
 #
 # Raw volume is not comparable across assets. Dollar volume normalizes.
 #
@@ -797,7 +854,7 @@ print("Dollar volume:")
 volume_df.select(["timestamp", "close", "volume", "dollar_volume"]).tail(10)
 
 # %% [markdown]
-# ### 5.2 Relative Volume
+# ### Relative Volume
 #
 # Volume relative to its recent average. >1 means above-average activity.
 #
@@ -860,11 +917,29 @@ fig.update_yaxes(title_text="Price ($)", row=1, col=1)
 fig.update_yaxes(title_text="Rel. volume (×avg)", row=2, col=1)
 fig.update_yaxes(title_text="Volume z-score", row=3, col=1)
 fig.update_xaxes(title_text="Date", row=3, col=1)
-fig.update_layout(height=600, title="Relative volume and z-scores isolate trading-activity spikes")
-fig.show()
+fig.update_layout(height=600, title="SPY close, relative volume, and the volume z-score")
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Three stacked panels sharing a date axis across 2024 and 2025. The top panel is "
+        "the SPY close, rising over the span with a sharp dip in the spring of 2025. The "
+        "middle panel fills relative volume as a multiple of its own average, oscillating "
+        "around a dashed line at one with spikes reaching about three. The bottom panel "
+        "plots the volume z-score with dashed red lines at plus and minus two: the series "
+        "crosses the upper line perhaps a dozen times across the two years and touches the "
+        "lower line rarely, so high-activity days stand out while quiet days do not."
+    ),
+)
 
 # %% [markdown]
-# ### 5.3 VWAP Distance
+# The two lower panels carry the same information in different units, and the z-score is
+# the one that gives a threshold a fixed meaning. Relative volume is a ratio, so what
+# counts as a spike depends on how dispersed that ratio is for the asset in hand; a
+# z-score puts the cut at a number of standard deviations, and a rule written against it
+# means the same thing on any instrument.
+
+# %% [markdown]
+# ### VWAP Distance
 #
 # How far price has moved from the volume-weighted average price.
 # Useful for intraday strategies and execution.
@@ -906,7 +981,7 @@ vwap_df.select(["timestamp", "close", "vwap_5d", "vwap_distance"]).tail(10)
 # key mean-reversion anchor; for daily data it proxies volume-weighted trend.
 
 # %% [markdown]
-# ## 6. Cross-Sectional Normalization
+# ## Cross-Sectional Normalization
 #
 # For multi-asset strategies, raw features are not comparable. Normalization
 # creates standardized signals across the universe.
@@ -915,7 +990,7 @@ vwap_df.select(["timestamp", "close", "vwap_5d", "vwap_distance"]).tail(10)
 # about timing. Always use point-in-time data.
 
 # %% [markdown]
-# ### 6.1 Cross-Sectional Ranks
+# ### Cross-Sectional Ranks
 #
 # Rank-based features are robust to outliers.
 #
@@ -949,12 +1024,12 @@ print(f"Cross-sectional ranks for {sample_date}:")
 )
 
 # %% [markdown]
-# ### 6.2 Vol-Scaled Cross-Sectional Momentum
+# ### Vol-Scaled Cross-Sectional Momentum
 #
 # The text's spec-table formula: cumulative return divided by realized volatility,
 # then cross-sectional percentile rank. Vol-scaling penalizes momentum driven by
-# high volatility — a stock that rose 10% with 40% vol is less compelling than one
-# that rose 10% with 15% vol.
+# high volatility: two assets that rose by the same amount are not equally interesting if
+# one of them did it with several times the dispersion of the other.
 #
 # $$\text{Vol-Scaled Mom} = \frac{r_{21d}}{\sigma_{21d}}$$
 
@@ -994,7 +1069,7 @@ print(f"Vol-scaled cross-sectional momentum ({sample_date}):")
 # same intuition as the Sharpe ratio applied cross-sectionally.
 
 # %% [markdown]
-# ### 6.3 Cross-Sectional Z-Scores
+# ### Cross-Sectional Z-Scores
 #
 # Z-score normalization assumes (roughly) normal distribution.
 #
@@ -1035,7 +1110,7 @@ print(f"Cross-sectional z-scores for {sample_date}:")
 )
 
 # %% [markdown]
-# ### 6.4 Leakage Warning: Point-in-Time Discipline
+# ### Leakage Warning: Point-in-Time Discipline
 #
 # **Common Leakage Patterns**:
 #
@@ -1057,7 +1132,7 @@ print(f"Cross-sectional z-scores for {sample_date}:")
 # ```
 
 # %% [markdown]
-# ## 7. Risk Features
+# ## Risk Features
 #
 # Risk features capture the *shape* of the return distribution beyond simple volatility.
 # Tail risk measures like VaR, CVaR, and tail ratio are essential for:
@@ -1094,13 +1169,13 @@ risk_df.select(
 # %% [markdown]
 # | Risk Feature | Interpretation | Trading Use |
 # |-------------|----------------|-------------|
-# | **VaR (5% tail)** | Max expected loss in worst 5% of days | Position sizing threshold |
-# | **CVaR (5%)** | Expected loss beyond VaR | Tail risk penalty |
+# | **VaR** | Loss the worst tail of days does not exceed, at the configured level | Position sizing threshold |
+# | **CVaR** | Expected loss beyond VaR | Tail risk penalty |
 # | **Downside Deviation** | Volatility of negative returns only | Sortino ratio denominator |
 # | **Tail Ratio** | Right tail / left tail size | Asymmetry of return distribution |
 
 # %% [markdown]
-# ## 8. ML-Specific Transforms
+# ## ML-Specific Transforms
 #
 # ML-specific transforms prepare features for tree and linear models:
 # - **Fractional differencing**: Makes features stationary while preserving memory
@@ -1122,19 +1197,20 @@ print("Fractional differencing (d=0.5 vs d=1.0):")
 ffd_df.select(["timestamp", "close", "close_ffd_05", "close_ffd_10"]).tail(10)
 
 # %% [markdown]
-# | Transform | d Value | Stationarity | Memory | Use Case |
-# |-----------|---------|-------------|--------|----------|
-# | Original | 0.0 | Non-stationary | Full | Not for ML |
-# | Fractional | 0.3-0.5 | Near-stationary | Preserved | Tree models, regressions |
-# | First diff | 1.0 | Stationary | Lost | Benchmark comparison |
+# | Transform | Differencing order | Stationarity | Memory | Use case |
+# |-----------|--------------------|--------------|--------|----------|
+# | Original | none | Non-stationary | Full | Not for ML |
+# | Fractional | between none and full | Near-stationary | Preserved | Tree models, regressions |
+# | First difference | full | Stationary | Lost | Benchmark comparison |
 #
-# Fractional differencing with $d \approx 0.5$ is a good default for financial
-# time series. It achieves stationarity (required by most ML models) while
-# retaining long-range dependence that purely differenced series lose.
+# A fractional order around the middle of that range is a good default for financial time
+# series - the two orders computed above bracket it. It achieves the stationarity most ML
+# models require while retaining the long-range dependence a fully differenced series
+# throws away.
 
 # %% [markdown]
-# **Caveat**: With finite truncation, `d=1.0` *approximates* but does not
-# exactly equal first differencing. The truncated weight series drops small
+# **Caveat**: with finite truncation, a full differencing order *approximates* but does
+# not exactly equal first differencing. The truncated weight series drops small
 # high-lag coefficients that a true first difference implicitly includes. For
 # practical purposes the difference is negligible, but be aware when comparing
 # FFD output to `pct_change()`.
