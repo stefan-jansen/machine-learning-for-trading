@@ -702,6 +702,13 @@ show_plotly_with_alt(
 # Microstructure features help identify which stocks are more liquid
 # and thus have lower trading costs.
 
+# %% [markdown]
+# The summary below carries the two estimators and the quantities they are built from, so
+# the orderings can be traced rather than asserted. The last column is Amihud's own per-bar
+# ratio, formed bar by bar and then summarised: a median of ratios, not a ratio of medians.
+# The distinction matters because a ratio of medians discards the pairing between each
+# return and the dollar volume that accompanied it, and can order the names differently.
+
 # %%
 # Compute features for all stocks
 all_features = bars.with_columns(
@@ -718,10 +725,12 @@ summary = (
         [
             pl.col("kyle_lambda").median().alias("kyle_median"),
             pl.col("amihud").median().alias("amihud_median"),
-            # The two ingredients the estimators are built from, so the ordering
-            # below can be traced rather than asserted.
+            # The quantities the estimators are built from (see the note below the cell).
             pl.col("returns").abs().median().alias("abs_return_median"),
             (pl.col("close") * pl.col("volume")).median().alias("dollar_volume_median"),
+            (pl.col("returns").abs() / (pl.col("close") * pl.col("volume")) * 1e6)
+            .median()
+            .alias("return_per_mm"),
             pl.len().alias("n_bars"),
         ]
     )
@@ -730,10 +739,6 @@ summary = (
 
 print("Liquidity Summary by Stock:")
 print(summary)
-
-summary = summary.with_columns(
-    (pl.col("abs_return_median") / pl.col("dollar_volume_median") * 1e6).alias("return_per_mm")
-)
 
 print()
 print("orderings, smallest value first:")
