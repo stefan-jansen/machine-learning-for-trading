@@ -91,7 +91,15 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, OrderSide, Strategy
+from ml4t.backtest import (
+    BacktestConfig,
+    DataFeed,
+    Engine,
+    ExecutionMode,
+    OrderSide,
+    OrderStatus,
+    Strategy,
+)
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
@@ -226,7 +234,10 @@ print(f"Features: {features.shape}, {len(fc)} feature columns")
 
 # %%
 registry_path = get_case_study_dir("etfs") / "run_log" / "registry.db"
-registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro&immutable=1"
+# Read-only, but not `immutable=1`: the registry is a WAL database that sweeps write to
+# concurrently, and an immutable connection ignores the -wal file and reads the pre-WAL main
+# file, which shows up here as a stale leader or as a table that appears not to exist.
+registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro"
 with sqlite3.connect(registry_uri, uri=True) as conn:
     winner = conn.execute(
         """SELECT tr.config_name, tr.spec_json, pm.ic_mean
@@ -427,8 +438,10 @@ print(
 # leverage stays constant as profit and loss accrue, and against slightly less than all of it.
 # `CASH_BUFFER` is what the order is sized on the current bar's close but fills at the next bar's:
 # an overnight move against the position, plus commission, makes a basket sized at the full account
-# value unaffordable, and the broker answers that by rejecting the last leg rather than by filling
-# it smaller.
+# value unaffordable, and the broker answers that by refusing the last leg rather than by filling
+# it smaller. Two per cent is a margin measured on this window, not a guarantee - a basket that
+# gaps up about two per cent overnight is unaffordable again - and the disposition check below is
+# what turns that into a stop rather than a quietly short basket.
 
 
 # %%
@@ -559,19 +572,34 @@ print(f"Backtest signals: {len(strategy_backtest.signal_log)}")
 # The replay is read below as the deterministic record of what the deployment would have done, so
 # an order it emitted and the broker refused has to stop it being read that way. The same four
 # buckets the live leg reports apply here: a signal the strategy logged is intended, and only a
-# filled order is accepted. Sizing every leg at the full account value produced eight rejections
+# filled order is accepted. Sizing every leg at the full account value produced eight refusals
 # over this window before `CASH_BUFFER` existed, and nothing in the notebook looked.
+#
+# An order still pending on the last bar is a different thing and is counted separately. Under
+# `NEXT_BAR` the engine fills an order at the start of the following bar, and the final bar has
+# no following bar, so a rebalance that lands on the last day of the window leaves its whole
+# basket unfilled. That is the replay running out of tape, not the broker refusing anything.
 
 # %%
-order_status_counts: dict[str, int] = {}
+last_bar_ts = engine_backtest.equity_curve[-1][0]
+refused, pending_at_end = [], []
 for order in engine_backtest.broker.orders:
-    name = order.status.name if hasattr(order.status, "name") else str(order.status)
-    order_status_counts[name] = order_status_counts.get(name, 0) + 1
-print(f"Offline order dispositions: {dict(sorted(order_status_counts.items()))}")
-unfilled = {k: v for k, v in order_status_counts.items() if k != "FILLED"}
-assert not unfilled, (
-    f"The offline replay did not place the basket it logged: {unfilled}. "
-    "A rejected order means the reference tape and the strategy's own signal log disagree, "
+    if order.status is OrderStatus.FILLED:
+        continue
+    if order.status is OrderStatus.PENDING and order.created_at == last_bar_ts:
+        pending_at_end.append(order)
+    else:
+        refused.append(order)
+
+print(f"Offline orders: {len(engine_backtest.broker.orders)}")
+print(f"  filled:              {len(engine_backtest.broker.fills)}")
+print(f"  unfilled at the end: {len(pending_at_end)}")
+print(f"  refused:             {len(refused)}")
+for order in refused[:5]:
+    print(f"    {order.asset} {order.side.value} {order.quantity:g}: {order.rejection_reason}")
+assert not refused, (
+    f"The offline replay did not place the basket it logged: {len(refused)} order(s) refused. "
+    "A refused order means the reference tape and the strategy's own signal log disagree, "
     "so the reconciliation below would compare an intended basket against one never held."
 )
 
@@ -609,7 +637,8 @@ show_with_alt(
     "against a dashed line at the starting balance, "
     + ("ending above it" if backtest_results["final_value"] >= INITIAL_CASH else "ending below it")
     + ". The lower panel shades the drawdown from the running peak, which returns to zero at each "
-    "new high and reaches its deepest point early in the window.",
+    "new high; its deepest point falls in "
+    f"{equity_dates[int(np.argmin(drawdown))]:%B %Y}.",
 )
 
 # %% [markdown]
