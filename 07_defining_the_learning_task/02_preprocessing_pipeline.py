@@ -606,7 +606,8 @@ if us_equities is not None:
 # The step stays, because dropping implausibly large upward jumps is still worth doing
 # before anything fits a scaler. What changes is the claim attached to it. The cell prints
 # how many of the removed rows `split_ratio` actually records as a split day, and the
-# smallest return it removed - which cannot be negative, whatever the threshold.
+# smallest return it removed - which cannot be negative for any threshold at or above 1,
+# and this one is well above it.
 
 # %%
 MAX_ABS_DAILY_RETURN = 2.0
@@ -619,9 +620,13 @@ if us_equities is not None:
     on_a_split_day = extreme_returns.filter(
         (pl.col("split_ratio") != 1) & pl.col("split_ratio").is_not_null()
     ).height
+    smallest_removed = extreme_returns["returns"].min()
     print(f"Rows with |return| > {MAX_ABS_DAILY_RETURN}: {len(extreme_returns):,}")
     print(f"  that split_ratio records as a split: {on_a_split_day:,}")
-    print(f"  smallest return removed:             {extreme_returns['returns'].min():+.4f}")
+    if smallest_removed is None:
+        print("  smallest return removed:             none, the filter removed nothing")
+    else:
+        print(f"  smallest return removed:             {smallest_removed:+.4f}")
     cleaned = cleaned.filter(
         pl.col("returns").is_null() | (pl.col("returns").abs() <= MAX_ABS_DAILY_RETURN)
     )
