@@ -232,13 +232,13 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # distribution relative to the true null and pushes the empirical p-value toward zero whether or not
 # the effect is real.
 #
-# **That is no longer what the column reports, and the reason is worth following.** Both labels used
-# to sit at 0.0396 and 0.0099, the second of which is 1/101 and the floor 100 draws can report. The
-# refutation now compares HAC t-statistics rather than raw effects, because a permuted treatment is
-# not predictable from the controls, its residual keeps nearly all its variance, and that variance is
-# the denominator of the second-stage effect - so every placebo effect was divided by a larger number
-# than the observed one. Correcting that moved these two rows to 0.2673 and 0.5545, both `Fails`, on
-# an identical fit. The block-length argument above still stands and is a separate, uncorrected
+# **That is no longer what the column reports, and the reason is worth following.** `fwd_ret_5d` used
+# to sit at 0.0396 and `fwd_ret_21d` at 0.0099, which is 1/101 and the floor 100 draws can report.
+# The refutation now compares HAC t-statistics rather than raw effects, because a permuted treatment
+# is not predictable from the controls, its residual keeps nearly all its variance, and that variance
+# is the denominator of the second-stage effect - so every placebo effect was divided by a larger
+# number than the observed one. Correcting that moved `fwd_ret_5d` to 0.5545 and `fwd_ret_21d` to
+# 0.2673, both `Fails`, on an identical fit. The block-length argument above still stands and is a separate, uncorrected
 # narrowing; it simply is no longer visible in these two numbers. Read the DML point estimate and its
 # HAC standard error. The refutation column is recorded for completeness and carries no evidence
 # here.
