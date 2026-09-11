@@ -238,7 +238,15 @@ def test_causal_pins_the_thread_pool_and_records_it_in_identity(tmp_path, monkey
     def capture(*args, **kwargs):
         passed.append(kwargs["thread_limit"])
         return {
-            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "dml_result": {
+                "theta": 0.02,
+                "se_hac": 0.01,
+                "n_obs": 120,
+                # `manual_dml_timeseries` always returns this, and
+                # `run_resolved_causal_request` reads it without a default so a
+                # missing one is a defect rather than a silent NULL in the row.
+                "covariance_type": "driscoll_kraay",
+            },
             "p_value_hac": 0.04,
             "naive_effect": 0.03,
             "confounding_bias_pct": 50.0,
@@ -321,9 +329,11 @@ def test_run_dml_analysis_pins_the_naive_ols_too(monkeypatch) -> None:
             "theta": 0.02,
             "se_hac": 0.01,
             "n_obs": n,
-            "t_stat": 2.0,
+            # `t_stat_hac` and not `t_stat`, and no `hac_lags`: neither of those names is
+            # in what `manual_dml_timeseries` returns, so the stub was answering to a
+            # shape the code under test never sees.
+            "t_stat_hac": 2.0,
             "p_value_hac": 0.04,
-            "hac_lags": 1,
             "n_entities": 1,
             "n_periods": n,
             "hac_maxlags": 1,
@@ -417,7 +427,15 @@ def test_causal_run_registers_once_and_reopens_after_restart(tmp_path, monkeypat
         causal,
         "run_dml_analysis",
         lambda *args, **kwargs: {
-            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "dml_result": {
+                "theta": 0.02,
+                "se_hac": 0.01,
+                "n_obs": 120,
+                # `manual_dml_timeseries` always returns this, and
+                # `run_resolved_causal_request` reads it without a default so a
+                # missing one is a defect rather than a silent NULL in the row.
+                "covariance_type": "driscoll_kraay",
+            },
             "p_value_hac": 0.04,
             "naive_effect": 0.03,
             "confounding_bias_pct": 50.0,
@@ -468,7 +486,15 @@ def test_the_frozen_fraction_reaches_the_registry_and_survives_a_cache_hit(
         nonlocal calls
         calls += 1
         return {
-            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "dml_result": {
+                "theta": 0.02,
+                "se_hac": 0.01,
+                "n_obs": 120,
+                # `manual_dml_timeseries` always returns this, and
+                # `run_resolved_causal_request` reads it without a default so a
+                # missing one is a defect rather than a silent NULL in the row.
+                "covariance_type": "driscoll_kraay",
+            },
             "p_value_hac": 0.04,
             "naive_effect": 0.03,
             "confounding_bias_pct": 50.0,
@@ -508,7 +534,15 @@ def test_causal_cache_accepts_provenance_only_drift(tmp_path, monkeypatch) -> No
         nonlocal calls
         calls += 1
         return {
-            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "dml_result": {
+                "theta": 0.02,
+                "se_hac": 0.01,
+                "n_obs": 120,
+                # `manual_dml_timeseries` always returns this, and
+                # `run_resolved_causal_request` reads it without a default so a
+                # missing one is a defect rather than a silent NULL in the row.
+                "covariance_type": "driscoll_kraay",
+            },
             "p_value_hac": 0.04,
             "naive_effect": 0.03,
             "confounding_bias_pct": 50.0,
@@ -1040,7 +1074,15 @@ def test_the_registered_row_names_the_notebook_not_the_module(tmp_path, monkeypa
         causal_module,
         "run_dml_analysis",
         lambda *a, **k: {
-            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "dml_result": {
+                "theta": 0.02,
+                "se_hac": 0.01,
+                "n_obs": 120,
+                # `manual_dml_timeseries` always returns this, and
+                # `run_resolved_causal_request` reads it without a default so a
+                # missing one is a defect rather than a silent NULL in the row.
+                "covariance_type": "driscoll_kraay",
+            },
             "p_value_hac": 0.04,
             "naive_effect": 0.03,
             "confounding_bias_pct": 50.0,

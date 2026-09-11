@@ -53,6 +53,7 @@ MIGRATION_BACKFILLED_COLUMNS = frozenset(
         "refutation_placebo_json",
         "refutation_placebo_t_json",
         "refutation_frozen_fraction",
+        "covariance_type",
     }
 )
 MAX_PREDICTION_STD_RATIO = 100.0
@@ -2407,6 +2408,7 @@ def register_causal_run(
     n_obs: int,
     dml_effect: float,
     dml_se_hac: float,
+    covariance_type: str | None = None,
     p_value_hac: float | None,
     naive_effect: float | None,
     confounding_bias_pct: float | None,
@@ -2469,6 +2471,7 @@ def register_causal_run(
             "n_obs",
             "dml_effect",
             "dml_se_hac",
+            "covariance_type",
             "p_value_hac",
             "naive_effect",
             "confounding_bias_pct",
@@ -2497,6 +2500,7 @@ def register_causal_run(
             n_obs,
             dml_effect,
             dml_se_hac,
+            covariance_type,
             p_value_hac,
             naive_effect,
             confounding_bias_pct,
@@ -2561,14 +2565,14 @@ def register_causal_run(
             """
             INSERT INTO causal_runs (
                 causal_hash, label, treatment, confounders_json, embargo,
-                n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
+                n_folds, n_obs, dml_effect, dml_se_hac, covariance_type, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
                 refutation_n_successful, refutation_placebo_json,
                 refutation_placebo_t_json,
                 refutation_frozen_fraction,
                 spec_json, notebook, started_at, elapsed_s, git_commit,
                 supersedes_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -2578,6 +2582,10 @@ def register_causal_run(
                 n_obs=excluded.n_obs,
                 dml_effect=excluded.dml_effect,
                 dml_se_hac=excluded.dml_se_hac,
+                -- Plain, not COALESCE: it is in `comparable_columns`, so an immutable
+                -- row has already had it backfilled or matched. The
+                -- `refutation_frozen_fraction` shape.
+                covariance_type=excluded.covariance_type,
                 p_value_hac=excluded.p_value_hac,
                 naive_effect=excluded.naive_effect,
                 confounding_bias_pct=excluded.confounding_bias_pct,
@@ -2621,6 +2629,7 @@ def register_causal_run(
                OR causal_runs.n_obs IS NOT excluded.n_obs
                OR causal_runs.dml_effect IS NOT excluded.dml_effect
                OR causal_runs.dml_se_hac IS NOT excluded.dml_se_hac
+               OR causal_runs.covariance_type IS NOT excluded.covariance_type
                OR causal_runs.p_value_hac IS NOT excluded.p_value_hac
                OR causal_runs.naive_effect IS NOT excluded.naive_effect
                OR causal_runs.confounding_bias_pct IS NOT excluded.confounding_bias_pct
@@ -2643,6 +2652,7 @@ def register_causal_run(
                 n_obs,
                 dml_effect,
                 dml_se_hac,
+                covariance_type,
                 p_value_hac,
                 naive_effect,
                 confounding_bias_pct,

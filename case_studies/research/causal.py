@@ -166,10 +166,14 @@ class CausalResult:
                     if "refutation_frozen_fraction" in columns
                     else "NULL AS refutation_frozen_fraction"
                 )
+                covariance_column = (
+                    "covariance_type" if "covariance_type" in columns else "NULL AS covariance_type"
+                )
                 row = db.execute(
                     "SELECT n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
                     f"confounding_bias_pct, refutation_p, {draws_column}, spec_json, "
-                    f"{placebo_column}, {placebo_t_column}, {frozen_column} "
+                    f"{placebo_column}, {placebo_t_column}, {frozen_column}, "
+                    f"{covariance_column} "
                     "FROM causal_runs WHERE causal_hash = ?",
                     (causal_hash,),
                 ).fetchone()
@@ -212,6 +216,12 @@ class CausalResult:
                     # the refutation recorded none - zero asserts that permutation moved
                     # every row, which is the opposite of not knowing.
                     "placebo_frozen_fraction": row[11],
+                    # Which estimator produced dml_se_hac: "driscoll_kraay",
+                    # "newey_west", or "failed". None means the row was written before
+                    # anything recorded it, and that is not recoverable after the fact -
+                    # the fallback returned an HC0 value under the robust name, bit for
+                    # bit, so no stored field distinguishes it from a robust result.
+                    "covariance_type": row[12],
                     # Derived here so every reader gets the same verdict from the same
                     # rule. A p-value alone cannot say whether the draws could have
                     # rejected at all, so a caller that re-applies a bare threshold
