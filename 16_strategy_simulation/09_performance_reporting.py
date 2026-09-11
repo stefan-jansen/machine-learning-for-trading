@@ -994,15 +994,40 @@ fig.update_layout(
     xaxis_title="Month",
     yaxis_title="Year",
 )
-_cells = [float(v) for row in fig.data[0].z for v in row if v is not None and np.isfinite(v)]
-_zero_cells = sum(1 for v in _cells if v == 0)
+_month_columns = [i for i, label in enumerate(fig.data[0].x) if label != "Annual"]
+_months = [
+    float(row[i])
+    for row in fig.data[0].z
+    for i in _month_columns
+    if row[i] is not None and np.isfinite(row[i])
+]
+_annual_column = [i for i, label in enumerate(fig.data[0].x) if label == "Annual"]
+_annual = [
+    float(row[i])
+    for row in fig.data[0].z
+    for i in _annual_column
+    if row[i] is not None and np.isfinite(row[i])
+]
+_zero_months = sum(1 for v in _months if v == 0)
+_month_note = (
+    f"{_zero_months} of the {len(_months)} monthly cells are exactly zero, the months the rule "
+    f"held no position, and the rest run from {min(_months):.1%} to {max(_months):.1%}, so the "
+    "months that are not flat are large in both directions rather than a gentle spread around "
+    "the mean"
+    if _months
+    else "the heatmap has no monthly cells"
+)
+_annual_note = (
+    f" The annual column compounds each row and runs from {min(_annual):.1%} to "
+    f"{max(_annual):.1%} over {len(_annual)} years."
+    if _annual
+    else ""
+)
 show_plotly_with_alt(
     fig,
     "Heatmap of net return by calendar month and year with an annual column at the right, on a "
     "diverging scale where positive is green and negative red, each cell labelled. "
-    f"{_zero_cells} of the {len(_cells)} cells are exactly zero, the months the rule held no "
-    f"position. The rest run from {min(_cells):.1f} to {max(_cells):.1f}, so the months that are "
-    "not flat are large in both directions rather than a gentle spread around the mean.",
+    f"{_month_note}.{_annual_note}",
 )
 
 # %%

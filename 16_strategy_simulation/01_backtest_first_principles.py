@@ -349,16 +349,22 @@ fig.update_layout(
 )
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
 _scores = latest_scores["momentum_score"].to_list()
-_gap_in_top = _scores[0] - _scores[TOP_N - 1]
-_gap_to_next = _scores[TOP_N - 1] - _scores[TOP_N]
+_n_held = len(latest_top)
+_gap_in_top = _scores[0] - _scores[_n_held - 1] if _n_held else 0.0
+_selection_note = (
+    f"They are spread over {_gap_in_top:.2f} among themselves against "
+    f"{_scores[_n_held - 1] - _scores[_n_held]:.2f} between the last of them and the first fund "
+    "left out, so what the chart shows is the size of the gap the selection rests on rather "
+    "than a clean break"
+    if 0 < _n_held < len(_scores)
+    else f"They are spread over {_gap_in_top:.2f} among themselves, with no fund left out"
+)
 show_plotly_with_alt(
     fig,
     f"Horizontal bar chart of the {len(_scores)} funds' trailing risk-adjusted momentum on "
     f"{dates[-1]}, sorted with the highest at the top and spanning {min(_scores):.2f} to "
-    f"{max(_scores):.2f}. The top {TOP_N} are drawn in navy as the ones a risk-on month would "
-    f"buy: {', '.join(latest_top)}. They are spread over {_gap_in_top:.2f} among themselves "
-    f"against {_gap_to_next:.2f} between the last of them and the first fund left out, so what "
-    "the chart shows is the size of the gap the selection rests on rather than a clean break.",
+    f"{max(_scores):.2f}. The top {_n_held} are drawn in navy as the ones a risk-on month would "
+    f"buy: {', '.join(latest_top)}. {_selection_note}.",
 )
 
 # %% [markdown]
