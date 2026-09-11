@@ -1037,10 +1037,31 @@ def _rank_on_common_support_where_a_conformal_candidate_is_present(
     name different configurations - and the degeneracy fallback's rank-2 and rank-3 were
     ordered by a criterion the rank-1 was not.
 
-    Each candidate keeps its registered ``sharpe`` and gains ``comparison_sharpe``, which is
-    the Sharpe over the timestamps every candidate prices, or ``None`` where no re-ranking
-    was needed. Callers reporting the selection's Sharpe want ``comparison_sharpe`` where it
-    is set; callers reporting what the registry stored want ``sharpe``.
+    Each candidate keeps its registered ``sharpe`` and gains ``comparison_sharpe``, the
+    Sharpe over the timestamps every candidate prices. Callers reporting the selection's
+    Sharpe want ``comparison_sharpe`` where it is set; callers reporting what the registry
+    stored want ``sharpe``.
+
+    ``comparison_sharpe`` is ``None`` in two different states, and ``comparison_ruined``
+    separates them, because the correct handling is opposite in each:
+
+    ``comparison_ruined is None``
+        No re-ranking ran - there was no conformal candidate in the field - so the
+        registered ``sharpe`` is the only Sharpe there is and is what a caller should read.
+    ``comparison_ruined is True``
+        Re-ranking ran and :func:`rank_returns_on_common_support` found this candidate's
+        path stopped at ruin, so it carries no Sharpe at all. **Falling back to the
+        registered ``sharpe`` here is what the ruin rule exists to prevent**: that number
+        is computed on a balance that no longer exists, and reading it lets a bankrupt
+        path compare as a solvent one. The candidate stays on the frame, ordered below
+        every solvent one, so a caller can see it was compared and not selected.
+
+    Coercing that ``None`` to a float is what this used to do, and it raised ``TypeError:
+    float() argument must be a string or a real number, not 'NoneType'`` on the one case
+    study whose field holds a conformal candidate and ruined candidates at once
+    (``us_firm_characteristics``: 46 of 2,516 candidates carry no Sharpe over the 109
+    monthly periods, 2006-12-29 to 2015-12-31, that every candidate prices). The crash was
+    the honest half of the behaviour; the fallback it hid is the dangerous half.
     """
 
     def _is_conformal(row: dict[str, Any]) -> bool:
@@ -1050,7 +1071,13 @@ def _rank_on_common_support_where_a_conformal_candidate_is_present(
 
     if not any(_is_conformal(row) for row in candidates):
         return [
-            {**row, "comparison_sharpe": None, "comparison_n_periods": None} for row in candidates
+            {
+                **row,
+                "comparison_sharpe": None,
+                "comparison_n_periods": None,
+                "comparison_ruined": None,
+            }
+            for row in candidates
         ]
 
     from case_studies.utils.uncertainty import periods_per_year_from_setup
@@ -1067,16 +1094,22 @@ def _rank_on_common_support_where_a_conformal_candidate_is_present(
     ):
         raise RuntimeError("Common-support ranking produced unequal n_periods")
     by_hash = {row["backtest_hash"]: row for row in candidates}
-    return [
-        {
+
+    def _compared(backtest_hash: str) -> dict[str, Any]:
+        # None is the producer's documented answer for a path stopped at ruin, not a
+        # missing value to fill in. Carried through as None and flagged, so that no caller
+        # can read it as a number and none has to guess which of the two Nones it is.
+        sharpe = rank_rows[backtest_hash]["sharpe"]
+        return {
             **by_hash[backtest_hash],
-            "comparison_sharpe": float(rank_rows[backtest_hash]["sharpe"]),
+            "comparison_sharpe": None if sharpe is None else float(sharpe),
+            "comparison_ruined": sharpe is None,
             "comparison_n_periods": comparison_n_periods,
             "comparison_start": rank_rows[backtest_hash]["start"],
             "comparison_end": rank_rows[backtest_hash]["end"],
         }
-        for backtest_hash in common_ranking["backtest_hash"].to_list()
-    ]
+
+    return [_compared(backtest_hash) for backtest_hash in common_ranking["backtest_hash"].to_list()]
 
 
 def resolve_canonical_rank1_lineage(
@@ -1134,6 +1167,22 @@ def resolve_canonical_rank1_lineage(
     # rank-1 is read rather than recomputed. `comparison_sharpe` is set exactly where that
     # re-ranking ran, and it is the Sharpe over the timestamps every candidate prices - the
     # only one the candidates can be compared on.
+    # A ruined rank-1 has no Sharpe to report and must not borrow the registered one. The
+    # ranking puts nulls last, so this is reachable in exactly two states: every candidate in
+    # the field was stopped at ruin, or a CARRIER_PINS entry narrowed the field to one that
+    # was. Both are a sweep to fix or a pin to re-derive, and neither is a selection this
+    # function can make - so it refuses here rather than returning a configuration whose
+    # reported Sharpe is computed on a balance that no longer exists.
+    if val.get("comparison_ruined"):
+        raise NoSelectableCandidates(
+            f"The rank-1 validation candidate for {case_study} ({val['backtest_hash']}) was "
+            "stopped at ruin, so it carries no Sharpe over the common support and nothing "
+            "measured downstream of it would mean anything. Its registered Sharpe of "
+            f"{float(val['sharpe']):.4f} is computed on a balance that no longer exists. "
+            "Ruined candidates sort below every solvent one, so reaching this means the whole "
+            "field was ruined, or a CARRIER_PINS entry narrowed it to one that was. Fix the "
+            "sweep, or re-derive the pin, rather than selecting a bankrupt path."
+        )
     val_sharpe = (
         float(val["comparison_sharpe"])
         if val["comparison_sharpe"] is not None

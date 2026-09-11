@@ -169,6 +169,11 @@ def _candidate_from_row(cs_id: str, row: dict) -> dict:
         # field was re-ranked. Reporting the stored value instead would have the two entry
         # points agree on the configuration and print different numbers for it, and chapter
         # 20 measures holdout decay against this.
+        #
+        # The fallback to the stored value is for the field that was never re-ranked, where
+        # it is the only Sharpe there is. It must not be reached for a ruined candidate,
+        # whose `comparison_sharpe` is also None and whose stored Sharpe describes an
+        # account that went to zero; `select_best_models` keeps those out of this pool.
         "val_sharpe": (
             row["comparison_sharpe"] if row["comparison_sharpe"] is not None else row["sharpe"]
         ),
@@ -248,6 +253,15 @@ def select_best_models(
     seen_phashes: set[str] = set()
     candidates: list[dict] = []
     for row in candidates_df:
+        # A candidate the engine stopped at ruin carries no Sharpe over the common support
+        # and is not a strategy anything can be retrained into. It stays on the ranked frame
+        # so it is visibly compared, and the ranking already orders it below every solvent
+        # one - but this pool is the rank-2 and rank-3 the holdout retrain falls back to,
+        # and a field with fewer than `top_n` solvent members would otherwise offer one.
+        # `_candidate_from_row` would then report its registered Sharpe as `val_sharpe`,
+        # which is the bankrupt path comparing as a solvent one.
+        if row.get("comparison_ruined"):
+            continue
         ph = row["prediction_hash"]
         if ph in seen_phashes:
             continue
