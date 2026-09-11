@@ -372,7 +372,15 @@ uv run jupyter nbconvert --to notebook --execute \
 The notebook is a research-only smoke workflow. It uses synthetic fixture data unless you
 explicitly replace it with a locally normalized MNQ file, and it requires no downloads,
 credentials, broker/API access, or live market data by default. Its output does not claim
-profitability or establish live execution quality.
+profitability or establish live execution quality. The baseline validation report is at
+[research/reports/mnq-baseline-validation.md](research/reports/mnq-baseline-validation.md).
+
+The extension gate is intentionally narrow: MES or MGC work requires no lookahead failures,
+no controlled-backtest risk-limit breaches, stable results across at least three chronological
+regimes, and a holdout report covering costs and drawdown. Each instrument must first supply
+its own point value, tick size, session rules, data-quality checks, and fixed-contract
+configuration validation. No MES/MGC implementation is included here; real MNQ history and a
+rollover policy are also not available in this checkout.
 
 ### Docker images
 
