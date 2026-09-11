@@ -1713,7 +1713,8 @@ show_plotly_with_alt(
         "minus 0.33 to plus 0.33. The left panel, fixed-horizon 21-day returns, is a broad "
         "bell centred slightly above zero with visible tails on both sides. The right "
         "panel, the booked triple-barrier return, is two thin spikes crowded together near "
-        "the middle at minus one and plus two percent, with the rest of the axis empty. "
+        "the middle at minus one and plus two percent, with the small remainder of "
+        "time-barrier exits spread too thinly between them to see at this scale. "
         "The barrier target occupies a small fraction of the range the fixed-horizon "
         "target spans."
     ),
@@ -1721,7 +1722,9 @@ show_plotly_with_alt(
 
 # %% [markdown]
 # On a shared axis the barriers stop looking like a variation on the forward return and
-# start looking like what they are: a target censored to two values a few percent apart.
+# start looking like what they are: a target whose mass is pinned to two values a few
+# percent apart, with only the trades that reach the time barrier keeping a return of
+# their own.
 # Everything the fixed-horizon label says about the size of a move has been discarded, in
 # exchange for a statement about which of two thresholds arrived first. That is the right
 # trade when the strategy really does exit at those thresholds and the wrong one when the
@@ -1812,8 +1815,10 @@ show_plotly_with_alt(
 #    with trailing volatility and with trailing drift together.
 # 3. **Cross-sectional percentile** fixes the class balance by construction and pushes all
 #    the variation into the cut point, where it is easy to stop looking at it.
-# 4. **Triple barrier** describes the trade, not the market: it censors the target to the
-#    two barrier levels and discards the rest of the path.
+# 4. **Triple barrier** describes the trade, not the market. A trade that touches a
+#    barrier is booked at that barrier, so most of the target lands on one of two values;
+#    only the minority that run to the time barrier carry a terminal return. Either way
+#    the rest of the path is discarded.
 # 5. **Trend scanning** gives a useful adaptive horizon and a sign. Its t-statistic is a
 #    regression on price levels and rejects at almost any threshold under its own null.
 # 6. **Anchor alignment** nets to zero on average and changes every individual label.
