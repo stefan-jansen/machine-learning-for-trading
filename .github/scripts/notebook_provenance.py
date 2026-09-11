@@ -732,6 +732,28 @@ def _alt_literal_spans(arg: ast.expr) -> list[ast.Constant] | None:
     return None
 
 
+def _alt_argument(node: ast.Call) -> ast.expr | None:
+    """The alt argument of an ``ALT_FUNCS`` call, whether positional or by keyword.
+
+    Reading ``node.args[1]`` alone made ``sync-alt`` unreachable for
+    ``show_plotly_with_alt(fig, alt=...)``: one positional argument, so the call was
+    skipped, its alt was never blanked, and a corrected wording compared as ordinary
+    source drift. What the author saw was "code cell N differs for something other
+    than an alt literal ... Re-run the notebook" - a plausible wrong answer rather
+    than a visible failure, which is the expensive kind, because the documented cheap
+    path for the correction is the one it closes.
+
+    Returns ``None`` when the call names no alt at all, which is left in the AST dump
+    the way an unknowable alt is.
+    """
+    if len(node.args) >= 2:
+        return node.args[1]
+    for keyword in node.keywords:
+        if keyword.arg == "alt":
+            return keyword.value
+    return None
+
+
 def _blank_alts(code: str) -> tuple[ast.Module, list[_AltText]] | None:
     """(*code* parsed with every alt's prose neutralised, the alts in source order).
 
@@ -771,13 +793,11 @@ def _blank_alts(code: str) -> tuple[ast.Module, list[_AltText]] | None:
 
     found: list[tuple[tuple[int, int], _AltText]] = []
     for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and _alt_call_name(node.func) in ALT_FUNCS
-            and len(node.args) >= 2
-        ):
+        if not (isinstance(node, ast.Call) and _alt_call_name(node.func) in ALT_FUNCS):
             continue
-        arg = node.args[1]
+        arg = _alt_argument(node)
+        if arg is None:
+            continue
         position = (arg.lineno, arg.col_offset)
         parts = _alt_literal_spans(arg)
         if parts is None:

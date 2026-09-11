@@ -44,6 +44,16 @@ from utils.style import show_plotly_with_alt
 show_plotly_with_alt(fig, "Bars sorted from tallest at the left to shortest at the right.")
 """
 
+KEYWORD = """# %% [markdown]
+# # A notebook
+
+# %%
+from utils.style import show_plotly_with_alt
+
+show_plotly_with_alt(fig, alt="Bars sorted from tallest at the left to shortest at the right.")
+"""
+
+
 COMPUTED = """# %% [markdown]
 # # A notebook
 
@@ -262,3 +272,58 @@ def test_code_bodies_drops_the_preamble_so_cells_line_up(repo):
     src = "# ---\n# jupyter: meta\n# ---\n\n# %% [markdown]\n# Prose.\n\n# %%\nx = 1\n"
     assert len(provenance._code_bodies(src)) == 1
     assert provenance._code_bodies(src)[0].strip() == "x = 1"
+
+
+def test_blank_alts_sees_an_alt_passed_by_keyword(repo):
+    """The defect: one positional argument, so the call was skipped and never blanked.
+
+    Counted across main when this was fixed, 38 calls in 8 files pass the alt by
+    keyword and 1,033 pass it positionally. All 38 are chapter 7, which had merged
+    and so would have paid a re-execution for any wording fix.
+    """
+    positional = provenance._blank_alts('show_plotly_with_alt(fig, "A bar chart.")')
+    keyword = provenance._blank_alts('show_plotly_with_alt(fig, alt="A bar chart.")')
+    assert positional is not None and keyword is not None
+    assert positional[1] == ["A bar chart."]
+    assert keyword[1] == ["A bar chart."], "an alt= call reports no alt at all"
+
+
+def test_blank_alts_reports_a_call_that_names_no_alt_as_unknowable(repo):
+    """The no-hit half: reading keywords must not invent an alt where there is none.
+
+    Keep this even though it passes with and without the keyword fix. The other three
+    tests would all pass against a checker that reported an alt for every call, so this
+    is the case that makes them about keywords rather than about reporting more. A rule
+    you cannot write a must-still-fail case for is not a rule.
+    """
+    tree_and_alts = provenance._blank_alts("show_plotly_with_alt(fig)")
+    assert tree_and_alts is not None
+    assert tree_and_alts[1] == []
+
+
+def test_a_corrected_keyword_alt_is_alt_text_only_drift(repo):
+    """Same contract as the positional case, which is the whole point of the fix."""
+    py, nb_path = _write_pair(
+        repo, KEYWORD, "Bars sorted from tallest at the left to shortest at the right edge."
+    )
+    blob = _stamp(nb_path, py)
+    py.write_text(KEYWORD.replace("shortest at the right.", "shortest at the right edge."), "utf-8")
+    assert _drift(nb_path, py, blob) is True
+
+
+def test_sync_alt_writes_a_keyword_correction_into_the_outputs(repo):
+    """The cheap path end to end: before the fix this left the outputs saying the old thing."""
+    py, nb_path = _write_pair(
+        repo, KEYWORD, "Bars sorted from tallest at the left to shortest at the right."
+    )
+    _stamp(nb_path, py)
+    py.write_text(KEYWORD.replace("shortest at the right.", "shortest at the right edge."), "utf-8")
+    provenance.sync_alt(nb_path)
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    alts = [
+        o["metadata"]["image/png"]["alt"]
+        for c in nb["cells"]
+        for o in c.get("outputs", [])
+        if "image/png" in (o.get("data") or {})
+    ]
+    assert alts == ["Bars sorted from tallest at the left to shortest at the right edge."]
