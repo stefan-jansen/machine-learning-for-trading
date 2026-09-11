@@ -98,7 +98,11 @@ case_study_dir = get_case_study_dir("etfs")
 registry_path = case_study_dir / "run_log" / "registry.db"
 registry_hash_before = hashlib.sha256(registry_path.read_bytes()).hexdigest()
 
-registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro&immutable=1"
+# Read-only, and deliberately not `immutable=1`. That flag promises SQLite the file cannot move
+# while it is open, which lets it skip WAL recovery; it holds for a released case directory and
+# not for a live one a sweep may be writing, and an immutable read of a database with an
+# uncheckpointed WAL sees the pre-WAL main file.
+registry_uri = f"{registry_path.resolve().as_uri()}?mode=ro"
 with sqlite3.connect(registry_uri, uri=True) as conn:
     winner = conn.execute(
         """SELECT ps.training_hash, br.backtest_hash, br.stage, bm.sharpe
