@@ -25,8 +25,10 @@
   timeout: 300
 02_financial_data_universe/06_futures_continuous:
   skip: true
-  skip_reason: "Requires individual contract months \u2014 test data has only continuous series"
+  skip_reason: "Reads `futures/market/contract_definitions.parquet`, which the CI fixture does not carry: cell 11 raises FileNotFoundError on it. Measured 2026-09-11 by un-skipping and running it. The individual contract months the older reason said were missing are present - `futures/market/individual` ships CL, ES and NQ - so that reason had stopped describing the fixture."
   timeout: 300
+  skip_blocker:
+    absent_fixture_path: futures/market/contract_definitions.parquet
 02_financial_data_universe/07_sp500_options_eda:
   timeout: 180
 02_financial_data_universe/08_options_greeks_computation:
@@ -53,11 +55,15 @@
   skip_reason: "YahooFinanceProvider.fetch_ohlcv() makes network calls \u2014 CI has no guaranteed internet"
   tier: weekly
   timeout: 300
+  skip_blocker:
+    external: "outbound network for YahooFinanceProvider.fetch_ohlcv()"
 02_financial_data_universe/17_complete_pipeline:
   skip: true
   skip_reason: "YahooFinanceProvider.fetch_ohlcv() makes network calls \u2014 CI has no guaranteed internet"
   tier: weekly
   timeout: 300
+  skip_blocker:
+    external: "outbound network for YahooFinanceProvider.fetch_ohlcv()"
 02_financial_data_universe/18_data_management:
   timeout: 300
 02_financial_data_universe/19_incremental_updates:
@@ -75,6 +81,8 @@
   skip_reason: "Parses the raw NASDAQ ITCH binary (6 GB compressed); the fixture set has no raw/ directory"
   tier: weekly
   timeout: 300
+  skip_blocker:
+    absent_fixture_path: equities/market/microstructure/nasdaq_itch/raw
 03_market_microstructure/02_itch_lob_reconstruction:
   # The ITCH fixture's add messages are a head-of-day subsample and all fall before the
   # opening auction, so the production 09:30 window would reconstruct an empty book.
@@ -106,6 +114,8 @@
   skip_reason: "Parses raw IEX DEEP pcap; the fixture ships only the already-parsed output"
   tier: weekly
   timeout: 300
+  skip_blocker:
+    absent_fixture_path: equities/market/microstructure/iex/deep/raw
 03_market_microstructure/11_algoseek_taq_eda:
   timeout: 300
 03_market_microstructure/12_algoseek_taq_lob_reconstruction:
@@ -772,6 +782,10 @@
   skip: true
   skip_reason: Walk-forward CV needs more bars than the test-data window provides
   timeout: 360
+  skip_blocker:
+    fixture_shortfall:
+      note: "Cell 21 raises ValueError: No walk-forward splits available for training period. The fixture window is shorter than one walk-forward split at the notebook's configured horizon, and no parameter in this entry reduces the number of bars a split needs."
+      verified: 2026-09-11
 15_causal_estimation/06_fed_announcement_bsts:
   docker_env: py312
   # tfcausalimpact needs NumPy 1.x, the signature stack on /opt/ml4t needs 2.x,
@@ -808,8 +822,6 @@
     N_ESTIMATORS: 50
   timeout: 900
 15_causal_estimation/10_case_study_insights:
-  skip: true
-  skip_reason: "Reads nine case-study registries; CI has none of them, and the loader raises on a missing registry file"
   timeout: 300
 15_causal_estimation/11_factor_zoo_validation:
   timeout: 360
@@ -1164,6 +1176,8 @@
   skip_reason: Requires 08_8k_event_extraction, which needs a CUDA device
   tier: on_demand
   timeout: 600
+  skip_blocker:
+    external: "CUDA device"
 23_knowledge_graphs/06_gnn_feature_engineering:
   # It raises unless `torch.cuda.is_available()`, then pins `DEVICE = torch.device("cuda")` for
   # every tensor the fold loop builds. There is no CPU path. Measured: fails in 28s with the card
@@ -1264,8 +1278,6 @@
     LLM_PROVIDER: mock
     N_AGENTS: 3
     SUPERVISOR_QUERIES: 1
-  skip: true
-  skip_reason: Requires 'langgraph' (not in CI image)
   tier: weekly
   timeout: 300
 24_autonomous_agents/11_research_operator:
@@ -1273,6 +1285,8 @@
   skip_reason: Requires ~/ml4t/skills/ repo (not in CI workspace)
   tier: weekly
   timeout: 300
+  skip_blocker:
+    external: "checkout of ml4t/skills outside the repo"
 25_live_trading/01_unified_framework_demo:
   timeout: 180
 25_live_trading/02_etfs_deployment_loop:
@@ -1293,6 +1307,8 @@
   skip_reason: Requires running IB Gateway on 127.0.0.1:7497
   tier: weekly
   timeout: 180
+  skip_blocker:
+    external: "IB Gateway on 127.0.0.1:7497"
 25_live_trading/04_alpaca_paper_trading_demo:
   parameters:
     LIVE_FEED: 0
@@ -1325,6 +1341,8 @@
   skip_reason: Requires OKX SDK + live exchange credentials (not in CI image)
   tier: weekly
   timeout: 180
+  skip_blocker:
+    external: "OKX live-exchange credentials"
 25_live_trading/10_safety_risk_demo:
   timeout: 180
 25_live_trading/11_fx_deployment_loop:
@@ -1332,11 +1350,15 @@
   skip_reason: Requires running IB Gateway (not available in CI)
   tier: weekly
   timeout: 180
+  skip_blocker:
+    external: "IB Gateway"
 25_live_trading/12_ib_basket_rebalance_demo:
   skip: true
   skip_reason: Requires live TWS or IB Gateway paper session on 127.0.0.1:7497; no silent fallback.
   tier: weekly
   timeout: 180
+  skip_blocker:
+    external: "IB Gateway paper session on 127.0.0.1:7497"
 25_live_trading/13_runtime_safety_showcase:
   parameters:
     HEALTH_OBSERVATION_SECONDS: 4
@@ -1601,7 +1623,11 @@ case_studies/cme_futures/10a_pca:
   timeout: 300
 case_studies/cme_futures/10b_stochastic_discount_factor:
   skip: true
-  skip_reason: 'TEMPORARY: case-study end-to-end pipeline times out or fails with trimmed test-data; needs full fixture rebuild'
+  skip_reason: "The canonical model-catalog cell (`run_official_model_catalog` for `cme_futures-sdf-validation-v1`) does not finish inside the 300 second budget: measured 2026-09-11 by un-skipping and running it, the cell timed out. The earlier reason said the pipeline times out or fails with trimmed test data and called itself TEMPORARY; the timeout half is what actually happens."
+  skip_blocker:
+    fixture_shortfall:
+      note: "The canonical `run_official_model_catalog` cell exceeds the 300 second budget this entry allows: measured 2026-09-11 by un-skipping and running it, the cell was still executing when the timeout fired. The SDF catalog fits every requested configuration, and no parameter in this entry narrows it."
+      verified: 2026-09-11
 case_studies/cme_futures/11_causal_dml:
   parameters:
     # The DML resolver requires every one of its four preview fields, not merely a non-empty
@@ -1680,13 +1706,19 @@ case_studies/cme_futures/17_holdout_predictions:
   # Refits the selected configuration over the holdout fold - one training run, no sweep.
   timeout: 900
   skip: true
-  skip_reason: "Refuses before fitting, at `resolve_solvent_carrier`: 'No validation rank-1 candidate for cme_futures (label_filter=None)', measured at cell 6. The preview fixture registers no validation backtest for this case study, so there is no carrier to refit, and the refusal is one step earlier than the etfs pair's - etfs reaches `build_holdout_training_spec` and refuses on the missing resolved computation block, cme does not get that far. Both are the same shortfall in the fixture rather than two problems. Remove this skip when the fixture seeds a validation backtest population with a resolvable rank-1, not before: a fabricated carrier would let the job report a holdout refit of a configuration nothing selected."
+  skip_reason: "`resolve_canonical_rank1_lineage` refuses against the fixture registry: every one of the 68 ranked validation backtests for cme_futures belongs to a superseded generation or to none the case study publishes, so `resolve_solvent_carrier` has no carrier to refit. Measured 2026-09-11 against the seeded registry. The earlier reason said the fixture registers no validation backtest for this case study; it registers 68, and what disqualifies them is their generation. Remove this skip when the fixture registers a selectable one, not before."
+  skip_blocker:
+    no_canonical_selection:
+      of: cme_futures
 case_studies/cme_futures/18_holdout_backtest:
   research_preview: false
   # One backtest over the holdout window.
   timeout: 900
   skip: true
-  skip_reason: "Reads the holdout prediction set 17_holdout_predictions registers and resolves the same carrier to find it, so it refuses at `resolve_solvent_carrier` for the same reason and one step earlier than 17 does. Remove this skip together with 17's."
+  skip_reason: "Reads the holdout prediction set 17_holdout_predictions registers and resolves the same carrier to find it, so it refuses one step earlier than 17 does, on the same fixture-registry condition. Remove this skip together with 17's."
+  skip_blocker:
+    no_canonical_selection:
+      of: cme_futures
 case_studies/cme_futures/19_strategy_analysis:
   # Its inputs are registered by cme_futures::13_backtest into this same workspace,
   # and the seeded registry holds none of them: tests/conftest.py records that seeding
@@ -1900,12 +1932,22 @@ case_studies/crypto_perps_funding/16_costs:
 case_studies/crypto_perps_funding/17_holdout_predictions:
   skip: true
   skip_reason: "Refits the funnel winner on the holdout fold, so it needs a registry carrying the validation sweep - resolve_solvent_carrier has no candidate to resolve against the CI fixture. Compounding it, the seeded grid strides weekdays, so an 8-hourly holdout window is unrepresentable in the fixture at all (ml4t/agent-workspace#960). No parameter reduces either: there is nothing to refit until the sweep has run."
+  skip_blocker:
+    no_canonical_selection:
+      of: crypto_perps_funding
 case_studies/crypto_perps_funding/18_holdout_backtest:
   skip: true
   skip_reason: "Trades 17_holdout_predictions' prediction set and raises by design when it is absent, so it inherits that notebook's prerequisite - a registry carrying the validation sweep and the holdout refit, neither of which the test data builds."
+  skip_blocker:
+    no_canonical_selection:
+      of: crypto_perps_funding
 case_studies/crypto_perps_funding/19_strategy_analysis:
   skip: true
   skip_reason: "Signed pre-holdout freeze pins an exact production registry snapshot (whole-file md5 + production-scale table counts, e.g. backtest_runs: 698) that a reduced CI fixture cannot reproduce by construction - same class as us_firm_characteristics/08a_ipca, not a fixable reduction."
+  skip_blocker:
+    fixture_shortfall:
+      note: "The signed pre-holdout freeze pins an exact production registry snapshot (whole-file md5 plus production-scale table counts, e.g. backtest_runs: 698) that a reduced CI fixture cannot reproduce by construction. Same class as us_firm_characteristics/08a_ipca, not a fixable reduction."
+      verified: 2026-09-11
 case_studies/etfs/01_feasibility_analysis:
   # ADV_THRESHOLD is the only name this notebook declares that an override can reach.
   # MAX_SYMBOLS, N_SPLITS, TRAIN_YEARS and TEST_YEARS named nothing in it; START_DATE
@@ -2343,19 +2385,29 @@ case_studies/etfs/18_holdout_predictions:
   # budget is a single GBM fit over the full history before the window, on 24 funds.
   timeout: 900
   skip: true
-  skip_reason: "The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. `tests/fixtures/seed_results.py:578` writes each training run's spec as {family, config_name, label} with no `computation` block, and `build_holdout_training_spec` re-keys the validation CV onto the holdout fold by reading `computation.cv` - so it refuses with 'holdout CV derivation requires a current resolved training specification'. That refusal is correct and the notebook is correct: a holdout refit is defined by the CV interval it covers, and a spec that records none cannot produce one. Remove this skip when the fixture seeds a resolved computation, not before - a fabricated CV block would let the job report a holdout derived from fold boundaries no model was ever fitted on."
+  skip_reason: "`resolve_canonical_rank1_lineage` refuses against the fixture registry: cell 6 raises NoSelectableCandidates because every one of the 134 ranked validation backtests for etfs belongs to a superseded generation or to none the case study publishes, so there is no configuration to refit on the holdout fold. Measured 2026-09-11 by un-skipping and running it. The earlier reason named a missing `computation` block in the seeded training specs; 136 of the 140 seeded etfs specs carry one, so that is no longer what stops it. Remove this skip when the fixture registry carries a selectable candidate, not before."
+  skip_blocker:
+    no_canonical_selection:
+      of: etfs
 case_studies/etfs/19_holdout_backtest:
   research_preview: false
   # One backtest over the holdout window, on the engine path this case study's trailing-stop
   # carrier requires.
   timeout: 600
   skip: true
-  skip_reason: "Reads the holdout prediction set 18_holdout_predictions registers, and derives which one through the same `build_holdout_training_spec` call - so it refuses for the same reason and one step earlier than 18 does. The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. `tests/fixtures/seed_results.py:578` writes each training run's spec as {family, config_name, label} with no `computation` block, and `build_holdout_training_spec` re-keys the validation CV onto the holdout fold by reading `computation.cv` - so it refuses with 'holdout CV derivation requires a current resolved training specification'. That refusal is correct and the notebook is correct: a holdout refit is defined by the CV interval it covers, and a spec that records none cannot produce one. Remove this skip when the fixture seeds a resolved computation, not before - a fabricated CV block would let the job report a holdout derived from fold boundaries no model was ever fitted on."
+  skip_reason: "Reads the holdout prediction set 18_holdout_predictions registers and derives which one through the same canonical resolution, so it refuses one step earlier than 18 does, on the same fixture-registry condition. Remove this skip together with 18's."
+  skip_blocker:
+    no_canonical_selection:
+      of: etfs
 case_studies/etfs/20_strategy_analysis:
   research_preview: false
   timeout: 900
   skip: true
-  skip_reason: "Every risk-overlay backtest in the fixture sits below its family's coverage bar, so the complete-run filter admits none and the notebook refuses. The bar is the population's maximum ic_n_days: the seeded deep_learning predictions carry more scored days than the ones this job actually fits, so a fitted run can never reach a maximum a seeded row holds. Measured: 20 risk_overlay rows, all on 57b4d1ffd748 at 1536 days, all below the bar. The refusal is the guard working - an incomplete run compared as complete manufactures a false leader - and the fixture is what cannot satisfy it. Same shape as the `.preview` seeding removed in a1227f1d, one level up. Stages 14 through 17 run unskipped and pass, so the chain below this notebook is exercised."
+  skip_reason: "The complete-run filter admits no risk-overlay backtest in the fixture, so cell 8 indexes an empty selection and raises OutOfBoundsError: index 0 is out of bounds for sequence of length 0. Measured 2026-09-11 by un-skipping and running it. The bar is the population's maximum ic_n_days: the seeded deep_learning predictions carry more scored days than the ones this job fits, so a fitted run cannot reach a maximum a seeded row holds. The refusal is the guard working - an incomplete run compared as complete manufactures a false leader - and the fixture is what cannot satisfy it. Stages 14 through 17 run unskipped and pass, so the chain below this notebook is exercised."
+  skip_blocker:
+    fixture_shortfall:
+      note: "Cell 8 raises OutOfBoundsError: index 0 is out of bounds for sequence of length 0 - the complete-run filter admits no risk-overlay backtest from the fixture, so the selection it indexes is empty. Measured 2026-09-11 by un-skipping and running it."
+      verified: 2026-09-11
 case_studies/fx_pairs/01_feasibility_analysis:
   timeout: 120
 case_studies/fx_pairs/02_labels:
@@ -2470,6 +2522,10 @@ case_studies/fx_pairs/12_model_analysis:
     as 17_strategy_analysis - not a reduction that can be made to work. It reads no preview
     rows either, so a preview tier is not the alternative."
   timeout: 300
+  skip_blocker:
+    fixture_shortfall:
+      note: "Asserts the assembled canonical population equals the configured menu, and the fixture cannot present both consistently: _trim_label_configs trims the seeded config dir while the seeded registry carries the full production population, so the guard reports 117 unexpected members and nothing missing."
+      verified: 2026-09-11
 case_studies/fx_pairs/13_backtest:
   research_preview: false
   parameters:
@@ -2522,22 +2578,27 @@ case_studies/fx_pairs/16_costs:
   timeout: 900
 case_studies/fx_pairs/17_holdout_predictions:
   skip: true
-  skip_reason: "Refits the canonical validation selection on the holdout interval. The fixture
-    registry carries no fx_pairs:holdout-candidates set, and a seeded one would make the holdout
-    lineage resolve against a selection no validation run produced. The notebook takes no
-    reduction that would change this: the configuration it refits is whichever one selection
-    chose, and there is only ever one."
+  skip_reason: "Refits the canonical validation selection on the holdout interval, and `resolve_canonical_rank1_lineage` refuses against the fixture registry: every one of the 143 ranked validation backtests for fx_pairs belongs to a superseded generation or to none the case study publishes. Measured 2026-09-11 against the seeded registry. The notebook takes no reduction that would change this: the configuration it refits is whichever one selection chose, and there is only one."
   timeout: 300
+  skip_blocker:
+    no_canonical_selection:
+      of: fx_pairs
 case_studies/fx_pairs/18_holdout_backtest:
   skip: true
   skip_reason: "Replays the selected strategy against 17_holdout_predictions' output, so it is
     skipped for the same reason and would fail on the missing holdout prediction first."
   timeout: 300
+  skip_blocker:
+    no_canonical_selection:
+      of: fx_pairs
 case_studies/fx_pairs/19_strategy_analysis:
   skip: true
   skip_reason: "Reads back the holdout lineage 17 and 18 produce; with those skipped there is
     nothing for it to resolve."
   timeout: 300
+  skip_blocker:
+    no_canonical_selection:
+      of: fx_pairs
 # max_symbols stays 5 here. The arithmetic asks for 10 - top_k_grid [5, 10, 20] and
 # long-short, so the smallest declared concentration needs 2 x 5 = 10 disjoint names - and the
 # raw fixture could supply it: `data/equities/market/nasdaq100/minute_bars` carries 12 symbols,
@@ -2781,7 +2842,10 @@ case_studies/nasdaq100_microstructure/18_holdout_predictions:
   # here rather than the number of configurations.
   timeout: 900
   skip: true
-  skip_reason: "The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. `tests/fixtures/seed_results.py:578` writes each training run's spec as {family, config_name, label} with no `computation` block, and `build_holdout_training_spec` re-keys the validation CV onto the holdout fold by reading `computation.cv` - so it refuses with 'holdout CV derivation requires a current resolved training specification'. That refusal is correct and the notebook is correct: a holdout refit is defined by the CV interval it covers, and a spec that records none cannot produce one. Identical to the etfs 18/19 skip, because the limitation is the shared fixture rather than anything about this case study. Remove this skip when the fixture seeds a resolved computation, not before - a fabricated CV block would let the job report a holdout derived from fold boundaries no model was ever fitted on."
+  skip_reason: "`resolve_canonical_rank1_lineage` refuses against the fixture registry with 'No validation rank-1 candidate for nasdaq100_microstructure', so the holdout refit has no configuration to resolve. Measured 2026-09-11 against the seeded registry, by calling the resolver rather than running the notebook - this case study has a production run in flight. The earlier reason named a missing `computation` block in the seeded training specs; all 97 seeded nasdaq100_microstructure specs carry one, so that is no longer what stops it. Remove this skip when the fixture registry carries a selectable candidate, not before."
+  skip_blocker:
+    no_canonical_selection:
+      of: nasdaq100_microstructure
 case_studies/nasdaq100_microstructure/19_holdout_backtest:
   research_preview: false
   # One backtest over the six-month holdout window. The engine runs on the minute grid and
@@ -2789,11 +2853,17 @@ case_studies/nasdaq100_microstructure/19_holdout_backtest:
   # rather than its sessions.
   timeout: 600
   skip: true
-  skip_reason: "Reads the holdout prediction set 18_holdout_predictions registers, and derives which one through the same `build_holdout_training_spec` call - so it refuses for the same reason and one step earlier than 18 does. The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. Remove this skip when the fixture seeds a resolved computation, not before."
+  skip_reason: "Reads the holdout prediction set 18_holdout_predictions registers and derives which one through the same canonical resolution, so it refuses one step earlier than 18 does, on the same fixture-registry condition."
+  skip_blocker:
+    no_canonical_selection:
+      of: nasdaq100_microstructure
 case_studies/nasdaq100_microstructure/20_strategy_analysis:
   skip: true
   skip_reason: "Analyzes the cost-feasible ensemble carrier, which is registered out-of-band (session_6/7 drivers) and is not reproduced by the in-notebook test sweep, so an isolated test registry has no carrier rows. Runs clean in production."
   timeout: 180
+  skip_blocker:
+    no_canonical_selection:
+      of: nasdaq100_microstructure
 case_studies/sp500_equity_option_analytics/01_feasibility_analysis:
   timeout: 120
 case_studies/sp500_equity_option_analytics/02_labels:
@@ -3448,6 +3518,14 @@ case_studies/sp500_options/11_model_analysis:
   # skipping in CI, which is the opposite of what the mechanism is for.
   skip: true
   skip_reason: "Resolves four named official populations, and a preview run cannot create one (research/population.py::_refuse_preview_activation). Runnable when the fixture registry ships canonical populations under those names."
+  skip_blocker:
+    absent_population:
+      of: sp500_options
+      names:
+        - sp500-options-linear-validation-v1
+        - sp500-options-gbm-validation-v1
+        - sp500-options-tabular-dl-validation-v1
+        - sp500-options-sequence-validation-v1
 case_studies/sp500_options/12_backtest:
   # Its inputs are registered by sp500_options::06_linear into this same workspace,
   # and the seeded registry holds none of them: tests/conftest.py records that seeding
@@ -3510,6 +3588,11 @@ case_studies/sp500_options/14_risk_management:
   # conditions over the maintainer's registry.
   skip: true
   skip_reason: "Opens the canonical candidate set `sp500-options-strategy-candidates-v1` and refuses a preview tier, and a preview run of 13_portfolio_management cannot create one (`CandidateSet.create` refuses a preview member). Runnable when the fixture registry ships that candidate set."
+  skip_blocker:
+    absent_candidate_set:
+      of: sp500_options
+      names:
+        - sp500-options-strategy-candidates-v1
 case_studies/sp500_options/15_costs:
   # Its inputs are registered by sp500_options::12_backtest into this same workspace,
   # and the seeded registry holds none of them: tests/conftest.py records that seeding
@@ -3539,13 +3622,19 @@ case_studies/sp500_options/16_holdout_predictions:
   # budget is a single linear fit over the history before the window.
   timeout: 900
   skip: true
-  skip_reason: "The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. `tests/fixtures/seed_results.py` writes each training run's spec as {family, config_name, label} with no `computation` block, and `build_holdout_training_spec` re-keys the validation CV onto the holdout fold by reading `computation.cv` - so it refuses with 'holdout CV derivation requires a current resolved training specification'. Same shape as `case_studies/etfs/18_holdout_predictions`. That refusal is correct and the notebook is correct: a holdout refit is defined by the CV interval it covers, and a spec that records none cannot produce one. Remove this skip when the fixture seeds a resolved computation, not before - a fabricated CV block would let the job report a holdout derived from fold boundaries no model was ever fitted on."
+  skip_reason: "`resolve_canonical_rank1_lineage` refuses against the fixture registry with 'No validation rank-1 candidate for sp500_options (label_filter=ret_to_expiry)', so the holdout fold has no configuration to refit. Measured 2026-09-11 against the seeded registry. The earlier reason named a missing `computation` block in the seeded training specs; all 106 seeded sp500_options specs carry one, so that is no longer what stops it."
+  skip_blocker:
+    no_canonical_selection:
+      of: sp500_options
 case_studies/sp500_options/17_holdout_backtest:
   research_preview: false
   # One short-straddle backtest over the holdout window, through the HTM cohort engine.
   timeout: 900
   skip: true
-  skip_reason: "Derives which holdout prediction set to trade through the same `build_holdout_training_spec` call 16 makes, so it refuses for the same reason and one step earlier. The seeded fixture carries no resolved training specification, so the holdout fold cannot be derived. It would refuse a second time even if that were fixed: the option path resolves short straddles against the raw AlgoSeek chain and replays that resolution in a fresh interpreter, and the fixture carries neither. Remove this skip when the fixture seeds a resolved computation and an option chain, not before."
+  skip_reason: "Derives which holdout prediction set to trade through the same canonical resolution 16 makes, so it refuses one step earlier and on the same fixture-registry condition. It would refuse a second time even if that were fixed: the option path resolves short straddles against the raw AlgoSeek chain and replays that resolution in a fresh interpreter, and the fixture carries neither."
+  skip_blocker:
+    no_canonical_selection:
+      of: sp500_options
 case_studies/sp500_options/18_strategy_analysis:
   # Not `awaiting_rebuild`, for the reason recorded on 11_model_analysis and 14 above: it
   # resolves the named official populations `sp500-options-baseline-validation-v1` and
@@ -3556,7 +3645,12 @@ case_studies/sp500_options/18_strategy_analysis:
   # ML4T_ARTIFACT_ROOT, so declaring it there turned this file red on every workstation that
   # had run the models while still skipping here.
   skip: true
-  skip_reason: "Resolves the named official baseline and cost-sensitivity populations and requires them complete, and a preview run cannot create one (research/population.py::_refuse_preview_activation). Runnable when the fixture registry ships canonical populations under those names."
+  skip_reason: "Resolves the named official baseline population `sp500-options-baseline-validation-v1` and requires it complete, and a preview run cannot create one (research/population.py::_refuse_preview_activation). The fixture registry ships only `sp500-options-linear-validation-v1`. Runnable when it ships the baseline population."
+  skip_blocker:
+    absent_population:
+      of: sp500_options
+      names:
+        - sp500-options-baseline-validation-v1
 case_studies/sp500_options/90_ic_diagnostic:
   # MAX_SYMBOLS was 5 while the notebook screens every cross-section at MIN_SYMBOLS_PER_DATE = 10,
   # so the cap guaranteed that no date could ever qualify - a reduction that made the run
@@ -3900,6 +3994,9 @@ case_studies/us_equities_panel/20_strategy_analysis:
   skip_reason: >-
     Needs a registered holdout refit and backtest, which the reduced CI fixture does not produce -
     the production run does.
+  skip_blocker:
+    no_canonical_selection:
+      of: us_equities_panel
 case_studies/us_firm_characteristics/01_feasibility_analysis:
   timeout: 120
 case_studies/us_firm_characteristics/02_labels:
@@ -4281,19 +4378,31 @@ case_studies/us_firm_characteristics/13_risk_management:
   timeout: 600
 case_studies/us_firm_characteristics/15_holdout_predictions:
   skip: true
-  skip_reason: "Refits the case study's canonical validation rank-1 on the holdout fold, and the test-data registry holds no validation backtests for us_firm_characteristics - resolve_canonical_rank1_lineage raises 'No validation rank-1 candidate'. No parameter reduces it: there is nothing to refit until the sweep has run."
+  skip_reason: "Refits the canonical validation rank-1 on the holdout fold, and `resolve_canonical_rank1_lineage` refuses against the fixture registry: every one of the 75 ranked validation backtests for us_firm_characteristics belongs to a superseded generation or to none the case study publishes. Measured 2026-09-11 against the seeded registry. The earlier reason said the registry holds no validation backtests; it holds 75, and what disqualifies them is their generation. No parameter reduces it: there is nothing to refit until a selectable one exists."
+  skip_blocker:
+    no_canonical_selection:
+      of: us_firm_characteristics
 case_studies/us_firm_characteristics/16_holdout_backtest:
   skip: true
   skip_reason: "Trades 15_holdout_predictions' prediction set, so it inherits that notebook's prerequisite - a registry carrying the validation sweep and the holdout refit, neither of which the test data builds."
+  skip_blocker:
+    no_canonical_selection:
+      of: us_firm_characteristics
 case_studies/us_firm_characteristics/17_strategy_analysis:
   skip: true
   skip_reason: "Test-data load_firm_characteristics() returns 80 firms/day; the NB's liquidity-profile section requires >=100 firms/day. The notebook reads the registry and the feature panel, not the price panel, so no parameter reduces it - it needs an expanded test-data fixture (>=100 firms)."
+  skip_blocker:
+    fixture_shortfall:
+      note: "Test-data load_firm_characteristics() returns 80 firms per day and the liquidity-profile section requires at least 100. The notebook reads the registry and the feature panel, not the price panel, so no parameter reduces it: it needs a wider fixture."
+      verified: 2026-09-11
 data/equities/market/microstructure/dataset_card:
   timeout: 120
 data/equities/market/us_equities/dataset_card:
   skip: true
   skip_reason: Data download notebook (requires API access)
   tier: weekly
+  skip_blocker:
+    external: "vendor API credentials for the download"
 data/factors/dataset_card:
   timeout: 120
 data/fx/market/dataset_card:

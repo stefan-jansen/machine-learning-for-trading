@@ -112,6 +112,7 @@ KNOWN_OVERRIDE_KEYS = frozenset(
         "research_preview",  # pm_helpers.injected_parameters
         "reruns",  # pm_helpers.get_reruns
         "skip",  # tests/test_chapter_notebooks.py
+        "skip_blocker",  # tests/skip_blockers.py
         "skip_reason",  # tests/test_chapter_notebooks.py
         "tier",  # pm_helpers.get_tier
         "timeout",  # tests/test_chapter_notebooks.py -> run_notebook
