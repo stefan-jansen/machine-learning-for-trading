@@ -732,6 +732,15 @@ jobs:
       # most for test_awaiting_rebuild: what it holds is that a skip expires
       # when the input it waits for arrives, and a skip mechanism whose expiry
       # check never runs is just a permanent skip.
+      #
+      # test_one_producer_per_fixture_file arrived the same way and is added here
+      # on 2026-09-11, with test_every_fixture_file_has_a_producer added to
+      # test-unit-data, where the fixture checkout it enumerates exists. Both were
+      # written as the gate on whether every CI fixture file has a producer and
+      # neither was named by any job, so the gate has been passing vacuously since
+      # it landed. This one reads only the producers' own declarations and needs no
+      # fixture; the other one does, and skips without it, which is why they are
+      # split across two jobs rather than both added here.
       - name: Run shared case-study helper tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -758,6 +767,8 @@ jobs:
             tests/test_sp500_equity_option_analytics_research.py \
             tests/test_research_declared_menu_coverage.py \
             tests/test_awaiting_rebuild.py \
+            tests/test_one_producer_per_fixture_file.py \
+            tests/test_fixture_builders_require_their_inputs.py \
             tests/test_cme_futures_research.py \
             tests/test_cross_sectional_ic_mean.py \
             -v --tb=short
@@ -1047,6 +1058,7 @@ jobs:
             tests/test_fixture_registry_identity.py \
             tests/test_reduced_universe_is_shared.py \
             tests/test_fixture_manifest_matches_builders.py \
+            tests/test_every_fixture_file_has_a_producer.py \
             tests/test_artifact_specs.py \
             tests/test_backtest_presets.py \
             tests/test_etf_baseline_parity.py \
