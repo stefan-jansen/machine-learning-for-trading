@@ -211,11 +211,14 @@ show_plotly_with_alt(
 print(f"\nSignificant autocorrelation lags: {n_significant_lags}/{n_acf_lags}")
 
 # %% [markdown]
-# The decline is smooth and reaches the white-noise band at roughly the label horizon,
-# which is what an overlap-driven autocorrelation looks like: two IC values computed $k$
-# days apart share $h - k$ days of return, so the correlation falls away as the shared
-# window shrinks and vanishes once it is gone. A naive t-statistic treats these values as
-# independent draws and will therefore overstate significance.
+# The decline is smooth and reaches the white-noise band near the label horizon, which is
+# consistent with overlap driving it: two IC values computed $k$ days apart share $h - k$
+# days of return, so the shared window shrinks as $k$ grows. It is consistent with
+# persistent signal ranks as well, and the two are not separated here. Nor can this figure
+# say what happens *past* the horizon - it stops at $h-1$, and a series of rank
+# correlations can stay dependent beyond the overlap through regimes or a slow-moving
+# signal. What the figure does establish is enough for the section's purpose: a naive
+# t-statistic treats these values as independent draws, and they are not.
 
 # %% [markdown]
 # ### Library Autocorrelation Analysis
@@ -578,30 +581,38 @@ show_plotly_with_alt(
 # ## Practical vs Statistical Significance
 #
 # Statistical significance of an IC time-series mean is a separate question from whether
-# the signal is economically tradeable. The bands printed below summarise typical
-# detectability of a mean IC at a range of magnitudes on multi-year daily samples; net P&L
-# after costs is a separate calculation, handled by the break-even analysis in
-# `05_signal_evaluation` and by the case-study cost models in Chapters 16 to 18.
+# the signal is economically tradeable.
 #
-# Whether a magnitude clears transaction costs depends on rebalancing frequency, turnover
-# and capacity, and none of those appear in this table. A factor can sit in the top band
-# here and still lose money.
+# There is no fixed IC magnitude that counts as detectable. Detectability is set by the
+# standard error, and this notebook has already estimated the one that applies here - the
+# HAC standard error on this series, at this sample size, with this label horizon. The
+# cell below uses it rather than a table of conventions: it reports the smallest mean IC
+# this series could distinguish from zero at the stated confidence, and then sweeps a
+# range of candidate magnitudes through the same test.
+#
+# Net P&L after costs is a separate calculation, handled by the break-even analysis in
+# `05_signal_evaluation` and by the case-study cost models in Chapters 16 to 18. A factor
+# can clear the test below and still lose money.
 
 # %% tags=["results"]
-IC_DETECTABILITY = (
-    (0.02, "at the boundary of HAC detectability; needs a large T"),
-    (0.03, "typically detectable with HAC-adjusted inference"),
-    (0.05, "comfortably above the HAC standard error in published equity-factor studies"),
-    (0.10, "at the top of the published cross-sectional range"),
-    (float("inf"), "outside that range; the prior is leakage until it is ruled out"),
-)
+IC_CANDIDATES = (0.01, 0.02, 0.03, 0.05, 0.10)
+CONFIDENCE = 0.95
 
-print("Detectability of a mean IC on multi-year daily samples:")
-lower = 0.0
-for upper, description in IC_DETECTABILITY:
-    edge = "and above" if upper == float("inf") else f"to {upper:.2f}"
-    print(f"  {lower:.2f} {edge:<12} {description}")
-    lower = upper
+z_crit = stats.norm.ppf(0.5 + CONFIDENCE / 2)
+hac_se = hac_result["hac_se"]
+min_detectable_ic = z_crit * hac_se
+
+print(f"Sample: {len(ic_series):,} daily IC values, label horizon {LABEL_HORIZON}")
+print(f"HAC standard error: {hac_se:.4f}  (lag truncation {hac_result['effective_lags']})")
+print(f"Smallest |mean IC| separable from zero at {CONFIDENCE:.0%}: {min_detectable_ic:.4f}")
+print()
+print(f"{'candidate IC':>13}{'t vs 0':>9}{'separable':>11}")
+print("-" * 33)
+for candidate in IC_CANDIDATES:
+    t_stat = candidate / hac_se
+    print(f"{candidate:>13.2f}{t_stat:>9.2f}{'yes' if t_stat > z_crit else 'no':>11}")
+print()
+print(f"This series' observed mean IC: {hac_result['mean_ic']:.4f} (t={hac_result['t_stat']:.2f})")
 
 # %%
 # Practical significance analysis
@@ -720,11 +731,13 @@ display(track_record_df)
 # 1. **IC is noisy**: daily cross-sectional IC has high variance.
 # 2. **Autocorrelation reduces the effective sample**: overlapping forward returns inflate
 #    the standard error by the factor printed above.
-# 3. **Small effects need large samples**: an IC in the lowest detectability band printed
-#    earlier is hard to separate from zero at any sample a researcher is likely to have.
+# 3. **Small effects need large samples**: the smallest separable mean IC printed earlier
+#    is the bar this series sets, and it moves with the sample and the dependence rather
+#    than sitting at a conventional number.
 #
 # **Implication**: a "predictive" factor claimed from one or two years of data deserves
-# skepticism, and the lower its IC sits in those bands the more of it.
+# skepticism. The test to apply is its own standard error, not a threshold read off a
+# table - which is what the cell above demonstrates on this series.
 
 # %% [markdown]
 # ## IC Inference Report
