@@ -17,7 +17,7 @@
 # # Robustness and Sensitivity Analysis
 #
 # **Chapter 8: Feature Engineering**
-# **Section Reference**: 8.6 — Combining Features and Controlling Search
+# **Section Reference**: 8.6, Combining Features and Controlling Search
 #
 # **Docker image**: `ml4t`
 #
@@ -41,7 +41,7 @@
 # All examples use **real ETF data**.
 
 # %%
-"""Robustness and Sensitivity Analysis — parameter sweeps, regime conditioning, and signal interaction features."""
+"""Robustness and Sensitivity: parameter sweeps, regime conditioning, and interaction features."""
 
 from __future__ import annotations
 
@@ -58,32 +58,42 @@ from plotly.subplots import make_subplots
 
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS  # activates the ml4t Plotly template on import
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # importing utils.style activates the ml4t Plotly template
+    COLORS,
+    show_plotly_with_alt,
+    show_with_alt,
+)
 
 # %% tags=["parameters"]
 START_DATE = "2015-01-01"
 END_DATE = "2024-01-01"
 SEED = 42
+# Thresholds the diagnostics below apply. Declared here so the code, the printed lines
+# and the prose cannot drift apart.
+ROBUST_THRESHOLD_PCT = 0.90  # a parameter is in the robust region at this share of the peak
+REGIME_IC_RANGE_MIN = 0.04  # IC spread across regimes below which conditioning is not warranted
 
 # %%
 set_global_seeds(SEED)
 
 # %% [markdown]
-# ## 1. Data Loading
+# ## Data Loading
 
 # %%
 from data import load_etfs
 
 etfs = load_etfs()
 
-# Sealed-holdout boundary (setup.yaml `evaluation.holdout_start`). Parameter
-# sweeps and robustness diagnostics are development decisions; the sealed
-# holdout must not inform them (see the rule in
-# 06_strategy_definition/02_cv_foundations). Clamp the analysis window so an
-# END_DATE override can never reach into the holdout — every IC below (sweep,
-# RAS, regime-conditional, implementation variants) sees only pre-holdout data.
+# %% [markdown]
+# Parameter sweeps and robustness diagnostics are development decisions, so the holdout
+# must not inform them; the rule is set out in `06_strategy_definition/02_cv_foundations`.
+# The boundary comes from the case study's own `setup.yaml` under
+# `evaluation.holdout_start`, and the analysis window is clamped to it so that an
+# `END_DATE` override cannot reach past it. Every IC computed below, in the sweep, the
+# snooping correction, the regime conditioning and the implementation variants alike,
+# reads pre-holdout data only.
+
+# %%
 setup = yaml.safe_load((get_case_study_dir("etfs") / "config" / "setup.yaml").read_text())
 HOLDOUT_START = setup["evaluation"]["holdout_start"]
 end_date = min(
@@ -111,7 +121,7 @@ symbols = [c for c in prices_wide.columns if c != "timestamp"]
 print(f"Computing features for {len(symbols)} symbols")
 
 # %% [markdown]
-# ## 2. IC Computation Helpers
+# ## IC Computation Helpers
 #
 # All IC statistics use HAC standard errors via the `ml4t-diagnostic` library
 # to account for serial dependence.
@@ -176,7 +186,7 @@ def compute_momentum_ic_series(
 
 
 # %% [markdown]
-# ## 3. Parameter Sweep: Response Surface
+# ## Parameter Sweep: Response Surface
 #
 # We vary the momentum lookback period and observe how IC changes. The goal
 # is not to find the "best" parameter but to understand the **response
@@ -271,22 +281,37 @@ if sweep_results:
     fig.update_yaxes(title_text="Mean IC", row=1, col=1)
     fig.update_yaxes(title_text="ICIR", row=1, col=2)
 
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "Two side-by-side panels sweeping a momentum lookback window, both with lookback "
+            "in days on the horizontal axis running from a few days to about two hundred "
+            "and fifty. The left panel plots mean information coefficient as a dark line "
+            "with vertical error bars for a ninety-five percent band, against a dashed zero "
+            "line: the line starts slightly below zero, dips to its lowest around forty "
+            "days, climbs through zero near a hundred days to a broad high around a hundred "
+            "and ninety, then falls back to the line at the right edge. Every error bar "
+            "crosses zero, including the one at the high point. The right panel plots the "
+            "information ratio of the same estimates as an amber line with no error bars, "
+            "tracing the same shape against a solid zero line."
+        ),
+    )
 
 # %% [markdown]
-# ## 4. Robustness: Breadth of Near-Optimal Region
+# ## Robustness: Breadth of Near-Optimal Region
 #
-# Robustness is **not** a scalar score (mean/std ratio). It is the breadth
-# of the near-optimal region: how many parameter values achieve performance
-# within 90% of the best. A robust signal has a broad plateau; a fragile
-# signal has a narrow peak.
+# Robustness is **not** a scalar score such as a mean-over-standard-deviation ratio. It is
+# the breadth of the near-optimal region: how many parameter values reach a performance
+# within `ROBUST_THRESHOLD_PCT` of the peak. A robust signal has a broad plateau; a fragile
+# one has a narrow peak, and a single tall value surrounded by poor neighbours is the
+# shape that does not survive contact with new data.
 
 
 # %%
 def compute_robust_region(
     sweep_results: dict[int, dict],
     metric: str = "icir",
-    threshold_pct: float = 0.90,
+    threshold_pct: float = ROBUST_THRESHOLD_PCT,
 ) -> dict:
     """Compute the robust region as parameters within threshold_pct of best."""
     if not sweep_results:
@@ -314,10 +339,12 @@ def compute_robust_region(
 
 # %%
 if sweep_results:
-    robustness = compute_robust_region(sweep_results, metric="icir", threshold_pct=0.90)
+    robustness = compute_robust_region(
+        sweep_results, metric="icir", threshold_pct=ROBUST_THRESHOLD_PCT
+    )
 
     print(f"Best lookback: {robustness['best_param']} days (ICIR = {robustness['best_value']:.2f})")
-    print(f"90% threshold: ICIR >= {robustness['threshold']:.2f}")
+    print(f"{ROBUST_THRESHOLD_PCT:.0%} threshold: ICIR >= {robustness['threshold']:.2f}")
     print(f"Robust parameters: {robustness['robust_params']}")
     rr = robustness["robust_range"]
     print(f"Robust range: {rr[0]} to {rr[1]} days" if rr else "Robust range: None")
@@ -326,6 +353,16 @@ if sweep_results:
     frac = robustness["robust_fraction"]
     band = ">50%" if frac >= 0.5 else "25-50%" if frac >= 0.25 else "<25%"
     print(f"\nRobust fraction {frac:.0%} ({band} of parameters near-optimal)")
+
+    # Before ranking the sweep, ask whether any entry in it is distinguishable from zero.
+    T_CRIT = 1.96
+    _tstats = {p_: abs(r["t_stat"]) for p_, r in sweep_results.items() if "t_stat" in r}
+    if _tstats:
+        _sig = [p_ for p_, t in _tstats.items() if t >= T_CRIT]
+        print(
+            f"lookbacks whose mean IC clears |t| >= {T_CRIT}: {len(_sig)} of {len(_tstats)}"
+            f"; largest |t| in the sweep is {max(_tstats.values()):.2f}"
+        )
 
 # %%
 # Visualize robust region
@@ -378,19 +415,50 @@ if sweep_results and robustness:
     )
 
     fig.update_layout(
-        title="Only the 189-day lookback lies within 90% of peak ICIR",
+        title="ICIR by lookback window, with the robust region shaded",
         xaxis_title="Lookback (days)",
         yaxis_title="ICIR",
         height=450,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "A single panel plotting the information ratio of a momentum signal against the "
+            "lookback window in days, as a dark line with a marker at each tested value. "
+            "The line starts below zero, falls to its lowest around forty days, rises "
+            "steadily through zero near a hundred days, peaks just short of two hundred, "
+            "then drops back to near zero at the longest window tested. A dashed amber "
+            "horizontal line near the top is labelled as the fraction of the peak that "
+            "defines the robust region. Exactly one marker, the peak, sits above that line, "
+            "and it carries a red star and an annotation naming it the robust region; its "
+            "immediate neighbours on both sides fall clearly below the dashed line."
+        ),
+    )
+
+# %% [markdown]
+# Read the robust fraction printed above against the shaded region in the figure. On this
+# sweep the region is a single point: one lookback reaches the threshold and none of its
+# neighbours do. That is the narrow-peak shape, and it is the one to distrust. A lookback
+# that works at its own value and fails a step either side is more plausibly the luckiest
+# draw from the sweep than a property of the signal.
+#
+# The line printed beneath it is the stronger statement, and it is worth pausing on. Not
+# one lookback in the sweep produces a mean IC distinguishable from zero at the usual
+# threshold, and the error bars in the response-surface figure show the same thing: every
+# band crosses the zero line, the one at the peak included. So "best lookback" here names
+# the largest of a set of estimates that are individually consistent with no signal at
+# all. Ranking them is still the right diagnostic, because the shape of the surface is
+# informative even when its level is not, but the ranking does not license a claim that
+# the top-scoring window carries an edge. The snooping correction below quantifies how much of that peak is
+# attributable to having looked at several windows.
 
 # %% [markdown]
 # ### RAS Correction for Parameter Snooping
 #
-# After sweeping N parameter combinations, the best IC is upward-biased.
-# RAS corrects for correlation-aware multiple testing — nearby parameters
-# produce correlated IC estimates and count as fewer independent tests.
+# After sweeping N parameter combinations, the highest IC in the sweep is biased upward:
+# it was chosen for being highest. RAS deflates it with a correlation-aware multiple-
+# testing correction, in which nearby parameters produce correlated IC estimates and so
+# count as fewer independent tests than their number suggests.
 
 # %%
 from ml4t.diagnostic.evaluation.stats import (
@@ -410,11 +478,9 @@ if sweep_results:
         ic_matrix_aligned = np.array([s[:min_len] for s in ic_matrix])  # (N strategies, T)
         best_ic_values = np.array([np.mean(s) for s in ic_matrix_aligned])
 
-        # complexity is the empirical Rademacher complexity R-hat, NOT the count
-        # of parameters tested. It expects a (T periods x N strategies) matrix and
-        # measures how correlated the swept ICs are (correlated -> fewer effective
-        # independent tests -> smaller snooping penalty).
-        r_hat = rademacher_complexity(ic_matrix_aligned.T, random_state=42)
+        # R-hat is the empirical Rademacher complexity, not a count of parameters; it
+        # takes a (periods x strategies) matrix and reads how correlated the swept ICs are.
+        r_hat = rademacher_complexity(ic_matrix_aligned.T, random_state=SEED)
         # The snooping bias is about the cherry-picked HIGHEST IC, so deflate that.
         best_idx = int(np.argmax(best_ic_values))
         ras_adjusted = ras_ic_adjustment(
@@ -432,7 +498,7 @@ if sweep_results:
         print(f"Time periods:                  {min_len}")
 
 # %% [markdown]
-# ## 5. Regime-Conditional Performance
+# ## Regime-Conditional Performance
 #
 # A robust signal maintains predictive power across market regimes. We use
 # 42-day realized volatility on SPY as a clean, pre-defined conditioning
@@ -546,10 +612,16 @@ if spy_vol is not None:
         ic_values = [r["mean_ic"] for r in regime_ic.values()]
         ic_range = max(ic_values) - min(ic_values)
         print(f"\nIC range across regimes: {ic_range:.4f}")
-        if ic_range > 0.04:
-            print("IC range > 0.04 across regimes — interaction features are warranted")
+        if ic_range > REGIME_IC_RANGE_MIN:
+            print(
+                f"IC range above {REGIME_IC_RANGE_MIN} across regimes; "
+                "interaction features are warranted"
+            )
         else:
-            print("IC range <= 0.04 across regimes — signal does not depend on regime")
+            print(
+                f"IC range at or below {REGIME_IC_RANGE_MIN} across regimes; "
+                "no regime dependence to condition on"
+            )
 
 # %% [markdown]
 # ### Conditional IC Distribution by Regime
@@ -613,7 +685,7 @@ if spy_vol is not None and regime_ic:
     ax.set_xticks(positions)
     ax.set_xticklabels(regime_labels)
     ax.set_ylabel("Information Coefficient (rank IC)")
-    ax.set_title("Momentum IC weakens from low- to high-volatility regimes")
+    ax.set_title("Momentum IC by volatility regime")
     ax.text(
         0.5,
         -0.22,
@@ -625,13 +697,36 @@ if spy_vol is not None and regime_ic:
         color=COLORS["neutral"],
     )
 
-    plt.show()
+    show_with_alt(
+        fig_mpl,
+        (
+            "Three box plots side by side, one per volatility tercile, labelled low, mid and "
+            "high volatility, with the information coefficient of a momentum signal on the "
+            "vertical axis and a dashed line at zero. Each box is overlaid with a cloud of "
+            "jittered semi-transparent points, one per observation, and annotated above "
+            "with its mean IC and t-statistic. The low-volatility box sits highest, with "
+            "its median above the zero line; the mid-volatility box straddles zero with its "
+            "median just above it; the high-volatility box sits lowest and is the widest of "
+            "the three, with its median below zero. An italic caption underneath names the "
+            "momentum, forward-return and volatility windows used."
+        ),
+    )
 
 # %% [markdown]
-# ## 6. Signal × State Interaction Features
+# The regime table above carries the reading the figure invites: mean IC is highest in the
+# low-volatility regime, smaller in the normal one, and negative in the high-volatility
+# one, and only the low-volatility estimate reaches significance on its own t-statistic.
+# Note what that does and does not license. Three regimes is three tests, the split points
+# are choices, and an IC that changes sign across them is a claim about this sample. The
+# printed IC range is the quantity the conditioning decision keys on, and it clears
+# `REGIME_IC_RANGE_MIN` here comfortably enough that the interaction features below are
+# worth building.
+
+# %% [markdown]
+# ## Signal and State Interaction Features
 #
-# The text (§8.6) describes three interaction templates. We demonstrate all
-# three using momentum (signal) and realized volatility (state).
+# Three interaction templates, each demonstrated with momentum as the signal and realized
+# volatility as the state.
 #
 # | Template | Construction | What changes |
 # |---|---|---|
@@ -731,16 +826,37 @@ if spy_vol is not None and len(interact_df) > 252:
         yaxis_title="Spearman IC",
         height=400,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "A line chart of rolling rank information coefficient against trading days, with "
+            "two series and a dashed zero line: raw momentum in dark blue and gated "
+            "momentum in amber. Both series spend most of the window below zero, "
+            "oscillating between about minus a half and plus a quarter. The amber series "
+            "tracks the dark one but sits above it through most of the span, and the gap is "
+            "widest where the dark series reaches its deepest troughs. The amber series "
+            "stops short of the right edge, ending earlier than the dark one."
+        ),
+    )
 
 # %% [markdown]
-# The gated signal avoids the worst IC drawdowns during high-volatility
-# episodes, at the cost of fewer active days (reduced breadth). Whether
-# gating improves net performance depends on the IC gain vs breadth loss —
-# a question for the modeling chapters (Ch11–12).
+# The gated series sits above the raw one through most of the window, and it is furthest
+# above it at the raw series' deepest troughs, which is what gating is supposed to do: the
+# episodes it removes are the ones where the signal was working against you.
+#
+# Notice the level before reading that as a win. Both lines spend most of the window below
+# zero. On this panel, over this span, the rolling rank IC of a momentum signal is
+# negative more often than not, so gating is lifting a negative number toward zero rather
+# than protecting a positive one. A reader who took "avoids the worst drawdowns" to imply
+# an otherwise profitable signal would have the sign wrong. What the comparison
+# establishes is the shape of the state dependence, not that the signal earns anything.
+#
+# Gating also costs active days, so it trades breadth for that lift. Whether the trade is
+# worth making is a question for the modelling chapters, and it needs a number this figure
+# does not contain.
 
 # %% [markdown]
-# ## 7. Implementation Variants
+# ## Implementation Variants
 #
 # Different implementation choices are hyperparameters. A robust signal
 # should not depend critically on one specific choice. We compare five
@@ -845,7 +961,7 @@ print(
 )
 
 # %% [markdown]
-# ## 8. Robustness Summary
+# ## Robustness Summary
 
 # %%
 print("\n" + "=" * 50)
@@ -875,16 +991,16 @@ print("=" * 50)
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Robustness is breadth, not a ratio**: The fraction of parameters
-#    within 90% of best performance, not mean/std
-# 2. **One knob at a time**: Vary lookback while holding everything else
-#    constant; combine best single-knob settings afterward
+# 1. **Robustness is breadth, not a ratio**: the fraction of parameters reaching
+#    `ROBUST_THRESHOLD_PCT` of the peak, not a mean over a standard deviation
+# 2. **One knob at a time**: vary the lookback while holding everything else
+#    constant, then combine the per-knob choices afterward
 # 3. **Regime conditioning requires care**: Use pre-defined conditioning
-#    variables (not derived from the signal); only condition when the IC
-#    range across regimes exceeds noise (>0.04)
-# 4. **Correct for snooping**: After sweeping N parameters, apply RAS to
-#    deflate the best IC for data-mining bias
-# 5. **Interactions multiply search**: Signal × state combinations must
-#    enter the searched-set accounting from §7.4
+#    variables, never ones derived from the signal, and condition only when the IC
+#    range across regimes clears `REGIME_IC_RANGE_MIN`
+# 4. **Correct for snooping**: after sweeping N parameters, apply RAS to deflate the
+#    highest IC for data-mining bias
+# 5. **Interactions multiply search**: signal-by-state combinations must enter the
+#    searched-set accounting, because each one is another test
 #
-# **Next**: `07_event_studies` — event-based signal validation
+# **Next**: `07_event_studies`, on event-based signal validation
