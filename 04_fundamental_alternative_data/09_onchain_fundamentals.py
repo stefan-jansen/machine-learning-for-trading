@@ -140,11 +140,14 @@ print(f"Observations: {len(total_tvl):,}")
 print(f"History: {total_tvl['timestamp'].min()} to {total_tvl['timestamp'].max()}")
 print(f"Highest level reached: ${total_tvl['tvl_bn'].max():.0f}bn")
 
-# The landmarks the figure below turns on, so the description under it argues from numbers
-# rather than from the shape of a line. Each one after the peak exists only if the snapshot
-# runs past the one before it: the downloader fetches history up to today, so a refresh landing
-# on a new all-time high leaves nothing after the peak, and one landing on the post-peak
-# minimum leaves nothing after the trough. Both are ordinary snapshots, not errors.
+# %% [markdown]
+# The cell below prints the landmarks the figure turns on. Each one after the peak exists only if
+# the snapshot runs past the one before it: the downloader fetches history up to today, so a
+# refresh landing on a new all-time high leaves nothing after the peak, and one landing on the
+# post-peak minimum leaves nothing after the trough. Both are ordinary snapshots rather than
+# errors, so the list is built conditionally.
+
+# %%
 _peak = total_tvl.filter(pl.col("tvl_bn") == pl.col("tvl_bn").max())
 _peak_bn, _peak_at = _peak["tvl_bn"][0], _peak["timestamp"][0]
 _landmarks = [("peak", _peak_bn, _peak_at)]
@@ -173,27 +176,21 @@ fig = px.line(
 fig.update_layout(height=380)
 show_plotly_with_alt(
     fig,
-    "Line chart of total value locked across DeFi, in billions of dollars, from late 2017 to "
-    "2026. The series is indistinguishable from zero until the middle of 2020, then rises "
-    "steeply through 2021 to its highest point at the end of that year. It falls by about "
-    "four fifths over the next two years to a low in late 2023, climbs back through 2024 and "
-    "2025 to a second peak nearly level with the first, and then falls by roughly half again, "
-    "ending the chart well below both peaks and far above the trough.",
+    "Line chart of total value locked across DeFi over the full published history, in billions "
+    "of dollars, against a date axis.",
 )
-
-# %% [markdown]
-# The landmarks printed above are the figure's shape in numbers, and the recovery high is what
-# a description written from the line alone tends to miss. The series does not fall from its 2021
-# peak and stay down: it climbs back to nearly the same level three years later before falling
-# by about half again. The level at the right edge sits below two highs rather than recovering
-# from one, and the share-of-peak column says how far below each.
 
 # %% [markdown]
 # ### Which chains hold it
 #
-# Chain-level series let the total be decomposed. The four loaded here are the largest, and the
+# Chain-level series let the total be decomposed. The chains loaded here are the largest, and the
 # breakdown below measures them against the **total** rather than against each other, so that
 # the share held by everything else is visible rather than assumed away.
+#
+# The residual bar is an aggregate over every chain not loaded separately, so it is reported
+# apart from the named chains rather than ranked among them as if it were one. Under a
+# single-chain `CHAINS` the residual is the bigger bar, and calling it the largest would read as
+# one chain holding the sector.
 
 # %%
 chain_tvl = {}
@@ -222,12 +219,17 @@ composition = pl.concat(
     ]
 ).with_columns(share=pl.col("tvl_bn") / recent_total)
 
-# How concentrated the total is, ranked across every bar including the residual, so the claim
-# under the figure is read off a number rather than off the length of a rectangle.
-_ranked = composition.sort("share", descending=True)
-_top = _ranked.row(0, named=True)
-print(f"Largest single bar: {_top['chain']}, {_top['share']:.1%} of the total")
-print(f"Every other bar combined: {1 - _top['share']:.1%}")
+# The residual is reported apart from the named chains rather than ranked among them.
+_named = composition.head(composition.height - 1).sort("share", descending=True)
+_residual = composition.row(-1, named=True)
+_top = _named.row(0, named=True)
+print(f"Largest chain loaded:   {_top['chain']}, {_top['share']:.1%} of the total")
+print(f"Other chains loaded:    {_named['share'].sum() - _top['share']:.1%} of the total")
+print(f"Not loaded separately:  {_residual['share']:.1%} of the total, in one residual bar")
+print(
+    f"The largest chain loaded holds "
+    f"{'more' if _top['share'] > 1 - _top['share'] else 'less'} than every other bar combined"
+)
 composition
 
 # %%
@@ -243,17 +245,17 @@ fig = px.bar(
 fig.update_layout(height=320, xaxis_tickformat=".0%", yaxis=dict(categoryorder="total ascending"))
 show_plotly_with_alt(
     fig,
-    "Horizontal bar chart of each chain's share of total value locked over the trailing "
-    "window. The largest bar is longer than every other bar combined, and the residual bar "
-    "labelled for the chains not loaded separately is the second longest.",
+    "Horizontal bar chart of each chain's share of total value locked, averaged over the "
+    "trailing window, with one bar per chain loaded and a residual bar for the chains not "
+    "loaded separately. Shares are measured against the published total.",
 )
 
-# %% [markdown]
-# On the chains loaded here, over the window printed above, one chain holds more than every
-# other bar combined, and that includes the residual standing for the hundreds of chains not
-# loaded separately. A "DeFi total" is mostly one chain's series with a minority of others
-# averaged into it, which is worth knowing before any result about the total is read as a
-# result about the sector.
+# %% [markdown] tags=["results"]
+# The shares printed above are what the breakdown is for. Measuring against the published total
+# rather than against each other keeps the share held by chains outside the selection visible,
+# and the residual bar is how much of the sector the selection leaves out. Where one chain holds
+# more than every other bar combined, a "DeFi total" is mostly that chain's series, and a result
+# about the total is not a result about the sector.
 
 # %% [markdown]
 # ## 3. The price series, and what bounds the study
@@ -330,18 +332,16 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Two stacked panels sharing one date axis over the joined one-year window: total value "
-    "locked in billions of dollars above, the ether price in dollars below. Both rise over the "
-    "first months of the window to highs in the second half of 2025, the price peaking a few "
-    "weeks before the level does, and both fall through the winter into 2026.",
+    "Two stacked panels sharing one date axis over the joined panel's window: total value "
+    "locked in billions of dollars above, the ether price in dollars below.",
 )
 
 # %% [markdown]
-# The correlation printed above puts a number on the two lines turning together, and that is the
-# first thing to be careful about. TVL is a dollar value of crypto holdings, so it mechanically
-# follows the price of those holdings. Any test of whether TVL predicts the price has to work
-# with a quantity that is not simply the price again, which is why the features below are growth
-# rates and z-scores rather than levels.
+# The correlation printed above is there because of what TVL is. It is a dollar value of crypto
+# holdings, so it follows the price of those holdings by construction rather than by any
+# relationship worth testing. A test of whether TVL predicts the price therefore has to work with
+# a quantity that is not the price again, which is why the features below are growth rates and
+# z-scores rather than levels.
 
 # %% [markdown]
 # ## 4. Features
@@ -481,28 +481,20 @@ fig = px.bar(
 fig.update_layout(height=400, yaxis_tickformat=".0%")
 show_plotly_with_alt(
     fig,
-    "Bar chart of the mean forward ether return in each of the three TVL regimes, "
-    "with Newey-West standard errors as error bars. The contraction bar is slightly positive "
-    "and the expansion bar slightly negative, and both error bars cross zero. The neutral bar "
-    "is far below both, near minus sixteen percent, and its error bar does not reach zero.",
+    "Bar chart of the mean forward ether return in each TVL regime, with Newey-West standard "
+    "errors as error bars. The regimes are the buckets the trailing TVL z-score falls into.",
 )
 
-# %% [markdown]
-# The error bars are what the first table does not show. Once the overlap is priced in, the two
-# extreme regimes carry standard errors larger than their own means, so neither is
-# distinguishable from zero, and the contrasts say whether the regimes differ from each other.
-#
-# The direct test of the hypothesis is the contraction-against-expansion contrast, since that is
-# the pair the story says should differ, and it is the flattest of the three. So the hypothesis
-# this section set out to test - that TVL expansion precedes higher returns and contraction lower
-# ones - is not supported by these estimates.
-#
-# What the estimates do show puts the mean furthest from zero on the neutral bucket, the one
-# defined as carrying no signal, and it is a negative mean. That is not what any monotonic
-# relationship in the z-score would produce, in either direction. Noise
-# partitioned three ways is one explanation and this sample cannot separate it from another; the
-# three contrasts are also three tests on ten independent windows, which is not a setting in which
-# one clearing a threshold means much.
+# %% [markdown] tags=["results"]
+# Read the contrast table rather than the regime means. The hypothesis this section set out to
+# test is that TVL expansion precedes higher returns and contraction lower ones, so the quantity
+# that tests it is the contraction-against-expansion contrast, under the corrected covariance;
+# the estimates do not support it. The pattern across the three buckets is worth reading as well
+# as the statistics, because a bucket defined as carrying no signal is not where a monotonic
+# relationship in the z-score would put the extreme mean, in either direction. Noise partitioned
+# three ways is one explanation and this sample cannot separate it from another. The three
+# contrasts are also three tests on the handful of independent windows counted below, which is
+# not a setting in which one of them clearing a threshold means much.
 #
 # ### The same question as a regression
 #
@@ -528,16 +520,16 @@ print(f"t-statistic assuming independent days: {naive.tvalues[1]:+.2f}")
 print(f"t-statistic with the overlap corrected: {corrected.tvalues[1]:+.2f}")
 print(f"Independent thirty-day windows in the sample: {len(tested) / FORWARD_DAYS:.0f}")
 
-# %% [markdown]
-# Both statistics are small, and the correction moves the smaller one toward zero. The reason is
-# in the last line: a year of daily observations of a thirty-day forward return is about ten
-# independent windows, and ten observations cannot establish a relationship of this size whatever
-# the daily row count suggests.
+# %% [markdown] tags=["results"]
+# The count on the last line is what the section turns on. A year of daily observations of a
+# forward return spanning a month is a handful of independent windows, not a year of them, and a
+# sample that size cannot establish a relationship of this magnitude whatever the daily row count
+# suggests.
 #
-# **What binds is the price feed, not the TVL series.** DeFi Llama publishes eight years of TVL
-# for free; the free price tier serves one. Extending the study needs a longer price history,
-# which the exchange feeds in Chapter 2 provide, and that is the change that would make this
-# question answerable rather than any refinement of the signal.
+# **What binds is the price feed, not the TVL series.** DeFi Llama publishes the whole history of
+# the sector for free; the free price tier serves the trailing year. Extending the study needs a
+# longer price history, which the exchange feeds in Chapter 2 provide, and that is the change
+# that would make this question answerable rather than any refinement of the signal.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -556,12 +548,12 @@ print(f"Independent thirty-day windows in the sample: {len(tested) / FORWARD_DAY
 #    assumes a dependence structure the data need not have.
 # 5. A regime table with three buckets will always produce an ordering. Estimate the bucket means
 #    as coefficients on regime indicators under the same corrected covariance and put the
-#    standard errors on the chart. Then read the pattern as well as the statistics: a bucket
-#    defined as "no signal" coming out furthest from zero is what noise partitioned three ways
-#    looks like, whatever any one t-statistic says.
+#    standard errors on the chart. Then read the pattern as well as the statistics: where a
+#    bucket defined as "no signal" carries the extreme mean, that is what noise partitioned three
+#    ways looks like, whatever any one t-statistic says.
 # 6. The binding constraint on an alternative-data study is often not the alternative data. Here
-#    the free TVL history is eight years and the free price history is one, so the price feed
-#    decides what can be concluded.
+#    the free TVL history spans the whole sector and the free price history the trailing year, so
+#    the price feed decides what can be concluded.
 #
 # **Next**: [`11_defi_tvl_evaluation`](11_defi_tvl_evaluation.ipynb) applies the chapter's full
 # due-diligence framework - signal, quality, legal risk and cost - to this same dataset.

@@ -121,8 +121,9 @@ meta = load_macro_metadata()
 meta.select("series", "description", "native_frequency", "kind", "formula")
 
 # %% [markdown]
-# Grouped by how often they are published, the twenty-odd series fall into four release clocks
-# plus the derived columns. That grouping is the whole difficulty of macro data in one table.
+# Grouping the metadata by how often each series is published separates the panel into its
+# release clocks and the derived columns. That grouping is the whole difficulty of macro data in
+# one table.
 
 # %%
 meta.group_by("native_frequency").agg(
@@ -145,10 +146,10 @@ print(f"Last date in this snapshot: {yields['timestamp'].max()}")
 yields.tail(3)
 
 # %% [markdown]
-# The window below opens in 2020 with both yields near zero, where policy had pinned them since
-# the financial crisis. Two annotations mark the decisions that moved them: the first increase of
-# the tightening cycle in March 2022, and the last one in July 2023, after which the policy rate
-# stayed at its peak for over a year.
+# The chart below is drawn on the recent window rather than the full panel, because the
+# tightening cycle is the episode the rest of this notebook refers back to. The annotations mark
+# the two decisions that bound it, the first and the last increase of the cycle, and each is
+# placed only if the window actually contains that date.
 
 # %%
 yields_recent = yields.filter(pl.col("timestamp") >= pl.lit(RECENT_START).str.to_date())
@@ -194,13 +195,9 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of the two-year and ten-year Treasury yields over the recent window. Both fall "
-    "almost to zero during 2020; the two-year stays there through 2021 while the ten-year "
-    "recovers to between one and two percent. Both then rise steeply through 2022 and 2023 to "
-    "around five percent before easing. The two-year rises further and faster than the "
-    "ten-year and crosses above it in 2022, staying "
-    "above for most of the rest of the window. Two annotations mark the first and last policy "
-    "increases of the cycle.",
+    "Line chart of the two-year and ten-year Treasury yields over the recent window, in percent "
+    "per year, against a shared date axis. Annotations mark the first and last policy increases "
+    "of the tightening cycle.",
 )
 
 # %%
@@ -212,17 +209,12 @@ for _label, _at in (("first increase", "2022-03-16"), ("last increase", "2023-07
             f"{_label:<16} {_at}   2-year {_row['dgs2'][0]:.2f}%   10-year {_row['dgs10'][0]:.2f}%"
         )
 
-# %% [markdown]
-# Read the two rows printed above together with the chart. By the first increase both yields
-# had already left the floor they reached in 2020, and the cycle roughly doubles the ten-year
-# and more than doubles the two-year from there. The two-year moves further, which is what
-# tightening looks like at the short end: the policy rate is the thing being set, and the
+# %% [markdown] tags=["results"]
+# The two rows printed above are the yields on the days the cycle began and ended, and they are
+# why the short end is worth watching separately: the policy rate is the thing being set, and the
 # two-year tracks expectations about it over a horizon short enough for those expectations to
-# dominate.
-#
-# Note also where the lines sit relative to each other by the end. The two-year finishing above
-# the ten-year is the inversion the spread section below makes its subject, and it is visible
-# here first as the orange line crossing over the dark one.
+# dominate, so it is the leg that moves further. Where the two-year ends the cycle above the
+# ten-year, that is the inversion Part 5 makes its subject.
 
 # %% [markdown]
 # ## 4. The VIX
@@ -254,9 +246,8 @@ print(f"Date it was reached: {vix.filter(pl.col('vixcls') == vix['vixcls'].max()
 # %% [markdown]
 # The two reference lines mark the levels the market conventionally treats as the boundary
 # between a calm regime, an unsettled one and a frightened one. They are conventions rather than
-# thresholds anything is computed from. The reason to draw them is that they make the shape of
-# the series legible: it sits below the lower line for most of its life, and the excursions above
-# the upper one are the episodes worth naming.
+# thresholds anything is computed from, and the reason to draw them is that "calm" and
+# "frightened" are otherwise opinions about a line.
 
 # %%
 vix_recent = vix.filter(pl.col("timestamp") >= pl.lit(RECENT_START).str.to_date())
@@ -296,7 +287,7 @@ for date, label in [
         x=date, y=float(at_date.iloc[0]), text=label, showarrow=True, arrowhead=2, ax=0, ay=-30
     )
 fig.update_layout(
-    title="VIX with conventional bands, and two named episodes",
+    title="VIX with conventional bands and annotated market episodes",
     xaxis_title="Date",
     yaxis_title="VIX (annualized % volatility)",
     height=400,
@@ -305,14 +296,15 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Filled line chart of the VIX over the recent window, with dashed rules at twenty and "
-    "thirty. The series spends most of its length below twenty, with brief tall spikes "
-    "annotated at the COVID crash and the failure of Silicon Valley Bank.",
+    "Filled line chart of the VIX over the recent window, in annualized percent volatility, "
+    "with dashed horizontal rules at the conventional band levels and annotations at named "
+    "market episodes.",
 )
 
 # %% [markdown]
-# The description above claims the series spends most of its life low and only days at a time
-# high. Both halves are countable, so count them.
+# The usual summary of this series is that it spends most of its life below the lower band and
+# only days at a time above the upper one. Both halves are countable against those same two
+# levels, over the plotted window and over the full history, so the cell below counts them.
 
 # %%
 _below, _above = VIX_BANDS[0][0], VIX_BANDS[1][0]
@@ -354,20 +346,16 @@ for _label, _frame in (("full history", vix), ("plotted window", vix_recent)):
     )
 
 # %% [markdown]
-# The first column bears out the usual summary: the index is below the lower band for most of
-# its life. The last column is the one to look at twice. The typical spell above the upper band
-# is a handful of days, which is where "spikes are brief" comes from, but the longest is far
-# longer than that in both rows, and much longer over the full history than over the window this
-# figure draws. That longest spell is the 2008-09 crisis, which this chart's window begins after.
-#
-# The lengths are in calendar days, because that is what a row of this panel is. "The panel and
-# its grid" above established that; this is the first place it changes a number, and it would
+# The spell lengths are in calendar days, because that is what a row of this panel is. "The panel
+# and its grid" above established that; this is the first place it changes a number, and it would
 # change any other window stated in rows the same way.
-#
-# A median and a maximum say different things here, and only one of them fits on the chart.
-# "Volatility spikes are brief" describes the typical episode and says nothing about the worst
-# one, which is the episode a risk model exists for. Read the two together, and note that a
-# figure windowed on recent years cannot show you the tail that matters.
+
+# %% [markdown] tags=["results"]
+# Read the median and the longest spell together rather than either alone. A median describes the
+# typical episode and says nothing about the worst one, which is the episode a risk model exists
+# for, and the two rows show what the choice of window does to each: a figure drawn on recent
+# years cannot show a tail that falls outside it. The 2008-09 crisis carries the longest spell in
+# the full history, and the plotted window starts after it.
 
 # %% [markdown]
 # ## 5. The yield curve spread, and checking a derived column
@@ -401,9 +389,10 @@ print(
 )
 
 # %% [markdown]
-# Both gaps are at the limit of floating-point precision, so the two columns are the same
-# quantity and either may be used. Where they had disagreed, the recomputation from `dgs10` and
-# `dgs2` is the one to trust, because it is the one whose inputs are in the panel.
+# The gaps printed above are the check: a difference at the limit of floating-point precision
+# means the two columns are the same quantity and either may be used. Where they disagree, the
+# recomputation from `dgs10` and `dgs2` is the one to trust, because it is the one whose inputs
+# are in the panel and can be inspected.
 
 # %%
 spread = macro.select("timestamp", "t10y2y").drop_nulls()
@@ -447,11 +436,8 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of the ten-year minus two-year Treasury spread over the recent window. It is "
-    "positive and rising into early 2021, falls through 2021, crosses below zero in mid-2022, "
-    "stays negative "
-    "until late 2024 apart from brief excursions back above the line, and is positive again "
-    "through 2025. The negative region is shaded.",
+    "Line chart of the ten-year minus two-year Treasury spread over the recent window, in "
+    "percentage points, with a zero line and the region below it shaded.",
 )
 
 # %% [markdown]
@@ -511,23 +497,20 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Horizontal bar chart, on a logarithmic axis, of how often each series changes value per "
-    "year, coloured by published frequency across five categories. The bars fall into groups: "
-    "the daily and derived-daily series between about one hundred and two hundred and fifty "
-    "changes a year, the two weekly series near fifty, the monthly series between eight and "
-    "thirteen, and the two quarterly series at four.",
+    "Horizontal bar chart, on a logarithmic axis, of how often each series in the panel changes "
+    "value per year, one bar per series, coloured by the publication frequency recorded in the "
+    "FRED metadata.",
 )
 
-# %% [markdown]
-# The bars separate into groups that match the metadata's `native_frequency` without being told
-# it: the business-daily series in the hundreds of changes a year, the two weekly ones near fifty,
-# the monthly ones near ten and the quarterly ones near four. Reading the same panel by row count
-# would have said all of them were daily.
+# %% [markdown] tags=["results"]
+# The bars recover each series' publication frequency from the panel alone, without being told
+# it: the colour is the frequency the FRED metadata records, and it is not an input to the count.
+# A row count over the same panel makes every series look daily.
 #
 # The unemployment rate is the case where the lower bound bites, and it is worth seeing rather
 # than taking on trust. It is published monthly and rounded to a tenth of a percentage point, so
-# in a year of twelve releases the printed value repeats often enough that the change count comes
-# in well under twelve.
+# across a year of releases the printed value repeats often enough that the change count comes in
+# under the release count. The cell below counts both for one year.
 #
 # ### Why forward fill, and what it costs
 #
@@ -567,10 +550,10 @@ by_month
 # %% [markdown]
 # ## 7. Three series together
 #
-# Read separately, each of the three charts above is a story about one market. Read together on
-# a shared time axis, they are one story: policy tightened, the curve inverted in anticipation of
-# the cuts that tightening implies, and volatility spiked at the two moments when the market
-# doubted the path.
+# Each of the three charts above is drawn from one market in isolation. Putting them on a shared
+# date axis is what lets the same stretch of time be read across all three at once, which is the
+# construction the rest of the book uses whenever a rates move, a curve move and a volatility
+# move have to be attributed to the same event rather than to three coincidences.
 
 # %%
 recent = macro.filter(pl.col("timestamp") >= pl.lit(RECENT_START).str.to_date()).to_pandas()
@@ -649,12 +632,10 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Three stacked panels sharing one time axis over the recent window: Treasury yields, the "
-    "ten-year minus two-year spread with a dashed zero line, and the VIX with a dashed rule at "
-    "twenty. The yields rise together from near zero in 2021 to around five percent by 2023; "
-    "the spread falls across the same stretch and is below its zero line from mid-2022 to late "
-    "2024; the VIX carries a single spike far taller than any other and otherwise sits mostly "
-    "below its rule.",
+    "Three stacked panels sharing one date axis over the recent window: the two- and ten-year "
+    "Treasury yields in percent per year, the ten-year minus two-year spread in percentage "
+    "points with a dashed zero line, and the VIX in annualized percent volatility with a dashed "
+    "rule at the lower band level.",
 )
 
 # %% [markdown]
