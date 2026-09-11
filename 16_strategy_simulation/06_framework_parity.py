@@ -546,8 +546,8 @@ show_plotly_with_alt(
     (
         "Line chart of array equity minus sequential equity in US dollars against date, with "
         "a dashed line at zero. Above the line the arithmetic run is ahead and below it the "
-        "engine is. Drawn as a difference rather than as two curves because the gap is small "
-        "against the level, and a difference is the only way to see its shape over time."
+        "engine is. Drawn as a difference rather than as two curves because a difference "
+        "resolves changes that are smaller than the line width on the panel above."
     ),
 )
 

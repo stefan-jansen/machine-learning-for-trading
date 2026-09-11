@@ -1254,9 +1254,11 @@ if cb_strategy.multiplier_history and cb_strategy.drawdown_history:
             "Three stacked panels on a shared date axis. The top panel holds two equity curves "
             "built from the same signals, one with the circuit breaker active and one without, so "
             "the only difference between them is the breaker. The middle panel is the protected "
-            "rule's drawdown against dashed lines at the caution and halt thresholds, measured as "
-            "a positive loss from the running peak. The bottom panel is the sizing multiplier the "
-            "breaker applies, which is the mechanism connecting the other two panels."
+            "rule's drawdown as a negative percentage below zero, against dashed lines at the "
+            "caution and halt thresholds drawn with the same sign; the breaker itself compares a "
+            "positive loss fraction internally, and the panel negates it so losses read downward. "
+            "The bottom panel is the sizing multiplier the breaker applies, which is the mechanism "
+            "connecting the other two panels."
         ),
     )
 

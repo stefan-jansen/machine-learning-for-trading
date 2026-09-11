@@ -647,11 +647,12 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     (
-        "Step chart of gross exposure in solid navy and net exposure in dotted amber, each as "
-        "a share of equity, against date. Gross counts position value regardless of "
-        "direction and net counts it signed, so the two separate only when a book holds both "
-        "sides. Drawn as steps rather than a line because exposure changes at fills and holds "
-        "between them."
+        "Line chart of gross exposure in solid navy and net exposure in dotted amber, each as "
+        "position value divided by contemporaneous equity, against date. Both are marked "
+        "daily, so a position's exposure drifts between fills as prices move rather than "
+        "holding at the level it was opened at. Gross counts position value regardless of "
+        "direction and net counts it signed, so the two coincide only for a book that is "
+        "entirely on one side and long; this strategy is long-only."
     ),
 )
 

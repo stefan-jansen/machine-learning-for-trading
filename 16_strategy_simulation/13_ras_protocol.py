@@ -491,9 +491,11 @@ show_plotly_with_alt(
     (
         f"Two panels over a sweep of {SWEEP_CANDIDATES:,} correlated candidates. The left "
         "panel scatters the RAS lower bound against the observed Sharpe, one point per "
-        "candidate, with a dashed diagonal marking no adjustment. The right panel is the "
-        "distribution of the adjustment itself. Correlated rather than independent "
-        "candidates, because that is the case the Rademacher bound is meant to handle."
+        "candidate, with a dashed diagonal marking no adjustment. The right panel overlays "
+        "two histograms on one Sharpe axis, the observed ratios and the adjusted lower "
+        "bounds, so the shift between them is the adjustment. Correlated rather than "
+        "independent candidates, because that is the case the Rademacher bound is meant to "
+        "handle."
     ),
 )
 

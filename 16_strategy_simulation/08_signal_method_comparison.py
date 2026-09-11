@@ -610,11 +610,13 @@ fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
 show_plotly_with_alt(
     fig,
     (
-        "Two bar panels comparing the three signal methods at one operating point, one colour "
-        "per prediction set, signal rate on the left and state-transition rate on the right. "
-        "The operating point is chosen to hold signal rate roughly equal across methods, so "
-        "the right panel asks what each method costs in turnover once it is held to the same "
-        "firing frequency."
+        "Two bar panels comparing the three signal methods at one configured operating point, "
+        "one colour per prediction set, signal rate on the left and state-transition rate on "
+        "the right. The operating point is the fixed zero cutoff for the threshold method "
+        f"and percentile {OPERATING_PERCENTILE} for the two percentile methods, with the "
+        f"rolling one at a {OPERATING_WINDOW}-observation window - a declared choice, not a "
+        "search for equal activation. The right panel counts how often a rule changes state "
+        "rather than how much a portfolio would trade."
     ),
 )
 

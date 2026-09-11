@@ -461,9 +461,11 @@ show_with_alt(
     (
         "Two horizontal bar panels sharing a state axis, one bar per volatility and trend "
         "state, each state in its own colour, with a dashed line marking the pooled figure "
-        "across all active days. The left panel is annualized Sharpe by state and the right "
-        "the maximum drawdown reached within each state. The pooled line is drawn on both so "
-        "each state can be read against the aggregate it is part of."
+        "across all active days. The left panel is the annualized Sharpe of each state's "
+        "days. The right is the drawdown of a path built by compounding only that state's "
+        "days in order, so it is the fall a portfolio would have taken holding through those "
+        "days alone rather than the fall it lived through between them. The pooled line is "
+        "drawn on both so each state can be read against the aggregate it is part of."
     ),
 )
 
