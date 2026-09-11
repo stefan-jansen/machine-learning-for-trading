@@ -366,14 +366,26 @@ show_plotly_with_alt(
     ),
 )
 
+
 # Both, and named: pl.corr is Pearson by default, which measures level co-movement,
 # while the question "do the two measures agree on which bars are illiquid" is a ranking
 # question and wants Spearman.
+def fmt(value: float | None, spec: str = "+.3f", absent: str = "undefined") -> str:
+    """Format a statistic that a short sample can leave undefined.
+
+    polars returns a null, not an error, when a correlation or a median has nothing to
+    work with: a constant column, fewer than two non-null rows, an empty frame. Those
+    arrive here as None and `format` raises TypeError on them, which stops the notebook
+    on a smaller slice of data while working on a larger one.
+    """
+    return absent if value is None else format(value, spec)
+
+
 corr_pearson = features_df.select(pl.corr("kyle_lambda", "amihud")).item()
 corr_spearman = features_df.select(pl.corr("kyle_lambda", "amihud", method="spearman")).item()
 print(f"Kyle lambda vs Amihud, over {len(features_df)} bars of one session:")
-print(f"  Pearson  {corr_pearson:+.3f}")
-print(f"  Spearman {corr_spearman:+.3f}")
+print(f"  Pearson  {fmt(corr_pearson)}")
+print(f"  Spearman {fmt(corr_spearman)}")
 
 # %% [markdown]
 # Both correlations are negative on this session, which the figure above shows directly:
@@ -405,8 +417,8 @@ _scaled = features_df.with_columns((pl.col("volume") * VOLUME_SCALE).alias("volu
     ]
 )
 print(f"with every volume multiplied by {VOLUME_SCALE}, the median ratio to the original:")
-print(f"  Kyle lambda {(_scaled['kyle_scaled'] / _scaled['kyle_lambda']).median():.3f}")
-print(f"  Amihud      {(_scaled['amihud_scaled'] / _scaled['amihud']).median():.3f}")
+print(f"  Kyle lambda {fmt((_scaled['kyle_scaled'] / _scaled['kyle_lambda']).median(), '.3f')}")
+print(f"  Amihud      {fmt((_scaled['amihud_scaled'] / _scaled['amihud']).median(), '.3f')}")
 
 # %% [markdown]
 # What the substitution shows: Kyle's ratio is unchanged and Amihud moves by the
@@ -521,8 +533,14 @@ corr_same = alpha_df.select(pl.corr("ofi", "returns")).item()
 corr_pred = alpha_df.select(pl.corr("ofi", "fwd_return")).item()
 
 
-def pearson_interval(r: float, n: int, z_crit: float = 1.96) -> tuple[float, float]:
-    """A 95% interval for a Pearson correlation, via the Fisher z transform."""
+def pearson_interval(r: float | None, n: int, z_crit: float = 1.96) -> tuple[float, float] | None:
+    """A 95% interval for a Pearson correlation, via the Fisher z transform.
+
+    None when the interval is not defined: an undefined correlation, or fewer than four
+    observations, where the transform's standard error divides by zero.
+    """
+    if r is None or n < 4:
+        return None
     z, se = np.arctanh(r), 1.0 / np.sqrt(n - 3)
     return float(np.tanh(z - z_crit * se)), float(np.tanh(z + z_crit * se))
 
@@ -533,7 +551,11 @@ for _label, _r in (
     ("same-bar OFI vs same-bar return", corr_same),
     ("OFI vs next-bar return", corr_pred),
 ):
-    _lo, _hi = pearson_interval(_r, _n)
+    _interval = pearson_interval(_r, _n)
+    if _interval is None:
+        print(f"  {_label:<34} {fmt(_r, '+.4f')}   interval undefined on {_n} bars")
+        continue
+    _lo, _hi = _interval
     _verdict = "excludes zero" if _lo * _hi > 0 else "includes zero"
     print(f"  {_label:<34} {_r:+.4f}   95% interval ({_lo:+.3f}, {_hi:+.3f}), {_verdict}")
 
