@@ -878,6 +878,10 @@ if ofi_arr is not None and ret_arr is not None:
 # The imbalance used here is the one the reconstruction computed per second, summed into
 # one-minute buckets - not the hand-built version from Section 4, which ignores replaces.
 #
+# A symbol reaches the figure only if it contributed at least `MIN_BUCKETS` buckets, so
+# the number of points is at most fifty and the cell prints what it was on this run
+# rather than leaving the reader to count them.
+#
 # The fifty symbols are fixed rather than discovered, so the figure redraws to the same
 # cross-section on every run. They are drawn in five strata of ten by daily message
 # count, because a cross-section of only heavily traded names would answer a narrower
@@ -998,7 +1002,7 @@ def analyze_all_stocks_ofi(
 #
 # Each stock is one point: how many orders it received that day against its imbalance-to-
 # return correlation. The horizontal axis is logarithmic because daily order counts span
-# several orders of magnitude across the fifty. What to look at is the vertical spread of
+# several orders of magnitude across the cross-section. What to look at is the spread of
 # the points around zero and whether it narrows as activity rises.
 
 
@@ -1267,8 +1271,8 @@ if lob_data:
 #    keeps the direction and takes the scale out. The notebook reports both, and the gap
 #    between them is the size of that effect.
 # 3. **A cross-section answers what one stock cannot.** A single correlation has no
-#    reference; fifty have a distribution, and the spread of that distribution is the
-#    quantity to read.
+#    reference; a cross-section has a distribution, and the spread of that distribution
+#    is the quantity to read.
 # 4. **Say which imbalance.** This chapter has two: one built by hand from adds and
 #    removals, which ignores replaces, and one computed inside the reconstruction, which
 #    does not. They are different numbers under one name, so every section names its
