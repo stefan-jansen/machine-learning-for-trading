@@ -19,8 +19,27 @@ import polars as pl
 # ── Output root ──────────────────────────────────────────────────────────────
 TEST_DATA_ROOT = Path.home() / "ml4t" / "test-data" / "data"
 
-# Seed for reproducibility
-RNG = np.random.default_rng(42)
+# Seed for reproducibility.
+#
+# One generator draws for all six functions, in the order `generate_all` calls them,
+# so they are NOT independent: calling one alone produces different bytes than calling
+# it in sequence. That is why `create_test_data.DATASETS` declares this file as one
+# unit rather than one entry per function - splitting it would either move every byte
+# of the current fixture or need a seed per function, which moves them the same way.
+SEED = 42
+RNG = np.random.default_rng(SEED)
+
+# Everything `generate_all` writes, as roots under the output directory. `Dataset.owns`
+# in create_test_data.py is built from this, so a generator that grows a new output adds
+# it here and the declaration follows.
+GENERATED_ROOTS: tuple[str, ...] = (
+    "equities/market/microstructure/nasdaq_itch/messages",
+    "equities/market/microstructure/market_by_order/NVDA",
+    "equities/market/microstructure/trade_and_quotes",
+    "equities/market/microstructure/iex/deep/parsed",
+    "futures/market/individual",
+    "prediction_markets",
+)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -36,11 +55,9 @@ def _ns_timestamp(hour: int, minute: int, second: int = 0, micro: int = 0) -> da
     return datetime(2020, 1, 30, hour, minute, second, micro)
 
 
-def generate_itch_messages() -> None:
+def generate_itch_messages(root: Path = TEST_DATA_ROOT) -> None:
     """Generate all ITCH message type parquet files."""
-    itch_dir = (
-        TEST_DATA_ROOT / "equities" / "market" / "microstructure" / "nasdaq_itch" / "messages"
-    )
+    itch_dir = root / "equities" / "market" / "microstructure" / "nasdaq_itch" / "messages"
 
     # ── R (Stock Directory) ──────────────────────────────────────────────
     r_dir = itch_dir / "R"
@@ -389,7 +406,7 @@ def _generate_mbo_day(base_date: datetime, base_price_nano: int, start_order_id:
     return rows
 
 
-def generate_mbo_data() -> None:
+def generate_mbo_data(root: Path = TEST_DATA_ROOT) -> None:
     """Generate synthetic DataBento MBO tick data for NVDA.
 
     Key schema requirements from notebooks:
@@ -402,7 +419,7 @@ def generate_mbo_data() -> None:
     We include both ts_event and timestamp columns, and use DataBento file naming.
     We also generate enough data (spread across hours) for meaningful analysis.
     """
-    mbo_dir = TEST_DATA_ROOT / "equities" / "market" / "microstructure" / "market_by_order" / "NVDA"
+    mbo_dir = root / "equities" / "market" / "microstructure" / "market_by_order" / "NVDA"
     mbo_dir.mkdir(parents=True, exist_ok=True)
 
     # Remove old file if it exists (was named 20241104.parquet before)
@@ -459,7 +476,7 @@ def generate_mbo_data() -> None:
 # NB15 does spread analysis using NBBO quotes and trade size distribution
 
 
-def generate_taq_data() -> None:
+def generate_taq_data(root: Path = TEST_DATA_ROOT) -> None:
     """Generate synthetic AlgoSeek TAQ tick data for AAPL on 2020-03-16.
 
     Key schema requirements from notebooks:
@@ -469,14 +486,7 @@ def generate_taq_data() -> None:
 
     We generate ~600 events with realistic distributions.
     """
-    taq_dir = (
-        TEST_DATA_ROOT
-        / "equities"
-        / "market"
-        / "microstructure"
-        / "trade_and_quotes"
-        / "symbol=AAPL"
-    )
+    taq_dir = root / "equities" / "market" / "microstructure" / "trade_and_quotes" / "symbol=AAPL"
     taq_dir.mkdir(parents=True, exist_ok=True)
 
     # March 16, 2020: AAPL around $250, huge volatility day
@@ -552,11 +562,9 @@ def generate_taq_data() -> None:
 # Path: ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "iex" / "deep" / "parsed" / {type}/
 
 
-def generate_iex_data() -> None:
+def generate_iex_data(root: Path = TEST_DATA_ROOT) -> None:
     """Generate synthetic IEX DEEP parsed data."""
-    parsed_dir = (
-        TEST_DATA_ROOT / "equities" / "market" / "microstructure" / "iex" / "deep" / "parsed"
-    )
+    parsed_dir = root / "equities" / "market" / "microstructure" / "iex" / "deep" / "parsed"
 
     base_date = datetime(2025, 1, 15, 14, 30, 0)  # 9:30 AM ET in UTC
     base_price = 240.0  # AAPL-ish
@@ -664,7 +672,7 @@ def generate_iex_data() -> None:
 # - Enough contracts for roll detection to produce adj_close
 
 
-def generate_individual_futures() -> None:
+def generate_individual_futures(root: Path = TEST_DATA_ROOT) -> None:
     """Generate synthetic CME individual contract data for ES, NQ, CL.
 
     Key requirements from NB06 (continuous construction):
@@ -673,7 +681,7 @@ def generate_individual_futures() -> None:
     - Need at least 3 contracts with clear roll transitions
     - Need enough data points for roll gaps to produce adj_close
     """
-    individual_dir = TEST_DATA_ROOT / "futures" / "market" / "individual"
+    individual_dir = root / "futures" / "market" / "individual"
 
     products = {
         "ES": {"base_price": 4500.0, "tick": 0.25},
@@ -771,9 +779,9 @@ def generate_individual_futures() -> None:
 # Schema: timestamp (Date), symbol (str), open/high/low/close (Float64), volume (Int64)
 
 
-def generate_kalshi_data() -> None:
+def generate_kalshi_data(root: Path = TEST_DATA_ROOT) -> None:
     """Generate synthetic Kalshi prediction market data."""
-    pm_dir = TEST_DATA_ROOT / "prediction_markets"
+    pm_dir = root / "prediction_markets"
     pm_dir.mkdir(parents=True, exist_ok=True)
 
     # 5 contracts, ~10 days each = ~50 rows
@@ -837,28 +845,50 @@ def generate_kalshi_data() -> None:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
+def generate_all(root: Path = TEST_DATA_ROOT, *, quiet: bool = False) -> list[Path]:
+    """Write every synthetic fixture under ``root`` and return the files written.
+
+    Reseeds first, so a second call in the same process reproduces the first. Without
+    that the module-level generator carries its position across calls and the bytes
+    differ, which would make this unusable as a `Dataset.build`.
+
+    The call order is part of the output: see `SEED`.
+    """
+    global RNG
+    RNG = np.random.default_rng(SEED)
+
+    def say(message: str) -> None:
+        if not quiet:
+            print(message)
+
+    say(f"Generating test microstructure data in {root}\n")
+    for index, (label, generate) in enumerate(
+        (
+            ("ITCH Parsed Messages", generate_itch_messages),
+            ("DataBento MBO", generate_mbo_data),
+            ("AlgoSeek TAQ", generate_taq_data),
+            ("IEX Parsed Data", generate_iex_data),
+            ("CME Individual Futures", generate_individual_futures),
+            ("Kalshi Prediction Markets", generate_kalshi_data),
+        ),
+        start=1,
+    ):
+        say(f"{'' if index == 1 else chr(10)}{index}. {label}")
+        generate(root)
+    say("\nDone.")
+
+    written: list[Path] = []
+    for relative in GENERATED_ROOTS:
+        target = root / relative
+        if target.is_dir():
+            written.extend(sorted(p for p in target.rglob("*") if p.is_file()))
+        elif target.is_file():
+            written.append(target)
+    return written
+
+
 def main() -> None:
-    print(f"Generating test microstructure data in {TEST_DATA_ROOT}\n")
-
-    print("1. ITCH Parsed Messages")
-    generate_itch_messages()
-
-    print("\n2. DataBento MBO")
-    generate_mbo_data()
-
-    print("\n3. AlgoSeek TAQ")
-    generate_taq_data()
-
-    print("\n4. IEX Parsed Data")
-    generate_iex_data()
-
-    print("\n5. CME Individual Futures")
-    generate_individual_futures()
-
-    print("\n6. Kalshi Prediction Markets")
-    generate_kalshi_data()
-
-    print("\nDone.")
+    generate_all(TEST_DATA_ROOT)
 
 
 if __name__ == "__main__":
