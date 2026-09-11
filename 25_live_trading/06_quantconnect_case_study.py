@@ -95,8 +95,8 @@ EXPORT_PATH = get_output_dir(25, "quantconnect_export") / "ml4t_qc_predictions.j
 
 # %% [markdown]
 # The registry is opened read-only, and deliberately not with `immutable=1`. That flag promises
-# SQLite the file cannot move while it is open, which lets it skip locking and WAL recovery. It
-# holds for a released case directory and not for a live one a sweep may be writing, and an
+# SQLite the database cannot change while it is open, which lets it skip locking and WAL recovery.
+# That holds for a released case directory and not for a live one a sweep may be writing, and an
 # immutable read of a database with an uncheckpointed write-ahead log sees the pre-WAL main file:
 # a stale configuration selected silently, or a table that appears not to exist.
 

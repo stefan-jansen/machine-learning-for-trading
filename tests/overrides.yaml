@@ -1246,10 +1246,14 @@
     REFRESH_DATA: false
   skip: true
   skip_reason:
-    Reads the ETFs case study's fwd_ret_21d labels and its registry, and stages a
-    basket for Alpaca paper equities. It opens no broker session by default
-    (SUBMIT_PAPER_ORDERS is false), so the earlier reason naming IB Gateway was
-    never this notebook's.
+    Needs the ETFs case study's fwd_ret_21d label parquet and a registry carrying
+    its linear stage; the notebook refuses rather than guesses when the registry
+    holds no validated Ridge run for the label, and the sampled fixture registry
+    is not built to guarantee one. No broker is involved - SUBMIT_PAPER_ORDERS is
+    false by default and the execution plane is an offline dry run - so the
+    earlier reason naming IB Gateway described a different notebook. The
+    EXPECTED_RIDGE_CONFIG override below is inert while this skip stands and is
+    what the notebook needs if the skip is lifted.
   tier: weekly
   timeout: 360
 25_live_trading/03_ib_paper_trading_demo:

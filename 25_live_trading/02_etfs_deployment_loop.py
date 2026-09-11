@@ -286,15 +286,18 @@ print(f"Registry leader on validation IC: {SOURCE_CONFIG}  (IC {source_ic:.4f})"
 print(f"  alpha:        {RIDGE_ALPHA:g}")
 print(f"  tuned on:     {SOURCE_FEATURE_SETS}")
 print(f"  deployed on:  {DEPLOYED_FEATURE_SETS}")
+dropped_feature_sets = sorted(set(SOURCE_FEATURE_SETS) - set(DEPLOYED_FEATURE_SETS))
+print(f"  dropped here: {dropped_feature_sets or 'none'}")
 
 # %% [markdown]
-# The two feature lists differ, and the difference is the cost of the transfer. The registry's
-# leader was tuned with the model-based families alongside the financial ones; this notebook fits
-# the financial families alone, because an HMM and a GARCH refit per symbol on every data update is
-# what the deployment declines to pay for. An alpha selected against one feature set is not
-# selected against another, so the number below is a starting point carried over from research,
-# not a tuned value for the model actually fitted here. Nothing in this notebook re-derives it, and
-# a deployment that wanted it re-derived would sweep on its own feature set.
+# Whatever the run prints as dropped is the cost of the transfer. This notebook fits the financial
+# families alone, because an HMM and a GARCH refit per symbol on every data update is what the
+# deployment declines to pay for, and the configuration it borrows from was tuned on whichever
+# families the registry records against it. An alpha selected against one feature set is not
+# selected against another, so with anything in that dropped list the number below is a starting
+# point carried over from research rather than a tuned value for the model actually fitted here.
+# Nothing in this notebook re-derives it, and a deployment that wanted it re-derived would sweep on
+# its own feature set.
 
 # %%
 labels = pl.read_parquet(labels_path)
@@ -434,10 +437,10 @@ print(
 #
 # Positions are sized against the broker's current account value rather than `INITIAL_CASH`, so
 # leverage stays constant as profit and loss accrue, and against slightly less than all of it.
-# `CASH_BUFFER` is what the order is sized on the current bar's close but fills at the next bar's:
-# an overnight move against the position, plus commission, makes a basket sized at the full account
-# value unaffordable, and the broker answers that by refusing the last leg rather than by filling
-# it smaller. Two per cent is a margin measured on this window, not a guarantee - a basket that
+# `CASH_BUFFER` exists because the order is sized on the current bar's close and fills at the next
+# bar's: an overnight move against the position, plus commission, makes a basket sized at the full
+# account value unaffordable, and the broker answers that by refusing the last leg rather than by
+# filling it smaller. Two per cent is a margin measured on this window, not a guarantee - a basket that
 # gaps up about two per cent overnight is unaffordable again - and the disposition check below is
 # what turns that into a stop rather than a quietly short basket.
 
@@ -932,13 +935,13 @@ print(f"Run metadata: {display_path(run_path)}")
 #   extended panel and a single train pass, not the case study's
 #   walk-forward CV.
 # - **The financial-only feature subset is a deliberate operational
-#   simplification, and it is not free.** Dropping HMM regimes and GARCH
-#   conditional volatility makes the refit complete in seconds instead of
-#   minutes. It also means the alpha this notebook borrows was selected
+#   simplification, and it is not free.** Dropping the model-based
+#   families makes the refit complete in seconds instead of minutes. It
+#   also means the alpha this notebook borrows may have been selected
 #   against a feature set the deployment does not use, which the run
-#   prints rather than leaves implicit. What that costs in forecast
-#   quality is not measured here; measuring it means sweeping on the
-#   deployment's own feature set.
+#   prints as a dropped list rather than leaving implicit. What that
+#   costs in forecast quality is not measured here; measuring it means
+#   sweeping on the deployment's own feature set.
 # - **This notebook refits once per run, and does not decide how often to
 #   run.** Prediction and the offline reference could be re-run daily
 #   against a persisted artefact while the refit happens far less often.
