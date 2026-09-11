@@ -676,7 +676,7 @@ if us_equities is not None:
     axes[1].set_title("Winsorized Returns (1st/99th)")
     axes[1].set_xlabel("Daily Return")
 
-    fig.suptitle("Winsorization clips the 1st/99th tails and leaves the bulk unchanged")
+    fig.suptitle("US equities daily returns, raw and winsorized at the 1st/99th")
     show_with_alt(
         fig,
         alt=(
@@ -1070,7 +1070,7 @@ axes[1].set_title("Leaky: Full-Data Fit")
 axes[1].set_xlabel("Scaled Return")
 axes[1].legend()
 
-fig.suptitle("Full-data leakage shifts the scaled test distribution only slightly")
+fig.suptitle("Scaled test returns under a train-only and a full-data scaler fit")
 show_with_alt(
     fig,
     alt=(

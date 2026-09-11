@@ -953,7 +953,7 @@ if us_equities is not None:
         time_col="timestamp",
         symbol_col="symbol",
         value_col="close",
-        title="US equities is survivorship-free: assets list and delist mid-panel",
+        title="US equities monthly coverage by asset, ordered by first month",
         max_symbols=50,
     )
     fig.update_layout(
