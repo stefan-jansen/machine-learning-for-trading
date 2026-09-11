@@ -234,13 +234,16 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # counts sessions.
 #
 # **The two blocks land on opposite sides of that profile, so the concern applies to one label
-# and not the other.** `carry_pct` has an AR(1) half-life of 3.6 sessions. The 5-session block
-# used for `fwd_ret_5d` is about 1.4 half-lives, and autocorrelation is still 0.52 at lag 5, so
-# that block leaves real dependence unpreserved; the placebo is a slightly weaker opponent than
-# the truth and `fwd_ret_5d`'s empirical p-value is biased toward zero by some amount this
-# notebook does not quantify. The 21-session block used for `fwd_ret_21d` is about six
-# half-lives, and autocorrelation is 0.14 at lag 21 and indistinguishable from zero by lag 63,
-# so that block is long against the dependence and the concern does not apply to it.
+# and not the other.** Read the block lengths against the autocorrelation at those lags rather
+# than against the half-life: the decay is slower than the AR(1) half-life implies - an AR(1)
+# with this lag-1 value would sit at 0.38 by lag 5 and 0.02 by lag 21, where the panel is at
+# 0.52 and 0.14 - so the half-life is a lower bound on persistence, not the yardstick for the
+# block. At the 5-session block used for `fwd_ret_5d` the autocorrelation is still 0.52, so that
+# block leaves real dependence unpreserved; the placebo is a weaker opponent than the truth and
+# `fwd_ret_5d`'s empirical p-value is biased toward zero by some amount this notebook does not
+# quantify. At the 21-session block used for `fwd_ret_21d` it is 0.14, and indistinguishable
+# from zero by lag 63, so that block spans most of the dependence and the concern is
+# correspondingly weaker there.
 #
 # **That is no longer what the column reports, and the reason is worth following.** `fwd_ret_5d`
 # used to sit at 0.0396 and `fwd_ret_21d` at 0.0099, which is 1/101 and the floor 100 draws can

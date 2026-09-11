@@ -115,12 +115,12 @@
 # the column's empirical persistence is a separate quantity and is much larger here.
 # `12_model_analysis` measures it from the feature panel rather than asserting it, on one row per
 # product-session because that is the unit the block counts, pooling the autocorrelation within
-# product with each product demeaned first. The AR(1) half-life is 3.6 sessions. The two blocks
-# straddle it: the 5-session block for `fwd_ret_5d` is about 1.4 half-lives and leaves real
-# dependence unpreserved, which narrows that label's placebo distribution by some amount neither
-# notebook quantifies; the 21-session block for `fwd_ret_21d` is about six, with autocorrelation
-# indistinguishable from zero by lag 63, so it is long against the dependence rather than short.
-# The narrowing is a limitation of one of the two refutations here, not of both.
+# product with each product demeaned first. Compare each block against the autocorrelation at
+# that lag: 0.52 at the 5 sessions used for `fwd_ret_5d`, 0.14 at the 21 used for
+# `fwd_ret_21d`, and indistinguishable from zero by lag 63. The 5-session block leaves real
+# dependence unpreserved and narrows that label's placebo distribution by some amount neither
+# notebook quantifies; the 21-session block spans most of it. The narrowing bears mainly on one
+# of the two refutations here, not equally on both.
 #
 # The contrast with a rolling treatment is worth holding onto, because it is where this is
 # usually got wrong. A treatment built from a 252-session window overlaps its neighbours in 251
