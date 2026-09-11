@@ -93,7 +93,7 @@ WORKSPACE: str = ""
 CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 
 # %% [markdown]
-# ## Resolve the carrier and its holdout lineage
+# ## Resolve the selected configuration and its holdout lineage
 #
 # Selection is not a parameter and is not made here. `resolve_solvent_carrier` reads the
 # highest-Sharpe registered validation backtest across the baseline, allocation and risk-overlay
@@ -101,7 +101,7 @@ CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 # siblings are not candidates: a cost variant is a descendant of a selection rather than an
 # entrant in one. Nothing on this page can revise the choice.
 #
-# The holdout lineage is matched to that carrier by CONFIGURATION - family, configuration name,
+# The holdout lineage is matched to that selection by CONFIGURATION - family, configuration name,
 # label and checkpoint - rather than by the validation model's training hash. A genuine retrain
 # does not share that hash; that is what makes it a retrain, and a lineage query keyed on it can
 # only ever find a validation fit scored over a later window.
@@ -467,12 +467,12 @@ controlled_summary = pl.DataFrame(
 controlled_summary
 
 # %% [markdown]
-# ## Require the holdout lineage the carrier determines
+# ## Require the holdout lineage the selected configuration determines
 #
 # The holdout results are not whatever happens to carry the holdout split; they are required to
-# be the ones this carrier determines. The match is not on the carrier's own training hash - a
-# genuine retrain never shares the validation model's training identity, which is the whole
-# point of a retrain - and it is not on family, configuration name and label either, because
+# be the ones the selected configuration determines. The match is not on its validation training
+# hash - a genuine retrain never shares the validation model's training identity, which is the
+# whole point of a retrain - and it is not on family, configuration name and label either, because
 # several training specifications carry the same three names. The holdout training identity is
 # derived here the way `17_holdout_predictions` derives it, and the query asks for that hash.
 
@@ -671,10 +671,11 @@ performance_figure.show()
 # than assumed. They used to be a side effect of the holdout lock transaction; with that gone,
 # the notebook that reads them is the notebook that has to produce them.
 #
-# The carrier is passed in rather than left to the populator. Left to itself it ranks the
-# registry on raw Sharpe, which would be a second selector sitting beside `resolve_solvent_carrier`
-# and the cost sweep - and a raw ranking has no notion of a retired generation, so it would pair
-# the superseded conformal-v2 backtest and describe a carrier this case study does not report.
+# The selected configuration is passed in rather than left to the populator. Left to itself it
+# ranks the registry on raw Sharpe, which would be a second selector sitting beside
+# `resolve_solvent_carrier` and the cost sweep - and a raw ranking has no notion of a retired
+# generation, so it would pair the superseded conformal-v2 backtest and describe a configuration
+# this case study does not report.
 
 # %% tags=["results"]
 _periods_per_year = int(
