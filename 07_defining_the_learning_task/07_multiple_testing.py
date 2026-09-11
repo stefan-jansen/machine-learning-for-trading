@@ -107,6 +107,9 @@ N_PERIODS_ZOO = 1260
 N_ASSETS_ZOO = 100
 ETF_START_DATE = "2010-01-01"
 ETF_LABEL_HORIZON = 5  # drives both the fwd return and its HAC truncation
+# The synthetic panels draw each period independently, so their labels do not overlap.
+# Declaring a one-period horizon states that, rather than leaving the library to guess.
+NON_OVERLAPPING = 1
 N_RAD_ETF = 5000
 N_STRATEGIES_DSR = 50
 N_DAYS_DSR = 756
@@ -242,7 +245,7 @@ show_plotly_with_alt(
     ),
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # The distribution is centred on zero because that is the truth about every factor in it.
 # What the marked line shows is the maximum of a hundred draws from that distribution, and
 # a maximum is not an estimate of the thing being maximised over. Reporting the selected
@@ -349,11 +352,18 @@ print(f"Wrote publication figure artifact: {figure_7_6_artifact}")
 # The p-values below are HAC-adjusted rather than naive. The correction procedures that
 # follow take p-values as given, so feeding them naive ones would leave the dependence
 # problem from `06_ic_inference` untouched and simply carry it through the correction.
+#
+# Every HAC call on a synthetic panel passes `NON_OVERLAPPING`, because these panels draw
+# each period independently and their labels therefore do not overlap. That is a claim
+# about the data, and it is worth making explicitly: omitting the argument leaves the
+# library to infer the bandwidth from sample size alone and to warn that it may be
+# anti-conservative, which is the right warning for real overlapping labels and the wrong
+# one here. The ETF search later in the notebook passes its actual horizon instead.
 
 # %% tags=[]
 p_values = []
 for f in range(n_factors):
-    hac_stats = compute_ic_hac_stats(ic_series_all[f])
+    hac_stats = compute_ic_hac_stats(ic_series_all[f], label_horizon=NON_OVERLAPPING)
     p_values.append(hac_stats["p_value"])
 
 p_values = np.array(p_values)
@@ -735,7 +745,7 @@ for f in range(n_factors_zoo):
         ic = pooled_ic(factor_signals_zoo[t, :, f], forward_returns_zoo[t, :], method="spearman")
         ics.append(ic)
 
-    hac = compute_ic_hac_stats(ics)
+    hac = compute_ic_hac_stats(ics, label_horizon=NON_OVERLAPPING)
 
     zoo_results.append(
         {
@@ -977,7 +987,7 @@ for f in range(n_factors_zoo):
         pooled_ic(explore_signals[t, :, f], explore_returns[t, :], method="spearman")
         for t in range(n_explore)
     ]
-    hac = compute_ic_hac_stats(ics)
+    hac = compute_ic_hac_stats(ics, label_horizon=NON_OVERLAPPING)
     explore_p_values[f] = hac["p_value"]
     explore_ics[f] = np.mean(ics)
 
@@ -996,7 +1006,7 @@ if len(promoted_idx) > 0:
             pooled_ic(confirm_signals[t, :, f], confirm_returns[t, :], method="spearman")
             for t in range(len(confirm_returns))
         ]
-        hac = compute_ic_hac_stats(ics)
+        hac = compute_ic_hac_stats(ics, label_horizon=NON_OVERLAPPING)
         confirm_p_values[i] = hac["p_value"]
         confirm_ics[i] = np.mean(ics)
 
@@ -1223,7 +1233,7 @@ show_plotly_with_alt(
     ),
 )
 
-# %% [markdown]
+# %% [markdown] tags=[]
 # Every bar is drawn in the same colour because nothing cleared the threshold: the search
 # found no feature it could call a discovery at this false-discovery rate. The two largest
 # ICs are realized-volatility features and are not small in absolute terms, which is the
