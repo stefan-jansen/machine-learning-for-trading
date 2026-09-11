@@ -708,7 +708,8 @@ for block_size in BLOCK_SIZES:
         p_mean = float(np.mean(placebo_t_stats))
         p_std = float(np.std(placebo_t_stats))
         z = (dml_t_stat - p_mean) / p_std if p_std > 0 else np.inf
-        # Plus-one corrected, so the floor is 1 / (n + 1); it is not a false discovery rate.
+        # Plus-one corrected, so the floor is 1 / (n + 1) where n counts the draws that
+        # returned a finite t, not the draws requested. It is not a false discovery rate.
         block_p = empirical_permutation_p(np.asarray(placebo_t_stats), dml_t_stat)
     else:
         p_mean = p_std = z = block_p = float("nan")
@@ -745,7 +746,7 @@ print(
     f"observed t={dml_t_stat:.2f} against a placebo t distribution centred at "
     f"{placebo_t_mean:.2f} with spread {placebo_t_std:.2f}: "
     f"z={z_score:.2f}, permutation p={permutation_p:.4f} "
-    f"(floor {1 / (N_PLACEBO_PERMUTATIONS + 1):.4f})"
+    f"(floor {1 / (headline['n_successful'] + 1):.4f})"
 )
 print(
     "  Placebo effects are on a different scale from the observed one: their spread is "
