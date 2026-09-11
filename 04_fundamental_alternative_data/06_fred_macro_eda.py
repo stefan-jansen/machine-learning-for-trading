@@ -184,7 +184,7 @@ for date, label in [
         ay=-40,
     )
 fig.update_layout(
-    title="The 2022-23 tightening cycle lifted both yields off the zero bound",
+    title="Two- and ten-year Treasury yields, with the tightening cycle marked",
     xaxis_title="Date",
     yaxis_title="Yield (% per year)",
     height=400,
@@ -192,8 +192,34 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of the two-year and ten-year Treasury yields from 2020, both starting near zero, rising steeply through 2022 and 2023 to around five percent, and easing afterwards. Two annotations mark the first and last policy increases of the cycle.",
+    "Line chart of the two-year and ten-year Treasury yields from 2020 onward. Both begin "
+    "between one and two percent, fall almost to zero during 2020 and stay there through 2021, "
+    "then rise steeply through 2022 and 2023 to around five percent before easing. The "
+    "two-year rises further and faster than the ten-year and crosses above it in 2022, staying "
+    "above for most of the rest of the window. Two annotations mark the first and last policy "
+    "increases of the cycle.",
 )
+
+# %%
+# What the cycle did to each yield, rather than leaving it to the eye.
+for _label, _at in (("first increase", "2022-03-16"), ("last increase", "2023-07-26")):
+    _row = yields_recent.filter(pl.col("timestamp") == pl.lit(_at).str.to_date())
+    if len(_row):
+        print(
+            f"{_label:<16} {_at}   2-year {_row['dgs2'][0]:.2f}%   10-year {_row['dgs10'][0]:.2f}%"
+        )
+
+# %% [markdown]
+# Read the two rows printed above together with the chart. By the first increase both yields
+# had already left the floor they reached in 2020, and the cycle roughly doubles the ten-year
+# and more than doubles the two-year from there. The two-year moves further, which is what
+# tightening looks like at the short end: the policy rate is the thing being set, and the
+# two-year tracks expectations about it over a horizon short enough for those expectations to
+# dominate.
+#
+# Note also where the lines sit relative to each other by the end. The two-year finishing above
+# the ten-year is the inversion the spread section below makes its subject, and it is visible
+# here first as the orange line crossing over the dark one.
 
 # %% [markdown]
 # ## 4. The VIX
@@ -204,7 +230,18 @@ show_plotly_with_alt(
 # demand for protection rises, which is why it is read as a measure of how frightened the market
 # is rather than of how volatile it has been.
 
+# %% [markdown]
+# The levels below are the ones the market conventionally reads as boundaries between a calm
+# regime, an unsettled one and a frightened one. They are declared once: the figure draws them,
+# each label formats its own number from the level it marks, and the counts printed after the
+# figure are taken at the same two levels, so nothing here can disagree with anything else.
+
 # %%
+VIX_BANDS = [
+    (20, "Unsettled", COLORS["neutral"]),
+    (30, "Frightened", COLORS["slate"]),
+]
+
 vix = macro.select("timestamp", "vixcls").drop_nulls()
 print(f"Observations: {len(vix):,}")
 print(f"Mean over the full history: {vix['vixcls'].mean():.1f}")
@@ -214,8 +251,9 @@ print(f"Date it was reached: {vix.filter(pl.col('vixcls') == vix['vixcls'].max()
 # %% [markdown]
 # The two reference lines mark the levels the market conventionally treats as the boundary
 # between a calm regime, an unsettled one and a frightened one. They are conventions rather than
-# thresholds anything is computed from, and the point of drawing them is that the series spends
-# most of its life below the first and only days at a time above the second.
+# thresholds anything is computed from. The reason to draw them is that they make the shape of
+# the series legible: it sits below the lower line for most of its life, and the excursions above
+# the upper one are the episodes worth naming.
 
 # %%
 vix_recent = vix.filter(pl.col("timestamp") >= pl.lit(RECENT_START).str.to_date())
@@ -233,10 +271,10 @@ fig.add_trace(
         fillcolor="rgba(212, 168, 75, 0.15)",  # translucent COLORS["amber"]
     )
 )
-for level, label, color in [
-    (20, "Unsettled above 20", COLORS["neutral"]),
-    (30, "Frightened above 30", COLORS["slate"]),
-]:
+for level, reading, color in VIX_BANDS:
+    # The number is formatted from the level itself, so a changed threshold cannot leave the
+    # label announcing the old one.
+    label = f"{reading} above {level:g}"
     fig.add_hline(
         y=level,
         line_dash="dash",
@@ -255,7 +293,7 @@ for date, label in [
         x=date, y=float(at_date.iloc[0]), text=label, showarrow=True, arrowhead=2, ax=0, ay=-30
     )
 fig.update_layout(
-    title="Volatility spikes are brief; the index spends most of its life low",
+    title="VIX with conventional bands, and two named episodes",
     xaxis_title="Date",
     yaxis_title="VIX (annualized % volatility)",
     height=400,
@@ -266,6 +304,50 @@ show_plotly_with_alt(
     fig,
     "Filled line chart of the VIX from 2020, with dashed rules at twenty and thirty. The series spends most of its length below twenty, with brief tall spikes annotated at the COVID crash and the failure of Silicon Valley Bank.",
 )
+
+# %% [markdown]
+# The description above claims the series spends most of its life low and only days at a time
+# high. Both halves are countable, so count them.
+
+# %%
+_below, _above = VIX_BANDS[0][0], VIX_BANDS[1][0]
+
+
+def spells_above(values: list[float], level: float) -> list[int]:
+    """Lengths of the consecutive runs in *values* that sit above *level*."""
+    runs, run = [], 0
+    for x in values:
+        if x > level:
+            run += 1
+        else:
+            if run:
+                runs.append(run)
+            run = 0
+    return runs + ([run] if run else [])
+
+
+for _label, _frame in (("full history", vix), ("plotted window", vix_recent)):
+    _v = _frame["vixcls"]
+    _runs = spells_above(_v.to_list(), _above)
+    print(
+        f"{_label:<15} below {_below:g}: {(_v < _below).mean():>6.1%}   "
+        f"above {_above:g}: {(_v > _above).mean():>6.1%}   "
+        f"spells above {_above:g}: {len(_runs)}, "
+        f"median {sorted(_runs)[len(_runs) // 2]}, longest {max(_runs)} trading days"
+    )
+
+# %% [markdown]
+# The first column bears out the usual summary: the index is below the lower band for most of
+# its life. The last column is the one to look at twice. The typical spell above the upper band
+# is a handful of trading days, which is where "spikes are brief" comes from, but the longest is
+# far longer than that in both rows, and much longer over the full history than over the window
+# this figure draws. That longest spell is the 2008-09 crisis, which this chart's window begins
+# after.
+#
+# A median and a maximum say different things here, and only one of them fits on the chart.
+# "Volatility spikes are brief" describes the typical episode and says nothing about the worst
+# one, which is the episode a risk model exists for. Read the two together, and note that a
+# figure windowed on recent years cannot show you the tail that matters.
 
 # %% [markdown]
 # ## 5. The yield curve spread, and checking a derived column
@@ -337,7 +419,7 @@ if len(inverted) > 0:
     )
 fig.add_hline(y=0, line_color=COLORS["negative"], line_width=2)
 fig.update_layout(
-    title="The curve inverted early in the tightening cycle and stayed inverted",
+    title="Ten-year minus two-year spread, with inversions shaded",
     xaxis_title="Date",
     yaxis_title="Spread (percentage points)",
     height=400,
@@ -390,7 +472,7 @@ fig = px.bar(
     color="native_frequency",
     orientation="h",
     hover_name="description",
-    title="Series on one daily grid still change at their own release frequency",
+    title="How often each series changes value per year, by publication frequency",
     labels={
         "changes_per_year": "Times the value changes per year (a lower bound on releases)",
         "series": "",
@@ -527,7 +609,7 @@ fig.update_yaxes(title_text="Percentage points", row=2, col=1)
 fig.update_yaxes(title_text="Index", row=3, col=1)
 fig.update_layout(
     height=650,
-    title_text="Yields, curve inversion and volatility track one tightening cycle",
+    title_text="Yields, curve spread and volatility on one time axis",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
 )
 show_plotly_with_alt(
