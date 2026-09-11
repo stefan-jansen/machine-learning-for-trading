@@ -597,7 +597,11 @@ for i, f in enumerate(final_features, 1):
 # in only a handful.
 # `STABILITY_MIN_SIGN_CONSISTENCY_PCT` is declared in the parameters cell and applied
 # below, so the notebook prints which features clear it rather than describing a cut it
-# never makes.
+# never makes. Applied means applied: the survivors replace `final_features`, so the model
+# fit, the importance analysis, the correlation check, the summary counts and both exported
+# parquet files all read the narrowed set. A cut that only changes a printed table is a
+# decoration, and it leaves the exported selection disagreeing with the notebook that
+# produced it.
 #
 # > **Caveat**: The bootstrap below samples individual rows (date × symbol),
 # > pooling across dates. A more rigorous approach bootstraps by *date*
@@ -693,6 +697,20 @@ for _row in stable_features.iter_rows(named=True):
         f"  {_row['feature']:<32} {_row['reference_sign']:>8} in "
         f"{_row['sign_consistency_pct']:5.1f}% of samples"
     )
+
+# A selection step narrows what follows it; see the note above the cell.
+_dropped = [f for f in final_features if f not in set(stable_features["feature"].to_list())]
+if not len(stable_features):
+    raise ValueError(
+        "no feature holds one sign in "
+        f"{STABILITY_MIN_SIGN_CONSISTENCY_PCT:.0f}% of bootstrap samples; nothing survives "
+        "selection, so there is no feature set to carry forward"
+    )
+final_features = [f for f in final_features if f in set(stable_features["feature"].to_list())]
+print()
+print(f"carried forward after the stability cut: {len(final_features)}")
+if _dropped:
+    print(f"dropped here: {', '.join(_dropped)}")
 
 # %% tags=[]
 fig, ax = plt.subplots(figsize=(10, 6))

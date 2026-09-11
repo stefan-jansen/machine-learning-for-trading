@@ -1054,10 +1054,15 @@ print(f"z-score above the cut:        {_z_hit.sum()} days")
 print(f"relative volume above the cut: {_r_hit.sum()} days")
 print(f"flagged by both:               {(_z_hit & _r_hit).sum()} days")
 _near = _v.filter((pl.col("volume_zscore") - VOLUME_SPIKE_CUT).abs() < 0.1)
-print(
-    f"relative volume on days whose z-score sits at the cut: "
-    f"{_near['rel_volume'].min():.2f} to {_near['rel_volume'].max():.2f}"
-)
+if len(_near):
+    print(
+        f"relative volume on days whose z-score sits at the cut: "
+        f"{_near['rel_volume'].min():.2f} to {_near['rel_volume'].max():.2f}"
+    )
+else:
+    # A high enough cut leaves no day near it, and an empty column's min and max are
+    # None rather than an error, so the format string is where it would have failed.
+    print(f"no day in this window has a z-score within 0.1 of {VOLUME_SPIKE_CUT}")
 
 # %% [markdown]
 # The two lower panels are not one quantity in two units. Relative volume divides raw volume
