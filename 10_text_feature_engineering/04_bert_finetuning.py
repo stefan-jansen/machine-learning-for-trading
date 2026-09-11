@@ -437,16 +437,11 @@ def fine_tune_model(model_name: str, spec: dict, dataset: DatasetDict) -> dict:
     train_result = trainer.train()
     train_time = time.time() - start_time
 
-    # `evaluate` and `predict` both make a full forward pass over the test split and
-    # report the same accuracy and macro F1, so this scores it twice. Collapsing them
-    # into a single `predict(..., metric_key_prefix="eval")` is correct and saves a
-    # pass per model, but it moves the two models fine-tuned after it - DeBERTa-v3 to
-    # 96.8% and ModernBERT to 97.9%, which puts ModernBERT above FinBERT and makes the
-    # "scores highest" in takeaway 2 false. ml4t/agent-workspace#1121 carries it.
-    test_results = trainer.evaluate(tokenized["test"])
-
-    # Get predictions for confusion matrix
-    predictions = trainer.predict(tokenized["test"])
+    # One forward pass over the test split, not two. `predict` computes the same metrics
+    # `evaluate` does when `compute_metrics` is set, and `metric_key_prefix="eval"` keeps
+    # the keys the caller reads below.
+    predictions = trainer.predict(tokenized["test"], metric_key_prefix="eval")
+    test_results = predictions.metrics
     y_pred = np.argmax(predictions.predictions, axis=-1)
     y_true = predictions.label_ids
 
