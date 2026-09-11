@@ -456,7 +456,6 @@ add_message_title(
     "Sharpe ratio and drawdown by volatility and trend state",
     subtitle="Dashed line is the pooled figure across all active days",
 )
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two horizontal bar panels sharing a state axis with one bar per volatility and trend state, "

@@ -403,7 +403,6 @@ zero_line(axes[1])
 axes[1].set_ylabel("Fractional minus whole (%)")
 axes[1].set_xlabel("Date")
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
@@ -546,7 +545,6 @@ add_message_title(
     "Equity gap from holding cash back for fees",
     subtitle="Reference equity minus headroom equity, in basis points of reference equity",
 )
-fig.tight_layout()
 _nonzero_gap = diff_hd_bps[diff_hd_bps.abs() > 0]
 _flipped = ((_nonzero_gap > 0) != (_nonzero_gap > 0).shift(1)).iloc[1:]
 # Dropping the zeros is right for counting reversals and wrong for locating them: position
@@ -652,7 +650,6 @@ add_message_title(
 )
 ax.legend()
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
-fig.tight_layout()
 show_with_alt(
     fig,
     f"Line chart of portfolio value under {len(all_results)} execution profiles - "
@@ -735,7 +732,6 @@ add_message_title(
     subtitle="Each bar is the reference minus one variant, as a percentage of reference final value",
 )
 zero_line(ax, axis="x")
-fig.tight_layout()
 show_with_alt(
     fig,
     "Horizontal bar chart of the impact on final value as a percentage of the reference, one bar "
@@ -889,7 +885,6 @@ axes[1].set_ylabel("Equity gap (%)")
 axes[1].set_xlabel("Date")
 axes[1].legend(fontsize=9)
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
