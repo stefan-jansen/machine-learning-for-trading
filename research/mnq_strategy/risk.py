@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -18,9 +19,9 @@ class CostModel:
     slippage_points: float = 0.50
 
     def __post_init__(self) -> None:
-        if self.commission_per_contract < 0:
+        if not math.isfinite(self.commission_per_contract) or self.commission_per_contract < 0:
             raise ValueError("commission_per_contract must be nonnegative")
-        if self.slippage_points < 0:
+        if not math.isfinite(self.slippage_points) or self.slippage_points < 0:
             raise ValueError("slippage_points must be nonnegative")
 
 
@@ -51,6 +52,16 @@ MIN_CONTRACTS = 4
 MAX_CONTRACTS = 10
 
 
+def _risk_breakdown(
+    stop_points: float, contracts: int, costs: CostModel
+) -> tuple[float, float, float]:
+    gross_risk = stop_points * MNQ_POINT_VALUE * contracts
+    commission_cost = costs.commission_per_contract * contracts * 2
+    slippage_cost = costs.slippage_points * 2 * contracts * MNQ_POINT_VALUE
+    estimated_costs = commission_cost + slippage_cost
+    return gross_risk, estimated_costs, gross_risk + estimated_costs
+
+
 def calculate_position_size(
     stop_points: float,
     requested_contracts: int,
@@ -69,7 +80,7 @@ def calculate_position_size(
     Raises:
         ValueError: If stop_points <= 0, costs negative, or requested_contracts not in [4, 10].
     """
-    if stop_points <= 0:
+    if not math.isfinite(stop_points) or stop_points <= 0:
         raise ValueError("stop_points must be > 0")
     if (
         not isinstance(requested_contracts, int)
@@ -79,38 +90,37 @@ def calculate_position_size(
         raise ValueError(
             f"requested_contracts must be an integer in [{MIN_CONTRACTS}, {MAX_CONTRACTS}]"
         )
-    if costs.commission_per_contract < 0 or costs.slippage_points < 0:
+    if (
+        not math.isfinite(costs.commission_per_contract)
+        or costs.commission_per_contract < 0
+        or not math.isfinite(costs.slippage_points)
+        or costs.slippage_points < 0
+    ):
         raise ValueError("costs must be nonnegative")
 
-    # Gross risk = stop_points * point_value * contracts
-    gross_risk = stop_points * MNQ_POINT_VALUE * requested_contracts
+    for contracts in range(requested_contracts, MIN_CONTRACTS - 1, -1):
+        gross_risk, estimated_costs, total_risk = _risk_breakdown(stop_points, contracts, costs)
+        if total_risk < MAX_TOTAL_RISK:
+            return RiskDecision(
+                accepted=True,
+                contracts=contracts,
+                gross_risk=gross_risk,
+                estimated_costs=estimated_costs,
+                total_risk=total_risk,
+                reason="",
+            )
 
-    # Round-trip costs:
-    # commission_per_contract * contracts * 2 (entry + exit)
-    # + slippage_points * 2 * contracts * point_value (entry + exit)
-    commission_cost = costs.commission_per_contract * requested_contracts * 2
-    slippage_cost = costs.slippage_points * 2 * requested_contracts * MNQ_POINT_VALUE
-    estimated_costs = commission_cost + slippage_cost
-
-    total_risk = gross_risk + estimated_costs
-
-    if total_risk >= MAX_TOTAL_RISK:
-        return RiskDecision(
-            accepted=False,
-            contracts=0,
-            gross_risk=gross_risk,
-            estimated_costs=estimated_costs,
-            total_risk=total_risk,
-            reason=f"total risk {total_risk:.2f} exceeds maximum {MAX_TOTAL_RISK}",
-        )
-
+    gross_risk, estimated_costs, total_risk = _risk_breakdown(stop_points, MIN_CONTRACTS, costs)
     return RiskDecision(
-        accepted=True,
-        contracts=requested_contracts,
+        accepted=False,
+        contracts=0,
         gross_risk=gross_risk,
         estimated_costs=estimated_costs,
         total_risk=total_risk,
-        reason="",
+        reason=(
+            f"minimum {MIN_CONTRACTS} contracts require total risk {total_risk:.2f}, "
+            f"which is not below the {MAX_TOTAL_RISK:.2f} USD risk ceiling"
+        ),
     )
 
 
@@ -122,15 +132,21 @@ class DailyRiskGuard:
     """
 
     def __init__(self, max_daily_loss: float = 400.0, max_consecutive_losses: int = 2) -> None:
+        if not math.isfinite(max_daily_loss):
+            raise ValueError("max_daily_loss must be finite")
+        if not math.isfinite(max_consecutive_losses):
+            raise ValueError("max_consecutive_losses must be finite")
         self.max_daily_loss = max_daily_loss
         self.max_consecutive_losses = max_consecutive_losses
         self._daily_pnl = 0.0
         self._consecutive_losses = 0
+        self._daily_loss_limit_reached = False
 
     def can_trade(self) -> bool:
         """Return True if new entries are allowed."""
         return (
-            self._daily_pnl > -self.max_daily_loss
+            not self._daily_loss_limit_reached
+            and self._daily_pnl > -self.max_daily_loss
             and self._consecutive_losses < self.max_consecutive_losses
         )
 
@@ -141,6 +157,8 @@ class DailyRiskGuard:
             pnl: Realized profit/loss in USD (negative for loss).
         """
         self._daily_pnl += pnl
+        if self._daily_pnl <= -self.max_daily_loss:
+            self._daily_loss_limit_reached = True
         if pnl < 0:
             self._consecutive_losses += 1
         else:
@@ -150,3 +168,4 @@ class DailyRiskGuard:
         """Reset daily state for a new trading day."""
         self._daily_pnl = 0.0
         self._consecutive_losses = 0
+        self._daily_loss_limit_reached = False

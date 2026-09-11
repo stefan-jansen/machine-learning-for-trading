@@ -1,5 +1,7 @@
 """Tests for MNQ risk management: position sizing, costs, and account guards."""
 
+import math
+
 import pytest
 
 from research.mnq_strategy.risk import (
@@ -42,10 +44,32 @@ def test_daily_guard_stops_after_400_dollar_loss():
     assert guard.can_trade() is False
 
 
+def test_daily_loss_stop_latches_until_reset_even_after_a_win():
+    guard = DailyRiskGuard()
+    guard.record_trade(-400)
+    assert guard.can_trade() is False
+
+    guard.record_trade(500)
+    assert guard.can_trade() is False
+
+    guard.reset_day()
+    assert guard.can_trade() is True
+
+
 def test_daily_guard_resets_on_win_or_zero():
     guard = DailyRiskGuard()
     guard.record_trade(-200)
     guard.record_trade(100)
+    assert guard.can_trade() is True
+
+
+def test_non_loss_resets_consecutive_loss_streak():
+    guard = DailyRiskGuard()
+    guard.record_trade(-100)
+    guard.record_trade(-100)
+    assert guard.can_trade() is False
+
+    guard.record_trade(0)
     assert guard.can_trade() is True
 
 
@@ -67,6 +91,16 @@ def test_validate_stop_points_positive():
         )
 
 
+@pytest.mark.parametrize("stop_points", [math.nan, math.inf, -math.inf])
+def test_validate_stop_points_finite(stop_points):
+    with pytest.raises(ValueError, match="stop_points"):
+        calculate_position_size(
+            stop_points=stop_points,
+            requested_contracts=5,
+            costs=CostModel(),
+        )
+
+
 def test_validate_costs_nonnegative():
     with pytest.raises(ValueError, match="commission|cost"):
         calculate_position_size(
@@ -81,6 +115,15 @@ def test_validate_costs_nonnegative():
             requested_contracts=5,
             costs=CostModel(commission_per_contract=1.50, slippage_points=-0.50),
         )
+
+
+@pytest.mark.parametrize("field", ["commission_per_contract", "slippage_points"])
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_cost_model_rejects_non_finite_values(field, value):
+    values = {"commission_per_contract": 1.50, "slippage_points": 0.50}
+    values[field] = value
+    with pytest.raises(ValueError, match=field):
+        CostModel(**values)
 
 
 def test_validate_requested_contracts_in_range():
@@ -155,16 +198,38 @@ def test_accepted_when_total_risk_under_250():
     assert decision.contracts == 5
 
 
-def test_rejected_when_total_risk_exceeds_250():
-    # With 10 contracts and stop=10: gross=200, costs=1.50*10*2+0.50*2*10*2=30+20=50, total=250
-    # Should be rejected since at the limit (>= 250)
+def test_downsizes_to_largest_affordable_contract_count():
+    # Ten contracts total exactly 250 USD; nine contracts total 225 USD.
     decision = calculate_position_size(
         stop_points=10,
         requested_contracts=10,
         costs=CostModel(commission_per_contract=1.50, slippage_points=0.50),
     )
+    assert decision.accepted is True
+    assert decision.contracts == 9
+    assert decision.gross_risk == 180
+    assert decision.estimated_costs == 45
+    assert decision.total_risk == 225
+
+
+def test_rejects_when_minimum_four_contracts_equal_risk_ceiling():
+    decision = calculate_position_size(
+        stop_points=31.25,
+        requested_contracts=10,
+        costs=CostModel(commission_per_contract=0, slippage_points=0),
+    )
     assert decision.accepted is False
+    assert decision.contracts == 0
+    assert decision.total_risk == 250
     assert "250" in decision.reason
+    assert "exceeds" not in decision.reason.lower()
+
+
+@pytest.mark.parametrize("field", ["max_daily_loss", "max_consecutive_losses"])
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_daily_guard_rejects_non_finite_thresholds(field, value):
+    with pytest.raises(ValueError, match=field):
+        DailyRiskGuard(**{field: value})
 
 
 def test_default_cost_model_values():
