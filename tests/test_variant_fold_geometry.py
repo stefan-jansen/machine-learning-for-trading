@@ -511,12 +511,6 @@ def test_sp500_options_corpus_uses_financial_timeline_geometry() -> None:
     case_study = "sp500_options"
     primary_label = "ret_to_expiry"
     artifact = _available_corpus_artifact(case_study)
-    if "fold" not in pl.read_parquet_schema(artifact):
-        # Same guard as the test above, for the same reason: sp500_options writes a fold-free
-        # model-based artifact now, so there is no fold geometry here to compare against the
-        # label timeline. Without this the test raises ColumnNotFoundError on `group_by("fold")`
-        # wherever the canonical artifact is reachable, and passes only where it is absent.
-        pytest.skip(f"{case_study} writes a fold-free model-based artifact")
     case_dir = artifact.parent.parent
     repo_root = Path(__file__).resolve().parents[1]
     setup = yaml.safe_load(
@@ -540,17 +534,31 @@ def test_sp500_options_corpus_uses_financial_timeline_geometry() -> None:
         outcome_horizon=resolve_label_horizon(case_study, primary_label, setup),
         date_col="timestamp",
     )
+    # The claim in this test's name, and it needs no `fold` column: the boundaries the corpus
+    # resolves against come from the financial timeline, not from the label one. Measured
+    # 2026-09-11 on the canonical artifact - resolved train_starts 2017-02-02 and 2018-01-05
+    # against 2017-01-05 and 2018-01-04 derived from the labels.
+    assert any(
+        _comparable_timestamp(actual["train_start"])
+        != _comparable_timestamp(from_label["train_start"])
+        for actual, from_label in zip(resolved, label_derived, strict=True)
+    )
+
+    # The second half needs one, and sp500_options writes a fold-free artifact now - one row
+    # per (symbol, timestamp), bounded by the refit schedule its sidecar records rather than by
+    # a fold. There is no per-fold start to compare, and the artifact's own first session
+    # (2018-01-04) is not a resolved train_start, so there is no fold-free restatement of this
+    # assertion either. What replaces it is asserted where the values are written:
+    # `case_studies/sp500_options/04_model_based_features.py:411` and `:1470` require every
+    # block's `fit_end` to precede the session it speaks for.
+    if "fold" not in pl.read_parquet_schema(artifact):
+        return
+
     observed_starts = (
         pl.scan_parquet(artifact)
         .group_by("fold")
         .agg(pl.col("timestamp").min().alias("timestamp"))
         .collect()
-    )
-
-    assert any(
-        _comparable_timestamp(actual["train_start"])
-        != _comparable_timestamp(from_label["train_start"])
-        for actual, from_label in zip(resolved, label_derived, strict=True)
     )
     for split in resolved:
         observed_start = observed_starts.filter(pl.col("fold") == split["fold"]).item(
