@@ -248,7 +248,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Bars of market beta and annualized alpha per ETF from the single-factor regression, with the betas clustered near one and the alphas small by comparison.",
+    "Bars of full-sample market beta per ETF from the single-factor regression, each labelled with its value, against a dashed reference line at a beta of one. The bars sit close to that line on both sides of it.",
 )
 
 # %% [markdown]
@@ -419,7 +419,7 @@ fig = px.bar(
 fig.update_layout(height=400)
 show_plotly_with_alt(
     fig,
-    "Grouped bars of five-factor loadings per ETF, with the two additional factors adding modest loadings that differ in sign across the funds.",
+    "Grouped bars of regression R-squared per ETF, one bar each for the single-factor, three-factor and five-factor models. Adding factors raises R-squared for each fund shown, and the gain from three factors to five is small next to the gain from one to three.",
 )
 
 # %% [markdown]

@@ -369,7 +369,7 @@ fig.update_xaxes(
 )
 show_plotly_with_alt(
     fig,
-    "Grouped bars of return by allocation for each historical crisis window. The ordering of the allocations differs between the equity-led selloffs and the 2022 rate-led one.",
+    "Grouped bars of return by asset for each historical stress window. The ordering of the assets differs between the equity-led selloffs and the 2022 rate-led one, where the long-duration bond bars turn negative alongside the equity bars instead of offsetting them.",
 )
 
 # %% [markdown]
