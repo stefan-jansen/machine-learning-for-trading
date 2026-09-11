@@ -67,6 +67,8 @@
 # %%
 """Macro Data Loading: FRED Economic Series - load and explore macroeconomic time series from FRED."""
 
+import statistics
+
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
@@ -315,7 +317,13 @@ _below, _above = VIX_BANDS[0][0], VIX_BANDS[1][0]
 
 
 def spells_above(values: list[float], level: float) -> list[int]:
-    """Lengths of the consecutive runs in *values* that sit above *level*."""
+    """Lengths of the consecutive runs in *values* that sit above *level*.
+
+    Counted in rows, and a row of this panel is a calendar day: the weekends and holidays the
+    VIX is not published on are forward-filled rather than absent, so a run of `n` rows is `n`
+    calendar days and fewer trading sessions. Which rows are fills cannot be recovered from the
+    panel, because a session that closes at the previous day's level looks the same.
+    """
     runs, run = [], 0
     for x in values:
         if x > level:
@@ -334,16 +342,19 @@ for _label, _frame in (("full history", vix), ("plotted window", vix_recent)):
         f"{_label:<15} below {_below:g}: {(_v < _below).mean():>6.1%}   "
         f"above {_above:g}: {(_v > _above).mean():>6.1%}   "
         f"spells above {_above:g}: {len(_runs)}, "
-        f"median {sorted(_runs)[len(_runs) // 2]}, longest {max(_runs)} trading days"
+        f"median {statistics.median(_runs):g}, longest {max(_runs)} calendar days"
     )
 
 # %% [markdown]
 # The first column bears out the usual summary: the index is below the lower band for most of
 # its life. The last column is the one to look at twice. The typical spell above the upper band
-# is a handful of trading days, which is where "spikes are brief" comes from, but the longest is
-# far longer than that in both rows, and much longer over the full history than over the window
-# this figure draws. That longest spell is the 2008-09 crisis, which this chart's window begins
-# after.
+# is a handful of days, which is where "spikes are brief" comes from, but the longest is far
+# longer than that in both rows, and much longer over the full history than over the window this
+# figure draws. That longest spell is the 2008-09 crisis, which this chart's window begins after.
+#
+# The lengths are in calendar days, because that is what a row of this panel is. "The panel and
+# its grid" above established that; this is the first place it changes a number, and it would
+# change any other window stated in rows the same way.
 #
 # A median and a maximum say different things here, and only one of them fits on the chart.
 # "Volatility spikes are brief" describes the typical episode and says nothing about the worst

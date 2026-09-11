@@ -161,6 +161,7 @@ print(
     f"  {'latest':<18} ${total_tvl['tvl_bn'][-1]:>6.1f}bn on {total_tvl['timestamp'][-1]}"
     f"   {total_tvl['tvl_bn'][-1] / _peak_bn:>5.0%} of peak"
 )
+total_tvl.tail(3)
 
 # %%
 fig = px.line(
@@ -339,9 +340,9 @@ show_plotly_with_alt(
 # %% [markdown]
 # The correlation printed above puts a number on the two lines turning together, and that is the
 # first thing to be careful about. TVL is a dollar value of crypto holdings, so it mechanically
-# follows the price of those holdings. Any test of whether
-# TVL predicts the price has to work with a quantity that is not simply the price again, which
-# is why the features below are growth rates and z-scores rather than levels.
+# follows the price of those holdings. Any test of whether TVL predicts the price has to work
+# with a quantity that is not simply the price again, which is why the features below are growth
+# rates and z-scores rather than levels.
 
 # %% [markdown]
 # ## 4. Features
