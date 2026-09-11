@@ -1,31 +1,47 @@
-"""Generate synthetic test data for currently-skipped notebooks.
+"""Generate synthetic intermediates for notebooks that would otherwise have no inputs.
 
-Run once to enrich the test-data repo with minimal synthetic datasets
-that allow the remaining skipped notebooks to execute their code paths.
+Run once to enrich the test-data repo with minimal synthetic artifacts that let
+the remaining skipped notebooks execute their code paths.
 
 Usage:
     uv run python tests/generate_skip_data.py --output ~/ml4t/test-data
 
-This generates data for:
-1. SEC 10-Q MD&A text (Ch10/09)
-2. ADV columns for Kyle lambda (Ch18/03)
-3. Engine divergence predictions (Ch16/07)
-4. Signal quality synthesis data (Ch20/02)
-5. MLOps drift detection features (Ch26/02)
-6. MLOps safe model rollout (Ch26/03)
-7. MLOps MLflow registry (Ch26/06)
+This generates, all of it under ``intermediates/``:
+1. Engine divergence predictions (Ch16/07)
+2. Signal quality synthesis data (Ch20/02)
+3. MLOps registry and stub predictions (Ch26/03, Ch26/06)
 
-The FNSPID news fixture is not here. It is subsampled from production by
+Nothing here writes into ``data/``. Two generators used to, and both wrote where
+nothing reads:
+
+- ``generate_sec_10q_mda`` wrote ``alternative/text/sp500_10q_mda.parquet`` with a
+  pre-canonical ``mda_text`` column, while ``load_sp500_10q_mda`` reads
+  ``equities/fundamentals/10q/sp500/reference/all_10q_filings.parquet``. That file
+  is production-sourced and declared as ``sec_filing_references`` in
+  ``tests/create_test_data.py``, so Ch10/09 has been running against the real
+  schema and the synthetic copy reached no reader.
+- ``enrich_adv_columns`` added ``adv_21d`` to ``etfs/etf_universe.parquet`` and
+  ``equities/us_equities.parquet``. Neither path exists: the fixture carries
+  ``etfs/market/`` and ``equities/market/us_equities/``, so every run printed
+  "SKIP (not found)". No notebook reads ``adv_21d`` from either file.
+
+Keeping this script out of ``data/`` is what makes the fixture's producers
+countable: ``tests/create_test_data.py`` derives from production and
+``tests/generate_test_microstructure.py`` is synthetic, and
+``tests/test_every_fixture_file_has_a_producer.py`` checks the fixture against
+those two.
+
+The FNSPID news fixture is not here either. It is subsampled from production by
 ``tests/create_test_data.py``, whose ``fnspid_news`` dataset bounds it by the
 us_equities panel's date range so 07_news_return_signals' price join has dates to
 land on; the synthetic generator that used to live here wrote 2022-2024, which is
-past the end of that panel - ml4t/agent-workspace#1116.
+past the end of that panel.
 """
 
 import argparse
 import json
 import sqlite3
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -35,92 +51,6 @@ np.random.seed(42)
 
 SYMBOLS_ETF = ["SPY", "QQQ", "IWM", "TLT", "GLD", "XLF", "XLK", "XLE", "EFA", "VWO"]
 SYMBOLS_EQ = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "JNJ"]
-
-
-def generate_sec_10q_mda(data_dir: Path):
-    """Generate synthetic SEC 10-Q MD&A text data."""
-    out = data_dir / "alternative" / "text"
-    out.mkdir(parents=True, exist_ok=True)
-
-    rows = []
-    for sym in SYMBOLS_EQ[:6]:
-        for year in range(2019, 2024):
-            for quarter in range(1, 5):
-                month = quarter * 3 + 1
-                if month > 12:
-                    month = 1
-                    year_f = year + 1
-                else:
-                    year_f = year
-                filing_date = date(year_f, min(month, 12), 15)
-                period_end = date(year, quarter * 3, 28)
-
-                mda_text = (
-                    f"Management's Discussion and Analysis for {sym}. "
-                    f"During Q{quarter} {year}, revenue increased by {np.random.uniform(2, 15):.1f}% "
-                    f"year-over-year. Operating margins improved to {np.random.uniform(15, 35):.1f}%. "
-                    f"We continue to invest in R&D and expect continued growth. "
-                    f"Key risks include market volatility and regulatory changes."
-                )
-                rows.append(
-                    {
-                        "symbol": sym,
-                        "cik": str(np.random.randint(100000, 999999)),
-                        "accession_no": f"0001234567-{year_f:04d}-{np.random.randint(10000, 99999):05d}",
-                        "filing_date": filing_date,
-                        "period_end": period_end,
-                        "mda_text": mda_text,
-                        "mda_word_count": len(mda_text.split()),
-                        "mda_char_count": len(mda_text),
-                    }
-                )
-
-    df = pl.DataFrame(rows)
-    df.write_parquet(out / "sp500_10q_mda.parquet")
-    print(f"  SEC 10-Q: {len(df)} filings -> {out / 'sp500_10q_mda.parquet'}")
-
-
-def enrich_adv_columns(data_dir: Path):
-    """Add adv_21d (21-day average daily volume) to datasets that need it.
-
-    The Kyle lambda market impact calibration notebook (Ch18/03) reads
-    adv_21d from equity price data. The test data doesn't have this computed.
-    """
-    datasets = [
-        ("etfs", "etf_universe.parquet"),
-        ("equities", "us_equities.parquet"),
-    ]
-    for subdir, filename in datasets:
-        path = data_dir / subdir / filename
-        if not path.exists():
-            print(f"  ADV: SKIP {path} (not found)")
-            continue
-        df = pl.read_parquet(path)
-        if "adv_21d" in df.columns:
-            print(f"  ADV: SKIP {path} (already has adv_21d)")
-            continue
-        if "volume" not in df.columns:
-            print(f"  ADV: SKIP {path} (no volume column)")
-            continue
-
-        # Compute rolling 21-day average volume per symbol
-        sort_cols = ["symbol", "timestamp"] if "symbol" in df.columns else ["timestamp"]
-        group_col = "symbol" if "symbol" in df.columns else None
-
-        if group_col:
-            df = df.sort(sort_cols).with_columns(
-                pl.col("volume")
-                .rolling_mean(window_size=21, min_samples=1)
-                .over(group_col)
-                .alias("adv_21d")
-            )
-        else:
-            df = df.sort("timestamp").with_columns(
-                pl.col("volume").rolling_mean(window_size=21, min_samples=1).alias("adv_21d")
-            )
-
-        df.write_parquet(path)
-        print(f"  ADV: Added adv_21d to {path} ({len(df)} rows)")
 
 
 def generate_engine_divergence_predictions(intermediates_dir: Path):
@@ -202,10 +132,8 @@ def generate_signal_quality_data(intermediates_dir: Path):
     print(f"  Signal quality: IC comparison + synthesis -> {out}")
 
 
-def generate_mlops_data(intermediates_dir: Path, data_dir: Path):
-    """Generate data for Ch26 MLOps notebooks (02, 03, 06)."""
-    # Ch26/02 needs ETFs features with adv_21d — handled by enrich_adv_columns
-
+def generate_mlops_data(intermediates_dir: Path):
+    """Generate the registry and stub predictions Ch26/03 and Ch26/06 read."""
     # Ch26/03 needs a linear/lasso validation run in registry
     out = intermediates_dir / "us_equities_panel" / "run_log"
     out.mkdir(parents=True, exist_ok=True)
@@ -319,32 +247,24 @@ def generate_mlops_data(intermediates_dir: Path, data_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate synthetic test data for skipped notebooks"
+        description="Generate synthetic intermediates for skipped notebooks"
     )
     parser.add_argument("--output", required=True, help="Test data repo root")
     args = parser.parse_args()
 
-    root = Path(args.output)
-    data_dir = root / "data"
-    intermediates_dir = root / "intermediates"
+    intermediates_dir = Path(args.output) / "intermediates"
 
-    print("Generating synthetic test data for skipped notebooks...")
+    print("Generating synthetic intermediates for skipped notebooks...")
     print()
 
-    print("[1/5] SEC 10-Q MD&A text (Ch10/09)...")
-    generate_sec_10q_mda(data_dir)
-
-    print("[2/5] ADV columns for Kyle lambda (Ch18/03)...")
-    enrich_adv_columns(data_dir)
-
-    print("[3/5] Engine divergence predictions (Ch16/07)...")
+    print("[1/3] Engine divergence predictions (Ch16/07)...")
     generate_engine_divergence_predictions(intermediates_dir)
 
-    print("[4/5] Signal quality synthesis data (Ch20/02)...")
+    print("[2/3] Signal quality synthesis data (Ch20/02)...")
     generate_signal_quality_data(intermediates_dir)
 
-    print("[5/5] MLOps registry and predictions (Ch26/02-06)...")
-    generate_mlops_data(intermediates_dir, data_dir)
+    print("[3/3] MLOps registry and predictions (Ch26/03, Ch26/06)...")
+    generate_mlops_data(intermediates_dir)
 
     print()
     print("Done! Now commit changes to the test-data repo and update overrides.yaml.")
