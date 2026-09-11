@@ -251,7 +251,7 @@ show_plotly_with_alt(
     "loaded separately. Shares are measured against the published total.",
 )
 
-# %% [markdown] tags=["results"]
+# %% [markdown]
 # The shares printed above are what the breakdown is for. Measuring against the published total
 # rather than against each other keeps the share held by chains outside the selection visible,
 # and the residual bar is how much of the sector the selection leaves out. Where one chain holds

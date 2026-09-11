@@ -213,14 +213,14 @@ for _label, _at in (("first increase", "2022-03-16"), ("last increase", "2023-07
     else:
         print(f"{_label:<16} {_at}   outside the plotted window, so it carries no annotation")
 
-# %% [markdown] tags=["results"]
-# Where the window contains both dates, the rows printed above are the yields on the days the
-# cycle began and ended, and the pair is why the short end is worth watching separately: the
-# policy rate is the thing being set, and the two-year tracks expectations about it over a
-# horizon short enough for those expectations to dominate, so it is the leg that moves further.
-# Where the two-year ends the cycle above the ten-year, that is the inversion Part 5 makes its
-# subject. Where a row reports its date as excluded instead, the window opens after that end of
-# the cycle and there is no pair to compare; widen it by moving `RECENT_START` back.
+# %% [markdown]
+# Where the window contains both dates, the rows printed above are each yield on the day the
+# cycle began and the day it ended. They are worth reading as a pair because the two legs need
+# not move together: the policy rate is the thing being set, the two-year tracks expectations
+# about it over a horizon short enough for those expectations to dominate, and the ten-year
+# carries much more besides. Part 5 makes the distance between them its subject. Where a row
+# reports its date as excluded instead, the window opens after that end of the cycle and there
+# is no pair; widen it by moving `RECENT_START` back.
 
 # %% [markdown]
 # ## 4. The VIX
@@ -356,7 +356,7 @@ for _label, _frame in (("full history", vix), ("plotted window", vix_recent)):
 # and its grid" above established that; this is the first place it changes a number, and it would
 # change any other window stated in rows the same way.
 
-# %% [markdown] tags=["results"]
+# %% [markdown]
 # Read the median and the longest spell together rather than either alone. A median describes the
 # typical episode and says nothing about the worst one, which is the episode a risk model exists
 # for. The two rows give both statistics over the full history and over the plotted window, so
@@ -509,7 +509,7 @@ show_plotly_with_alt(
     "FRED metadata.",
 )
 
-# %% [markdown] tags=["results"]
+# %% [markdown]
 # The bars recover each series' publication frequency from the panel alone, without being told
 # it: the colour is the frequency the FRED metadata records, and it is not an input to the count.
 # A row count over the same panel makes every series look daily.
