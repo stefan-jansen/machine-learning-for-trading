@@ -71,8 +71,9 @@
 # - ETF data downloaded under `ML4T_DATA_PATH/etfs/market`.
 # - FRED macro data under `ML4T_DATA_PATH/macro` (for the yield-curve
 #   regime feature).
-# - Forward-return label parquet at
-#   `case_studies/etfs/labels/fwd_ret_21d.parquet`.
+# - The ETFs case study's forward-return label parquet and its registry,
+#   both reached through `get_case_study_dir("etfs")` so a run with
+#   `ML4T_OUTPUT_DIR` set reads the tree that run wrote.
 # - Alpaca paper credentials in `ALPACA_API_KEY` / `ALPACA_SECRET_KEY`
 #   (free at <https://app.alpaca.markets/paper>).
 
@@ -91,6 +92,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from _etfs_features import build_yield_curve, compute_financial_features, feature_columns
+from async_utils import run_async
 from ml4t.backtest import (
     BacktestConfig,
     DataFeed,
@@ -105,13 +108,8 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from data import load_etfs, load_macro
-from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
+from utils.paths import display_path, get_case_study_dir, get_output_dir
 from utils.style import COLORS, add_message_title, show_with_alt
-
-CHAPTER_DIR = get_chapter_dir(25)
-
-from _etfs_features import build_yield_curve, compute_financial_features, feature_columns
-from async_utils import run_async
 
 # basicConfig is a no-op once a handler exists, and importing the feature libraries installs one,
 # so configuring the root logger here would leave two handlers attached and print every line
@@ -233,7 +231,9 @@ print(f"Features: {features.shape}, {len(fc)} feature columns")
 # the same configuration, so a hash pin would fire on runs where nothing had changed.
 
 # %%
-registry_path = get_case_study_dir("etfs") / "run_log" / "registry.db"
+etfs_dir = get_case_study_dir("etfs")
+labels_path = etfs_dir / "labels" / f"{PRIMARY_LABEL}.parquet"
+registry_path = etfs_dir / "run_log" / "registry.db"
 # Read-only, but not `immutable=1`: the registry is a WAL database that sweeps write to
 # concurrently, and an immutable connection ignores the -wal file and reads the pre-WAL main
 # file, which shows up here as a stale leader or as a table that appears not to exist.
@@ -297,9 +297,7 @@ print(f"  deployed on:  {DEPLOYED_FEATURE_SETS}")
 # a deployment that wanted it re-derived would sweep on its own feature set.
 
 # %%
-labels = pl.read_parquet(
-    CHAPTER_DIR.parent / "case_studies" / "etfs" / "labels" / f"{PRIMARY_LABEL}.parquet"
-)
+labels = pl.read_parquet(labels_path)
 panel = features.join(labels, on=["timestamp", "symbol"], how="inner")
 print(f"Joined panel: {len(panel):,} rows over {panel['symbol'].n_unique()} symbols")
 
