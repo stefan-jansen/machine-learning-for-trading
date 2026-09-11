@@ -1020,7 +1020,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Grouped bars of portfolio weight per ETF for the five allocations, with a dashed line at the equal-weight level. The two optimized allocations put nearly all their weight on one or two funds; the three heuristics spread across every fund.",
+    "Grouped bars of portfolio weight per ETF for the five allocations, with a dashed line at the equal-weight level. The two optimized allocations put nearly all their weight on one or two funds; the three heuristics hold a position in every fund, though inverse volatility and ERC place their largest weights on the short-Treasury fund.",
 )
 
 # %%
