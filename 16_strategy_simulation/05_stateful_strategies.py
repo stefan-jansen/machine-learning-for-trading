@@ -78,6 +78,7 @@
 # ## Setup
 
 # %%
+import itertools
 from datetime import datetime
 
 import numpy as np
@@ -428,7 +429,7 @@ if kelly_strategy.size_history:
         y=kelly_strategy.base_size,
         line_dash="dash",
         line_color=COLORS["neutral"],
-        annotation_text="Base target (10%)",
+        annotation_text=f"Base target ({kelly_strategy.base_size:.0%})",
     )
     fig.update_layout(
         title=(
@@ -439,14 +440,29 @@ if kelly_strategy.size_history:
         yaxis_title="Target Fraction of Equity",
         height=400,
     )
+    # Both counts are properties of the run rather than of the chart: the signal is seeded and
+    # SEED is a papermill parameter, so a different seed closes trades at different times and
+    # moves where the step falls. A prefix count, not a total - the helper can return the base
+    # again later, and a sentence saying "the first N" has to mean the first N.
+    _sizes = kelly_strategy.size_history
+    _leading_base = len(
+        list(itertools.takewhile(lambda size: size == kelly_strategy.base_size, _sizes))
+    )
+    _rest = _sizes[_leading_base:]
+    _tail = (
+        f"every one of the remaining {len(_rest)} comes out at {_rest[0]:.0%}"
+        if _rest and min(_rest) == max(_rest)
+        else f"the remaining {len(_rest)} range from {min(_rest):.0%} to {max(_rest):.0%}"
+        if _rest
+        else "no entry leaves it"
+    )
     show_plotly_with_alt(
         fig,
         "Line chart of the Kelly target fraction of equity against trade number, with a dashed "
-        "line at the base target. The first four entries sit exactly on the base target, which "
-        "is what the sizing helper returns while fewer than the required number of trades have "
-        "closed and while the closed ones are all wins or all losses. From the fifth entry on "
-        "the formula applies, and it returns the configured floor, about a fifth of the base, "
-        "for every remaining entry.",
+        f"line at the base target of {kelly_strategy.base_size:.0%}. The first {_leading_base} "
+        f"of {len(_sizes)} entries sit exactly on it, which is what the sizing helper returns "
+        "while fewer than the required number of trades have closed and while the closed ones "
+        f"are all wins or all losses. After that the formula applies and {_tail}.",
     )
 
 # %%

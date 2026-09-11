@@ -257,12 +257,14 @@ fig.update_layout(
     yaxis_type="log",
     height=400,
 )
+_mults = {p: DEMO_SPECS[p].multiplier for p in PRODUCTS}
+_mult_phrase = ", ".join(f"{p} {m:,.0f}" for p, m in sorted(_mults.items(), key=lambda kv: kv[1]))
 show_plotly_with_alt(
     fig,
     "Bar chart of contract multiplier by product on a logarithmic dollar axis, each bar labelled "
-    "with its value. ES and ZC are the smallest at 50 dollars per point, GC is 100, CL and ZN are "
-    "1,000, and 6E towers over the rest at 125,000. The range spans more than three orders of "
-    "magnitude, which is why a point move cannot be read as a dollar move without the multiplier.",
+    f"with its value. From the smallest to the largest: {_mult_phrase} dollars per point. The "
+    f"range spans a factor of {max(_mults.values()) / min(_mults.values()):,.0f}, which is why a "
+    "point move cannot be read as a dollar move without the multiplier.",
 )
 
 # %% [markdown]
@@ -356,13 +358,28 @@ fig.update_layout(
     height=450,
     legend=dict(orientation="h", yanchor="bottom", y=1.02),
 )
+# The widest product is named from the data rather than asserted: START_DATE is a papermill
+# parameter, so a shorter window need not contain the 2020 crude-oil episode at all.
+_ranges = {
+    product: (
+        momentum_df.filter((pl.col("symbol") == product) & pl.col("momentum").is_not_null())[
+            "momentum"
+        ].min(),
+        momentum_df.filter((pl.col("symbol") == product) & pl.col("momentum").is_not_null())[
+            "momentum"
+        ].max(),
+    )
+    for product in PRODUCTS
+}
+_widest = max(_ranges, key=lambda k: (_ranges[k][1] or 0) - (_ranges[k][0] or 0))
+_lo, _hi = _ranges[_widest]
 show_plotly_with_alt(
     fig,
-    "Line chart of each product's trailing return over the sample, one line per product. Five of "
-    "the six stay within roughly plus or minus 40 percent throughout. Crude oil is the exception: "
-    "it falls to about -75 percent in the first half of 2020 and spikes to nearly +200 percent "
-    "that summer, and reaches about +75 percent again in early 2022. The dispersion the ranking "
-    "trades on comes mostly from that one product.",
+    "Line chart of each product's trailing return over the sample, one line per product. The "
+    f"widest is {_widest}, which spans {_lo:.0%} to {_hi:.0%}; the other "
+    f"{len(PRODUCTS) - 1} products move over visibly narrower ranges. The dispersion a "
+    "cross-sectional ranking trades on comes mostly from whichever product is having its own "
+    "episode, which is one product here.",
 )
 
 # %% [markdown]
@@ -814,13 +831,16 @@ fig.update_layout(
     yaxis_tickformat="$,.0f",
     height=400,
 )
+_sector_rows = sector_pnl.sort("total_pnl", descending=True).iter_rows(named=True)
+_sector_phrase = ", ".join(f"{r['sector']} {format_usd(r['total_pnl'])}" for r in _sector_rows)
+_n_positive = int((sector_pnl["total_pnl"] > 0).sum())
 show_plotly_with_alt(
     fig,
     "Bar chart of realized profit and loss by sector, each bar labelled with its dollar value and "
-    "coloured green above zero and red below. Metals and FX are positive at roughly +630,000 and "
-    "+510,000 dollars; Rates is near zero; Energy, Equity Index and Agriculture are negative, the "
-    "largest loss being Agriculture at about -1.25 million. Each sector holds one product in this "
-    "demonstration.",
+    "coloured green above zero and red below. Reading the bars from the largest gain to the "
+    f"largest loss: {_sector_phrase}. {_n_positive} of {sector_pnl.height} sectors finished "
+    "positive. Each sector holds one product in this demonstration, so the chart relabels "
+    "per-product P&L rather than aggregating within a sector.",
 )
 
 # %% [markdown]
