@@ -525,6 +525,12 @@ print(f"Lowest BIC at {selection.loc[selection['BIC'].idxmin(), 'states']} state
 
 # %%
 N_STATES = 2
+# The grid above decides which counts were fitted; this line decides which fit the rest of
+# the notebook reads. Nothing else ties the two together, so editing STATE_COUNTS to drop
+# 2 would reach `fitted_models[N_STATES]` below as a bare KeyError.
+assert N_STATES in STATE_COUNTS, (
+    f"N_STATES={N_STATES} was never fitted; STATE_COUNTS={STATE_COUNTS}"
+)
 
 spy_hmm = fitted_models[N_STATES]
 order = sort_states_by_variance(spy_hmm)

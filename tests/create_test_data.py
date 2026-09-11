@@ -1471,6 +1471,197 @@ def build_individual_futures_es(source: Path, output: Path) -> list[Path]:
     return [dst]
 
 
+# --- published factor returns, FRED macro and on-chain TVL ---------------------
+#
+# Four sources that are downloaded rather than derived, total about 9 MB against a
+# 529 MB fixture, so all four builders copy: every fixture file is byte-identical to
+# production's, and a parquet round-trip through polars would change their bytes
+# while changing nothing a reader sees.
+#
+# Each copies whatever production carries rather than a declared list, and declares
+# the MINIMUM instead -- the files a loader can name or a notebook opens by path. A
+# production directory that has lost one fails here rather than shipping a fixture a
+# notebook cannot read, and one that has gained a file ships it rather than silently
+# omitting it.
+#
+# What this replaces is not a smaller builder. It is none: all 51 files were in the
+# test-data repo with no producer, so nothing regenerated them from production and
+# nothing said what they were meant to contain. The evidence they had drifted is in
+# the row counts. Every AQR parquet the fixture carried was 2 to 64 rows SHORT of
+# production, which is what an old snapshot looks like, and the FRED panel had drifted
+# in both directions at once -- `fred_macro_initial_release` 49 rows AHEAD of
+# production and `fred_macro_raw` 27,132 rows behind.
+
+FF_DIR = Path("factors") / "fama-french"
+AQR_DIR = Path("factors") / "aqr"
+MACRO_DIR = Path("macro")
+ONCHAIN_DIR = Path("crypto") / "onchain"
+
+# The six `data/factors/loader.py::load_ff_factors` can name. Its two Literal
+# parameters are the whole reachable set, so this is read off the signature rather
+# than maintained: dataset in (ff3, ff5, mom) x frequency in (daily, monthly). The
+# other four the fixture carries -- bp_me, ind_5, port_size, ff3_developed -- are
+# reachable only by opening the path directly and are copied, not required.
+FF_REQUIRED = tuple(
+    f"{dataset}_{frequency}.parquet"
+    for dataset in ("ff3", "ff5", "mom")
+    for frequency in ("daily", "monthly")
+)
+
+# The four `load_aqr_factors` maps by name, plus the two that 01_process_is_edge/
+# factor_regimes and 17_portfolio_construction/05_factor_allocation_evidence open by
+# path. The rest are copied and not required.
+AQR_REQUIRED = (
+    "qmj_factors.parquet",
+    "bab_factors.parquet",
+    "hml_devil.parquet",
+    "vme_factors.parquet",
+    "century_premia.parquet",
+    "tsmom.parquet",
+)
+
+# `fred_macro.parquet` is the aligned panel three teaching notebooks read by path;
+# the raw and metadata files are what `data/macro/loader.py` names in its outputs.
+#
+# `fred_macro_initial_release.parquet` is here because it comes from a DIFFERENT
+# download script - `download_alfred.py`, not `download.py` - so a production tree can
+# hold every other file here and not this one. `04_fundamental_alternative_data/
+# 07_macro_data_alignment` calls `load_macro_initial_release()` unconditionally, and
+# without it that notebook raises where the build would have succeeded. The three not
+# required - the two dictionaries and `initial_release_raw` - are copied because
+# production carries them and read by nothing in this repo.
+MACRO_REQUIRED = (
+    "fred_macro.parquet",
+    "fred_macro_raw.parquet",
+    "fred_macro_metadata.parquet",
+    "fred_macro_initial_release.parquet",
+)
+
+# 04_fundamental_alternative_data reads the per-chain files through an f-string over
+# the chain name, so the four chains are required by construction, not by choice.
+ONCHAIN_REQUIRED = (
+    "defillama_tvl_total.parquet",
+    "defillama_tvl_arbitrum.parquet",
+    "defillama_tvl_bsc.parquet",
+    "defillama_tvl_ethereum.parquet",
+    "defillama_tvl_solana.parquet",
+    "coingecko_ethereum.parquet",
+)
+
+
+def _copy_flat_directory(
+    source: Path,
+    output: Path,
+    directory: Path,
+    required: tuple[str, ...],
+    patterns: tuple[str, ...],
+    label: str,
+    fetch_hint: str,
+) -> list[Path]:
+    """Copy production's files for one downloaded source, verbatim, and check the minimum.
+
+    Args:
+        source: Production data root.
+        output: Fixture data root.
+        directory: Path under both roots holding this source's files.
+        required: File names a loader can name or a notebook opens by path. A
+            production directory missing one of these fails rather than shipping a
+            fixture that cannot satisfy it.
+        patterns: Globs naming what belongs to this source. Deliberately not ``*``:
+            the AQR directory also holds a ``source/`` tree of the original 15
+            spreadsheets, 95 MB that no loader reads.
+        label: Printed name for the build summary.
+        fetch_hint: What to run when a required file is missing.
+
+    Returns:
+        The fixture paths written.
+
+    Raises:
+        FileNotFoundError: If production carries none of this source, or is missing a
+            required file.
+    """
+    source_dir = source / directory
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Production carries no {label} at {source_dir}. {fetch_hint}")
+
+    names = sorted({path.name for pattern in patterns for path in source_dir.glob(pattern)})
+    if missing := sorted(set(required) - set(names)):
+        raise FileNotFoundError(
+            f"Production is missing {label} files {missing} at {source_dir}. {fetch_hint}"
+        )
+
+    written: list[Path] = []
+    for name in names:
+        destination = output / directory / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_dir / name, destination)
+        written.append(destination)
+    size = sum(path.stat().st_size for path in written) / 1e6
+    print(f"    {label}: {len(written)} files ({size:.1f} MB), copied verbatim")
+    return written
+
+
+def build_fama_french_factors(source: Path, output: Path) -> list[Path]:
+    """Copy every Fama-French factor parquet production carries, verbatim."""
+    return _copy_flat_directory(
+        source,
+        output,
+        FF_DIR,
+        FF_REQUIRED,
+        ("*.parquet",),
+        "fama-french/",
+        "Fetch them with data/factors/ff_download.py.",
+    )
+
+
+def build_aqr_factors(source: Path, output: Path) -> list[Path]:
+    """Copy AQR's published factor parquets and their metadata, verbatim.
+
+    Not the ``source/`` tree beside them: those are the 15 original spreadsheets the
+    parquets were converted from, 95 MB that no loader opens.
+    """
+    return _copy_flat_directory(
+        source,
+        output,
+        AQR_DIR,
+        AQR_REQUIRED,
+        ("*.parquet", "metadata.json"),
+        "aqr/",
+        "Fetch them with data/factors/aqr_download.py.",
+    )
+
+
+def build_fred_macro(source: Path, output: Path) -> list[Path]:
+    """Copy the FRED macro panels production carries, verbatim.
+
+    Only the ``fred_macro*`` files. The production directory also holds the download
+    scripts, a loader, a README and two profile JSONs, none of which a notebook reads
+    through ``ML4T_DATA_PATH``.
+    """
+    return _copy_flat_directory(
+        source,
+        output,
+        MACRO_DIR,
+        MACRO_REQUIRED,
+        ("fred_macro*.parquet",),
+        "macro/",
+        "Fetch them with data/macro/download.py and data/macro/download_alfred.py.",
+    )
+
+
+def build_crypto_onchain(source: Path, output: Path) -> list[Path]:
+    """Copy the DefiLlama TVL and CoinGecko on-chain series, verbatim."""
+    return _copy_flat_directory(
+        source,
+        output,
+        ONCHAIN_DIR,
+        ONCHAIN_REQUIRED,
+        ("*.parquet",),
+        "onchain/",
+        "Fetch them with data/crypto/onchain/download.py.",
+    )
+
+
 DATASETS: tuple[Dataset, ...] = (
     Dataset(
         name="etfs",
@@ -1721,6 +1912,43 @@ DATASETS: tuple[Dataset, ...] = (
         build=build_individual_futures_es,
         # Named individually: CL and NQ sit in the same directory and are synthetic.
         owns=(ES_INDIVIDUAL,),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="fama_french_factors",
+        description=(
+            "every Fama-French factor parquet production carries, copied verbatim, "
+            f"with the {len(FF_REQUIRED)} load_ff_factors() can name required"
+        ),
+        build=build_fama_french_factors,
+        owns=(FF_DIR,),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="aqr_factors",
+        description=(
+            "AQR's published factor parquets and their metadata, copied verbatim, "
+            "without the source/ spreadsheets they were converted from"
+        ),
+        build=build_aqr_factors,
+        owns=(AQR_DIR,),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="fred_macro",
+        description=(
+            "the FRED macro panels production carries - aligned, raw, initial-release "
+            "and their dictionaries and metadata - copied verbatim"
+        ),
+        build=build_fred_macro,
+        owns=(MACRO_DIR,),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="crypto_onchain",
+        description="the DefiLlama TVL and CoinGecko on-chain series, copied verbatim",
+        build=build_crypto_onchain,
+        owns=(ONCHAIN_DIR,),
         budget={"subsample": "none"},
     ),
 )
