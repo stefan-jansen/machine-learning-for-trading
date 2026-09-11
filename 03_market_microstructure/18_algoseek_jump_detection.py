@@ -310,8 +310,9 @@ def lee_mykland_jumps_session(rets: pl.DataFrame, k: int, threshold: float) -> p
 # %% [markdown]
 # The threshold depends on how many bars a session holds, because testing more bars gives
 # more chances for a large return to appear by accident. It is computed once from the
-# median session length so that every bar in the study is tested against the same bar,
-# rather than a symbol with a slightly longer session facing a slightly harder test.
+# median session length so that every bar in the study is tested against the same
+# threshold, rather than a symbol with a slightly longer session facing a slightly
+# harder test.
 
 # %%
 n_per_session = returns.group_by(["symbol", "date"]).len()["len"].to_numpy()

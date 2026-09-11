@@ -623,9 +623,10 @@ if multi_day is not None and len(multi_day) > 0:
     )
 
     # Correlation analysis
-    pdf = multi_day.drop_nulls(
-        ["ofi", "ofi_lag1", "markout_1", "markout_5", "markout_10"]
-    ).to_pandas()
+    # Only the predictor is dropped here. Dropping the markouts as well would truncate
+    # every horizon to the longest one's sample, and the per-horizon dropna() below would
+    # then have nothing left to select.
+    pdf = multi_day.drop_nulls(["ofi", "ofi_lag1"]).to_pandas()
 
     print("Correlation of OFI(t-1) with the return over the following window\n")
     print(
@@ -678,8 +679,13 @@ if multi_day is not None and len(multi_day) > 0:
 if multi_day is not None and len(multi_day) > 0:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
+    # Both panels measure the same thing, so they use the same rows: the bars a
+    # 5-minute markout exists for. pdf keeps every horizon's own sample, so the
+    # pairing has to be made here rather than assumed.
+    paired = pdf[["ofi_lag1", "markout_5"]].dropna()
+
     # Sample for scatter plot (too many points otherwise)
-    sample = pdf.sample(min(10000, len(pdf)), random_state=42)
+    sample = paired.sample(min(10000, len(paired)), random_state=42)
 
     # Left panel: scatter OFI vs 5-min return + trend
     axes[0].scatter(
@@ -695,7 +701,7 @@ if multi_day is not None and len(multi_day) > 0:
     axes[0].axhline(0, color="black", linestyle="--", linewidth=0.5)
     axes[0].axvline(0, color="black", linestyle="--", linewidth=0.5)
 
-    z = np.polyfit(sample["ofi_lag1"].dropna(), sample["markout_5"].dropna() * 10000, 1)
+    z = np.polyfit(sample["ofi_lag1"], sample["markout_5"] * 10000, 1)
     p = np.poly1d(z)
     x_line = np.linspace(-1, 1, 100)
     axes[0].plot(
@@ -704,8 +710,10 @@ if multi_day is not None and len(multi_day) > 0:
     axes[0].legend()
 
     # Right panel: binned decile analysis
-    pdf["ofi_bin"] = pd.qcut(pdf["ofi_lag1"], q=10, labels=False, duplicates="drop")
-    binned = pdf.groupby("ofi_bin")["markout_5"].mean() * 10000
+    paired = paired.assign(
+        ofi_bin=pd.qcut(paired["ofi_lag1"], q=10, labels=False, duplicates="drop")
+    )
+    binned = paired.groupby("ofi_bin")["markout_5"].mean() * 10000
 
     colors = [COLORS["warm"] if v < 0 else COLORS["accent"] for v in binned.values]
     axes[1].bar(range(len(binned)), binned.values, color=colors, edgecolor="black", linewidth=0.5)
