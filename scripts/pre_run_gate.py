@@ -550,8 +550,12 @@ def check_supersedes_declarations(report: Report, case_study: str, notebook: str
     `check_notebook_prose` gives: a gate that passes when it did not run is worse than none.
     """
     try:
-        sys.path.insert(0, str(REPO_ROOT / "scripts"))
-        from check_supersedes_literals import _default_artifacts_root, check_case_study
+        # This module's own directory, not `REPO_ROOT`: the checker is a sibling file, and
+        # that stays true whatever tree is under check.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from check_supersedes_literals import _registry_for, check_case_study
+
+        from utils.paths import get_case_study_dir
     except Exception as error:  # noqa: BLE001 - the reason is reported, not raised
         report.add(
             "supersedes literals name live generations",
@@ -560,10 +564,26 @@ def check_supersedes_declarations(report: Report, case_study: str, notebook: str
         )
         return
 
-    try:
-        findings = check_case_study(
-            case_study, repo_root=REPO_ROOT, artifacts_root=_default_artifacts_root()
+    # The checker's own default is `~/ml4t/artifacts/case_studies`, which is where the
+    # `run_log/` symlink happens to point in a standard checkout and nowhere else. Resolve
+    # the registry the way `check_registry_ready` does instead, so a run under
+    # `ML4T_OUTPUT_DIR` or a relocated `CASE_STUDIES_DIR` is checked against the registry it
+    # will actually write, rather than against a stranger's.
+    artifacts_root = get_case_study_dir(case_study, create=False).parent
+    registry = _registry_for(case_study, artifacts_root)
+    if not registry.exists():
+        # A missing registry is not "no dead declaration". `check_case_study` records it as a
+        # `no-registry` finding, which is not `stale`, so letting it through would report the
+        # green this check exists to withhold.
+        report.add(
+            "supersedes literals name live generations",
+            False,
+            f"no registry at {registry}, so no declaration was checked",
         )
+        return
+
+    try:
+        findings = check_case_study(case_study, repo_root=REPO_ROOT, artifacts_root=artifacts_root)
     except Exception as error:  # noqa: BLE001
         report.add(
             "supersedes literals name live generations",
