@@ -344,12 +344,15 @@ summary = pl.DataFrame(
 summary
 
 # %% [markdown]
-# ### The observed effect against its placebos
+# ### The observed t-statistic against its placebos
 #
-# The permutation test asks how often the same estimator recovers an effect this large from
-# data whose treatment has been shuffled in blocks - which keeps the panel's shape but
-# destroys the treatment's alignment with the outcome. The two significance readings answer
-# different questions and can disagree. The Newey-West p-value asks whether the effect is
+# The permutation test asks how often the same estimator recovers a HAC t-statistic this large
+# from data whose treatment has been shuffled in blocks - which keeps the panel's shape but
+# destroys the treatment's alignment with the outcome. It compares t-statistics rather than
+# effects because a shuffled treatment is no longer predictable from the controls: its residual
+# keeps nearly all its variance, that variance is the denominator of the second-stage effect, and
+# so every placebo effect is divided by a larger number than the observed one. The two significance
+# readings answer# different questions and can disagree. The Newey-West p-value asks whether the effect is
 # distinguishable from zero under a parametric model of the errors; the permutation p-value
 # needs no such model, but can only reject in proportion to the draws run. When the
 # permutation test does not corroborate the parametric one, the parametric standard error is

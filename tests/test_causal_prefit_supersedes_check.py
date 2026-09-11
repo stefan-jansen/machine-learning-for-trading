@@ -1,8 +1,9 @@
 """The refusal a causal run earns has to arrive before the fit, not after it.
 
-`_causal_source_identity` hashes the whole of `case_studies/utils/causal.py` into the
-resolved spec, so any edit to that module - including one made for a different case
-study - gives every resolver-based fit a new identity. A notebook that declares no
+`_causal_source_identity` puts the declared `CAUSAL_RUNNER_VERSION` into the resolved
+spec - it does not hash the module, so an edit to `case_studies/utils/causal.py` moves no
+identity until that integer is raised by hand. When it is raised, every resolver-based fit
+gets a new identity at once. A notebook that declares no
 predecessor then misses the cache, pays the full DML fit and every placebo refit, and is
 refused at the write for leaving two current identities. On a panel of this size that is
 an hour spent to be told a hash the registry could have named before the first fold

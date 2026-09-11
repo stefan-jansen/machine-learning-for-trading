@@ -298,14 +298,21 @@ result_table
 #
 # The refutation p-value above is one number read off the distribution below. Each draw is the
 # whole estimate redone with the treatment permuted in blocks within each stock, so the draws are
-# what the effect looks like when the treatment's real timing has been destroyed and everything
+# what the estimator produces when the treatment's real timing has been destroyed and everything
 # else - the confounders, the folds, the nuisance models - is left alone.
 #
-# What to read: where the observed effect sits relative to the bulk of the draws. Far out in a
-# tail means an effect this size is not something the construction produces by itself. Inside the
-# bulk means it is, and no amount of the estimate's own precision changes that. The spread of the
-# draws is also worth looking at on its own - a wide placebo distribution says this estimand is
-# hard to pin down at this sample size, whatever the point estimate came out at.
+# **The draws are HAC t-statistics, not effects.** Permuting the treatment frees it from the
+# controls, so the first stage can no longer predict it and its residual keeps nearly all its
+# variance - and that variance is the denominator of the second-stage effect. On the effect scale
+# every placebo is divided by a larger number than the observed estimate, so the placebo
+# distribution comes out narrower than the null it stands for and always in the direction that
+# makes a refutation read as passed. Dividing each draw by its own standard error cancels that.
+#
+# What to read: where the observed t-statistic sits relative to the bulk of the draws. Far out in
+# a tail means a statistic this size is not something the construction produces by itself. Inside
+# the bulk means it is. Do not read the spread as precision: t-scale draws come out near unit
+# spread whatever the sample size, which is the calibration a permutation test should have and is
+# not a statement about how well this estimand is pinned down.
 
 # %% tags=["results"]
 # The draws are read on the t-statistic, which is the scale the p-value above is computed

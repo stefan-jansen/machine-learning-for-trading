@@ -1061,13 +1061,16 @@ def run_dml_analysis(
             # unit spread without anyone tuning for it, which is the calibration a
             # permutation test is supposed to have.
             #
-            # `placebo_effects` stays in this dict, and no notebook plots it any more - all
-            # five that drew the permutation distribution now draw `placebo_t_stats`, because
-            # that is the scale the verdict is decided on. It is kept because the effect scale
+            # `placebo_effects` stays in this dict, and no notebook plots it any more - the three
+            # that draw the permutation distribution all read `placebo_t_stats`, because that is
+            # the scale the verdict is decided on. It is kept because the effect scale
             # is the one a reader can interpret against the estimate, so a row carries both and
             # the registry schema says the same. `placebo_t_stats` is what `empirical_p`,
-            # `z_score`, `placebo_mean` and `placebo_std` describe; `refutation_statistic` is
-            # here so no reader can take the old meaning by accident.
+            # `z_score`, `placebo_mean` and `placebo_std` describe. `refutation_statistic` names
+            # the scale in this dict, for a caller holding the fit; it is not registered and
+            # `CausalResult.metrics` does not expose it, so what tells a reader of a stored row
+            # which comparison produced its p-value is `refutation_placebo_t_json` being
+            # non-NULL.
             placebo_arr = np.array(placebo_effects)
             placebo_t_arr = np.array(placebo_t_stats)
             observed_t = float(dml["t_stat_hac"])

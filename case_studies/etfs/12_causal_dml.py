@@ -103,7 +103,9 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 # Incrementing the causal runner's semantic version moves this notebook's causal identity, and
 # the registering write then refuses a second current identity for the same label. This names the
-# one to retire: the estimate fitted before the placebo block was sized by the treatment window.
+# one to retire: the 126-block fit, whose refutation p was computed on raw placebo effects rather
+# than on their t-statistics. Section 2 says what that comparison did and why the block length is a
+# separate question.
 # The hash is committed source and so is wrong for every reader, whose gitignored `run_log/` holds
 # no causal rows at all. `causal_supersedes` resolves it against the registry in hand and
 # withholds it where there is nothing to retire, which is what makes one declaration right for
