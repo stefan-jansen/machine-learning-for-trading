@@ -77,6 +77,8 @@ END_DATE = "2024-01-01"
 # The two-sided normal critical value the confidence bands, the bar shading and the
 # significance verdicts all read. Declared once so a reader changing it changes all three.
 Z_CRIT = 1.96
+# The level that critical value implies, so every band label follows the parameter.
+CONF_LEVEL = 2 * stats.norm.cdf(Z_CRIT) - 1
 SEED = 42
 
 # %%
@@ -488,7 +490,7 @@ if len(result["daily_aar"]) > 0:
     caar = daily_aar["caar"].to_numpy() * 100  # Convert to percent
     caar_se = daily_aar["caar_se"].to_numpy() * 100
 
-    # 95% confidence band (Var(CAAR_t) = cumulative sum of daily AAR variances)
+    # Confidence band at CONF_LEVEL; Var(CAAR_t) is the cumulative sum of daily AAR variances
     upper = caar + Z_CRIT * caar_se
     lower = caar - Z_CRIT * caar_se
 
@@ -499,7 +501,7 @@ if len(result["daily_aar"]) > 0:
             fill="toself",
             fillcolor="rgba(10, 22, 40, 0.15)",  # COLORS["blue"] at 15% opacity
             line=dict(width=0),
-            name="95% CI",
+            name=f"{CONF_LEVEL:.0%} CI",
         )
     )
 
@@ -525,7 +527,7 @@ if len(result["daily_aar"]) > 0:
     fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
 
     fig.update_layout(
-        title="Cumulative average abnormal return around the event, with a 95% band",
+        title=f"Cumulative average abnormal return around the event, {CONF_LEVEL:.0%} band",
         xaxis_title="Trading days relative to event",
         yaxis_title="Cumulative average abnormal return (%)",
         height=500,
@@ -536,7 +538,7 @@ if len(result["daily_aar"]) > 0:
         (
             "A line chart of cumulative average abnormal return, in percent, against trading "
             "days relative to the event, running from five days before to ten days after. A "
-            "grey band marks the ninety-five percent confidence interval and an amber "
+            "grey band marks the confidence interval and an amber "
             "vertical line labelled Event day marks day zero. The line starts at zero five "
             "days before, climbs steadily through the pre-event days, and rises most "
             "steeply between the day before and the event day itself, where it reaches its "
@@ -707,14 +709,24 @@ print(f"Significant at 5%: {'Yes' if lib_result.p_value < 0.05 else 'No'}")
 if len(result["event_cars"]) > 0:
     cars = result["event_cars"]["car"].to_numpy() * 100
 
-    # The paragraph under this figure turns on a mean-median comparison and on whether the
-    # distribution is skewed, so compute both rather than inviting the reader to eyeball
-    # them off a histogram.
-    print(f"cumulative abnormal return over the event window, across {len(cars)} events:")
-    print(f"  mean   {cars.mean():+.2f}%")
-    print(f"  median {np.median(cars):+.2f}%")
-    print(f"  skewness {float(stats.skew(cars)):+.2f}")
-    print(f"  share positive {float((cars > 0).mean()):.1%}")
+    # Two distributions, not one; the markdown below the figure says why.
+    _post = (
+        result["abnormal_returns"]
+        .filter(pl.col("day") > 0)
+        .group_by(["event_date", "symbol"])
+        .agg((pl.col("ar").sum() * 100).alias("car_post"))
+    )
+    post_cars = _post["car_post"].to_numpy()
+
+    for _label, _v in (
+        ("full window, days -5 to +10", cars),
+        ("post-event only, days +1 to +10", post_cars),
+    ):
+        print(f"{_label}, across {len(_v)} events:")
+        print(f"  mean {_v.mean():+.2f}%   median {np.median(_v):+.2f}%", end="")
+        print(
+            f"   skewness {float(stats.skew(_v)):+.2f}   share positive {float((_v > 0).mean()):.1%}"
+        )
 
     fig = go.Figure()
 
@@ -775,20 +787,36 @@ if len(result["event_cars"]) > 0:
     print(f"  Significant at 5%: {'Yes' if p_value < 0.05 else 'No'}")
 
 # %% [markdown]
-# **Interpretation**: read the four numbers printed above the figure together. The
-# question they answer is whether the aggregate effect is a property of the typical event
-# or the work of a few large ones, and the mean alone cannot tell you.
+# **Interpretation**: two rows of numbers are printed above the figure, and the histogram
+# shows the first of them.
 #
-# A mean and a median close to each other, with a skewness near zero and a share of
-# positive events meaningfully above half, describe an effect spread across the sample:
-# the aggregate CAAR then says something about what to expect from the next breakout. A
-# mean well above a median near zero would say the opposite, that a handful of events
-# carry the average, and an aggregate built that way is not something to size a position
-# against however significant its t-statistic looks.
+# Within either row, the comparison to make is between the mean and the median, alongside
+# the skewness and the share of positive events. Together they say whether the aggregate
+# describes the typical event or is carried by a few large ones: a mean and median close
+# together, a skewness near zero and a share of positives well above half describe an
+# effect spread across the sample, while a mean well above a median near zero would say a
+# handful of events produced it. That distinction matters because a t-statistic is
+# significant either way, and only the first kind of aggregate is something to size a
+# position against.
 #
-# The histogram shows the same thing in shape rather than in numbers, and the two dashed
-# lines are there so the gap between zero and the mean can be read against the width of
-# the distribution, which is the comparison that matters.
+# Between the rows, the comparison is what the distributions can be used for, and on this
+# sample the two rows disagree about the sign. The full-window figures cover days minus
+# five to plus ten, and the pre-event days rose by construction, so a positive full-window
+# mean is guaranteed by how the event was defined. The post-event row drops those days and
+# keeps only what was unknown when the signal fired; compare its mean, its median and its
+# share of positive events against the row above.
+#
+# Take that seriously rather than as a caveat. An event study whose window straddles the
+# trigger will show a positive average abnormal return for any event defined by a past
+# price move, and the CAAR figure earlier in this notebook has the same problem: most of
+# its rise happens before day zero. Splitting the window is what separates the definition
+# from the finding, and it is the first thing to do to any event study whose events are
+# chosen by a signal rather than by an announcement.
+#
+# One sample of a hundred-odd breakouts on a handful of ETFs settles nothing on its own,
+# and a single number from a single window is not the basis for a decision either way.
+# What this comparison establishes is the method: report the post-event window separately,
+# every time, and let the reader see both.
 
 # %% [markdown]
 # ## Event Study Heatmap
