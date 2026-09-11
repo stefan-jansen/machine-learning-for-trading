@@ -386,7 +386,7 @@ if sweep_results and robustness:
         y=robustness["threshold"],
         line_dash="dash",
         line_color=COLORS["amber"],
-        annotation_text=f"90% of best ({robustness['threshold']:.2f})",
+        annotation_text=(f"{ROBUST_THRESHOLD_PCT:.0%} of peak ({robustness['threshold']:.2f})"),
         annotation_position="bottom left",
     )
 
