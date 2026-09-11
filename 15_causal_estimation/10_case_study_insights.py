@@ -56,6 +56,7 @@ from case_studies.utils.analytics import (
     SHORT_NAMES,
     registry_path,
 )
+from utils.paths import registry_readonly_uri
 from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
@@ -100,17 +101,25 @@ CASE_ORDER = {case_study: rank for rank, case_study in enumerate(CASE_STUDY_IDS)
 # preview tier. On the registries as they stand the two rules select the same rows.
 # `current_causal_identities` in `case_studies/utils/registry/store.py` is the authority, and
 # a reader who needs the full rule should call it rather than copy the query below.
+#
+# The connection is read-only, and `registry_readonly_uri` decides whether it may also be
+# immutable. `immutable=1` promises SQLite the file cannot change while it is open, which lets
+# it skip locking and never open the write-ahead log. That is false of a case directory a sweep
+# is writing, and here it would be doubly wrong: the integrity check below runs on the same
+# connection, so it would certify the pre-WAL main file and the query would then read the same
+# stale snapshot the check had just approved. The promise does hold for a downloaded artifact
+# bundle, whose tree is left unwritable, and there the flag is what lets a WAL reader open the
+# file at all.
 
 
 # %%
 def _load_causal_runs(case_study: str) -> pl.DataFrame:
-    """Load one immutable causal row per label from a case-study registry."""
+    """Load the current causal row per label from a case-study registry."""
     db_path = registry_path(case_study).resolve()
     if not db_path.is_file():
         raise FileNotFoundError(f"Missing registry for {case_study}: {db_path}")
 
-    uri = f"file:{db_path}?mode=ro&immutable=1"
-    with sqlite3.connect(uri, uri=True) as connection:
+    with sqlite3.connect(registry_readonly_uri(db_path), uri=True) as connection:
         connection.row_factory = sqlite3.Row
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
