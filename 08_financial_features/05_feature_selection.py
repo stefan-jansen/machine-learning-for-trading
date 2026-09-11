@@ -204,7 +204,6 @@ analysis = features_df.join(
 
 print(f"Analysis dataset: {analysis.shape}")
 
-# %% tags=[]
 # %% [markdown] tags=[]
 # Cross-sectional IC is computed per date, then sorted by timestamp. The sort matters:
 # `group_by` does not preserve order, and the Newey-West t-statistic below regresses each
