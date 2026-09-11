@@ -707,6 +707,7 @@ if ic_results:
         "IC series (NB07, NB08) is the chapter's headline inference framework."
     )
 else:
+    ic_summary = pl.DataFrame()
     print("Insufficient data for IC computation (need more symbols/filings)")
 
 # %% [markdown]
@@ -754,7 +755,6 @@ if len(ic_summary) > 0:
         "crosses zero, so few of the signal-horizon pairs are separated from it. The "
         "intervals are long relative to the bars they sit on.",
     )
-    ic_summary = pl.DataFrame()
 
 # %% [markdown]
 # ## 6. Quintile Analysis

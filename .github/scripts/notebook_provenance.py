@@ -453,10 +453,29 @@ def paired_py(nb_path: Path) -> Path | None:
     return cand if cand.exists() else None
 
 
-def git_blob(path: Path) -> str:
-    """git blob SHA-1 of the file's current content (working tree)."""
+def git_blob(path: Path, *, write: bool = False) -> str:
+    """git blob SHA-1 of the file's current content (working tree).
+
+    ``write=True`` also puts the object in the store, and every caller that records the hash
+    **in a stamp** passes it. A stamp names a blob so that a later command can fetch it and
+    compare code cells; hashing without storing writes down the name of something that does
+    not exist yet, and the object only appears when the ``.py`` is staged or committed.
+
+    Until then every command that resolves the stamp fails, and the message it fails with says
+    "Re-run it" - which is the most expensive possible answer to a missing loose object. Two
+    bands hit it the same day on 2026-09-11, and the second form is the one that bites twice:
+    a successful ``sync-prose`` re-stamps to the new blob, so the next sync in the same session
+    refuses on the sha the previous one just wrote. ``nb-run`` executes the working tree, so an
+    executed ``.py`` that was never committed at the version that ran is the normal mid-task
+    state, not an error.
+
+    A comparison does not need the object stored, so ``check`` and ``library_digest`` leave it
+    off rather than writing a loose object per source file on every sweep. An unreferenced blob
+    is pruned by ``git gc`` after its grace period, which is long after the ``.py`` it describes
+    has been committed and made it reachable.
+    """
     return subprocess.run(
-        ["git", "hash-object", str(path)],
+        ["git", "hash-object", *(["-w"] if write else []), str(path)],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -1133,7 +1152,7 @@ def stamp_notebook(
     if not allow_unchanged_outputs and (reason := unwritten_run(nb, py)):
         raise SystemExit(f"refusing to stamp {display_path(nb_path)}: {reason}")
     stamp = {
-        "source_py_blob": git_blob(py),
+        "source_py_blob": git_blob(py, write=True),
         # What the run produced, and the repository code that produced it. Neither is
         # covered by source_py_blob, and each was a way a superseded result reached
         # main with every check green: outputs from an earlier run under an untouched
@@ -1443,6 +1462,44 @@ def drift_is_prose_only(stamped_blob: str, py: Path) -> bool:
     return before is not None and after is not None and before == after
 
 
+def drift_is_alt_and_prose_only(stamped_blob: str, py: Path) -> bool:
+    """Whether a stale-reading drift is confined to prose and alt literals, so ``sync-alt`` resolves it.
+
+    ``drift_is_prose_only`` compares with the alt literals left in, so a corrected alt reads to it
+    as a changed code cell and the report says "re-run". That is the wrong remedy and it is the
+    expensive one: ``sync-alt`` writes the corrected string into the output metadata, which is
+    exactly the bytes a re-run would produce, because the image comes from
+    ``fig._repr_mimebundle_()`` and never sees the alt string.
+
+    The two classifiers differ in one argument. Blanking the alts and comparing again asks whether
+    anything *other than* an alt literal moved in a code cell. Nothing did, and this is the
+    ``sync-alt`` case; something did, and it falls through to the re-run bucket where it belongs.
+
+    Markdown is free in both, because both drop the pure-markdown cells (`code_cells_only`): adding,
+    deleting, merging or retagging one cannot change what any code cell computes. That matters here
+    rather than being incidental - bringing a notebook under the results-cell rule *is* adding and
+    retagging markdown cells, and doing it in the same pass as an alt correction is the shape this
+    classifier exists to price correctly.
+
+    Naming the command is the whole point. ``sync-alt`` may still refuse the notebook for a reason
+    this cannot see - an alt passed as a variable, or a computed alt whose interpolated values are
+    not recoverable from the executed output - and it says so explicitly when it does. A report that
+    says "re-run" instead never gets that far.
+    """
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        return False  # stamped blob is gone; cannot compare, so do not soften the report
+    before = code_cells_only(_comparable(old.stdout, blank_alts=True))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=True))
+    return before is not None and after is not None and before == after
+
+
 def _output_counts(nb: dict) -> list[int]:
     """Outputs per code cell, in order. The unit a prose sync must leave untouched."""
     return [len(c.get("outputs", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code"]
@@ -1495,8 +1552,12 @@ def sync_prose(nb_path: Path) -> str:
     )
     if old.returncode != 0:
         raise SystemExit(
-            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
-            "so the code cells cannot be compared. Re-run it."
+            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, so "
+            "the code cells cannot be compared. This is NOT a reason to re-run: it means the .py "
+            "that was executed was never stored, which is the normal state for a run against an "
+            "uncommitted working tree. Reconstruct that source, check it hashes to the sha above "
+            "with `git hash-object <file>`, then `git hash-object -w <file>` to put it in the "
+            "store. Stamps written from here on store the blob, so this cannot recur for them."
         )
     # Alt literals are NOT blanked here. This command keeps the outputs, so an alt the
     # output metadata does not carry would be stamped as current while rendering the old
@@ -1558,7 +1619,7 @@ def sync_prose(nb_path: Path) -> str:
         )
     nb = json.loads(nb_path.read_text(encoding="utf-8"))
     stamp = dict(stamp)
-    stamp["source_py_blob"] = git_blob(py)
+    stamp["source_py_blob"] = git_blob(py, write=True)
     stamp["notes"] = (
         f"prose synced from the .py at {datetime.now(UTC).isoformat()} without re-executing; "
         f"every code cell is identical to blob {stamped_blob[:12]}"
@@ -1566,6 +1627,90 @@ def sync_prose(nb_path: Path) -> str:
     nb.setdefault("metadata", {})[STAMP_KEY] = stamp
     nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     return stamp["source_py_blob"]
+
+
+def sync_paths(nb_path: Path) -> str:
+    """Re-stamp a notebook whose only change is the path sanitizer's rewrite.
+
+    `sanitize_notebook_paths.py` rewrites machine-specific paths out of cell outputs, and
+    a path in an output is hashed by `outputs_digest`, so a sanitize reads as stale. None
+    of the existing tiers covers it: `sync-prose` refuses because the outputs moved,
+    `sync-alt` writes alt text, and a figure title is a code change.
+
+    A re-run is the wrong answer here, and not merely an expensive one. Re-executing
+    cannot remove a worktree path from an output - it writes the *current* worktree's path
+    instead - so the gate would be demanding the one action that reintroduces the defect.
+    That is the same argument `VOLATILE_OUTPUT_KEYS` makes for figure `alt`: re-executing
+    cannot change the image either.
+
+    Decidable rather than trusted. This does not accept "the author says it was only
+    paths". It reads the committed notebook, applies the sanitizer to it, and requires the
+    result to equal the file on disk exactly. Anything else - a number that moved, a cell
+    that was edited, a figure that was regenerated - fails that comparison and is refused.
+    The stamp keeps its `source_py_blob`, `executed_at` and `executor`, because the `.py`
+    did not change and the outputs are still the ones that run produced.
+    """
+    rel = nb_path.relative_to(REPO_ROOT)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from sanitize_notebook_paths import sanitize_notebook
+
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    stamp = nb.get("metadata", {}).get(STAMP_KEY)
+    if not stamp:
+        raise SystemExit(
+            f"{rel} carries no provenance stamp, so there is no executed state to preserve."
+        )
+
+    # Already folded in. A batch that stops halfway must be resumable, and without this
+    # the second pass refuses every notebook the first one finished - the stamp on disk is
+    # correctly no longer the one at HEAD, which is exactly what the check below rejects.
+    if stamp.get("outputs_digest") == outputs_digest(nb):
+        return stamp["outputs_digest"]
+
+    committed = subprocess.run(
+        ["git", "show", f"HEAD:{rel}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if committed.returncode != 0:
+        raise SystemExit(
+            f"{rel} is not committed at HEAD, so there is nothing to compare the rewrite "
+            "against. This command folds in a sanitize of an already-committed notebook."
+        )
+
+    old = json.loads(committed.stdout)
+    old_stamp = old.get("metadata", {}).get(STAMP_KEY) or {}
+    if old_stamp.get("outputs_digest") != stamp.get("outputs_digest"):
+        raise SystemExit(
+            f"{rel}: the stamp on disk is not the one at HEAD, so this working copy carries "
+            "more than a sanitize. Refusing rather than stamping over it."
+        )
+    if outputs_digest(old) != old_stamp.get("outputs_digest"):
+        raise SystemExit(
+            f"{rel}: the committed notebook's outputs already disagree with its own stamp, so "
+            "it was stale before this rewrite. That is a re-run, not a sanitize."
+        )
+
+    expected_raw, _replaced, _skipped = sanitize_notebook(committed.stdout)
+    if json.loads(expected_raw) != nb:
+        raise SystemExit(
+            f"{rel}: the file on disk is not the committed notebook with its paths sanitized, "
+            "so something else changed too. Refusing - this command cannot tell a moved number "
+            "from a moved path, so it insists the two agree exactly."
+        )
+
+    stamp = dict(stamp)
+    stamp["outputs_digest"] = outputs_digest(nb)
+    stamp["notes"] = (
+        f"machine-specific paths sanitized out of the outputs at "
+        f"{datetime.now(UTC).isoformat()} without re-executing; every other byte of every "
+        f"output is identical to the run stamped at {stamp.get('executed_at', 'unknown')}"
+    )
+    nb.setdefault("metadata", {})[STAMP_KEY] = stamp
+    nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    return stamp["outputs_digest"]
 
 
 def _splice_alt(
@@ -1659,8 +1804,12 @@ def sync_alt(nb_path: Path) -> str:
     )
     if old.returncode != 0:
         raise SystemExit(
-            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
-            "so the code cells cannot be compared. Re-run it."
+            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, so "
+            "the code cells cannot be compared. This is NOT a reason to re-run: it means the .py "
+            "that was executed was never stored, which is the normal state for a run against an "
+            "uncommitted working tree. Reconstruct that source, check it hashes to the sha above "
+            "with `git hash-object <file>`, then `git hash-object -w <file>` to put it in the "
+            "store. Stamps written from here on store the blob, so this cannot recur for them."
         )
     old_source = old.stdout
     before = code_cells_only(_comparable(old_source, blank_alts=True))
@@ -1781,7 +1930,7 @@ def sync_alt(nb_path: Path) -> str:
         )
 
     stamp = dict(stamp)
-    stamp["source_py_blob"] = git_blob(py)
+    stamp["source_py_blob"] = git_blob(py, write=True)
     stamp["notes"] = (
         f"alt text synced from the .py at {datetime.now(UTC).isoformat()} without re-executing; "
         f"every code cell is identical to blob {stamped_blob[:12]} once alt literals are blanked, "
@@ -1792,6 +1941,66 @@ def sync_alt(nb_path: Path) -> str:
     return stamp["source_py_blob"]
 
 
+def _uncomment(line: str) -> str:
+    """Drop the ``#`` comment prefix and at most one space after it.
+
+    Not `lstrip()`. Markdown carries meaning in leading whitespace - a nested list item, a
+    fenced YAML block, an indented continuation - and stripping all of it renders prose that
+    is not the prose in the notebook. `07_defining_the_learning_task/10_ml4t_library_ecosystem`
+    has a `features:` block four levels deep that came out flat.
+    """
+    if line.startswith("# "):
+        return line[2:]
+    if line.startswith("#"):
+        return line[1:]
+    return line
+
+
+def _cmd_prose(args: argparse.Namespace) -> int:
+    """Print every markdown cell of each notebook, for a review pass that touches no code.
+
+    The markdown is already in the ``.py`` as comment blocks under ``# %% [markdown]`` markers,
+    so this reads the source rather than the notebook and needs no kernel, no outputs and no
+    execution. What it adds over reading the file is that it shows *only* the prose, with each
+    cell's index and tags, so a reviewer reads the notebook's writing as a document instead of
+    scrolling past the code between the paragraphs.
+
+    The index it prints is the cell's position among markdown cells, which is what an editor
+    needs to find it again; ``--all`` numbers every cell instead, for a reviewer who needs to
+    know what the prose sits next to.
+    """
+    for name in args.notebooks:
+        path = Path(name).resolve()
+        if path.suffix == ".ipynb":
+            path = path.with_suffix(".py")
+        if not path.exists():
+            raise SystemExit(f"no such source: {path}")
+        rel = display_path(path)
+        cells = _percent_cells(path.read_text(encoding="utf-8"))
+        # `_percent_cells` opens with a markerless entry holding the jupytext header, before
+        # any `# %%`. It is not a cell, so counting it inflates every position and the total
+        # by one - `--all` said "cell 3 of 36" for the second cell of a 35-cell notebook.
+        if cells and not cells[0][0]:
+            cells = cells[1:]
+        shown = 0
+        for i, (marker, kind, body) in enumerate(cells):
+            if kind == "code":
+                continue
+            shown += 1
+            tags = re.search(r"tags=(\[[^\]]*\])", marker)
+            label = f"{rel}  markdown cell {shown}"
+            if args.all:
+                label += f"  (cell {i + 1} of {len(cells)})"
+            if tags and tags.group(1) not in ("[]", ""):
+                label += f"  tags={tags.group(1)}"
+            print(f"\n=== {label} ===")
+            for line in body.splitlines():
+                print(_uncomment(line))
+        if shown == 0:
+            print(f"{rel}: no markdown cells")
+    return 0
+
+
 def _cmd_sync_alt(args: argparse.Namespace) -> int:
     for name in args.notebooks:
         path = Path(name).resolve()
@@ -1799,6 +2008,16 @@ def _cmd_sync_alt(args: argparse.Namespace) -> int:
             path = path.with_suffix(".ipynb")
         blob = sync_alt(path)
         print(f"alt text synced {path.relative_to(REPO_ROOT)}: source_py_blob={blob[:12]}")
+    return 0
+
+
+def _cmd_sync_paths(args: argparse.Namespace) -> int:
+    for name in args.notebooks:
+        path = Path(name).resolve()
+        if path.suffix == ".py":
+            path = path.with_suffix(".ipynb")
+        digest = sync_paths(path)
+        print(f"paths synced {path.relative_to(REPO_ROOT)}: outputs_digest={digest[:12]}")
     return 0
 
 
@@ -1918,7 +2137,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         for r in lost:
             print(f"  {r}")
     if stale:
-        prose, executable = [], []
+        prose, alt, executable = [], [], []
         for r in stale:
             nb_path = REPO_ROOT / r
             py = paired_py(nb_path)
@@ -1928,8 +2147,12 @@ def _cmd_check(args: argparse.Namespace) -> int:
                 .get(STAMP_KEY, {})
                 .get("source_py_blob")
             )
-            if py is not None and stamped and drift_is_prose_only(stamped, py):
+            if py is None or not stamped:
+                executable.append(r)
+            elif drift_is_prose_only(stamped, py):
                 prose.append(r)
+            elif drift_is_alt_and_prose_only(stamped, py):
+                alt.append(r)
             else:
                 executable.append(r)
         if prose:
@@ -1938,6 +2161,14 @@ def _cmd_check(args: argparse.Namespace) -> int:
                 "  uv run python .github/scripts/notebook_provenance.py sync-prose <nb.py>):"
             )
             for r in prose:
+                print(f"  {r}")
+        if alt:
+            print(
+                "STALE, alt text and prose only (no code cell moved for anything but an alt "
+                "literal - fold it in, do NOT re-run:\n"
+                "  uv run python .github/scripts/notebook_provenance.py sync-alt <nb.py>):"
+            )
+            for r in alt:
                 print(f"  {r}")
         if executable:
             print(
@@ -2075,6 +2306,37 @@ def main() -> int:
     )
     yp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
     yp.set_defaults(func=_cmd_sync_prose)
+
+    sp = sub.add_parser(
+        "sync-paths",
+        help="fold the path sanitizer's rewrite into the executed .ipynb, keeping its outputs",
+        description=(
+            "For a notebook whose only change is `sanitize_notebook_paths.py` rewriting a "
+            "machine-specific path out of a cell output. Re-running cannot fix that - it "
+            "writes the current worktree's path instead - so the stamp keeps its executed_at "
+            "and executor and only outputs_digest moves. Refuses unless the file on disk is "
+            "exactly the committed notebook with the sanitizer applied."
+        ),
+    )
+    sp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
+    sp.set_defaults(func=_cmd_sync_paths)
+
+    pp = sub.add_parser(
+        "prose",
+        help="print every markdown cell, for a review pass that touches no code",
+        description=(
+            "Reads the paired .py, where markdown cells are comment blocks, and prints only "
+            "the prose with each cell's index and tags. Nothing is executed and nothing is "
+            "written. Edit the .py and fold the result in with sync-prose."
+        ),
+    )
+    pp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
+    pp.add_argument(
+        "--all",
+        action="store_true",
+        help="also number each markdown cell among all cells, not only among the markdown ones",
+    )
+    pp.set_defaults(func=_cmd_prose)
 
     ap_alt = sub.add_parser(
         "sync-alt",

@@ -48,6 +48,7 @@ from .model_planning import (
 )
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import (
+    SUPERSEDES_LIVE,
     OfficialPopulation,
     RetirementSplit,
     population_supersedes,
@@ -160,6 +161,7 @@ __all__ = [
     "unfinished_sweep_plans",
     "planned_backtests",
     "upstream_plan_hashes",
+    "SUPERSEDES_LIVE",
     "population_supersedes",
     "research_name",
     "resolved_model_plan",

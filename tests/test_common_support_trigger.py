@@ -24,7 +24,11 @@ import pytest
 
 import case_studies.utils.uncertainty as uncertainty
 import utils.paths as paths
-from case_studies.utils.strategy_analysis import resolve_canonical_rank1_lineage
+from case_studies.utils.strategy_analysis import (
+    NoSelectableCandidates,
+    resolve_canonical_rank1_lineage,
+    selectable_validation_candidates,
+)
 
 CASE_STUDY = "fixture_conformal"
 SESSIONS = [dt.datetime(2024, 1, 1) + dt.timedelta(days=i) for i in range(40)]
@@ -162,3 +166,82 @@ def test_a_current_version_candidate_survives_an_older_one_in_the_same_field(
     lineage = resolve_canonical_rank1_lineage(CASE_STUDY)
 
     assert lineage["val_backtest_hash"] == "bt_conformal_v3"
+
+
+# A path that takes its account to zero. `first_ruin_index` reads the equity curve, so a
+# single -100% period is ruin regardless of what follows it, and the engine books the rest
+# as zeros. Its registered Sharpe is high on purpose: the bug this pins is a fallback to
+# that stored number, so a ruined candidate whose stored Sharpe is low would pass a broken
+# implementation for the wrong reason.
+RUINED_RETURNS = [0.05] * 10 + [-1.0] + [0.0] * 19
+
+
+def test_a_ruined_candidate_is_compared_without_a_sharpe(case_dir: Path) -> None:
+    """It stays on the frame, carries no Sharpe, and says which kind of None that is.
+
+    `rank_returns_on_common_support` returns None for a path stopped at ruin, deliberately.
+    Coercing it with `float()` raised TypeError and took the whole resolver down; the
+    ranking is fine either way, because nulls sort last.
+    """
+    _add(case_dir, "bt_plain", _spec(None), sharpe=0.5, values=PLAIN_RETURNS)
+    _add(
+        case_dir,
+        "bt_conformal_v3",
+        _spec("conformal_weighted", "walk_forward_v3"),
+        sharpe=0.6,
+        values=CONFORMAL_RETURNS,
+    )
+    _add(case_dir, "bt_ruined", _spec(None), sharpe=9.0, values=RUINED_RETURNS)
+
+    field = selectable_validation_candidates(CASE_STUDY)
+
+    by_hash = {row["backtest_hash"]: row for row in field}
+    assert set(by_hash) == {"bt_plain", "bt_conformal_v3", "bt_ruined"}
+
+    ruined = by_hash["bt_ruined"]
+    assert ruined["comparison_sharpe"] is None
+    assert ruined["comparison_ruined"] is True
+    # Stored Sharpe 9.0 is the highest in the field and still does not decide the order.
+    assert field[-1]["backtest_hash"] == "bt_ruined"
+    for solvent in ("bt_plain", "bt_conformal_v3"):
+        assert by_hash[solvent]["comparison_ruined"] is False
+        assert by_hash[solvent]["comparison_sharpe"] is not None
+
+
+def test_a_field_that_was_never_re_ranked_reports_a_third_state(case_dir: Path) -> None:
+    """No conformal candidate, so ruin was never assessed - which is not the same as False.
+
+    `comparison_sharpe` is None here too. A caller reading only that field cannot tell this
+    apart from a ruined candidate, and the two want opposite handling: here the registered
+    Sharpe is the only one there is.
+    """
+    _add(case_dir, "bt_plain", _spec(None), sharpe=0.5, values=PLAIN_RETURNS)
+    _add(case_dir, "bt_other", _spec(None), sharpe=0.4, values=CONFORMAL_RETURNS)
+
+    field = selectable_validation_candidates(CASE_STUDY)
+
+    assert [row["comparison_ruined"] for row in field] == [None, None]
+    assert all(row["comparison_sharpe"] is None for row in field)
+    assert resolve_canonical_rank1_lineage(CASE_STUDY)["val_sharpe"] == pytest.approx(0.5)
+
+
+def test_the_resolver_refuses_a_ruined_rank_1_rather_than_borrowing_its_stored_sharpe(
+    case_dir: Path,
+) -> None:
+    """Every candidate ruined is not a selection, and the stored Sharpe must not stand in.
+
+    Nulls sort last, so a ruined rank-1 means the whole field is ruined. Falling back to the
+    registered Sharpe would answer with a configuration whose reported number is computed on
+    a balance that no longer exists.
+    """
+    _add(
+        case_dir,
+        "bt_conformal_v3",
+        _spec("conformal_weighted", "walk_forward_v3"),
+        sharpe=0.6,
+        values=[0.02] * 5 + [-1.0] + [0.0] * 24,
+    )
+    _add(case_dir, "bt_ruined", _spec(None), sharpe=9.0, values=RUINED_RETURNS)
+
+    with pytest.raises(NoSelectableCandidates, match="stopped at ruin"):
+        resolve_canonical_rank1_lineage(CASE_STUDY)

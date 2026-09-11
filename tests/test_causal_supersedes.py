@@ -235,7 +235,15 @@ def test_a_re_registration_without_a_declaration_does_not_clear_one(tmp_path) ->
 # ---------------------------------------------------------------------------
 
 _CANNED = {
-    "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+    "dml_result": {
+        "theta": 0.02,
+        "se_hac": 0.01,
+        "n_obs": 120,
+        # `manual_dml_timeseries` always returns this, and
+        # `run_resolved_causal_request` reads it without a default so a
+        # missing one is a defect rather than a silent NULL in the row.
+        "covariance_type": "driscoll_kraay",
+    },
     "p_value_hac": 0.04,
     "naive_effect": 0.03,
     "confounding_bias_pct": 50.0,

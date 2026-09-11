@@ -32,7 +32,7 @@
 # - Compare validation IC with holdout IC (signal persistence)
 # - Identify reproducibility and stability concerns
 #
-# **Book Reference**: Chapter 20, Section 20.2 (Signal Evidence)
+# **Book Reference**: Chapter 20, Section 20.3 (Signal quality and prediction uncertainty)
 #
 # **Prerequisites**: Run [`01_aggregate_synthesis`](01_aggregate_synthesis.ipynb) first.
 

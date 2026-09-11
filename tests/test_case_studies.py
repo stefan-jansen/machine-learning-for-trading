@@ -34,6 +34,7 @@ from tests.pm_helpers import (
     run_notebook,
     stage_sort_key,
 )
+from tests.skip_blockers import honoured_skip_reason
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -145,8 +146,8 @@ def test_case_study_pipeline(
     # Check case-study-level skip (e.g., "case_studies/nasdaq100_microstructure")
     cs_key = f"case_studies/{case_study}"
     cs_overrides = get_overrides(cs_key)
-    if cs_overrides.get("skip"):
-        pytest.skip(f"Skipped: {cs_overrides.get('skip_reason', 'case study skipped')}")
+    if cs_reason := honoured_skip_reason(cs_overrides):
+        pytest.skip(f"Skipped: {cs_reason}")
 
     rel_path = notebook_path.relative_to(REPO_ROOT).with_suffix("")
     overrides = get_overrides(str(rel_path))
@@ -157,9 +158,10 @@ def test_case_study_pipeline(
     if nb_tier != run_tier:
         pytest.skip(f"Tier {nb_tier} — current run tier is {run_tier}")
 
-    # Skip if overrides say so
-    if overrides.get("skip"):
-        reason = overrides.get("skip_reason", "marked skip in overrides")
+    # Skip if overrides say so. Honoured only while the condition the reason rests on still
+    # holds - see tests/skip_blockers.py - so a fixture registry that gains a selectable
+    # candidate retires the skip rather than outliving it.
+    if reason := honoured_skip_reason(overrides):
         pytest.skip(f"Skipped: {reason}")
 
     # Inputs the rebuild has not produced yet. Unlike `skip`, this is checked against the

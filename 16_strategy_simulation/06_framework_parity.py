@@ -86,7 +86,7 @@ from ml4t.backtest import (
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
 
 from data import load_etfs, load_macro
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -318,8 +318,13 @@ context_df = pl.DataFrame(weight_records).with_columns(pl.col("timestamp").cast(
 # Align context timestamps with price timestamps
 etf_long = etf_long.with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
 
+# %% [markdown]
+# The sequential run follows. Two counts come out of it and they answer different questions.
+# `num_fills` counts fills. The `trades` list is not a fill count: the engine appends a trade only
+# when a position is closed, flipped or scaled down, plus every position still open on the last
+# session, marked to market, so opens and scale-ups never appear in it.
+
 # %%
-# Run ml4t-backtest Engine
 feed = DataFeed(prices_df=etf_long, context_df=context_df)
 strategy = WeightRebalanceStrategy(assets=ETF_SYMBOLS)
 
@@ -341,10 +346,6 @@ equity_ml4t = pd.Series(
 portfolio_returns_ml4t = equity_ml4t.pct_change().dropna()
 
 print(f"Sequential account, ending equity: ${equity_ml4t.iloc[-1]:,.0f}")
-# results["trades"] is not a fill count: the engine appends a Trade only when a position
-# is closed, flipped or scaled DOWN, plus every position still open on the last session,
-# marked to market. Opens and scale-ups are absent from it. num_fills is the count of
-# fills. Both are printed because they answer different questions.
 print(f"Fills: {results_ml4t['num_fills']:,}")
 print(f"Closed, reduced or still-open positions: {len(results_ml4t['trades']):,}")
 
@@ -494,7 +495,17 @@ fig.update_layout(
     height=500,
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Line chart of portfolio equity in US dollars for one strategy under two simulators, "
+        "the array-arithmetic run in solid navy and the sequential-engine run in dashed grey, "
+        "both from the same starting capital on one axis. The two consume the same weights "
+        "and the same prices; what differs is that one applies the weights as vectorized "
+        "arithmetic over the whole panel and the other steps through sessions in order. Drawn "
+        "on a shared axis to show what that difference in method does to the level."
+    ),
+)
 
 # %%
 # Difference over time (align index types)
@@ -520,7 +531,7 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 
 fig.update_layout(
     title=(
-        "The difference between the two accumulates rather than oscillating"
+        "Array equity minus sequential equity, over the sample"
         "<br><sup>Array equity minus sequential equity, in USD; positive means the "
         "arithmetic is ahead</sup>"
     ),
@@ -528,7 +539,17 @@ fig.update_layout(
     yaxis_title="Array minus sequential equity (USD)",
     height=400,
 )
-fig.show()
+_nonzero_diff = diff_series[diff_series.abs() > 0]
+_sign_changes = int(((_nonzero_diff > 0) != (_nonzero_diff > 0).shift(1)).iloc[1:].sum())
+show_plotly_with_alt(
+    fig,
+    (
+        "Line chart of array equity minus sequential equity in US dollars against date, with "
+        "a dashed line at zero. Above the line the arithmetic run is ahead and below it the "
+        "engine is. Drawn as a difference rather than as two curves because a difference "
+        "resolves changes that are smaller than the line width on the panel above."
+    ),
+)
 
 # %% [markdown]
 # ## 8. What is still different between the two runs
@@ -567,8 +588,7 @@ fig.show()
 # `07_engine_divergence_anatomy` changes one at a time and measures each.
 
 # %%
-# fillna(weights) so the opening allocation counts, matching how executed_turnover is
-# built at the top of section 5; weights.diff() alone leaves the first row NaN and drops it.
+# fillna(weights) so the opening allocation counts, as executed_turnover does in section 5.
 _weight_change_dates = int((weights.diff().fillna(weights).abs().sum(axis=1) > 0).sum())
 print(f"Sessions in the panel:                  {len(close_prices):,}")
 print(f"Dates the weight matrix changes:        {_weight_change_dates:,}")

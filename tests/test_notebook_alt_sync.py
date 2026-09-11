@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("tmp_repo")
+
 REPO = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
     "notebook_provenance", REPO / ".github" / "scripts" / "notebook_provenance.py"

@@ -64,7 +64,7 @@ This is the chapter's methodological center of gravity. It argues that validatio
 uv run python 05_synthetic_data/<notebook>.py
 
 # Test mode (reduced data via Papermill)
-uv run pytest tests/test_notebooks.py -v -k "05_synthetic_data"
+uv run pytest tests/test_chapter_notebooks.py -v -k "05_synthetic_data"
 ```
 
 > Runtime callouts (cold-start, no cached checkpoint):

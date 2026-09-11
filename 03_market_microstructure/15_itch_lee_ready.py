@@ -62,11 +62,8 @@
 # %%
 """Lee-Ready Trade Classification Validation — validate Lee-Ready against DataBento ground truth aggressor labels."""
 
-import warnings
 from collections import Counter
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import polars as pl
@@ -76,7 +73,7 @@ from data import load_mbo_data
 
 # ML4T imports - path resolution
 from utils.paths import get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 SYMBOL = "NVDA"
@@ -136,18 +133,16 @@ def load_databento_mbo(file_path: Path, max_rows: int | None = None) -> pl.DataF
     if "price" in df.columns and df["price"].max() > 1_000_000:
         df = df.with_columns((pl.col("price") / 1e9).alias("price"))
 
-    # Filter to regular trading hours (09:30-16:00 America/New_York). Convert the
-    # UTC instant to exchange-local time so the window is correct in both EDT and
-    # EST: a fixed UTC window silently drops the final trading hour (or admits an
-    # hour of pre-market) whenever the sample straddles a DST boundary.
+    # Regular trading hours are defined on the exchange's clock, so convert before
+    # filtering: a window fixed in UTC is an hour wrong for half the year.
     _et = pl.col("timestamp").dt.replace_time_zone("UTC").dt.convert_time_zone("America/New_York")
     df = df.filter(
         ((_et.dt.hour() > 9) | ((_et.dt.hour() == 9) & (_et.dt.minute() >= 30)))
         & (_et.dt.hour() < 16)
     )
 
-    # Sort by timestamp. Note: Messages with identical timestamps may not have
-    # a guaranteed order; DataBento sequence numbers could be used if available.
+    # Trades sharing a timestamp have no guaranteed order after this sort, which matters
+    # only for the tick test's notion of 'the previous trade'.
     return df.sort("timestamp")
 
 
@@ -532,12 +527,17 @@ if sample_df is not None and len(sample_df) > 1000:
 # %% [markdown]
 # ## 6. Multi-Day Classification Accuracy (Table 3.3)
 #
-# Aggregate Lee-Ready and tick-test classification accuracy across the same
-# 5-day window used in §3.4 Table 3.3. Tick-test reports two cohorts:
-# **continuous** (zero-tick trades carry forward the last non-zero direction —
-# 100% coverage) and **non-zero** (only classify trades whose price changed —
-# coverage equals the share of non-zero-tick trades). Persists a summary
-# parquet read by `book/03_market_microstructure/figures/scripts/generate_table_3_3.py`.
+# Accuracy is aggregated over the same multi-day window the book's Table 3.3 reports.
+#
+# The tick test is scored two ways, because it faces a choice the quote test does not.
+# Many trades print at the same price as the one before them, and the rule has nothing
+# to read. The **continuous** cohort carries the last non-zero direction forward, so it
+# classifies every trade; the **non-zero** cohort declines to classify those trades at
+# all, so it is scored only on the ones whose price moved. Comparing the two separates
+# how good the rule is from how often it has anything to go on.
+#
+# The summary is written to parquet so the book's table script can rebuild Table 3.3
+# without re-running this notebook.
 
 
 # %%
@@ -663,10 +663,11 @@ if data_files:
 # %% [markdown]
 # ### Table 3.3 as a chart
 #
-# The three classifiers trade coverage against accuracy. Lee-Ready and the
-# continuous tick test classify every trade; the non-zero tick test is accurate
-# only on the ~18% of trades whose price actually moves, so its higher accuracy
-# comes at a steep coverage cost.
+# Read the two numbers on each bar together. The bar length is accuracy on the trades a
+# method classified; the label to its right is what share of trades that was. A method
+# that only answers when the answer is easy scores well on a small denominator, and the
+# non-zero tick test is exactly that case - which is why coverage is printed beside
+# accuracy rather than left out of the comparison.
 
 # %%
 if "multi_day_tick_summary" in globals():
@@ -675,7 +676,7 @@ if "multi_day_tick_summary" in globals():
     _acc = _s["accuracy_pct"].to_list()
     _cov = _s["coverage_pct"].to_list()
 
-    fig, ax = plt.subplots(figsize=(10, 4), layout="tight")
+    fig, ax = plt.subplots(figsize=(10, 4))
     bars = ax.barh(_methods, _acc, color=COLORS["blue"], height=0.6)
     for bar, acc, cov in zip(bars, _acc, _cov):
         y = bar.get_y() + bar.get_height() / 2
@@ -700,23 +701,30 @@ if "multi_day_tick_summary" in globals():
     ax.set_xlim(0, 120)
     ax.set_xlabel("Accuracy vs DataBento aggressor labels (%)")
     ax.set_title(
-        "Lee-Ready recovers trade direction at ~95% accuracy with full coverage",
+        "Classification accuracy against the venue's aggressor labels, with coverage",
         loc="left",
-        fontweight="bold",
     )
     ax.spines[["top", "right"]].set_visible(False)
-    plt.show()
+    show_with_alt(
+        fig,
+        "A horizontal bar chart with one bar per classification method, sorted with the shortest at the bottom. Each bar's length is its accuracy against the venue's aggressor labels as a percentage, labelled inside the bar, with the share of trades that method classified printed as a separate label to the right of it.",
+    )
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# ### Lee-Ready Validation Results
+# ### What the comparison establishes
 #
-# | Method | Accuracy | Notes |
-# |--------|----------|-------|
-# | Lee-Ready (quote + tick) | ~94-95% | Uses LOB midpoint when available |
-# | Tick test only | ~78% | Significantly worse without quote test |
-# | Ground truth | 100% | DataBento provides actual aggressor |
+# Three things are being compared and it is worth being precise about what each is. The
+# venue's own aggressor label is the record of which side crossed, and it is the standard
+# the other two are scored against rather than a method with an accuracy of its own.
+# Lee-Ready reads the trade price against the quote midpoint and falls back on the tick
+# test where that is uninformative. The tick test alone reads only the direction of the
+# last price change.
+#
+# The figure above carries the numbers. What they show is how much of the classification
+# comes from the quote: the tick test is the part of Lee-Ready that runs when the quote
+# says nothing, and scoring it alone measures what the quote was contributing.
 #
 # ### Why Lee-Ready Works
 #

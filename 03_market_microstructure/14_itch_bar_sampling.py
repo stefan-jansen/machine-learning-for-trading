@@ -55,10 +55,7 @@
 # %%
 """Information-Driven Bars — constructing tick, volume, dollar, and imbalance bars from raw trades."""
 
-import warnings
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -79,7 +76,7 @@ from scipy import stats
 from data.equities.loader import load_nasdaq_itch
 from utils import ML4T_PATH
 from utils.paths import get_output_dir
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 SYMBOL = "AAPL"
@@ -246,11 +243,13 @@ if MESSAGE_DIR.exists():
         print(f"  Total volume: {all_trades['volume'].sum():,.0f} shares")
         print(f"  Dollar volume: ${(all_trades['price'] * all_trades['volume']).sum():,.0f}")
 
+# %% [markdown]
+# Bars are cut over regular trading hours only. ITCH timestamps are nanoseconds since
+# midnight on the exchange's own clock and carry no timezone, so the window below is
+# already in exchange-local time and needs no conversion - which also means these
+# timestamps must not be treated as UTC anywhere downstream.
+
 # %%
-# Filter to regular trading hours (9:30 AM - 4:00 PM ET)
-# Note: ITCH timestamps are in US/Eastern (exchange local time), timezone-naive.
-# This filter assumes the data is already in ET. For DST-aware filtering,
-# you would need to localize timestamps first.
 if all_trades is not None and len(all_trades) > 0:
     start_time = pd.Timestamp(f"{TRADING_DATE} 09:30:00")
     end_time = pd.Timestamp(f"{TRADING_DATE} 16:00:00")
@@ -465,15 +464,17 @@ if time_1m is not None:
     ax.axhline(0, color=COLORS["neutral"], linestyle="--", linewidth=1, label="Normal (0)")
     add_message_title(
         ax,
-        "Time bars stay fat-tailed while activity-sampled bars approach normality",
+        "Intraday return excess kurtosis by bar type",
         subtitle=f"{SYMBOL} intraday return excess kurtosis by bar type, {TRADING_DATE}",
     )
     ax.set_xlabel("Bar type")
     ax.set_ylabel("Excess kurtosis (0 = normal)")
     ax.legend()
     plt.xticks(rotation=20, ha="right")
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "A vertical bar chart of intraday return excess kurtosis with one bar per bar type, sorted from lowest at the left to highest at the right, and a dashed reference line at zero marking the normal distribution. The rightmost bar, for time bars, is highlighted in a contrasting colour.",
+    )
 
 # %% [markdown]
 # ## 4. Visualize Return Distributions
@@ -519,11 +520,13 @@ if time_1m is not None:
     axes[5].axis("off")
 
     plt.suptitle(
-        f"{SYMBOL} activity-sampled bars sit closer to normal (tails clipped to ±2%)",
+        f"{SYMBOL} intraday return distribution by bar type, tails clipped",
         fontsize=14,
     )
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "A grid of panels, one per bar type, each a histogram of that sampler's bar returns as a density with a fitted normal curve drawn over it. The horizontal axis is the bar return as a percentage, clipped at the tails so the centre of each distribution is comparable across panels.",
+    )
 
 # %% [markdown]
 # ## 5. Bar Duration Analysis
@@ -570,11 +573,13 @@ if tick_bars is not None:
             ax.legend()
 
     plt.suptitle(
-        f"{SYMBOL} information-bar duration swings with activity ({TRADING_DATE})",
+        f"{SYMBOL} bar duration by bar type, {TRADING_DATE}",
         fontsize=14,
     )
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "A grid of panels, one per bar type, each plotting how long a bar took to fill in seconds against the bar's position in the session, so the series runs chronologically rather than as a distribution. A dashed horizontal line in each panel marks that sampler's mean duration and is labelled with it.",
+    )
 
 # %% [markdown]
 # ## 6. Buy/Sell Volume Decomposition
@@ -583,8 +588,8 @@ if tick_bars is not None:
 # per-trade `side` label. Because **ITCH Trade (P) messages do not carry true
 # aggressor direction** — the `buy_sell_indicator` field is uniformly 'B' for
 # every trade in this dataset — the decomposition below rests on the **tick-test**
-# classification from §1, not an exchange-provided aggressor field. Treat it as a
-# ~78%-accurate proxy.
+# classification from §1, not an exchange-provided aggressor field. It is an inference,
+# and `15_itch_lee_ready` measures how good an inference against a venue's own labels.
 #
 # More accurate alternatives:
 # - **Lee-Ready algorithm**: compare trade price to quote midpoint (§7 below)
@@ -630,7 +635,7 @@ if volume_bars is not None and "buy_volume" in volume_bars.columns:
             width=1.0,
         )
         ax.axhline(0, color=COLORS["neutral"], linewidth=0.6)
-        ax.set_title("Order-flow imbalance flips bar to bar")
+        ax.set_title("Order-flow imbalance per bar, in sequence")
         ax.set_xlabel("Bar index (chronological)")
         ax.set_ylabel("(Buy - Sell) / total volume")
 
@@ -646,7 +651,7 @@ if volume_bars is not None and "buy_volume" in volume_bars.columns:
         )
         ax.axhline(0, color=COLORS["neutral"], linewidth=0.6)
         ax.axvline(0, color=COLORS["neutral"], linewidth=0.6)
-        ax.set_title("Imbalance vs next-bar return")
+        ax.set_title("Bar imbalance against the following bar's return")
         ax.set_xlabel("Imbalance at bar t")
         ax.set_ylabel("Return at bar t+1 (%)")
 
@@ -654,15 +659,17 @@ if volume_bars is not None and "buy_volume" in volume_bars.columns:
             f"{SYMBOL} volume-bar order flow (tick-test sides, {TRADING_DATE})",
             fontsize=14,
         )
-        plt.tight_layout()
-        plt.show()
+        show_with_alt(
+            fig,
+            "Two panels. The left is a bar chart of each bar's order-flow imbalance in sequence, green above the zero line and red below, against bar index. The right scatters that same imbalance against the return over the following bar, one point per bar, with reference lines at zero on both axes.",
+        )
 
 # %% [markdown]
 # ## 7. Lee-Ready Trade Classification
 #
-# Since ITCH Trade (P) messages don't provide aggressor direction, we implement
-# the **Lee-Ready algorithm** to classify trades. **Validated accuracy: ~94%**
-# (compared to ~78% for tick-test alone; see `15_itch_lee_ready` for details).
+# ITCH `P` messages carry no aggressor direction, so it has to be inferred. The
+# **Lee-Ready** rule does that with two tests in order, and `15_itch_lee_ready` scores
+# both against a venue's own aggressor labels.
 #
 # **Quote test** (primary):
 # - Compare trade price to midpoint of best bid/ask
@@ -674,9 +681,12 @@ if volume_bars is not None and "buy_volume" in volume_bars.columns:
 # - Downtick → sell
 # - Zero tick → use last tick direction
 #
-# **Why tick-test alone fails**: 83% of consecutive trades have the same price.
-# The continuous tick test carries forward the previous direction, but errors
-# propagate and decorrelate from actual aggressor intent.
+# **Why the tick test needs the quote test in front of it.** Most consecutive trades
+# print at the same price, so the tick test has nothing to read on the majority of them
+# and carries the last direction forward instead. One wrong classification then persists
+# through every subsequent flat trade until the price moves again, which is why its
+# errors are not independent. The quote test answers those trades directly, from the
+# quote rather than from history.
 #
 # This requires reconstructing the LOB state at each trade timestamp—see
 # `02_itch_lob_reconstruction` for the complete LOB state machine.
@@ -773,7 +783,7 @@ if tick_bars is not None and len(tick_bars) > 0:
     # Bars per hour
     ax = axes[0]
     bars_per_hour.plot(kind="bar", ax=ax, color=COLORS["blue"], alpha=0.9)
-    ax.set_title("Tick-bar count peaks at the open and close")
+    ax.set_title("Tick bars formed per hour")
     ax.set_xlabel("Hour (ET)")
     ax.set_ylabel("Number of tick bars")
     ax.set_xticklabels([f"{h}:00" for h in bars_per_hour.index], rotation=45)
@@ -782,17 +792,19 @@ if tick_bars is not None and len(tick_bars) > 0:
     ax = axes[1]
     volume_per_hour = tick_bars_pd.groupby("hour")["volume"].sum()
     volume_per_hour.plot(kind="bar", ax=ax, color=COLORS["amber"], alpha=0.9)
-    ax.set_title("Traded volume follows the same U-shape")
+    ax.set_title("Traded volume by time of day")
     ax.set_xlabel("Hour (ET)")
     ax.set_ylabel("Volume (shares)")
     ax.set_xticklabels([f"{h}:00" for h in volume_per_hour.index], rotation=45)
 
     plt.suptitle(
-        f"{SYMBOL} intraday activity traces the classic U-shape ({TRADING_DATE})",
+        f"{SYMBOL} bar formation and traded volume by time of day, {TRADING_DATE}",
         fontsize=14,
     )
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "Two bar charts side by side against hour of the trading session. The left counts the tick bars formed in each hour; the right sums the shares traded in the same hours.",
+    )
 
     print(
         "Intraday U-shape: the opening hour concentrates activity as overnight "
@@ -832,22 +844,25 @@ if time_1m is not None:
 # | **Dollar** | Economic activity | Price-adjusted | Complex to compute |
 # | **Imbalance** | Informed trading | Captures signals | Parameter-sensitive |
 #
-# ### Trade Classification Methods (Validated Accuracy)
+# ### Where trade direction comes from
 #
-# | Method | Accuracy | Coverage | Data Required | Use Case |
-# |--------|----------|----------|---------------|----------|
-# | **Direct aggressor** | 100% | 100% | DataBento MBO, CME FIX | Production systems |
-# | **Lee-Ready** | **~94%** | 100% | LOB + trades | ITCH reconstruction |
-# | **Tick test only** | **~78%** | 100% | Trade prices only | Weak fallback |
+# | Source | What it is | What it needs |
+# |--------|------------|---------------|
+# | The venue's own label | A record of which side crossed | A feed that publishes it, such as DataBento MBO or CME FIX |
+# | Lee-Ready | An inference from the trade price against the quote | A reconstructed book alongside the trades |
+# | Tick test alone | An inference from the last price change | Trade prices only |
 #
-# **Critical finding**: The tick test alone (~78% accuracy) substantially underperforms
-# Lee-Ready (~94%). Zero-tick trades (same price as previous) propagate classification
-# errors. Do not use tick-test alone for imbalance bars.
+# The ordering matters more than any accuracy figure. A venue label is a record and the
+# other two are estimates, so where a label exists there is nothing to infer. Between
+# the two estimates, the quote test answers from the quote prevailing at the trade while
+# the tick test answers from what happened before it. They disagree whenever the
+# direction of the last price change points the other way from the trade's position
+# relative to the midpoint - an uptick that still prints below the midpoint reads as a
+# buy to one and a sell to the other. Trades at an unchanged price are one case of this
+# and the most common, because the tick test has nothing to read on them at all and
+# carries its last answer forward instead.
 #
-# Lee-Ready achieves ~94% accuracy by using LOB midpoint for classification,
-# falling back to tick-test only for the minority of trades at the midpoint.
-# Direct aggressor field (DataBento, CME) is always preferred when available.
-# See `15_itch_lee_ready` for full multi-day validation results.
+# `15_itch_lee_ready` measures all three on the same trades and reports the gap.
 #
 # ### ITCH Data Advantages
 #

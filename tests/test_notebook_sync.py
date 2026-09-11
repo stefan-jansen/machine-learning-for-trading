@@ -32,6 +32,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
+pytestmark = pytest.mark.usefixtures("tmp_repo")
+
 import notebook_provenance  # noqa: E402
 from notebook_provenance import (  # noqa: E402
     check_all,

@@ -52,7 +52,7 @@
 # **Prerequisites**: [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb) and
 # [`04_ipca`](04_ipca.ipynb)
 #
-# **Book section**: Section 14.5, "Finding priced factors with risk-premium PCA"
+# **Book section**: Section 14.5, "Bridging economics and statistics with advanced models"
 #
 # **Next**: [`06_conditional_autoencoder`](06_conditional_autoencoder.ipynb)
 # replaces the static linear loading map with a neural network.

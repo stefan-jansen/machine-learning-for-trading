@@ -90,7 +90,7 @@ from scipy.stats import norm
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -303,7 +303,7 @@ print(f"Spread of the estimates: {np.std(simulated_srs, ddof=1):.3f}")
 print(f"Standard error, formula: {theoretical_se:.3f}")
 
 # %%
-fig, ax = plt.subplots(figsize=(12, 5))
+fig, ax = plt.subplots(figsize=FIGSIZE["single"])
 ax.hist(
     simulated_srs,
     bins=50,
@@ -326,14 +326,25 @@ ax.set_xlabel("Estimated annualized Sharpe ratio")
 ax.set_ylabel("Density")
 add_message_title(
     ax,
-    "A year of data cannot tell a good strategy from no strategy",
+    "Sampling distribution of the estimated Sharpe ratio",
     subtitle=(
         f"{N_SIMULATIONS:,} simulated track records of {DEMO_SAMPLE_DAYS} days, "
         f"all from one strategy with a true annualized Sharpe of {DEMO_TRUE_SR}"
     ),
 )
 ax.legend()
-plt.show()
+_share_negative = float((simulated_srs < 0).mean())
+show_with_alt(
+    fig,
+    (
+        f"Histogram of {N_SIMULATIONS:,} simulated Sharpe estimates in grey with the "
+        "analytical sampling distribution drawn over it as an amber curve, a dotted vertical "
+        "line at zero and a dashed green line at the true Sharpe the draws were generated "
+        "from. Every draw is the same length and the same underlying process, so the width of "
+        "the histogram is estimation noise alone. Drawn with the formula on top to show what "
+        "the closed form is claiming about that noise."
+    ),
+)
 
 # %% [markdown]
 # The estimates are centred on the truth, which is the only reassuring thing about them. Their
@@ -365,11 +376,8 @@ def probabilistic_sharpe_ratio(
     z_score = (observed_sr - benchmark_sr) / se
     psr = norm.cdf(z_score)
 
-    # `sf` rather than `1 - psr`: the PSR is the cdf and is reported as such, but the p-value
-    # is its tail, and subtracting a probability near one from one keeps only the digits that
-    # survive the cancellation. Measured on the normal: at z = 8 the subtraction returns
-    # 6.66e-16 against a true 6.22e-16, and from z = 9 it returns exactly 0 where the tail is
-    # 1.13e-19. A p-value of 0 is the one value a reader cannot interpret.
+    # `sf` rather than `1 - psr`: subtracting a probability near one from one keeps only the
+    # digits that survive the cancellation, and from z = 9 it returns exactly zero.
     upper_tail = float(norm.sf(z_score))
     one_sided_p_value = upper_tail
     two_sided_p_value = 2 * min(psr, upper_tail)
@@ -538,7 +546,7 @@ pl.DataFrame(mintrl_rows)
 sr_range = np.linspace(0.2, 2.5, 100)
 min_trl_values = [minimum_track_record_length(sr)["planning_length_with_power"] for sr in sr_range]
 
-fig, ax = plt.subplots(figsize=(12, 5))
+fig, ax = plt.subplots(figsize=FIGSIZE["single_wide"])
 ax.plot(sr_range, min_trl_values, color=COLORS["blue"], lw=2)
 ax.axhline(252, color=COLORS["positive"], linestyle="--", label="1 year")
 ax.axhline(504, color=COLORS["amber"], linestyle="--", label="2 years")
@@ -548,13 +556,24 @@ ax.set_xlabel("Target annualized Sharpe ratio")
 ax.set_ylabel("Trading days required (log scale)")
 add_message_title(
     ax,
-    "Halving the target Sharpe roughly quadruples the history needed",
+    "Trading days required against the target Sharpe ratio",
     subtitle="Log scale; prospective horizon at one-sided alpha 0.05 and power 0.80",
 )
 ax.set_yscale("log")
 ax.legend()
 ax.grid(True, alpha=0.3)
-plt.show()
+
+
+show_with_alt(
+    fig,
+    (
+        "Line chart of the trading days required to distinguish a Sharpe ratio from zero "
+        "against the target annualized Sharpe, on a logarithmic vertical axis, with dashed "
+        "horizontal lines at one, two and three years of sessions. The axis is logarithmic "
+        "because the requirement scales with the inverse square of the target; the reference "
+        "lines convert the vertical axis into calendar terms."
+    ),
+)
 
 sr_05 = minimum_track_record_length(0.5)
 print(

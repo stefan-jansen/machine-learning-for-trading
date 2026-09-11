@@ -61,7 +61,7 @@ from plotly.subplots import make_subplots
 from scipy import stats
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -132,11 +132,8 @@ def _format_dsr_result(
     return {
         "dsr": probability,
         "z_score": z_score,
-        # `sf` rather than `1 - cdf`: the DSR is the cdf and is wanted as such, but the
-        # p-value is its tail, and subtracting a probability near one from one keeps only the
-        # digits that survive the cancellation. Measured: at z = 8 the subtraction gives
-        # 6.66e-16 against a true 6.22e-16, and from z = 9 it returns exactly 0 where the
-        # tail is 1.13e-19. A p-value of 0 is the one value a reader cannot interpret.
+        # `sf` rather than `1 - cdf`: subtracting a probability near one from one keeps
+        # only the digits that survive the cancellation, and from z = 9 it returns exactly 0.
         "p_value": float(stats.norm.sf(z_score)),
         "expected_max_sharpe": expected_max_annual,
         "adjusted_sharpe": observed_sharpe - expected_max_annual,
@@ -303,10 +300,11 @@ print(f"Expected best, extreme-value formula:       {gumbel_expected_max:.3f}")
 # above the expectation rather than on it. The extreme-value expression is the expected maximum,
 # and it is the one the deflated Sharpe ratio uses internally.
 #
-# Both sit above the maximum this particular batch produced, which is the third thing worth
-# noticing. The largest of a hundred draws is itself a random variable with a wide distribution,
-# so a single batch landing below its own expectation is ordinary. The correction is built on the
-# expectation, not on what one batch happened to do.
+# Neither is a prediction about the batch printed above, which is the third thing worth noticing.
+# The largest of a hundred draws is itself a random variable with a wide distribution, so a single
+# batch landing on either side of its own expectation is ordinary. The correction is built on the
+# expectation, not on what one batch happened to do, so the maximum printed here is not evidence
+# for or against either expression.
 #
 # The variance of Sharpe ratios across trials is printed for the same reason: it is an input to
 # the correction, not a description of the output. Its true value here is fixed by the record
@@ -344,12 +342,21 @@ fig.add_vline(
 )
 
 fig.update_layout(
-    title="Testing enough strategies with no edge produces an impressive one",
+    title="Distribution of observed Sharpe ratios across the tested strategies",
     xaxis_title="Observed Sharpe Ratio",
     yaxis_title="Count",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        f"Histogram of the observed Sharpe ratios from {NULL_STRATEGIES:,} strategies "
+        "simulated with no edge at all, with a dashed vertical line at the true Sharpe of "
+        "zero and a second at the largest value the sample produced. Every strategy here has "
+        "the same true Sharpe by construction, so the spread is sampling noise and the "
+        "maximum is what selecting the best of this many produces from noise alone."
+    ),
+)
 
 # %% [markdown]
 # ## 2. What the correction costs a good-looking strategy
@@ -428,7 +435,7 @@ fig.add_hline(
     annotation_text="50-50 chance",
 )
 fig.update_layout(
-    title="The same Sharpe becomes less convincing the harder it was looked for",
+    title="Deflated Sharpe probability against the number of strategies tested",
     xaxis_title="Number of Strategies Tested",
     yaxis_title="DSR probability (%)",
     xaxis_type="log",
@@ -440,7 +447,16 @@ fig.update_xaxes(
     tickvals=_n_trials_ticks,
     ticktext=[str(t) for t in _n_trials_ticks],
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Line chart of the deflated Sharpe probability in percent against the number of "
+        "strategies tested, on a logarithmic horizontal axis, with dashed reference lines at "
+        "95 percent and at 50. One observed Sharpe is held fixed across the whole curve and "
+        "only the trial count varies, so the curve is the deflation alone rather than a "
+        "change in the estimate."
+    ),
+)
 
 # %% [markdown]
 # ## 3. The same result in three units
@@ -503,7 +519,6 @@ for skew in skewness_values:
 nonnorm_df = pl.DataFrame(results_matrix)
 
 # %%
-# Create heatmap - pivot the data
 pivot = nonnorm_df.pivot(on="kurtosis", index="skewness", values="dsr_probability")
 skew_col = pivot.get_column("skewness").to_list()
 kurt_cols = [c for c in pivot.columns if c != "skewness"]
@@ -514,7 +529,10 @@ fig = go.Figure(
         z=z_values,
         x=[f"k={k}" for k in kurt_cols],
         y=[f"s={s:.1f}" for s in skew_col],
-        colorscale=ml4t_diverging(),
+        # Sequential, not diverging: the deflated probability has no meaningful midpoint
+        # for a diverging scale to sit on, and a red-to-green ramp would read the higher
+        # cells as the better ones, which is a verdict this grid does not carry.
+        colorscale=[[0, COLORS["silver"]], [1, COLORS["blue"]]],
         colorbar={"title": "DSR %"},
         text=np.round(z_values, 1),
         texttemplate="%{text}%",
@@ -523,12 +541,21 @@ fig = go.Figure(
 )
 
 fig.update_layout(
-    title="Skewness and kurtosis move the deflated probability very little here",
+    title="Deflated Sharpe probability by skewness and kurtosis",
     xaxis_title="Kurtosis",
     yaxis_title="Skewness",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Heatmap of the deflated Sharpe probability in percent over a grid of skewness and "
+        "kurtosis settings, one cell per pair, each labelled. The observed Sharpe, sample "
+        "length and trial count are held fixed across the grid, so the surface isolates what "
+        "the two non-normality corrections do on their own. Rows and columns are the two "
+        "moments, so a row reads as one moment varying and a column as the other."
+    ),
+)
 
 # %% [markdown]
 # ## 5. Selecting the largest Sharpe from variants that all work equally well
@@ -719,12 +746,22 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title="Two corrections, two different shapes of penalty",
+    title="Adjusted against observed Sharpe ratio, under two corrections",
     xaxis_title="Observed Sharpe Ratio",
     yaxis_title="Adjusted Sharpe Ratio",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Line chart of adjusted against observed Sharpe ratio, with the RAS and DSR "
+        "adjustments as separate lines and a dashed grey diagonal marking no adjustment at "
+        "all. Both adjustments are applied to the same observed values on the horizontal "
+        "axis, so vertical distance from the diagonal is each method's penalty at that "
+        "observation. Drawn against the identity because the two methods are otherwise on "
+        "different scales."
+    ),
+)
 
 # %% [markdown]
 # ## 7. Choosing between them, and what a threshold implies
@@ -1006,7 +1043,7 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title="Stable edge keeps PBO at 0% across partition counts",
+    title="Backtest overfitting probability and combination count, by block count",
     xaxis_title="Number of CSCV blocks",
     height=400,
 )
@@ -1017,10 +1054,21 @@ fig.update_yaxes(
     type="log",
     tickmode="array",
     tickvals=pbo_blocks_df["n_combinations"].to_list(),
-    ticktext=["6", "20", "70", "252", "924", "12.9k"],
+    # Formatted from the values rather than typed beside them: a different block grid would
+    # leave a hand-written list labelling the wrong ticks.
+    ticktext=[f"{n:,}" for n in pbo_blocks_df["n_combinations"].to_list()],
     secondary_y=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Dual-axis line chart against the number of CSCV blocks. The left axis carries the "
+        "backtest overfitting probability in percent with a dashed reference line at 50; the "
+        "right, logarithmic, axis carries the number of train/test combinations the block "
+        "count produces. The two series share a panel because both are consequences of the "
+        "same block count, and they measure unrelated quantities."
+    ),
+)
 
 # %% [markdown]
 # ### DSR and PBO answer different questions

@@ -76,6 +76,40 @@ def traded_universe_declaration(prices: pl.DataFrame) -> dict[str, Any]:
     }
 
 
+def prediction_age_declaration(
+    *, max_age_sessions: int, dropped: int, kept: int, symbols_dropped: int
+) -> dict[str, Any]:
+    """Describe a prediction-age bound that removed rows, for the caller to put in its spec.
+
+    The sibling of :func:`traded_universe_declaration`, and the same defect it exists for.
+    Aligning predictions onto a coarser bar with a backward as-of join reuses a symbol's last
+    score for as long as the panel runs after its series ends, and bounding that age changes
+    what the backtest is computed from while ``prediction_hash`` and the strategy spec stay
+    identical - so a run with the bound and a run without it hash alike, and the second is
+    served the first's result. Measured on `nasdaq100_microstructure/17_costs`: the bound
+    removes 19,667 of 303,641 aligned rows at 30-minute cadence.
+
+    Carries the counts and not only the bound, because two runs can declare the same bound
+    and drop different rows: the prediction set behind them moves on every refit, and a run
+    whose universe left earlier is a different portfolio at the same tolerance.
+
+    Declare it only when the bound actually removed something. A caller that drops nothing
+    passes ``None`` and produces byte-identical specs to before this key existed, which is
+    what leaves every registered backtest at the identity it was written under.
+    """
+    if dropped <= 0:
+        raise ValueError(
+            "prediction_age_declaration is for a bound that removed rows; a bound that "
+            "removed none must declare nothing, so the run keeps the identity it had."
+        )
+    return {
+        "max_age_sessions": int(max_age_sessions),
+        "dropped": int(dropped),
+        "kept": int(kept),
+        "symbols_dropped": int(symbols_dropped),
+    }
+
+
 def resolve_execution_mode(fill_timing: str):
     """Map fill_timing string to ExecutionMode enum.
 
@@ -504,6 +538,7 @@ def build_backtest_spec(
     min_trade_value: float | None = None,
     label: str | None = None,
     traded_universe: dict[str, Any] | None = None,
+    prediction_age: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # A case study that declares per-label cadences must be told which label it is building for.
     # Defaulting to the case-study cadence here would put the spec on the wrong grid and register
@@ -541,6 +576,12 @@ def build_backtest_spec(
     # registered backtest keeps the identity it was written under (ml4t/agent-workspace#911).
     if traded_universe is not None:
         resolved_signal["traded_universe"] = deepcopy(traded_universe)
+    # The prediction-age bound, from `prediction_age_declaration`, on the same terms and in
+    # the same block for the same reason: it changes what the run is computed from without
+    # touching `prediction_hash`, so without this a bounded run and an unbounded one over the
+    # same predictions hash alike and the second is served the first's result.
+    if prediction_age is not None:
+        resolved_signal["prediction_age"] = deepcopy(prediction_age)
 
     strategy_spec: dict[str, Any] = {
         "signal": resolved_signal,

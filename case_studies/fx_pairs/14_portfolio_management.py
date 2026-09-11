@@ -68,6 +68,7 @@ from case_studies.research import (
     plan_backtests,
     population_supersedes,
     research_name,
+    reuse_disclosure,
     run_backtests,
     strategy_warmup_periods,
     superseded_members,
@@ -93,20 +94,35 @@ RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
 BASELINE_POPULATION_NAME = None
-SUPERSEDES_ALLOCATION_BACKTESTS: str = "e487eb0d75db"
+# `e487eb0d75db` was in no lineage the registry holds, and this notebook builds the name it
+# publishes under with `research_name`, so nothing could look it up to say whether it was
+# dead or waiting for a first publication. `"live"` names the lineage instead and is
+# resolved against that name at run time.
+SUPERSEDES_ALLOCATION_BACKTESTS: str = "live"
 
 # A candidate set is sealed once written, so a run whose members differ from the recorded
 # generation has to name the set it replaces - the same shape 15_risk_management and 16_costs
-# already carry, and keyed by the full set name because that is what the refusal prints. These
-# three moved when 10a_dl_lstm registered the lstm_h64 checkpoints the training menu declares:
-# the equal-weight baselines went from 1,452 to 1,572, so every label's candidate set gained
-# the 40 backtests riding the new predictions. Resolved through `candidate_set_supersedes`
-# rather than passed straight to `create`, because a reader's clean clone has no generation to
-# supersede and `create` refuses a first version that claims to replace one.
+# already carry, and keyed by the full set name because that is what the refusal prints.
+# Resolved through `candidate_set_supersedes` rather than passed straight to `create`, because
+# a reader's clean clone has no generation to supersede and `create` refuses a first version
+# that claims to replace one.
+#
+# `"live"` names the lineage rather than a generation of it, which is what stops these going
+# stale again. The hashes it replaces - `77b9631c7f13`, `1c6a3826af9f`, `db7b24f2a58b` - were in
+# no lineage the registry holds. All three lineages were reset and restarted rather than
+# superseded: each live head carries `supersedes_hash` NULL, so it is generation one under its
+# name. A membership move - which is what an earlier note described, the equal-weight baselines
+# going from 1,452 to 1,572 when 10a_dl_lstm registered the lstm_h64 checkpoints - would have
+# left the old hash as the head's `supersedes_hash`. It is not there, so that was a different
+# event from the one these hashes came through, and the old values are not recoverable.
+#
+# Naming the head instead would be correct only until the next run of whichever notebook freezes
+# these sets, because `create` accepts the head and nothing else and the head moves on every
+# publish. See `case_studies.research.population.SUPERSEDES_LIVE`.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "fx_pairs:fwd_ret_1d:equal-weight-candidates": "77b9631c7f13",
-    "fx_pairs:fwd_ret_5d:equal-weight-candidates": "1c6a3826af9f",
-    "fx_pairs:fwd_ret_21d:equal-weight-candidates": "db7b24f2a58b",
+    "fx_pairs:fwd_ret_1d:equal-weight-candidates": "live",
+    "fx_pairs:fwd_ret_5d:equal-weight-candidates": "live",
+    "fx_pairs:fwd_ret_21d:equal-weight-candidates": "live",
 }
 
 # %% [markdown]
@@ -545,7 +561,7 @@ if any(
 
 served = run_status.count("reused")
 print(
-    f"Allocation backtests: {len(allocation_results) - served} computed, {served} served from the registry, "
+    f"Allocation backtests: {reuse_disclosure(len(allocation_results) - served, served)}, "
     f"{len(allocation_results)} in the population"
 )
 

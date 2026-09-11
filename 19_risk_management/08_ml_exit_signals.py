@@ -30,7 +30,8 @@
 # - Recognize when an architectural change does not pay off on AUC but still matters operationally.
 #
 # ## Book reference
-# §19.7 Adaptive Risk Controls, Figure 19.5 (signal-strength-conditioned barrier outcomes).
+# §19.7 Adaptive risk controls without leakage, Figure 19.5
+# (signal-strength-conditioned barrier outcomes).
 #
 # ## Prerequisites
 # Complete [`02_exit_strategies`](02_exit_strategies.ipynb) first for the rule-based exit

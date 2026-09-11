@@ -42,7 +42,7 @@
 # - Read the estimand and its temporal controls off the resolved specification
 # - Compare the adjusted estimate with naive OLS and a block-permutation null
 #
-# **Book Reference**: Chapter 15, Section 15.6 (Cross-Dataset Causal Evidence)
+# **Book Reference**: Chapter 15, Section 15.7 (Case study causal evidence)
 #
 # **Prerequisites**: `03_financial_features.py`, `04_model_based_features.py`
 

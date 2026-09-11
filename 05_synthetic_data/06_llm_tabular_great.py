@@ -331,19 +331,41 @@ print(f"Generated {len(synthetic_df)} samples")
 print("\nSample synthetic rows:")
 print(synthetic_df.head())
 
-# Check for parsing errors (NaN values)
+# Check for parsing errors. A value the model wrote as prose is not null - it is a
+# string the row parser left in place - so counting nulls misses the failure this cell
+# is named for. Count how many values in each numeric column convert to a number, and
+# which schema columns the sampler did not return at all. Every section below reads
+# synthetic_df, so both counts are taken once here.
+numerical_cols = ["ret_1d", "ret_5d", "ret_20d", "volatility", "volume_ratio", "fwd_ret_5d"]
+absent_cols = [c for c in numerical_cols if c not in synthetic_df.columns]
+parsed_counts = {
+    c: int(pd.to_numeric(synthetic_df[c], errors="coerce").notna().sum())
+    for c in numerical_cols
+    if c in synthetic_df.columns
+}
+
 nan_counts = synthetic_df.isna().sum()
 if nan_counts.sum() > 0:
-    print(f"\nParsing issues (NaN counts):\n{nan_counts[nan_counts > 0]}")
+    print(f"\nNull values after parsing:\n{nan_counts[nan_counts > 0]}")
+if absent_cols:
+    print(f"\nSchema columns the sampler did not return: {absent_cols}")
+if parsed_counts:
+    print(f"\nParseable numeric values per column, of {len(synthetic_df)} generated rows:")
+    for col, count in parsed_counts.items():
+        print(f"  {col:<14} {count}")
 
 # %% [markdown]
 # **Observation**: The generated rows should contain plausible feature values -- returns
 # near zero with occasional larger moves, volatility in realistic ranges, and valid
-# categorical labels. NaN counts above zero indicate parsing failures where the LLM
-# produced text that could not be mapped back to the original schema. This is a known
-# limitation of autoregressive generation: the model can "hallucinate" tokens that
-# break column parsing, especially with short fine-tuning. Increasing epochs and using
-# larger base models (GPT-2 medium/large) reduces parsing errors significantly.
+# categorical labels. Read the per-column parse counts above as the measure of that: a
+# count below the number of generated rows means the model wrote something that does not
+# convert to a number in that column. Counting nulls alone understates it, because a cell
+# holding the words "not the case" is a string the row parser left in place, not a null.
+# This is a known limitation of autoregressive generation: the model can "hallucinate"
+# tokens that break column parsing, especially with short fine-tuning. Increasing epochs
+# and using larger base models (GPT-2 medium/large) reduces parsing errors significantly,
+# and a count of zero everywhere is what leaves the comparisons below with nothing to
+# compare.
 
 # %% [markdown]
 # ## 4. Fidelity: Visual Comparison with PCA and t-SNE
@@ -414,7 +436,24 @@ for col in numerical_cols:
                     "synth_std": synth_vals.std(),
                 }
             )
-numerical_comparison = pd.DataFrame(numerical_rows).set_index("feature").round(3)
+if numerical_rows:
+    numerical_comparison = pd.DataFrame(numerical_rows).set_index("feature").round(3)
+else:
+    # An empty list is not a missing column. It means no numeric column survived
+    # parsing, which is a foreseeable outcome of sampling from a short fine-tune and
+    # is what the counts printed after generation describe. Setting "feature" as the
+    # index of an empty frame raises a KeyError naming the column the cell was about
+    # to write, which says nothing about the condition that produced it.
+    print(
+        f"No numerical comparison: no parseable value in any of {numerical_cols} "
+        f"across the {len(synthetic_df)} generated rows."
+    )
+    if absent_cols:
+        print(f"  Absent from the generated frame entirely: {absent_cols}")
+    print("  Raise EPOCHS or N_GENERATE - a short fine-tune emits rows the parser cannot map back.")
+    numerical_comparison = pd.DataFrame(
+        columns=["real_mean", "synth_mean", "real_std", "synth_std"]
+    ).rename_axis("feature")
 numerical_comparison
 
 # %%
@@ -433,6 +472,12 @@ for col in categorical_cols:
                 }
             )
 categorical_comparison = pd.DataFrame(categorical_rows).round(1)
+if categorical_comparison.empty:
+    # This one renders as a blank table rather than raising, and says nothing either way.
+    print(
+        f"No categorical comparison: none of {categorical_cols} is present in the "
+        f"{len(synthetic_df)} generated rows."
+    )
 categorical_comparison
 
 # %% [markdown]
@@ -547,9 +592,12 @@ n_train = int(len(X_real) * TRAIN_FRACTION)
 X_train_real, X_test = X_real[:n_train], X_real[n_train:]
 y_train_real, y_test = y_real[:n_train], y_real[n_train:]
 
-# Synthetic data - need to handle potential parsing issues
-synth_features = synthetic_df[feature_cols].apply(pd.to_numeric, errors="coerce")
-synth_target = pd.to_numeric(synthetic_df[target_col], errors="coerce")
+# Synthetic data - need to handle potential parsing issues. reindex rather than []: a
+# column the sampler did not return then arrives as all-null and reaches the guarded
+# branch below, instead of raising a missing-column error at this line.
+synth_frame = synthetic_df.reindex(columns=[*feature_cols, target_col])
+synth_features = synth_frame[feature_cols].apply(pd.to_numeric, errors="coerce")
+synth_target = pd.to_numeric(synth_frame[target_col], errors="coerce")
 
 # Drop rows with NaN and convert target to binary
 valid_mask = ~(synth_features.isna().any(axis=1) | synth_target.isna())

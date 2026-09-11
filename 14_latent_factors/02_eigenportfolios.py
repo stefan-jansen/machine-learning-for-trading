@@ -49,7 +49,7 @@
 # ## Cross-References
 # - **Upstream**: [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb) (sector ETF PCA, bootstrap stability)
 # - **Downstream**: Chapter 18 (factor-based portfolio construction)
-# - **Related**: Section 9.4 (HMM regimes for factor timing)
+# - **Related**: Section 9.5 (Regime features)
 #
 # ## Data Source
 # US Equities (NASDAQ Data Link), with sector ETF returns used only for descriptive labels

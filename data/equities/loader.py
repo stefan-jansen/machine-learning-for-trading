@@ -1116,6 +1116,7 @@ def load_nasdaq_itch(
     message_types: list[str] | None = None,
     symbols: list[str] | None = None,
     get_base_path: bool = False,
+    must_exist: bool = True,
 ) -> pl.DataFrame | Path:
     """Load parsed NASDAQ ITCH message data.
 
@@ -1140,6 +1141,10 @@ def load_nasdaq_itch(
         symbols: Optional list of stock symbols to filter (e.g., ["AAPL", "MSFT"])
         get_base_path: If True, return the resolved base path instead of loading data.
             Useful for notebooks that need direct access to message type directories.
+        must_exist: Whether an absent messages directory is an error. True is right for
+            every reader: the directory is the data, so its absence is the download
+            instruction. The parser notebook of Chapter 3 is the one caller that writes
+            the directory, and it passes False to be told where to write.
 
     Returns:
         If get_base_path=False (default): DataFrame with message-type-specific columns.
@@ -1160,7 +1165,15 @@ def load_nasdaq_itch(
     base_path = (
         ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "nasdaq_itch" / "messages"
     )
-    if not base_path.exists():
+    if not must_exist and not get_base_path:
+        raise ValueError("must_exist=False only makes sense with get_base_path=True")
+    # An empty directory counts as absent. A parse that stops before writing anything can
+    # leave one behind, and a caller asking only for the path would then be handed it
+    # instead of the download instruction, to fail later on empty frames.
+    has_messages = base_path.is_dir() and any(
+        d.is_dir() and len(d.name) == 1 and d.name.isupper() for d in base_path.iterdir()
+    )
+    if must_exist and not has_messages:
         raise DataNotFoundError(
             dataset_name="NASDAQ ITCH Parsed Messages",
             path=base_path,

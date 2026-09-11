@@ -59,7 +59,7 @@ from utils.style import COLORS, add_message_title, apply_ml4t_style
 
 apply_ml4t_style()
 
-from case_studies.research import open_study
+from case_studies.research import open_study, reuse_disclosure
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
     build_backtest_spec,
@@ -428,9 +428,7 @@ for pred_row in pred_index.iter_rows(named=True):
             )
 
 elapsed = time.time() - t0
-print(
-    f"\nSweep complete: {len(results)} backtests in {elapsed:.0f}s ({failed} failed, {skipped} skipped)"
-)
+print(f"\nSweep complete in {elapsed:.0f}s: {reuse_disclosure(len(results), skipped, failed)}")
 for reason, count in failures.most_common():
     print(f"  {count:>5} x {reason[:150]}")
 

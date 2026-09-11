@@ -36,7 +36,7 @@
 # - Inspect coefficient sign consistency, Lasso sparsity, and the overlap
 #   of selected features across case studies
 #
-# **Book reference**: Section 11.6 - Linear Models Across Nine Case Studies.
+# **Book reference**: Section 11.6 - Case study insights.
 #
 # **Prerequisites**: each case study's `06_linear.py` pipeline has populated
 # `run_log/registry.db` for the linear family. Teaching notebooks NB01-NB06

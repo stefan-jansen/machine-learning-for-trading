@@ -28,7 +28,7 @@
 # - Build cross-dataset comparison tables
 # - Export summary DataFrames for downstream notebooks (02–06)
 #
-# **Book Reference**: Chapter 20, Section 20.1 (The Nine Case Studies)
+# **Book Reference**: Chapter 20, Section 20.1 (First-pass results across nine case studies)
 #
 # **Prerequisites**: Case studies must have run Ch16–19 backtests.
 
@@ -1095,8 +1095,9 @@ print(f"\npaired={len(paired_rows)}/{len(explorers)}, skipped={len(paired_skips)
 #
 # 1. selected signal (overall) ↔ equal-weight (overall) — populated above
 # 2. selected signal (holdout) ↔ equal-weight (holdout window)
-# 3. holdout carrier ↔ validation carrier (same lineage decay; min-length
-#    truncation since the windows are disjoint)
+# 3. the selected configuration on holdout ↔ the same configuration on
+#    validation (same lineage decay; min-length truncation since the
+#    windows are disjoint)
 # 4-6. one pair per consecutive stage transition the prediction actually has,
 #    in ``STAGE_SEQUENCE`` order: allocation ↔ signal, risk-overlay ↔
 #    allocation, cost-sensitivity ↔ risk-overlay. A case study that did not

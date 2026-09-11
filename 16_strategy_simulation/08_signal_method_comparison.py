@@ -58,15 +58,12 @@
 """Compare fixed, rolling-percentile, and cross-sectional signal conversion."""
 
 import sqlite3
-import warnings
 from pathlib import Path
 
 import plotly.graph_objects as go
 import polars as pl
 import yaml
 from plotly.subplots import make_subplots
-
-warnings.filterwarnings("ignore")
 
 # %%
 from case_studies.utils.signals import (
@@ -75,7 +72,7 @@ from case_studies.utils.signals import (
     rolling_percentile_signal,
 )
 from utils.paths import get_case_study_dir, get_output_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 CASE_STUDIES = {
     "crypto_perps_funding": "Crypto perpetuals",
@@ -458,12 +455,20 @@ fig.add_trace(
 )
 
 fig.update_layout(
-    title="A zero cutoff produces model-specific activation rates",
+    title="Signal rate under a zero cutoff, by prediction set",
     xaxis_title="Registered prediction set",
     yaxis_title="Signal rate (%)",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Bar chart of signal rate, one bar per registered prediction set, for a fixed cutoff "
+        "at zero. Signal rate is the share of observations the rule would act on. Drawn as a "
+        "baseline for the rest of the notebook: this is what a fixed cutoff produces before "
+        "any percentile or lookback rule is applied."
+    ),
+)
 
 # %% [markdown]
 # ## 6. Trailing rules across the grid
@@ -499,13 +504,23 @@ for case_study in CASE_STUDIES:
         )
     )
 
+
 fig.update_layout(
-    title="Crypto rules change state more often than their activation rate implies",
+    title="State-transition rate against signal rate, one point per rule",
     xaxis_title="Share of observations with a signal (%)",
     yaxis_title="Share of observations that change state (%)",
     height=450,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Scatter plot with signal rate on the horizontal axis and the share of observations "
+        "that change state on the vertical, one point per rule in the grid and one colour per "
+        "prediction set. Both axes are shares of the same observation count, so a point's "
+        "position says how often a rule fires against how often it switches. Drawn as a "
+        "scatter because the grid sweeps two settings at once and neither is the axis."
+    ),
+)
 
 # %% [markdown]
 # ## 7. The three methods at one cutoff
@@ -582,7 +597,7 @@ for case_study in CASE_STUDIES:
         col=2,
     )
 fig.update_layout(
-    title="Relative rules sharply reduce activation versus a zero cutoff",
+    title="Signal rate and state-transition rate by signal method",
     barmode="group",
     height=430,
     margin=dict(t=100, r=140),
@@ -592,7 +607,18 @@ fig.update_xaxes(title_text="Signal method", row=1, col=1)
 fig.update_xaxes(title_text="Signal method", row=1, col=2)
 fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Two bar panels comparing the three signal methods at one configured operating point, "
+        "one colour per prediction set, signal rate on the left and state-transition rate on "
+        "the right. The operating point is the fixed zero cutoff for the threshold method "
+        f"and percentile {OPERATING_PERCENTILE} for the two percentile methods, with the "
+        f"rolling one at a {OPERATING_WINDOW}-observation window - a declared choice, not a "
+        "search for equal activation. The right panel counts how often a rule changes state "
+        "rather than how much a portfolio would trade."
+    ),
+)
 
 # %% [markdown]
 # ## 8. What the lookback length buys
@@ -648,7 +674,7 @@ for case_study in CASE_STUDIES:
         col=2,
     )
 fig.update_layout(
-    title="Longer lookbacks reduce state-transition frequency",
+    title="Signal rate and state-transition rate by lookback length",
     height=400,
     margin=dict(t=100, r=140),
     legend=dict(x=1.02, y=1.0, xanchor="left", yanchor="top"),
@@ -657,7 +683,34 @@ fig.update_xaxes(title_text="Lookback (observations)", row=1, col=1)
 fig.update_xaxes(title_text="Lookback (observations)", row=1, col=2)
 fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
-fig.show()
+# Read off the plotted frames rather than written from one run: ROLLING_WINDOWS is a papermill
+# parameter, so the x-axis a test run plots is not the one the production render shows.
+_ends = {
+    CASE_STUDIES[cs]: (
+        lookback_plot_data[cs]["signal_rate"].to_list(),
+        lookback_plot_data[cs]["transition_rate"].to_list(),
+    )
+    for cs in CASE_STUDIES
+}
+# `if sig` rather than assuming a row: the grid is a parameter and a prediction set short
+# enough to support none of its lookbacks contributes no line to plot and no sentence here.
+_sentences = " ".join(
+    f"{name}: signal rate {sig[0] * 100:.1f} to {sig[-1] * 100:.1f} percent across the grid, "
+    f"state-transition rate {tr[0] * 100:.1f} to {tr[-1] * 100:.1f} percent."
+    for name, (sig, tr) in _ends.items()
+    if sig and tr
+)
+show_plotly_with_alt(
+    fig,
+    (
+        "Two line panels against lookback length in observations, one line per prediction "
+        "set, signal rate on the left and state-transition rate on the right. Only the "
+        "trailing-percentile method is plotted, with its percentile pinned at "
+        f"{OPERATING_PERCENTILE} so the sweep varies the window alone. The lookback is the "
+        "window that percentile is taken over, so this sweeps how much history the rule "
+        "re-centres on."
+    ),
+)
 
 # %% [markdown]
 # ## 9. What the cutoff buys
@@ -703,7 +756,7 @@ for case_study in CASE_STUDIES:
     )
 
 fig.update_layout(
-    title="Higher percentile cutoffs reduce signals and state changes",
+    title="Signal rate and state-transition rate by percentile cutoff",
     height=400,
     margin=dict(t=100, r=140),
     legend=dict(x=1.02, y=1.0, xanchor="left", yanchor="top"),
@@ -712,7 +765,35 @@ fig.update_xaxes(title_text="Percentile", row=1, col=1)
 fig.update_xaxes(title_text="Percentile", row=1, col=2)
 fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
-fig.show()
+_pct_ends = {}
+for case_study in CASE_STUDIES:
+    _row = comparison_df.filter(
+        (pl.col("case_study") == case_study)
+        & (pl.col("method") == "rolling_percentile")
+        & (pl.col("window") == min(ROLLING_WINDOWS))
+    ).sort("percentile")
+    _pct_ends[CASE_STUDIES[case_study]] = (
+        _row["signal_rate"].to_list(),
+        _row["transition_rate"].to_list(),
+    )
+_pct_sentences = " ".join(
+    f"{name}: signal rate {sig[0] * 100:.1f} down to {sig[-1] * 100:.1f} percent, "
+    f"state-transition rate {tr[0] * 100:.1f} down to {tr[-1] * 100:.1f} percent."
+    for name, (sig, tr) in _pct_ends.items()
+    if sig and tr
+)
+show_plotly_with_alt(
+    fig,
+    (
+        f"Two line panels against the percentile cutoff, swept from {min(PERCENTILES)} to "
+        f"{max(PERCENTILES)}, one line per prediction set, signal rate on the left and "
+        "state-transition rate on the right. Only the trailing-percentile method is plotted, "
+        f"with its window pinned at the shortest in the grid, {min(ROLLING_WINDOWS)} "
+        "observations, so the sweep varies the cutoff alone. The cutoff is the percentile of "
+        "that trailing window a score must exceed to fire. Drawn beside the lookback sweep "
+        "so the rule's two settings can be read the same way."
+    ),
+)
 
 # %% [markdown]
 # ## 10. The grid, summarized
