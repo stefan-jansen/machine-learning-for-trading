@@ -16,7 +16,6 @@ from tests.pm_helpers import OVERRIDES_PATH
 from tests.skip_blockers import (
     DECIDABLE_KINDS,
     UNDECIDABLE_KINDS,
-    UndecidableHere,
     blocker_unmet_reason,
     declared_kind,
     per_commit_tier,
@@ -37,6 +36,20 @@ def _overrides() -> dict:
 
 def _skips() -> dict[str, dict]:
     return skip_declarations(_overrides())
+
+
+def _decidable_skips() -> dict[str, dict]:
+    """The rows whose condition this process can actually evaluate.
+
+    Parametrising the expiry check over every row instead would report the two undecidable
+    kinds as skips, and `test-unit-data` treats a skip as a failure precisely because a job
+    that runs nothing passes. The undecidable rows are inspected by the two tests below.
+    """
+    return {
+        key: row
+        for key, row in _skips().items()
+        if declared_kind(row["skip_blocker"]) in DECIDABLE_KINDS
+    }
 
 
 def test_every_skip_declares_a_blocker():
@@ -96,21 +109,21 @@ def test_undecidable_blockers_stay_a_minority():
     )
 
 
-@pytest.mark.parametrize("key", sorted(_skips()))
+@pytest.mark.parametrize("key", sorted(_decidable_skips()))
 def test_declaration_has_not_outlived_its_reason(key, populated_data_dir, seeded_output_dir):
     """The condition the skip rests on still holds.
 
-    When the fixture, the image or the registry grows what the reason says is missing, this
-    fails, which is the signal to delete the skip or rewrite the reason. The notebook's own
-    test then runs with no other edit.
+    When the fixture or the registry grows what the reason says is missing, this fails, which
+    is the signal to delete the skip or rewrite the reason. The notebook's own test then runs
+    with no other edit.
+
+    ``UndecidableHere`` is deliberately not caught. ``populated_data_dir`` has already skipped
+    the whole file when there is no fixture, so reaching it means the fixture is present and
+    the seeding produced no registry - a silent failure of the thing this check measures
+    against, which should be loud rather than another skip.
     """
-    declaration = _skips()[key]["skip_blocker"]
-    if declared_kind(declaration) in UNDECIDABLE_KINDS:
-        pytest.skip(f"{declared_kind(declaration)} cannot be decided from inside the run")
-    try:
-        reason = blocker_unmet_reason(declaration)
-    except UndecidableHere as absent:
-        pytest.skip(f"nothing to measure against here: {absent}")
+    declaration = _decidable_skips()[key]["skip_blocker"]
+    reason = blocker_unmet_reason(declaration)
     assert reason is not None, (
         f"{key}: the condition this skip rests on no longer holds. Un-skip the notebook and "
         "run it: either the skip goes, or skip_reason and skip_blocker are rewritten to what "
@@ -159,11 +172,7 @@ def test_fixture_path_evaluator_reports_both_outcomes(
 def test_registry_evaluators_report_both_outcomes(
     declaration, still_blocked, populated_data_dir, seeded_output_dir
 ):
-    try:
-        reason = blocker_unmet_reason(declaration)
-    except UndecidableHere as absent:
-        pytest.skip(f"nothing to measure against here: {absent}")
-    assert (reason is not None) is still_blocked
+    assert (blocker_unmet_reason(declaration) is not None) is still_blocked
 
 
 def test_no_canonical_selection_reports_an_expiry_when_the_resolver_returns(

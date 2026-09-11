@@ -1027,7 +1027,13 @@ jobs:
           # whether that file reads a redirect or the source tree. Both orders were
           # measured before this change landed and both are green: the roster tests
           # read a SEEDED redirect, which is the case the unset above never covered.
+          # tests/test_skip_blockers.py belongs here and in no other job. Its expiry checks
+          # measure a declared skip condition against the fixture - files under
+          # ML4T_DATA_PATH and the registries seeded_output_dir builds - so in test-unit,
+          # which checks out no test data, every one of them skips and the guard asserts
+          # nothing. That is the same "runs in no job at all" state this job was created for.
           .venv/bin/python -m pytest \
+            tests/test_skip_blockers.py \
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \
             tests/test_reduced_universe_is_shared.py \
