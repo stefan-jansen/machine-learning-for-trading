@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import json
 import logging
-import warnings
 
 import numpy as np
 import plotly.graph_objects as go
@@ -68,12 +67,13 @@ from scipy import stats
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS  # importing utils.style activates the ml4t Plotly template
+from utils.style import (  # importing utils.style activates the ml4t Plotly template
+    COLORS,
+    show_plotly_with_alt,
+)
 
-warnings.filterwarnings("ignore")
-# Quiet ml4t library INFO logging. Child loggers (e.g. ml4t.diagnostic.evaluation.
-# autocorrelation) set their own level, so raising the parent alone does not silence
-# them - set every already-created ml4t logger explicitly.
+# Quiet ml4t library INFO logging. Child loggers set their own level, so raising the
+# parent alone does not silence them - set every already-created ml4t logger explicitly.
 for _lg in list(logging.root.manager.loggerDict):
     if _lg.startswith("ml4t"):
         logging.getLogger(_lg).setLevel(logging.WARNING)
@@ -92,7 +92,7 @@ set_global_seeds(SEED)
 
 
 # %% [markdown]
-# ## 1. The Autocorrelation Problem
+# ## The Autocorrelation Problem
 #
 # IC time series exhibit **autocorrelation** due to:
 #
@@ -169,10 +169,8 @@ acf_values = compute_acf(ic_series, nlags=n_acf_lags)
 n = len(ic_series)
 sig_bound = 1.96 / np.sqrt(n)
 
-# Visualize ACF
 fig = go.Figure()
 
-# Count significant lags
 n_significant_lags = sum(abs(acf_values[1:]) > sig_bound)
 
 fig.add_trace(
@@ -193,18 +191,34 @@ fig.add_hline(y=-sig_bound, line_dash="dash", line_color=COLORS["negative"])
 fig.add_hline(y=0, line_color=COLORS["neutral"])
 
 fig.update_layout(
-    title="Overlapping labels leave most IC lags outside the white-noise band",
+    title=f"Autocorrelation of the daily IC series, lags 1 to {LABEL_HORIZON - 1}",
     xaxis_title="Lag (days)",
     yaxis_title="Autocorrelation",
     template="ml4t",
     height=350,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "A bar chart of the autocorrelation of the daily IC series against lag, from one "
+        "day out to one day short of the label horizon, with dashed red lines marking the "
+        "white-noise band either side of zero. The bars start just above 0.8 at lag one "
+        "and fall away in a smooth, almost linear decline, reaching the band around lag "
+        "sixteen. Every bar up to that point is amber, marking it outside the band; only "
+        "the last few lags are inside it and drawn in navy."
+    ),
+)
 print(f"\nSignificant autocorrelation lags: {n_significant_lags}/{n_acf_lags}")
-print("\nThis means naive t-statistics will overstate significance!")
 
 # %% [markdown]
-# ### 1.1 Library Autocorrelation Analysis
+# The decline is smooth and reaches the white-noise band at roughly the label horizon,
+# which is what an overlap-driven autocorrelation looks like: two IC values computed $k$
+# days apart share $h - k$ days of return, so the correlation falls away as the shared
+# window shrinks and vanishes once it is gone. A naive t-statistic treats these values as
+# independent draws and will therefore overstate significance.
+
+# %% [markdown]
+# ### Library Autocorrelation Analysis
 #
 # The library version includes PACF and the **Ljung-Box portmanteau test**,
 # which tests the joint null that all autocorrelations up to lag $L$ are zero.
@@ -219,7 +233,7 @@ print(f"Is white noise:        {acf_analysis.is_white_noise}")
 print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
 
 # %% [markdown]
-# ## 2. HAC (Newey-West) Adjustment
+# ## HAC (Newey-West) Adjustment
 #
 # HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors account
 # for serial correlation in the IC series.
@@ -252,15 +266,14 @@ print(f"Suggested ARIMA order: {acf_analysis.suggested_arima_order}")
 # next section measures what it is worth.
 
 # %% [markdown]
-# ### 2.1 What the Bandwidth Is Worth
+# ### What the Bandwidth Is Worth
 #
 # Worth measuring rather than asserting, so the cell below runs the estimator
-# both ways on the same IC series. The block bootstrap in Section 3 resamples
-# contiguous blocks of length $h$, so it already respects the overlap. If HAC is
-# given a bandwidth that does not, the two will not agree - and the gap is then a
-# property of the bandwidth, not of the estimator families, which is what the
-# side-by-side below is there to establish. Section 3 shows HAC and the bootstrap
-# agreeing once both are horizon-aware.
+# both ways on the same IC series. The block bootstrap below resamples contiguous blocks
+# of length $h$, so it already respects the overlap. If HAC is given a bandwidth that does
+# not, the two will not agree - and the gap is then a property of the bandwidth, not of the
+# estimator families, which is what the side-by-side is there to establish. The bootstrap
+# section shows the two agreeing once both are horizon-aware.
 
 # %%
 # Compute HAC-adjusted statistics
@@ -337,7 +350,7 @@ print(f"Effective sample size: {effective_n:.0f}")
 print(f"Efficiency loss: {(1 - effective_n / len(ic_series)) * 100:.0f}%")
 
 # %% [markdown]
-# ## 3. Block Bootstrap for Robust CI
+# ## Block Bootstrap for Robust CI
 #
 # When IC series has autocorrelation, **iid bootstrap is invalid**. We use
 # **block bootstrap** which preserves the dependence structure by resampling
@@ -430,7 +443,7 @@ ci_includes_zero = block_result["ci_lower"] <= 0 <= block_result["ci_upper"]
 print(f"\nBlock Bootstrap CI includes zero: {'Yes' if ci_includes_zero else 'No'}")
 
 # %% [markdown]
-# ### 3.1 Library vs Manual Bootstrap: When to Use Each
+# ### Library vs Manual Bootstrap: When to Use Each
 #
 # The `ml4t-diagnostic` library provides `stationary_bootstrap_ic()` for
 # **cross-sectional** bootstrap: given arrays of predictions and returns for a
@@ -438,8 +451,8 @@ print(f"\nBlock Bootstrap CI includes zero: {'Yes' if ci_includes_zero else 'No'
 # when you want a confidence interval for a single cross-section's IC.
 #
 # For **time-series** inference on the IC series itself - "is the mean IC over
-# many dates significantly different from zero?" - the correct tool is the
-# block bootstrap from Section 3 above, which preserves temporal dependence.
+# many dates significantly different from zero?" - the correct tool is the block bootstrap
+# used above, which preserves temporal dependence.
 #
 # ```python
 # # Cross-sectional bootstrap (library) - CI for one date's IC
@@ -531,7 +544,7 @@ for i, method in enumerate(methods):
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"], row=1, col=2)
 
 fig.update_layout(
-    title="HAC and block bootstrap agree: the mean IC's 95% CI straddles zero",
+    title="Mean IC: block-bootstrap distribution and the two interval estimates",
     height=400,
     template="ml4t",
     showlegend=False,
@@ -540,27 +553,55 @@ fig.update_xaxes(title_text="Mean IC", row=1, col=1)
 fig.update_yaxes(title_text="Frequency", row=1, col=1)
 fig.update_yaxes(title_text="Mean IC", row=1, col=2)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    alt=(
+        "Two panels. The left panel is a histogram of the block-bootstrap distribution of "
+        "the mean IC, a symmetric bell centred on zero and running out to roughly plus and "
+        "minus 0.045, with dashed red lines marking the 2.5th and 97.5th percentiles and a "
+        "dotted line at the null, which falls on the mode. "
+        "The right panel plots the two interval estimates side by side as a point with "
+        "error bars: the block bootstrap in navy and HAC in amber. Both point estimates "
+        "sit on the dotted zero line and both intervals span it, reaching roughly the "
+        "same distance above and below, so the two methods are hard to tell apart."
+    ),
+)
 
 # %% [markdown]
-# ## 4. Practical vs Statistical Significance
+# The two intervals are close enough to overlay, which is the result the bandwidth section
+# predicted: once HAC is given a lag truncation matched to the label horizon, it agrees
+# with a bootstrap that resamples blocks of that same length. They agree about the answer
+# as well - both intervals contain zero, so the mean IC is not distinguishable from no
+# skill at this sample size, whichever dependence-aware method is used.
+
+# %% [markdown]
+# ## Practical vs Statistical Significance
 #
-# Statistical significance of an IC time-series mean is a separate question
-# from whether the signal is economically tradeable. The table below summarises
-# typical detectability of a mean IC at the indicated magnitudes; net P&L
-# after costs is a separate calculation handled in `05_signal_evaluation`
-# (break-even cost analysis) and the case-study cost models (Ch16-18).
+# Statistical significance of an IC time-series mean is a separate question from whether
+# the signal is economically tradeable. The bands printed below summarise typical
+# detectability of a mean IC at a range of magnitudes on multi-year daily samples; net P&L
+# after costs is a separate calculation, handled by the break-even analysis in
+# `05_signal_evaluation` and by the case-study cost models in Chapters 16 to 18.
 #
-# | $\bar{\text{IC}}$ | Statistical detectability on multi-year daily samples |
-# |----|------------------------------------|
-# | 0.02 | At the boundary of HAC detectability; requires large $T$ |
-# | 0.03 | Typically detectable with HAC-adjusted inference |
-# | 0.05 | Comfortably above the HAC standard error in published equity-factor studies |
-# | 0.10 | Outside the published cross-sectional range; prior is leakage until ruled out |
-#
-# Whether any of these magnitudes survives transaction costs depends on
-# rebalancing frequency, turnover, and capacity - see the break-even
-# analysis in `05_signal_evaluation`.
+# Whether a magnitude clears transaction costs depends on rebalancing frequency, turnover
+# and capacity, and none of those appear in this table. A factor can sit in the top band
+# here and still lose money.
+
+# %% tags=["results"]
+IC_DETECTABILITY = (
+    (0.02, "at the boundary of HAC detectability; needs a large T"),
+    (0.03, "typically detectable with HAC-adjusted inference"),
+    (0.05, "comfortably above the HAC standard error in published equity-factor studies"),
+    (0.10, "at the top of the published cross-sectional range"),
+    (float("inf"), "outside that range; the prior is leakage until it is ruled out"),
+)
+
+print("Detectability of a mean IC on multi-year daily samples:")
+lower = 0.0
+for upper, description in IC_DETECTABILITY:
+    edge = "and above" if upper == float("inf") else f"to {upper:.2f}"
+    print(f"  {lower:.2f} {edge:<12} {description}")
+    lower = upper
 
 # %%
 # Practical significance analysis
@@ -591,7 +632,7 @@ print("  (This is a raw, pre-cost upper bound - net IR depends on turnover and c
 print("   the break-even cost analysis in `05_signal_evaluation` evaluates feasibility.)")
 
 # %% [markdown]
-# ## 5. Track Record Planning
+# ## Track Record Planning
 #
 # How many observations do we need to be confident in our IC estimate?
 #
@@ -676,16 +717,17 @@ display(track_record_df)
 #
 # The track record requirements are substantial because:
 #
-# 1. **IC is noisy**: Daily cross-sectional IC has high variance
-# 2. **Autocorrelation reduces effective sample**: overlapping forward returns
-#    inflate the standard error by the factor printed above
-# 3. **Small effects need large samples**: IC of 0.02 is hard to distinguish from 0
+# 1. **IC is noisy**: daily cross-sectional IC has high variance.
+# 2. **Autocorrelation reduces the effective sample**: overlapping forward returns inflate
+#    the standard error by the factor printed above.
+# 3. **Small effects need large samples**: an IC in the lowest detectability band printed
+#    earlier is hard to separate from zero at any sample a researcher is likely to have.
 #
-# **Implication**: Claims of "predictive" factors from 1-2 years of data should be
-# treated with skepticism, especially if IC is below 0.03.
+# **Implication**: a "predictive" factor claimed from one or two years of data deserves
+# skepticism, and the lower its IC sits in those bands the more of it.
 
 # %% [markdown]
-# ## 6. IC Inference Report
+# ## IC Inference Report
 #
 # Export a structured report for downstream use.
 
