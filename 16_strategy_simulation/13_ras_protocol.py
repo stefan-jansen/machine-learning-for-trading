@@ -75,7 +75,7 @@ from plotly.subplots import make_subplots
 from scipy import stats
 
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -161,11 +161,8 @@ def _format_dsr_result(
     return {
         "dsr": probability,
         "z_score": z_score,
-        # `sf` rather than `1 - cdf`: the DSR is the cdf and is wanted as such, but the
-        # p-value is its tail, and subtracting a probability near one from one keeps only the
-        # digits that survive the cancellation. Measured: at z = 8 the subtraction gives
-        # 6.66e-16 against a true 6.22e-16, and from z = 9 it returns exactly 0 where the
-        # tail is 1.13e-19. A p-value of 0 is the one value a reader cannot interpret.
+        # `sf` rather than `1 - cdf`: subtracting a probability near one from one keeps
+        # only the digits that survive the cancellation, and from z = 9 it returns exactly 0.
         "p_value": float(stats.norm.sf(z_score)),
         "expected_max_sharpe": expected_max_annual,
         "adjusted_sharpe": observed_sharpe - expected_max_annual,
@@ -324,12 +321,21 @@ fig.add_hline(
 )
 
 fig.update_layout(
-    title="Shared variation lowers candidate-class complexity",
+    title="Rademacher complexity by candidate correlation structure",
     yaxis_title="Rademacher Complexity (R̂)",
     height=400,
 )
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        f"Bar chart of the estimated Rademacher complexity for {len(strategies)} candidate-"
+        "class structures, one bar per structure, with a dashed red line marking Massart's "
+        "bound for a finite class of this size. The bound depends only on the candidate "
+        "count, so it is the same for every bar and is what each estimate is being read "
+        "against."
+    ),
+)
 
 # %% [markdown]
 # With candidate count, sample size, and column norms fixed, greater shared
@@ -340,7 +346,7 @@ fig.show()
 # %% [markdown]
 # ## 2. The charge applied to a candidate class
 #
-# The bound, from Paleologo's Procedure 8.2:
+# The bound, which is Paleologo's Rademacher Anti-Serum procedure:
 #
 # $$\theta_n \geq \hat{\theta}_n - 2\hat{R} - 3\sqrt{\frac{2\log(2/\delta)}{T}} - \sqrt{\frac{2\log(2N/\delta)}{T}}$$
 #
@@ -407,10 +413,7 @@ print(f"  Charged:        {observed_sharpe[sweep_best] - adjusted_sharpe[sweep_b
 fig = make_subplots(
     rows=1,
     cols=2,
-    subplot_titles=[
-        "Every candidate below the dashed line",
-        "The whole distribution shifts left",
-    ],
+    subplot_titles=["Lower bound against estimate", "Both distributions"],
 )
 
 fig.add_trace(
@@ -470,7 +473,7 @@ fig.add_vline(x=0, line_dash="dash", line_color=COLORS["negative"], row=1, col=2
 
 fig.update_layout(
     title=(
-        "What the search costs every candidate, not just the largest"
+        "RAS lower bound and observed Sharpe across the candidate set"
         f"<br><sup>{SWEEP_CANDIDATES} correlated candidates over {SWEEP_PERIODS} days; "
         "annualized Sharpe ratios</sup>"
     ),
@@ -483,7 +486,18 @@ fig.update_yaxes(title_text="Lower bound on the Sharpe ratio", row=1, col=1)
 fig.update_xaxes(title_text="Annualized Sharpe ratio", row=1, col=2)
 fig.update_yaxes(title_text="Candidate count", row=1, col=2)
 
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        f"Two panels over a sweep of {SWEEP_CANDIDATES:,} correlated candidates. The left "
+        "panel scatters the RAS lower bound against the observed Sharpe, one point per "
+        "candidate, with a dashed diagonal marking no adjustment. The right panel overlays "
+        "two histograms on one Sharpe axis, the observed ratios and the adjusted lower "
+        "bounds, so the shift between them is the adjustment. Correlated rather than "
+        "independent candidates, because that is the case the Rademacher bound is meant to "
+        "handle."
+    ),
+)
 
 # %% [markdown]
 # The lower-bound distribution shifts left of the point estimates because RAS

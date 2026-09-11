@@ -65,9 +65,6 @@
 """Backtesting first principles with point-in-time signals and next-open execution."""
 
 import hashlib
-import warnings
-
-warnings.filterwarnings("ignore")
 
 import numpy as np
 import plotly.graph_objects as go
@@ -78,7 +75,7 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs, load_macro
 from utils import ML4T_DATA_PATH
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 START_DATE = "2010-01-01"
@@ -343,7 +340,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=f"The {TOP_N} highest scores are the funds the rule would hold",
+    title="Trailing risk-adjusted momentum by fund, last session of the sample",
     xaxis_title=f"{LOOKBACK_PERIOD}-session return per unit of annualized volatility",
     yaxis_title="ETF symbol",
     height=430,
@@ -351,7 +348,18 @@ fig.update_layout(
     showlegend=False,
 )
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Horizontal bar chart of one trailing momentum score per fund, drawn for the last "
+        "session of the sample so the ranking the monthly rule acts on is visible directly. "
+        f"The score is a fund's return over the trailing {LOOKBACK_PERIOD}-session window "
+        "divided by its annualized volatility over that same window, so the axis is return "
+        "per unit of risk rather than return. Funds are sorted with the highest score at the "
+        "top, the ones the rule would hold are drawn in navy and the rest in grey, and a "
+        "dashed vertical line marks zero."
+    ),
+)
 
 # %% [markdown]
 # ## 5. Generate target weights that were tradable when the period began
@@ -411,7 +419,9 @@ print(f"Next-open rebalances, including the opening purchase: {rebalance_at_open
 # colors as lines, and because what the reader is judging is a pattern of presence and absence
 # rather than a level. Dark bands on the AGG and TLT rows are the defensive months; a dark band on
 # three equity rows at once is a momentum rotation. The dashed line on the top panel is the
-# threshold, and every stretch below it should line up with bonds below.
+# threshold, and a stretch below it should be followed by bonds - followed, not matched,
+# because the regime is read at a month end and the weights it produces fill on the next
+# session.
 
 # %%
 fig = make_subplots(
@@ -442,14 +452,25 @@ fig.add_trace(
     col=1,
 )
 fig.update_layout(
-    title="The portfolio sits in bonds whenever the spread is under the threshold",
+    title="The 10Y-2Y spread and the target weights it produced",
     height=700,
     showlegend=False,
 )
 fig.update_yaxes(title_text="Spread (percentage points)", row=1, col=1)
 fig.update_yaxes(title_text="ETF symbol", row=2, col=1)
 fig.update_xaxes(title_text="Date", row=2, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Two stacked panels sharing a date axis. The upper panel is the 10Y-2Y Treasury "
+        "spread in percentage points, with a dashed horizontal line at the risk-off "
+        "threshold. The lower panel is a heatmap of target weight by fund and date, one row "
+        "per fund, dated to the session each weight fills on rather than the session that "
+        "produced it. Drawn so the two panels can be read against each other with that shift "
+        "already applied: the regime is read at a month end and the weights it produces are "
+        "executed at the next open."
+    ),
+)
 
 # %% [markdown]
 # ## 7. The fundamental return equation
@@ -668,7 +689,17 @@ fig.update_layout(
     height=500,
 )
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Line chart of cumulative net return for the ETF momentum portfolio in solid navy "
+        "against the 60/40 benchmark in dashed grey. Both are measured against the same "
+        "starting capital and carry the same per-trade costs, and both begin at the first "
+        "session's close rather than at zero, so each point is growth on the capital "
+        "committed at the start. Drawn to put the rule's whole path beside the passive "
+        "alternative it has to beat."
+    ),
+)
 
 # %% [markdown]
 # Drawdown is measured from the running peak, with zero at the top and losses below.
@@ -710,7 +741,16 @@ fig.update_layout(
     height=420,
 )
 fig.update_yaxes(range=[min(strategy_dd.min(), benchmark_dd.min()) * 110, 0])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Underwater chart of each portfolio's drawdown from its own running peak, zero at the "
+        "top and losses below, the momentum rule as a filled navy area and the 60/40 "
+        "benchmark as a dashed grey line. Each series is measured against its own peak rather "
+        "than a shared one, so the question the panel answers is how far below its own "
+        "high-water mark each portfolio was on a given date, independently of the other."
+    ),
+)
 
 # %% [markdown]
 # ## 12. Compare performance by contemporaneous regime
@@ -772,7 +812,17 @@ fig.update_yaxes(title_text="Mean daily return (bps)", row=1, col=1)
 fig.update_yaxes(title_text="Annualized volatility (%)", row=1, col=2)
 fig.update_xaxes(title_text="Yield-curve regime", row=1, col=1)
 fig.update_xaxes(title_text="Yield-curve regime", row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Two bar panels splitting the momentum rule's realized daily returns by the state of "
+        "the yield curve on the same session. The left panel is mean daily return in basis "
+        "points, the right annualized volatility in percent, and the horizontal axis of both "
+        "is the curve regime. Drawn as two panels because a regime split asks two separate "
+        "questions: whether the state changes what the rule earns, and whether it changes how "
+        "much the rule moves."
+    ),
+)
 
 # %% [markdown]
 # ## 13. Reconcile with `ml4t-diagnostic`

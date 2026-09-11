@@ -59,7 +59,7 @@ CASE_NAMES = {
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
     "fx_pairs": "FX allocation (USD-quoted pairs)",
-    "us_equities_panel": "US equity panel (3,175 assets)",
+    "us_equities_panel": "US equity panel",
 }
 
 # %% [markdown]
