@@ -219,9 +219,9 @@ def alert_count_condition(
 
 # %% [markdown]
 # The domain classifier declares the LightGBM backend it wants rather than taking whatever the
-# install happens to provide. A LightGBM built without the CUDA tree learner accepts
-# `device_type="cuda"` and trains on the CPU anyway, so every fit below is checked against
-# `LGB_DEVICE` afterwards and raises if the booster came back with a different backend.
+# install happens to provide. A build without the requested tree learner raises at `fit()`, so
+# the checks below are not catching a silent fallback: each reads back the device its booster
+# kept, and a requested value that never reached it would otherwise leave no trace.
 
 # %%
 print(

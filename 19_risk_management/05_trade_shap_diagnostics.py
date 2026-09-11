@@ -213,8 +213,10 @@ y_test = test_df["fwd_return"].to_numpy()
 # bitwise reproducible: the same predictions, the same trades, and the same SHAP vectors on
 # every run. That is a property of the backend rather than of the seeds - a CUDA fit with
 # these same seeds would not give it, because its histogram reductions vary with how the
-# card schedules them. The device is asserted after the fit because a LightGBM built without
-# the requested backend falls back to another one without saying so.
+# card schedules them. Asking for a backend this LightGBM was not built with raises at `fit()`
+# rather than quietly substituting another, so the assertion below is not catching a fallback:
+# it reads back the device the booster kept, and a requested value that never reached it would
+# otherwise leave no trace.
 
 # %% tags=["results"]
 model = lgb.LGBMRegressor(

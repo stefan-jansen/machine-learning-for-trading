@@ -76,8 +76,9 @@ set_global_seeds(SEED)
 OUTPUT_DIR = get_output_dir(19, "ml_exit_signals")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 print(
-    f"LightGBM device_type requested: {LGB_DEVICE}. A build without the CUDA tree learner "
-    "falls back to CPU without saying so, so the fitted booster is checked against this below."
+    f"LightGBM device_type requested: {LGB_DEVICE}. A build without that tree learner raises "
+    "at fit(), and the booster is checked against this value below in case the parameter "
+    "never reached it."
 )
 
 # %% [markdown]
