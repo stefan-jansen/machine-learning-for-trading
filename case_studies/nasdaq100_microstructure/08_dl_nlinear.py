@@ -171,13 +171,18 @@ if (narrows or device != PUBLISHED_DEVICE) and not POPULATION_NAME:
 # - **`validation_start` and `validation_end` bracket the development sample.** The held-out tail
 #   must not appear; it is scored once, at the end of the case study.
 #
-# **How many windows are drawn is declared, not left to the tier.** Every row of this panel
-# starts a window, and the panel is minute bars, so an uncapped fold would build about four
-# million near-identical overlapping sequences - consecutive windows share 59 of their 60
-# observations. `modeling.dl.max_train_sequences` in `config/setup.yaml` declares the cap, which
-# makes it part of the training identity rather than a property of how the run was invoked. A
-# preview may lower it and cannot raise it above the declaration, because a preview that fits on
-# more windows than the canonical run is not rehearsing it.
+# **How far apart the training windows sit is declared, not left to the tier.** Every row of this
+# panel could start a window, and the panel is minute bars, so an unspaced fold would build about
+# four million near-identical overlapping sequences - neighbouring windows would share 59 of their
+# 60 observations. `modeling.dl.train_sequence_stride_horizons` in `config/setup.yaml` declares
+# the spacing instead: one window per label horizon, so consecutive windows of a symbol carry
+# labels that do not overlap - the window ending at t is scored on the return from t to t+H and
+# the next one starts at t+H. It is declared in horizons rather than in windows because the
+# horizon differs by label: `fwd_ret_5m` strides 5 observations, `fwd_ret_15m` 15 and
+# `fwd_ret_60m` 60, each spacing its own labels exactly, where a single window count could only
+# have been right for one of them. The spacing travels in the training identity; **how many
+# windows it yields is derived at run time** from the eligible rows of each fold rather than
+# declared, and is printed below.
 
 # %%
 requests = model_requests(
@@ -314,15 +319,16 @@ show_plotly_with_alt(
 #    curve below is an information coefficient, and selection is validation backtest Sharpe in
 #    [`14_backtest`](14_backtest.ipynb), over the population published here.
 #
-# 2. **How many windows are drawn is part of the model.** On a minute panel the cap decides what
-#    was fitted, so it is declared in `config/setup.yaml` and travels in the training identity
-#    rather than arriving with the invocation.
+# 2. **How far apart the training windows sit is part of the model.** On a minute panel the
+#    spacing decides what was fitted, so it is declared in `config/setup.yaml` as one window per
+#    label horizon and travels in the training identity rather than arriving with the invocation.
 #
 # 3. **A sequence family is measured on fewer rows than a tabular one.** A prediction needs a
 #    full window behind it, so the samples differ and the comparison has to say so.
 #
 # **Known limitations.** The window is fixed at sixty observations, so nothing earlier than the
-# trailing hour reaches the model whatever the architecture can represent. The declared sequence
-# cap is a compute budget rather than a quantity derived from the data - `config/setup.yaml`
-# says so - so the same declared count covers a different share of the panel whenever the
-# panel's size changes.
+# trailing hour reaches the model whatever the architecture can represent. The window spacing is a
+# modelling choice rather than a compute budget - one window per label horizon is what stops two
+# training examples carrying the same return twice - so the number of windows a fold yields
+# follows from how many eligible rows it holds, and a panel of a different size changes the count
+# without changing the declaration.
