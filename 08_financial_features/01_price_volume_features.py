@@ -364,16 +364,16 @@ fig.update_xaxes(title_text="Date", row=3, col=1)
 fig.update_layout(height=600, title="SPY close, raw MA distance, and MA distance in ATR units")
 show_plotly_with_alt(
     fig,
-    alt=(
+    (
         "Three stacked panels sharing a date axis across 2025. The top panel plots the SPY "
-        "close against its 21-day simple moving average: a dip in March and April, then a "
+        "close against a dashed simple moving average: a dip in March and April, then a "
         "climb to the end of the year. The middle panel fills the raw distance between the "
-        "two in dollars around a dashed zero line, reaching about minus 55 dollars at the "
-        "April low and plus 35 in May. The bottom panel fills the same distance divided by "
-        "ATR, in a teal that keeps the middle panel's sign and zero crossings on an axis "
-        "running about minus 4.8 to plus 3.2 rather than in dollars, but with the peaks at "
-        "different heights: its deepest trough is the April low as in the middle panel, "
-        "while its highest point is in September rather than May."
+        "two in dollars around a dashed zero line, at its deepest below zero at the April "
+        "low and at its highest in May. The bottom panel fills the same distance divided "
+        "by ATR, in a teal that keeps the middle panel's sign and crosses zero on the same "
+        "days but is scaled in ATR units rather than dollars, and whose peaks are at "
+        "different relative heights: its deepest trough is the April low as in the middle "
+        "panel, while its highest point is in September rather than May."
     ),
 )
 
@@ -657,7 +657,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    alt=(
+    (
         "Four small-multiple panels of annualized SPY volatility over the same two years, "
         "one per estimator, drawn on a single shared vertical range from zero. Each panel "
         "shows the same two events, a bump in mid-2024 and a tall spike in the spring of "
@@ -744,7 +744,7 @@ ax.patch.set_visible(False)
 
 show_with_alt(
     fig_mpl,
-    alt=(
+    (
         "A decade of annualized rolling volatility for SPY with four estimators overlaid "
         "in different line styles, the legend naming each with its efficiency relative to "
         "close-to-close. The four lines rise and fall on the same events and stay close "
@@ -1031,7 +1031,7 @@ fig.update_xaxes(title_text="Date", row=3, col=1)
 fig.update_layout(height=600, title="SPY close, relative volume, and the volume z-score")
 show_plotly_with_alt(
     fig,
-    alt=(
+    (
         "Three stacked panels sharing a date axis across 2024 and 2025. The top panel is "
         "the SPY close, rising over the span with a sharp dip in the spring of 2025. The "
         "middle panel fills relative volume as a multiple of its own average, oscillating "
