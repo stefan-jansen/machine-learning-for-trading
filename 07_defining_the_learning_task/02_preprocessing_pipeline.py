@@ -599,15 +599,17 @@ if us_equities is not None:
 # ### Step 3: Implausibly large one-day moves
 #
 # A raw return is bounded below by $-1$, so a threshold on $|r|$ set above 1 can only ever
-# fire on the upside. `01_data_quality_diagnostics` takes that apart on this same panel:
-# the rule catches most reverse splits and almost no forward ones, so the rows it removes
-# are not the corporate actions they are often taken for.
+# fire on the upside. `01_data_quality_diagnostics` works that through on this same panel:
+# the rule catches most reverse splits and essentially no forward ones, and forward splits
+# are the large majority.
 #
-# The step stays, because dropping implausibly large upward jumps is still worth doing
-# before anything fits a scaler. What changes is the claim attached to it. The cell prints
-# how many of the removed rows `split_ratio` actually records as a split day, and the
-# smallest return it removed - which cannot be negative for any threshold at or above 1,
-# and this one is well above it.
+# Read the two directions separately, because they do not agree here. Most of the rows this
+# step removes *are* split days - the cell prints how many, from `split_ratio` itself - so
+# the rule is reasonably precise about what it takes out. What it cannot do is find splits,
+# because the kind that divides the price can never clear the threshold. A filter you
+# cannot use as a detector is still a usable filter, and that is all this step is: it drops
+# implausibly large upward jumps before anything fits a scaler. The smallest return it
+# removes cannot be negative for any threshold at or above 1, and this one is well above.
 
 # %%
 MAX_ABS_DAILY_RETURN = 2.0
@@ -675,7 +677,6 @@ if us_equities is not None:
     axes[1].set_xlabel("Daily Return")
 
     fig.suptitle("Winsorization clips the 1st/99th tails and leaves the bulk unchanged")
-    fig.tight_layout()
     show_with_alt(
         fig,
         alt=(
@@ -1070,7 +1071,6 @@ axes[1].set_xlabel("Scaled Return")
 axes[1].legend()
 
 fig.suptitle("Full-data leakage shifts the scaled test distribution only slightly")
-fig.tight_layout()
 show_with_alt(
     fig,
     alt=(
