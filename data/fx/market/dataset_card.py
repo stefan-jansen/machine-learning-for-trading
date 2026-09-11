@@ -32,7 +32,6 @@
 # %%
 """FX Pairs - download, explore, and update workflow."""
 
-import json
 import os
 from pathlib import Path
 
@@ -269,38 +268,25 @@ fx_vol
 # They are stored alongside the data files.
 
 # %%
+from ml4t.data.storage.data_profile import load_profile
+
 from utils import ML4T_DATA_PATH
+from utils.paths import display_path
 
-# Check for existing profile
 profile_path = ML4T_DATA_PATH / "fx" / "market" / "4h_profile.json"
+profile = load_profile(profile_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== FX 4h Profile ===")
-    rows = profile.get("total_rows", profile.get("rows"))
-    cols_field = profile.get("columns")
-    n_cols = profile.get(
-        "total_columns",
-        len(cols_field) if isinstance(cols_field, list) else cols_field,
-    )
-    print(f"Rows: {rows:,}" if rows is not None else "Rows: unknown")
-    print(f"Columns: {n_cols}")
-    if isinstance(cols_field, list):
-        print("\nSchema:")
-        for c in cols_field:
-            print(f"  {c['name']}: {c['dtype']}")
-        ts = next((c for c in cols_field if c.get("name") == "timestamp"), None)
-        if ts:
-            print(f"\nDate range: {ts['min']}")
-            print(f"         to {ts['max']}")
-else:
-    print(f"No profile at {profile_path}")
+if profile is None:
+    print(f"No profile at {display_path(profile_path)}")
     print(
-        "Profiles are written next to the data by whatever builds the dataset - the\n"
-        "download script in this directory, or the ml4t-data loader it drives - through\n"
+        "Profiles are written next to the data by whatever builds the dataset, through\n"
         "ml4t.data.storage.data_profile. There is no separate profile-generating script,\n"
         "and nothing in this notebook writes one."
     )
+else:
+    print("=== FX 4h Profile ===")
+    print(f"Written by {profile.source}")
+    print(profile.summary())
 
 # %% [markdown]
 # ## 6. Loader Options

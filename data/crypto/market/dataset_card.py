@@ -32,7 +32,6 @@
 # %%
 """Crypto Premium Index - download, explore, and update workflow."""
 
-import json
 from pathlib import Path
 
 import polars as pl
@@ -341,35 +340,29 @@ premium_stats
 # Profiles document the dataset structure, statistics, and quality metrics.
 
 # %%
-from utils import ML4T_DATA_PATH
+from ml4t.data.storage.data_profile import load_profile
 
-# Check for existing profiles
+from utils import ML4T_DATA_PATH
+from utils.paths import display_path
+
 for dataset, filename in [
     ("OHLCV", "perps_1h_profile.json"),
     ("Premium", "premium_index_8h_profile.json"),
 ]:
     profile_path = ML4T_DATA_PATH / "crypto" / "market" / filename
-    if profile_path.exists():
-        profile = json.loads(profile_path.read_text())
-        print(f"=== Crypto {dataset} Profile ===")
-        rows = profile.get("total_rows", profile.get("rows"))
-        cols = profile.get("total_columns", profile.get("columns"))
-        if isinstance(cols, list):
-            cols = len(cols)
-        print(f"Rows: {rows:,}" if rows is not None else "Rows: unknown")
-        print(f"Columns: {cols}")
-        mem = profile.get("memory_mb")
-        if mem is not None:
-            print(f"Memory: {mem:.1f} MB")
-        print()
-    else:
-        print(f"No profile at {profile_path}")
+    profile = load_profile(profile_path)
+    if profile is None:
+        print(f"No profile at {display_path(profile_path)}")
         print(
-            "Profiles are written next to the data by whatever builds the dataset - the\n"
-            "download script in this directory, or the ml4t-data loader it drives -\n"
-            "through ml4t.data.storage.data_profile. There is no separate\n"
-            "profile-generating script, and nothing in this notebook writes one.\n"
+            "Profiles are written next to the data by whatever builds the dataset, through\n"
+            "ml4t.data.storage.data_profile. There is no separate profile-generating\n"
+            "script, and nothing in this notebook writes one.\n"
         )
+    else:
+        print(f"=== Crypto {dataset} Profile ===")
+        print(f"Written by {profile.source}")
+        print(profile.summary())
+        print()
 
 # %% [markdown]
 # ## 6. Loader Options

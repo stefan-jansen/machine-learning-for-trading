@@ -176,9 +176,9 @@ profile = load_profile(profile_path)
 if profile is None:
     print(f"No profile at {display_path(profile_path)}")
     print(
-        "A profile is written next to the data by whatever builds the dataset, through\n"
-        "ml4t.data.storage.data_profile. The downloader above does not write one, so this\n"
-        "dataset has none; there is no separate profile-generating script to run."
+        "The downloader above writes it, next to the data, through\n"
+        "ml4t.data.storage.data_profile. Re-run it to produce one; there is no separate\n"
+        "profile-generating script."
     )
 else:
     print("=== Firm Characteristics Profile ===")
