@@ -53,7 +53,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
@@ -76,6 +75,7 @@ from sklearn.metrics import (
 )
 
 from data import load_etfs
+from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import (  # importing utils.style activates the ml4t Plotly template
     COLORS,
@@ -84,7 +84,10 @@ from utils.style import (  # importing utils.style activates the ml4t Plotly tem
 
 # %% tags=["parameters"]
 SEED = 42
-OUTPUT_DIR = Path("07_defining_the_learning_task/output")
+# Resolved from the chapter, not the working directory: the runner sets cwd to the chapter
+# dir, so a repo-relative literal writes the publication artifact one level too deep and
+# the book figure pipeline keeps reading an older copy at the intended path.
+OUTPUT_DIR = get_chapter_dir(7) / "output"
 START_DATE = "2006-01-01"
 MAX_SYMBOLS = 0
 N_PERMUTATIONS = 1000
