@@ -1004,9 +1004,9 @@ show_plotly_with_alt(
     (
         "Heatmap of net return by calendar month and year, one row per year and one column "
         "per month, with a compounded annual column at the right, on a diverging scale where "
-        "positive is green and negative red and each cell is labelled. The annual column is "
-        "the product of its row's months, so it is a different quantity from the cells beside "
-        "it and is placed apart for that reason."
+        "positive is green and negative red and each cell is labelled. The annual column "
+        "compounds its row: one plus each monthly return multiplied together, minus one. That "
+        "is a different quantity from the cells beside it, which is why it sits apart."
     ),
 )
 

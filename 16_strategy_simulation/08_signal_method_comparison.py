@@ -704,10 +704,11 @@ show_plotly_with_alt(
     fig,
     (
         "Two line panels against lookback length in observations, one line per prediction "
-        "set, signal rate on the left and state-transition rate on the right. The lookback is "
-        "the window a trailing percentile is taken over, so this sweeps how much history the "
-        "rule re-centres on. Two panels because the lookback acts on both rates and they are "
-        "not the same quantity."
+        "set, signal rate on the left and state-transition rate on the right. Only the "
+        "trailing-percentile method is plotted, with its percentile pinned at "
+        f"{OPERATING_PERCENTILE} so the sweep varies the window alone. The lookback is the "
+        "window that percentile is taken over, so this sweeps how much history the rule "
+        "re-centres on."
     ),
 )
 
@@ -786,9 +787,11 @@ show_plotly_with_alt(
     (
         f"Two line panels against the percentile cutoff, swept from {min(PERCENTILES)} to "
         f"{max(PERCENTILES)}, one line per prediction set, signal rate on the left and "
-        "state-transition rate on the right. The cutoff is the percentile of the trailing "
-        "window a score must exceed to fire. Drawn beside the lookback sweep so the two "
-        "settings of the same rule can be read the same way."
+        "state-transition rate on the right. Only the trailing-percentile method is plotted, "
+        f"with its window pinned at the shortest in the grid, {min(ROLLING_WINDOWS)} "
+        "observations, so the sweep varies the cutoff alone. The cutoff is the percentile of "
+        "that trailing window a score must exceed to fire. Drawn beside the lookback sweep "
+        "so the rule's two settings can be read the same way."
     ),
 )
 
