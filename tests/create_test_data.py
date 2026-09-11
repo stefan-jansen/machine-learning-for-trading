@@ -1522,10 +1522,19 @@ AQR_REQUIRED = (
 
 # `fred_macro.parquet` is the aligned panel three teaching notebooks read by path;
 # the raw and metadata files are what `data/macro/loader.py` names in its outputs.
+#
+# `fred_macro_initial_release.parquet` is here because it comes from a DIFFERENT
+# download script - `download_alfred.py`, not `download.py` - so a production tree can
+# hold every other file here and not this one. `04_fundamental_alternative_data/
+# 07_macro_data_alignment` calls `load_macro_initial_release()` unconditionally, and
+# without it that notebook raises where the build would have succeeded. The three not
+# required - the two dictionaries and `initial_release_raw` - are copied because
+# production carries them and read by nothing in this repo.
 MACRO_REQUIRED = (
     "fred_macro.parquet",
     "fred_macro_raw.parquet",
     "fred_macro_metadata.parquet",
+    "fred_macro_initial_release.parquet",
 )
 
 # 04_fundamental_alternative_data reads the per-chain files through an f-string over

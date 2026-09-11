@@ -753,6 +753,7 @@ jobs:
             tests/test_research_declared_menu_coverage.py \
             tests/test_awaiting_rebuild.py \
             tests/test_one_producer_per_fixture_file.py \
+            tests/test_fixture_builders_require_their_inputs.py \
             tests/test_cme_futures_research.py \
             tests/test_cross_sectional_ic_mean.py \
             -v --tb=short
