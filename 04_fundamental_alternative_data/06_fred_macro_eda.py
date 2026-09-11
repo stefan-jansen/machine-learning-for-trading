@@ -194,11 +194,11 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of the two-year and ten-year Treasury yields from 2020 onward. Both begin "
-    "between one and two percent and fall almost to zero during 2020; the two-year stays there "
-    "through 2021 while the ten-year recovers to between one and two percent. Both then rise "
-    "steeply through 2022 and 2023 to around five percent before easing. The "
-    "two-year rises further and faster than the ten-year and crosses above it in 2022, staying "
+    "Line chart of the two-year and ten-year Treasury yields over the recent window. Both fall "
+    "almost to zero during 2020; the two-year stays there through 2021 while the ten-year "
+    "recovers to between one and two percent. Both then rise steeply through 2022 and 2023 to "
+    "around five percent before easing. The two-year rises further and faster than the "
+    "ten-year and crosses above it in 2022, staying "
     "above for most of the rest of the window. Two annotations mark the first and last policy "
     "increases of the cycle.",
 )
@@ -305,7 +305,9 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Filled line chart of the VIX from 2020, with dashed rules at twenty and thirty. The series spends most of its length below twenty, with brief tall spikes annotated at the COVID crash and the failure of Silicon Valley Bank.",
+    "Filled line chart of the VIX over the recent window, with dashed rules at twenty and "
+    "thirty. The series spends most of its length below twenty, with brief tall spikes "
+    "annotated at the COVID crash and the failure of Silicon Valley Bank.",
 )
 
 # %% [markdown]
@@ -338,11 +340,17 @@ def spells_above(values: list[float], level: float) -> list[int]:
 for _label, _frame in (("full history", vix), ("plotted window", vix_recent)):
     _v = _frame["vixcls"]
     _runs = spells_above(_v.to_list(), _above)
+    _spells = (
+        f"spells above {_above:g}: none"
+        if not _runs
+        else (
+            f"spells above {_above:g}: {len(_runs)}, "
+            f"median {statistics.median(_runs):g}, longest {max(_runs)} calendar days"
+        )
+    )
     print(
         f"{_label:<15} below {_below:g}: {(_v < _below).mean():>6.1%}   "
-        f"above {_above:g}: {(_v > _above).mean():>6.1%}   "
-        f"spells above {_above:g}: {len(_runs)}, "
-        f"median {statistics.median(_runs):g}, longest {max(_runs)} calendar days"
+        f"above {_above:g}: {(_v > _above).mean():>6.1%}   {_spells}"
     )
 
 # %% [markdown]
@@ -439,8 +447,9 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of the ten-year minus two-year Treasury spread from 2020. It is positive and "
-    "rising into early 2021, falls through 2021, crosses below zero in mid-2022, stays negative "
+    "Line chart of the ten-year minus two-year Treasury spread over the recent window. It is "
+    "positive and rising into early 2021, falls through 2021, crosses below zero in mid-2022, "
+    "stays negative "
     "until late 2024 apart from brief excursions back above the line, and is positive again "
     "through 2025. The negative region is shaded.",
 )
@@ -640,12 +649,12 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Three stacked panels sharing one time axis from 2020: Treasury yields, the ten-year minus "
-    "two-year spread with a dashed zero line, and the VIX with a dashed rule at twenty. The "
-    "yields rise together from near zero in 2021 to around five percent by 2023; the spread "
-    "falls across the same stretch and is below its zero line from mid-2022 to late 2024; the "
-    "VIX has its tallest spike at the left edge in 2020 and sits mostly below its rule "
-    "thereafter.",
+    "Three stacked panels sharing one time axis over the recent window: Treasury yields, the "
+    "ten-year minus two-year spread with a dashed zero line, and the VIX with a dashed rule at "
+    "twenty. The yields rise together from near zero in 2021 to around five percent by 2023; "
+    "the spread falls across the same stretch and is below its zero line from mid-2022 to late "
+    "2024; the VIX carries a single spike far taller than any other and otherwise sits mostly "
+    "below its rule.",
 )
 
 # %% [markdown]

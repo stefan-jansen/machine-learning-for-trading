@@ -140,27 +140,25 @@ print(f"Observations: {len(total_tvl):,}")
 print(f"History: {total_tvl['timestamp'].min()} to {total_tvl['timestamp'].max()}")
 print(f"Highest level reached: ${total_tvl['tvl_bn'].max():.0f}bn")
 
-# The four landmarks the figure below turns on, so the description under it argues from
-# numbers rather than from the shape of a line.
+# The landmarks the figure below turns on, so the description under it argues from numbers
+# rather than from the shape of a line. Each one after the peak exists only if the snapshot
+# runs past the one before it: the downloader fetches history up to today, so a refresh landing
+# on a new all-time high leaves nothing after the peak, and one landing on the post-peak
+# minimum leaves nothing after the trough. Both are ordinary snapshots, not errors.
 _peak = total_tvl.filter(pl.col("tvl_bn") == pl.col("tvl_bn").max())
 _peak_bn, _peak_at = _peak["tvl_bn"][0], _peak["timestamp"][0]
+_landmarks = [("peak", _peak_bn, _peak_at)]
 _post = total_tvl.filter(pl.col("timestamp") > _peak_at)
-_trough = _post.filter(pl.col("tvl_bn") == pl.col("tvl_bn").min())
-_rec = _post.filter(pl.col("timestamp") > _trough["timestamp"][0])
-_rec_high = _rec.filter(pl.col("tvl_bn") == _rec["tvl_bn"].max())
-for _label, _row in (
-    ("peak", _peak),
-    ("post-peak trough", _trough),
-    ("recovery high", _rec_high),
-):
-    print(
-        f"  {_label:<18} ${_row['tvl_bn'][0]:>6.1f}bn on {_row['timestamp'][0]}"
-        f"   {_row['tvl_bn'][0] / _peak_bn:>5.0%} of peak"
-    )
-print(
-    f"  {'latest':<18} ${total_tvl['tvl_bn'][-1]:>6.1f}bn on {total_tvl['timestamp'][-1]}"
-    f"   {total_tvl['tvl_bn'][-1] / _peak_bn:>5.0%} of peak"
-)
+if len(_post):
+    _trough = _post.filter(pl.col("tvl_bn") == pl.col("tvl_bn").min())
+    _landmarks.append(("post-peak trough", _trough["tvl_bn"][0], _trough["timestamp"][0]))
+    _rec = _post.filter(pl.col("timestamp") > _trough["timestamp"][0])
+    if len(_rec):
+        _high = _rec.filter(pl.col("tvl_bn") == _rec["tvl_bn"].max())
+        _landmarks.append(("recovery high", _high["tvl_bn"][0], _high["timestamp"][0]))
+_landmarks.append(("latest", total_tvl["tvl_bn"][-1], total_tvl["timestamp"][-1]))
+for _label, _bn, _at in _landmarks:
+    print(f"  {_label:<18} ${_bn:>6.1f}bn on {_at}   {_bn / _peak_bn:>5.0%} of peak")
 total_tvl.tail(3)
 
 # %%
@@ -184,8 +182,8 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# The landmarks printed above are the figure's shape in numbers, and the third one is what a
-# description written from the line alone tends to miss. The series does not fall from its 2021
+# The landmarks printed above are the figure's shape in numbers, and the recovery high is what
+# a description written from the line alone tends to miss. The series does not fall from its 2021
 # peak and stay down: it climbs back to nearly the same level three years later before falling
 # by about half again. The level at the right edge sits below two highs rather than recovering
 # from one, and the share-of-peak column says how far below each.
@@ -245,16 +243,17 @@ fig = px.bar(
 fig.update_layout(height=320, xaxis_tickformat=".0%", yaxis=dict(categoryorder="total ascending"))
 show_plotly_with_alt(
     fig,
-    "Horizontal bar chart of each chain's share of total value locked over the trailing thirty "
-    "days. The largest bar is longer than the other four combined, and the residual bar for all "
-    "remaining chains is the second longest.",
+    "Horizontal bar chart of each chain's share of total value locked over the trailing "
+    "window. The largest bar is longer than every other bar combined, and the residual bar "
+    "labelled for the chains not loaded separately is the second longest.",
 )
 
 # %% [markdown]
-# Over the window printed above, one chain holds more than every other bar combined, and that
-# includes the residual standing for the hundreds of chains not loaded here. A "DeFi total" is
-# mostly one chain's series with a minority of others averaged into it, which is worth knowing
-# before any result about the total is read as a result about the sector.
+# On the chains loaded here, over the window printed above, one chain holds more than every
+# other bar combined, and that includes the residual standing for the hundreds of chains not
+# loaded separately. A "DeFi total" is mostly one chain's series with a minority of others
+# averaged into it, which is worth knowing before any result about the total is read as a
+# result about the sector.
 
 # %% [markdown]
 # ## 3. The price series, and what bounds the study
@@ -482,7 +481,7 @@ fig = px.bar(
 fig.update_layout(height=400, yaxis_tickformat=".0%")
 show_plotly_with_alt(
     fig,
-    "Bar chart of the mean thirty-day forward ether return in each of the three TVL regimes, "
+    "Bar chart of the mean forward ether return in each of the three TVL regimes, "
     "with Newey-West standard errors as error bars. The contraction bar is slightly positive "
     "and the expansion bar slightly negative, and both error bars cross zero. The neutral bar "
     "is far below both, near minus sixteen percent, and its error bar does not reach zero.",
