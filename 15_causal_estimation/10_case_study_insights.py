@@ -30,10 +30,11 @@
 #
 # **Book reference**: Sections 15.6 and 15.7.
 #
-# **Prerequisites**: each case study has an intact `run_log/registry.db`. A registry whose
-# `causal_runs` table is empty is reported as a case study whose causal stage has not run
-# rather than failing the notebook. The notebook reads those registries without modifying
-# them.
+# **Prerequisites**: each case study has an intact `run_log/registry.db`, and at least one of
+# them has registered a causal run. A registry whose `causal_runs` table is empty is reported
+# as a case study whose causal stage has not run rather than failing the notebook; every
+# registry empty stops it, because there is nothing left to compare. The notebook reads those
+# registries without modifying them.
 
 # %%
 """Case Study Insights: Causal Estimation from registered DML results."""
