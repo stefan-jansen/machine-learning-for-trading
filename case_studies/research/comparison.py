@@ -13,7 +13,7 @@ import polars as pl
 from case_studies.utils.registry.specs import canonical_json, compute_hash
 from case_studies.utils.registry.store import _git_hash, _open_registry, _utc_now
 
-from .population import _refuse_preview_activation
+from .population import SUPERSEDES_LIVE, _refuse_preview_activation
 from .results import Result
 
 if TYPE_CHECKING:
@@ -101,6 +101,13 @@ def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -
     - **The refit.** The declaration names the tip itself, and offering it publishes the next
       generation over that tip.
 
+    A declaration of :data:`case_studies.research.population.SUPERSEDES_LIVE` resolves to the tip
+    in all three and is the form that does not decay. It matters more here than on the population
+    path: a candidate set's hash is computed from its members and its contract, not from what it
+    supersedes, so an unchanged re-run is answered by the existing name binding and the
+    declaration is never read at all. The only run that reads it is the one whose membership
+    moved, and that run accepts the tip and nothing else.
+
     Anything else is withheld, and ``create`` then refuses and names the hash it requires, which
     is a better answer than this function guessing.
 
@@ -118,6 +125,11 @@ def candidate_set_supersedes(study: Study, *, name: str, declared: str | None) -
         # name resolves to other than exactly one head, `open` raises `KeyError` for a hash the
         # table does not hold, and a clean clone has no `candidate_sets` table for either to read.
         return None
+    if declared == SUPERSEDES_LIVE:
+        # Same branch as `population_supersedes`, for the same reason and with the same reading
+        # of the two cases above it: a clean clone and an unbound name have already returned
+        # None, so there is a generation here to extend. See `SUPERSEDES_LIVE`.
+        return current.hash
     if declared in (current.supersedes, current.hash):
         return declared
     return None
