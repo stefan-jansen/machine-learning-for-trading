@@ -54,6 +54,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,14 +64,16 @@ import numpy as np
 import polars as pl
 
 from data import load_institutional_holdings_13f
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 # %% tags=["parameters"]
 # Production defaults. Papermill overrides them for testing.
-# The chapter demo uses the 10 largest institutions x 50 most-held stocks; this
-# keeps the in-memory graph small enough to print and reason about by hand.
+# The stock cap is what shapes the graph: 50 names out of the several thousand
+# the cohort discloses. The institution cap is a formality - the artifact holds
+# ten managers in total and all ten file in every period - and the run prints
+# both caps against the population they were applied to.
 N_INSTITUTIONS = 10
 
 # %% [markdown]
@@ -98,25 +101,29 @@ print(f"Neo4j connected: {NEO4J_URI}")
 # ## 1. Schema Design
 #
 # The 13F Knowledge Graph uses a property graph model with three node types
-# and three relationship types. HOLDS edges are keyed on `(institution, stock,
-# quarter)`, where the legacy `quarter` key is the filing-availability vintage.
-# Each (institution, stock) pair carries one HOLDS edge per available filing
-# vintage. These edges power the point-in-time queries in `03_graph_rag_qa`,
-# which constrain results with `h.quarter <= $cutoff_date`.
+# and three relationship types. A HOLDS edge is keyed on `(institution, stock,
+# report_date)` and carries two dates, because a 13F position has two and they
+# answer different questions. `report_date` is the quarter-end the position was
+# held on, which is what a quarter-over-quarter comparison needs.
+# `available_from` is the filing date on which the position became public,
+# roughly six weeks later, which is what a point-in-time query needs:
+# `03_graph_rag_qa` constrains on `h.available_from <= $cutoff_date`. Using
+# either date for the other question is a look-ahead in one direction and a
+# misaligned quarter in the other.
 
 # %%
 # Schema definition
 SCHEMA = {
     "nodes": {
-        "Institution": ["cik", "name", "aum", "strategy"],
-        "Stock": ["cusip", "ticker", "issuer", "sector"],
+        "Institution": ["cik", "name", "equity_13f_value"],
+        "Stock": ["cusip", "issuer", "label", "sector"],
         "Sector": ["name"],
     },
     "relationships": {
         "HOLDS": {
             "from": "Institution",
             "to": "Stock",
-            "properties": ["shares", "value", "quarter"],
+            "properties": ["shares", "value", "report_date", "available_from"],
         },
         "IN_SECTOR": {"from": "Stock", "to": "Sector", "properties": []},
     },
@@ -127,23 +134,28 @@ print(f"  Node Types: {list(SCHEMA['nodes'].keys())}")
 print(f"  Relationship Types: {list(SCHEMA['relationships'].keys())}")
 
 # %% [markdown]
-# The `aum` property retains the chapter graph's published schema name, but its
-# value is the manager's total reported 13F equity value in the formation
-# vintage. It is not the manager's total assets under management.
+# Two schema names say what they hold rather than what they resemble.
+# `Institution.equity_13f_value` is the manager's total long US equity value in
+# the formation quarter; it was called `aum`, which it is not - a 13F covers
+# US-listed equity and says nothing about the fund's cash, debt, foreign or
+# private books. `Stock.label` is a shortened issuer name for display; it was
+# called `ticker`, and it is not one either, because the 13F artifact keys
+# securities by CUSIP and carries no ticker at all. There is no `strategy`
+# property: the old one was the constant string "Unknown" on every node.
 
 # %% [markdown]
 # ## 2. Real 13F Data
 #
-# Load the Chapter 4 13F artifact and shrink it to a manageable universe of the
-# largest institutions and most-owned stocks. Raw filing dates cluster within a
-# 14-day window around the SEC quarterly due date, so we bin each filing into a
-# common availability vintage and carry all vintages through the loader.
+# Load the Chapter 4 13F artifact and shrink it to a universe small enough to
+# print and reason about by hand.
 #
-# The upstream artifact does not preserve the SEC `reportDate`. The legacy
-# graph property named `quarter` therefore stores the latest filing date in
-# each availability cluster, not the exact holdings-report quarter. It supports
-# as-of filing-availability queries in `03_graph_rag_qa`; it must not be used to
-# infer exact report periods or quarter-over-quarter holdings changes.
+# Every position in the artifact carries both of the dates the graph needs.
+# `report_date` is the SEC report period, the quarter-end the holdings are as
+# of, and it partitions the rows exactly - each report period has its own
+# filing window six weeks later. `filing_date` is when the manager filed, and
+# the latest filing date within a report period is when that period became
+# public. The calendar below prints both so the gap is visible rather than
+# assumed.
 #
 # The input field retains the legacy name `value_thousands`, but these post-2023
 # filings report position values in dollars. The graph preserves those dollar
@@ -151,31 +163,55 @@ print(f"  Relationship Types: {list(SCHEMA['relationships'].keys())}")
 
 
 # %%
-def assign_quarter_bins(holdings_df: pl.DataFrame) -> pl.DataFrame:
-    """Add the legacy `quarter` key from 14-day filing-availability clusters.
+def report_period_calendar(holdings_df: pl.DataFrame) -> pl.DataFrame:
+    """One row per SEC report period: its filing window and when it went public.
 
-    13F filings cluster around the SEC quarterly due date (45 days after
-    quarter-end); adjacent filings within a 14-day window collapse into a
-    single availability vintage labeled by the latest filing date in the
-    cluster. This does not reconstruct the SEC report period.
+    `available_from` is the last filing date in the period's window. A position
+    disclosed for a quarter-end is not public on that quarter-end, so a
+    point-in-time query has to compare against this column, not against
+    `report_date`.
     """
-    distinct = sorted(holdings_df["filing_date"].unique().to_list())
-    clusters: list[list] = []
-    for d in distinct:
-        if not clusters or (d - clusters[-1][-1]).days > 14:
-            clusters.append([d])
-        else:
-            clusters[-1].append(d)
-    quarter_map = {d: max(cluster).isoformat() for cluster in clusters for d in cluster}
-    return holdings_df.with_columns(
-        pl.col("filing_date").replace_strict(quarter_map).alias("quarter")
+    return (
+        holdings_df.group_by("report_date")
+        .agg(
+            pl.len().alias("rows"),
+            pl.min("filing_date").alias("first_filed"),
+            pl.max("filing_date").alias("available_from"),
+        )
+        .sort("report_date")
+        .with_columns(
+            (pl.col("available_from") - pl.col("report_date")).dt.total_days().alias("lag_days")
+        )
     )
+
+
+# %% [markdown]
+# ### Ownership Rows and Derivative Rows
+#
+# A 13F reports three kinds of row and only one of them is ownership.
+
+
+# %%
+def split_derivatives(holdings_df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Separate long equity positions from the reported option positions.
+
+    `put_call` is null for a share position and carries "CALL" or "PUT" for an
+    option. Summing all three into one value makes a put indistinguishable from
+    ownership, which is a sign error rather than a rounding one: the manager
+    holding the put profits when the issuer falls. Only the long rows go into
+    the graph; the option rows come back so the notebook can report what it
+    excluded instead of dropping it silently.
+    """
+    long_rows = holdings_df.filter(pl.col("put_call").is_null())
+    option_rows = holdings_df.filter(pl.col("put_call").is_not_null())
+    return long_rows, option_rows
 
 
 # %% [markdown]
 # ### Formation-Cohort Selector
 #
-# Rank the cohort once at the first vintage so later filings cannot change earlier membership.
+# Rank the cohort once at the first report period so later filings cannot change
+# earlier membership.
 
 
 # %%
@@ -184,14 +220,21 @@ def select_real_13f_universe(
     max_institutions: int,
     max_stocks: int,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    """Filter raw 13F holdings to the largest institutions and most-owned stocks.
+    """Filter long-equity 13F holdings to a cohort of institutions and stocks.
 
-    Form the institution and stock cohort at the earliest available vintage,
-    then carry those entities forward through every later vintage. This prevents
-    future membership from leaking into earlier point-in-time queries.
+    Form the institution and stock cohort at the earliest report period, then
+    carry those entities forward through every later one. For stocks this
+    prevents future membership from leaking into earlier point-in-time queries:
+    ranking on all periods would put a name in the graph before anyone in the
+    cohort had disclosed it.
+
+    Both caps are reported against the population they were applied to, because
+    a cap that does not bind selects nothing and should not be described as
+    selection.
     """
-    formation_quarter = holdings_df["quarter"].min()
-    formation_slice = holdings_df.filter(pl.col("quarter") == formation_quarter)
+    formation_period = holdings_df["report_date"].min()
+    formation_slice = holdings_df.filter(pl.col("report_date") == formation_period)
+    institution_population = formation_slice["cik"].n_unique()
     top_institutions = (
         formation_slice.group_by("cik", "company_name")
         .agg(pl.sum("value_thousands").alias("total_value"))
@@ -199,14 +242,48 @@ def select_real_13f_universe(
         .head(max_institutions)
     )
     filtered = holdings_df.filter(pl.col("cik").is_in(top_institutions["cik"].implode()))
+    formation_cohort_slice = filtered.filter(pl.col("report_date") == formation_period)
+    stock_population = formation_cohort_slice["cusip"].n_unique()
+    # Group on CUSIP alone. Managers spell the same issuer differently -
+    # "MASTERCARD INC" and "MASTERCARD INCORPORATED" are one security under one
+    # CUSIP - and grouping on (cusip, issuer) puts both spellings in the cohort
+    # as separate stocks. Neo4j MERGEs on cusip and would collapse them back to
+    # one node, so the cohort would claim a size the graph does not have.
+    # `canonical_issuer` is the spelling carrying the most disclosed value.
+    per_security = formation_cohort_slice.group_by("cusip", "issuer").agg(
+        pl.sum("value_thousands").alias("issuer_value")
+    )
     top_stocks = (
-        filtered.filter(pl.col("quarter") == formation_quarter)
-        .group_by("cusip", "issuer")
-        .agg(pl.sum("value_thousands").alias("total_value"))
+        per_security.group_by("cusip")
+        .agg(
+            pl.col("issuer").sort_by(["issuer_value", "issuer"], descending=[True, False]).first(),
+            pl.sum("issuer_value").alias("total_value"),
+            pl.len().alias("issuer_spellings"),
+        )
         .sort(["total_value", "cusip"], descending=[True, False])
         .head(max_stocks)
     )
+    split_names = top_stocks.filter(pl.col("issuer_spellings") > 1)
     filtered = filtered.filter(pl.col("cusip").is_in(top_stocks["cusip"].implode()))
+    print(f"Formation report period: {formation_period}")
+    print(
+        f"  Institutions: cap {max_institutions} applied to a population of "
+        f"{institution_population}, kept {len(top_institutions)}"
+        f"{' (the cap does not bind)' if max_institutions >= institution_population else ''}"
+    )
+    print(
+        f"  Stocks: cap {max_stocks} applied to a population of {stock_population} CUSIPs, "
+        f"kept {len(top_stocks)}"
+    )
+    if len(split_names):
+        print(
+            f"  {len(split_names)} of the kept CUSIPs were disclosed under more than one "
+            "issuer spelling and were merged: "
+            + ", ".join(
+                f"{row['issuer']} ({row['issuer_spellings']})"
+                for row in split_names.iter_rows(named=True)
+            )
+        )
     return top_institutions, top_stocks, filtered
 
 
@@ -226,12 +303,12 @@ def select_real_13f_universe(
 
 # %%
 SECTOR_TERMS = {
-    "Technology": "APPLE|MICROSOFT|NVIDIA|ALPHABET|GOOGLE|META|AMAZON|ORACLE|ADOBE|SALESFORCE|INTEL|AMD|BROADCOM|QUALCOMM|CISCO|IBM|SAMSUNG|TAIWAN SEMICONDUCTOR|ASML",
+    "Technology": "APPLE|MICROSOFT|NVIDIA|ALPHABET|GOOGLE|META|ORACLE|ADOBE|SALESFORCE|INTEL|AMD|BROADCOM|QUALCOMM|CISCO|IBM|SAMSUNG|TAIWAN SEMICONDUCTOR|ASML",
     "Financials": "BANK|JPMORGAN|GOLDMAN|MORGAN STANLEY|WELLS FARGO|CITIGROUP|BERKSHIRE|BLACKROCK|VISA|MASTERCARD|AMERICAN EXPRESS|SCHWAB|PAYPAL",
     "Healthcare": "UNITEDHEALTH|JOHNSON|PFIZER|LILLY|ABBVIE|MERCK|AMGEN|MEDTRONIC|ABBOTT|THERMO FISHER|DANAHER|BRISTOL-MYERS|REGENERON|INTUITIVE SURGICAL",
-    "Consumer": "PROCTER|COCA COLA|PEPSICO|COSTCO|WALMART|HOME DEPOT|NIKE|MCDONALD|STARBUCKS|DISNEY",
+    "Consumer": "AMAZON|PROCTER|COCA COLA|PEPSICO|COSTCO|WALMART|HOME DEPOT|NIKE|MCDONALD|STARBUCKS|DISNEY|TESLA",
     "Energy": "EXXON|CHEVRON|CONOCOPHILLIPS|SCHLUMBERGER",
-    "Industrials": "CATERPILLAR|HONEYWELL|UNION PACIFIC|DEERE|3M|GENERAL ELECTRIC|LOCKHEED|BOEING|RAYTHEON|GE ",
+    "Industrials": "CATERPILLAR|HONEYWELL|UNION PACIFIC|DEERE|3M|GENERAL ELECTRIC|LOCKHEED|BOEING|RAYTHEON|GE",
     "Telecom": "AT&T|VERIZON|T-MOBILE|COMCAST",
 }
 
@@ -244,16 +321,28 @@ def normalize_label(value: str) -> str:
 # %% [markdown]
 # ### Sector Classifier
 #
-# Apply the explicit issuer-name map used in the graph schema.
+# A name screen, not a classification. The 13F artifact carries no sector
+# field, so this map exists to give the sector panel something to group by, and
+# it can only recognise names that were written into it. Anything else is
+# "Other", and the cohort's share of "Other" is printed before the panel is
+# drawn so the reader can see how much of it the screen actually covers.
 
 
 # %%
 def classify_sector(issuer: str) -> str:
-    """Assign a broad sector from explicit issuer-name terms."""
+    """Assign a broad sector from explicit issuer-name terms.
+
+    Matching is on whole words. Substring matching put "RANGE RESOURCES",
+    "STORAGE" and "BRIDGE" into Industrials, because the term list carried
+    "GE " for General Electric and every one of those names contains it. A
+    screen that cannot be argued with because its hits are accidents is worse
+    than no screen.
+    """
     upper = issuer.upper()
     for sector, terms in SECTOR_TERMS.items():
-        if any(term in upper for term in terms.split("|")):
-            return sector
+        for term in terms.split("|"):
+            if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", upper):
+                return sector
     return "Other"
 
 
@@ -272,15 +361,14 @@ def build_entity_payloads(
         {
             "cik": row["cik"],
             "name": normalize_label(row["company_name"]),
-            "aum": row["total_value"],
-            "strategy": "Unknown",
+            "equity_13f_value": row["total_value"],
         }
         for row in top_institutions.iter_rows(named=True)
     ]
     stocks = [
         {
             "cusip": row["cusip"],
-            "ticker": normalize_label(row["issuer"])[:15],
+            "label": normalize_label(row["issuer"])[:20],
             "issuer": normalize_label(row["issuer"]),
             "sector": classify_sector(row["issuer"]),
         }
@@ -292,38 +380,47 @@ def build_entity_payloads(
 # %% [markdown]
 # ### Holding Payload Builder
 #
-# Aggregate each institution-stock position within a vintage before graph loading.
+# Aggregate each institution-stock position within a report period before graph
+# loading, and carry the date it became public alongside the period it is as of.
 
 
 # %%
 def build_holding_payloads(
     filtered: pl.DataFrame,
-) -> tuple[list[tuple[str, str, int, int, str]], list[tuple[str, str, int, int, str]]]:
-    """Aggregate positions within each cohort member, stock, and vintage."""
-    vintage_holdings = (
-        filtered.group_by("cik", "cusip", "quarter")
-        .agg(pl.sum("value_thousands").alias("value"), pl.sum("shares").alias("shares"))
-        .sort(["quarter", "value"], descending=[False, True])
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Aggregate positions within each cohort member, stock, and report period.
+
+    A manager can file several rows for one security in one period (separate
+    sub-portfolios or managers with shared discretion), so the rows are summed
+    within `(cik, cusip, report_date)`. `available_from` is the last filing date
+    among the rows that were summed.
+    """
+    period_holdings = (
+        filtered.group_by("cik", "cusip", "report_date")
+        .agg(
+            pl.sum("value_thousands").alias("value"),
+            pl.sum("shares").alias("shares"),
+            pl.max("filing_date").alias("available_from"),
+        )
+        .sort(["report_date", "value"], descending=[False, True])
+        .with_columns(
+            pl.col("report_date").cast(pl.String), pl.col("available_from").cast(pl.String)
+        )
     )
-    all_vintages = [
-        (row["cik"], row["cusip"], row["shares"], row["value"], row["quarter"])
-        for row in vintage_holdings.iter_rows(named=True)
-    ]
-    latest_quarter = vintage_holdings["quarter"].max()
-    latest = vintage_holdings.filter(pl.col("quarter") == latest_quarter).sort(
-        "value", descending=True
+    all_periods = period_holdings.to_dicts()
+    latest_period = period_holdings["report_date"].max()
+    latest_payload = (
+        period_holdings.filter(pl.col("report_date") == latest_period)
+        .sort("value", descending=True)
+        .to_dicts()
     )
-    latest_payload = [
-        (row["cik"], row["cusip"], row["shares"], row["value"], row["quarter"])
-        for row in latest.iter_rows(named=True)
-    ]
-    return latest_payload, all_vintages
+    return latest_payload, all_periods
 
 
 # %% [markdown]
 # ### Payload Orchestrator
 #
-# Keep the latest snapshot for teaching queries and all vintages for point-in-time retrieval.
+# Keep the latest period for teaching queries and every period for point-in-time retrieval.
 
 
 # %%
@@ -332,20 +429,20 @@ def build_real_13f_payloads(
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, str]],
-    list[tuple[str, str, int, int, str]],
-    list[tuple[str, str, int, int, str]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     """Convert filtered 13F tables into notebook graph records.
 
-    Returns four payloads: institutions, stocks, the latest-vintage holdings
-    list used by the in-memory graph demos in §4-6, and the full multi-vintage
+    Returns four payloads: institutions, stocks, the latest-period holdings list
+    used by the in-memory graph demos in §4-6, and the full multi-period
     holdings list loaded to Neo4j so `03_graph_rag_qa` can demonstrate
-    point-in-time queries with `h.quarter <= $cutoff_date`.
+    point-in-time queries with `h.available_from <= $cutoff_date`.
     """
 
     institutions, stocks = build_entity_payloads(top_institutions, top_stocks)
-    holdings_latest, holdings_all_vintages = build_holding_payloads(filtered)
-    return institutions, stocks, holdings_latest, holdings_all_vintages
+    holdings_latest, holdings_all_periods = build_holding_payloads(filtered)
+    return institutions, stocks, holdings_latest, holdings_all_periods
 
 
 # %% [markdown]
@@ -358,7 +455,7 @@ def build_real_13f_payloads(
 # %%
 def load_real_13f_data(
     max_institutions: int = 20, max_stocks: int = 100
-) -> tuple[list, list, list, list]:
+) -> tuple[list, list, list, list, pl.DataFrame]:
     """Load real 13F data from Chapter 4's downloaded files."""
     holdings_df = load_institutional_holdings_13f()
     required_columns = {
@@ -366,6 +463,7 @@ def load_real_13f_data(
         "company_name",
         "cusip",
         "issuer",
+        "report_date",
         "filing_date",
         "shares",
         "value_thousands",
@@ -374,29 +472,38 @@ def load_real_13f_data(
     assert holdings_df.filter(
         pl.any_horizontal(pl.col(list(required_columns)).is_null())
     ).is_empty()
-    print(f"Loaded 13F holdings: {len(holdings_df):,} rows")
-
-    # Bin filings into availability vintages. Within each legacy
-    # (cik, cusip, quarter) key we aggregate sub-portfolio rows; vintages remain
-    # separate edges so 03_graph_rag_qa can apply an as-of filing-date cutoff.
-    holdings_df = assign_quarter_bins(holdings_df).with_columns(
+    holdings_df = holdings_df.with_columns(
         pl.col(["company_name", "issuer"]).str.replace_all(r"\s+", " ").str.strip_chars()
     )
-    vintages = sorted(holdings_df["quarter"].unique().to_list())
-    print(f"Filing-availability vintages: {len(vintages)} ({vintages})")
+    print(f"Loaded 13F holdings: {len(holdings_df):,} rows")
+
+    calendar = report_period_calendar(holdings_df)
+    print("\nReport periods and when each became public:")
+    print(calendar)
+
+    long_rows, option_rows = split_derivatives(holdings_df)
+    long_value = long_rows["value_thousands"].sum()
+    option_value = option_rows["value_thousands"].sum()
+    print(
+        f"\nOwnership rows: {len(long_rows):,} worth ${long_value / 1e9:,.0f}B. "
+        f"Excluded option rows: {len(option_rows):,} worth ${option_value / 1e9:,.0f}B "
+        f"({option_value / (long_value + option_value):.0%} of the reported total), "
+        f"{option_rows.filter(pl.col('put_call') == 'PUT').height:,} of them puts."
+    )
 
     top_institutions, top_stocks, filtered = select_real_13f_universe(
-        holdings_df, max_institutions=max_institutions, max_stocks=max_stocks
+        long_rows, max_institutions=max_institutions, max_stocks=max_stocks
     )
-    institutions, stocks, holdings_latest, holdings_all_vintages = build_real_13f_payloads(
+    institutions, stocks, holdings_latest, holdings_all_periods = build_real_13f_payloads(
         top_institutions, top_stocks, filtered
     )
+    periods = sorted({row["report_date"] for row in holdings_all_periods})
     print(
         f"  Institutions: {len(institutions)} | Stocks: {len(stocks)} | "
-        f"Latest-vintage holdings: {len(holdings_latest)} | "
-        f"All-vintage holdings: {len(holdings_all_vintages)} across {len(vintages)} vintages"
+        f"Latest-period holdings: {len(holdings_latest)} | "
+        f"All-period holdings: {len(holdings_all_periods)} across {len(periods)} report periods"
     )
-    return institutions, stocks, holdings_latest, holdings_all_vintages
+    return institutions, stocks, holdings_latest, holdings_all_periods, calendar
 
 
 # %%
@@ -414,15 +521,25 @@ SOURCE_ROWS = pl.scan_parquet(SOURCE_PATH).select(pl.len()).collect().item()
     data_institutions,
     data_stocks,
     data_holdings,
-    data_holdings_all_vintages,
+    data_holdings_all_periods,
+    period_calendar,
 ) = load_real_13f_data(max_institutions=max_inst, max_stocks=50)
 data_source = "EDGAR 13F"
 
 print(f"\nData source: {data_source}")
 print(
     f"Working with: {len(data_institutions)} institutions, {len(data_stocks)} stocks, "
-    f"{len(data_holdings)} latest-vintage holdings "
-    f"({len(data_holdings_all_vintages)} edges across all vintages for Neo4j)"
+    f"{len(data_holdings)} latest-period holdings "
+    f"({len(data_holdings_all_periods)} edges across all report periods for Neo4j)"
+)
+
+sector_counts_all = {}
+for stock in data_stocks:
+    sector_counts_all[stock["sector"]] = sector_counts_all.get(stock["sector"], 0) + 1
+other_count = sector_counts_all.get("Other", 0)
+print(
+    f"Sector name screen: {len(data_stocks) - other_count} of {len(data_stocks)} cohort "
+    f"stocks matched a term, {other_count} fell through to Other"
 )
 
 # %% [markdown]
@@ -462,7 +579,7 @@ class Node:
 # ### Edge Dataclass
 #
 # Store directed ownership and sector relationships with their edge-level
-# properties such as quarter, shares, and market value.
+# properties such as the report period, share count, and market value.
 
 
 # %%
@@ -518,8 +635,8 @@ class InMemoryGraph:
 #
 # Instantiate the graph and add all nodes (institutions, stocks, sectors) and
 # edges (HOLDS, IN_SECTOR) from the loaded data. The in-memory graph carries
-# only the latest vintage so the §4-6 ownership demos work on a clean
-# point-in-time snapshot; Neo4j separately receives all vintages for
+# only the latest report period so the §4-6 ownership demos work on a clean
+# point-in-time snapshot; Neo4j separately receives every report period for
 # point-in-time querying in `03_graph_rag_qa`.
 
 # %%
@@ -540,9 +657,19 @@ for sector in sectors:
     graph.add_node(Node("Sector", {"name": sector}))
 
 # Add HOLDS edges
-for inst_cik, stock_cusip, shares, value, quarter in data_holdings:
+for row in data_holdings:
     graph.add_edge(
-        Edge("HOLDS", inst_cik, stock_cusip, {"shares": shares, "value": value, "quarter": quarter})
+        Edge(
+            "HOLDS",
+            row["cik"],
+            row["cusip"],
+            {
+                "shares": row["shares"],
+                "value": row["value"],
+                "report_date": row["report_date"],
+                "available_from": row["available_from"],
+            },
+        )
     )
 
 # Add IN_SECTOR edges
@@ -579,7 +706,7 @@ print("Cypher equivalent:")
 print(f"""
 MATCH (a:Institution {{name: "{inst1_name}"}})-[:HOLDS]->(s:Stock)
       <-[:HOLDS]-(b:Institution {{name: "{inst2_name}"}})
-RETURN s.ticker, s.issuer
+RETURN s.label, s.issuer
 """)
 
 # %%
@@ -592,9 +719,7 @@ print(f"Result ({len(shared_stocks)} shared holdings):")
 for cusip in sorted(shared_stocks)[:10]:  # Limit to 10 for display
     node = graph.get_node(cusip)
     if node:
-        ticker = node.properties.get("ticker", "")
-        issuer = node.properties.get("issuer", cusip)
-        print(f"  {ticker or cusip}: {issuer}")
+        print(f"  {cusip}  {node.properties.get('issuer', cusip)}")
 if len(shared_stocks) > 10:
     print(f"  ... and {len(shared_stocks) - 10} more")
 
@@ -612,7 +737,7 @@ print("""
 MATCH (i:Institution)-[h:HOLDS]->(s:Stock)
 WITH s, COUNT(i) AS holder_count, SUM(h.value) AS total_value
 WHERE holder_count > 2
-RETURN s.ticker, holder_count, total_value
+RETURN s.label, holder_count, total_value
 ORDER BY holder_count DESC
 """)
 
@@ -624,29 +749,40 @@ for edge in graph.edges:
             stock_holders[edge.target_id] = []
         stock_holders[edge.target_id].append((edge.source_id, edge.properties["value"]))
 
-print("\nResult (holder_count > 2):")
+HOLDER_FLOOR = 2
 crowding_data = []
 for cusip, holders in stock_holders.items():
     holder_count = len(holders)
     total_value = sum(v for _, v in holders)
-    if holder_count > 2:
+    if holder_count > HOLDER_FLOOR:
         stock = graph.get_node(cusip)
         crowding_data.append(
             {
-                "ticker": stock.properties["ticker"],
+                "stock": stock.properties["label"],
                 "holder_count": holder_count,
                 "total_value_bn": total_value / 1_000_000_000,
             }
         )
 
-crowding_df = pl.DataFrame(crowding_data).sort(["holder_count", "ticker"], descending=[True, False])
+print(
+    f"\nResult: {len(crowding_data)} of the {len(data_stocks)} cohort stocks pass "
+    f"holder_count > {HOLDER_FLOOR}. Cohort stocks with no position in the latest "
+    f"report period, having been chosen at the formation period: "
+    f"{len(data_stocks) - len(stock_holders)}. Lowest holder count among the rest: "
+    f"{min(len(h) for h in stock_holders.values())}."
+)
+crowding_df = pl.DataFrame(crowding_data).sort(["holder_count", "stock"], descending=[True, False])
 crowding_df
 
 # %% [markdown]
-# **Interpretation**: Stocks held by many institutions simultaneously represent
-# crowding risk -- if several large holders unwind at once, the price impact
-# compounds. This query is a direct input to the crowding signal discussed in
-# Section 23.4.
+# **Interpretation**: the `WHERE holder_count > 2` clause is what a crowding
+# query looks like against the full 13F universe, where most names are held by
+# nobody in the cohort. Against this cohort it selects almost everything, and the
+# printed counts above say by how much: the 50 stocks were chosen for being the
+# largest positions of the ten managers, so being widely held is the selection
+# criterion rather than a finding. Whether crowding of this kind amplifies price
+# impact when several holders unwind together is the hypothesis behind the
+# features in Section 23.4; nothing here tests it.
 
 # %%
 # Find two stocks with multiple holders for network path query
@@ -661,10 +797,10 @@ if len(sorted_stocks) >= 2:
     stock2_cusip = sorted_stocks[1][0]
     stock1_node = graph.get_node(stock1_cusip)
     stock2_node = graph.get_node(stock2_cusip)
-    stock1_name = stock1_node.properties.get("ticker") or stock1_node.properties.get(
+    stock1_name = stock1_node.properties.get("label") or stock1_node.properties.get(
         "issuer", stock1_cusip
     )
-    stock2_name = stock2_node.properties.get("ticker") or stock2_node.properties.get(
+    stock2_name = stock2_node.properties.get("label") or stock2_node.properties.get(
         "issuer", stock2_cusip
     )
 else:
@@ -746,12 +882,12 @@ for i, stock_a in enumerate(stock_ids):
     for stock_b in stock_ids[i + 1 :]:
         sim = jaccard_similarity(stock_holder_sets[stock_a], stock_holder_sets[stock_b])
         if sim > 0:
-            ticker_a = graph.get_node(stock_a).properties["ticker"]
-            ticker_b = graph.get_node(stock_b).properties["ticker"]
+            label_a = graph.get_node(stock_a).properties["label"]
+            label_b = graph.get_node(stock_b).properties["label"]
             similarities.append(
                 {
-                    "stock_a": ticker_a,
-                    "stock_b": ticker_b,
+                    "stock_a": label_a,
+                    "stock_b": label_b,
                     "jaccard_similarity": round(sim, 3),
                     "shared_holders": len(stock_holder_sets[stock_a] & stock_holder_sets[stock_b]),
                 }
@@ -761,67 +897,113 @@ sim_df = pl.DataFrame(similarities).sort(
     ["jaccard_similarity", "stock_a", "stock_b"],
     descending=[True, False, False],
 )
-print("Top co-ownership pairs:")
-sim_df.head(10)
+
+# %% [markdown]
+# ### How Many Values This Similarity Can Take
+#
+# Every holder set here is a subset of the cohort's institutions, so a Jaccard
+# score is one of a small number of ratios of small integers. Sorting the pairs
+# and printing the head asks the reader to read an ordering that mostly does not
+# exist: the rows at the top are tied, and which of them appear is decided by
+# the alphabetical tiebreak. Report the tie instead.
+
+
+# %%
+value_counts = (
+    sim_df["jaccard_similarity"].value_counts().sort("jaccard_similarity", descending=True)
+)
+top_value = value_counts["jaccard_similarity"][0]
+top_group = sim_df.filter(pl.col("jaccard_similarity") == top_value)
+print(
+    f"{len(sim_df):,} stock pairs share at least one holder, taking "
+    f"{len(value_counts)} distinct similarity values across "
+    f"{len(data_institutions)} possible holders."
+)
+print(
+    f"The highest value is {top_value:.3f} and {len(top_group)} pairs sit on it. "
+    f"The rows below are the first ten of those {len(top_group)} in alphabetical order, "
+    "not the ten most similar pairs."
+)
+top_group.head(10)
 
 # %% [markdown]
 # **Interpretation**: Jaccard similarity measures the overlap in institutional
-# holders between two stocks. Pairs with high Jaccard share most of their
-# holders; whether that holder overlap drives co-movement in prices is the
-# downstream hypothesis that the crowding features in §23.5 are designed to
-# test. This notebook does not measure the price-co-movement relationship.
+# holders between two stocks, and with this few possible holders it is a coarse
+# measure - a single holder moving in or out steps the score by a visible
+# amount rather than nudging it. Whether holder overlap drives co-movement in
+# prices is the downstream hypothesis that the crowding features in §23.5 are
+# designed to test. This notebook does not measure the price-co-movement
+# relationship, and at this cohort size it could not resolve one.
 
 # %% [markdown]
 # ### Institutional Crowding Visualization
 #
-# Visualize which stocks are most widely held and the sector distribution.
+# Holder counts are drawn against the full range they could take, 0 to the size
+# of the cohort. A bar chart scaled to its own data would make a band running
+# from most of the cohort to all of it look like a spread, and the width of that
+# band is the thing worth seeing: within ten managers who each file thousands of
+# positions, the 50 largest names are held by nearly all of them.
 
 # %%
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], constrained_layout=True)
 
-# Panel (a): Most crowded stocks (by holder count)
+# Panel (a): most widely held names, against the cohort size
 stock_holders = {}
 for edge in graph.edges:
     if edge.edge_type == "HOLDS":
         stock_holders[edge.target_id] = stock_holders.get(edge.target_id, 0) + 1
 
-if stock_holders:
-    sorted_stocks = sorted(stock_holders.items(), key=lambda x: (-x[1], x[0]))[:15]
-    names = []
-    for cusip, _ in sorted_stocks:
-        match = [s for s in data_stocks if s["cusip"] == cusip]
-        names.append(match[0]["ticker"][:15] if match else cusip[:10])
-    counts = [c for _, c in sorted_stocks]
-    axes[0].barh(range(len(names)), counts, color=COLORS["blue"])
-    axes[0].set_yticks(range(len(names)))
-    axes[0].set_yticklabels(names, fontsize=8)
-    axes[0].set_xlabel("Number of Institutional Holders")
-    axes[0].invert_yaxis()
+sorted_stocks = sorted(stock_holders.items(), key=lambda x: (-x[1], x[0]))[:15]
+names = []
+for cusip, _ in sorted_stocks:
+    match = [s for s in data_stocks if s["cusip"] == cusip]
+    names.append(match[0]["label"] if match else cusip[:10])
+counts = [c for _, c in sorted_stocks]
+panel_span = (min(counts), max(counts))
+axes[0].barh(range(len(names)), counts, color=COLORS["blue"])
+axes[0].set_yticks(range(len(names)))
+axes[0].set_yticklabels(names, fontsize=8)
+axes[0].set_xlabel(f"Holders, of {len(data_institutions)} institutions in the cohort")
+axes[0].set_xlim(0, len(data_institutions))
+axes[0].set_xticks(range(0, len(data_institutions) + 1, 2))
+axes[0].invert_yaxis()
 
-# Panel (b): Sector distribution
+# Panel (b): what the sector name screen matched
 sector_counts = {}
-for s in data_stocks:
-    sector_counts[s["sector"]] = sector_counts.get(s["sector"], 0) + 1
-if sector_counts:
-    sector_rows = sorted(sector_counts.items(), key=lambda item: (-item[1], item[0]))
-    sectors = [row[0] for row in sector_rows]
-    scounts = [row[1] for row in sector_rows]
-    axes[1].barh(sectors[::-1], scounts[::-1], color=COLORS["blue"])
-    axes[1].set_xlabel("Stocks in Formation Cohort")
-    axes[1].set_title(
-        f"{sectors[0]} has the largest cohort share ({scounts[0]} stocks)", loc="left"
-    )
+for stock in data_stocks:
+    sector_counts[stock["sector"]] = sector_counts.get(stock["sector"], 0) + 1
+sector_rows = sorted(sector_counts.items(), key=lambda item: (-item[1], item[0]))
+sector_names = [row[0] for row in sector_rows]
+scounts = [row[1] for row in sector_rows]
+axes[1].barh(sector_names[::-1], scounts[::-1], color=COLORS["blue"])
+axes[1].set_xlabel("Cohort stocks")
+axes[1].set_title("What the issuer-name screen matched, Other included", loc="left")
 
 add_message_title(
     axes[0],
-    "The formation cohort reveals concentrated institutional ownership",
-    subtitle="Ten institutions and 50 stocks selected at the earliest 13F vintage",
+    "Holder counts and screened sectors for the formation cohort",
+    subtitle=(
+        f"{len(data_stocks)} stocks held by {len(data_institutions)} institutions, "
+        f"formed at report period {period_calendar['report_date'][0]}"
+    ),
 )
-fig.show()
+show_with_alt(
+    fig,
+    f"Two stacked panels. The upper one has horizontal bars for the {len(names)} most "
+    "widely held "
+    "stocks, labelled by shortened issuer name, on an axis running from zero to "
+    f"{len(data_institutions)} possible holders. The bars run from {panel_span[0]} to "
+    f"{panel_span[1]} holders, so they all end in a narrow band near the right edge and "
+    "the ordering between them is a difference of one or two holders. The lower one has "
+    "horizontal bars counting cohort stocks per screened sector, longest first, led by "
+    f"{sector_names[0]} at {scounts[0]} of {len(data_stocks)}.",
+)
 
 # %% [markdown]
-# The left panel reports holder counts within the fixed ten-institution cohort.
-# These counts describe overlap; they do not measure the price impact of an unwind.
+# The top panel describes holder overlap inside a fixed ten-institution cohort;
+# it does not measure the price impact of an unwind. The bottom panel describes
+# the name screen, not the market: "Other" is where an issuer whose name nobody
+# wrote into `SECTOR_TERMS` lands, so its height is a property of the term list.
 
 # %% [markdown]
 # ## 6. Top Holdings by Sector
@@ -839,7 +1021,7 @@ print("Cypher equivalent:")
 print(f"""
 MATCH (i:Institution)-[h:HOLDS]->(s:Stock)-[:IN_SECTOR]->(sec:Sector {{name: '{sector_to_analyze}'}})
 WITH s, SUM(h.value) AS total_ownership
-RETURN s.ticker, s.issuer, total_ownership
+RETURN s.label, s.issuer, total_ownership
 ORDER BY total_ownership DESC
 LIMIT 10
 """)
@@ -865,14 +1047,14 @@ for cusip, value in sector_ownership.items():
     if stock:
         sector_data.append(
             {
-                "ticker": stock.properties.get("ticker", ""),
+                "stock": stock.properties.get("label", ""),
                 "issuer": stock.properties.get("issuer", cusip),
                 "total_ownership_bn": value / 1_000_000_000,
             }
         )
 
 sector_df = pl.DataFrame(sector_data).sort(
-    ["total_ownership_bn", "ticker"], descending=[True, False]
+    ["total_ownership_bn", "stock"], descending=[True, False]
 )
 sector_df.head(10)
 
@@ -893,13 +1075,13 @@ sector_df.head(10)
 INSTITUTION_QUERY = """
 UNWIND $rows AS row
 MERGE (i:Institution {cik: row.cik})
-SET i.name = row.name, i.aum = row.aum, i.strategy = row.strategy
+SET i.name = row.name, i.equity_13f_value = row.equity_13f_value
 """
 
 STOCK_QUERY = """
 UNWIND $rows AS row
 MERGE (s:Stock {cusip: row.cusip})
-SET s.ticker = row.ticker, s.issuer = row.issuer, s.sector = row.sector
+SET s.label = row.label, s.issuer = row.issuer, s.sector = row.sector
 MERGE (sector:Sector {name: row.sector})
 MERGE (s)-[:IN_SECTOR]->(sector)
 """
@@ -908,8 +1090,8 @@ HOLDING_QUERY = """
 UNWIND $rows AS row
 MATCH (i:Institution {cik: row.cik})
 MATCH (s:Stock {cusip: row.cusip})
-MERGE (i)-[h:HOLDS {quarter: row.quarter}]->(s)
-SET h.shares = row.shares, h.value = row.value
+MERGE (i)-[h:HOLDS {report_date: row.report_date}]->(s)
+SET h.shares = row.shares, h.value = row.value, h.available_from = row.available_from
 """
 
 
@@ -954,20 +1136,27 @@ def clear_holdings_subgraph(session) -> None:
 
 # %%
 def build_graph_snapshot(holding_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Record the source bytes, cohort policy, vintages, and expected graph counts."""
-    quarters = sorted({row["quarter"] for row in holding_rows})
+    """Record the source bytes, cohort policy, report periods, and graph counts.
+
+    A consumer reads its own cutoff from this node instead of restating one.
+    `03_graph_rag_qa` pinned the literal "2026-02-17" and broke the first time
+    the artifact rolled a quarter forward; `latest_available_from` is the same
+    fact, written once by the producer.
+    """
+    periods = sorted({row["report_date"] for row in holding_rows})
     return {
         "name": "ch23_13f",
         "source_sha256": SOURCE_SHA256,
         "source_rows": SOURCE_ROWS,
-        "formation_quarter": quarters[0],
-        "latest_quarter": quarters[-1],
-        "vintage_count": len(quarters),
+        "formation_report_date": periods[0],
+        "latest_report_date": periods[-1],
+        "latest_available_from": max(row["available_from"] for row in holding_rows),
+        "report_period_count": len(periods),
         "institution_count": len(data_institutions),
         "stock_count": len(data_stocks),
         "holding_count": len(holding_rows),
-        "cohort_policy": "earliest-vintage formation, fixed forward",
-        "vintage_basis": "filing-date availability clusters, not SEC reportDate",
+        "cohort_policy": "earliest-report-period formation, fixed forward",
+        "position_basis": "long equity only; reported put and call rows excluded",
     }
 
 
@@ -1003,10 +1192,7 @@ def load_13f_to_neo4j() -> dict:
 
     Returns stats dict with counts of loaded entities/relationships.
     """
-    holding_rows = [
-        {"cik": cik, "cusip": cusip, "shares": shares, "value": value, "quarter": quarter}
-        for cik, cusip, shares, value, quarter in data_holdings_all_vintages
-    ]
+    holding_rows = data_holdings_all_periods
     snapshot = build_graph_snapshot(holding_rows)
     print("Loading to Neo4j...")
     with NEO4J_DRIVER.session() as session:
@@ -1039,7 +1225,10 @@ neo4j_stats = load_13f_to_neo4j()
 # %% [markdown]
 # ## 8. Summary Statistics
 #
-# Key statistics for Chapter 23 integration.
+# Two graphs were built here and they are different sizes. The in-memory graph
+# carries the latest report period only, which is what §4-6 queried; Neo4j
+# carries every period, which is what `03_graph_rag_qa` needs to answer an
+# as-of question. Each row below says which one it counts.
 
 # %%
 # Compute statistics
@@ -1057,13 +1246,13 @@ for c, h in stock_holder_sets.items():
     if len(h) == max_crowding:
         node = graph.get_node(c)
         if node:
-            name = node.properties.get("ticker") or node.properties.get("issuer", c)
+            name = node.properties.get("label") or node.properties.get("issuer", c)
             most_crowded.append(name)
 
 max_sim = sim_df.row(0) if len(sim_df) > 0 else None
 
-n_vintage_holdings = len(data_holdings_all_vintages)
-n_vintages = len({h[4] for h in data_holdings_all_vintages})
+n_period_holdings = len(data_holdings_all_periods)
+n_periods = len({row["report_date"] for row in data_holdings_all_periods})
 
 # %%
 summary_rows = [
@@ -1071,15 +1260,15 @@ summary_rows = [
     ("Institutions", n_institutions),
     ("Stocks", n_stocks),
     ("Sectors", n_sectors),
-    ("Holdings relationships (latest)", n_holdings),
+    ("HOLDS edges in the in-memory graph (latest period)", n_holdings),
     (
-        "Vintage HOLDS edges (Neo4j)",
-        f"{n_vintage_holdings} across {n_vintages} filing vintages",
+        "HOLDS edges in Neo4j",
+        f"{n_period_holdings} across {n_periods} report periods",
     ),
-    ("Avg holdings per inst", f"{avg_holdings_per_inst:.1f}"),
-    ("Avg holders per stock", f"{avg_holders_per_stock:.1f}"),
-    ("Max crowding (holders)", max_crowding),
-    ("Shared holdings pairs", len(sim_df)),
+    ("Avg holdings per institution (latest period)", f"{avg_holdings_per_inst:.1f}"),
+    ("Avg holders per stock (latest period)", f"{avg_holders_per_stock:.1f}"),
+    ("Max holders on one stock", f"{max_crowding} of {n_institutions}"),
+    ("Stock pairs sharing a holder", len(sim_df)),
     ("Neo4j loaded", "Yes" if NEO4J_DRIVER else "No"),
 ]
 if most_crowded:
@@ -1087,7 +1276,11 @@ if most_crowded:
     summary_rows.insert(8, ("Most crowded stocks", ", ".join(most_crowded[:5])))
 if max_sim:
     summary_rows.insert(
-        -1, ("Highest similarity pair", f"{max_sim[0]}-{max_sim[1]} ({max_sim[2]:.3f})")
+        -1,
+        (
+            "Pairs tied at the highest similarity",
+            f"{len(top_group)} at {top_value:.3f}",
+        ),
     )
 summary_df = pl.DataFrame(
     {"Metric": [r[0] for r in summary_rows], "Value": [str(r[1]) for r in summary_rows]}
@@ -1095,13 +1288,12 @@ summary_df = pl.DataFrame(
 summary_df
 
 # %% [markdown]
-# The summary table fixes the scope and reports each count from the executed
-# graph. The most crowded stocks are held by a majority of the sampled
-# institutions, and the highest Jaccard pair shares most of its holders. The same
-# information can be derived from the flat 13F table via groupby; the graph
-# representation makes multi-hop traversals (e.g. "stocks connected to
-# Berkshire's holdings through any other holder") expressible in a single
-# query.
+# Every count above comes from the executed graph, and every one of them is
+# reachable from the flat 13F table with a groupby. What the graph buys is the
+# multi-hop question: "stocks connected to this manager's holdings through any
+# other holder" is one traversal here and a chain of self-joins there. Nothing
+# in this table is a market measurement - the cohort is ten managers and fifty
+# names, chosen by size.
 
 # %% [markdown]
 # ## 9. Verification
@@ -1121,13 +1313,14 @@ if most_crowded:
 completion_record = {
     "source_sha256": SOURCE_SHA256,
     "source_rows": SOURCE_ROWS,
-    "formation_vintage": neo4j_stats["formation_quarter"],
-    "latest_vintage": neo4j_stats["latest_quarter"],
-    "vintage_count": n_vintages,
+    "formation_report_date": neo4j_stats["formation_report_date"],
+    "latest_report_date": neo4j_stats["latest_report_date"],
+    "latest_available_from": neo4j_stats["latest_available_from"],
+    "report_period_count": n_periods,
     "institutions": n_institutions,
     "stocks": n_stocks,
     "holdings_latest": n_holdings,
-    "holdings_all_vintages": n_vintage_holdings,
+    "holdings_all_periods": n_period_holdings,
     "sector_edges": neo4j_stats["sector_edges"],
     "graph_nodes": len(graph.nodes),
     "graph_edges": len(graph.edges),
@@ -1141,23 +1334,45 @@ NEO4J_DRIVER.close()
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **13F filings form a bipartite graph** -- institutions connected to stocks
-#    through HOLDS edges with value, share count, and a filing-availability
-#    vintage stored under the legacy `quarter` key.
-# 2. **Graph queries express ownership patterns directly**: shared holdings,
+# 1. **13F filings form a bipartite graph**: institutions connected to stocks
+#    through HOLDS edges carrying value, share count, the report period the
+#    position is as of, and the filing date it became public. Two dates, because
+#    a quarter-over-quarter comparison and a point-in-time query need different
+#    ones, and using either for the other question is a look-ahead in one
+#    direction and a misaligned quarter in the other.
+#
+# 2. **A 13F is not a portfolio, and its option rows are not ownership.** A put
+#    disclosed on an issuer profits when the issuer falls, and summing it into
+#    the same `value` as the shares makes a short view indistinguishable from a
+#    long one. The run prints how much was excluded on that basis; it is not a
+#    rounding-sized share of the reported total, and it reorders the managers by
+#    size when you put it back in. `22_rag_financial_research/07` makes the same
+#    exclusion for the same reason.
+#
+# 3. **Graph queries express ownership patterns directly**: shared holdings,
 #    network paths, and multi-hop sector aggregations are single Cypher
 #    traversals; the equivalent SQL requires self-joins on the holdings table.
-#    This notebook does not benchmark Cypher vs SQL execution time.
-# 3. **Jaccard co-ownership similarity** projects the bipartite graph into a
-#    stock-stock network. Within the fixed formation cohort, the highest-similarity
-#    pair shares most of its institutional holders. The notebook does not
-#    measure how this co-ownership structure relates to return correlation.
-# 4. **Crowding detection** identifies stocks held by many of the sampled
-#    institutions simultaneously. Whether this concentration translates to
-#    amplified drawdowns during unwinds is not measured here.
-# 5. **Neo4j persistence** supports live point-in-time queries over the loaded
-#    filing-availability vintages; the in-memory graph supports the
-#    single-vintage teaching queries.
+#    This notebook does not benchmark Cypher against SQL execution time.
+#
+# 4. **A similarity over ten possible holders is coarse.** Jaccard scores here
+#    are ratios of small integers, so the pairs bunch onto a handful of values
+#    and the top of a sorted list is a tie broken alphabetically. The run reports
+#    how many pairs sit on the top value instead of printing ten of them as a
+#    ranking. Whether co-ownership structure relates to return correlation is
+#    not measured here, and a cohort this size could not resolve it.
+#
+# 5. **The security is the CUSIP, not the name.** Managers spell the same
+#    issuer differently in the same quarter, and grouping positions on
+#    `(cusip, issuer)` puts both spellings into the cohort as separate stocks.
+#    Neo4j `MERGE`s on the CUSIP and collapses them back, so the cohort would
+#    have claimed a size the graph did not have - the load-count assertion is
+#    what caught it. The run prints which CUSIPs were merged.
+#
+# 6. **Two counts of "the graph" are two graphs.** The in-memory graph holds the
+#    latest report period, which is what §4-6 query; Neo4j holds every period,
+#    which is what `03_graph_rag_qa` needs. The summary table names which one
+#    each row counts, and `GraphSnapshot` records the same facts for consumers
+#    so they read the cutoff rather than restate it.
 #
 # **Next**: See `07_dynamic_kg_temporal` for how this ownership graph evolves over
 # time, enabling trend detection in institutional positioning.

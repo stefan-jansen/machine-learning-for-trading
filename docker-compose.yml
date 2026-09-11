@@ -37,6 +37,21 @@ x-common: &common
     # can populate /data. ML4T_DATA_PATH=/data below points every downloader
     # here; a read-only mount makes each write fail with "Read-only file system".
     - ${ML4T_DATA_PATH:-./data}:/data:rw
+    # Every notebook that pins a HuggingFace checkpoint loads it with
+    # local_files_only=True, so a container run has to see the host's cache or the
+    # load raises LocalEntryNotFoundError. Read-write, because the notebooks that do
+    # not pin a checkpoint fetch it on first use (10_text_feature_engineering/09
+    # loads FinBERT through a bare from_pretrained), and a read-only mount turns
+    # that download into a failure. What a pinned load must not do is silently
+    # substitute a different checkpoint, and `revision=` with local_files_only is
+    # what prevents that, not the mount mode.
+    #
+    # The host directory has to exist before the first `docker compose` command.
+    # Docker creates a missing bind source as root, and the container runs as the
+    # invoking user, so an uncached download then fails on permissions despite the
+    # :rw. `mkdir -p ~/.cache/huggingface` once is the whole fix; any host that has
+    # run a HuggingFace library already has it.
+    - ${HF_HOME:-${HOME}/.cache/huggingface}:/home/ml4t/.cache/huggingface:rw
   environment:
     - ML4T_DATA_PATH=/data
     - ML4T_PATH=/app

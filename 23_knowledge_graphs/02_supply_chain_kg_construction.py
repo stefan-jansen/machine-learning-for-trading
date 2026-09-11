@@ -18,14 +18,16 @@
 #
 # **Chapter 23: Knowledge Graphs for Financial AI**
 #
-# **Docker image**: `ml4t-gpu`
+# **Docker image**: `ml4t`
 #
 # > **Neo4j required**: The checked-in Qwen2.5 extraction cache is the default
-# > production input. A CUDA GPU is required only when deliberately regenerating it:
+# > production input, and the default path needs no GPU:
 # > ```bash
 # > docker compose --profile kg up -d neo4j
-# > docker compose run --rm ml4t-gpu python 23_knowledge_graphs/02_supply_chain_kg_construction.py
+# > docker compose run --rm ml4t python 23_knowledge_graphs/02_supply_chain_kg_construction.py
 # > ```
+# > Set `RERUN_EXTRACTION=True` to rebuild the cache, which does need a CUDA GPU and
+# > the `ml4t-gpu` image.
 #
 #
 # This notebook demonstrates large-scale knowledge graph construction from SEC 10-K
@@ -55,6 +57,7 @@ import os
 import re
 import tempfile
 import time
+from collections import Counter
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,15 +68,16 @@ import torch
 
 from utils.paths import get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 # %% tags=["parameters"]
 # Production defaults. Papermill overrides them for testing.
-# The staged SP100 10-K corpus ships with ~601 filings × 101 companies × 2020-2025.
-# MAX_COMPANIES caps the unique companies processed (most recent filings first per
-# company); set to 0 to process the full corpus.
+# The staged SP100 10-K corpus ships with 601 filings across 101 companies, 2020-2025.
+# MAX_COMPANIES caps the companies sent through the LLM when RERUN_EXTRACTION is True,
+# keeping every filing of the alphabetically first N symbols. It does nothing on the
+# cached path: those triples were extracted from the whole corpus.
 MAX_COMPANIES = 0
 LLM_BATCH_SIZE = 2  # Texts per GPU batch (Qwen2.5-7B uses ~14GB; 2 leaves headroom on 24GB)
 RERUN_EXTRACTION = False  # Set True to force LLM re-extraction; False loads cached triples
@@ -181,14 +185,20 @@ assert filings_df.select(pl.struct(["symbol", "accession_no"]).is_duplicated().s
 assert filings_df.filter(pl.col("text").str.len_chars() != pl.col("text_length")).is_empty()
 print(f"Loaded {len(filings_df)} 10-K filings via load_sec_filings()")
 
-# Optionally subsample for tractable Qwen runtime: keep MAX_COMPANIES distinct
-# companies (sorted alphabetically for determinism), all of their filings.
-if MAX_COMPANIES > 0:
+# Subsample for tractable Qwen runtime, but only when the LLM is the source of the
+# triples. On the cached path the committed triples came from the whole corpus, so
+# subsampling here would relabel every figure with a corpus that produced none of them.
+if MAX_COMPANIES > 0 and RERUN_EXTRACTION:
     keep = sorted(filings_df["symbol"].unique().to_list())[:MAX_COMPANIES]
     filings_df = filings_df.filter(pl.col("symbol").is_in(keep))
     print(
         f"Subset to MAX_COMPANIES={MAX_COMPANIES}: {len(filings_df)} filings "
         f"across {filings_df['symbol'].n_unique()} companies"
+    )
+elif MAX_COMPANIES > 0:
+    print(
+        f"MAX_COMPANIES={MAX_COMPANIES} ignored: RERUN_EXTRACTION is False, and the "
+        "cached triples were extracted from the full corpus"
     )
 
 # Show summary
@@ -519,30 +529,128 @@ CACHE_META_PATH = CACHE_DIR / "extracted_triples.meta.json"
 
 if not RERUN_EXTRACTION:
     cached_df = _validate_cache(CACHE_PATH, CACHE_META_PATH)
+    CACHE_META = json.loads(CACHE_META_PATH.read_text())
     all_triples = [
         Triple(r["subject"], r["predicate"], r["object"]) for r in cached_df.iter_rows(named=True)
     ]
-    extraction_elapsed = 0.0
+    extraction_elapsed = None
+    # MODEL_NAME says what would run, not what did: the cache carries its own
+    # producer, and overriding the parameter cannot retroactively change it.
+    EXTRACTOR_NAME = CACHE_META["model_name"]
+    CACHE_CONTENT_HASH = CACHE_META["content_hash"]
     print(f"Loaded and validated {len(all_triples)} cached triples from {CACHE_PATH.name}")
+    print(f"Cache producer: {EXTRACTOR_NAME}, {CACHE_META['row_count']} rows")
+    # Narrow to the cohort the producer recorded. A cache regenerated with
+    # MAX_COMPANIES set covers part of the corpus, and the roster and figures
+    # below have to describe the filings the triples came from.
+    CACHE_SCOPE = int(CACHE_META.get("max_companies", 0) or 0)
+    if CACHE_SCOPE:
+        cached_symbols = sorted(filings_df["symbol"].unique().to_list())[:CACHE_SCOPE]
+        filings_df = filings_df.filter(pl.col("symbol").is_in(cached_symbols))
+        years = filings_df["year"].unique().sort().to_list()
+        print(
+            f"Cache covers MAX_COMPANIES={CACHE_SCOPE}: narrowed to {len(filings_df)} "
+            f"filings across {filings_df['symbol'].n_unique()} companies"
+        )
 else:
     all_triples, extraction_elapsed = run_full_extraction(filings_df.to_dicts())
     cache_df = pl.DataFrame([triple.to_dict() for triple in all_triples])
     cache_df.write_parquet(CACHE_PATH)
     _write_cache_meta(CACHE_PATH, CACHE_META_PATH, len(all_triples))
+    EXTRACTOR_NAME = MODEL_NAME
+    CACHE_CONTENT_HASH = _hash_cache_bytes(CACHE_PATH)
     print(f"Regenerated {len(all_triples)} triples in {extraction_elapsed:.1f}s")
 
 # %% [markdown]
 # ## 7. Entity Resolution
 #
-# Normalize entity names for graph consistency. SEC filings use inconsistent naming
-# (e.g., "Taiwan Semiconductor Manufacturing Company" vs "TSMC"). Without resolution,
-# the same supplier appears as multiple graph nodes, fragmenting degree centrality.
+# The extraction prompt hands the model the filer's name and asks it to repeat that
+# name as the subject. It comes back unchanged for 51 of the 133 distinct subject
+# strings in the cache. Another 61 are the same registrant re-cased, re-punctuated or
+# word-order swapped, and 21 name something else, usually an operating subsidiary or
+# a brand. Each spelling is a separate node unless something merges them, and every
+# degree count downstream is then measured on the fragments.
+#
+# Two things resolve names here. A canonical key strips case, punctuation, corporate
+# suffixes and word order, so all spellings of one name collapse onto one node. The
+# key is then looked up in the roster of S&P 100 filers built from the corpus itself,
+# and a match takes the filer's official name. That second step is what makes a
+# company named as somebody's competitor the same node as the company that filed its
+# own 10-K.
+
+# %% [markdown]
+# ### Canonical Entity Key
+#
+# The join key for every name in the graph. Sorting the surviving tokens is what
+# merges `SCHWAB CHARLES CORP` with `The Charles Schwab Corporation`; it is the only
+# rule here that can merge names with different word order, and on this cache it
+# merges exactly one group, the four spellings of that company.
+
+# %%
+CORPORATE_SUFFIXES = frozenset(
+    {
+        "inc",
+        "incorporated",
+        "corp",
+        "corporation",
+        "co",
+        "cos",
+        "company",
+        "companies",
+        "plc",
+        "ltd",
+        "limited",
+        "lp",
+        "llc",
+        "holdings",
+        "holding",
+        "group",
+        "the",
+        "nv",
+        "sa",
+        "ag",
+        "new",
+        "del",
+        "de",
+    }
+)
+
+
+def entity_key(name: str) -> str:
+    """Canonical join key: case, punctuation, corporate suffix and word order removed."""
+    stripped = re.sub(r"[^a-z0-9]+", " ", name.lower())
+    tokens = [token for token in stripped.split() if token not in CORPORATE_SUFFIXES]
+    return " ".join(sorted(tokens or stripped.split()))
+
+
+def normalize_entity_text(name: str) -> str:
+    """Collapse whitespace and strip trailing punctuation from extracted names."""
+    return " ".join(name.split()).strip(" ,.;:")
+
+
+# %% [markdown]
+# ### Filer Roster
+#
+# The corpus knows the official name of every company whose filings were extracted,
+# so the subject of a triple is not a name that has to be guessed at. Alphabet files
+# under two symbols with one name, which is why the roster is keyed on the name.
+
+# %%
+FILER_ROSTER: dict[str, str] = {}
+for filer_name in sorted(set(filings_df["company_name"].to_list())):
+    FILER_ROSTER.setdefault(entity_key(filer_name), filer_name)
+assert len(FILER_ROSTER) == len(set(filings_df["company_name"].to_list())), (
+    "two filers share a canonical key; the roster cannot resolve between them"
+)
+print(f"Filer roster: {len(FILER_ROSTER)} issuers from {filings_df['symbol'].n_unique()} symbols")
 
 # %% [markdown]
 # ### Entity Alias Map
 #
-# Maps common name variants to standard short forms. In production, this would be
-# a more comprehensive lookup (fuzzy matching, ticker resolution).
+# Short forms for entities that never file with the SEC, so the roster cannot reach
+# them. The extraction prompt already tells the model to emit `TSMC` rather than the
+# full legal name, and the hit counts printed below show what that leaves for the
+# alias map to do.
 
 # %%
 ENTITY_ALIASES = {
@@ -551,24 +659,25 @@ ENTITY_ALIASES = {
     "Foxconn Technology Group": "Foxconn",
     "Hon Hai Precision": "Foxconn",
     "Samsung Electronics": "Samsung",
-    "Samsung Display": "Samsung Display",
     "SK Hynix": "SK Hynix",
     "Hynix": "SK Hynix",
     "Advanced Micro Devices": "AMD",
     "Amazon Web Services": "AWS",
-    "Google Cloud": "Google Cloud",
     "Microsoft Azure": "Azure",
 }
+ALIAS_BY_KEY = {entity_key(variant): standard for variant, standard in ENTITY_ALIASES.items()}
+assert len(ALIAS_BY_KEY) == len(ENTITY_ALIASES), "two aliases collapse onto one canonical key"
 
 # %% [markdown]
 # ### Generic Entity Filter
 #
-# Reject category phrases that do not identify a company or organization.
-
+# Reject category phrases that do not identify a company or organization. The filter
+# matches on the canonical key rather than the raw string, so a phrase cannot escape
+# it by arriving in a different case or with a hyphen the list does not carry.
 
 # %%
 # Generic category phrases are not named graph entities. A pipe-delimited string
-# keeps this reader-facing configuration compact while preserving exact matching.
+# keeps this reader-facing configuration compact.
 GENERIC_ENTITY_NAMES = """
 aluminum suppliers|broadcast station group|broadcast station groups|composite suppliers
 media corporation|media corporations|numerous suppliers|restaurants|third party suppliers
@@ -586,54 +695,130 @@ mobile providers|other multichannel video providers|digital messaging and paymen
 high-frequency stores|3000+ small businesses|small, minority- and women-owned businesses
 construction, earthmoving, material handling, roadbuilding, and/or forestry equipment locations
 """.strip()
-GENERIC_ENTITY_BLACKLIST = frozenset(
-    name.strip() for name in GENERIC_ENTITY_NAMES.replace("\n", "|").split("|")
+GENERIC_ENTITY_KEYS = frozenset(
+    entity_key(name.strip()) for name in GENERIC_ENTITY_NAMES.replace("\n", "|").split("|")
 )
-
-
-def normalize_entity_text(name: str) -> str:
-    """Collapse whitespace and strip trailing punctuation from extracted names."""
-    cleaned = " ".join(name.split()).strip(" ,.;:")
-    return cleaned
-
-
-def resolve_entity(name: str) -> str:
-    """Resolve an entity to its standard name."""
-    cleaned = normalize_entity_text(name)
-    return ENTITY_ALIASES.get(cleaned, cleaned)
+assert not (GENERIC_ENTITY_KEYS & set(FILER_ROSTER)), "a generic phrase collides with a filer"
 
 
 # %%
 def is_actionable_entity(name: str, predicate: str) -> bool:
     """Reject generic placeholders that do not identify a real graph node."""
     lower = name.lower()
-    if not name or lower in GENERIC_ENTITY_BLACKLIST:
+    if not name or entity_key(name) in GENERIC_ENTITY_KEYS:
         return False
     if predicate == "HAS_SUPPLIER" and "supplier" in lower and lower not in {"supplier.io"}:
         return False
     return not (predicate == "HAS_CUSTOMER" and "customer" in lower)
 
 
+# %% [markdown]
+# ### Canonical Name Chooser
+#
+# Every name sharing a key becomes one node, so one surface form has to represent the
+# group. A filer match takes the corpus spelling. Otherwise the most frequent form
+# wins, with all-caps forms broken to the back of the tie, so a group holding one
+# `Apple` and one `APPLE` resolves to `Apple`.
+
+
 # %%
-# Apply entity resolution
+def build_canonical_names(triples: list[Triple]) -> tuple[dict[str, str], dict[str, int]]:
+    """Map every extracted name to one canonical form, and count the alias rewrites."""
+    frequency: Counter[str] = Counter()
+    forms: dict[str, set[str]] = {}
+    for triple in triples:
+        for raw in (triple.subject, triple.object):
+            name = normalize_entity_text(raw)
+            if not name:
+                continue
+            frequency[name] += 1
+            forms.setdefault(entity_key(name), set()).add(name)
+
+    canonical: dict[str, str] = {}
+    alias_hits: Counter[str] = Counter()
+    for key, group in forms.items():
+        if key in FILER_ROSTER:
+            chosen = FILER_ROSTER[key]
+        elif key in ALIAS_BY_KEY:
+            chosen = ALIAS_BY_KEY[key]
+            alias_hits[key] += sum(frequency[name] for name in group)
+        else:
+            chosen = sorted(group, key=lambda name: (-frequency[name], name.isupper(), name))[0]
+        for name in group:
+            canonical[name] = chosen
+    return canonical, alias_hits
+
+
+def resolve_entity(name: str, canonical: dict[str, str]) -> str:
+    """Resolve one extracted name to its canonical graph node name."""
+    cleaned = normalize_entity_text(name)
+    return canonical.get(cleaned, cleaned)
+
+
+# %%
+CANONICAL_NAMES, ALIAS_HITS = build_canonical_names(all_triples)
+
 resolved_triples = []
 for t in all_triples:
-    resolved_subject = resolve_entity(t.subject)
-    resolved_object = resolve_entity(t.object)
+    resolved_subject = resolve_entity(t.subject, CANONICAL_NAMES)
+    resolved_object = resolve_entity(t.object, CANONICAL_NAMES)
     if not is_actionable_entity(resolved_subject, t.predicate):
         continue
     if not is_actionable_entity(resolved_object, t.predicate):
         continue
-    resolved = Triple(
-        subject=resolved_subject,
-        predicate=t.predicate,
-        object=resolved_object,
+    resolved_triples.append(
+        Triple(subject=resolved_subject, predicate=t.predicate, object=resolved_object)
     )
-    resolved_triples.append(resolved)
 
 # Deduplicate
 unique_triples = list({(t.subject, t.predicate, t.object): t for t in resolved_triples}.values())
 print(f"After resolution and dedup: {len(unique_triples)} unique triples")
+
+# %% [markdown]
+# ### What Resolution Actually Did
+#
+# Print the work rather than asserting it happened. The alias table shows which
+# entries rewrote a name and which were unreachable, either because the roster
+# already covers that entity or because no spelling in the cache matches them.
+
+# %%
+raw_names = {normalize_entity_text(n) for t in all_triples for n in (t.subject, t.object) if n}
+merged_names = {CANONICAL_NAMES[n] for n in raw_names if n in CANONICAL_NAMES}
+raw_subjects = {normalize_entity_text(t.subject) for t in all_triples}
+matched_subjects = {n for n in raw_subjects if entity_key(n) in FILER_ROSTER}
+print(f"Distinct extracted names: {len(raw_names)} -> {len(merged_names)} after resolution")
+print(
+    f"Subject strings matching a filer: {len(matched_subjects)}/{len(raw_subjects)} "
+    f"({len(raw_subjects - matched_subjects)} name entities the roster cannot reach)"
+)
+print("\nAlias map, by rewritten name slots:")
+for variant, standard in ENTITY_ALIASES.items():
+    key = entity_key(variant)
+    if key in FILER_ROSTER:
+        reason = f"unused: the filer roster resolves it to {FILER_ROSTER[key]}"
+    elif ALIAS_HITS[key]:
+        slots = ALIAS_HITS[key]
+        reason = f"rewrote {slots} name slot{'s' if slots != 1 else ''}"
+    else:
+        reason = "unused: no spelling in the cache matches this variant"
+    print(f"  {variant} -> {standard}: {reason}")
+
+# %% [markdown]
+# ### The Names the Roster Cannot Reach
+#
+# A subject that matches no filer is not noise. Most of them are operating
+# subsidiaries and brands that the model named instead of the registrant, and no
+# string rule can fold `KAYAK` into `Booking Holdings Inc.` A production pipeline
+# resolves these against a corporate hierarchy; this one leaves them as their own
+# nodes, so the company count below is larger than the number of filers in it.
+
+# %%
+unreachable_subjects = sorted(
+    {t.subject for t in unique_triples if entity_key(t.subject) not in FILER_ROSTER}
+)
+print(f"Subject nodes that are not S&P 100 filers: {len(unreachable_subjects)}")
+for name in unreachable_subjects:
+    print(f"  {name}")
 
 # %% [markdown]
 # ## 8. Graph Statistics
@@ -651,6 +836,8 @@ suppliers = {t.object for t in unique_triples if t.predicate == "HAS_SUPPLIER"}
 competitors = {t.object for t in unique_triples if t.predicate == "COMPETES_WITH"}
 customers = {t.object for t in unique_triples if t.predicate == "HAS_CUSTOMER"}
 
+filer_companies = {c for c in companies if entity_key(c) in FILER_ROSTER}
+
 supplier_rels = sum(1 for t in unique_triples if t.predicate == "HAS_SUPPLIER")
 competitor_rels = sum(1 for t in unique_triples if t.predicate == "COMPETES_WITH")
 customer_rels = sum(1 for t in unique_triples if t.predicate == "HAS_CUSTOMER")
@@ -665,6 +852,10 @@ for t in unique_triples:
         supplier_companies[t.object].add(t.subject)
 
 shared_suppliers = {s: cs for s, cs in supplier_companies.items() if len(cs) > 1}
+assert shared_suppliers, (
+    "no supplier is named by more than one company, so the shared-supplier figures "
+    "below have nothing to draw. A subsampled extraction run reaches this state."
+)
 
 # %%
 print("=" * 60)
@@ -679,25 +870,46 @@ print(f"Supplier relationships:   {supplier_rels}")
 print(f"Competitor relationships: {competitor_rels}")
 print(f"Customer relationships:   {customer_rels}")
 print(f"Total relationships:      {len(unique_triples)}")
-print(f"Shared suppliers:         {len(shared_suppliers)}")
+print(f"  of the companies, S&P 100 filers: {len(filer_companies)}")
+print(f"  suppliers named by one company:   {len(suppliers) - len(shared_suppliers)}")
+print(f"  suppliers named by more than one: {len(shared_suppliers)}")
 
 if shared_suppliers:
-    print("\nTop Shared Suppliers (critical supply chain nodes):")
+    print("\nSuppliers named by more than one company:")
     sorted_shared = sorted(shared_suppliers.items(), key=lambda x: len(x[1]), reverse=True)
     for supplier, companies_set in sorted_shared[:10]:
         print(f"  {supplier}: {len(companies_set)} companies")
 
 # %% [markdown]
-# Shared-supplier degree measures exposure concentration in the extracted graph.
-# It does not establish disruption probabilities or causal propagation. The metric
-# is useful as a portfolio diagnostic after the extracted entities have been reviewed.
+# Almost every extracted supplier is named by exactly one company, so the shared
+# structure this chapter queries rests on the handful above. That is a property of
+# what a 10-K names rather than of the supply chain: a filer lists the suppliers it
+# is required to disclose, and only the ones many filers depend on get repeated.
+#
+# Shared-supplier degree measures exposure concentration in the extracted graph. It
+# does not establish disruption probabilities or causal propagation. The metric is
+# useful as a portfolio diagnostic after the extracted entities have been reviewed.
 
 # %% [markdown]
 # ### Relationship Type Distribution
 #
-# Visualize the balance between supplier, competitor, and customer edges.
+# The edge classes, and the supplier degree distribution behind the shared-supplier
+# claim. Panel (b) plots every supplier named by more than one company, so its bar
+# count is the finding rather than a top-N cut.
 
 # %%
+RELATIONSHIP_FIGURE_ALT = (
+    f"Two stacked panels. The upper bar chart counts extracted edges by class: "
+    f"{competitor_rels} competitor, {customer_rels} customer and {supplier_rels} "
+    f"supplier relationships. The lower horizontal bar chart shows the "
+    f"{len(shared_suppliers)} suppliers named by more than one company: "
+    + ", ".join(
+        f"{name} at {len(cs)}"
+        for name, cs in sorted(shared_suppliers.items(), key=lambda kv: -len(kv[1]))
+    )
+    + " companies."
+)
+
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], constrained_layout=True)
 
 # Panel (a): Relationship counts
@@ -714,28 +926,37 @@ for bar, count in zip(bars, rel_counts):
         fontweight="bold",
     )
 
-# Panel (b): Top shared suppliers
-if shared_suppliers:
-    sorted_shared = sorted(shared_suppliers.items(), key=lambda x: len(x[1]), reverse=True)[:10]
-    names = [s[:20] for s, _ in sorted_shared]
-    counts = [len(cs) for _, cs in sorted_shared]
-    axes[1].barh(range(len(names)), counts, color=COLORS["amber"])
-    axes[1].set_yticks(range(len(names)))
-    axes[1].set_yticklabels(names, fontsize=8)
-    axes[1].set_xlabel("Companies Served")
-    axes[1].set_title("Shared suppliers concentrate company exposure", loc="left")
-    axes[1].invert_yaxis()
+# Panel (b): every supplier named by more than one company, not a top-N slice
+sorted_shared = sorted(shared_suppliers.items(), key=lambda x: len(x[1]), reverse=True)
+names = [s[:20] for s, _ in sorted_shared]
+counts = [len(cs) for _, cs in sorted_shared]
+axes[1].barh(range(len(names)), counts, color=COLORS["amber"])
+axes[1].set_yticks(range(len(names)))
+axes[1].set_yticklabels(names, fontsize=8)
+axes[1].set_xlabel("Companies naming this supplier")
+axes[1].set_title("Suppliers named by more than one company", loc="left")
+axes[1].invert_yaxis()
+axes[1].text(
+    0.99,
+    0.05,
+    f"{len(suppliers) - len(shared_suppliers)} of {len(suppliers)} extracted suppliers\n"
+    "are named by one company only",
+    transform=axes[1].transAxes,
+    ha="right",
+    va="bottom",
+    fontsize=8,
+    color=COLORS["slate"],
+)
 
-dominant_type, dominant_count = max(zip(rel_types, rel_counts), key=lambda item: item[1])
 add_message_title(
     axes[0],
-    f"{dominant_type} links form the largest class ({dominant_count})",
+    "Extracted relationship classes and their shared suppliers",
     subtitle=(
-        f"Qwen2.5-7B extraction from {len(filings_df)} S&P 100 10-K filings, "
+        f"{EXTRACTOR_NAME} extraction from {len(filings_df)} S&P 100 10-K filings, "
         f"{min(years)}-{max(years)}"
     ),
 )
-fig.show()
+show_with_alt(fig, RELATIONSHIP_FIGURE_ALT)
 
 # %% [markdown]
 # ## 9. Neo4j Batch Loading
@@ -769,30 +990,37 @@ def run_unwind_batch(session, batch: list[Triple], query: str) -> int:
 # %% [markdown]
 # ### UNWIND Templates per Predicate
 #
-# Each supply-chain predicate has its own MERGE template (suppliers and customers
-# materialize their own node labels; competitors are company-to-company). Keying
-# the templates by predicate lets the loader dispatch on a single map instead of
-# repeating three near-identical batch blocks.
+# Each supply-chain predicate has its own MERGE template. Every template merges on
+# `:Entity {name}` and adds the role as a second label, because a name is one entity
+# no matter which side of an edge it appears on. Merging on the role label instead
+# gives Microsoft three separate nodes here: it is a company that files, a supplier
+# somebody names, and a customer somebody else names.
 
 
 # %%
 UNWIND_TEMPLATES: dict[str, str] = {
     "HAS_SUPPLIER": """
         UNWIND $batch AS row
-        MERGE (c:Company {name: row.subject})
-        MERGE (s:Supplier {name: row.object})
+        MERGE (c:Entity {name: row.subject})
+        SET c:Company
+        MERGE (s:Entity {name: row.object})
+        SET s:Supplier
         MERGE (c)-[:HAS_SUPPLIER]->(s)
         """,
     "COMPETES_WITH": """
         UNWIND $batch AS row
-        MERGE (c1:Company {name: row.subject})
-        MERGE (c2:Company {name: row.object})
+        MERGE (c1:Entity {name: row.subject})
+        SET c1:Company
+        MERGE (c2:Entity {name: row.object})
+        SET c2:Company
         MERGE (c1)-[:COMPETES_WITH]->(c2)
         """,
     "HAS_CUSTOMER": """
         UNWIND $batch AS row
-        MERGE (c:Company {name: row.subject})
-        MERGE (cust:Customer {name: row.object})
+        MERGE (c:Entity {name: row.subject})
+        SET c:Company
+        MERGE (cust:Entity {name: row.object})
+        SET cust:Customer
         MERGE (c)-[:HAS_CUSTOMER]->(cust)
         """,
 }
@@ -815,10 +1043,45 @@ def _load_predicate(session, triples: list[Triple], predicate: str, batch_size: 
 
 
 # %% [markdown]
+# ### Clearing an Existing Graph
+#
+# This notebook shares a database with the rest of the chapter, and it is the
+# second writer to touch `:Company`: `08_8k_event_extraction` attaches its event
+# relationships to nodes with that label and declares `Company.name` unique. So the
+# reset cannot delete company nodes, and it cannot leave a second node behind for a
+# name that already exists.
+#
+# Adopting existing `:Company` nodes into `:Entity` is what prevents the duplicate.
+# Without it, a database where 08 ran first already holds `(:Company {name: "Apple
+# Inc."})`, `MERGE (:Entity {name: "Apple Inc."})` matches nothing, and the load
+# creates a second node that the uniqueness constraint then rejects.
+#
+# Deleting only entity nodes that have no relationships left is what protects 08:
+# a `DETACH DELETE` over `:Entity` would take its `APPOINTED` and `ACQUIRED` edges
+# with it, because after adoption those nodes carry the label too.
+
+
+# %%
+RESET_STATEMENTS = (
+    # This notebook's own edges, whichever revision wrote them.
+    "MATCH (:Company)-[r:HAS_SUPPLIER|COMPETES_WITH|HAS_CUSTOMER]->() DELETE r",
+    # One node per name across the chapter: adopt company nodes written by 08, or
+    # by an earlier revision of this notebook, before anything merges on :Entity.
+    "MATCH (n:Company) WHERE NOT n:Entity SET n:Entity",
+    # Role nodes from the revision that keyed on the role label are unreachable now.
+    "MATCH (n:Supplier) WHERE NOT n:Entity DETACH DELETE n",
+    "MATCH (n:Customer) WHERE NOT n:Entity DETACH DELETE n",
+    # Roles are re-applied by the load; a stale one would outlive its edges.
+    "MATCH (n:Entity) REMOVE n:Supplier, n:Customer",
+    # What is left with no edges at all belongs to no notebook.
+    "MATCH (n:Entity) WHERE NOT (n)--() DELETE n",
+)
+
+
+# %% [markdown]
 # ### Top-Level Batch Loader
 #
-# Clear the supply-chain subgraph (relationships plus Supplier/Customer nodes,
-# leaving Company nodes intact), then dispatch each predicate to `_load_predicate`.
+# Reset the supply-chain subgraph, then dispatch each predicate to `_load_predicate`.
 
 
 # %%
@@ -836,9 +1099,8 @@ def load_to_neo4j_batch(triples: list[Triple], batch_size: int = 1000) -> int:
 
     loaded = 0
     with NEO4J_DRIVER.session() as session:
-        session.run("MATCH (:Company)-[r:HAS_SUPPLIER|COMPETES_WITH|HAS_CUSTOMER]->() DELETE r")
-        session.run("MATCH (n:Supplier) DETACH DELETE n")
-        session.run("MATCH (n:Customer) DETACH DELETE n")
+        for statement in RESET_STATEMENTS:
+            session.run(statement)
         for predicate in UNWIND_TEMPLATES:
             loaded += _load_predicate(session, triples, predicate, batch_size)
 
@@ -856,12 +1118,88 @@ with NEO4J_DRIVER.session() as session:
     persisted_count = session.run(
         "MATCH (:Company)-[r:HAS_SUPPLIER|COMPETES_WITH|HAS_CUSTOMER]->() RETURN count(r) AS n"
     ).single()["n"]
+    persisted_entities = session.run(
+        "MATCH (n:Entity) WHERE EXISTS { (n)-[:HAS_SUPPLIER|COMPETES_WITH|HAS_CUSTOMER]-() } "
+        "RETURN count(n) AS n"
+    ).single()["n"]
 assert persisted_count == len(unique_triples), (
     f"Neo4j contains {persisted_count} supply-chain edges; expected {len(unique_triples)}"
 )
+assert persisted_entities == len(all_entities), (
+    f"Neo4j holds {persisted_entities} entity nodes on the supply-chain edges; "
+    f"expected {len(all_entities)}. A name that reached the graph twice means "
+    "resolution did not collapse it."
+)
 load_elapsed = time.time() - load_start_time
-total_elapsed = extraction_elapsed + load_elapsed
 print(f"Loading completed in {load_elapsed:.2f}s")
+print(f"Entity nodes on supply-chain edges: {persisted_entities}, edges: {persisted_count}")
+
+# %% [markdown]
+# ### Graph Snapshot
+#
+# `09_knowledge_graph_features` reads this graph back and needs to know it is reading
+# what this notebook wrote, not a graph a partial run left behind. Record the identity
+# here, computed from the graph as Neo4j returns it, so the check downstream compares
+# two independent reads rather than a constant somebody remembered to update.
+#
+# The relationship query text is repeated in 09. If either copy drifts, the two reads
+# order differently and the hash comparison fails, which is the intended outcome.
+
+# %%
+SNAPSHOT_NAME = "ch23_supply_chain"
+RELATIONSHIP_QUERY = """
+    CALL () {
+        MATCH (c:Company)-[:HAS_SUPPLIER]->(s:Supplier)
+        RETURN c.name AS company, 'HAS_SUPPLIER' AS predicate, s.name AS related
+        UNION ALL
+        MATCH (c:Company)-[:COMPETES_WITH]->(peer:Company)
+        RETURN c.name AS company, 'COMPETES_WITH' AS predicate, peer.name AS related
+        UNION ALL
+        MATCH (c:Company)-[:HAS_CUSTOMER]->(cust:Customer)
+        RETURN c.name AS company, 'HAS_CUSTOMER' AS predicate, cust.name AS related
+    }
+    RETURN company, predicate, related
+    ORDER BY company, predicate, related
+"""
+
+
+def read_graph_identity(session) -> tuple[str, dict[str, int], int]:
+    """Hash the supply-chain edges as Neo4j returns them, with per-class counts."""
+    lines, counts = [], Counter()
+    for record in session.run(RELATIONSHIP_QUERY):
+        company = " ".join(record["company"].split())
+        related = " ".join(record["related"].split())
+        lines.append(f"{company}\t{record['predicate']}\t{related}")
+        counts[record["predicate"]] += 1
+    digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+    return digest, dict(counts), len(lines)
+
+
+with NEO4J_DRIVER.session() as session:
+    graph_sha256, edge_counts, edge_total = read_graph_identity(session)
+    SUPPLY_SNAPSHOT = {
+        "name": SNAPSHOT_NAME,
+        "graph_sha256": graph_sha256,
+        "company_count": len(companies),
+        "entity_count": persisted_entities,
+        "edge_total": edge_total,
+        "supplier_edges": edge_counts.get("HAS_SUPPLIER", 0),
+        "competitor_edges": edge_counts.get("COMPETES_WITH", 0),
+        "customer_edges": edge_counts.get("HAS_CUSTOMER", 0),
+        "cache_content_hash": CACHE_CONTENT_HASH,
+        "extractor": EXTRACTOR_NAME,
+    }
+    session.run("MERGE (s:SupplyGraphSnapshot {name: $s.name}) SET s = $s", s=SUPPLY_SNAPSHOT)
+
+assert edge_total == len(unique_triples), (
+    f"the snapshot read {edge_total} edges back; the loader wrote {len(unique_triples)}"
+)
+assert edge_counts == {
+    "HAS_SUPPLIER": supplier_rels,
+    "COMPETES_WITH": competitor_rels,
+    "HAS_CUSTOMER": customer_rels,
+}, f"edge classes read back as {edge_counts}"
+print(f"Supply graph snapshot {SNAPSHOT_NAME}: sha256 {graph_sha256[:12]}, {edge_total} edges")
 
 # %% [markdown]
 # ## 10. Example Queries
@@ -906,24 +1244,32 @@ for name, query in queries.items():
 # %% [markdown]
 # ## 11. Summary Statistics
 
+# %% [markdown]
+# The two stages are timed separately and never summed. On the cached path the
+# extraction did not run in this process at all, so a "total pipeline time" would be
+# the Neo4j load wearing the label of the 27 GPU-minutes that produced the triples.
+
 # %%
 summary_stats = {
     "Metric": [
         "Companies analyzed",
+        "  of which S&P 100 filers",
+        "Entity nodes",
         "Total relationships",
         "Supplier relationships",
         "Competitor relationships",
         "Customer relationships",
         "Unique suppliers",
-        "Shared suppliers (2+ companies)",
-        "Critical suppliers (3+ companies)",
+        "Suppliers named by 2+ companies",
+        "Suppliers named by 3+ companies",
         "Extraction time (s)",
         "Neo4j load time (s)",
-        "Total pipeline time (s)",
-        "Relationships per second",
+        "Neo4j edges per second",
     ],
     "Value": [
         str(len(companies)),
+        str(len(filer_companies)),
+        str(persisted_entities),
         str(len(unique_triples)),
         str(supplier_rels),
         str(competitor_rels),
@@ -931,10 +1277,9 @@ summary_stats = {
         str(len(suppliers)),
         str(len(shared_suppliers)),
         str(len([s for s, cs in shared_suppliers.items() if len(cs) >= 3])),
-        f"{extraction_elapsed:.1f}",
+        "not run (cached)" if extraction_elapsed is None else f"{extraction_elapsed:.1f}",
         f"{load_elapsed:.1f}",
-        f"{total_elapsed:.1f}",
-        f"{len(unique_triples) / max(total_elapsed, 0.1):.0f}",
+        f"{len(unique_triples) / max(load_elapsed, 1e-6):.0f}",
     ],
 }
 
@@ -969,37 +1314,43 @@ import networkx as nx
 
 
 # %%
-def build_networkx_graph(triples: list[Triple], max_suppliers: int = 15) -> nx.Graph:
-    """Build NetworkX graph from triples, focusing on most connected nodes."""
+def build_networkx_graph(triples: list[Triple], min_companies: int = 2) -> nx.Graph:
+    """Build the subgraph of suppliers named by at least `min_companies` companies."""
     G = nx.Graph()
 
-    # Find top shared suppliers (most trading-relevant)
-    supplier_counts = {}
+    named_by = {}
     for t in triples:
         if t.predicate == "HAS_SUPPLIER":
-            supplier_counts[t.object] = supplier_counts.get(t.object, 0) + 1
+            named_by.setdefault(t.object, set()).add(t.subject)
 
-    top_suppliers = sorted(supplier_counts.items(), key=lambda x: x[1], reverse=True)[
-        :max_suppliers
-    ]
-    top_supplier_names = {s[0] for s in top_suppliers}
+    # A count cut, not a rank cut. Ranking and keeping the top N would fill the
+    # figure with arbitrary members of the tie at one company, which is where all
+    # but a handful of the extracted suppliers sit.
+    kept = {s for s, cs in named_by.items() if len(cs) >= min_companies}
 
-    # Add supplier relationships for top suppliers
-    companies_added = set()
     for t in triples:
-        if t.predicate == "HAS_SUPPLIER" and t.object in top_supplier_names:
+        if t.predicate == "HAS_SUPPLIER" and t.object in kept:
             G.add_node(t.subject, node_type="company", label=t.subject[:15])
-            G.add_node(t.object, node_type="supplier", count=supplier_counts[t.object])
+            G.add_node(t.object, node_type="supplier", count=len(named_by[t.object]))
             G.add_edge(t.subject, t.object, edge_type="supplies")
-            companies_added.add(t.subject)
 
     return G
 
 
 # %%
 # Build the graph
-G = build_networkx_graph(unique_triples, max_suppliers=12)
+MIN_SHARED_COMPANIES = 2
+G = build_networkx_graph(unique_triples, min_companies=MIN_SHARED_COMPANIES)
+network_suppliers = [n for n, d in G.nodes(data=True) if d.get("node_type") == "supplier"]
+network_companies = [n for n, d in G.nodes(data=True) if d.get("node_type") == "company"]
 print(f"Network graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+print(
+    f"{len(network_suppliers)} suppliers named by {MIN_SHARED_COMPANIES}+ companies, "
+    f"reaching {len(network_companies)} of the {len(companies)} companies in the graph"
+)
+assert len(network_suppliers) == len(shared_suppliers), (
+    "the network figure and the shared-supplier count disagree"
+)
 
 # %% [markdown]
 # ### 12.1 Static Book Figure
@@ -1069,7 +1420,7 @@ def add_static_supplier_callout(
     top = sorted_suppliers[0]
     top_pos = pos[top]
     ax.annotate(
-        f"{G.degree(top)} companies\ndepend on this supplier",
+        f"{G.degree(top)} companies\nname this supplier",
         xy=top_pos,
         xytext=(top_pos[0] + 0.8, top_pos[1] + 0.8),
         fontsize=9,
@@ -1102,7 +1453,7 @@ STATIC_LEGEND_HANDLES = [
         color="w",
         markerfacecolor=COLORS["amber"],
         markersize=14,
-        label="Critical Suppliers",
+        label="Shared suppliers",
     ),
 ]
 
@@ -1143,11 +1494,13 @@ def finalize_static_figure(
 ) -> None:
     """Add the supplier callout, title, legend, and footer."""
     add_static_supplier_callout(ax, G, pos, sorted_suppliers)
-    top_supplier = sorted_suppliers[0]
     add_message_title(
         ax,
-        f"{top_supplier} connects {G.degree(top_supplier)} companies in the candidate graph",
-        subtitle="Shared suppliers from Qwen2.5 extraction of S&P 100 10-K excerpts",
+        "Suppliers named by several companies, and who names them",
+        subtitle=(
+            f"{EXTRACTOR_NAME} extraction of S&P 100 10-K excerpts; inner ring sized "
+            "by the number of companies naming the supplier"
+        ),
     )
     ax.legend(handles=STATIC_LEGEND_HANDLES, loc="upper left", frameon=True)
     add_static_footer(ax)
@@ -1202,13 +1555,23 @@ VIZ_DIR = OUTPUT_ROOT / "ch23" / "supply_chain_visualizations"
 VIZ_DIR.mkdir(parents=True, exist_ok=True)
 
 static_fig = create_static_figure(G)
-plt.show()
+top_shared_name, top_shared_companies = max(shared_suppliers.items(), key=lambda kv: len(kv[1]))
+show_with_alt(
+    static_fig,
+    f"A two-ring network diagram. The inner ring holds the {len(network_suppliers)} "
+    f"suppliers named by more than one company, the largest being {top_shared_name} at "
+    f"{len(top_shared_companies)} companies. The outer ring holds the "
+    f"{len(network_companies)} companies that name at least one of them, each joined "
+    "by a line to the suppliers it names.",
+)
 
 # %% [markdown]
-# Larger inner-ring nodes serve more companies in the extracted candidate graph.
-# This shared-neighbor structure is directly queryable in a graph representation.
-# A disruption scenario still needs event evidence and a model that links exposure
-# to portfolio outcomes.
+# Larger inner-ring nodes are named by more companies in the extracted candidate
+# graph. This shared-neighbor structure is directly queryable in a graph
+# representation. The figure omits every supplier named by a single company, which
+# is almost all of them, so it shows where the graph has shared structure rather
+# than what the graph mostly contains. A disruption scenario still needs event
+# evidence and a model that links exposure to portfolio outcomes.
 
 # %% [markdown]
 # ### 12.2 Interactive Notebook Visualization
@@ -1232,12 +1595,21 @@ from pyvis.network import Network
 # same high/medium/low thresholds.
 
 
+# %% [markdown]
+# Thresholds on the number of companies naming one supplier. They are cut points for
+# a display, not a calibrated risk scale: nothing here estimates a disruption
+# probability, and the counts they read come from what filings happen to name.
+
 # %%
+RISK_HIGH_COMPANIES = 10
+RISK_MEDIUM_COMPANIES = 5
+
+
 def supplier_risk_level(count: int) -> str:
-    """Classify supplier concentration risk for notebook displays."""
-    if count >= 10:
+    """Bucket a supplier by how many companies name it, for notebook displays."""
+    if count >= RISK_HIGH_COMPANIES:
         return "HIGH"
-    if count >= 5:
+    if count >= RISK_MEDIUM_COMPANIES:
         return "MEDIUM"
     return "LOW"
 
@@ -1324,8 +1696,7 @@ def create_interactive_graph(G: nx.Graph, output_path: Path | None = None) -> st
     return None
 
 
-if len(filings_df) > 0:
-    interactive_path = create_interactive_graph(G, VIZ_DIR / "supply_chain_interactive")
+interactive_path = create_interactive_graph(G, VIZ_DIR / "supply_chain_interactive")
 
 # %% [markdown]
 # ### 12.3 D3.js Web Export
@@ -1360,7 +1731,11 @@ def build_d3_nodes(G: nx.Graph) -> tuple[list[dict[str, object]], dict[str, int]
                 "group": 1 if node_type == "supplier" else 2,
                 "type": node_type,
                 "degree": degree,
-                "risk_level": supplier_risk_level(degree).lower(),
+                # A company's degree counts the suppliers it names, which the
+                # supplier thresholds do not describe. Only suppliers get a level.
+                "risk_level": (
+                    supplier_risk_level(degree).lower() if node_type == "supplier" else None
+                ),
             }
         )
     return nodes, node_index
@@ -1404,7 +1779,10 @@ def build_d3_metadata(
         "total_companies": len([n for n in nodes if n["type"] == "company"]),
         "total_suppliers": len([n for n in nodes if n["type"] == "supplier"]),
         "total_relationships": len(links),
-        "high_risk_suppliers": len([n for n in nodes if n["risk_level"] == "high"]),
+        "high_risk_threshold": RISK_HIGH_COMPANIES,
+        "high_risk_suppliers": len(
+            [n for n in nodes if n["type"] == "supplier" and n["risk_level"] == "high"]
+        ),
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1417,7 +1795,7 @@ def build_d3_metadata(
 
 
 # %%
-def export_d3_json(G: nx.Graph, triples: list[Triple], output_path: Path) -> dict:
+def export_d3_json(G: nx.Graph, output_path: Path) -> dict:
     """Export graph data for D3.js visualization."""
     nodes, node_index = build_d3_nodes(G)
     links = build_d3_links(G, node_index)
@@ -1429,7 +1807,7 @@ def export_d3_json(G: nx.Graph, triples: list[Triple], output_path: Path) -> dic
     return d3_data
 
 
-d3_data = export_d3_json(G, unique_triples, VIZ_DIR / "supply_chain_d3.json")
+d3_data = export_d3_json(G, VIZ_DIR / "supply_chain_d3.json")
 print(f"D3 export: {d3_data['metadata']}")
 
 # %% [markdown]
@@ -1524,7 +1902,7 @@ D3_HTML_BODY = """
     <div class="legend">
         <div class="legend-item">
             <div class="legend-circle" style="background: #D4A84B;"></div>
-            <span>Critical Suppliers (node size = # dependencies)</span>
+            <span>Shared suppliers (node size = companies naming them)</span>
         </div>
         <div class="legend-item">
             <div class="legend-circle" style="background: #0a1628;"></div>
@@ -1659,9 +2037,9 @@ D3_HTML_FOOT = """
     // Stats
     document.getElementById('stats').innerHTML =
         `${graphData.metadata.total_companies} companies | ` +
-        `${graphData.metadata.total_suppliers} critical suppliers | ` +
+        `${graphData.metadata.total_suppliers} shared suppliers | ` +
         `${graphData.metadata.total_relationships} supply relationships | ` +
-        `<strong style="color:#ef4444">${graphData.metadata.high_risk_suppliers} high-risk concentration points</strong>`;
+        `<strong>${graphData.metadata.high_risk_suppliers} named by ${graphData.metadata.high_risk_threshold}+ companies</strong>`;
     </script>
 </body>
 </html>
@@ -1696,16 +2074,14 @@ print(f"Saved D3 HTML visualization to {d3_html_path.name}")
 print("\n" + "=" * 60)
 print("NOTEBOOK EXECUTION COMPLETE")
 print("=" * 60)
-print(f"Mode: {'Preloaded filings' if len(filings_df) > 0 else 'Per-ticker filings'}")
-print(f"Companies: {len(companies)}")
+print(f"Triple source: {'cache' if not RERUN_EXTRACTION else 'live extraction'}")
+print(f"Extractor: {EXTRACTOR_NAME}")
+print(f"Companies: {len(companies)} ({len(filer_companies)} S&P 100 filers)")
 print(f"Total relationships: {len(unique_triples)}")
-if shared_suppliers:
-    top_supplier = max(shared_suppliers.items(), key=lambda x: len(x[1]))
-    print(f"Most connected supplier: {top_supplier[0]} ({len(top_supplier[1])} companies)")
+print(f"Most widely named supplier: {top_shared_name} ({len(top_shared_companies)} companies)")
 print("\nVisualizations:")
 print("  - Static: displayed inline (publication PNG/PDF generated book-side)")
-if len(filings_df) > 0:
-    print("  - Interactive: supply_chain_interactive.html")
+print("  - Interactive: supply_chain_interactive.html")
 print("  - D3 web: supply_chain_d3.html")
 print("\nReady for Graph RAG integration (03_graph_rag_qa.py)")
 
@@ -1716,19 +2092,29 @@ print("\nReady for Graph RAG integration (03_graph_rag_qa.py)")
 #    supplier, customer, and competitor triples from the staged 10-K corpus. The cache
 #    is provenance-checked, but its edge precision is not established here.
 #
-# 2. **Entity resolution is critical**: Without normalizing names (e.g., "Taiwan
-#    Semiconductor Manufacturing Company" to "TSMC"), the same real-world entity
-#    fragments into multiple graph nodes, understating concentration risk.
+# 2. **Entity resolution runs on the corpus, not on a lookup table**: the alias map
+#    printed above rewrites almost nothing, because the extraction prompt already
+#    asks for short forms. What does the work is the canonical key plus the roster of
+#    filers the corpus already knows, which is also the only thing that folds a
+#    company named as a competitor onto the company that filed the 10-K. Both are
+#    string rules, and a subsidiary named instead of its registrant defeats both.
 #
 # 3. **Batch loading separates graph writes from extraction**: UNWIND sends each
 #    relationship class in batches. This execution reports both stages without
 #    treating one graph size as a scaling benchmark.
 #
-# 4. **Shared-neighbor counts describe concentration**: The network view identifies
-#    candidate suppliers connected to several companies. Review the underlying
-#    extractions before using these counts in risk decisions.
+# 4. **The shared structure is thin, and the count is the finding**: nearly every
+#    extracted supplier is named by exactly one company. Ranking suppliers and keeping
+#    the top dozen hides that, because the twelfth is an arbitrary member of a large
+#    tie at one company. Cutting on the count instead makes the figure report how much
+#    shared structure exists.
 #
-# 5. **Graph structure supports relational diagnostics**: Shared-supplier degree is
+# 5. **One name, one node**: merging on the role label rather than the entity gives
+#    a company that appears as a supplier and as a customer three separate nodes with
+#    the same name, and every degree computed over them is wrong. The load asserts
+#    that the node count Neo4j reports equals the number of distinct resolved names.
+#
+# 6. **Graph structure supports relational diagnostics**: Shared-supplier degree is
 #    directly available once relationships are explicit. A retrieval-only index
 #    would need a separate relationship layer to answer the same aggregation.
 #
@@ -1737,20 +2123,25 @@ print("\nReady for Graph RAG integration (03_graph_rag_qa.py)")
 # converting graph topology into tabular ML features.
 
 # %%
-top_supplier = max(shared_suppliers.items(), key=lambda item: len(item[1]))
 completion_record = {
     "source_filings": filings_df.height,
     "year_min": min(years),
     "year_max": max(years),
+    "extractor": EXTRACTOR_NAME,
     "raw_triples": len(all_triples),
+    "distinct_raw_names": len(raw_names),
     "candidate_edges": len(unique_triples),
     "supplier_edges": supplier_rels,
     "competitor_edges": competitor_rels,
     "customer_edges": customer_rels,
     "subject_companies": len(companies),
+    "filer_companies": len(filer_companies),
+    "entity_nodes": persisted_entities,
     "persisted_edges": persisted_count,
-    "top_supplier": top_supplier[0],
-    "top_supplier_degree": len(top_supplier[1]),
+    "shared_suppliers": len(shared_suppliers),
+    "top_supplier": top_shared_name,
+    "top_supplier_degree": len(top_shared_companies),
+    "graph_sha256": graph_sha256,
     "llm_loaded": LLM_MODEL is not None,
 }
 print("COMPLETION_RECORD=" + json.dumps(completion_record, sort_keys=True))

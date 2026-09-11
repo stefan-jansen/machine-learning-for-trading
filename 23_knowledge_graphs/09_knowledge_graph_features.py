@@ -51,8 +51,9 @@
 
 from __future__ import annotations
 
+import json
 import os
-import warnings
+from datetime import date
 from hashlib import sha256
 from logging import getLogger
 
@@ -63,20 +64,20 @@ import polars as pl
 from matplotlib.colors import LinearSegmentedColormap
 
 from data import load_institutional_holdings_13f
-from utils.paths import get_output_dir
-from utils.style import add_message_title, ml4t_diverging
+from utils.paths import get_chapter_dir, get_output_dir
+from utils.style import add_message_title, ml4t_diverging, show_with_alt
 
 getLogger("matplotlib.font_manager").setLevel("ERROR")
 
 # %% tags=["parameters"]
 # Production defaults - Papermill overrides for testing
 N_COMPANIES = 0  # 0 = all available
-# Point-in-time as-of date for holdings-derived features. Crowding and
-# co-ownership are computed from each institution's most recent 13F filed on or
-# before this date - never summed across quarters - to keep them tradable.
-CUTOFF_DATE = "2026-02-17"
-SUPPLY_GRAPH_COMMIT = "eacb181d"
-SUPPLY_GRAPH_SHA256 = "743c96ecea2004d6ca927c7df65b02e96e67c2f84d4bb8e38d55279ceafde683"
+# Point-in-time as-of date for holdings-derived features. Empty resolves to the
+# date the newest complete 13F report period became public, read off the artifact
+# below. An earlier override is honoured; a later one has no data behind it.
+CUTOFF_DATE = ""
+# 02_supply_chain_kg_construction records the graph it wrote under this name.
+SUPPLY_SNAPSHOT_NAME = "ch23_supply_chain"
 
 # %%
 OUTPUT_DIR = get_output_dir(23, "knowledge_graph_features")
@@ -143,13 +144,48 @@ RELATIONSHIP_QUERY = """
 """
 
 # %% [markdown]
-# The snapshot guard rejects a Neo4j service whose companies, relationship
-# classes, or complete sorted content differ from the signed Ch23/02 producer.
-
+# ### The Snapshot Guard
+#
+# The graph this notebook reads has to be the one `02_supply_chain_kg_construction`
+# wrote, not what a partial run or a different revision left behind. 02 records the
+# identity of the graph as it read it back: the sha256 of the sorted relationship
+# lines, the per-class edge counts, the company count, and the content hash of the
+# extraction cache it loaded. This notebook queries the graph independently and
+# compares.
+#
+# Both reads come out of the same database, so agreement alone would only show the
+# graph has not changed since 02 ran. The cache hash is what ties it to something
+# outside: the sidecar committed in this repository. A graph built from a different
+# extraction fails there even if it is internally consistent.
+#
+# The previous version of this check carried the expected counts and hash as
+# literals in this file, which meant every change to 02 had to be copied here by
+# hand or the chapter stopped running in its own documented order.
 
 # %%
-def validate_supply_snapshot(companies: list[str], relationships: list[dict[str, str]]) -> None:
-    """Require the exact signed Ch23/02 supply graph."""
+SUPPLY_CACHE_META_PATH = (
+    get_chapter_dir(23) / "output" / "supply_chain_cache" / "extracted_triples.meta.json"
+)
+
+
+def read_supply_snapshot(session) -> dict[str, object]:
+    """Read the identity 02 recorded for the graph it wrote."""
+    record = session.run(
+        "MATCH (s:SupplyGraphSnapshot {name: $name}) RETURN properties(s) AS props",
+        name=SUPPLY_SNAPSHOT_NAME,
+    ).single()
+    if record is None:
+        raise RuntimeError(
+            f"Neo4j holds no SupplyGraphSnapshot named {SUPPLY_SNAPSHOT_NAME}. "
+            "Run 02_supply_chain_kg_construction.py first."
+        )
+    return dict(record["props"])
+
+
+def validate_supply_snapshot(
+    companies: list[str], relationships: list[dict[str, str]], snapshot: dict[str, object]
+) -> str:
+    """Check the graph read here against the identity 02 recorded, and return its hash."""
     relationship_lines = [
         f"{row['company']}\t{row['predicate']}\t{row['related']}" for row in relationships
     ]
@@ -162,15 +198,34 @@ def validate_supply_snapshot(companies: list[str], relationships: list[dict[str,
         .to_dict(as_series=False)
     )
     actual_count_map = dict(zip(actual_counts["predicate"], actual_counts["len"], strict=True))
-    expected_counts = {"HAS_SUPPLIER": 276, "COMPETES_WITH": 472, "HAS_CUSTOMER": 309}
-    if len(companies) == 127 and actual_count_map == expected_counts:
-        if graph_sha256 == SUPPLY_GRAPH_SHA256:
-            return
-    raise RuntimeError(
-        "Neo4j does not contain the signed Ch23/02 supply snapshot "
-        f"{SUPPLY_GRAPH_COMMIT}: companies={len(companies)}, "
-        f"counts={actual_count_map}, sha256={graph_sha256}."
-    )
+    expected_counts = {
+        "HAS_SUPPLIER": snapshot["supplier_edges"],
+        "COMPETES_WITH": snapshot["competitor_edges"],
+        "HAS_CUSTOMER": snapshot["customer_edges"],
+    }
+    cache_meta = json.loads(SUPPLY_CACHE_META_PATH.read_text())
+
+    problems = []
+    if graph_sha256 != snapshot["graph_sha256"]:
+        problems.append(
+            f"content sha256 {graph_sha256[:12]} against {snapshot['graph_sha256'][:12]}"
+        )
+    if len(companies) != snapshot["company_count"]:
+        problems.append(f"{len(companies)} companies against {snapshot['company_count']}")
+    if actual_count_map != expected_counts:
+        problems.append(f"edge classes {actual_count_map} against {expected_counts}")
+    if cache_meta["content_hash"] != snapshot["cache_content_hash"]:
+        problems.append(
+            f"extraction cache {cache_meta['content_hash'][:12]} against the "
+            f"{str(snapshot['cache_content_hash'])[:12]} the graph was built from"
+        )
+    if problems:
+        raise RuntimeError(
+            "The Neo4j supply graph does not match the snapshot 02 recorded: "
+            + "; ".join(problems)
+            + ". Re-run 02_supply_chain_kg_construction.py."
+        )
+    return graph_sha256
 
 
 # %% [markdown]
@@ -179,7 +234,7 @@ def validate_supply_snapshot(companies: list[str], relationships: list[dict[str,
 
 
 # %%
-def fetch_supply_relationships() -> tuple[list[str], pl.DataFrame]:
+def fetch_supply_relationships() -> tuple[list[str], pl.DataFrame, dict[str, object], str]:
     """Load and bind the signed supply-chain relationship snapshot."""
     try:
         from neo4j import GraphDatabase
@@ -191,6 +246,7 @@ def fetch_supply_relationships() -> tuple[list[str], pl.DataFrame]:
     except Exception as exc:
         raise RuntimeError(f"Neo4j is unavailable at {NEO4J_URI}.") from exc
     with driver.session() as session:
+        snapshot = read_supply_snapshot(session)
         companies = [
             " ".join(record["company"].split())
             for record in session.run(COMPANY_QUERY)
@@ -210,19 +266,23 @@ def fetch_supply_relationships() -> tuple[list[str], pl.DataFrame]:
         raise RuntimeError(
             "No supply-chain relationships found in Neo4j. Run 02_supply_chain_kg_construction.py first."
         )
-    validate_supply_snapshot(companies, relationships)
-    return companies, pl.DataFrame(relationships)
+    graph_sha256 = validate_supply_snapshot(companies, relationships, snapshot)
+    return companies, pl.DataFrame(relationships), snapshot, graph_sha256
 
 
 # %%
-source_companies, supply_rel_df = fetch_supply_relationships()
+source_companies, supply_rel_df, SUPPLY_SNAPSHOT, SUPPLY_GRAPH_SHA256 = fetch_supply_relationships()
 if N_COMPANIES > 0:
     source_companies = source_companies[:N_COMPANIES]
     supply_rel_df = supply_rel_df.filter(pl.col("company").is_in(source_companies))
 
 print(f"Supply graph source companies: {len(source_companies)}")
 print(f"Supply graph relationships: {len(supply_rel_df)}")
-print(f"Signed supply snapshot: {SUPPLY_GRAPH_COMMIT} ({SUPPLY_GRAPH_SHA256[:12]})")
+print(
+    f"Snapshot {SUPPLY_SNAPSHOT_NAME} verified: sha256 {SUPPLY_GRAPH_SHA256[:12]}, "
+    f"extractor {SUPPLY_SNAPSHOT['extractor']}, "
+    f"cache {str(SUPPLY_SNAPSHOT['cache_content_hash'])[:12]}"
+)
 supply_rel_df.head(10)
 
 
@@ -290,6 +350,135 @@ def load_holdings_artifact() -> pl.DataFrame:
 holdings_raw_df = load_holdings_artifact()
 holdings_df = holdings_raw_df.filter(pl.col("put_call").is_null())
 print(f"13F holdings rows: {len(holdings_raw_df)} raw, {len(holdings_df)} long-equity")
+
+
+# %% [markdown]
+# ### Report Periods and the As-Of Date
+#
+# A 13F row carries two dates: `report_date`, the quarter end the positions
+# describe, and `filing_date`, when that report reached EDGAR. Every point-in-time
+# question in this notebook needs both. The period is what groups a manager's
+# positions into a comparable snapshot; the last filing date within it is when that
+# snapshot became knowable, which is the date a cutoff has to respect.
+#
+# Deriving the periods from `report_date` is also what removes a heuristic. An
+# earlier version binned filing dates by collapsing any two within fourteen days,
+# which chains: a run of dates fourteen days apart merges without limit, and the
+# label it produces is a filing date standing in for a quarter end the artifact
+# already records.
+#
+# A period being present is not the same as a period being complete. 13Fs arrive
+# over a filing window, and the downloader keeps a partially filed quarter rather
+# than dropping it, so an artifact built during filing season holds a newest
+# period with some of the panel in it. Admitted as it stands, the institutions
+# that have not filed yet read as ownership exits: holder counts fall, values fall,
+# and churn rises, all from an artifact boundary. A period is only admitted here
+# when every institution in the panel has filed for it.
+#
+# Coverage is counted on every filing, options included, because an institution
+# that reported only puts and calls for a quarter did file. Features are still
+# computed from long-equity rows alone.
+
+
+# %%
+def report_period_calendar(holdings: pl.DataFrame) -> pl.DataFrame:
+    """One row per SEC report period: when its last filing arrived, and who filed."""
+    return (
+        holdings.group_by("report_date")
+        .agg(
+            pl.col("filing_date").min().alias("first_filed"),
+            pl.col("filing_date").max().alias("available_from"),
+            pl.col("cik").n_unique().alias("institutions"),
+        )
+        .sort("report_date")
+    )
+
+
+def complete_report_periods(periods: pl.DataFrame, panel_size: int) -> pl.DataFrame:
+    """Periods the whole institution panel has filed for."""
+    return periods.filter(pl.col("institutions") == panel_size)
+
+
+def public_report_periods(periods: pl.DataFrame, cutoff_date: str) -> list[date]:
+    """Of those periods, the ones whose filings had all arrived by the cutoff."""
+    cutoff = date.fromisoformat(cutoff_date)
+    return [
+        row["report_date"]
+        for row in periods.iter_rows(named=True)
+        if row["available_from"] <= cutoff
+    ]
+
+
+# %%
+PANEL_SIZE = holdings_raw_df.get_column("cik").n_unique()
+REPORT_PERIODS = report_period_calendar(holdings_raw_df)
+COMPLETE_PERIODS = complete_report_periods(REPORT_PERIODS, PANEL_SIZE)
+_partial = REPORT_PERIODS.filter(pl.col("institutions") < PANEL_SIZE)
+assert not COMPLETE_PERIODS.is_empty(), (
+    f"no report period carries all {PANEL_SIZE} institutions in the panel"
+)
+LATEST_AVAILABLE = COMPLETE_PERIODS.get_column("available_from").max().isoformat()
+if not CUTOFF_DATE:
+    CUTOFF_DATE = LATEST_AVAILABLE
+    print(f"CUTOFF_DATE resolved from the artifact: {CUTOFF_DATE}")
+else:
+    assert CUTOFF_DATE <= LATEST_AVAILABLE, (
+        f"CUTOFF_DATE {CUTOFF_DATE} is after {LATEST_AVAILABLE}, the date the newest "
+        "complete report period became public. Nothing exists to answer as of then."
+    )
+    print(f"CUTOFF_DATE overridden to {CUTOFF_DATE} (artifact reaches {LATEST_AVAILABLE})")
+
+PUBLIC_PERIODS = public_report_periods(COMPLETE_PERIODS, CUTOFF_DATE)
+assert len(PUBLIC_PERIODS) >= 2, (
+    f"only {len(PUBLIC_PERIODS)} complete report period(s) are public at {CUTOFF_DATE}; "
+    "the change and churn features need a prior period to compare against"
+)
+# One filing per institution per period is what makes a period a snapshot rather
+# than a sum; an amendment against its original would break every count below.
+_per_period = holdings_raw_df.group_by(["cik", "report_date"]).agg(
+    pl.col("filing_date").n_unique().alias("filing_dates")
+)
+assert _per_period.filter(pl.col("filing_dates") > 1).is_empty(), (
+    "an institution filed more than once for the same report period"
+)
+print(f"Institution panel: {PANEL_SIZE}")
+print(REPORT_PERIODS)
+print(f"Periods dropped for incomplete coverage: {_partial.height}")
+print(f"Report periods public at {CUTOFF_DATE}: {[p.isoformat() for p in PUBLIC_PERIODS]}")
+
+
+# %% [markdown]
+# ### The Coverage Gate, Exercised
+#
+# The artifact on disk is complete in every period, so the rule above is inert on
+# this data and would stay inert if it were wrong. Withholding one institution's
+# newest filing reproduces what a download during filing season looks like, and
+# the calendar has to drop that period.
+
+# %%
+_held_back = holdings_raw_df.get_column("cik").unique().sort().first()
+# Withhold from the newest period the gate currently admits, not the newest period
+# in the artifact. On an artifact that is already mid-season those differ, and
+# withholding from a period the gate has already excluded would demonstrate nothing.
+_target_period = COMPLETE_PERIODS.get_column("report_date").max()
+_mid_season = holdings_raw_df.filter(
+    ~((pl.col("cik") == _held_back) & (pl.col("report_date") == _target_period))
+)
+_mid_season_periods = (
+    complete_report_periods(report_period_calendar(_mid_season), PANEL_SIZE)
+    .get_column("report_date")
+    .to_list()
+)
+assert _target_period not in _mid_season_periods, (
+    f"a period missing {_held_back} was still admitted as complete"
+)
+assert len(_mid_season_periods) == len(COMPLETE_PERIODS) - 1, (
+    "withholding one filing changed more than the period it was withheld from"
+)
+print(
+    f"With institution {_held_back} withheld from {_target_period.isoformat()}, that "
+    f"period is excluded and {len(_mid_season_periods)} complete periods remain"
+)
 
 
 # %% [markdown]
@@ -492,40 +681,30 @@ print(supply_features_df)
 #
 # Aggregate the real 13F holdings into crowding and concentration features for
 # the names that overlap with the supply-chain graph. Both crowding and
-# co-ownership are computed as of `CUTOFF_DATE` from each institution's most
-# recent 13F on or before that date - a point-in-time, tradable snapshot rather
-# than a sum across quarters. (Supply-chain temporal features in Section 8 stay
-# zero baselines because only a single graph vintage is materialized.)
+# co-ownership come from the newest report period that was fully public at
+# `CUTOFF_DATE` - a point-in-time, tradable snapshot rather than a sum across
+# quarters. (Supply-chain temporal features in Section 8 stay zero baselines
+# because only a single graph snapshot is materialized.)
 
 
 # %%
 def build_holdings_snapshots(
-    holdings: pl.DataFrame, cutoff_date: str
+    holdings: pl.DataFrame, public_periods: list[date]
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Return each institution's latest and prior complete filing by the cutoff."""
-    cutoff = pl.lit(cutoff_date).str.to_date()
-    available = holdings.filter(pl.col("filing_date") <= cutoff)
-    filing_ranks = (
-        available.select(["cik", "filing_date"])
-        .unique()
-        .with_columns(
-            pl.col("filing_date").rank("dense", descending=True).over("cik").alias("filing_rank")
-        )
-    )
-    ranked = available.join(filing_ranks, on=["cik", "filing_date"], how="inner")
-
+    """Return every institution's positions for the two newest public report periods."""
+    latest_period, prior_period = public_periods[-1], public_periods[-2]
     aggregation = [
         pl.max("filing_date").alias("filing_date"),
         pl.sum("value_thousands").alias("value_thousands"),
         pl.sum("shares").alias("shares"),
     ]
     latest = (
-        ranked.filter(pl.col("filing_rank") == 1)
+        holdings.filter(pl.col("report_date") == latest_period)
         .group_by(["cik", "cusip", "issuer"])
         .agg(aggregation)
     )
     prior = (
-        ranked.filter(pl.col("filing_rank") == 2)
+        holdings.filter(pl.col("report_date") == prior_period)
         .group_by(["cik", "cusip", "issuer"])
         .agg(aggregation)
     )
@@ -533,16 +712,30 @@ def build_holdings_snapshots(
 
 
 # %% [markdown]
-# Aggregate the latest and prior institution snapshots independently. This
-# produces cutoff-safe holder breadth, concentration, and value-change fields.
+# Aggregate the latest and prior period snapshots independently. This produces
+# cutoff-safe holder breadth, concentration, and value-change fields.
+#
+# `inst_coverage_pct` divides by the number of institutions in the panel, so the
+# feature takes as many values as the panel has members plus one, and is the holder
+# count on a different scale. `crowding_score` divides the same count by its median
+# across securities, so it is the same count again. Both are printed with their
+# denominators rather than left to look like continuous measures.
+#
+# The denominator is the panel, counted over every filing. A count taken over the
+# long-equity rows shrinks whenever a manager reports only puts and calls for a
+# period, and a stock the rest of the panel holds then reads as fully covered.
 
 
 # %%
 def compute_stock_ownership_stats(
-    latest_positions: pl.DataFrame, prior_positions: pl.DataFrame
+    latest_positions: pl.DataFrame, prior_positions: pl.DataFrame, panel_size: int
 ) -> pl.DataFrame:
     """Aggregate point-in-time stock ownership statistics."""
-    institution_count = latest_positions.get_column("cik").n_unique()
+    long_equity_filers = latest_positions.get_column("cik").n_unique()
+    print(
+        f"Institution panel: {panel_size}; reporting long equity in the latest "
+        f"public period: {long_equity_filers}"
+    )
     latest_stats = latest_positions.group_by("cusip").agg(
         pl.col("cik").n_unique().alias("n_holders"),
         pl.col("value_thousands").sum().alias("total_value_thousands"),
@@ -555,7 +748,7 @@ def compute_stock_ownership_stats(
         pl.col("value_thousands").sum().alias("prior_value_thousands")
     )
     return latest_stats.join(prior_values, on="cusip", how="left").with_columns(
-        (pl.col("n_holders") / institution_count).alias("inst_coverage_pct"),
+        (pl.col("n_holders") / panel_size).alias("inst_coverage_pct"),
         (pl.col("total_value_thousands") - pl.col("prior_value_thousands")).alias(
             "inst_value_change"
         ),
@@ -579,16 +772,18 @@ def compute_stock_ownership_stats(
 def compute_crowding_features(
     holdings: pl.DataFrame,
     mapping: pl.DataFrame,
-    cutoff_date: str,
+    public_periods: list[date],
+    panel_size: int,
 ) -> pl.DataFrame:
     """Compute point-in-time ownership concentration and candidate crowding proxies."""
     matched = mapping.filter(pl.col("cusip").is_not_null())
     if matched.is_empty():
         return pl.DataFrame({"entity": []})
 
-    latest_positions, prior_positions = build_holdings_snapshots(holdings, cutoff_date)
-    stock_stats = compute_stock_ownership_stats(latest_positions, prior_positions)
+    latest_positions, prior_positions = build_holdings_snapshots(holdings, public_periods)
+    stock_stats = compute_stock_ownership_stats(latest_positions, prior_positions, panel_size)
     median_holders = stock_stats.get_column("n_holders").median() or 1.0
+    print(f"Median holders across held securities: {median_holders}")
 
     crowding = (
         matched.join(stock_stats, on="cusip", how="left")
@@ -617,9 +812,40 @@ def compute_crowding_features(
 
 
 # %%
-crowding_df = compute_crowding_features(holdings_df, company_mapping, CUTOFF_DATE)
+crowding_df = compute_crowding_features(holdings_df, company_mapping, PUBLIC_PERIODS, PANEL_SIZE)
 print("Crowding features:")
 crowding_df
+
+
+# %% [markdown]
+# ### The Coverage Denominator, Exercised
+#
+# Every manager in this artifact reports long equity in every period, so the
+# distinction between the panel and the long-equity filers is invisible on the data
+# as it stands. Withholding one manager's long rows reproduces a period in which it
+# reported only derivatives, and the check requires two things: that coverage still
+# divides by the panel, and that the filer count would have given a different answer.
+
+# %%
+_probe_latest, _probe_prior = build_holdings_snapshots(holdings_df, PUBLIC_PERIODS)
+_derivatives_only = _probe_latest.get_column("cik").unique().sort().first()
+_thin_latest = _probe_latest.filter(pl.col("cik") != _derivatives_only)
+_thin_filers = _thin_latest.get_column("cik").n_unique()
+_thin_stats = compute_stock_ownership_stats(_thin_latest, _probe_prior, PANEL_SIZE)
+_row = _thin_stats.sort(["n_holders", "cusip"], descending=[True, False]).row(0, named=True)
+if _row["inst_coverage_pct"] != _row["n_holders"] / PANEL_SIZE:
+    raise RuntimeError("inst_coverage_pct is not dividing by the institution panel")
+if _row["n_holders"] / _thin_filers == _row["inst_coverage_pct"]:
+    raise RuntimeError(
+        "withholding one manager did not change the long-equity filer count, so this "
+        "check cannot tell the two denominators apart"
+    )
+print(
+    f"With {_derivatives_only} reporting no long equity, {_thin_filers} of {PANEL_SIZE} "
+    f"managers appear in the slice; the most widely held security reads "
+    f"{_row['inst_coverage_pct']:.1%} against the panel and "
+    f"{_row['n_holders'] / _thin_filers:.1%} against the filers"
+)
 
 
 # %% [markdown]
@@ -671,13 +897,13 @@ def summarize_coownership(
 
 # %%
 def compute_coownership_similarity(
-    holdings: pl.DataFrame, mapping: pl.DataFrame, cutoff_date: str
+    holdings: pl.DataFrame, mapping: pl.DataFrame, public_periods: list[date]
 ) -> pl.DataFrame:
     """Compute Jaccard co-ownership across the matched universe, point-in-time.
 
-    Holder sets are derived from each institution's most recent 13F on or before
-    the cutoff (consistent with the crowding features), not from an undated edge
-    table, so the similarity reflects a single tradable ownership snapshot.
+    Holder sets come from the newest report period public at the cutoff
+    (consistent with the crowding features), not from an undated edge table, so
+    the similarity reflects a single tradable ownership snapshot.
     """
     matched = mapping.filter(pl.col("cusip").is_not_null()).select(["entity", "cusip"])
     if matched.height <= 1:
@@ -693,7 +919,7 @@ def compute_coownership_similarity(
         )
 
     matched_cusips = matched.get_column("cusip").unique().sort().to_list()
-    latest_positions, _ = build_holdings_snapshots(holdings, cutoff_date)
+    latest_positions, _ = build_holdings_snapshots(holdings, public_periods)
     holders_by_cusip = build_holder_sets(latest_positions, matched_cusips)
 
     records = []
@@ -713,7 +939,7 @@ def compute_coownership_similarity(
 
 
 # %%
-similarity_df = compute_coownership_similarity(holdings_df, company_mapping, CUTOFF_DATE)
+similarity_df = compute_coownership_similarity(holdings_df, company_mapping, PUBLIC_PERIODS)
 print("Co-ownership similarity:")
 similarity_df
 
@@ -724,78 +950,34 @@ similarity_df
 # The staged supply-chain graph remains a single extracted snapshot, so the
 # supply-network columns (`relationship_churn`, `centrality_momentum`,
 # `supplier_change`) stay at the explicit zero baseline. The institutional
-# holdings graph, in contrast, spans multiple quarterly 13F vintages: this lets us
-# compute per-entity ownership-churn features that draw on the full history of
-# filings on or before `CUTOFF_DATE`.
-
-# %% [markdown]
-# ### Vintage Discovery
-#
-# Bin the 13F filing dates into quarterly vintages (filings cluster around the
-# 13F due date). The resulting vintage labels are the as-of dates used to
-# compute per-vintage holder sets.
-
-
-# %%
-def discover_holdings_vintages(holdings: pl.DataFrame, cutoff_date: str) -> list[str]:
-    """Return ISO-date vintage labels (quarter-end approximations) up to cutoff_date.
-
-    13F filings cluster around the quarterly due date (45 days after quarter-end),
-    so adjacent filing dates within a 14-day window collapse into a single
-    vintage labeled by the latest date in the window.
-    """
-    from datetime import date as _date
-
-    cutoff = pl.lit(cutoff_date).str.to_date()
-    distinct_dates = (
-        holdings.filter(pl.col("filing_date") <= cutoff)
-        .select(pl.col("filing_date").cast(pl.Date))
-        .unique()
-        .sort("filing_date")
-        .get_column("filing_date")
-        .to_list()
-    )
-    vintages: list[str] = []
-    for date in distinct_dates:
-        if not vintages:
-            vintages.append(date.isoformat())
-            continue
-        prev = _date.fromisoformat(vintages[-1])
-        if (date - prev).days <= 14:
-            vintages[-1] = date.isoformat()
-        else:
-            vintages.append(date.isoformat())
-    return vintages
-
+# holdings graph, in contrast, spans several quarterly report periods: this lets us
+# compute per-entity ownership-churn features across the periods that were public
+# at `CUTOFF_DATE`, which `PUBLIC_PERIODS` already holds.
 
 # %% [markdown]
 # ### Ownership Temporal Features
 #
-# For each matched entity, compute three vintage-aware metrics from the 13F
-# holdings panel:
+# For each matched entity, compute three metrics across the public report
+# periods:
 #
 # - `ownership_churn`: 1 − mean Jaccard similarity of holder sets across
-#   consecutive vintages (higher = more turnover in the institutional base).
+#   consecutive periods (higher = more turnover in the institutional base).
 # - `position_value_cv`: coefficient of variation of total reported position
-#   value across vintages (higher = more dollar-volume volatility).
-# - `new_holders_recent`: count of CIKs in the latest vintage that were absent
-#   from the prior vintage (raw institutional accumulation count).
+#   value across periods (higher = more dollar-volume volatility).
+# - `new_holders_recent`: count of CIKs in the latest period that were absent
+#   from the prior one (raw institutional accumulation count).
 
 
 # %%
 def build_vintage_snapshots(
-    holdings: pl.DataFrame, vintage_dates: list[str], cusips: list[str]
-) -> tuple[dict[str, dict[str, set[str]]], dict[str, dict[str, float]]]:
-    """For each vintage, snap each institution to its latest filing on or before
-    the vintage date and return per-cusip (holder set, total value) maps."""
-    holders_per_vintage: dict[str, dict[str, set[str]]] = {}
-    value_per_vintage: dict[str, dict[str, float]] = {}
-    for vintage in vintage_dates:
-        cutoff = pl.lit(vintage).str.to_date()
-        snapshot = (
-            holdings.filter(pl.col("filing_date") <= cutoff)
-            .filter(pl.col("filing_date") == pl.col("filing_date").max().over("cik"))
-            .filter(pl.col("cusip").is_in(cusips))
+    holdings: pl.DataFrame, periods: list[date], cusips: list[str]
+) -> tuple[dict[date, dict[str, set[str]]], dict[date, dict[str, float]]]:
+    """Per report period, return the per-cusip holder set and total reported value."""
+    holders_per_period: dict[date, dict[str, set[str]]] = {}
+    value_per_period: dict[date, dict[str, float]] = {}
+    for period in periods:
+        snapshot = holdings.filter(pl.col("report_date") == period).filter(
+            pl.col("cusip").is_in(cusips)
         )
         holders: dict[str, set[str]] = {}
         values: dict[str, float] = {}
@@ -806,22 +988,22 @@ def build_vintage_snapshots(
         ):
             holders[row["cusip"]] = set(row["cik"])
             values[row["cusip"]] = float(row["total_value"] or 0.0)
-        holders_per_vintage[vintage] = holders
-        value_per_vintage[vintage] = values
-    return holders_per_vintage, value_per_vintage
+        holders_per_period[period] = holders
+        value_per_period[period] = values
+    return holders_per_period, value_per_period
 
 
 # %% [markdown]
-# A per-security summary keeps the consecutive-vintage, value-variation, and
+# A per-security summary keeps the consecutive-period, value-variation, and
 # latest-holder calculations explicit and independently testable.
 
 
 # %%
 def summarize_ownership_history(
     cusip: str,
-    vintage_dates: list[str],
-    holders_per_vintage: dict[str, dict[str, set[str]]],
-    value_per_vintage: dict[str, dict[str, float]],
+    vintage_dates: list[date],
+    holders_per_vintage: dict[date, dict[str, set[str]]],
+    value_per_vintage: dict[date, dict[str, float]],
 ) -> dict[str, float | int]:
     """Summarize one security's ownership history."""
     jaccards = []
@@ -848,9 +1030,9 @@ def summarize_ownership_history(
 
 # %%
 def compute_ownership_temporal_features(
-    holdings: pl.DataFrame, mapping: pl.DataFrame, vintage_dates: list[str]
+    holdings: pl.DataFrame, mapping: pl.DataFrame, vintage_dates: list[date]
 ) -> pl.DataFrame:
-    """Compute per-entity 13F-vintage-aware ownership churn metrics."""
+    """Compute per-entity ownership churn metrics across report periods."""
     matched = mapping.filter(pl.col("cusip").is_not_null()).select(["entity", "cusip"])
     if len(vintage_dates) < 2:
         return pl.DataFrame(
@@ -897,13 +1079,13 @@ def compute_temporal_features(
     companies: list[str],
     holdings: pl.DataFrame | None = None,
     mapping: pl.DataFrame | None = None,
-    cutoff_date: str | None = None,
+    public_periods: list[date] | None = None,
 ) -> pl.DataFrame:
-    """Combine supply-chain zero-baseline columns with 13F-vintage ownership churn.
+    """Combine supply-chain zero-baseline columns with report-period ownership churn.
 
     Supply-chain temporal columns stay zero because the supply graph is a single
-    snapshot; ownership columns populate from the quarterly 13F vintages
-    available through the declared cutoff.
+    snapshot; ownership columns populate from the report periods that were public
+    at the declared cutoff.
     """
     base = pl.DataFrame(
         [
@@ -916,23 +1098,20 @@ def compute_temporal_features(
             for company in companies
         ]
     )
-    if holdings is None or mapping is None or cutoff_date is None:
+    if holdings is None or mapping is None or public_periods is None:
         return base.with_columns(
             pl.lit(None, dtype=pl.Float64).alias("ownership_churn"),
             pl.lit(None, dtype=pl.Float64).alias("position_value_cv"),
             pl.lit(None, dtype=pl.Int64).alias("new_holders_recent"),
         )
 
-    vintage_dates = discover_holdings_vintages(holdings, cutoff_date)
-    ownership = compute_ownership_temporal_features(holdings, mapping, vintage_dates)
+    ownership = compute_ownership_temporal_features(holdings, mapping, public_periods)
     return base.join(ownership, on="entity", how="left")
 
 
 # %%
-holdings_vintages = discover_holdings_vintages(holdings_df, CUTOFF_DATE)
-print(f"13F vintages (≤ {CUTOFF_DATE}): {holdings_vintages}")
 temporal_df = compute_temporal_features(
-    source_companies, holdings=holdings_df, mapping=company_mapping, cutoff_date=CUTOFF_DATE
+    source_companies, holdings=holdings_df, mapping=company_mapping, public_periods=PUBLIC_PERIODS
 )
 print("Temporal features:")
 temporal_df
@@ -1020,17 +1199,61 @@ all_features.head(10)
 # ## 11. Feature Diagnostics
 
 
+# %% [markdown]
+# The families name their columns. Slicing the column list by position, which is
+# what this cell used to do, raises nothing when the matrix changes: add, drop or
+# reorder a column anywhere above and every family relabels silently. The
+# assertion below is the part that makes naming them worth anything, since a
+# family that no longer covers the matrix is what a positional slice hides.
+
 # %%
 numeric_cols = [
     column for column in all_features.columns if column not in {"entity", "cusip", "issuer_name"}
 ]
 feature_families = {
-    "topology": numeric_cols[:5],
-    "supply": numeric_cols[5:12],
-    "holdings": numeric_cols[12:21],
-    "temporal": numeric_cols[21:27],
-    "cross_graph": numeric_cols[27:31],
+    "topology": ["pagerank", "betweenness", "clustering", "in_degree", "out_degree"],
+    "supply": [
+        "n_suppliers",
+        "n_competitors",
+        "n_customers",
+        "shared_supplier_count",
+        "single_source_count",
+        "supplier_overlap_ratio",
+        "supplier_dependency_score",
+    ],
+    "holdings": [
+        "n_holders",
+        "crowding_score",
+        "top_holder_pct",
+        "ownership_hhi",
+        "inst_coverage_pct",
+        "inst_value_change",
+        "inst_pct_change",
+        "avg_coownership_jaccard",
+        "n_similar_stocks",
+    ],
+    "temporal": [
+        "relationship_churn",
+        "centrality_momentum",
+        "supplier_change",
+        "ownership_churn",
+        "position_value_cv",
+        "new_holders_recent",
+    ],
+    "cross_graph": [
+        "supply_chain_crowding",
+        "concentrated_dependency_risk",
+        "systemic_exposure",
+        "customer_concentration_risk",
+    ],
 }
+_assigned = [column for columns in feature_families.values() for column in columns]
+assert len(_assigned) == len(set(_assigned)), "a column is claimed by two families"
+assert set(_assigned) == set(numeric_cols), (
+    "the feature families no longer cover the matrix: "
+    f"unassigned {sorted(set(numeric_cols) - set(_assigned))}, "
+    f"missing from the matrix {sorted(set(_assigned) - set(numeric_cols))}"
+)
 coverage_summary = pl.DataFrame(
     [
         {
@@ -1079,9 +1302,15 @@ top_correlations
 # %% [markdown]
 # ### Feature Heatmap
 #
-# Focus on a compact set of interpretable columns and the 20 most unusual
-# complete security profiles. Graph aliases sharing a CUSIP are averaged for
-# this diagnostic only, and row labels travel with the filtered data.
+# A compact set of interpretable columns over the complete security profiles with
+# the largest standardized deviation on any single column. Graph aliases
+# sharing a CUSIP are averaged for this diagnostic only, and row labels travel
+# with the filtered data.
+#
+# The rows are selected by the quantity the figure then displays, so the extreme
+# cells are there by construction and their size measures nothing. What the figure
+# is for is seeing which columns the extremes sit in and whether one company is
+# extreme on several at once.
 
 # %%
 diagnostic_cols = [
@@ -1113,7 +1342,8 @@ feature_std = heatmap_data.std(axis=0)
 feature_std[feature_std == 0] = 1.0
 heatmap_z = (heatmap_data - heatmap_data.mean(axis=0)) / feature_std
 row_score = np.abs(heatmap_z).max(axis=1)
-row_order = np.argsort(row_score, kind="stable")[-20:][::-1]
+HEATMAP_ROWS = 20
+row_order = np.argsort(row_score, kind="stable")[-HEATMAP_ROWS:][::-1]
 plot_data = heatmap_z[row_order]
 plot_entities = np.asarray(heatmap_frame.get_column("entity"))[row_order]
 extreme_row, extreme_col = np.unravel_index(np.abs(plot_data).argmax(), plot_data.shape)
@@ -1123,7 +1353,7 @@ extreme_row, extreme_col = np.unravel_index(np.abs(plot_data).argmax(), plot_dat
 # reports the largest standardized deviation visible in the figure.
 
 # %%
-fig, ax = plt.subplots(figsize=(12, 8))
+fig, ax = plt.subplots(figsize=(12, 8), constrained_layout=True)
 diverging_cmap = LinearSegmentedColormap.from_list("ml4t_diverging", ml4t_diverging())
 image = ax.imshow(
     plot_data,
@@ -1138,27 +1368,30 @@ ax.set_yticklabels(plot_entities, fontsize=8)
 ax.set_xticks(range(len(diagnostic_cols)))
 ax.set_xticklabels(diagnostic_cols, fontsize=8, rotation=45, ha="right")
 ax.set_xlabel("Graph and ownership feature")
-ax.set_ylabel("Company")
+ax.set_ylabel(f"Company ({len(plot_entities)} of {heatmap_frame.height} complete profiles)")
 add_message_title(
     ax,
-    f"{plot_entities[extreme_row]} Has the Most Extreme Standardized Feature",
-    subtitle=(
-        f"{diagnostic_cols[extreme_col]} = {plot_data[extreme_row, extreme_col]:+.1f}z; "
-        f"top 20 of {heatmap_frame.height} complete profiles"
-    ),
+    "Standardized graph and ownership features, most deviant profiles",
+    subtitle="rows ranked by their largest deviation on any one column",
 )
 fig.colorbar(image, ax=ax, shrink=0.8, label="Standardized value (z-score)")
-fig.tight_layout()
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
-    fig.show()
+show_with_alt(
+    fig,
+    f"A heatmap of {len(diagnostic_cols)} standardized features across "
+    f"{len(plot_entities)} companies, on a diverging scale centred at zero. Rows are "
+    f"ordered by their largest absolute deviation, so {plot_entities[extreme_row]} at "
+    f"the top carries the strongest cell, {diagnostic_cols[extreme_col]} at "
+    f"{plot_data[extreme_row, extreme_col]:+.1f}z. "
+    f"{int((np.abs(plot_data) >= 2).sum())} of the {plot_data.size} cells reach two "
+    "standard deviations or more; the rest are pale, in both directions.",
+)
 
 # %% [markdown]
-# **Finding**: The heatmap shows which companies are outliers on specific
-# graph features. Combining graph-derived columns (PageRank, betweenness) with
-# 13F holdings columns (n_holders, ownership_hhi) produces an interaction
-# surface that single-source features cannot express; whether these
-# interactions add predictive value is not measured in this notebook.
+# Combining graph-derived columns (PageRank, betweenness) with 13F holdings
+# columns (n_holders, ownership_hhi) puts operational structure and ownership on
+# one row, which neither source expresses alone. Whether these interactions carry
+# predictive value is not measured here, and the rows on display were selected for
+# being extreme, so the figure cannot answer it either.
 
 # %% [markdown]
 # ## 12. Persist Outputs
@@ -1206,7 +1439,10 @@ FEATURE_METADATA.update(
             "category": "holdings",
             "interpretation": "Covered institutions holding the stock",
         },
-        "crowding_score": {"category": "holdings", "interpretation": "Normalized holder count"},
+        "crowding_score": {
+            "category": "holdings",
+            "interpretation": "Holder count over its median across held securities",
+        },
         "top_holder_pct": {
             "category": "holdings",
             "interpretation": "Largest holder share of value",
@@ -1214,7 +1450,7 @@ FEATURE_METADATA.update(
         "ownership_hhi": {"category": "holdings", "interpretation": "Ownership concentration"},
         "inst_coverage_pct": {
             "category": "holdings",
-            "interpretation": "Coverage among sampled institutions",
+            "interpretation": "Holder count over the institutions in the 13F panel",
         },
         "inst_value_change": {
             "category": "holdings",
@@ -1256,15 +1492,15 @@ FEATURE_METADATA.update(
         },
         "ownership_churn": {
             "category": "temporal",
-            "interpretation": "1 − mean Jaccard of holder sets across consecutive 13F vintages",
+            "interpretation": "1 − mean Jaccard of holder sets across consecutive report periods",
         },
         "position_value_cv": {
             "category": "temporal",
-            "interpretation": "Coefficient of variation of position value across 13F vintages",
+            "interpretation": "Coefficient of variation of position value across report periods",
         },
         "new_holders_recent": {
             "category": "temporal",
-            "interpretation": "CIKs holding the stock in the latest vintage but absent from the prior vintage",
+            "interpretation": "CIKs holding the stock in the latest report period but not the prior one",
         },
     }
 )
@@ -1322,7 +1558,8 @@ print("Saved: company_mapping.parquet")
 print("\n" + "=" * 70)
 print("NOTEBOOK EXECUTION COMPLETE")
 print("=" * 70)
-print(f"Signed supply snapshot: {SUPPLY_GRAPH_COMMIT} ({SUPPLY_GRAPH_SHA256[:12]})")
+print(f"Supply snapshot {SUPPLY_SNAPSHOT_NAME}: sha256 {SUPPLY_GRAPH_SHA256[:12]}")
+print(f"Extraction cache behind it: {str(SUPPLY_SNAPSHOT['cache_content_hash'])[:12]}")
 print(f"Supply-chain companies processed: {len(source_companies)}")
 print(f"Cross-graph matches: {len(matched_companies)}")
 print(
@@ -1330,7 +1567,10 @@ print(
     f"{company_mapping.filter(pl.col('match_method') == 'ambiguous').height}"
 )
 print(f"Supply relationships: {len(supply_rel_df)}")
-print(f"13F vintages through {CUTOFF_DATE}: {len(holdings_vintages)}")
+print(
+    f"13F report periods public at {CUTOFF_DATE}: {len(PUBLIC_PERIODS)} "
+    f"({PUBLIC_PERIODS[0].isoformat()} to {PUBLIC_PERIODS[-1].isoformat()})"
+)
 print(f"Feature columns: {len(all_features.columns) - 3}")
 print(f"Output target: {OUTPUT_DIR.name}")
 
@@ -1343,12 +1583,24 @@ print(f"Output target: {OUTPUT_DIR.name}")
 #    attributes miss.
 # 2. Point-in-time long-equity 13F features summarize holder breadth,
 #    concentration, and co-ownership; they are candidate crowding proxies, not
-#    measured price impact.
+#    measured price impact. Holder breadth is bounded by the institution panel, so
+#    `n_holders`, `crowding_score` and `inst_coverage_pct` are one small integer on
+#    three scales rather than three measurements. The panel is counted over every
+#    filing, not over the long-equity rows the features use, so a manager reporting
+#    only derivatives for a period does not shrink the denominator.
 # 3. Cross-graph features combining supply-chain and ownership signals
 #    create transparent interaction terms for downstream testing.
 # 4. The feature matrix is output in both wide format (ready for gradient
 #    boosting) and long format (convenient for IC analysis), with ambiguous
 #    issuer mappings preserved in a separate audit artifact.
+# 5. A consumer verifies its input rather than restating it. The supply graph is
+#    checked against the identity 02 recorded when it wrote the graph, and that
+#    record is checked against the extraction cache committed in this repository,
+#    so no constant here has to be re-copied when 02 changes.
+# 6. The report period is in the artifact, so nothing here has to infer one. An
+#    earlier revision clustered filing dates within fourteen days to approximate
+#    a quarter; `report_date` says which quarter each row describes, and the last
+#    filing date within a period says when that period became knowable.
 #
 # **Next**: See `10_network_portfolio_construction.py` for network-based
 # portfolio construction and Section 23.4 for the full feature discussion.

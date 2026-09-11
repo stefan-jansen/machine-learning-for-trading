@@ -57,7 +57,7 @@ from torch import nn
 
 from data import load_us_equities
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 N_ASSETS = 200
@@ -196,9 +196,14 @@ graph_density = n_edges / possible_edges
 degrees = adjacency.sum(axis=1)
 corr_values = correlation_matrix[np.triu_indices(len(symbol_order), k=1)]
 
+isolated_nodes = int((degrees == 0).sum())
 print(f"Returns matrix: {returns_matrix.shape}")
 print(f"Graph: {n_edges:,} edges, {graph_density:.2%} density")
 print(f"Median degree: {np.median(degrees):.0f}")
+print(
+    f"Stocks with no edge: {isolated_nodes} of {len(symbol_order)} "
+    f"({isolated_nodes / len(symbol_order):.0%})"
+)
 
 # %% [markdown]
 # ## 3. Construct node features and the forward target
@@ -522,9 +527,25 @@ tabular_ic_mean = float(fold_results["tabular_ic"].mean())
 hybrid_ic_mean = float(fold_results["hybrid_ic"].mean())
 mean_ic_delta = float(fold_results["hybrid_minus_tabular"].mean())
 
+# Descriptive spread only: these folds share training stocks and score correlated
+# names inside one return window, so they are not independent replicates.
+fold_deltas = fold_results["hybrid_minus_tabular"].to_numpy()
+delta_sd = float(np.std(fold_deltas, ddof=1))
+folds_favouring_hybrid = int((fold_deltas > 0).sum())
+largest_adverse = float(fold_deltas.min())
+largest_favourable = float(fold_deltas.max())
+
 print(f"\nMean tabular IC: {tabular_ic_mean:+.3f}")
 print(f"Mean hybrid IC: {hybrid_ic_mean:+.3f}")
 print(f"Mean paired delta: {mean_ic_delta:+.3f}")
+print(
+    f"Per-fold delta spread: sd {delta_sd:.3f}, range {largest_adverse:+.3f} to "
+    f"{largest_favourable:+.3f}"
+)
+print(
+    f"Folds favouring the hybrid: {folds_favouring_hybrid} of {len(fold_deltas)}; "
+    f"the mean is {abs(mean_ic_delta) / delta_sd:.2f} standard deviations from zero"
+)
 fold_results
 
 # %% [markdown]
@@ -533,6 +554,18 @@ fold_results
 # result: it tests whether these trained graph embeddings helped this model on
 # this sample. It does not establish that GNNs generally improve or degrade
 # equity forecasts.
+#
+# The mean is also not the result. The folds disagree in sign, the single most
+# adverse one moves further than the rest put together, and the mean is a small
+# fraction of the fold-to-fold spread. A reader shown only the mean takes a small
+# negative number for a small negative effect. What the experiment produced is a
+# sign it does not determine, which is why the spread prints beside the mean and
+# the figure draws five separate lines rather than one summary marker.
+#
+# The spread is descriptive and nothing here converts it into a confidence
+# statement. The folds share training stocks and score correlated names inside one
+# return window, so treating five paired deltas as independent replicates would
+# understate the uncertainty rather than quantify it.
 
 # %% [markdown]
 # Direct fold labels are spread by a minimum vertical gap. Leader lines preserve
@@ -610,16 +643,25 @@ ax.scatter(
 ax.axhline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set_xticks([0, 1], ["Tabular", "Tabular + graph embeddings"])
 ax.set_ylabel("Held-out-stock IC (Spearman)")
-ax.set_title("Graph features must earn their place in a paired ablation")
+ax.set_title("Held-out-stock IC, tabular against tabular plus graph")
 ax.text(
     0.02,
     0.02,
-    f"Mean paired delta: {mean_ic_delta:+.3f}",
+    f"Mean paired delta {mean_ic_delta:+.3f}, fold spread {largest_adverse:+.3f} "
+    f"to {largest_favourable:+.3f}",
     transform=ax.transAxes,
     color=COLORS["neutral"],
 )
 ax.legend(frameon=False, loc="upper left")
-fig
+show_with_alt(
+    fig,
+    f"A slope chart with two columns, tabular on the left and tabular plus graph "
+    f"embeddings on the right, joined by one line per fold. "
+    f"{folds_favouring_hybrid} of {len(fold_deltas)} lines end higher on the right "
+    f"and {len(fold_deltas) - folds_favouring_hybrid} end lower, the widest single "
+    f"gap being {abs(largest_adverse):.3f} of IC on a line that ends lower. The two "
+    f"diamonds mark the fold means, which sit close together.",
+)
 
 # %% [markdown]
 # ## 6. Inspect the graph input
@@ -627,6 +669,13 @@ fig
 # A distribution view is more legible than a 200-node hairball. The left panel
 # shows which correlations cross the edge threshold; the right panel shows how
 # unevenly those edges are distributed across stocks.
+#
+# The left tail of the degree histogram is where the ablation's ceiling is. A stock
+# with no edge has no neighbours to aggregate, so its graph embedding carries only
+# its own features passed through the encoder, and the hybrid model sees nothing
+# the tabular model does not. The count printed above says how much of the universe
+# is in that position, and the threshold is what puts it there: raise it and more
+# stocks become isolated, lower it and the edges stop meaning strong co-movement.
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(10, 4.4), layout="constrained")
@@ -642,8 +691,15 @@ axes[1].axvline(np.median(degrees), color=COLORS["amber"], linestyle="--", linew
 axes[1].set_xlabel("Node degree")
 axes[1].set_ylabel("Stocks")
 axes[1].set_title("Connectivity varies across the universe")
-fig.suptitle(f"Pre-target correlation graph: {n_edges:,} edges ({graph_density:.1%} density)")
-fig.show()
+fig.suptitle("The correlation graph the encoder is trained on")
+show_with_alt(
+    fig,
+    f"Two histograms. The left one bins the {len(corr_values):,} pairwise return "
+    f"correlations, with dashed lines at plus and minus the "
+    f"{CORRELATION_THRESHOLD:.2f} edge threshold marking the tails that become "
+    f"edges. The right one bins node degree across {len(degrees)} stocks, with a "
+    f"dashed line at the median of {np.median(degrees):.0f}.",
+)
 
 # %% [markdown]
 # ## 7. Verification and chapter-impact summary
@@ -697,5 +753,9 @@ results
 # 1. **Train the representation**: Random graph projections are not learned GNN embeddings.
 # 2. **Fit preprocessing inside the fold**: Even cross-sectional scaling can leak held-out data.
 # 3. **Use a pre-target universe**: Future liquidity cannot decide today's investable set.
-# 4. **Interpret the ablation narrowly**: Five stock folds from one target window do not settle
-#    whether GNNs help across markets or time.
+# 4. **Report the spread, not the mean**: the folds disagree in sign here and the
+#    mean is a small fraction of their spread, so the experiment does not determine
+#    which way the effect goes even on its own sample. The spread is descriptive:
+#    folds that share training stocks are not independent replicates.
+# 5. **Interpret the ablation narrowly**: five stock folds from one target window
+#    do not settle whether GNNs help across markets or time.

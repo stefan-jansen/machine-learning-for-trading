@@ -52,7 +52,7 @@ import polars as pl
 from matplotlib.colors import ListedColormap
 
 from data import load_sec_filings
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
@@ -138,48 +138,75 @@ if "year" in filings_10k.columns:
     )
 
 # %% [markdown]
-# ### Filing Coverage Heatmap
+# ### Filing coverage
 #
-# Visualize which companies have filings in each year. Gaps reveal
-# missing data that could affect downstream KG completeness.
+# One cell per company-year. Two details decide whether the picture is
+# readable, and the notebook got both wrong before this pass.
+#
+# **The columns have to be put in year order.** `pivot(on="year")` returns
+# columns in the order the years happen to appear in the frame, which after a
+# `unique()` is arbitrary - here it came out 2022, 2024, 2025, 2020, 2023,
+# 2021 - while the axis was labelled with a sorted year list. Every column in
+# the rendered heatmap carried the wrong year, and the one company with a gap
+# appeared to be missing the wrong ones.
+#
+# **The rows have to be ordered so the gaps are visible.** The panel is nearly
+# complete, so a few missing cells among six hundred, in alphabetical order,
+# are a scatter of pixels nobody will find. Sorting by coverage puts the
+# incomplete companies at the top where the chart can be read.
 
 # %%
 if "year" in filings_10k.columns:
     years = sorted(filings_10k["year"].unique().to_list())
-    symbols = sorted(filings_10k["symbol"].unique().to_list())
     presence_df = (
         filings_10k.select("symbol", "year")
         .unique()
         .with_columns(pl.lit(1).alias("present"))
         .pivot(index="symbol", on="year", values="present")
-        .sort("symbol")
         .fill_null(0)
+        # Column order comes from the pivot, not from the data. Name the years.
+        .select("symbol", *[str(year) for year in years])
+        .with_columns(pl.sum_horizontal([str(year) for year in years]).alias("years_present"))
+        .sort(["years_present", "symbol"])
     )
-    presence = presence_df.select(pl.exclude("symbol")).to_numpy()
+    symbols = presence_df["symbol"].to_list()
+    presence = presence_df.select([str(year) for year in years]).to_numpy()
     missing_company_years = int(presence.size - presence.sum())
-    gap_label = "company-year is" if missing_company_years == 1 else "company-years are"
+    incomplete = presence_df.filter(pl.col("years_present") < len(years))
+    print(f"Panel: {len(symbols)} companies x {len(years)} years = {presence.size} cells")
+    print(f"Missing company-years: {missing_company_years}")
+    print(f"Companies with a gap: {dict(incomplete.select('symbol', 'years_present').iter_rows())}")
 
     fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], constrained_layout=True)
     coverage_cmap = ListedColormap([COLORS["silver_muted"], COLORS["blue"]])
     ax.imshow(presence, aspect="auto", cmap=coverage_cmap, interpolation="nearest")
     ax.set_xticks(range(len(years)))
     ax.set_xticklabels(years)
-    y_positions = range(0, len(symbols), 10)
-    ax.set_yticks(list(y_positions))
+    y_positions = list(range(0, len(symbols), 10))
+    ax.set_yticks(y_positions)
     ax.set_yticklabels([symbols[i] for i in y_positions], fontsize=7)
-    ax.set_xlabel("Filing Year")
-    ax.set_ylabel("S&P 100 Company")
+    ax.set_xlabel("Filing year")
+    ax.set_ylabel("S&P 100 company, fewest filing years first")
     add_message_title(
         ax,
-        f"Only {missing_company_years} {gap_label} missing from the 10-K panel",
-        subtitle=f"{len(symbols)} symbols across {len(years)} filing years; dark cells are present",
+        "10-K coverage by company and year",
+        subtitle="Dark cells are present; companies sorted by how many years they cover",
     )
-    fig.show()
+    show_with_alt(
+        fig,
+        "A tall two-colour grid, one row per S&P 100 company and one column per filing year "
+        "from 2020 to 2025, with dark cells marking a filing present. Almost the entire "
+        "panel is dark. The rows are ordered by how many years each company covers, so the "
+        "only visible light cells are in the first row at the top, where a single company "
+        "is missing every year but the last.",
+    )
 
 # %% [markdown]
-# The nearly complete panel supports longitudinal description. A missing cell is
-# a coverage fact, not evidence about its cause; downstream work should retain
-# the gap rather than impute a filing.
+# A missing cell is a coverage fact and not evidence about its cause. A company
+# can be absent because it joined the index late, because it changed its filer
+# identity, or because the download missed it, and the panel cannot tell those
+# apart. Downstream work should carry the gap rather than impute a filing into
+# it.
 
 # %% [markdown]
 # ## Text Length Distribution
@@ -212,16 +239,26 @@ ax.set_ylabel("Number of Filings")
 modal_10k_length = int(filings_10k["text_length"].mode()[0])
 add_message_title(
     ax,
-    f"10-K excerpts cluster at {modal_10k_length:,} characters",
-    subtitle="8-K event disclosures have a broader, shorter distribution",
+    "Excerpt length by filing form",
+    subtitle="Counts of filings per length bin; both forms on one axis",
 )
 ax.legend()
-fig.show()
+show_with_alt(
+    fig,
+    "Two overlaid histograms of extracted text length in characters. The 10-K series is "
+    "concentrated in one tall spike well to the right, with a smaller spike beyond it and "
+    "almost nothing elsewhere. The 8-K series sits entirely to the left of the 10-K spike, "
+    "spread across a range of shorter lengths rather than concentrated at one value.",
+)
 
 # %% [markdown]
-# The modal 10-K length exposes the fixed extraction window. The broader 8-K
-# distribution reflects varying event-disclosure length, so document length
-# should not be treated as a comparable information-volume measure across forms.
+# The 10-K spikes are the download's fixed extraction windows rather than a
+# property of annual reports - `01_sec_filing_pipeline` in chapter 22 takes
+# that apart. The 8-K distribution is spread because event disclosures vary in
+# length and the 8-K rule keeps the opening rather than a fixed window.
+#
+# So length is a diagnostic of the extraction, not a measure of how much a
+# filing says, and it is not comparable across the two forms.
 
 # %% [markdown]
 # ## Text Quality Check
@@ -243,10 +280,15 @@ for row in sample.iter_rows(named=True):
 # 2. 8-K filings capture discrete events - M&A, leadership, material agreements
 #    feed the temporal edge layer
 # 3. Coverage is nearly complete, but gaps remain explicit rather than imputed
-# 4. Fixed extraction windows make text length a pipeline diagnostic, not a direct
-#    measure of filing informativeness
+# 4. Fixed extraction windows make text length a pipeline diagnostic, not a
+#    direct measure of filing informativeness
+# 5. A pivot returns its columns in whatever order the data supplied them.
+#    Labelling those columns from a separately sorted list mislabels every one
+#    of them, and a heatmap gives no hint that it happened - name the columns
+#    when you select them
 #
-# **Next**: See `02_supply_chain_kg_construction.py` for LLM-based entity extraction.
+# **Next**: [`02_supply_chain_kg_construction`](02_supply_chain_kg_construction.ipynb)
+# extracts supply-chain relations from these filings with a local LLM.
 
 # %%
 completion_record = {

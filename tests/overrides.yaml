@@ -1117,7 +1117,12 @@
 23_knowledge_graphs/07_dynamic_kg_temporal:
   docker_env: ml4t+neo4j
   skip: true
-  skip_reason: Requires 08_8k_event_extraction with GPU to generate temporal edges
+  # It reads the 8k_events GraphSnapshot and the timestamped edges 08 writes, and
+  # raises when they are absent. 08 asserts torch.cuda.is_available() before loading
+  # Qwen, so on a GPU-less runner 08 skips and this notebook has nothing to read.
+  # The test-neo4j job still runs 08 ahead of it, so on a machine with a card the
+  # order is right and only the skip has to come off.
+  skip_reason: Requires 08_8k_event_extraction, which needs a CUDA device
   tier: on_demand
   timeout: 600
 23_knowledge_graphs/06_gnn_feature_engineering:
@@ -1127,31 +1132,51 @@
   gpu: true
   timeout: 600
 23_knowledge_graphs/03_graph_rag_qa:
+  docker_env: ml4t+neo4j
   timeout: 300
 23_knowledge_graphs/05_institutional_holdings_kg:
   docker_env: ml4t+neo4j
   timeout: 600
 23_knowledge_graphs/09_knowledge_graph_features:
+  # It reads the supply graph and the SupplyGraphSnapshot that 02 writes, and raises
+  # when either is absent, so 02 has to run against the same Neo4j first. The
+  # test-neo4j job gives 02 its own pytest invocation ahead of this one. 02 no longer
+  # needs a GPU either, which is what the previous skip here was waiting on.
   docker_env: ml4t+neo4j
-  skip: true
-  skip_reason: Requires 02_supply_chain_kg_construction with GPU to populate Neo4j
-  tier: on_demand
   timeout: 600
 23_knowledge_graphs/10_network_portfolio_construction:
-  docker_env: ml4t+neo4j
+  # The test panel carries 56 tickers, so the production universe of 100 names and
+  # the 1,000-symbol market-date threshold both leave it with nothing: measured, the
+  # date filter returned 0 dates and the notebook raised. These four numbers size the
+  # same construction down to the fixture. Measured on a local replica of the fixture
+  # (production us_equities filtered to tests/create_test_data.py's ticker list):
+  # 813 dates clear a 40-symbol threshold, and the notebook runs clean in 7s.
+  parameters:
+    ESTIMATION_DAYS: 120
+    EVALUATION_DAYS: 60
+    MIN_SYMBOLS_PER_DATE: 40
+    N_ASSETS: 25
   timeout: 300
 23_knowledge_graphs/04_rag_comparison_benchmark:
+  # Section 4 asserts `torch.cuda.is_available()`, then constructs the SentenceTransformer
+  # with `device="cuda"` and asserts the encoder landed there. There is no CPU path.
+  # Measured: with the card hidden, `torch.cuda.is_available()` is False, so the assert
+  # fires before any embedding is computed.
+  gpu: true
   timeout: 300
 23_knowledge_graphs/01_sp100_sec_download:
-  skip: true
-  skip_reason: Writes to data volume (read-only in Docker)
+  # It was skipped as "Writes to data volume (read-only in Docker)". It writes
+  # nothing: it loads the staged filings through load_sec_filings and profiles them.
+  # Measured: runs clean in the ml4t image in 25s. The download it documents is a
+  # separate script, which is what the stale reason described.
+  timeout: 300
 23_knowledge_graphs/02_supply_chain_kg_construction:
-  docker_env: ml4t+neo4j+gpu
-  gpu: true
-  long_running: true
-  parameters:
-    MAX_COMPANIES: 3
-  timeout: 1200
+  # The default path loads the committed extraction cache and touches no GPU:
+  # RERUN_EXTRACTION is False, so Qwen is never loaded. Only cache regeneration
+  # needs CUDA. MAX_COMPANIES subsamples the corpus that feeds the extractor, so
+  # on this path it changes nothing that runs.
+  docker_env: ml4t+neo4j
+  timeout: 300
 24_autonomous_agents/01_react_reasoning:
   parameters:
     LLM_PROVIDER: mock
