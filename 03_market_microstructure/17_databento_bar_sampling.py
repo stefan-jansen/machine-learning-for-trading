@@ -59,7 +59,6 @@
 """DataBento MBO: Multi-Day Bar Calibration Study — calibrating bar sampling parameters across trading days."""
 
 import re
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -68,12 +67,11 @@ import polars as pl
 import seaborn as sns
 from scipy import stats
 
-warnings.filterwarnings("ignore")
-
 # ML4T imports - path resolution
 # Import loader for MBO data
 from data import load_mbo_data
 from utils.paths import get_output_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults — Papermill injects overrides for CI
@@ -250,6 +248,33 @@ if len(trades) == 0:
     trades = None
 
 # %% [markdown]
+# ### Trades with no aggressor side
+#
+# DataBento marks a trade `N` when it cannot say which side was the aggressor, and this
+# notebook maps that to a side of zero. Volume and imbalance bars cannot use such a
+# trade: the first splits each bar's volume into buys and sells, the second accumulates
+# signed flow. Tick and dollar bars could use it, and time bars do not look at side
+# at all.
+#
+# Every bar type here is compared against the others, though, so they have to be built
+# from the same trades. The comparison set is therefore the classified trades, and the
+# share that drops out is printed rather than absorbed - on a liquid name it is not
+# small, and a reader comparing these bars to a count of the day's prints should know
+# the difference.
+
+# %%
+if trades is not None and len(trades) > 0:
+    classified = trades.filter(pl.col("side") != 0)
+    unclassified = len(trades) - len(classified)
+    print(
+        f"{unclassified:,} of {len(trades):,} trades carry no aggressor side "
+        f"({unclassified / len(trades):.1%}); every bar type below is built from the "
+        f"remaining {len(classified):,}."
+    )
+    trades_all_sides = trades
+    trades = classified
+
+# %% [markdown]
 # ## 3. Daily Volume Profile
 #
 # Before calibrating bar thresholds, we need to understand the day-to-day
@@ -258,9 +283,10 @@ if len(trades) == 0:
 
 # %%
 if trades is not None and len(trades) > 0:
-    # Compute daily statistics
+    # Every print of the day, including the ones with no aggressor side: this section
+    # describes the day's trading, not the subset the bar samplers can use.
     daily_stats = (
-        trades.group_by("date")
+        trades_all_sides.group_by("date")
         .agg(
             [
                 pl.len().alias("trade_count"),
@@ -292,7 +318,11 @@ if trades is not None and len(trades) > 0:
     print(f"  Trade count CV: {cv_trades:.2%}")
     print(f"  Volume CV:      {cv_volume:.2%}")
     print(f"  Dollar volume CV: {cv_dollar:.2%}")
-    print("\nConclusion: ~20-40% daily variability means single-day calibration is unreliable.")
+    widest = max(cv_trades, cv_volume, cv_dollar)
+    print(
+        f"\nConclusion: the widest of these is {widest:.0%}, so a threshold calibrated on "
+        f"one day does not carry to the next."
+    )
 
 # %% [markdown]
 # ## 4. Bar Samplers
@@ -511,9 +541,13 @@ def compute_bar_statistics(bars: pl.DataFrame) -> dict | None:
 # Run the calibration experiment across all days and bar types.
 # We test multiple thresholds to find those producing ~500 bars/day.
 
+# %% [markdown]
+# The grid below is a range around the threshold each sampler would need to produce a
+# few hundred bars a day on a name of this size. Sweeping a range rather than picking
+# one value is what makes the sensitivity visible: how far the bar count moves for a
+# given change in threshold is as much a property of the sampler as the count itself.
+
 # %%
-# Define calibration grid
-# NVDA trades ~$6-10B/day, so need $10-20M thresholds for ~500 bars
 CALIBRATION_GRID = {
     "time": [1, 2, 5, 10],  # minutes
     "tick": [500, 1000, 2000, 4000],
@@ -782,9 +816,16 @@ if trades is not None and "daily_stats" in dir() and len(daily_stats) > 0:
     ax.legend()
 
     plt.suptitle(f"{SYMBOL} Daily Trading Profile ({N_DAYS} Days)", y=1.02)
-    plt.show()
+    show_with_alt(
+        fig,
+        "Three panels for one symbol over the sample of trading days: the number of trades per day, the shares traded per day, and the dollar value traded per day, each as a series across the days.",
+    )
 
-    print("\nThis variability (CV=20-40%) is why multi-day calibration matters.")
+    print(
+        "\nThe dispersion above is why a threshold calibrated on one day does not "
+        "transfer: the same threshold meets a materially different amount of trading "
+        "on a quiet day and a busy one."
+    )
 
 # %% [markdown]
 # ### Figure 2: Bar Count by Threshold
@@ -850,7 +891,10 @@ if "calibration_df" in dir() and len(calibration_df) > 0:
         _plot_bar_calibration(axes[i // 2, i % 2], calibration_df, bar_type)
 
     plt.suptitle(f"Bar Count Calibration ({SYMBOL}, {N_DAYS} Days)", y=1.02)
-    plt.show()
+    show_with_alt(
+        fig,
+        "One panel per bar type, each plotting the number of bars produced per day against the candidate threshold values swept for that sampler, so the threshold giving a target bar count can be read off.",
+    )
 
 # %% [markdown]
 # ### Figure 3: Statistical Properties Comparison
@@ -962,7 +1006,10 @@ if combined_stats is not None and len(combined_stats) > 0:
             ax.set_title(title)
 
     plt.suptitle(f"Statistical Properties by Bar Type ({SYMBOL}, {N_DAYS} Days)", y=1.02)
-    plt.show()
+    show_with_alt(
+        fig,
+        "A grid of panels, one statistical diagnostic each, comparing the bar types produced by the different samplers over the sample of days.",
+    )
 
 # %% [markdown]
 # ### Figure 4: Tick Imbalance Bar Sensitivity (E[T] at fixed α)
@@ -1003,10 +1050,11 @@ if "calibration_df" in dir() and len(calibration_df) > 0:
         alpha_vals = [col for col in pivot.columns if col != "expected_t"]
         heatmap_matrix = pivot.select(alpha_vals).to_numpy()
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
 # %%
 if imb_has_data:
+    # Created here rather than at the end of the cell above: a figure made in one cell
+    # and drawn into in the next is published empty by the inline backend.
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     ax = axes[0]
     im = ax.imshow(heatmap_matrix, cmap="YlOrRd", aspect="auto")
     ax.set_xticks(range(len(alpha_vals)))
@@ -1024,7 +1072,7 @@ if imb_has_data:
             if not np.isnan(val):
                 ax.text(j, i, f"{val:.0f}", ha="center", va="center", fontsize=10)
 
-    plt.colorbar(im, ax=ax, label="Bars/Day")
+    fig.colorbar(im, ax=ax, label="Bars/Day")
 
     # Target highlight - find cell closest to 500
     target_diff = np.abs(heatmap_matrix - TARGET_BARS_PER_DAY)
@@ -1040,9 +1088,8 @@ if imb_has_data:
         )
     )
 
-# %%
-if imb_has_data:
-    # CV heatmap (stability)
+    # The CV panel belongs in this cell: a figure drawn across two cells is published
+    # half-finished at the end of the first one, with no alt text.
     cv_pivot = (
         heatmap_data.with_columns((pl.col("std_bars") / pl.col("mean_bars")).alias("cv"))
         .pivot(index="expected_t", on="alpha", values="cv")
@@ -1059,7 +1106,7 @@ if imb_has_data:
     ax.set_yticklabels([f"E[T]={t}" for t in expected_t_vals])
     ax.set_xlabel("Alpha (EWMA decay)")
     ax.set_ylabel("Expected Ticks per Bar")
-    ax.set_title("Bar Count CV (lower = more stable)")
+    ax.set_title("Coefficient of variation of the daily bar count")
 
     for i in range(len(expected_t_vals)):
         for j in range(len(alpha_vals)):
@@ -1067,10 +1114,13 @@ if imb_has_data:
             if not np.isnan(val):
                 ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=10)
 
-    plt.colorbar(im, ax=ax, label="CV")
+    fig.colorbar(im, ax=ax, label="CV")
 
     plt.suptitle(f"Tick Imbalance Bar Sensitivity ({SYMBOL}, α={IMBALANCE_ALPHA[0]})", y=1.02)
-    plt.show()
+    show_with_alt(
+        fig,
+        "Panels showing how the tick imbalance sampler responds as its target bar size is varied at a fixed decay rate, including the coefficient of variation of the daily bar count.",
+    )
 
     print(f"\nBest parameters for ~{TARGET_BARS_PER_DAY} bars/day:")
     print(f"  E[T]={expected_t_vals[best_idx[0]]}, α={alpha_vals[best_idx[1]]}")
@@ -1115,7 +1165,10 @@ if trades is not None and len(trades) > 0:
         .filter(pl.col("volume") > 0)
     )
     time_bars = time_bars.with_columns(
-        (pl.col("bar_end") - pl.col("bar_start")).dt.total_seconds().alias("duration_sec")
+        (pl.col("bar_end") - pl.col("bar_start"))
+        .dt.total_nanoseconds()
+        .truediv(1e9)
+        .alias("duration_sec")
     )
     bar_data["time"] = time_bars
 
@@ -1132,7 +1185,10 @@ if trades is not None and len(trades) > 0:
             tick_bars.with_columns(pl.col("timestamp").alias("bar_start"))
             .with_columns(pl.col("bar_start").shift(-1).alias("bar_end"))
             .with_columns(
-                (pl.col("bar_end") - pl.col("bar_start")).dt.total_seconds().alias("duration_sec")
+                (pl.col("bar_end") - pl.col("bar_start"))
+                .dt.total_nanoseconds()
+                .truediv(1e9)
+                .alias("duration_sec")
             )
         )
     bar_data["tick"] = tick_bars
@@ -1147,7 +1203,10 @@ if trades is not None and len(trades) > 0:
             vol_bars.with_columns(pl.col("timestamp").alias("bar_start"))
             .with_columns(pl.col("bar_start").shift(-1).alias("bar_end"))
             .with_columns(
-                (pl.col("bar_end") - pl.col("bar_start")).dt.total_seconds().alias("duration_sec")
+                (pl.col("bar_end") - pl.col("bar_start"))
+                .dt.total_nanoseconds()
+                .truediv(1e9)
+                .alias("duration_sec")
             )
         )
     bar_data["volume"] = vol_bars
@@ -1163,7 +1222,10 @@ if trades is not None and len(trades) > 0:
             dollar_bars.with_columns(pl.col("timestamp").alias("bar_start"))
             .with_columns(pl.col("bar_start").shift(-1).alias("bar_end"))
             .with_columns(
-                (pl.col("bar_end") - pl.col("bar_start")).dt.total_seconds().alias("duration_sec")
+                (pl.col("bar_end") - pl.col("bar_start"))
+                .dt.total_nanoseconds()
+                .truediv(1e9)
+                .alias("duration_sec")
             )
         )
     bar_data["dollar"] = dollar_bars
@@ -1184,7 +1246,8 @@ if trades is not None and len(trades) > 0:
                 .with_columns(pl.col("bar_start").shift(-1).alias("bar_end"))
                 .with_columns(
                     (pl.col("bar_end") - pl.col("bar_start"))
-                    .dt.total_seconds()
+                    .dt.total_nanoseconds()
+                    .truediv(1e9)
                     .alias("duration_sec")
                 )
             )
@@ -1201,7 +1264,8 @@ if trades is not None and len(trades) > 0:
                 .with_columns(pl.col("bar_start").shift(-1).alias("bar_end"))
                 .with_columns(
                     (pl.col("bar_end") - pl.col("bar_start"))
-                    .dt.total_seconds()
+                    .dt.total_nanoseconds()
+                    .truediv(1e9)
                     .alias("duration_sec")
                 )
             )
@@ -1272,10 +1336,13 @@ if "bar_data" in dir() and bar_data:
         ax.set_yticklabels([k.title() for k in y_positions.keys()])
         ax.set_xlabel("Time")
         ax.set_ylabel("Bar Type")
-        ax.set_title("Information-driven bars cluster during active periods (first 100 bars)")
+        ax.set_title("Bar start times over the first hundred bars, by bar type")
         ax.legend(loc="upper right")
         plt.xticks(rotation=45)
-        plt.show()
+        show_with_alt(
+            fig,
+            "A timeline of when each bar type cut its first hundred bars over the session, one row per bar type, so the clustering of event-driven bars in busy periods can be compared against the even spacing of time bars.",
+        )
 
         print("\nKey observation: Time bars are evenly spaced.")
         print("Event-driven bars cluster during high-activity periods.")
@@ -1307,10 +1374,8 @@ if "bar_data" in dir() and bar_data:
         "volume_imbalance": "#8c564b",
     }
 
-    # Plot 1: Duration per bar (seconds)
-    # Cap x-axis at the cross-series 99th percentile so a single long tail
-    # (time bars on quiet sessions) doesn't crush the other distributions
-    # into the first bin.
+    # The horizontal axis is capped at the ninety-ninth percentile across all series:
+    # one long tail would otherwise push every other distribution into the first bin.
     ax = axes[0, 0]
     all_durations = []
     for bt in bar_types:
@@ -1456,7 +1521,14 @@ if "bar_data" in dir() and bar_data:
     )
 
     plt.suptitle(f"Cross-Perspective Bar Distributions ({first_date})", y=1.02, fontsize=14)
-    plt.show()
+    show_with_alt(
+        fig,
+        "Six panels in two rows of three, comparing what each sampler produced on one session. The top row holds three overlaid histograms, one colour per bar type: bar duration in seconds, bar volume in thousands of shares, and bar tick count. Each of those three horizontal axes is capped at the ninety-ninth percentile across the series drawn in it, so one long tail cannot push the others into the first bin. Bottom left is a grouped bar chart of the coefficient of variation of duration, volume and tick count for each bar type. Bottom centre is a box plot of bar duration by bar type. Bottom right is not a chart: it is a table drawn as text inside the figure, listing each bar type with its count, mean duration and mean volume, and the same numbers are printed below the figure.",
+    )
+
+    # The table in the sixth panel is drawn as pixels, so a screen reader cannot read
+    # it. Print the same text.
+    print(summary_text)
 
     print("\nKey insight:")
     print("- Time bars: Low duration CV (fixed), high volume CV (varies)")
@@ -1537,36 +1609,30 @@ if "bar_data" in dir() and bar_data:
 #
 # ### Recommended Thresholds for NVDA (~500 bars/day)
 #
-# | Bar Type | Threshold | Bars/Day | Std |
-# |----------|-----------|----------|-----|
-# | Time | 1 minute | 450 | 0 (fixed) |
-# | Tick | 500 ticks | ~496 | ±103 |
-# | Volume | 50K shares | ~471 | ±86 |
-# | Dollar | $10M | ~343 | ±64 |
-# | TIB | E[T]=2000, α=0.001 | ~237 | ±239 |
-# | VIB | E[T]=5000, α=0.001 | ~150 | ±141 |
+# The calibration tables above give each sampler's mean daily bar count and the standard
+# deviation of that count across days. Read those two against each other: a sampler
+# whose day-to-day standard deviation approaches its mean is not delivering a
+# predictable number of bars, and downstream code that assumes one will break on the
+# quiet days. The comparison table that follows reports distributional diagnostics
+# instead, which is a separate question from stability.
 #
-# **Note**: Imbalance bars show high variability (std > mean), reflecting
-# genuine day-to-day variation in order flow persistence. Dollar bars at
-# $5M give ~679 bars/day if more bars are desired.
+# ### How to calibrate a threshold
 #
-# ### Calibration Methodology
+# **Calibrate off the median day, not the mean.** A single heavy day pulls the mean up
+# and leaves a threshold that produces too few bars on every ordinary day.
 #
-# 1. **Use median daily volume** for threshold calibration, not mean
-#    (more robust to outlier days)
+# **Expect the bar count to move, and decide how much movement is acceptable before
+# looking.** Fixed-threshold bars track activity by construction, so their count varies
+# with the market; imbalance bars vary more, because their threshold adapts as well.
 #
-# 2. **Accept ±30% daily bar count variation** as normal for standard bars;
-#    imbalance bars can vary more (reflects genuine market activity changes)
+# **Dollar bars are the reasonable default.** They weight by value rather than share
+# count, which is the unit portfolio arithmetic is done in, and they absorb a price move
+# that would change what a volume threshold means. A volume threshold calibrated on a
+# $50 stock samples very differently after it doubles.
 #
-# 3. **Dollar bars recommended** as default choice:
-#    - Value-weighted (natural for portfolio math)
-#    - Accounts for both price and volume changes
-#    - More stable than volume bars for high-price stocks
-#
-# 4. **Imbalance bars for information-driven sampling**:
-#    - Use α=0.001 (very slow adaptation) to avoid threshold spiral
-#    - Higher E[T] for fewer, more significant bars
-#    - Expect higher day-to-day variability than standard bars
+# **Imbalance bars buy information-driven sampling at the cost of predictability.** Use a
+# slow decay so the threshold does not run away, and a larger target so that each bar
+# represents a meaningful accumulation of one-sided flow rather than noise.
 #
 # ### Key Findings
 #
@@ -1575,9 +1641,10 @@ if "bar_data" in dir() and bar_data:
 #    (see the comparison table for the per-bar-type numbers). This notebook
 #    does not evaluate downstream ML performance on the resulting series.
 #
-# 2. **Single-day calibration is unreliable**:
-#    - 20-40% CV in daily volume
-#    - Thresholds from one day may fail on another
+# 2. **A threshold calibrated on one day is calibrated on that day.** Daily volume
+#    varies enough across this sample that a threshold fitted to a single session
+#    produces a materially different bar count on another - the dispersion measured
+#    above is what to size that risk against.
 #
 # 3. **Variance Ratio VR(5) ≈ 1** for all bar types:
 #    - Returns are not distinguishable from a random walk by VR(5)
@@ -1597,12 +1664,12 @@ if "bar_data" in dir() and bar_data:
 if trades is not None and len(trades) > 0:
     summary_date = trades["date"].unique().sort().head(1).item()
     summary_day = trades.filter(pl.col("date") == summary_date).drop("date")
-    summary_usable = summary_day.filter(pl.col("side") != 0)
     n_summary = len(summary_day)
     buy_frac_summary = (summary_day["side"] > 0).mean()
 
+    # Every trade here carries a side already: the unclassified ones were reported and
+    # dropped at load, so a "usable" share computed now could only ever be 100%.
     print(f"Day: {summary_date}, Trades: {n_summary:,}, P[buy] = {buy_frac_summary:.3f}")
-    print(f"  Usable (with side): {len(summary_usable):,} ({len(summary_usable) / n_summary:.1%})")
 
     # Build bars with thresholds targeting ~400-500 bars/day
     summary_configs = [
@@ -1636,8 +1703,9 @@ if trades is not None and len(trades) > 0:
         if s:
             summary_results.append({"label": label, **s})
 
-    # Volume Imbalance bars (use usable trades with known side)
-    vib_bars = build_bars_for_day(summary_usable, "imbalance", 500, alpha=0.001)
+    # Imbalance bars need a classified side, which every trade here has: the
+    # unclassified ones were dropped at load.
+    vib_bars = build_bars_for_day(summary_day, "imbalance", 500, alpha=0.001)
     vib_stats = compute_bar_statistics(vib_bars)
     if vib_stats:
         summary_results.append({"label": "Vol Imbalance", **vib_stats})
@@ -1673,10 +1741,10 @@ if trades is not None and len(trades) > 0:
 #
 # | Feature | DataBento | ITCH |
 # |---------|-----------|------|
-# | Multi-day data | [OK] 62+ days | [FAIL] Single day |
-# | Calibration | [OK] Robust | WARNING: Unstable |
-# | Aggressor side | [OK] Direct (~83%) | WARNING: Lee-Ready estimate |
-# | Imbalance bars | [OK] Ground truth | WARNING: Estimated |
+# | Multi-day data | Many sessions | One session |
+# | Calibration | Can be fitted across days | Fitted on a single day |
+# | Aggressor side | Labelled by the venue on most trades | Inferred by the Lee-Ready rule |
+# | Imbalance bars | Built on labelled sides | Built on inferred sides |
 #
 # ### Next Steps
 #

@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -38,15 +38,15 @@
 #
 # ## Book reference
 #
-# Section §3.3, *From Raw Messages to the Limit Order Book* — the
-# market-wide statistics paragraph cites this notebook.
+# Section §3.3, *From raw messages to the limit order book* - the market-wide statistics
+# paragraph cites this notebook.
 #
 # ## Prerequisites
 #
 # - Parsed ITCH message parquets at `data/equities/market/microstructure/nasdaq_itch/messages/`
 #   (output of `01_itch_parser` or the Rust parser).
 # - Notebooks 06 and 07 read the canonical trade table this notebook writes
-#   under `output/ch03/nasdaq_itch/trading_activity/`.
+#   under `03_market_microstructure/output/nasdaq_itch/trading_activity/`.
 #
 # ---
 
@@ -56,53 +56,55 @@
 # %%
 """Trading Activity Overview — high-level view of NASDAQ trading activity using TotalView-ITCH data."""
 
-import warnings
 from pathlib import Path
-
-warnings.filterwarnings("ignore")
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import numpy as np
+import pandas as pd
 import polars as pl
 import pyarrow.dataset as ds
-import seaborn as sns
 from IPython.display import display
+from itch_message_specs import MESSAGE_SPECS
 
 from data import load_nasdaq_itch
-from utils.paths import get_output_dir
+from utils.paths import display_path, get_output_dir
+from utils.style import COLORS, show_with_alt
 
-sns.set_style("whitegrid")
+# %% [markdown]
+# ### Declared parameters
+#
+# `MAX_ROWS` caps how many rows of each message type are read; zero means read them all,
+# which is what the committed run does. A small cap exercises the same code in seconds.
+#
+# `REBUILD_ENRICHED` decides whether the enrichment below is recomputed. The enriched
+# files are large and take minutes to build, so a reader who already has them can skip
+# the work; the committed run rebuilds them, because a result read from a cache is not a
+# result the notebook reproduced.
 
 # %% tags=["parameters"]
-# Production defaults
 MAX_ROWS = 0
+REBUILD_ENRICHED = True
 
 # %%
-# Configuration - Unified output directory structure
-# All ITCH-related outputs under a single chapter directory
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
-
-# Input: Parsed messages from canonical loader path
 MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
-
-# Output: This notebook's analysis outputs
-# Trade summary is consumed by notebooks 06 and 07
 OUTPUT_DIR = NASDAQ_ITCH_OUTPUT / "trading_activity"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+ENRICHED_DIR = NASDAQ_ITCH_OUTPUT / "enriched"
 
 ROW_LIMIT = MAX_ROWS or None
 
-print(f"Input directory (messages): {MESSAGE_DIR}")
-print(f"Output directory (analysis): {OUTPUT_DIR}")
+print(f"Input directory (messages):  {display_path(MESSAGE_DIR)}")
+print(f"Output directory (analysis): {display_path(OUTPUT_DIR)}")
 
 if not MESSAGE_DIR.exists():
-    print(f"\nWARNING: Message directory not found: {MESSAGE_DIR}")
-    print("   Run 01_itch_parser first to parse ITCH data.")
+    print(f"Message directory not found: {display_path(MESSAGE_DIR)}")
+    print("Run 01_itch_parser first to parse ITCH data.")
     available = []
 else:
     available = sorted([d.name for d in MESSAGE_DIR.iterdir() if d.is_dir()])
-    print(f"\nAvailable message types: {available}")
+    print(f"Available message types: {available}")
 
 # Check if we have message data to analyze
 HAS_MESSAGE_DATA = len(available) > 0
@@ -111,7 +113,7 @@ if not HAS_MESSAGE_DATA:
     raise RuntimeError(
         "No parsed ITCH message data found.\n"
         "This notebook requires output from 01_itch_parser (full parse ~60min).\n"
-        f"Expected directory: {MESSAGE_DIR}"
+        f"Expected directory: {display_path(MESSAGE_DIR)}"
     )
 
 
@@ -124,52 +126,49 @@ if not HAS_MESSAGE_DATA:
 
 # %%
 def count_parquet_rows(base_dir: Path) -> dict[str, int]:
-    """
-    Count total rows (messages) in each Parquet subdirectory.
+    """Count rows per ITCH message type.
+
+    Only the single-letter codes the ITCH specification defines are counted, so a
+    directory some other tool left in the store cannot appear in the chart as though
+    the venue had published it.
 
     Args:
-        base_dir: Directory containing subfolders like A/, C/, E/, etc.
+        base_dir: Directory containing subfolders like A/, C/, E/.
 
     Returns:
-        Mapping from subfolder name (e.g. 'A') to total row count.
+        Mapping from message-type code to total row count.
     """
     message_counts = {}
-    for sub in sorted(base_dir.iterdir()):
-        if sub.is_dir():
-            try:
-                dset = ds.dataset(sub.as_posix(), format="parquet")
-                total_rows = sum(frag.metadata.num_rows for frag in dset.get_fragments())
-                message_counts[sub.name] = total_rows
-            except (OSError, FileNotFoundError) as e:
-                print(f"Error reading {sub.name}: {e}")
-            except Exception as e:
-                # Log unexpected errors for debugging
-                print(f"Unexpected error reading {sub.name}: {type(e).__name__}: {e}")
+    for path in sorted(base_dir.iterdir()):
+        if not path.is_dir() or path.name not in MESSAGE_SPECS:
+            continue
+        try:
+            dset = ds.dataset(path.as_posix(), format="parquet")
+            message_counts[path.name] = sum(frag.metadata.num_rows for frag in dset.get_fragments())
+        except (OSError, ValueError) as exc:
+            print(f"Could not read {path.name}: {type(exc).__name__}: {exc}")
     return message_counts
 
 
 # %%
 if HAS_MESSAGE_DATA:
     message_summary = count_parquet_rows(MESSAGE_DIR)
+    labelled = {f"{code}  {MESSAGE_SPECS[code]['name']}": n for code, n in message_summary.items()}
 
-    # Convert to pandas for plotting (matplotlib expects pandas)
-    import pandas as pd
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    pd.Series(message_summary).sort_values().plot.barh(ax=ax, color="steelblue")
-    # Counts span nine orders of magnitude (adds ~185M vs. rare admin types in
-    # single digits) — a log axis keeps every message type legible.
+    fig, ax = plt.subplots(figsize=(9, 6))
+    pd.Series(labelled).sort_values().plot.barh(ax=ax, color=COLORS["blue"])
     ax.set_xscale("log")
-    ax.set_title("Message Frequency by Type (Log Scale)")
-    ax.set_xlabel("Number of Messages")
-    sns.despine()
-    plt.tight_layout()
-    plt.show()
+    ax.set_title("Messages published per ITCH message type")
+    ax.set_xlabel("Messages (log scale)")
+    ax.set_ylabel("")
+    show_with_alt(
+        fig,
+        "A horizontal bar chart with one bar per ITCH message type, labelled with its letter code and name and sorted with the most numerous type at the top and the rarest at the bottom. The horizontal axis counts messages on a logarithmic scale, so single-digit counts and counts in the hundreds of millions are both readable on the same chart.",
+    )
 
-    # Print summary
-    print("\nMessage Type Summary:")
+    print("Message counts:")
     for msg_type, count in sorted(message_summary.items(), key=lambda x: -x[1]):
-        print(f"  {msg_type}: {count:>12,}")
+        print(f"  {msg_type} {MESSAGE_SPECS[msg_type]['name']:<28}: {count:>12,}")
 
 # %% [markdown]
 # ### Message Type Reference
@@ -196,9 +195,12 @@ if HAS_MESSAGE_DATA:
 #
 # This enables filtering trades by stock symbol and analyzing execution quality.
 #
-# **Note**: This enrichment is performed here in notebook 05, not notebook 01.
-# The enriched files are saved to `messages/enriched/` and reused by downstream
-# notebooks (04, 06, 07) that need stock-level execution data.
+# The result is written to `03_market_microstructure/output/nasdaq_itch/enriched/` and read by
+# `04_itch_order_lifecycle_analysis` and `07_itch_stylized_facts`, so the join runs once
+# for the whole chapter rather than three times. It goes under the chapter's output
+# directory rather than beside the parsed messages because it is derived here, and the
+# message store is whatever the reader has mounted at `ML4T_DATA_PATH` - a shared
+# checkout, a synced folder, a read-only mount.
 
 
 # %%
@@ -257,47 +259,97 @@ def _build_order_attrs(message_dir: Path) -> pl.DataFrame | None:
 
 
 # %% [markdown]
-# ### Apply Order Replacements
-# Incorporate U (Replace) messages so new order references inherit original attributes.
+# ### Follow the replace chains
+#
+# A `U` message retires one order reference and issues another, and the new reference
+# never appears in an add, so an execution against it cannot be attributed from the adds
+# alone. Resolving one hop is not enough: `A → U → U` leaves the second `U`'s parent
+# undefined until the first has been resolved, and a chain can run several deep.
+#
+# Following one hop per pass would need as many passes as the longest chain, and on a
+# full day that is roughly ten thousand: a market maker rewrites the same quote all
+# session. So the chain is collapsed by pointer doubling instead. Each pass replaces
+# every reference's recorded parent with *its* parent, halving the remaining depth, and a
+# chain of ten thousand closes in fourteen passes rather than ten thousand.
+#
+# Once every reference points at the add that started its chain, side and ticker come
+# from that add, and the price comes from the `U` message itself, since that is what the
+# replacement is quoting at. Whatever is still unresolved is reported rather than dropped
+# in silence.
+#
+# The pass cap stops a cycle. Each pass doubles the depth a pointer covers, so forty of
+# them reach a chain length no order book will ever produce, and a run that hits the cap
+# has found references pointing at each other rather than a very long chain.
 
 
 # %%
+MAX_REPLACEMENT_PASSES = 40
+
+
 def _apply_replacements(message_dir: Path, order_attrs: pl.DataFrame) -> pl.DataFrame:
-    """Incorporate U (Replace) messages so new_order_ref inherits original attributes."""
+    """Resolve U (Replace) chains so every new order reference inherits its attributes.
+
+    Collapses each chain by pointer doubling, which costs a pass per doubling of the
+    depth rather than a pass per hop.
+    """
     u_path = message_dir / "U"
     if not (u_path.exists() and list(u_path.glob("*.parquet"))):
         return order_attrs
 
     print("Processing U (Replace) messages for order lineage...")
-    replacements = (
+    # One row per new reference: who it replaced, and what it quotes at. A reference the
+    # day issues twice would break the uniqueness the caller asserts, so keep the first.
+    links = (
         pl.scan_parquet(u_path / "*.parquet")
         .select(
-            "original_order_reference_number",
-            "new_order_reference_number",
-            "price",  # U messages have updated price
+            pl.col("new_order_reference_number").alias("order_reference_number"),
+            pl.col("original_order_reference_number").alias("ancestor"),
+            "price",
         )
         .collect()
+        .unique(subset="order_reference_number", keep="first")
     )
+    total_replacements = links.height
 
-    # For each replacement, look up the original order's attributes
-    replaced = (
-        replacements.join(
-            order_attrs.select("order_reference_number", "buy_sell_indicator", "stock"),
-            left_on="original_order_reference_number",
-            right_on="order_reference_number",
+    passes = 0
+    while passes < MAX_REPLACEMENT_PASSES:
+        doubled = links.join(
+            links.select(
+                pl.col("order_reference_number").alias("ancestor"),
+                pl.col("ancestor").alias("grandparent"),
+            ),
+            on="ancestor",
             how="left",
         )
-        .select(
-            pl.col("new_order_reference_number").alias("order_reference_number"),
-            "price",  # Use the NEW price from U message
-            "buy_sell_indicator",
-            "stock",
+        # An ancestor that is itself a replaced reference still has further to go. When
+        # none is, every chain already points at the add that started it.
+        if not doubled["grandparent"].is_not_null().any():
+            break
+        links = doubled.select(
+            "order_reference_number",
+            pl.coalesce("grandparent", "ancestor").alias("ancestor"),
+            "price",
         )
-        .drop_nulls()
-    )
+        passes += 1
 
-    print(f"  {len(replaced):,} replacement orders tracked")
-    return pl.concat([order_attrs, replaced])
+    newly = links.join(
+        order_attrs.select("order_reference_number", "buy_sell_indicator", "stock"),
+        left_on="ancestor",
+        right_on="order_reference_number",
+        how="inner",
+    ).select("order_reference_number", "price", "buy_sell_indicator", "stock")
+
+    unresolved = total_replacements - newly.height
+    print(
+        f"  {newly.height:,} of {total_replacements:,} replacements "
+        f"resolved over {passes} doubling pass(es)"
+    )
+    if unresolved:
+        print(
+            f"  {unresolved:,} replacements name a parent this sample never saw and "
+            f"stay unattributed"
+        )
+    return pl.concat([order_attrs, newly])
 
 
 # %% [markdown]
@@ -414,7 +466,7 @@ def _enrich_x_messages(
 
 
 # %%
-def enrich_execution_messages(message_dir: Path) -> dict[str, int]:
+def enrich_execution_messages(message_dir: Path, enriched_dir: Path) -> dict[str, int]:
     """
     Enrich E/C/X messages with stock symbol and order attributes.
 
@@ -423,10 +475,15 @@ def enrich_execution_messages(message_dir: Path) -> dict[str, int]:
     - Execution quality analysis (fill price vs limit price)
     - Fill rate analysis by order characteristics
 
+    Args:
+        message_dir: Parsed ITCH message store, read only.
+        enriched_dir: Where the enriched files are written. Under the chapter's output
+            directory, not beside the messages: this is derived data, and writing it
+            into the data root puts it in whatever the reader has mounted there.
+
     Returns count of enriched messages by type.
     """
-    enriched_dir = message_dir / "enriched"
-    enriched_dir.mkdir(exist_ok=True)
+    enriched_dir.mkdir(parents=True, exist_ok=True)
 
     stock_directory = _build_stock_directory(message_dir)
     if stock_directory is None:
@@ -436,6 +493,15 @@ def enrich_execution_messages(message_dir: Path) -> dict[str, int]:
     if order_attrs is None:
         return {}
     order_attrs = _apply_replacements(message_dir, order_attrs)
+
+    # Every enrichment below joins executions to this table on the order reference. A
+    # duplicated reference would multiply execution rows and inflate every count and sum
+    # downstream, so the key is asserted unique before any of them run.
+    n_refs = order_attrs["order_reference_number"].n_unique()
+    assert n_refs == order_attrs.height, (
+        f"order attributes hold {order_attrs.height:,} rows for {n_refs:,} distinct order "
+        f"references; joining on a duplicated key would multiply executions"
+    )
 
     counts = {}
     for label, fn in [
@@ -447,24 +513,24 @@ def enrich_execution_messages(message_dir: Path) -> dict[str, int]:
         if result is not None:
             counts[label] = result
 
-    print(f"\nEnriched files saved to: {enriched_dir}")
+    print(f"\nEnriched files saved to: {display_path(enriched_dir)}")
     return counts
 
 
 # %%
-# Run enrichment if parsed data exists and enriched files don't
 if HAS_MESSAGE_DATA and (MESSAGE_DIR / "R").exists():
-    enriched_dir = MESSAGE_DIR / "enriched"
-    # Check if enrichment already done
-    if not (enriched_dir / "E.parquet").exists():
+    already_built = (ENRICHED_DIR / "E.parquet").exists()
+    if REBUILD_ENRICHED or not already_built:
         print("Running execution enrichment...")
-        enrichment_counts = enrich_execution_messages(MESSAGE_DIR)
-        print("\n=== Enrichment Summary ===")
+        enrichment_counts = enrich_execution_messages(MESSAGE_DIR, ENRICHED_DIR)
+        print("\nEnrichment summary:")
         for msg_type, count in enrichment_counts.items():
             print(f"  {msg_type}: {count:,} messages")
     else:
-        print(f"Enriched files already exist in {enriched_dir}")
-        print("  Delete the directory and re-run to regenerate.")
+        print(
+            f"Reusing the enriched files already in {display_path(ENRICHED_DIR)}; set "
+            f"REBUILD_ENRICHED to rebuild them from the parsed messages."
+        )
 
 # %% [markdown]
 # ## 4. Trade Volume and Value by Ticker
@@ -525,10 +591,10 @@ def _unify_columns(df: pl.DataFrame, msg_type: str) -> pl.DataFrame | None:
 
 # %%
 def _load_single_msg_type(
-    base_dir: Path, msg_type: str, max_rows: int | None
+    base_dir: Path, enriched_dir: Path, msg_type: str, max_rows: int | None
 ) -> pl.DataFrame | None:
     """Load a single ITCH execution message type (C, E, P, or Q)."""
-    enriched_file = base_dir / "enriched" / f"{msg_type}.parquet"
+    enriched_file = enriched_dir / f"{msg_type}.parquet"
     msg_folder = base_dir / msg_type
 
     try:
@@ -594,7 +660,9 @@ def _normalize_trades(trades: list[pl.DataFrame], type_counts: dict[str, int]) -
 
 
 # %%
-def load_executions(base_dir: Path, max_rows: int | None = None) -> pl.DataFrame:
+def load_executions(
+    base_dir: Path, enriched_dir: Path, max_rows: int | None = None
+) -> pl.DataFrame:
     """
     Load execution data from C, E, P, Q message types using Polars.
 
@@ -607,7 +675,7 @@ def load_executions(base_dir: Path, max_rows: int | None = None) -> pl.DataFrame
     type_counts = {}
 
     for msg_type in ["C", "E", "P", "Q"]:
-        df = _load_single_msg_type(base_dir, msg_type, max_rows)
+        df = _load_single_msg_type(base_dir, enriched_dir, msg_type, max_rows)
         if df is not None:
             type_counts[msg_type] = len(df)
             trades.append(df)
@@ -629,7 +697,7 @@ def load_executions(base_dir: Path, max_rows: int | None = None) -> pl.DataFrame
 
 # %%
 if HAS_MESSAGE_DATA:
-    trade_df = load_executions(MESSAGE_DIR, max_rows=ROW_LIMIT)
+    trade_df = load_executions(MESSAGE_DIR, ENRICHED_DIR, max_rows=ROW_LIMIT)
     print(f"\nLoaded {len(trade_df):,} trades total")
     print(trade_df.schema)
 
@@ -665,9 +733,12 @@ if HAS_MESSAGE_DATA:
     display(trade_df.head().to_pandas())
 
 # %% [markdown]
-# ### 4.1. Aggregate Trades by Ticker
+# ### Which tickers the day's dollars went through
 #
-# Summarize total shares and dollar value to see which tickers dominate activity.
+# Trades are summed per ticker in two currencies: share count and dollar value. The two
+# rank differently, because a share of a $3 stock and a share of a $300 stock are not
+# comparable quantities, and it is the dollar ranking that says where the day's risk was
+# transferred.
 
 # %%
 if HAS_MESSAGE_DATA and len(trade_df) > 0:
@@ -717,22 +788,29 @@ if HAS_MESSAGE_DATA and len(trade_df) > 0:
     ax.axvline(n_50, color="red", linestyle=":", alpha=0.5)
     ax.axvline(n_80, color="orange", linestyle=":", alpha=0.5)
 
-    ax.set_title("Concentration of Traded Value Across Tickers")
-    ax.set_ylabel("Cumulative Share of Dollar Volume")
-    ax.set_xlabel("Ticker Rank by Value")
+    ax.set_title("Cumulative share of traded dollar value by ticker rank")
+    ax.set_ylabel("Cumulative share of dollar volume")
+    ax.set_xlabel("Ticker rank by traded value")
     ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
     ax.legend()
     ax.set_xlim(0, min(500, len(cum_val)))
-    sns.despine()
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        "A cumulative curve rising steeply from the origin and then flattening, plotting the running share of the day's traded dollar value against ticker rank, with rank on the horizontal axis truncated at five hundred and the share on the vertical axis as a percentage. Two dashed horizontal reference lines mark the fifty and eighty percent levels, each meeting a dotted vertical line at the rank where the curve crosses it.",
+    )
 
-    print(f"Tickers needed for 50% of value: {n_50}")
-    print(f"Tickers needed for 80% of value: {n_80}")
+    print(f"Tickers reaching 50% of traded value: {n_50}")
+    print(f"Tickers reaching 80% of traded value: {n_80}")
 
 # %% [markdown]
-# **Key Insight**: A small fraction of tickers accounts for most of the traded value.
-# This concentration is typical of equity markets - a few highly liquid names dominate activity.
+# Read the two crossings off that curve. The rank at which it reaches half the day's value,
+# and the rank at which it reaches four fifths, are printed below it. Both are small
+# relative to the several thousand tickers the venue quotes, and the gap between them says
+# how quickly the tail thins out.
+#
+# What follows from it is practical: a universe screened on liquidity is not a small
+# restriction of the market but almost all of it, and a strategy built on the names past
+# the flat part of this curve is trading in a different regime from the ones before it.
 
 # %% [markdown]
 # ## Save Output for Downstream Notebooks
@@ -745,27 +823,43 @@ if HAS_MESSAGE_DATA and len(trade_df) > 0:
     # Save trade summary for downstream notebooks
     output_path = OUTPUT_DIR / "trade_summary.parquet"
     trade_summary.write_parquet(output_path)
-    print(f"Saved trade summary to {output_path}")
+    print(f"Saved per-ticker trade summary to {display_path(output_path)}")
 
-    # Save canonical trades table for notebooks 06/07
-    # This is the single source of truth for trade extraction,
-    # using enriched E/C files where available
     trades_path = OUTPUT_DIR / "trades.parquet"
     trade_df.write_parquet(trades_path)
-    print(f"Saved canonical trades to {trades_path}")
+    print(f"Saved the trade table to {display_path(trades_path)}")
     print(f"  {len(trade_df):,} trades across {trade_df['ticker'].n_unique():,} tickers")
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Message volume**: this single NASDAQ session carries ~423M ITCH messages,
-#    dominated by adds (A, 184.7M) and deletes (D, 180.3M); executions (E, 8.4M)
-#    are a small slice - most orders are posted and then cancelled, not traded.
-# 2. **Concentration**: dollar volume is heavily concentrated - just 70 tickers
-#    reach 50% of traded value and 461 reach 80%.
-# 3. **Top 50 tickers** account for 45.6% of total dollar volume - nearly half.
+# 1. **A venue publishes far more quoting than trading.** Adds and deletes dominate the
+#    message counts and executions are a small share of them, which is the same fact
+#    `04_itch_order_lifecycle_analysis` measures per order.
+# 2. **An execution message does not say what was traded.** `E` and `C` carry a numeric
+#    `stock_locate` and an order reference, so the ticker comes from the `R` directory
+#    and the side and limit price from the add that created the order.
+# 3. **Follow replace chains to the end.** A `U` issues a new reference whose parent may
+#    itself be a `U`, so resolving one hop attributes some executions and silently loses
+#    the rest. The resolution here repeats until it stops finding anything.
+# 4. **Assert the key before a left join on it.** A duplicated order reference multiplies
+#    execution rows, and every count and sum computed afterwards is wrong by a factor
+#    nothing reports.
+# 5. **Rank by dollars, not by shares.** The two orderings differ, and it is the dollar
+#    ranking that says where the day's risk moved.
+# 6. **Do the join once.** Three later notebooks read the enriched files this one writes,
+#    so the attribution has one definition rather than four.
 #
-# **Next**: See `06_itch_intraday_patterns` for time-of-day analysis.
+# ### Known limitations
+#
+# - One venue, one session. NASDAQ-routed activity only, so a ticker's share here is its
+#   share of this venue rather than of its consolidated volume.
+# - `P` trades are non-displayed and have no resting order to attribute to, so execution
+#   quality against a limit price is undefined for them.
+# - A replacement whose parent falls outside the sample stays unattributed; the count is
+#   printed rather than absorbed.
+#
+# **Next**: `06_itch_intraday_patterns` reads the trade table written above.
 #
 # ---
 #

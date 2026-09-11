@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -44,7 +44,7 @@
 # ## Prerequisites
 #
 # - The canonical enriched-trade parquet at
-#   `output/ch03/nasdaq_itch/trading_activity/trades.parquet` and the matching
+#   `03_market_microstructure/output/nasdaq_itch/trading_activity/trades.parquet` and the matching
 #   `trade_summary.parquet` (used for liquidity-tier symbol selection); both
 #   are produced by `05_itch_trading_activity`.
 #
@@ -56,34 +56,38 @@
 # %%
 """Intraday Patterns — volume and volatility dynamics from NASDAQ ITCH data."""
 
-import warnings
-
-warnings.filterwarnings("ignore")
-
 import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
-import seaborn as sns
 
 from data import load_nasdaq_itch
 from utils.paths import display_path, get_output_dir, require_chapter_inputs
+from utils.style import COLORS, show_with_alt
 
-sns.set_style("whitegrid")
-
+# %% [markdown]
+# ### Declared parameters
+#
+# `MIN_TRADES_LOW` is the floor a ticker must clear to stand for the low-liquidity tier.
+# A ticker that printed a handful of trades all day produces a panel with two points on
+# it, which shows nothing about intraday shape; the floor picks the least active name
+# that still has one.
+#
+# `PATTERN_TICKERS` is how many of the most actively traded tickers the aggregate
+# U-shape averages over. Averaging over a handful would let one name's day decide the
+# shape; averaging over everything would let thousands of barely traded ones bury it.
+#
+# `PATTERN_FREQ` sets the bar width for that aggregate. Thirty minutes divides the
+# session into thirteen bars, which is fine enough to separate the open and the close
+# from the middle of the day and coarse enough that each bar holds real volume.
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides for CI
-MAX_SYMBOLS = 0  # 0 = all
+MIN_TRADES_LOW = 500
+PATTERN_TICKERS = 20
+PATTERN_FREQ = "30m"
 
 # %%
-# Configuration - Unified output directory structure
-# All ITCH-related outputs under a single chapter directory
 NASDAQ_ITCH_OUTPUT = get_output_dir(3, "nasdaq_itch")
-
-# Input: Parsed messages from notebook 01, which writes them under the data root - the
-# same place 04, 05 and 07 read them from.
 MESSAGE_DIR = load_nasdaq_itch(get_base_path=True)
-
-# Input: Trade summary from notebook 05 (trading_activity_overview)
 TRADING_ACTIVITY_DIR = NASDAQ_ITCH_OUTPUT / "trading_activity"
 
 print(f"Input directory (messages): {display_path(MESSAGE_DIR)}")
@@ -96,8 +100,9 @@ print(f"Input directory (trade summary): {display_path(TRADING_ACTIVITY_DIR)}")
 # - `trade_summary.parquet`: Aggregated stats by ticker (for symbol selection)
 # - `trades.parquet`: Canonical tick-level trades (for analysis)
 #
-# Using the canonical trades file ensures we include enriched E/C data
-# (executions with stock attribution added by notebook 01).
+# `trades.parquet` is the table `05_itch_trading_activity` builds by attributing each
+# `E` and `C` execution back to a ticker, so reading it here means the two notebooks
+# cannot disagree about what a trade is.
 
 # %%
 # Load trade summary and canonical trades from notebook 05
@@ -118,10 +123,6 @@ require_chapter_inputs(
 trade_summary = pl.read_parquet(TRADE_SUMMARY_PATH)
 # Sort explicitly by value to ensure correct selection
 trade_summary = trade_summary.sort("total_value", descending=True)
-# Gate the low-liquidity tier on a minimum number of trades so the
-# comparison panel is not degenerate (single-trade tickers produce
-# collapsed price/volume axes that obscure the intraday shape).
-MIN_TRADES_LOW = 500
 trade_col = next(
     (c for c in ("trade_count", "n_trades", "total_trades") if c in trade_summary.columns),
     None,
@@ -231,35 +232,43 @@ def plot_intraday_bars(trades_df: pl.DataFrame, ticker: str, freq: str = "5m") -
     bars_pd = bars.to_pandas()
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    fig.suptitle(f"{ticker} - Intraday Patterns ({freq} bars)", fontsize=14)
+    fig.suptitle(f"{ticker}: intraday trading in {freq} bars", fontsize=14)
 
-    # Volume & Trade Count
     ax1 = axes[0]
     ax1.bar(
         bars_pd["timestamp"],
         bars_pd["shares"],
         alpha=0.7,
-        color="steelblue",
-        label="Volume (Shares)",
+        color=COLORS["blue"],
+        label="Shares traded",
     )
-    ax1.set_ylabel("Shares Traded")
+    ax1.set_ylabel("Shares traded")
     ax1.legend(loc="upper left")
 
     ax1_2 = ax1.twinx()
-    ax1_2.plot(bars_pd["timestamp"], bars_pd["trade_count"], color="tab:orange", label="Trades")
-    ax1_2.set_ylabel("Trade Count")
+    ax1_2.plot(bars_pd["timestamp"], bars_pd["trade_count"], color=COLORS["amber"], label="Trades")
+    ax1_2.set_ylabel("Number of trades")
     ax1_2.legend(loc="upper right")
 
-    # Price & VWAP
     ax2 = axes[1]
-    ax2.plot(bars_pd["timestamp"], bars_pd["price"], label="Last Price", color="tab:green")
-    ax2.plot(bars_pd["timestamp"], bars_pd["vwap"], label="VWAP", color="tab:red", linestyle="--")
+    ax2.plot(
+        bars_pd["timestamp"], bars_pd["price"], label="Last trade price", color=COLORS["slate"]
+    )
+    ax2.plot(
+        bars_pd["timestamp"],
+        bars_pd["vwap"],
+        label="Volume-weighted average price",
+        color=COLORS["copper"],
+        linestyle="--",
+    )
     ax2.set_ylabel("Price ($)")
-    ax2.set_xlabel("Time")
+    ax2.set_xlabel("Time (US/Eastern)")
     ax2.legend()
 
-    plt.tight_layout()
-    plt.show()
+    show_with_alt(
+        fig,
+        f"Two stacked panels for {ticker} sharing a clock-time axis over one session. The upper panel is a bar chart of shares traded in each {freq} bar, with a line on a second vertical axis giving the number of trades in the same bar. The lower panel plots two price lines, the last trade price and the volume-weighted average price of the bar, the second dashed.",
+    )
 
 
 # %%
@@ -320,9 +329,9 @@ def compute_intraday_pattern(
         # Compute time-of-day slot (e.g., 9:30 -> 9.5)
         bars = bars.with_columns((pl.col("hour") + pl.col("minute") / 60).alias("time_slot"))
 
-        # Normalize volume by total (to compare across tickers)
-        # Note: For multi-day data, this normalizes by total across all days,
-        # which gives average intraday pattern. For single-day data, this is daily total.
+        # Each ticker's bars are expressed as shares of its own daily total, so that a
+        # mega-cap and a mid-cap contribute equally to the average shape rather than in
+        # proportion to their size.
         total_vol = bars["shares"].sum()
         if total_vol > 0:
             bars = bars.with_columns(
@@ -338,32 +347,27 @@ def compute_intraday_pattern(
 
 
 # %%
-# Get top 20 liquid tickers for pattern analysis
-top_tickers = trade_summary.head(20)["ticker"].to_list()
+top_tickers = trade_summary.head(PATTERN_TICKERS)["ticker"].to_list()
+pattern_df = compute_intraday_pattern(all_trades, top_tickers, freq=PATTERN_FREQ)
+assert not pattern_df.is_empty(), (
+    f"None of the {len(top_tickers)} most active tickers produced intraday bars; the "
+    f"trade table is empty or carries no usable timestamps."
+)
 
-pattern_df = compute_intraday_pattern(all_trades, top_tickers, freq="30m")
-
-if len(pattern_df) > 0:
-    # Aggregate across tickers
-    hourly_pattern = (
-        pattern_df.group_by("time_slot")
-        .agg(
-            [
-                pl.col("vol_pct").mean().alias("avg_vol_pct"),
-                pl.col("vol_pct").std().alias("std_vol_pct"),
-                pl.col("trade_count").mean().alias("avg_trades"),
-            ]
-        )
-        .sort("time_slot")
+hourly_pattern = (
+    pattern_df.group_by("time_slot")
+    .agg(
+        pl.col("vol_pct").mean().alias("avg_vol_pct"),
+        pl.col("vol_pct").std().alias("std_vol_pct"),
+        pl.col("trade_count").mean().alias("avg_trades"),
     )
-
-    # Filter to regular trading hours (9:30-16:00)
-    hourly_pattern = hourly_pattern.filter(
-        (pl.col("time_slot") >= 9.5) & (pl.col("time_slot") <= 16)
-    )
+    .sort("time_slot")
+    # Regular trading hours only: pre- and post-market bars are a different market with
+    # its own participants, and mixing them in flattens the shape being measured.
+    .filter((pl.col("time_slot") >= 9.5) & (pl.col("time_slot") <= 16))
+)
 
 # %%
-# Plot U-shape
 times = hourly_pattern["time_slot"].to_numpy()
 vol_pct = hourly_pattern["avg_vol_pct"].to_numpy() * 100
 vol_std = hourly_pattern["std_vol_pct"].to_numpy() * 100
@@ -371,50 +375,86 @@ trades = hourly_pattern["avg_trades"].to_numpy()
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-# Volume U-shape
-axes[0].fill_between(times, vol_pct - vol_std, vol_pct + vol_std, alpha=0.3, color="steelblue")
-axes[0].plot(times, vol_pct, color="steelblue", linewidth=2, marker="o")
-axes[0].set_xlabel("Time of Day (hour)")
-axes[0].set_ylabel("Share of Daily Volume (%)")
-axes[0].set_title("Volume concentrates at the open and close")
-axes[0].axhline(100 / len(times), color="red", linestyle="--", label="Uniform distribution")
+axes[0].fill_between(
+    times,
+    vol_pct - vol_std,
+    vol_pct + vol_std,
+    alpha=0.3,
+    color=COLORS["blue"],
+    label="±1 standard deviation across tickers",
+)
+axes[0].plot(times, vol_pct, color=COLORS["blue"], linewidth=2, marker="o", label="Mean")
+axes[0].set_xlabel("Time of day (US/Eastern, hours)")
+axes[0].set_ylabel("Share of the ticker's daily volume (%)")
+axes[0].set_title("Volume by time of day, averaged over the most active tickers")
+axes[0].axhline(
+    100 / len(times),
+    color=COLORS["negative"],
+    linestyle="--",
+    label="Even across the session",
+)
 axes[0].legend()
 axes[0].set_xlim(9.5, 16)
 
-# Trade count pattern
-axes[1].bar(times, trades, width=0.4, alpha=0.7, color="steelblue")
-axes[1].set_xlabel("Time of Day (hour)")
-axes[1].set_ylabel("Average Trade Count (per 30min)")
-axes[1].set_title("Trade frequency mirrors the volume U-shape")
+axes[1].bar(times, trades, width=0.4, alpha=0.7, color=COLORS["blue"])
+axes[1].set_xlabel("Time of day (US/Eastern, hours)")
+axes[1].set_ylabel(f"Mean trades per {PATTERN_FREQ} bar")
+axes[1].set_title("Number of trades by time of day, the same tickers")
 axes[1].set_xlim(9.5, 16)
 
-sns.despine()
-plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two panels side by side, both against time of day from the 09:30 open to the 16:00 close. The left plots the mean share of a ticker's daily volume falling in each bar as a line with circular markers, inside a shaded band of one standard deviation across tickers, with a dashed horizontal line marking the level an even split across the session would give. The right is a bar chart of the mean number of trades in each bar over the same hours.",
+)
 
-# Print statistics
-print("Intraday Volume Distribution:")
-print(f"  First 30min (9:30-10:00): {vol_pct[0]:.1f}% of daily volume")
-print(f"  Midday (12:00-12:30):     {vol_pct[len(vol_pct) // 2]:.1f}% of daily volume")
-print(f"  Last 30min (15:30-16:00): {vol_pct[-1]:.1f}% of daily volume")
+# Name the bars by the clock, not by position: the number of bars follows from
+# PATTERN_FREQ, so an index into the middle is not a fixed time of day.
+
+
+def slot_label(slot: float) -> str:
+    """Render a decimal hour such as 12.5 as a clock time."""
+    hour, minute = divmod(round(slot * 60), 60)
+    return f"{hour:02d}:{minute:02d}"
+
+
+midday = int(np.argmin(np.abs(times - 12.5)))
+print(f"Share of daily volume by {PATTERN_FREQ} bar, averaged over the selected tickers:")
+print(f"  Opening bar   ({slot_label(times[0])}): {vol_pct[0]:.1f}%")
+print(f"  Midday bar    ({slot_label(times[midday])}): {vol_pct[midday]:.1f}%")
+print(f"  Closing bar   ({slot_label(times[-1])}): {vol_pct[-1]:.1f}%")
 print(
-    f"  Open/Close ratio to midday: {(vol_pct[0] + vol_pct[-1]) / (2 * vol_pct[len(vol_pct) // 2]):.1f}x"
+    f"  Opening and closing bars against the midday bar: "
+    f"{(vol_pct[0] + vol_pct[-1]) / (2 * vol_pct[midday]):.1f}x"
 )
 
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Intraday U-shape**: Across the top-20 most active NASDAQ tickers in this
-#    single-session sample, the first (16.7%) and last (15.4%) 30-minute bars
-#    each carry far more of the day's volume than the midday bar (2.6%) - a
-#    ~6x open/close-to-midday ratio, with trade frequency tracking the same shape.
-# 2. **Scope**: The pattern is computed across the top-20 tickers and shown
-#    separately for one high-, one medium-, and one low-liquidity ticker; this
-#    notebook does not test how the shape varies systematically with liquidity.
-# 3. **ML implications**: Time-of-day features capture this intraday variation.
+# 1. **Volume is not spread evenly across a session.** The opening and closing bars carry
+#    a multiple of what a midday bar carries; the figure above draws the level an even
+#    split would give, and the printed ratio says by how much the ends exceed the middle.
+#    Any statistic computed per bar - a volatility, a spread, an average trade size - is
+#    estimated from very different sample sizes depending on when the bar falls.
+# 2. **Normalise each ticker before averaging shapes.** Expressing every bar as a share
+#    of that ticker's own day is what makes the average a shape rather than a picture of
+#    whichever ticker traded most.
+# 3. **Read the bar by the clock, not by its index.** The number of bars follows from the
+#    chosen frequency, so 'the middle one' is a different time of day at 15 minutes than
+#    at 30, and a label written against one is wrong for the other.
+# 4. **Time of day is a feature.** Chapter 8 encodes it directly, and this is the shape
+#    it encodes.
 #
-# **Next**: See `07_itch_stylized_facts` for bid-ask bounce and liquidity analysis.
+# ### Known limitations
+#
+# - One venue and one session. The U-shape is a well-established regularity, and one day
+#   of one venue illustrates it rather than establishing it.
+# - The three per-tier panels are one ticker each, chosen by traded value. They show what
+#   the shape looks like at different activity levels; they do not test whether it varies
+#   systematically with liquidity, which would need the whole cross-section.
+# - Regular trading hours only. Pre- and post-market bars are dropped rather than shown.
+#
+# **Next**: `07_itch_stylized_facts` for bid-ask bounce and liquidity.
 #
 # ---
 #
