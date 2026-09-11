@@ -703,8 +703,16 @@ print("\n" + "=" * 60)
 print("NUISANCE MODEL SENSITIVITY")
 print("=" * 60)
 print(sensitivity_df.to_string(index=False))
-spread = sensitivity_df["ATE Estimate"].abs()
-print(f"\nSpread across nuisance specifications: {spread.max() / spread.min():.2f}x")
+# A ratio of magnitudes reports 1.00x, which reads as no spread at all, when the
+# specifications straddle zero symmetrically - the one case where the nuisance choice
+# changes the conclusion rather than its size. The signed range cannot do that.
+lo = float(sensitivity_df["ATE Estimate"].min())
+hi = float(sensitivity_df["ATE Estimate"].max())
+print(
+    f"\nAcross {len(sensitivity_df)} nuisance specifications the estimate spans "
+    f"{lo:.6f} to {hi:.6f}, a range of {hi - lo:.6f} in {outcome_col} units"
+)
+print(f"  Specifications agreeing in sign: {'all' if lo * hi > 0 else 'not all'}")
 
 # %% [markdown]
 # ## 7. Results Summary

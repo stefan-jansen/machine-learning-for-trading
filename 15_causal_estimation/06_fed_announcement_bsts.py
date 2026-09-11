@@ -688,10 +688,12 @@ if not event_df.empty:
 #
 # Run the same analysis on 12 dates with no Fed announcement. A
 # "significant" cumulative impact on any of these dates means the model
-# is misspecified. With only 12 placebo dates the empirical rate is a
-# coarse diagnostic rather than a precise Type I estimate (one date in
-# twelve is already a rate of eight percent); we therefore report it as a
-# *placebo false-positive rate*, not a multiple-testing FDR.
+# is misspecified. With so few placebo dates the empirical rate is a
+# coarse diagnostic rather than a precise Type I estimate: a single
+# flagged window moves it by a large step, and its denominator is not the
+# twelve dates listed but however many of them survive the FOMC screen
+# applied below, which is the count printed beside the rate. We therefore
+# report it as a *placebo false-positive rate*, not a multiple-testing FDR.
 #
 # **Caveat - macro contamination of placebo dates**: "No FOMC announcement"
 # is necessary but not sufficient. A clean placebo date for a Fed/bond
