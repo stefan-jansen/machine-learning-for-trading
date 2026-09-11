@@ -72,8 +72,8 @@
 # - FRED macro data under `ML4T_DATA_PATH/macro` (for the yield-curve
 #   regime feature).
 # - The ETFs case study's forward-return label parquet and its registry,
-#   both reached through `get_case_study_dir("etfs")` so a run with
-#   `ML4T_OUTPUT_DIR` set reads the tree that run wrote.
+#   by default `case_studies/etfs/labels/fwd_ret_21d.parquet` and
+#   `case_studies/etfs/run_log/registry.db`.
 # - Alpaca paper credentials in `ALPACA_API_KEY` / `ALPACA_SECRET_KEY`
 #   (free at <https://app.alpaca.markets/paper>).
 
