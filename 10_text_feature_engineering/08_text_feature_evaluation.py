@@ -223,6 +223,15 @@ if not AVAILABLE_SIGNALS:
 print(f"Signals to evaluate: {AVAILABLE_SIGNALS}")
 
 RET_COL_BY_HORIZON = {1: "fwd_ret_1d", 5: "fwd_ret_5d", 20: "fwd_ret_20d"}
+# CONFIG.horizons and this dict are declared independently, and the evaluation loop below
+# reads RET_COL_BY_HORIZON[h] for every h in CONFIG.horizons. Adding a horizon to the
+# config without a column here surfaces as a KeyError several cells later.
+missing_horizons = [h for h in CONFIG.horizons if h not in RET_COL_BY_HORIZON]
+if missing_horizons:
+    raise ValueError(
+        f"No forward-return column for horizon(s) {missing_horizons}. "
+        f"CONFIG.horizons={CONFIG.horizons}, columns declared for {sorted(RET_COL_BY_HORIZON)}."
+    )
 
 # %% [markdown] tags=[]
 # ### Date Grouping Utility
@@ -383,6 +392,13 @@ print(summary_df)
 # IC time series for the key signal (weighted_surprise, 1-day horizon)
 KEY_SIGNAL = "weighted_surprise"
 KEY_HORIZON = 1
+# The three figures and the bucket table below all index RET_COL_BY_HORIZON with this
+# constant. It is declared here and the columns are declared at the top of the notebook,
+# so nothing but this line keeps them in step.
+assert KEY_HORIZON in RET_COL_BY_HORIZON, (
+    f"KEY_HORIZON={KEY_HORIZON} has no forward-return column; "
+    f"declared horizons are {sorted(RET_COL_BY_HORIZON)}"
+)
 
 if KEY_SIGNAL in AVAILABLE_SIGNALS:
     ic_df = daily_ic(

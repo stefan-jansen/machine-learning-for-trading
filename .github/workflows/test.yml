@@ -464,6 +464,21 @@ jobs:
         run: |
           source .venv/bin/activate
           python .github/scripts/check_import_resolution.py
+      # An int constant subscripting a container built from a SECOND constant is
+      # a coupling nothing checks: `STATE_COUNTS = [2, 3, 4]` fills a dict and
+      # `N_STATES = 2` reads it back. Edit either and the notebook raises
+      # KeyError the next time it runs, while ruff, the formatter, py_compile and
+      # tests/overrides.yaml all stay green. Four review rounds produced five
+      # execution failures of this shape (ml4t/agent-workspace#1128).
+      #
+      # Stdlib-only AST, nothing imported or executed, so it belongs here rather
+      # than in a built image. `--selftest` is run first: the rule is only worth
+      # gating on if it can be shown to fail on a constructed case.
+      - name: No int constant subscripts a container built from another constant
+        run: |
+          source .venv/bin/activate
+          python .github/scripts/check_constant_subscripts.py --selftest
+          python .github/scripts/check_constant_subscripts.py
       - name: Notebook output hygiene
         run: |
           source .venv/bin/activate

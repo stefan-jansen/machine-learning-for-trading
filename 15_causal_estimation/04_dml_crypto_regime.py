@@ -149,6 +149,18 @@ HAC_LAGS = TREATMENT_WINDOW_DAYS * BARS_PER_DAY
 # %%
 set_global_seeds(SEED)
 
+# BLOCK_SIZES and BLOCK_SIZE_HEADLINE are declared side by side in the parameters cell and
+# invite exactly the edit that breaks them: the sweep fits one row per block size, and the
+# headline figures below are read out of the row BLOCK_SIZE_HEADLINE names. This check sits
+# in the first cell after the injection point, so it also covers a papermill override, and
+# it fires here rather than after the permutations have run.
+if BLOCK_SIZE_HEADLINE not in BLOCK_SIZES:
+    raise ValueError(
+        f"BLOCK_SIZE_HEADLINE={BLOCK_SIZE_HEADLINE} is not one of the block sizes the sweep "
+        f"runs ({BLOCK_SIZES}), so the headline row would not exist. Add it to BLOCK_SIZES "
+        f"or pick a headline from the grid."
+    )
+
 print("DML Crypto Premium Index Configuration:")
 print(f"  Case study: {CASE_STUDY_ID}")
 print(f"  Label: {PRIMARY_LABEL}")
