@@ -845,8 +845,10 @@ if (
     executed_orders_set = (
         orders_with_exec.filter(pl.col("executed").is_not_null()).select("order").unique()
     )
+    # implode makes the Series one collection to test membership in. Passing it bare is
+    # ambiguous in polars and prints a deprecation into the render.
     unified = unified.with_columns(
-        pl.col("order").is_in(executed_orders_set["order"]).alias("has_execution")
+        pl.col("order").is_in(executed_orders_set["order"].implode()).alias("has_execution")
     )
 
     # Add termination flag
@@ -854,7 +856,7 @@ if (
         orders_with_cancel.filter(pl.col("cancelled").is_not_null()).select("order").unique()
     )
     unified = unified.with_columns(
-        pl.col("order").is_in(terminated_orders_set["order"]).alias("has_termination")
+        pl.col("order").is_in(terminated_orders_set["order"].implode()).alias("has_termination")
     )
 
     # Create mutually exclusive outcome categories
