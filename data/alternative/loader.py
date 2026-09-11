@@ -129,6 +129,16 @@ def load_bloomberg_news(
     return data
 
 
+# Which file holds each agreement level. The corpus ships one file per level rather than
+# one file with a level column, which is what the old filter assumed.
+_PHRASEBANK_FILES: dict[str, str] = {
+    "100": "sentences_allagree.parquet",
+    "75": "sentences_75agree.parquet",
+    "66": "sentences_66agree.parquet",
+    "50": "sentences_50agree.parquet",
+}
+
+
 def load_financial_phrasebank(
     agreement: Literal["all", "50", "66", "75", "100"] = "100",
 ) -> pl.DataFrame:
@@ -139,39 +149,61 @@ def load_financial_phrasebank(
     sentiment analysis.
 
     Args:
-        agreement: Minimum annotator agreement level:
-            - "100": All annotators agree (most reliable, ~2,264 sentences)
-            - "75": 75%+ agreement (~3,453 sentences)
-            - "66": 66%+ agreement (~4,217 sentences)
-            - "50": 50%+ agreement (~4,846 sentences)
-            - "all": Load all agreement levels combined
+        agreement: Annotator agreement level, selecting one distributed file:
+            - "100": all annotators agree (most reliable, 2,264 sentences)
+            - "75": 75%+ agreement (3,453 sentences)
+            - "66": 66%+ agreement (4,217 sentences)
+            - "50": 50%+ agreement (4,846 sentences)
+            - "all": every level present on disk, tagged with `agreement_level`
 
     Returns:
-        DataFrame with columns: sentence, sentiment/label, agreement_level (if 'all')
+        DataFrame with columns: sentence, label, and `agreement_level` when
+        `agreement="all"`.
+
+    The levels nest - the 50% file contains every sentence the 100% file does - so
+    `agreement="all"` repeats sentences across levels by construction. It exists to
+    show which level a sentence survives at, not as a larger corpus.
 
     Source: Malo et al. (2014) "Good debt or bad debt: Detecting semantic
             orientations in economic texts"
-    Coverage: ~4,800 sentences from financial news articles
     """
     base_path = ML4T_DATA_PATH / "alternative" / "text" / "financial_phrasebank"
-    parquet_files = list(base_path.glob("*.parquet")) if base_path.exists() else []
 
-    if not parquet_files:
-        raise DataNotFoundError(
+    def _missing(wanted: str) -> DataNotFoundError:
+        return DataNotFoundError(
             dataset_name="Financial Phrasebank",
-            path=base_path,
+            path=base_path / wanted if wanted else base_path,
             readme="data/alternative/text/README.md",
             instructions=(
                 "Download from HuggingFace (takala/financial_phrasebank) and save as\n"
-                f"  {base_path}/sentences_{{agreement}}.parquet\n\n"
+                f"  {base_path}/sentences_{{allagree,75agree,66agree,50agree}}.parquet\n\n"
                 "See data/alternative/text/README.md for the download script."
             ),
         )
 
-    data = pl.read_parquet(parquet_files)
+    if agreement == "all":
+        present = [
+            (level, base_path / name)
+            for level, name in _PHRASEBANK_FILES.items()
+            if (base_path / name).exists()
+        ]
+        if not present:
+            raise _missing("")
+        return pl.concat(
+            [
+                pl.read_parquet(path).with_columns(pl.lit(level).alias("agreement_level"))
+                for level, path in present
+            ],
+            how="vertical_relaxed",
+        )
 
-    if agreement != "all" and "agreement" in data.columns:
-        min_agreement = int(agreement) / 100
-        data = data.filter(pl.col("agreement") >= min_agreement)
+    # One file per level, so the level is chosen by which file is read. The previous
+    # implementation globbed every parquet in the directory and filtered an `agreement`
+    # column, which no distributed file carries - so the argument selected nothing and a
+    # second file in the directory would have been concatenated into the result.
+    name = _PHRASEBANK_FILES[agreement]
+    path = base_path / name
+    if not path.exists():
+        raise _missing(name)
 
-    return data
+    return pl.read_parquet(path)
