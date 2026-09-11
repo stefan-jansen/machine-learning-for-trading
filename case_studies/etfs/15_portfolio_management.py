@@ -396,7 +396,10 @@ fig.update_layout(
     title="Mean Sharpe by weighting scheme",
     height=380,
     width=800,
-    margin=dict(t=90),
+    # The left margin is explicit because the allocator names are the y tick labels and the
+    # longest of them ran off the canvas: the rendered PNG read "ormal_weighted" and
+    # "score_weighted". Plotly sizes the default margin before it lays the labels out.
+    margin=dict(t=90, l=150),
 )
 _span = ordered["avg_sharpe"]
 show_plotly_with_alt(
