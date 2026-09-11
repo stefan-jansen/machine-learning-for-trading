@@ -2395,6 +2395,31 @@ def classify_holdout_degradation(
     return "degenerate"
 
 
+def rank_one(frame: pl.DataFrame, *, by: str, name: str) -> pl.DataFrame:
+    """The top row of *frame* by *by*, with *name* deciding a tie.
+
+    A one-key ``sort(by, descending=True).head(1)`` hands a tie to whatever order the frame
+    arrived in, so the row it returns is not a function of the data - the defect class
+    ml4t/agent-workspace#333 is about, where a visible precaution (the sort) leaves one
+    dimension of the answer free.
+
+    Exact ties in these quantities are not hypothetical. Measured across the nine live
+    registries on 2026-09-11, 14 (case study, stage) pairs hold at least one exactly repeated
+    Sharpe, with multiplicity up to 6, and crypto_perps_funding's signal stage holds two rows
+    tied at the maximum. Two risk overlays that never trigger book the baseline exactly, which
+    is the mechanism that produces them.
+
+    Breaking on the name costs nothing when there is no tie: the second key is only consulted
+    where the first is equal.
+
+    ``nulls_last`` because polars puts nulls FIRST under ``descending=True``, so a row with no
+    value for *by* would win the ranking and be reported as the best of them. No live registry
+    holds a null Sharpe today, so this changes no current result; it is here because the frame
+    is built by a join and the code reading the result already guards a null ``max_drawdown``.
+    """
+    return frame.sort([by, name], descending=[True, False], nulls_last=True).head(1)
+
+
 def build_all_synthesis(
     case_studies: list[str],
     explorers: dict,
@@ -2580,7 +2605,8 @@ def build_all_synthesis(
         if not alloc_comp.is_empty():
             # compare_allocators sorts by avg_sharpe; the heatmap and prose report
             # the allocator with the highest best_sharpe, so re-rank explicitly.
-            _top = alloc_comp.sort("best_sharpe", descending=True).head(1)
+            #
+            _top = rank_one(alloc_comp, by="best_sharpe", name="allocator")
             alloc_dict["best_allocator"] = _top["allocator"][0]
             alloc_dict["best_sharpe"] = round(float(_top["best_sharpe"][0]), 4)
             for row in alloc_comp.iter_rows(named=True):
@@ -2681,7 +2707,7 @@ def build_all_synthesis(
                 if len(bs) > 0:
                     risk_dict["baseline_sharpe"] = round(float(bs[0]), 4)
 
-            best_risk = risk_df.sort("sharpe", descending=True).head(1)
+            best_risk = rank_one(risk_df, by="sharpe", name="risk_name")
             risk_dict["best_overlay"] = best_risk["risk_name"][0]
             risk_dict["managed_sharpe"] = round(float(best_risk["sharpe"][0]), 4)
             risk_dict["managed_max_dd"] = round(float(best_risk["max_drawdown"][0] or 0), 4)
