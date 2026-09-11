@@ -93,6 +93,7 @@
 
 import json
 
+import numpy as np
 import polars as pl
 
 from case_studies.cme_futures.research_workflow import (
@@ -104,6 +105,7 @@ from case_studies.cme_futures.research_workflow import (
     product_universe_table,
 )
 from case_studies.research import CausalResult, require_declared_menu_coverage
+from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -225,12 +227,13 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # The refutation permutes contiguous blocks within each product, and the shared runner sizes those
 # blocks as `max(label_buffer, treatment_window)`. `causal.treatment_window` is 1 here, so the label
 # buffer binds and the registered rows carry a 21-period block for `fwd_ret_21d` and a 5-period
-# block for `fwd_ret_5d`. Neither length is a property of `carry_pct`. Measured on this case study's
-# own feature panel, `carry_pct` has a lag-1 autocorrelation of 0.943, an AR(1) half-life of 11.8
-# trading days, and autocorrelation still at 0.44 by lag 21 and 0.17 by lag 63. Blocks of 5 and 21
-# periods therefore destroy serial dependence that the real treatment has. That narrows the placebo
-# distribution relative to the true null and pushes the empirical p-value toward zero whether or not
-# the effect is real.
+# block for `fwd_ret_5d`. Neither length is a property of `carry_pct`, whose own persistence the
+# cell below measures on this case study's feature panel: the autocorrelation is pooled within
+# product, each product demeaned before pooling so a level difference between products cannot
+# stand in for persistence within one. Blocks of 5 and 21 periods are short against that profile,
+# so they destroy serial dependence the real treatment has. That narrows the placebo distribution
+# relative to the true null and pushes the empirical p-value toward zero whether or not the effect
+# is real.
 #
 # **That is no longer what the column reports, and the reason is worth following.** `fwd_ret_5d`
 # used to sit at 0.0396 and `fwd_ret_21d` at 0.0099, which is 1/101 and the floor 100 draws can
@@ -242,6 +245,35 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # stands and is a separate, uncorrected narrowing; it simply is no longer visible in these two
 # numbers. Read the DML point estimate and its HAC standard error. The refutation column is recorded
 # for completeness and carries no evidence here.
+
+# %%
+carry = (
+    pl.read_parquet(get_case_study_dir(CASE_STUDY) / "features" / "financial.parquet")
+    .select(["product", "timestamp", "carry_pct"])
+    .drop_nulls()
+    .sort(["product", "timestamp"])
+)
+autocorr = []
+for lag in (1, 5, 21, 63):
+    paired = (
+        carry.with_columns(pl.col("carry_pct").shift(lag).over("product").alias("lagged"))
+        .drop_nulls()
+        .with_columns(
+            (pl.col("carry_pct") - pl.col("carry_pct").mean().over("product")).alias("x"),
+            (pl.col("lagged") - pl.col("lagged").mean().over("product")).alias("y"),
+        )
+    )
+    rho = (paired["x"] * paired["y"]).sum() / (
+        ((paired["x"] ** 2).sum() * (paired["y"] ** 2).sum()) ** 0.5
+    )
+    autocorr.append({"lag": lag, "autocorrelation": rho, "n_pairs": paired.height})
+carry_persistence = pl.DataFrame(autocorr)
+half_life = np.log(0.5) / np.log(carry_persistence["autocorrelation"][0])
+print(
+    f"carry_pct within-product pooled autocorrelation, "
+    f"AR(1) half-life {half_life:.1f} sessions from lag 1"
+)
+carry_persistence
 
 # %%
 causal_rows = []

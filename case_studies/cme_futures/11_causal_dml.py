@@ -113,12 +113,12 @@
 # **A one-bar construction window is not a claim that the column is serially independent**, and
 # the two are worth keeping apart. The declared window says how many bars the formula reads;
 # the column's empirical persistence is a separate quantity and is much larger here.
-# `12_model_analysis` measures it: lag-1 autocorrelation 0.943, an AR(1) half-life of 11.8
-# trading days, autocorrelation still 0.44 at lag 21 and 0.17 at lag 63. The half-life alone is
-# more than twice the 5-period block, and the 0.44 at lag 21 says dependence survives past the
-# 21-period block too, so neither block preserves all of the dependence the treatment actually
-# has. That is a known narrowing of the refutation on this case study, stated there rather than
-# left for the reader to infer from a `Fails`.
+# `12_model_analysis` measures it from the feature panel rather than asserting it, pooling the
+# autocorrelation within product with each product demeaned first. It prints the profile at lags
+# 1, 5, 21 and 63 beside the AR(1) half-life implied by lag 1, and that profile decays over
+# months rather than days - long against both blocks, so neither preserves all of the dependence
+# the treatment actually has. That is a known narrowing of the refutation on this case study,
+# stated there rather than left for the reader to infer from a `Fails`.
 #
 # The contrast with a rolling treatment is worth holding onto, because it is where this is
 # usually got wrong. A treatment built from a 252-session window overlaps its neighbours in 251
