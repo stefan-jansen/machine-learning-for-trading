@@ -509,8 +509,18 @@ def _numba_reconstruct_lob(
     bid_book = NumbaDict.empty(key_type=int64, value_type=int64)
     ask_book = NumbaDict.empty(key_type=int64, value_type=int64)
 
-    # Pre-allocate snapshot arrays (worst case: one per message)
-    max_snapshots = n_messages // 100 + 10000  # Reasonable upper bound
+    # Pre-allocate snapshot arrays. Two bounds hold at once and the tighter one wins.
+    # A snapshot is recorded only when the clock has advanced a full interval past the
+    # last recorded one, so there can be no more than one per interval in the span, and
+    # no more than one per message. Numba's nopython mode does not bounds-check, so a
+    # buffer sized from the message count alone is an out-of-bounds write as soon as the
+    # interval is shortened.
+    if n_messages == 0:
+        span_ns = int64(0)
+    else:
+        span_ns = timestamps[n_messages - 1] - timestamps[0]
+    by_interval = span_ns // snapshot_interval_ns + 2
+    max_snapshots = by_interval if by_interval < n_messages + 1 else n_messages + 1
     snap_timestamps = np.zeros(max_snapshots, dtype=np.int64)
     snap_best_bid = np.zeros(max_snapshots, dtype=np.float64)
     snap_best_ask = np.zeros(max_snapshots, dtype=np.float64)
@@ -699,7 +709,11 @@ def _numba_reconstruct_lob(
                     curr_ask_add - curr_ask_remove
                 )
 
-                # Record snapshot
+                # Record snapshot. The bound above is provably sufficient; the check
+                # is here so that a future change to the trigger truncates the result
+                # instead of corrupting the heap.
+                if n_snapshots >= max_snapshots:
+                    break
                 snap_timestamps[n_snapshots] = ts
                 snap_best_bid[n_snapshots] = best_bid
                 snap_best_ask[n_snapshots] = best_ask
@@ -800,7 +814,13 @@ def reconstruct_lob_with_ofi(
         "10s": 10_000_000_000,
         "1min": 60_000_000_000,
     }
-    snapshot_interval_ns = freq_ns_map.get(snapshot_freq, 1_000_000_000)
+    if snapshot_freq not in freq_ns_map:
+        raise ValueError(
+            f"snapshot_freq={snapshot_freq!r} is not one of {sorted(freq_ns_map)}. "
+            "Silently falling back to one second would mislabel every axis that "
+            "interpolates the value."
+        )
+    snapshot_interval_ns = freq_ns_map[snapshot_freq]
 
     # Build message arrays
     if show_progress:

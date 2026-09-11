@@ -92,9 +92,11 @@ from utils.style import show_with_alt
 # makes a first pass quick while exercising the same code path. `None` reads them all,
 # which is what the committed run does.
 #
-# `SNAPSHOT_FREQ` sets how often the book is written down. One second is fine enough to
-# see liquidity move and coarse enough that a trading day fits in a frame of a few tens of
-# thousands of rows.
+# `SNAPSHOT_FREQ` sets how often the book is written down, and takes one of `100ms`,
+# `500ms`, `1s`, `5s`, `10s` or `1min` - anything else is refused rather than quietly
+# treated as one second. One second is fine enough to see liquidity move and coarse
+# enough that a trading day fits in a frame of a few tens of thousands of rows; at
+# `100ms` the same day is ten times the rows and takes ten times the memory to hold.
 
 # %% tags=["parameters"]
 SYMBOL = "AAPL"
