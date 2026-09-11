@@ -289,7 +289,13 @@ def test_blank_alts_sees_an_alt_passed_by_keyword(repo):
 
 
 def test_blank_alts_reports_a_call_that_names_no_alt_as_unknowable(repo):
-    """The no-hit half: reading keywords must not invent an alt where there is none."""
+    """The no-hit half: reading keywords must not invent an alt where there is none.
+
+    Keep this even though it passes with and without the keyword fix. The other three
+    tests would all pass against a checker that reported an alt for every call, so this
+    is the case that makes them about keywords rather than about reporting more. A rule
+    you cannot write a must-still-fail case for is not a rule.
+    """
     tree_and_alts = provenance._blank_alts("show_plotly_with_alt(fig)")
     assert tree_and_alts is not None
     assert tree_and_alts[1] == []
