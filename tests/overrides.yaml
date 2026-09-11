@@ -941,8 +941,9 @@
   timeout: 300
 19_risk_management/08_ml_exit_signals:
   # `LGB_DEVICE` defaults to "cpu" and the run asserts the booster honoured whatever was
-  # requested, so no card is needed. Thirteen LightGBM fits at max_bin=255 on one thread.
-  timeout: 900
+  # requested, so no card is needed. Thirteen LightGBM fits at max_bin=255 on one thread
+  # measured 16s end to end on the workstation, so the original 300 is ample.
+  timeout: 300
 19_risk_management/09_deep_hedging:
   # torch alone: it refuses at line 105 unless CUDA is available and calls
   # `torch.cuda.set_device(0)`. No LightGBM here.
