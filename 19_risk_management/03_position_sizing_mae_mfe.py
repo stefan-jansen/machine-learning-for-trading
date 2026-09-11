@@ -302,7 +302,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Bars of position size by stop distance, falling as the stop widens because a fixed risk budget buys fewer shares the further away the stop sits.",
+    "Bars of inverse-volatility weight per ETF, tallest for the least volatile fund and shortest for the most volatile.",
 )
 
 # %% [markdown]
@@ -628,7 +628,7 @@ fig.update_layout(
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
 show_plotly_with_alt(
     fig,
-    "Bars of inverse-volatility weight per ETF, tallest for the least volatile fund and shortest for the most volatile.",
+    "Two return distributions on shared axes, full exits against scale-outs. The scale-out distribution is narrower at both ends.",
 )
 
 # %% [markdown]
@@ -791,7 +791,7 @@ fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(height=450)
 show_plotly_with_alt(
     fig,
-    "Two return distributions on shared axes, full exits against scale-outs. The scale-out distribution is narrower at both ends.",
+    "A scatter of trade return against maximum adverse excursion, coloured by outcome. Losing trades cluster at deeper adverse excursions and the two groups overlap substantially in the middle.",
 )
 
 # %% [markdown]
@@ -820,7 +820,7 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(height=450)
 show_plotly_with_alt(
     fig,
-    "A scatter of trade return against maximum adverse excursion, coloured by outcome. Losing trades cluster at deeper adverse excursions and the two groups overlap substantially in the middle.",
+    "A scatter of trade return against maximum favorable excursion, coloured by outcome. Winning trades reach further in their favour, with overlap near the origin.",
 )
 
 # %% [markdown]
@@ -929,7 +929,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "A scatter of trade return against maximum favorable excursion, coloured by outcome. Winning trades reach further in their favour, with overlap near the origin.",
+    "Two curves of separation score against stop distance, calibration and future, with a dotted line at the distance chosen on calibration. Both rise to a broad maximum and the future curve is the noisier of the two.",
 )
 
 # %% [markdown]
@@ -1049,7 +1049,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Two curves of separation score against stop distance, calibration and future, with a dotted line at the distance chosen on calibration. Both rise to a broad maximum and the future curve is the noisier of the two.",
+    "Excursion percentile bands widening with the holding horizon, favorable above zero and adverse below, with the adverse side widening faster.",
 )
 
 # %% [markdown]
@@ -1126,7 +1126,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Excursion percentile bands widening with the holding horizon, favorable above zero and adverse below, with the adverse side widening faster.",
+    "Bars of position size as a share of the portfolio against conviction score, rising steadily from the lowest conviction to the highest across the full range of scores.",
 )
 
 # %% [markdown]

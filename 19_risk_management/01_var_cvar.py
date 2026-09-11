@@ -59,7 +59,6 @@
 """Value at Risk and Conditional Value at Risk on real ETF returns."""
 
 import logging
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -76,7 +75,6 @@ from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_plotly_with_alt
 
-warnings.filterwarnings("ignore")
 logging.disable(logging.INFO)
 
 # %% tags=["parameters"]

@@ -369,7 +369,7 @@ fig.update_xaxes(
 )
 show_plotly_with_alt(
     fig,
-    "Grouped bars of return by allocation for each historical crisis window. The ordering of the allocations differs between the equity-led selloffs and the 2022 rate-led one.",
+    "Grouped bars of return by asset for each historical stress window. The ordering of the assets differs between the equity-led selloffs and the 2022 rate-led one, where the long-duration bond bars turn negative alongside the equity bars instead of offsetting them.",
 )
 
 # %% [markdown]
@@ -1005,7 +1005,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Four panels of sensitivity metrics against shock size on a shared horizontal axis, each with its own vertical units, showing how each allocation degrades as the shock deepens.",
+    "Four panels of annualized return, annualized volatility, Sharpe ratio and maximum drawdown against equity weight, each on its own vertical scale over the same horizontal range. Return and volatility rise with equity weight while the Sharpe ratio falls and the drawdown deepens.",
 )
 
 # %% [markdown]

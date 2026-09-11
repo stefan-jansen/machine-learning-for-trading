@@ -15,7 +15,7 @@
 
 # %% [markdown]
 # # ML-Based Exit Signals: Two-Model Architecture
-# **Docker image**: `ml4t-gpu`
+# **Docker image**: `ml4t`
 #
 # ## Purpose
 # Demonstrate a two-model exit architecture in which entry-model confidence becomes an
@@ -61,7 +61,7 @@ from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
-LGB_DEVICE = "cuda"
+LGB_DEVICE = "cpu"
 FORWARD_HOURS = 24
 N_OOF_FOLDS = 5
 N_IMPORTANCE_REPEATS = 5
@@ -75,7 +75,11 @@ ENTRY_CONFIDENCE_DROP = 0.30
 set_global_seeds(SEED)
 OUTPUT_DIR = get_output_dir(19, "ml_exit_signals")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-print(f"LightGBM device: {LGB_DEVICE} (GPU production path required)")
+print(
+    f"LightGBM device_type requested: {LGB_DEVICE}. A build without that tree learner raises "
+    "at fit(), and the booster is checked against this value below in case the parameter "
+    "never reached it."
+)
 
 # %% [markdown]
 # ## 1. Data Loading
@@ -287,7 +291,7 @@ label_summary
 
 # %%
 def make_classifier(seed: int) -> lgb.LGBMClassifier:
-    """Create the pinned CUDA LightGBM classifier used throughout the notebook."""
+    """Create the pinned LightGBM classifier used throughout the notebook."""
 
     return lgb.LGBMClassifier(
         n_estimators=100,
@@ -298,7 +302,7 @@ def make_classifier(seed: int) -> lgb.LGBMClassifier:
         subsample=0.8,
         subsample_freq=1,
         colsample_bytree=0.8,
-        max_bin=63,
+        max_bin=255,
         importance_type="gain",
         device_type=LGB_DEVICE,
         n_jobs=1,
@@ -452,8 +456,8 @@ if entry_model_device != LGB_DEVICE:
         f"LightGBM device mismatch: required {LGB_DEVICE}, observed {entry_model_device or 'unset'}"
     )
 print(
-    f"GPU completeness: LightGBM {lgb.__version__}; "
-    f"trained booster device_type={entry_model_device}; CPU helper threads=1"
+    f"Device check: LightGBM {lgb.__version__} trained the booster with "
+    f"device_type={entry_model_device}, the value that was requested; helper threads=1"
 )
 entry_proba_test = predict_positive_probability(entry_model, X_test)
 
@@ -593,6 +597,10 @@ exit_signal_confidence = entry_proba_test < entry_confidence_drop
 exit_signal_combined = exit_signal_model | exit_signal_confidence
 
 # %%
+# Bound once: both rates are read by name in the table, the reading under it, and the takeaways.
+confidence_fire_rate = exit_signal_confidence.mean()
+combined_fire_rate = exit_signal_combined.mean()
+
 signal_counts = pl.DataFrame(
     {
         "Rule": [
@@ -610,16 +618,14 @@ signal_counts = pl.DataFrame(
         "Share of bars": [
             f"{entry_signal.mean():.1%}",
             f"{exit_signal_model.mean():.1%}",
-            f"{exit_signal_confidence.mean():.1%}",
-            f"{exit_signal_combined.mean():.1%}",
+            f"{confidence_fire_rate:.1%}",
+            f"{combined_fire_rate:.1%}",
         ],
     }
 )
 signal_counts
 
 # %% tags=["results"]
-confidence_fire_rate = exit_signal_confidence.mean()
-combined_fire_rate = exit_signal_combined.mean()
 display(
     Markdown(
         f"""**Interpretation**: The confidence-drop clause fires on
@@ -826,9 +832,9 @@ cost, and are not an estimate of what the strategy would earn."""
 # %% [markdown]
 # ## 10. Visualization
 #
-# The figures test whether the architecture's behavior is explainable. GPU LightGBM
-# is best-effort reproducible rather than bitwise deterministic, so importance is
-# summarized across seeded repeats with random row and feature subsampling.
+# The figures test whether the architecture's behavior is explainable. Gain importance
+# depends on the row and feature subsamples each fit happens to draw, so it is summarized
+# across seeded repeats rather than read off a single fit.
 
 
 # %%
@@ -839,7 +845,7 @@ def repeated_gain_importance(
     seed: int,
     repeats: int,
 ) -> pl.DataFrame:
-    """Estimate normalized gain importance dispersion across seeded GPU repeats."""
+    """Estimate normalized gain importance dispersion across seeded repeats."""
 
     records = []
     for repeat in range(repeats):
@@ -954,7 +960,7 @@ show_plotly_with_alt(
 # %% tags=["results"]
 display(
     Markdown(
-        f"""**Interpretation**: Across {N_IMPORTANCE_REPEATS} seeded GPU fits,
+        f"""**Interpretation**: Across {N_IMPORTANCE_REPEATS} seeded fits,
 `entry_prediction` ranks #{entry_prediction_rank} by mean normalized gain in the enhanced exit
 model. Gain importance is an impurity-based allocation measure, not a signed or causal effect; the
 error bars show its repeat-to-repeat dispersion."""
@@ -1136,7 +1142,7 @@ takeaways = pl.DataFrame(
             f"{exit_auc_basic:.3f}",
             f"{exit_auc_enhanced:.3f}",
             f"{(exit_auc_enhanced - exit_auc_basic):+.3f} ({improvement:+.2f}%)",
-            f"{exit_signal_confidence.mean():.1%} of bars",
+            f"{confidence_fire_rate:.1%} of bars",
         ],
     }
 )

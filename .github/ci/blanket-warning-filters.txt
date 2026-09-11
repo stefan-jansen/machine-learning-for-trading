@@ -53,8 +53,6 @@
 16_strategy_simulation/01_backtest_first_principles.py
 16_strategy_simulation/02_futures_backtesting.py
 16_strategy_simulation/08_signal_method_comparison.py
-19_risk_management/01_var_cvar.py
-19_risk_management/02_exit_strategies.py
 20_strategy_synthesis/00_holdout_predictions.py
 20_strategy_synthesis/03_signal_quality.py
 20_strategy_synthesis/04_signal_to_strategy.py

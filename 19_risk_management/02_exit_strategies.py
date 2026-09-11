@@ -47,7 +47,6 @@
 # %%
 """Compare fixed, trailing, and volatility-adjusted exit rules."""
 
-import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -74,9 +73,6 @@ from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_plotly_with_alt
-
-# %%
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 SEED = 42
@@ -690,7 +686,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Trade return against average holding period for each trailing distance, with the fixed-stop baseline alongside. Tighter trails cut holding periods sharply.",
+    "Box plots of stop distance in percent, one box per ATR multiplier. Each successive multiplier shifts the whole distribution wider, and the spread between the quartiles widens with it.",
 )
 
 # %% [markdown]
@@ -859,7 +855,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Stop distance over time for each ATR multiple, widening in volatile periods and narrowing in calm ones, against the flat line of a fixed percentage stop.",
+    "Horizontal bars of mean decrease in impurity per feature with error bars across five chronological folds. The bars are of similar length and the error bars are wide relative to the differences between them.",
 )
 
 
@@ -1225,7 +1221,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Horizontal bars of mean decrease in impurity per feature with error bars across five chronological folds. The bars are of similar length and the error bars are wide relative to the differences between them.",
+    "Stacked bars of exit-type composition for each policy. Adding the trailing overlay converts most stop-loss and take-profit exits into trailing-stop exits; adding the ML overlay converts timeouts into signal exits.",
 )
 
 # %% [markdown]
@@ -1736,7 +1732,9 @@ for quintile in merged["signal_quintile"].unique():
 
 # %%
 # Visualize barrier outcomes
-outcome_summary = merged.groupby(["signal_quintile", "label"]).size().unstack(fill_value=0)
+outcome_summary = (
+    merged.groupby(["signal_quintile", "label"], observed=True).size().unstack(fill_value=0)
+)
 outcome_summary.columns = ["SL Hit", "Timeout", "TP Hit"]
 outcome_pct = outcome_summary.div(outcome_summary.sum(axis=1), axis=0) * 100
 
@@ -1766,7 +1764,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Stacked bars of exit-type composition for each policy. Adding the trailing overlay converts most stop-loss and take-profit exits into trailing-stop exits; adding the ML overlay converts timeouts into signal exits.",
+    "Stacked bars of barrier outcome share for each signal quintile, split into stop-loss hit, timeout and take-profit hit. The take-profit share grows from the weakest quintile through the fourth and falls back in the strongest.",
 )
 
 # %% [markdown]
