@@ -1366,10 +1366,25 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     study.require_writable()
     study.activate(tier)
     label_ref = study.labels.get(request["label"], execution_tier=tier)
+    # Read before the load, not after, which is the whole of the reordering. The estimand needs
+    # exactly the treatment, the confounders, the outcome and the two join keys; the loader adds
+    # the last three itself, so the only names supplied here come from setup.yaml and nothing in
+    # this block depends on the panel. Loading first and projecting the finished frame - which is
+    # what this did - has already paid for every column. Measured on us_equities_panel/fwd_ret_1d,
+    # 2026-09-11: the projected load hands back 9,973,233 x 7 at 0.441 GiB for a process peak of
+    # 4.93 GiB, where the unprojected join is 74 columns whose numeric block alone is 5.39 GiB
+    # (computed from the three artifact schemas, not loaded - there was no headroom to load it
+    # beside a running notebook, so that figure is arithmetic and the two beside it are measured).
+    # `study.activate` still precedes both, because it resolves the `study.root` read below.
+    setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
+    causal = setup.get("causal") or {}
+    treatment = str(causal["treatment"])
+    confounders = tuple(str(value) for value in causal["confounders"])
     mds = load_modeling_dataset(
         study.case_study,
         label_ref.name,
         max_symbols=int(reductions.get("max_symbols", 0)),
+        columns=[treatment, *confounders],
     )
     if mds.date_col != "timestamp" or not mds.entity_cols:
         raise ValueError("DML runner requires timestamp and an entity key")
@@ -1385,10 +1400,6 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         config = configs[request["config_name"]]
     except KeyError as error:
         raise ValueError(f"unknown DML configuration {request['config_name']!r}") from error
-    setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
-    causal = setup.get("causal") or {}
-    treatment = str(causal["treatment"])
-    confounders = tuple(str(value) for value in causal["confounders"])
     seed = int(config.get("seed", RANDOM_SEED))
     n_folds = int(reductions.get("n_folds", config.get("n_folds", 5)))
     n_placebo = int(reductions.get("n_placebo", config.get("n_placebo", 100)))
@@ -1592,7 +1603,12 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     computation = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
         "feature_artifacts": mds.input_lineage["artifacts"],
-        "feature_names": list(mds.feature_names),
+        # The panel's own feature list, not the projected load's. The load above asks for the
+        # seven columns the estimand reads; recording those seven here instead would move this
+        # run's identity for a change that reads the same artifacts and computes the same
+        # estimate, re-keying every causal run already registered against the other case
+        # studies. `panel_feature_names` is what the unprojected load would have reported.
+        "feature_names": list(mds.panel_feature_names or mds.feature_names),
         "estimand": {
             "method": "walk_forward_dml",
             "outcome": mds.label_col,
