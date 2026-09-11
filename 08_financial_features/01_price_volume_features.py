@@ -24,7 +24,7 @@
 #
 # This notebook demonstrates the **core feature families** derived from a single
 # asset's price and volume history. These are the workhorse features of most
-# quantitative strategies — available for every tradeable instrument.
+# quantitative strategies, available for every tradeable instrument.
 #
 # ## Learning Objectives
 #
@@ -52,11 +52,10 @@
 # All examples use **real ETF data** (no synthetic data).
 
 # %%
-"""Price and Volume Feature Families — core feature families derived from a single asset's price and volume history."""
+"""Price and Volume Feature Families: the core feature families derived from a single asset's price and volume history."""
 
 from __future__ import annotations
 
-import warnings
 from datetime import datetime
 
 import numpy as np
@@ -65,16 +64,20 @@ import polars as pl
 from plotly.subplots import make_subplots
 
 from utils.paths import get_chapter_dir
-from utils.style import COLORS  # importing utils.style sets the ml4t Plotly template as default
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # importing utils.style sets the ml4t Plotly template as default
+    COLORS,
+    show_plotly_with_alt,
+    show_with_alt,
+)
 
 # %% tags=["parameters"]
 SEED = 42
 START_DATE = "2015-01-01"
+# The cut the volume figure draws and the spike diagnostic applies, in z-score units.
+VOLUME_SPIKE_CUT = 2.0
 
 # %% [markdown]
-# ## 0. Feature Discovery with ml4t-engineer
+# ## Feature Discovery with ml4t-engineer
 #
 # Before building features manually, let's see what the `ml4t-engineer` library
 # offers. The registry provides 120 pre-built, validated features that the
@@ -141,7 +144,7 @@ result.select(["timestamp", "close"] + new_cols).tail(5)
 # pipelines.
 
 # %% [markdown]
-# ## 1. Data Loading and Sorting
+# ## Data Loading and Sorting
 #
 # **Critical**: All rolling/window operations require chronological ordering.
 # We establish sorting once at data load, not implicitly per operation.
@@ -165,7 +168,7 @@ print(f"Cross-sectional universe: {len(cs_etfs):,} rows, {cs_etfs['symbol'].n_un
 print(f"Date range: {spy['timestamp'].min()} to {spy['timestamp'].max()}")
 
 # %% [markdown]
-# ## 2. Returns and Horizons
+# ## Returns and Horizons
 #
 # Returns are the foundation of all momentum features. Key variants:
 #
@@ -177,7 +180,7 @@ print(f"Date range: {spy['timestamp'].min()} to {spy['timestamp'].max()}")
 # | Cumulative | $\sum_{i=0}^{h} r_{t-i}$ | Multi-period signals |
 
 # %% [markdown]
-# ### 2.1 Manual Implementation (Teaching)
+# ### Manual Implementation (Teaching)
 #
 # Understanding the mechanics of return computation.
 
@@ -209,7 +212,7 @@ print("Return features computed:")
 returns_df.select(["timestamp", "close", "ret_1d", "ret_5d", "ret_21d"]).tail(10)
 
 # %% [markdown]
-# ### 2.2 Skip-1 Momentum
+# ### Skip-1 Momentum
 #
 # Skip the most recent day to avoid microstructure reversals (bid-ask bounce).
 #
@@ -233,13 +236,13 @@ correlation = skip1_df.drop_nulls().select(
 print(f"Correlation between standard and skip-1 momentum: {correlation[0, 0]:.4f}")
 
 # %% [markdown]
-# **Interpretation**: A correlation of ~0.97 confirms the two series carry
-# very similar information at the 21-day horizon. The skip-1 variant removes
+# **Interpretation**: the correlation printed above is close enough to one that the two
+# series carry very similar information at this horizon. The skip-1 variant removes
 # the last day's microstructure noise (bid-ask bounce), so it is preferred for
 # daily-rebalanced strategies where the most recent close is noisiest.
 
 # %% [markdown]
-# ### 2.3 Session-Based Returns
+# ### Session-Based Returns
 #
 # Decomposing returns into overnight (gap) and intraday components:
 #
@@ -269,7 +272,7 @@ session_df.select(
 ).tail(10)
 
 # %% [markdown]
-# ## 3. Trend and Reversal Features
+# ## Trend and Reversal Features
 #
 # These features capture where price is relative to historical patterns.
 #
@@ -280,7 +283,7 @@ session_df.select(
 # | Short-term Reversal | Mean reversion | Oversold/overbought |
 
 # %% [markdown]
-# ### 3.1 MA Distance (Volatility-Scaled)
+# ### MA Distance (Volatility-Scaled)
 #
 # Raw MA distance varies with price level. Scaling by volatility creates
 # a standardized signal comparable across assets and time.
@@ -358,14 +361,49 @@ fig.update_yaxes(title_text="Price ($)", row=1, col=1)
 fig.update_yaxes(title_text="Distance ($)", row=2, col=1)
 fig.update_yaxes(title_text="Distance (ATR units)", row=3, col=1)
 fig.update_xaxes(title_text="Date", row=3, col=1)
-fig.update_layout(
-    height=600, title="Volatility-scaling standardizes MA distance for cross-asset comparison"
+fig.update_layout(height=600, title="SPY close, raw MA distance, and MA distance in ATR units")
+show_plotly_with_alt(
+    fig,
+    (
+        "Three stacked panels sharing a date axis across 2025. The top panel plots the SPY "
+        "close against a dashed simple moving average: a dip in March and April, then a "
+        "climb to the end of the year. The middle panel fills the raw distance between the "
+        "two in dollars around a dashed zero line, at its deepest below zero at the April "
+        "low and at its highest in May. The bottom panel fills the same distance divided "
+        "by ATR, in a teal that keeps the middle panel's sign and crosses zero on the same "
+        "days but is scaled in ATR units rather than dollars, and whose peaks are at "
+        "different relative heights: its deepest trough is the April low as in the middle "
+        "panel, while its highest point is in September rather than May."
+    ),
 )
-fig.show()
+
+# %%
+# What the ATR divisor does to the curve, rather than what it is assumed to do.
+_win = ma_df.tail(n)
+_atr, _raw, _scaled = _win["atr_21"], _win["ma_dist_raw"], _win["ma_dist_scaled"]
+print(
+    f"ATR(21) over the window: {_atr.min():.2f} to {_atr.max():.2f}, a {_atr.max() / _atr.min():.1f}x spread"
+)
+print(f"days the two panels agree on sign: {(_raw.sign() == _scaled.sign()).mean():.3f}")
+print(f"largest positive distance in dollars:   {_win['timestamp'][_raw.arg_max()]}")
+print(f"largest positive distance in ATR units: {_win['timestamp'][_scaled.arg_max()]}")
+
+# %% [markdown]
+# The bottom panel keeps the middle panel's sign on every day of the window and crosses zero
+# on the same dates, but it is not the same curve redrawn. ATR itself moves over the window by
+# the spread printed above, so each day is divided by a different number and the relative
+# heights change: the largest positive distance in dollars and the largest in ATR units fall
+# in different months, because a smaller dollar move during a quiet stretch is the larger one
+# once measured against that stretch's typical range.
+#
+# That is what the scaling is for. A dollar distance cannot be compared across assets or
+# across regimes - it is larger for a more expensive instrument and larger again for a more
+# volatile one - while a distance in ATR units says how far the price has moved relative to
+# how far it usually moves, which means the same thing on any instrument.
 
 
 # %% [markdown]
-# ### 3.2 Rolling Regression Slope
+# ### Rolling Regression Slope
 #
 # OLS slope over a rolling window measures trend strength more robustly than
 # endpoint-to-endpoint returns: it uses all intermediate prices and is less
@@ -390,7 +428,7 @@ def rolling_regression_slope(
         .rolling_map(
             lambda s: np.polyfit(np.arange(len(s)), s.to_numpy(), 1)[0] / s.mean() * len(s),
             window_size=period,
-            min_periods=period,
+            min_samples=period,
         )
         .alias(f"slope_{period}d")
     )
@@ -401,10 +439,10 @@ print("Rolling regression slope (normalized %-change over 21d):")
 slope_df.select(["timestamp", "close", "slope_21d"]).tail(10)
 
 # %% [markdown]
-# ### 3.3 Short-Term Reversal
+# ### Short-Term Reversal
 #
-# Recent underperformers tend to outperform in the short term (1-5 days).
-# This is the complement to momentum.
+# Over a horizon of a few days, the assets that fell most recently tend to rise, and the
+# reverse. This is the complement to momentum.
 #
 # $$\text{Reversal} = -r_{1d}$$
 
@@ -425,17 +463,18 @@ print("Short-term reversal features:")
 reversal_df.select(["timestamp", "close", "ret_1d", "reversal_1d"]).tail(10)
 
 # %% [markdown]
-# ### 3.4 Directional Persistence: Distance to MA in ATR Units
+# ### Directional Persistence: Distance to MA in ATR Units
 #
-# This extends the vol-scaled MA distance from §3.1 with different parameters
-# and interpretation. Where §3.1 uses SMA(21)/ATR(21) to measure *current*
-# deviation, here MA(50)/ATR(14) captures *directional persistence* — how
-# far price has trended away from a slower anchor.
+# This extends the vol-scaled MA distance from **MA Distance (Volatility-Scaled)** above,
+# with different parameters and a different reading. There a fast moving average over a
+# matching ATR window measures *current* deviation; here a slower anchor over a shorter
+# ATR window captures *directional persistence* - how far price has trended away from
+# that anchor.
 #
-# $$\text{dist\_to\_ma\_atr} = \frac{P_t - MA_{50}}{ATR_{14}}$$
+# $$\text{dist-to-ma-atr} = \frac{P_t - MA_{50}}{ATR_{14}}$$
 #
-# ATR is used here for normalization (price-denominated), not as a volatility
-# estimator — see §4 for the distinction.
+# ATR is used here for normalization, in price units, rather than as a volatility
+# estimator. **Volatility Features** below draws that distinction.
 
 # %%
 dist_ma_df = spy.with_columns(
@@ -458,7 +497,7 @@ dist_ma_df.select(["timestamp", "close", "ma_50", "atr_14", "dist_to_ma_atr"]).t
 # (conditioning faster signals on trend context).
 
 # %% [markdown]
-# ## 4. Volatility Features
+# ## Volatility Features
 #
 # Volatility is essential for:
 # - **Risk scaling**: Adjust signals by volatility
@@ -475,7 +514,7 @@ dist_ma_df.select(["timestamp", "close", "ma_50", "atr_14", "dist_to_ma_atr"]).t
 # | Yang-Zhang | ~8–14× | Best overall |
 
 # %% [markdown]
-# ### 4.1 Realized Volatility (Close-to-Close)
+# ### Realized Volatility (Close-to-Close)
 #
 # $$\sigma_{CC} = \sqrt{252} \times \text{std}(r_t)$$
 
@@ -486,7 +525,7 @@ vol_df = spy.with_columns(
     pl.col("close").pct_change().alias("ret"),
 ).with_columns(
     [
-        # Close-to-close (annualized) — note: realized_volatility expects returns, not prices
+        # Close-to-close (annualized); realized_volatility expects returns, not prices
         realized_volatility("ret", period=21, annualize=True).alias("vol_cc_21"),
         # Yang-Zhang (most efficient)
         yang_zhang_volatility("open", "high", "low", "close", period=21, annualize=True).alias(
@@ -499,29 +538,43 @@ print("Volatility comparison:")
 vol_df.select(["timestamp", "close", "vol_cc_21", "vol_yz_21"]).tail(10)
 
 # %% [markdown]
-# ### 4.2 Range-Based Estimators
+# ### Range-Based Estimators
 #
 # Range-based estimators use OHLC data for much higher efficiency than
 # close-to-close. Key formulas:
 #
-# **Parkinson (1980)** — uses high-low range only:
+# **Parkinson (1980)** uses the high-low range only:
 #
 # $$\hat{\sigma}^2_P = \frac{1}{4 \ln 2} (\ln H_t - \ln L_t)^2$$
 #
-# **Garman-Klass (1980)** — adds open-close information:
+# **Garman-Klass (1980)** adds open-close information:
 #
-# $$\hat{\sigma}^2_{GK} = 0.5 (\ln H_t - \ln L_t)^2 - (2\ln 2 - 1)(\ln C_t - \ln O_t)^2$$
-#
-# | Estimator | Efficiency vs CC | Data Required |
-# |-----------|-----------------|---------------|
-# | Close-to-Close | 1× | Close |
-# | Parkinson | ~5× | High, Low |
-# | Garman-Klass | ~7× | Open, High, Low, Close |
-# | Yang-Zhang | ~8–14× | Open, High, Low, Close |
+# $$\hat{\sigma}^2_{GK} = \tfrac{1}{2} (\ln H_t - \ln L_t)^2 - (2\ln 2 - 1)(\ln C_t - \ln O_t)^2$$
 #
 # **Note**: ATR (Average True Range) measures price *range* in dollar terms,
 # not *volatility* in return terms. ATR is useful for stop placement and
 # normalization but is not a volatility estimator.
+
+# %% [markdown]
+# The four estimators and what each buys. The efficiency column holds the published
+# asymptotic variance ratio against the close-to-close estimator, derived in each paper
+# under driftless geometric Brownian motion with no overnight gap. Nothing in this
+# notebook measures these; they are the reason to reach for a range estimator, and the
+# figures below are where you see what the assumption costs on real data. The legend of
+# the overlaid figure reads these same values, so the table and the chart cannot disagree.
+
+# %%
+# col, label, published efficiency vs close-to-close, prices required
+ESTIMATORS = [
+    ("vol_cc", "Close-to-Close", 1.0, "close"),
+    ("vol_parkinson", "Parkinson", 5.2, "high, low"),
+    ("vol_gk", "Garman-Klass", 7.4, "open, high, low, close"),
+    ("vol_yz", "Yang-Zhang", 8.4, "open, high, low, close"),
+]
+
+print(f"{'Estimator':<16}{'Efficiency vs CC':>18}   Prices required")
+for _col, _label, _eff, _inputs in ESTIMATORS:
+    print(f"{_label:<16}{_eff:>17.1f}x   {_inputs}")
 
 
 # %%
@@ -546,21 +599,26 @@ vol_compare_df = spy.with_columns(
     pl.col("close").pct_change().alias("ret"),
 ).with_columns(
     [
-        # Close-to-close — realized_volatility expects returns, not prices
+        # Close-to-close; realized_volatility expects returns, not prices
         realized_volatility("ret", period=21, annualize=True).alias("vol_cc"),
-        # Parkinson (manual — works on OHLC directly)
+        # Parkinson (manual, works on OHLC directly)
         parkinson_vol(period=21).alias("vol_parkinson"),
-        # Garman-Klass (manual — works on OHLC directly)
+        # Garman-Klass (manual, works on OHLC directly)
         garman_klass_vol(period=21).alias("vol_gk"),
-        # Yang-Zhang (library — works on OHLC directly, most efficient)
+        # Yang-Zhang (library, works on OHLC directly, most efficient)
         yang_zhang_volatility("open", "high", "low", "close", period=21, annualize=True).alias(
             "vol_yz"
         ),
     ]
 )
 
+# %% [markdown]
+# The four panels below share one vertical range. Plotly's `shared_yaxes` ties panels
+# within a row and not across rows, so without an explicit range the top and bottom rows
+# rescale independently and the estimator with the smallest spread is drawn as tall as the
+# one with the largest - which is the comparison this figure exists to make.
+
 # %%
-# 4-panel comparison
 n = 504  # Last ~2 years for visualization
 fig = make_subplots(
     rows=2,
@@ -588,17 +646,59 @@ for idx, (col, name) in enumerate(
 
 fig.update_yaxes(title_text="Annualized volatility", col=1)
 fig.update_xaxes(title_text="Date", row=2)
+_vol_max = max(
+    float(max(v for v in vol_compare_df[col].to_list()[-n:] if v is not None))
+    for col in ("vol_cc", "vol_parkinson", "vol_gk", "vol_yz")
+)
+fig.update_yaxes(range=[0, _vol_max * 1.05])
 fig.update_layout(
     height=500,
-    title="Range estimators track SPY volatility more smoothly than close-to-close",
+    title="Four volatility estimators on SPY, on one scale",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Four small-multiple panels of annualized SPY volatility over the same two years, "
+        "one per estimator, drawn on a single shared vertical range from zero. Each panel "
+        "shows the same two events, a bump in mid-2024 and a tall spike in the spring of "
+        "2025, against a quiet level for the rest of the span; the mid-2024 bump is "
+        "clearest in Yang-Zhang and faintest in Parkinson. The close-to-close panel "
+        "reaches the highest peak of the four and is visibly the noisiest line. Parkinson "
+        "and Garman-Klass peak lower and run smoother. Yang-Zhang peaks between them and "
+        "the close-to-close panel, with far less day-to-day jitter than close-to-close."
+    ),
+)
 
 # %% [markdown]
-# **Interpretation**: Range-based estimators (Parkinson, GK, YZ) are smoother
-# and more responsive than close-to-close. During high-volatility events
-# (e.g., March 2020), the range-based estimators capture intraday dynamics
-# that CC misses. Yang-Zhang is preferred for most applications.
+# **Interpretation**: on one scale the ordering is legible, and it is not a single
+# ordering. Close-to-close reaches the highest peak and is the most jagged of the four,
+# but it is not the highest line most of the time: the counts printed below say which
+# estimator sits on top day by day, and Yang-Zhang holds that position on the majority of
+# days in this window. Parkinson and Garman-Klass are never the highest and are usually
+# the lowest.
+#
+# The smoothness has one cause and the level has another, and it is worth keeping them
+# apart. Range estimators are smoother because a day's high and low carry more
+# information about that day's variation than its two endpoints do, which is what the
+# efficiency column claims. They read lower for a different reason, developed against
+# the next figure.
+#
+# This panel covers only the last two years. The overlaid figure below runs the full
+# history, where a much larger volatility event separates the estimators far more than
+# this window can.
+
+# %%
+# Which estimator is on top, and which at the bottom, day by day.
+_cols = [c for c, _l, _e, _i in ESTIMATORS]
+_w = vol_compare_df.drop_nulls(subset=_cols).tail(n)
+_m = _w.select(_cols).to_numpy()
+_top, _bot = _m.argmax(axis=1), _m.argmin(axis=1)
+print(f"over the {len(_w)} days plotted above:")
+for _j, (_col, _label, _eff, _inputs) in enumerate(ESTIMATORS):
+    print(
+        f"  {_label:<16} highest on {(_top == _j).mean():>6.1%} of days, "
+        f"lowest on {(_bot == _j).mean():>6.1%}, peak {_m[:, _j].max():.3f}"
+    )
 
 # %% [markdown]
 # ### Four OHLC Estimators Overlaid
@@ -610,7 +710,7 @@ fig.show()
 # %%
 import matplotlib.pyplot as plt
 
-# Prepare data — use full history for a window that includes a volatility spike
+# Prepare data: the full history, so the window includes a volatility spike
 vol_plot = vol_compare_df.drop_nulls(subset=["vol_cc", "vol_parkinson", "vol_gk", "vol_yz"])
 
 fig_mpl, ax = plt.subplots(figsize=(12, 5))
@@ -624,16 +724,17 @@ ax2.tick_params(axis="y", labelcolor=COLORS["neutral"])
 
 # Vol estimators on primary axis (convert to percentage for readability).
 # Line styles vary alongside color so the four series stay distinct in grayscale print.
-estimators = [
-    ("vol_cc", "Close-to-Close (eff. 1.0\u00d7)", "-", COLORS["blue"]),
-    ("vol_parkinson", "Parkinson (eff. 5.2\u00d7)", "--", COLORS["amber"]),
-    ("vol_gk", "Garman-Klass (eff. 7.4\u00d7)", ":", COLORS["copper"]),
-    ("vol_yz", "Yang-Zhang (eff. 8.4\u00d7)", "-.", COLORS["slate"]),
-]
+_STYLES = {
+    "vol_cc": ("-", COLORS["blue"]),
+    "vol_parkinson": ("--", COLORS["amber"]),
+    "vol_gk": (":", COLORS["copper"]),
+    "vol_yz": ("-.", COLORS["slate"]),
+}
 
-for col, label, ls, color in estimators:
+for col, label, eff, _inputs in ESTIMATORS:
+    ls, color = _STYLES[col]
     vals = [v * 100 for v in vol_plot[col].to_list()]
-    ax.plot(dates, vals, ls=ls, color=color, label=label, linewidth=1.2)
+    ax.plot(dates, vals, ls=ls, color=color, label=f"{label} (eff. {eff:.1f}\u00d7)", linewidth=1.2)
 
 ax.set_ylabel("Annualized Volatility (%)")
 ax.set_title("Rolling Volatility Estimates: Four OHLC Estimators on SPY")
@@ -641,7 +742,23 @@ ax.legend(frameon=False, fontsize=8, loc="upper left")
 ax.set_zorder(ax2.get_zorder() + 1)
 ax.patch.set_visible(False)
 
-plt.show()
+show_with_alt(
+    fig_mpl,
+    (
+        "A decade of annualized rolling volatility for SPY with four estimators overlaid "
+        "in different line styles, the legend naming each with its efficiency relative to "
+        "close-to-close. The four lines rise and fall on the same events and stay close "
+        "together at quiet levels, but they separate at the peaks: the solid "
+        "close-to-close line and the dash-dot Yang-Zhang line run together at the top, "
+        "swapping which is higher, while the dashed Parkinson and dotted Garman-Klass "
+        "lines reach only about two thirds as high. Close-to-close is the most jagged of "
+        "the four. One spike in the spring of 2020 towers over the rest of the decade, "
+        "reaching the top of the axis; smaller peaks stand out in 2015, 2018, 2022 and "
+        "2025, and it is at these peaks that the range estimators fall furthest behind. "
+        "Behind the lines the SPY close is shaded in pale grey against a second axis on "
+        "the right, climbing steadily across the span."
+    ),
+)
 
 # Persist source data so the book figure script can re-render at print resolution
 # without re-executing this notebook.
@@ -657,9 +774,60 @@ vol_plot.select(
 ).write_parquet(_FIG_8_3_ARTIFACT)
 
 # %% [markdown]
-# ### 4.3 Volatility-of-Volatility (Vol-of-Vol)
+# Why the range estimators read low. Parkinson and Garman-Klass read the high, the low,
+# the open and the close of one session, so every price they touch is inside trading
+# hours: the jump from the previous close to this open is not in their inputs. They are
+# therefore estimating the volatility of the within-session return, while close-to-close
+# estimates the volatility of the whole daily return. The reference row below is that
+# within-session return volatility, computed directly and divided by the same denominator
+# as the estimators, so the comparison is against a measured quantity rather than an
+# assumption.
+
+# %%
+_ref = vol_compare_df.with_columns(
+    ((pl.col("close").log() - pl.col("open").log()).rolling_std(21) * np.sqrt(252)).alias(
+        "within_session"
+    )
+).drop_nulls([c for c, _l, _e, _i in ESTIMATORS] + ["within_session"])
+
+print(f"median ratio to the close-to-close estimator, over {len(_ref)} days:")
+for _col, _label, _eff, _inputs in ESTIMATORS:
+    print(f"  {_label:<32} {(_ref[_col] / _ref['vol_cc']).median():.3f}")
+print(
+    f"  {'within-session return volatility':<32} "
+    f"{(_ref['within_session'] / _ref['vol_cc']).median():.3f}"
+)
+
+print()
+_peak = vol_plot.filter(pl.col("vol_cc") == pl.col("vol_cc").max())
+print(f"the four estimators at the close-to-close peak, {_peak['timestamp'][0]}:")
+for _col, _label, _eff, _inputs in ESTIMATORS:
+    print(f"  {_label:<16} {_peak[_col][0] * 100:>5.1f}%")
+
+# %% [markdown]
+# Parkinson and Garman-Klass land on the within-session reference, not below
+# close-to-close by some amount of noise. That is the whole of the level difference: they
+# answer a different question, and they answer it accurately. Yang-Zhang sits at
+# close-to-close instead, because it carries an explicit overnight term alongside its range
+# terms, which is why it stays with close-to-close through the peak while the other two
+# fall away.
 #
-# Second moment of volatility — useful for detecting unstable regimes.
+# The separation is therefore not a question of efficiency, and the distinction is worth
+# holding on to: efficiency says how much data an estimator needs to reach a given
+# precision, and it says nothing about what the estimator is precise about. A more
+# efficient estimator of the wrong quantity is still an estimator of the wrong quantity.
+#
+# Which one is right follows from the return being modelled. Reach for Parkinson or
+# Garman-Klass when the question is about the session itself, such as intraday range or
+# execution risk inside the day. When the position is held overnight and the daily
+# close-to-close return is what is being scaled or sized against, their level is the wrong
+# denominator by the margin in the table above, and the choice is close-to-close for
+# simplicity or Yang-Zhang for the same quantity with less noise.
+
+# %% [markdown]
+# ### Volatility-of-Volatility (Vol-of-Vol)
+#
+# Second moment of volatility, which detects unstable regimes.
 
 # %%
 from ml4t.engineer.features.volatility import volatility_of_volatility
@@ -677,7 +845,7 @@ print("Vol-of-vol (last 10 rows):")
 vov_df.select(["timestamp", "vol", "vol_of_vol"]).tail(10)
 
 # %% [markdown]
-# ### 4.4 Volatility State Features
+# ### Volatility State Features
 #
 # Volatility state features transform continuous vol into conditioning variables:
 #
@@ -701,7 +869,7 @@ vol_state_df = (
         ]
     )
     .with_columns(
-        # Vol ratio: short/long — >1 means expansion, <1 contraction
+        # Vol ratio: short over long; above one is expansion, below one contraction
         (pl.col("vol_short") / pl.col("vol_long").clip(1e-10, None)).alias("vol_ratio"),
     )
 )
@@ -712,7 +880,7 @@ vol_state_df = vol_state_df.with_columns(
     .rolling_map(
         lambda s: 100 * (s.rank().last() - 1) / max(len(s) - 1, 1),
         window_size=PERCENTILE_LOOKBACK,
-        min_periods=PERCENTILE_LOOKBACK // 2,
+        min_samples=PERCENTILE_LOOKBACK // 2,
     )
     .alias("vol_percentile")
 )
@@ -730,7 +898,7 @@ print("Volatility state features:")
 vol_state_df.select(["timestamp", "vol_ratio", "vol_percentile", "vol_decile"]).tail(10)
 
 # %% [markdown]
-# ### 4.5 Price-Derived Regime Indicators
+# ### Price-Derived Regime Indicators
 #
 # `ml4t-engineer` provides rolling statistical tests that detect market regime
 # changes without relying on parametric models (HMM, GARCH are in Chapter 9):
@@ -763,14 +931,14 @@ regime_ind_df.select(
 # below 1 indicates mean-reversion. This is the Lo-MacKinlay (1988) test as a
 # rolling feature.
 #
-# **Fractal Efficiency**: Measures path efficiency — 1 means price moves in a
-# straight line (trend), 0 means random wandering.
+# **Fractal Efficiency**: Measures path efficiency. One means price moves in a
+# straight line (trend), zero means random wandering.
 #
 # **Note**: These are *rolling-window* regime indicators derived purely from price.
 # Parametric regime models (HMM, Markov-switching GARCH) appear in Chapter 9.
 
 # %% [markdown]
-# ## 5. Volume and Liquidity Features
+# ## Volume and Liquidity Features
 #
 # Volume features proxy for:
 # - **Attention**: High volume = information event
@@ -778,7 +946,7 @@ regime_ind_df.select(
 # - **Conviction**: Volume confirms price moves
 
 # %% [markdown]
-# ### 5.1 Dollar Volume
+# ### Dollar Volume
 #
 # Raw volume is not comparable across assets. Dollar volume normalizes.
 #
@@ -797,7 +965,7 @@ print("Dollar volume:")
 volume_df.select(["timestamp", "close", "volume", "dollar_volume"]).tail(10)
 
 # %% [markdown]
-# ### 5.2 Relative Volume
+# ### Relative Volume
 #
 # Volume relative to its recent average. >1 means above-average activity.
 #
@@ -853,18 +1021,62 @@ fig.add_trace(
     col=1,
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=3, col=1)
-fig.add_hline(y=2, line_dash="dash", line_color=COLORS["negative"], row=3, col=1)
-fig.add_hline(y=-2, line_dash="dash", line_color=COLORS["negative"], row=3, col=1)
+fig.add_hline(y=VOLUME_SPIKE_CUT, line_dash="dash", line_color=COLORS["negative"], row=3, col=1)
+fig.add_hline(y=-VOLUME_SPIKE_CUT, line_dash="dash", line_color=COLORS["negative"], row=3, col=1)
 
 fig.update_yaxes(title_text="Price ($)", row=1, col=1)
 fig.update_yaxes(title_text="Rel. volume (×avg)", row=2, col=1)
 fig.update_yaxes(title_text="Volume z-score", row=3, col=1)
 fig.update_xaxes(title_text="Date", row=3, col=1)
-fig.update_layout(height=600, title="Relative volume and z-scores isolate trading-activity spikes")
-fig.show()
+fig.update_layout(height=600, title="SPY close, relative volume, and the volume z-score")
+show_plotly_with_alt(
+    fig,
+    (
+        "Three stacked panels sharing a date axis across 2024 and 2025. The top panel is "
+        "the SPY close, rising over the span with a sharp dip in the spring of 2025. The "
+        "middle panel fills relative volume as a multiple of its own average, oscillating "
+        "around a dashed line at one with spikes reaching about three. The bottom panel "
+        "plots the volume z-score with dashed red lines at plus and minus two: the series "
+        "crosses the upper line perhaps a dozen times across the two years and touches the "
+        "lower line rarely, so high-activity days stand out while quiet days do not."
+    ),
+)
 
 # %% [markdown]
-# ### 5.3 VWAP Distance
+# The two lower panels are different transformations, so the same numeric cut does not select
+# the same days. Measure that disagreement rather than assume it away.
+
+# %%
+_v = rel_vol_df.tail(n).drop_nulls(["rel_volume", "volume_zscore"])
+_z_hit = _v["volume_zscore"] > VOLUME_SPIKE_CUT
+_r_hit = _v["rel_volume"] > VOLUME_SPIKE_CUT
+print(f"z-score above the cut:        {_z_hit.sum()} days")
+print(f"relative volume above the cut: {_r_hit.sum()} days")
+print(f"flagged by both:               {(_z_hit & _r_hit).sum()} days")
+_near = _v.filter((pl.col("volume_zscore") - VOLUME_SPIKE_CUT).abs() < 0.1)
+if len(_near):
+    print(
+        f"relative volume on days whose z-score sits at the cut: "
+        f"{_near['rel_volume'].min():.2f} to {_near['rel_volume'].max():.2f}"
+    )
+else:
+    # A high enough cut leaves no day near it, and an empty column's min and max are
+    # None rather than an error, so the format string is where it would have failed.
+    print(f"no day in this window has a z-score within 0.1 of {VOLUME_SPIKE_CUT}")
+
+# %% [markdown]
+# The two lower panels are not one quantity in two units. Relative volume divides raw volume
+# by its own rolling mean; the z-score standardizes the **logarithm** of volume, which pulls
+# in the long right tail that volume always has. The counts printed above are what that costs:
+# the same numeric cut applied to each selects overlapping but different sets of days, and the
+# relative-volume level corresponding to a z-score at the cut is a range rather than a number.
+#
+# The z-score is the one worth writing a rule against. A cut expressed in standard deviations
+# of log volume means the same thing on an instrument whose volume is more dispersed, while a
+# ratio threshold does not.
+
+# %% [markdown]
+# ### VWAP Distance
 #
 # How far price has moved from the volume-weighted average price.
 # Useful for intraday strategies and execution.
@@ -901,12 +1113,12 @@ vwap_df.select(["timestamp", "close", "vwap_5d", "vwap_distance"]).tail(10)
 
 # %% [markdown]
 # **Interpretation**: Positive VWAP distance means the close is above the
-# volume-weighted average — buying pressure exceeded selling pressure over the
+# volume-weighted average, so buying pressure exceeded selling pressure over the
 # lookback. Negative indicates the opposite. For intraday strategies this is a
 # key mean-reversion anchor; for daily data it proxies volume-weighted trend.
 
 # %% [markdown]
-# ## 6. Cross-Sectional Normalization
+# ## Cross-Sectional Normalization
 #
 # For multi-asset strategies, raw features are not comparable. Normalization
 # creates standardized signals across the universe.
@@ -915,7 +1127,7 @@ vwap_df.select(["timestamp", "close", "vwap_5d", "vwap_distance"]).tail(10)
 # about timing. Always use point-in-time data.
 
 # %% [markdown]
-# ### 6.1 Cross-Sectional Ranks
+# ### Cross-Sectional Ranks
 #
 # Rank-based features are robust to outliers.
 #
@@ -949,12 +1161,12 @@ print(f"Cross-sectional ranks for {sample_date}:")
 )
 
 # %% [markdown]
-# ### 6.2 Vol-Scaled Cross-Sectional Momentum
+# ### Vol-Scaled Cross-Sectional Momentum
 #
 # The text's spec-table formula: cumulative return divided by realized volatility,
 # then cross-sectional percentile rank. Vol-scaling penalizes momentum driven by
-# high volatility — a stock that rose 10% with 40% vol is less compelling than one
-# that rose 10% with 15% vol.
+# high volatility: two assets that rose by the same amount are not equally interesting if
+# one of them did it with several times the dispersion of the other.
 #
 # $$\text{Vol-Scaled Mom} = \frac{r_{21d}}{\sigma_{21d}}$$
 
@@ -989,12 +1201,12 @@ print(f"Vol-scaled cross-sectional momentum ({sample_date}):")
 )
 
 # %% [markdown]
-# **Interpretation**: Vol-scaling reshuffles the ranking — high-momentum assets
+# **Interpretation**: Vol-scaling reshuffles the ranking. High-momentum assets
 # with elevated volatility drop, while steady trending assets rise. This is the
 # same intuition as the Sharpe ratio applied cross-sectionally.
 
 # %% [markdown]
-# ### 6.3 Cross-Sectional Z-Scores
+# ### Cross-Sectional Z-Scores
 #
 # Z-score normalization assumes (roughly) normal distribution.
 #
@@ -1035,7 +1247,7 @@ print(f"Cross-sectional z-scores for {sample_date}:")
 )
 
 # %% [markdown]
-# ### 6.4 Leakage Warning: Point-in-Time Discipline
+# ### Leakage Warning: Point-in-Time Discipline
 #
 # **Common Leakage Patterns**:
 #
@@ -1044,7 +1256,7 @@ print(f"Cross-sectional z-scores for {sample_date}:")
 # 3. **Look-ahead in ranks**: Ranking before data was available
 #
 # **Safe Pattern**: Always use `.over("timestamp")` for cross-sectional
-# operations — this guarantees that each date's statistics use only
+# operations; that guarantees each date's statistics use only
 # contemporaneous data:
 #
 # ```python
@@ -1057,7 +1269,7 @@ print(f"Cross-sectional z-scores for {sample_date}:")
 # ```
 
 # %% [markdown]
-# ## 7. Risk Features
+# ## Risk Features
 #
 # Risk features capture the *shape* of the return distribution beyond simple volatility.
 # Tail risk measures like VaR, CVaR, and tail ratio are essential for:
@@ -1094,13 +1306,13 @@ risk_df.select(
 # %% [markdown]
 # | Risk Feature | Interpretation | Trading Use |
 # |-------------|----------------|-------------|
-# | **VaR (5% tail)** | Max expected loss in worst 5% of days | Position sizing threshold |
-# | **CVaR (5%)** | Expected loss beyond VaR | Tail risk penalty |
+# | **VaR** | Loss threshold that the worst tail of days exceeds, at the configured level | Position sizing threshold |
+# | **CVaR** | Expected loss beyond VaR | Tail risk penalty |
 # | **Downside Deviation** | Volatility of negative returns only | Sortino ratio denominator |
 # | **Tail Ratio** | Right tail / left tail size | Asymmetry of return distribution |
 
 # %% [markdown]
-# ## 8. ML-Specific Transforms
+# ## ML-Specific Transforms
 #
 # ML-specific transforms prepare features for tree and linear models:
 # - **Fractional differencing**: Makes features stationary while preserving memory
@@ -1122,19 +1334,20 @@ print("Fractional differencing (d=0.5 vs d=1.0):")
 ffd_df.select(["timestamp", "close", "close_ffd_05", "close_ffd_10"]).tail(10)
 
 # %% [markdown]
-# | Transform | d Value | Stationarity | Memory | Use Case |
-# |-----------|---------|-------------|--------|----------|
-# | Original | 0.0 | Non-stationary | Full | Not for ML |
-# | Fractional | 0.3-0.5 | Near-stationary | Preserved | Tree models, regressions |
-# | First diff | 1.0 | Stationary | Lost | Benchmark comparison |
+# | Transform | Differencing order | Stationarity | Memory | Use case |
+# |-----------|--------------------|--------------|--------|----------|
+# | Original | none | Non-stationary | Full | Not for ML |
+# | Fractional | between none and full | Near-stationary | Preserved | Tree models, regressions |
+# | First difference | full | Stationary | Lost | Benchmark comparison |
 #
-# Fractional differencing with $d \approx 0.5$ is a good default for financial
-# time series. It achieves stationarity (required by most ML models) while
-# retaining long-range dependence that purely differenced series lose.
+# A fractional order around the middle of that range is a good default for financial time
+# series - the two orders computed above bracket it. It achieves the stationarity most ML
+# models require while retaining the long-range dependence a fully differenced series
+# throws away.
 
 # %% [markdown]
-# **Caveat**: With finite truncation, `d=1.0` *approximates* but does not
-# exactly equal first differencing. The truncated weight series drops small
+# **Caveat**: with finite truncation, a full differencing order *approximates* but does
+# not exactly equal first differencing. The truncated weight series drops small
 # high-lag coefficients that a true first difference implicitly includes. For
 # practical purposes the difference is negligible, but be aware when comparing
 # FFD output to `pct_change()`.
@@ -1171,6 +1384,6 @@ ffd_df.select(["timestamp", "close", "close_ffd_05", "close_ffd_10"]).tail(10)
 #
 # ### Next Notebooks
 #
-# - `02_microstructure_features` — Trade-based features (§8.2)
-# - `03_structural_cross_instrument_features` — Carry, cross-asset, options (§8.3)
-# - `04_fundamentals_macro_calendar` — Fundamentals, macro, calendar (§8.4)
+# - `02_microstructure_features`: trade-based features (§8.2)
+# - `03_structural_cross_instrument_features`: carry, cross-asset, options (§8.3)
+# - `04_fundamentals_macro_calendar`: fundamentals, macro, calendar (§8.4)

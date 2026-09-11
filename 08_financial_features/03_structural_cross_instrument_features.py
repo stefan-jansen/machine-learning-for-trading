@@ -47,11 +47,10 @@
 # All examples use **real data**: CME futures, ETFs, and S&P 500 options.
 
 # %%
-"""Structural and Cross-Instrument Features — carry, cross-asset, and options-implied feature families."""
+"""Structural and Cross-Instrument Features: carry, cross-asset, and options-implied families."""
 
 from __future__ import annotations
 
-import warnings
 from datetime import datetime
 from typing import cast
 
@@ -65,9 +64,7 @@ from utils.paths import get_chapter_dir
 # Importing utils.style registers and activates the ML4T Plotly template
 # (house palette, fonts, gridlines) as the repo-wide default, so every Plotly
 # figure below inherits the book style; matplotlib is styled via matplotlibrc.
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -95,11 +92,11 @@ def ensure_df(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
 #
 # $$\text{carry}_{t,c} = \frac{F_{t,c}^{\text{near}} - F_{t,c}^{\text{far}}}{F_{t,c}^{\text{near}}} \times \frac{365}{\Delta T}$$
 #
-# - Positive carry (backwardation): near > far — earn by holding
-# - Negative carry (contango): near < far — pay to hold
+# - Positive carry (backwardation): near > far, so a holder earns by rolling
+# - Negative carry (contango): near < far, so a holder pays to roll
 
 # %% [markdown]
-# ## 1.1 Load Futures Data
+# ## Load Futures Data
 
 # %%
 from data import load_cme_futures
@@ -120,7 +117,7 @@ print(f"Tenors: {futures['tenor'].unique().sort().to_list()}")
 print(f"Date range: {futures['session_date'].min()} to {futures['session_date'].max()}")
 
 # %% [markdown]
-# ## 1.2 Roll Yield (Manual Implementation)
+# ## Roll Yield (Manual Implementation)
 #
 # Roll yield is the annualized price difference between near and far contracts.
 # We pivot tenors to compute the spread.
@@ -134,11 +131,11 @@ def compute_roll_yield(df: pl.DataFrame) -> pl.DataFrame:
     Roll yield = (F_near - F_far) / F_near * (365 / DeltaT)
 
     We approximate DeltaT ≈ 30 days (typical monthly roll).
+
+    Reads ``raw_close`` rather than the adjusted series. Term structure is a spread
+    between contemporaneous tenor *levels*, and the ratio-adjusted series bakes each
+    tenor's accumulated roll history into its level, which is not the curve.
     """
-    # Pivot to get front and deferred prices side by side. Term structure is a
-    # spread between contemporaneous tenor *levels*, so it must read raw_close:
-    # the ratio-adjusted series bakes each tenor's accumulated roll history into
-    # the level, which is not the curve.
     front = df.filter(pl.col("tenor") == 0).select(
         ["session_date", "product", pl.col("raw_close").alias("close_front")]
     )
@@ -176,12 +173,12 @@ for product in PRODUCTS:
         print(f"  {product}: {ry:+.4f} ({'backwardation' if ry > 0 else 'contango'})")
 
 # %% [markdown]
-# ## 1.3 Term Structure Slope and Curvature
+# ## Term Structure Slope and Curvature
 #
 # With three tenors we can also extract slope and curvature:
 #
-# - **Slope**: $(F_0 - F_2) / F_0$ — overall term structure direction
-# - **Curvature**: $F_0 - 2 \cdot F_1 + F_2$ — butterfly shape
+# - **Slope**: $(F_0 - F_2) / F_0$, the overall term structure direction
+# - **Curvature**: $F_0 - 2 \cdot F_1 + F_2$, the butterfly shape
 
 
 # %%
@@ -218,7 +215,7 @@ print("\nTerm structure features:")
 ts_df.select(["session_date", "product", "ts_slope", "ts_curvature"]).tail(8)
 
 # %% [markdown]
-# ## 1.4 Visualize Carry Across Products
+# ## Visualize Carry Across Products
 
 # %%
 # Smooth carry with 21-day EMA for visualization
@@ -232,7 +229,7 @@ carry_smooth = carry_df.sort(["product", "session_date"]).with_columns(
 fig = make_subplots(
     rows=2,
     cols=2,
-    subplot_titles=[f"{p} — Annualized Roll Yield" for p in PRODUCTS],
+    subplot_titles=[f"{p}: annualized roll yield" for p in PRODUCTS],
     vertical_spacing=0.12,
     horizontal_spacing=0.08,
 )
@@ -255,15 +252,60 @@ for idx, product in enumerate(PRODUCTS):
 fig.update_layout(height=500, title="Carry (Roll Yield) Across Products", showlegend=False)
 fig.update_yaxes(title_text="Roll Yield (ann.)", row=1, col=1)
 fig.update_yaxes(title_text="Roll Yield (ann.)", row=2, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "A two-by-two grid of annualized roll yield, one panel per product, over roughly "
+        "fifteen years to the mid-2020s, each drawn against a dashed zero line. Each panel "
+        "has its own vertical scale and they differ greatly, so only the position relative "
+        "to zero is comparable between panels. ES oscillates tightly above zero for the "
+        "first stretch, sits near zero in the late 2010s, spikes upward around 2020 and "
+        "then settles into a sustained band below zero for the final years. CL is close to "
+        "zero for most of the span apart from dips below it in the mid-2010s and one "
+        "isolated plunge in 2020 that reaches far beyond anything else in the grid and "
+        "sets that panel's scale on its own. GC hugs zero early, then swings increasingly "
+        "far below it from the early 2020s with tall recoveries above zero in between. ZN "
+        "crosses zero rapidly and symmetrically across the whole span, with its widest "
+        "swings in the mid-2010s and a visibly calmer stretch after 2020."
+    ),
+)
 
 # %% [markdown]
-# **Interpretation**: Backwardation (positive carry) in commodities like CL
-# typically indicates supply tightness; CL prints positive roll yield on 44% of
-# sessions. GC is in contango 80% of the time, as storage and financing costs
-# dominate. ZN is backwardated on 62% of sessions, reflecting the positive carry
-# of a coupon-bearing note held against a lower financing rate. ES carry reflects
-# the cost-of-carry relationship (dividends minus financing).
+# The four panels carry very different magnitudes, so each has its own vertical scale and
+# only the sign is comparable across them. Count the signs rather than reading them off
+# the panel heights.
+
+# %%
+backwardation = (
+    carry_df.drop_nulls("roll_yield_ann")
+    .group_by("product")
+    .agg(
+        [
+            (pl.col("roll_yield_ann") > 0).mean().alias("share_backwardated"),
+            pl.col("roll_yield_ann").median().alias("median_roll_yield"),
+            pl.len().alias("n_sessions"),
+        ]
+    )
+    .sort("share_backwardated", descending=True)
+)
+print("share of sessions in backwardation (positive roll yield), by product:")
+print(backwardation)
+
+# %% [markdown]
+# **Interpretation**: read the shares printed above rather than the panel heights, which
+# are on four different scales. Backwardation means the front contract trades above the
+# deferred one, so a holder who rolls earns the difference; contango is the reverse and
+# the holder pays. The table says how often each product sat on each side of that line
+# over this sample.
+#
+# The received explanations are worth holding next to the numbers rather than in place of
+# them. Backwardation in an energy contract like CL is usually read as physical tightness,
+# a market paying up for a barrel today. Gold is the standard contango example, because
+# storage and financing dominate and there is no convenience yield to offset them. A
+# note like ZN carries the coupon against a financing rate, so its sign follows that
+# spread. ES sits on the cost-of-carry relation between dividends and financing. Whether
+# this sample agrees with each of those is what the table is for, and a sample this short
+# settles none of them.
 #
 # **Crypto funding rates** operate on a distinct clock (8-hour settlements) with
 # much higher volatility. See the `crypto_perps_funding` case study for the
@@ -276,7 +318,7 @@ fig.show()
 # ### Book Figure: Cross-Sectional Roll Yield Snapshot
 #
 # Load all CME products and plot a single-date snapshot of annualized roll yield
-# sorted by magnitude — the canonical carry signal from §8.3.
+# sorted by magnitude, which is the canonical carry signal of this section.
 
 # %%
 import matplotlib.pyplot as plt
@@ -354,10 +396,12 @@ SECTOR_GRAYS = {
     "FX": "0.90",
 }
 
+# %% [markdown]
+# The bars, the regime annotations and the sector legend are built in one cell because the
+# inline backend flushes a figure at the end of the cell that created it; splitting the
+# legend into a later cell would display the bars before it is attached.
+
 # %%
-# Build the figure in one cell so the bars, regime annotations, and sector
-# legend render together (inline flushes a figure at cell end — splitting the
-# legend into a later cell would display the bars before it is attached).
 products = snapshot["product"].to_list()
 yields = snapshot["roll_yield_ann"].to_list()
 colors = [SECTOR_GRAYS.get(SECTORS.get(p, "Other"), "0.50") for p in products]
@@ -384,11 +428,24 @@ legend_handles = [
 ]
 ax.legend(legend_handles, unique_sectors, loc="upper left", fontsize=7, frameon=False, ncol=4)
 
-plt.show()
+show_with_alt(
+    fig_mpl,
+    (
+        "A bar chart of annualized roll yield across the CME product set on a single "
+        "snapshot date, sorted from most negative on the left to most positive on the "
+        "right, with a solid line at zero. Bars are filled in shades of grey keyed to a "
+        "sector legend across the top. Most products cluster in a shallow band just "
+        "either side of zero. The left tail is led by a single agriculture contract "
+        "reaching well below the rest, followed by two more agriculture bars. The right "
+        "tail is dominated by one energy contract whose bar towers over everything else "
+        "in the chart, several times the height of the next largest. Italic annotations "
+        "label the region above zero as backwardation, where the holder earns, and the "
+        "region below as contango, where the holder pays."
+    ),
+)
 
 # %%
-# Persist the snapshot so the book figure script can re-render it at print
-# resolution without re-executing this notebook.
+# Persisted so the book figure script can re-render at print resolution.
 _FIG_8_4_ARTIFACT = (
     get_chapter_dir(8) / "output" / "book_figure_artifacts" / "figure_8_4_carry_roll_yield.parquet"
 )
@@ -406,7 +463,7 @@ snapshot.with_columns(pl.lit(snapshot_date).alias("snapshot_date")).write_parque
 # - **Relative value**: Deviation from peer mean (z-scored)
 
 # %% [markdown]
-# ## 2.1 Load ETF Data
+# ## Load ETF Data
 
 # %%
 from data import load_etfs
@@ -423,7 +480,7 @@ ca_etfs = etfs.filter(pl.col("symbol").is_in(CA_SYMBOLS)).sort(["symbol", "times
 print(f"Cross-asset universe: {ca_etfs['symbol'].n_unique()} assets, {len(ca_etfs):,} rows")
 
 # %% [markdown]
-# ## 2.2 Rolling Beta to Market
+# ## Rolling Beta to Market
 #
 # Rolling beta measures time-varying sensitivity to the market factor:
 #
@@ -458,7 +515,7 @@ print(f"Rolling 63-day Beta to SPY ({latest}):")
 )
 
 # %% [markdown]
-# ## 2.3 Beta-Adjusted Residual Momentum
+# ## Beta-Adjusted Residual Momentum
 #
 # Isolate stock-specific momentum by subtracting market contribution:
 #
@@ -490,14 +547,17 @@ print(f"\nRaw vs Residual 21d Momentum ({latest}):")
 # %% [markdown]
 # **Interpretation**: High-beta ETFs (XLK, QQQ) often show strong raw momentum
 # that is largely market-driven. Residual momentum isolates the ETF-specific
-# component — more useful for rotation strategies.
+# component, which is what a rotation strategy wants.
 
 # %% [markdown]
-# ## 2.4 Lead-Lag Correlations
+# ## Lead-Lag Correlations
+
+# %% [markdown]
+# Does SPY lead the sector ETFs? The loop below correlates the SPY return at t with each
+# sector's return at t plus a lag, so a non-zero correlation at a positive lag is SPY
+# moving first.
 
 # %%
-# Lead-lag: does SPY lead sector ETFs?
-# We compute correlation between SPY return at t and sector return at t+lag
 sectors = ["XLF", "XLE", "XLK", "XLV"]
 
 for sector in sectors:
@@ -521,7 +581,7 @@ for sector in sectors:
 # Always verify that the leading instrument actually traded at the "lead" timestamp.
 
 # %% [markdown]
-# ## 2.5 Deviation from Peer Mean (Relative Value Z-Score)
+# ## Deviation from Peer Mean (Relative Value Z-Score)
 #
 # For each ETF, compute how far its return deviates from the cross-sectional mean:
 #
@@ -574,7 +634,7 @@ print(f"\nRelative value z-scores ({latest}):")
 # | VRP (IV minus RV) | Variance risk premium | Signal/state |
 
 # %% [markdown]
-# ## 3.1 Load Options and Equity Data
+# ## Load Options and Equity Data
 
 # %%
 from data import load_sp500_daily_bars, load_sp500_options_eda
@@ -601,10 +661,16 @@ print(f"Date range: {options['timestamp'].min()} to {options['timestamp'].max()}
 print(f"Equities: {len(equities):,} rows")
 
 # %% [markdown]
-# ## 3.2 ATM Implied Volatility
+# ## ATM Implied Volatility
 #
-# ATM IV is the market's expectation of future volatility. We select contracts
-# near delta = 0.50 and DTE 25-35 days for a stable 30-day measure.
+# ATM IV is the market's expectation of future volatility over the option's life. The
+# selection below is on **moneyness**, not on delta: `compute_atm_iv` keeps calls whose
+# strike sits inside `moneyness_range` of the underlying and whose maturity sits inside
+# `dte_range`, then takes the strike closest to the money on each day. Near the money and
+# near a one-month maturity the closest-to-the-money call has a delta in the region of a
+# half, which is where "the fifty-delta" as a name for this contract comes from, but the
+# delta is never read and a contract is never selected by it. The defaults are in the
+# function signature below.
 
 
 # %%
@@ -639,9 +705,9 @@ print(f"ATM IV: {len(atm_iv):,} rows")
 atm_iv.head(5)
 
 # %% [markdown]
-# ## 3.3 Risk Reversal (25-Delta Skew)
+# ## Risk Reversal (25-Delta Skew)
 #
-# The risk reversal measures directional skew — the price of downside protection
+# The risk reversal measures directional skew: the price of downside protection
 # relative to upside:
 #
 # $$\mathrm{RR}_{25\delta} = IV_{25\delta,\,\mathrm{put}} - IV_{25\delta,\,\mathrm{call}}$$
@@ -691,7 +757,7 @@ print(f"Risk reversal: {len(rr_df):,} rows")
 rr_df.head(5)
 
 # %% [markdown]
-# ## 3.4 IV Term Structure Slope
+# ## IV Term Structure Slope
 #
 # The ratio of short-dated to long-dated IV captures near-term stress:
 #
@@ -744,15 +810,41 @@ print(f"IV term slope: {len(term_df):,} rows")
 term_df.head(5)
 
 # %% [markdown]
-# ## 3.5 Variance Risk Premium (IV - RV)
+# ## Variance Risk Premium (IV - RV)
 #
-# The VRP is the difference between implied and realized volatility:
+# The VRP as computed here is the difference between a forward-looking implied volatility
+# and a trailing realized volatility:
 #
-# $$\text{VRP}_t = IV_{30,\text{atm}} - RV_{20}$$
+# $$\text{VRP}_t = IV_{30,\text{atm},t} - RV_{20,t}$$
 #
-# The VRP is typically positive — volatility sellers earn a premium for bearing
-# risk. When unusually wide ($>$ 5 vol points), selling volatility has higher
-# expected return. When compressed ($<$ 1 point), the premium is priced out.
+# where $RV_{20,t}$ looks back over the twenty sessions ending at $t$. The realized leg is
+# built from split-adjusted closes; the note in `compute_vrp` says why that matters.
+#
+# Be precise about what this quantity is before reading anything off it. It subtracts a
+# **trailing** twenty-day realized volatility from a **forward-looking** thirty-day
+# implied volatility, so the two terms describe different and barely overlapping windows.
+# It is a spread between two volatility measurements taken on the same day, and it is not
+# a return: nothing here buys or sells an option, and no position is held to expiry. The
+# quantity a volatility seller actually earns compares the implied volatility quoted at t
+# with the realized volatility over the *following* thirty days, which this feature does
+# not compute.
+#
+# With that established, the cell below describes the spread's distribution. Read the
+# share of days on which it is positive together with the median and the mean. A spread
+# that is positive on most days while its mean sits below its median is left-skewed: small
+# positive values most of the time, and occasional negative values large enough to move
+# the average on their own. The most positive and most negative values printed say how
+# lopsided, and the bottom panel of the figure further down shows the same thing for one
+# name: a series near zero whose vertical extent is set by a single deep excursion.
+#
+# The skew is a property of the spread worth carrying forward, because it is what makes a
+# summary statistic misleading here: a mean and a median disagree about the sign, and
+# quoting either alone describes a different series. It also suggests treating a feature
+# built from this spread as a state variable rather than reading it as a signal at face
+# value. Whether selling volatility is profitable is a separate question that needs
+# the horizon-matched calculation above, not this table. Note too that the share of
+# positive days is not uniform across names: check whether every symbol is above a half
+# before treating "the spread is positive" as something to lean on.
 
 
 # %%
@@ -764,15 +856,30 @@ def compute_vrp(
     """
     Compute variance risk premium = ATM IV - realized vol.
 
-    iv_df must have columns: date, asset, iv_atm_30
-    equity_df must have columns: date, asset, close
+    iv_df must have columns: timestamp, symbol, iv_atm_30
+    equity_df must have columns: timestamp, symbol, close, adj_factor
+
+    Returns are taken from ``close * adj_factor``, not from ``close``. The bundled
+    daily bars carry the as-traded price and the cumulative split factor in separate
+    columns, so a raw close steps down by the split ratio on the ex-date: AAPL goes
+    from 499.23 to 129.04 on 2020-08-31, which enters a return series as a 74% fall
+    and then inflates every rolling window that contains it. Multiplying by
+    ``adj_factor`` first restores the continuous series, and that day becomes the
+    3% rise it was.
     """
-    # Compute annualized realized vol from equity close prices
+    if "adj_factor" not in equity_df.columns:
+        raise KeyError(
+            "equity_df needs adj_factor to build a split-continuous return series; "
+            f"got {sorted(equity_df.columns)}"
+        )
+
     rv = (
         equity_df.sort(["symbol", "timestamp"])
+        .with_columns((pl.col("close") * pl.col("adj_factor")).alias("adj_close"))
         .with_columns(
             (
-                pl.col("close").pct_change().over("symbol").rolling_std(rv_window) * np.sqrt(252)
+                pl.col("adj_close").pct_change().over("symbol").rolling_std(rv_window)
+                * np.sqrt(252)
             ).alias("rv_20")
         )
         .select(["timestamp", "symbol", "rv_20"])
@@ -787,10 +894,33 @@ def compute_vrp(
 
 vrp_df = compute_vrp(atm_iv, equities)
 print(f"VRP: {len(vrp_df):,} rows")
-vrp_df.select(["timestamp", "symbol", "iv_atm_30", "rv_20", "vrp"]).tail(10)
+print(vrp_df.select(["timestamp", "symbol", "iv_atm_30", "rv_20", "vrp"]).tail(5))
+
+# The received claim is that this premium is usually positive. Check it on this sample
+# rather than repeating it.
+print()
+print("VRP sign, by symbol:")
+print(
+    vrp_df.drop_nulls("vrp")
+    .group_by("symbol")
+    .agg(
+        [
+            (pl.col("vrp") > 0).mean().alias("share_positive"),
+            pl.col("vrp").median().alias("median_vrp"),
+            pl.col("iv_atm_30").median().alias("median_iv"),
+            pl.col("rv_20").median().alias("median_rv"),
+            pl.len().alias("n"),
+        ]
+    )
+    .sort("share_positive", descending=True)
+)
+_v = vrp_df.drop_nulls("vrp")["vrp"]
+print(f"pooled share positive: {(_v > 0).mean():.3f}")
+print(f"pooled median {_v.median():+.4f} against a mean of {_v.mean():+.4f}")
+print(f"most positive {_v.max():+.3f}, most negative {_v.min():+.3f}")
 
 # %% [markdown]
-# ## 3.6 Visualize Options Features
+# ## Visualize Options Features
 
 # %%
 # Pick one symbol for visualization
@@ -814,7 +944,7 @@ fig = make_subplots(
     cols=1,
     shared_xaxes=True,
     subplot_titles=[
-        f"{viz_symbol} — ATM IV (30d)",
+        f"{viz_symbol}: ATM IV (30d)",
         "Risk Reversal (25δ)",
         "IV Term Slope",
         "Variance Risk Premium (IV − RV)",
@@ -861,16 +991,35 @@ fig.add_trace(
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=4, col=1)
 
-fig.update_layout(height=700, title=f"Options-Implied Features — {viz_symbol}", showlegend=False)
+fig.update_layout(height=700, title=f"Options-implied features for {viz_symbol}", showlegend=False)
 fig.update_yaxes(title_text="IV", row=1, col=1)
 fig.update_yaxes(title_text="RR 25d", row=2, col=1)
 fig.update_yaxes(title_text="Short/Long", row=3, col=1)
 fig.update_yaxes(title_text="VRP", row=4, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Four stacked panels of options-implied features for one symbol, sharing a date "
+        "axis across 2019 and 2020. The top panel plots at-the-money implied volatility, "
+        "flat at a low level through 2019, spiking to its highest point of the window in "
+        "the spring of 2020, falling back, then rising to a second lower peak in the "
+        "autumn. The second fills the twenty-five delta risk reversal around a dashed "
+        "zero line: positive for most of 2019 and early 2020, peaking as implied "
+        "volatility does, then turning persistently negative from late summer 2020 with "
+        "its deepest trough near the end. The third plots the implied volatility term "
+        "slope, the ratio of short-dated to long-dated volatility, crossing a dashed "
+        "reference line at one repeatedly across the window. The bottom panel fills the "
+        "variance risk premium, implied volatility minus trailing realized volatility, "
+        "around a dashed zero line: it sits above the line through much of 2019 and "
+        "again from the autumn of 2020, dips below it in several short stretches, and "
+        "carries one pronounced downward excursion in the spring of 2020 that reaches "
+        "several times deeper than any other move in the panel."
+    ),
+)
 
 # %% [markdown]
 # **Interpretation**:
-# - ATM IV spikes during market stress (COVID crash, etc.) — a key state variable
+# - ATM IV spikes during market stress (the COVID crash, for one), which makes it a state variable
 # - Positive risk reversal indicates elevated put demand (crash fear)
 # - Term slope > 1 = inverted term structure (near-term event risk)
 # - VRP > 0 is normal; extreme VRP signals attractive vol-selling opportunities
@@ -910,13 +1059,13 @@ fig.show()
 # ## Practical Takeaways
 #
 # 1. **Carry varies by asset class**: in the snapshot above, CL trades closer to
-#    backwardation while GC is closer to contango — consistent with the
-#    asset-specific drivers (supply tightness vs cost-of-carry) discussed in §8.3
+#    backwardation than GC does, which the printed shares either bear out on this sample
+#    or do not; read them rather than this sentence, and read them as one sample's
+#    behaviour rather than as the asset-class rule the received explanations describe
 # 2. **Residual momentum isolates idiosyncratic return**: subtracting
 #    $\beta_{t,a} r_{t,m}$ removes the market component from each ETF's return.
 #    Whether residual momentum has higher IC than raw momentum is evaluated in
-#    the `etfs` case study (Chapter 11+) — this notebook only demonstrates the
-#    construction
+#    the `etfs` case study; this notebook demonstrates only the construction
 # 3. **Options-implied features are state, not signal**: use them to condition
 #    faster signals
 # 4. **Surface stability is non-negotiable**: changing quote conventions
@@ -924,7 +1073,7 @@ fig.show()
 #
 # ## Next Notebooks
 #
-# - `04_fundamentals_macro_calendar` — Fundamentals, macro, calendar encodings
-# - `case_studies/cme_futures` — Full 30-product futures pipeline
-# - `case_studies/sp500_equity_option_analytics` — Full equity + options pipeline
-# - `case_studies/sp500_options` — Options straddle strategy pipeline
+# - `04_fundamentals_macro_calendar`: fundamentals, macro, calendar encodings
+# - `case_studies/cme_futures`: full 30-product futures pipeline
+# - `case_studies/sp500_equity_option_analytics`: full equity and options pipeline
+# - `case_studies/sp500_options`: options straddle strategy pipeline

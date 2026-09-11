@@ -46,20 +46,22 @@
 # is missing rather than substituting a synthetic toy panel.
 
 # %%
-"""Microstructure Features — compute trade-based liquidity and order flow features from tick data."""
+"""Microstructure Features: trade-based liquidity and order flow features from tick data."""
 
 from __future__ import annotations
 
-import warnings
 from datetime import time
 
+import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
 from utils.reproducibility import set_global_seeds
-
-warnings.filterwarnings("ignore")
+from utils.style import (  # importing utils.style sets the ml4t Plotly template as default
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 SEED = 42
@@ -69,15 +71,16 @@ set_global_seeds(SEED)
 
 
 # %% [markdown]
-# ## 1. Data Loading with Availability Check
+# ## Data Loading with Availability Check
 #
 # Microstructure analysis requires high-frequency data. The loader raises
-# a clear error if ITCH is missing — no silent fallback to synthetic data.
+# a clear error if ITCH is missing, with no silent fallback to synthetic data.
+
+# %% [markdown]
+# The loader fails loudly when ITCH is missing rather than silently substituting a
+# synthetic toy panel, so a green run of this notebook means it read real trade data.
 
 # %%
-# Load real ITCH trade data — the notebook fails loudly if the data is
-# missing rather than silently substituting a synthetic toy panel.
-
 from data import load_nasdaq_itch
 
 sample = load_nasdaq_itch(message_types=["P"], symbols=["AAPL"])
@@ -100,9 +103,21 @@ trades = trades.filter(
 ).sort(["stock", "timestamp"])
 
 print(f"Loaded {len(trades):,} trades across {trades['stock'].n_unique()} stocks")
+_days = trades["timestamp"].dt.date().n_unique()
+print(
+    f"spanning {_days} trading day(s): {trades['timestamp'].min()} to {trades['timestamp'].max()}"
+)
 
 # %% [markdown]
-# ## 2. Aggregate to Bars
+# Read the span printed above before reading any number in this notebook. The ITCH
+# fixture is a single session, so every statistic below is computed on one day of one
+# venue's trades. That is enough to show how each feature is built and what it responds
+# to, and it is not enough to establish anything about how these features behave in
+# general. Where a number would ordinarily invite a conclusion, the text says what the
+# sample can and cannot support.
+
+# %% [markdown]
+# ## Aggregate to Bars
 #
 # Trade-based features work on aggregated bars (not tick-by-tick).
 # Common intervals: 1m, 5m, 15m for intraday; daily for cross-sectional.
@@ -132,7 +147,7 @@ def aggregate_to_bars(
         effective_tick_rule(price_col).over(stock_col).alias("trade_sign")
     )
     bars = (
-        classified.group_by_dynamic("timestamp", every=interval, by=stock_col)
+        classified.group_by_dynamic("timestamp", every=interval, group_by=stock_col)
         .agg(
             [
                 pl.col(price_col).first().alias("open"),
@@ -177,16 +192,22 @@ focus_bars = bars.filter(pl.col("stock") == FOCUS_STOCK).drop_nulls(["returns"])
 print(f"\n{FOCUS_STOCK}: {len(focus_bars):,} bars")
 
 # %% [markdown]
-# ## 3. Trade-Based Liquidity Features
+# ## Trade-Based Liquidity Features
 #
 # These features require only OHLCV bars (widely available).
 # They proxy for market liquidity and trading costs.
 #
-# | Feature | Formula | Interpretation |
-# |---------|---------|----------------|
-# | Kyle λ | Cov(ΔP, V) / Var(V) | Price impact per unit volume |
-# | Amihud | \|r\| / DollarVol | Illiquidity ratio |
+# | Feature | What the library computes here | Interpretation |
+# |---------|-------------------------------|----------------|
+# | Kyle λ | mean of \|r\| / (V / V̄), over the window | Return per unit of *relative* volume |
+# | Amihud | mean of \|r\| / DollarVol × 10⁶, over the window | Return per *million* dollars traded |
 # | Roll Spread | 2√(-Cov(ΔP_t, ΔP_{t-1})) | Implied bid-ask spread |
+#
+# The Kyle row is the one to read carefully. `kyle_lambda` takes a `method` argument that
+# defaults to `"ratio"`, and `method="regression"` raises `NotImplementedError` in the
+# installed version, so what this notebook computes is the ratio approximation above and
+# not the regression slope of Kyle (1985). Both are called Kyle lambda. Only one of them
+# is a covariance, and it is not the one running here.
 
 # %%
 from ml4t.engineer.features.microstructure import (
@@ -217,21 +238,34 @@ print("Trade-based features computed:")
 features_df.select(["timestamp", "close", "kyle_lambda", "amihud", "roll_spread", "ofi"]).tail(10)
 
 # %% [markdown]
-# **Interpretation**: Kyle lambda measures price impact per unit volume -- higher
-# values mean the market is less liquid. Amihud illiquidity captures the same
-# concept via |return|/dollar-volume. Despite both proxying for illiquidity,
-# their correlation can be weak or negative with small samples because
-# they emphasize different aspects: Kyle lambda uses return-volume covariance
-# (directional impact), while Amihud uses absolute return per dollar traded.
-# Cross-sectional agreement improves with longer samples and more stocks.
+# **Interpretation**: both measures are an absolute return divided by a volume, averaged
+# over the window, so neither carries a direction and the difference between them is
+# entirely in the denominator. Kyle's ratio divides by volume *relative to its own rolling
+# mean*; Amihud divides by dollar volume in dollars. Naming both "illiquidity" invites the
+# assumption that they agree, and the correlation printed under the next figure says how
+# far that holds on this session.
 
 # %% [markdown]
-# ### 3.1 Kyle Lambda (Price Impact)
+# ### Kyle Lambda (Price Impact)
 #
-# High Kyle λ means prices move significantly per unit of volume — the market
-# is **illiquid** and trades have high impact.
+# High Kyle λ means prices move a lot per unit of volume: the market is **illiquid**
+# and trades have high impact.
 #
-# $$\lambda = \frac{\text{Cov}(\Delta P, V)}{\text{Var}(V)}$$
+# Kyle (1985) defines λ as the slope of returns on signed order flow, which is a
+# regression coefficient:
+#
+# $$r_t = \lambda \, S_t + \varepsilon_t$$
+#
+# The installed `ml4t-engineer` does not fit that regression. Its default `method="ratio"`
+# averages a per-bar ratio over the window instead, with volume normalized by its own
+# rolling mean:
+#
+# $$\lambda_{\text{ratio}} = \text{mean}_{t}\!\left(\frac{|r_t|}{V_t / \bar{V}_t}\right)$$
+#
+# Read the second formula when reading the figure below, because the second formula is
+# what produced it. The two agree on the direction of "less liquid" and they are not the
+# same statistic: the ratio uses the absolute return and so has no sign, while the
+# regression slope does.
 
 # %%
 # Visualize Kyle Lambda
@@ -243,7 +277,8 @@ fig = make_subplots(
     vertical_spacing=0.1,
 )
 
-n = min(len(features_df), 200)  # Last ~2 days of 5m bars
+# The fixture holds one session, so this takes every bar there is rather than a tail.
+n = min(len(features_df), 200)
 fig.add_trace(
     go.Scatter(
         x=features_df["timestamp"].to_list()[-n:],
@@ -263,13 +298,25 @@ fig.add_trace(
     row=2,
     col=1,
 )
-fig.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 
 fig.update_layout(height=500, title=f"Kyle Lambda - {FOCUS_STOCK}")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Two stacked panels sharing a time axis across the afternoon of a single trading "
+        "session in January 2020. The top panel plots the AAPL close, which drifts "
+        "sideways and slightly lower through the early afternoon, then climbs steadily "
+        "into the final hour to finish at the high of the window. The bottom panel fills "
+        "Kyle lambda, the price impact per unit of volume, in amber above a dashed zero "
+        "line. It begins at its highest value on the left and declines through the "
+        "session, with a distinct step down shortly after two o'clock, after which it "
+        "holds a lower and flatter level to the close."
+    ),
+)
 
 # %% [markdown]
-# ### 3.2 Amihud Illiquidity
+# ### Amihud Illiquidity
 #
 # Amihud ratio measures absolute return per dollar traded. Higher = more illiquid.
 #
@@ -305,14 +352,81 @@ fig.add_trace(
 )
 
 fig.update_layout(height=500, title="Liquidity Measures Comparison")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Two stacked panels sharing a time axis across the afternoon of a single trading "
+        "session in January 2020, each on its own vertical scale because the two measures "
+        "are in different units. The top panel plots Kyle lambda in dark blue, declining "
+        "from its highest value on the left through a step down shortly after two "
+        "o'clock to a lower, flatter level for the rest of the window. The bottom panel "
+        "plots Amihud illiquidity in amber, which runs the other way over the same hours: "
+        "it rises from the left to a broad peak in the middle of the window, then falls "
+        "through the last hour to finish at its lowest point."
+    ),
+)
 
-# Correlation
-corr = features_df.select(pl.corr("kyle_lambda", "amihud")).item()
-print(f"Kyle λ / Amihud correlation: {corr:.3f}")
+
+# Both, and named: pl.corr is Pearson by default, which measures level co-movement,
+# while the question "do the two measures agree on which bars are illiquid" is a ranking
+# question and wants Spearman.
+def fmt(value: float | None, spec: str = "+.3f", absent: str = "undefined") -> str:
+    """Format a statistic that a short sample can leave undefined.
+
+    polars returns a null, not an error, when a correlation or a median has nothing to
+    work with: a constant column, fewer than two non-null rows, an empty frame. Those
+    arrive here as None and `format` raises TypeError on them, which stops the notebook
+    on a smaller slice of data while working on a larger one.
+    """
+    return absent if value is None else format(value, spec)
+
+
+corr_pearson = features_df.select(pl.corr("kyle_lambda", "amihud")).item()
+corr_spearman = features_df.select(pl.corr("kyle_lambda", "amihud", method="spearman")).item()
+print(f"Kyle lambda vs Amihud, over {len(features_df)} bars of one session:")
+print(f"  Pearson  {fmt(corr_pearson)}")
+print(f"  Spearman {fmt(corr_spearman)}")
 
 # %% [markdown]
-# ## 4. Order Flow Imbalance (OFI)
+# Both correlations are negative on this session, which the figure above shows directly:
+# Kyle lambda falls through the afternoon while Amihud rises to a midday peak before
+# dropping away. Two measures that a reader would reasonably expect to agree are moving
+# against each other, and the sign is the thing to notice rather than the magnitude, which
+# one session of one name does not pin down.
+#
+# The denominators differ in one respect that is easy to check: what happens if every
+# volume is multiplied by a constant, returns and prices left alone. Kyle's ratio divides
+# volume by its own rolling mean, so the constant cancels. Amihud divides by dollar volume
+# in dollars, so the constant passes through. The cell below runs that substitution and
+# prints both ratios to the original.
+#
+# Read it for what it is. It establishes that the two measures answer differently to the
+# units volume is quoted in, and it does not by itself explain the negative correlation
+# above, which arises from returns, prices and volumes all moving together across the
+# session. The cross-stock section later in this notebook does the decomposition that
+# explains the disagreement.
+
+# %%
+# Scale every volume by a constant and recompute. One measure is invariant, one is not.
+VOLUME_SCALE = 10
+
+_scaled = features_df.with_columns((pl.col("volume") * VOLUME_SCALE).alias("volume")).with_columns(
+    [
+        kyle_lambda("returns", "volume", period=PERIOD).alias("kyle_scaled"),
+        amihud_illiquidity("returns", "volume", "close", period=PERIOD).alias("amihud_scaled"),
+    ]
+)
+print(f"with every volume multiplied by {VOLUME_SCALE}, the median ratio to the original:")
+print(f"  Kyle lambda {fmt((_scaled['kyle_scaled'] / _scaled['kyle_lambda']).median(), '.3f')}")
+print(f"  Amihud      {fmt((_scaled['amihud_scaled'] / _scaled['amihud']).median(), '.3f')}")
+
+# %% [markdown]
+# What the substitution shows: Kyle's ratio is unchanged and Amihud moves by the
+# reciprocal of the factor. The measures are not on a common footing, and a threshold
+# tuned on one says nothing about the other.
+
+# %% [markdown]
+# ## Order Flow Imbalance (OFI)
 #
 # OFI measures the buy-sell imbalance within a bar, proxying for **net order
 # flow**:
@@ -322,16 +436,18 @@ print(f"Kyle λ / Amihud correlation: {corr:.3f}")
 # **Important**: Without exchange-provided buy/sell labels we estimate the side
 # of each trade with the **tick rule** (Lee-Ready), classifying it buyer- or
 # seller-initiated from the sign of the price change. That classification has to
-# happen at the **trade** level, before aggregation — which is why
+# happen at the **trade** level, before aggregation, which is why
 # `aggregate_to_bars` splits `buy_volume`/`sell_volume` there. Applying the tick
 # rule to a *bar's* single close would collapse OFI to the sign of that bar's
 # own return (+/-1), a tautology rather than a flow measure. This is the concrete
 # reason OFI is a **flow** feature that needs trade data, not a bar-OHLCV
-# feature (Learning Objective 3).
+# feature which is the flow-versus-state distinction this chapter turns on.
 
 # %%
 # OFI visualization
-ofi_colors = ["#1f77b4" if x > 0 else "#ff7f0e" for x in features_df["ofi"].to_list()[-n:]]
+ofi_colors = [
+    COLORS["positive"] if x > 0 else COLORS["negative"] for x in features_df["ofi"].to_list()[-n:]
+]
 
 fig = make_subplots(
     rows=2,
@@ -360,13 +476,24 @@ fig.add_trace(
     row=2,
     col=1,
 )
-fig.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
+fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=2, col=1)
 
 fig.update_layout(height=500, title=f"Order Flow Imbalance - {FOCUS_STOCK}")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Two stacked panels sharing a time axis across the afternoon of a single trading "
+        "session in January 2020. The top panel plots the AAPL close, flat to slightly "
+        "lower early and climbing into the final hour. The bottom panel draws order flow "
+        "imbalance as one bar per five-minute bar, green above a dashed zero line where "
+        "buying dominates and red below it where selling does. The bars change sign "
+        "frequently rather than persisting in one direction; the tallest green bar sits "
+        "just before two o'clock and the deepest red bar is the first of the window."
+    ),
+)
 
 # %% [markdown]
-# ## 5. Feature Timing: Alpha vs Feasibility
+# ## Feature Timing: Alpha vs Feasibility
 #
 # **Critical distinction**: Some microstructure features are alpha signals;
 # others are feasibility/cost state variables.
@@ -400,25 +527,55 @@ alpha_df = features_df.with_columns(
 alpha_df = alpha_df.drop_nulls(["ofi", "returns", "fwd_return"])
 
 # Same-bar OFI vs same-bar return: mechanically strong because a bar with a buy
-# imbalance is usually an up bar — using it as a signal peeks at the outcome.
+# imbalance is usually an up bar, so using it as a signal peeks at the outcome.
 corr_same = alpha_df.select(pl.corr("ofi", "returns")).item()
 # Same OFI against the NEXT bar's return: the honest, tradable predictive content.
 corr_pred = alpha_df.select(pl.corr("ofi", "fwd_return")).item()
 
-print(f"OFI Predictive Content (n={len(alpha_df)} bars):")
-print(f"  Same-bar OFI vs same-bar return:  {corr_same:+.4f} (leaky if used as a signal)")
-print(f"  OFI vs next-bar return:           {corr_pred:+.4f} (honest, tradable)")
+
+def pearson_interval(r: float | None, n: int, z_crit: float = 1.96) -> tuple[float, float] | None:
+    """A 95% interval for a Pearson correlation, via the Fisher z transform.
+
+    None when the interval is not defined: an undefined correlation, or fewer than four
+    observations, where the transform's standard error divides by zero.
+    """
+    if r is None or n < 4:
+        return None
+    z, se = np.arctanh(r), 1.0 / np.sqrt(n - 3)
+    return float(np.tanh(z - z_crit * se)), float(np.tanh(z + z_crit * se))
+
+
+_n = len(alpha_df)
+print(f"OFI predictive content (n={_n} bars):")
+for _label, _r in (
+    ("same-bar OFI vs same-bar return", corr_same),
+    ("OFI vs next-bar return", corr_pred),
+):
+    _interval = pearson_interval(_r, _n)
+    if _interval is None:
+        print(f"  {_label:<34} {fmt(_r, '+.4f')}   interval undefined on {_n} bars")
+        continue
+    _lo, _hi = _interval
+    _verdict = "excludes zero" if _lo * _hi > 0 else "includes zero"
+    print(f"  {_label:<34} {_r:+.4f}   95% interval ({_lo:+.3f}, {_hi:+.3f}), {_verdict}")
 
 # %% [markdown]
-# **Interpretation**: The contemporaneous correlation is typically much larger
-# than the lagged correlation — this gap is the signature of look-ahead bias.
-# Any strategy that uses same-bar OFI to trade same-bar returns is
-# implicitly assuming you know the future. The lagged correlation is the
-# realistic signal strength. With limited intraday data (few bars per stock),
-# both correlations may be noisy; longer samples sharpen the distinction.
+# **Interpretation**: the same-bar correlation is the larger of the two, and it is the one
+# that cannot be traded. A bar with a buy imbalance is usually a bar whose price rose, so
+# the same-bar number is mostly the definition of an up bar read back to you; a strategy
+# that uses it is assuming it knows the bar's outcome while the bar is still open. The gap
+# between the two numbers is what look-ahead bias is worth here.
+#
+# The lagged correlation is the one a strategy could act on, and this sample does not
+# establish that it is different from zero: its interval spans zero while the same-bar
+# interval does not. That is the honest reading, and it is not a disappointing one. What
+# the notebook demonstrates is the construction and the size of the bias, both of which
+# are visible in a single session. Whether lagged OFI carries tradable content is a
+# question for many sessions and many names, and the right response to a wide interval is
+# to widen the sample rather than to quote the point estimate.
 
 # %% [markdown]
-# ## 6. Flow vs State: Critical Distinction
+# ## Flow vs State: Critical Distinction
 #
 # > **WARNING: Flow vs State Confusion**
 # >
@@ -434,7 +591,7 @@ print(f"  OFI vs next-bar return:           {corr_pred:+.4f} (honest, tradable)"
 #
 # ### Order Book Spread: A State Feature
 #
-# The bid-ask spread is a **state** property — the current top of book.
+# The bid-ask spread is a **state** property: the current top of book.
 # You cannot compute it from order **flow** (arrivals) because:
 #
 # 1. Cancellations remove orders but aren't in arrival flow
@@ -449,7 +606,7 @@ print("For LOB state reconstruction, see Chapter 3 notebooks.")
 print("This notebook focuses on trade-based features (flow only).")
 
 # %% [markdown]
-# ## 7. Composite Liquidity Score
+# ## Composite Liquidity Score
 #
 # Combining multiple liquidity metrics into a single score via z-score
 # normalization then summation.
@@ -458,16 +615,15 @@ print("This notebook focuses on trade-based features (flow only).")
 #
 # The z-scores below use **full-sample** mean and standard deviation across the
 # entire history of each metric. The resulting composite is an *ex-post*
-# characterization of how the three illiquidity measures combine on this
-# sample — useful for the dashboard and the qualitative comparison that
-# follows. It is **not** a lookahead-safe feature: each daily z-score depends
-# on the global mean and variance computed over future as well as past data,
-# so using `illiquidity_score` directly as a regression feature would leak
-# future information into the training set.
+# characterization of how the three illiquidity measures combine on this sample, which is
+# what the dashboard below needs. It is **not** a lookahead-safe feature: each z-score
+# divides by a mean and variance taken over the whole history, future bars included, so
+# `illiquidity_score` carries information from after the bar it is attached to. Feed it to
+# a regression and the fit is scored partly on knowledge the model would not have had.
 #
 # The lookahead-safe construction (expanding-window percentiles / rolling
 # z-scores) is demonstrated in
-# [`06_robustness_sensitivity.py`](06_robustness_sensitivity.ipynb) §5, which
+# [`06_robustness_sensitivity.py`](06_robustness_sensitivity.ipynb), which
 # uses expanding-window quantiles to threshold a state variable without
 # leaking future values, and again in the per-case-study feature pipelines
 # under `case_studies/*/data/features/` where production features are
@@ -484,7 +640,7 @@ for feat in liquidity_features:
         std_val = 1.0
     features_df = features_df.with_columns(
         ((pl.col(feat) - mean_val) / std_val).alias(f"{feat}_z")
-    )  # Full-sample z-score — use rolling in production
+    )  # Full-sample z-score; use rolling in production
 
 # Composite illiquidity score
 features_df = features_df.with_columns(
@@ -518,7 +674,7 @@ fig.add_trace(
         y=features_df["illiquidity_score"].to_list()[-n:],
         name="Illiquidity",
         fill="tozeroy",
-        line=dict(color="red"),
+        line=dict(color=COLORS["negative"]),
     ),
     row=2,
     col=1,
@@ -538,21 +694,42 @@ fig.add_trace(
         x=features_df["timestamp"].to_list()[-n:],
         y=features_df["trade_intensity"].to_list()[-n:],
         name="Intensity",
-        line=dict(color="purple"),
+        line=dict(color=COLORS["slate"]),
     ),
     row=4,
     col=1,
 )
-fig.add_hline(y=1.0, line_dash="dash", line_color="gray", row=4, col=1)
+fig.add_hline(y=1.0, line_dash="dash", line_color=COLORS["neutral"], row=4, col=1)
 
 fig.update_layout(height=700, title=f"Microstructure Dashboard - {FOCUS_STOCK}", showlegend=False)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Four stacked panels sharing a time axis across the afternoon of a single trading "
+        "session in January 2020. The first plots the AAPL close, flat to slightly lower "
+        "early and climbing into the final hour. The second fills the composite "
+        "illiquidity score in red around a zero line: positive through the first part of "
+        "the window with a peak near its middle, crossing below zero shortly before half "
+        "past two, then drifting down to its most negative value at the close. The third "
+        "repeats the order flow imbalance bars, green where buying dominates and red "
+        "where selling does. The fourth plots trade intensity against a dashed reference "
+        "line at one, close to that line for most of the window apart from a tall spike "
+        "in the middle of the afternoon and a rise at the very end."
+    ),
+)
 
 # %% [markdown]
-# ## 8. Cross-Stock Comparison
+# ## Cross-Stock Comparison
 #
 # Microstructure features help identify which stocks are more liquid
 # and thus have lower trading costs.
+
+# %% [markdown]
+# The summary below carries the two estimators and the quantities they are built from, so
+# the orderings can be traced rather than asserted. The last column is Amihud's own per-bar
+# ratio, formed bar by bar and then summarised: a median of ratios, not a ratio of medians.
+# The distinction matters because a ratio of medians discards the pairing between each
+# return and the dollar volume that accompanied it, and can order the names differently.
 
 # %%
 # Compute features for all stocks
@@ -570,7 +747,12 @@ summary = (
         [
             pl.col("kyle_lambda").median().alias("kyle_median"),
             pl.col("amihud").median().alias("amihud_median"),
-            pl.col("volume").sum().alias("total_volume"),
+            # The quantities the estimators are built from (see the note below the cell).
+            pl.col("returns").abs().median().alias("abs_return_median"),
+            (pl.col("close") * pl.col("volume")).median().alias("dollar_volume_median"),
+            (pl.col("returns").abs() / (pl.col("close") * pl.col("volume")) * 1e6)
+            .median()
+            .alias("return_per_mm"),
             pl.len().alias("n_bars"),
         ]
     )
@@ -578,16 +760,46 @@ summary = (
 )
 
 print("Liquidity Summary by Stock:")
-summary
+print(summary)
+
+print()
+print("orderings, smallest value first:")
+for _col, _label in (
+    ("kyle_median", "Kyle lambda"),
+    ("amihud_median", "Amihud"),
+    ("abs_return_median", "median |return| per bar"),
+    ("dollar_volume_median", "median dollar volume per bar"),
+    ("return_per_mm", "median |return| per million dollars"),
+):
+    print(f"  {_label:<36} {' < '.join(summary.sort(_col)['stock'].to_list())}")
 
 # %% [markdown]
-# **Interpretation**: Cross-stock liquidity differences inform **position sizing**.
-# Illiquid names require smaller positions to avoid market impact. Note that
-# Kyle lambda and Amihud can rank stocks differently — Kyle lambda captures
-# directional price-volume covariance while Amihud measures absolute return per
-# dollar traded. Using multiple liquidity proxies provides a more robust picture
-# than relying on any single measure. In production, these features feed the
-# feasibility overlay that gates position size (see `06_robustness_sensitivity`).
+# **Interpretation**: compare the two orderings printed above before drawing anything from
+# either. On this session they do not merely differ at the margin; read the lists and see
+# how much of the disagreement is a reordering and how much is a reversal. A reader who
+# had taken one measure as *the* liquidity ranking and sized positions against it would
+# have sized them against the other measure's answer inverted.
+#
+# Neither measure is wrong, and on this sample the five orderings printed above say where
+# the disagreement comes from. Compare the Kyle ordering against the median absolute
+# return, and the Amihud ordering against the median absolute return per million dollars.
+# Each estimator's ordering is the ordering of one of those two raw quantities.
+#
+# That is what the denominators do. Kyle's ratio divides volume by its own rolling mean,
+# which is close to one on a typical bar, so across names it is left ranking by how large
+# a typical return is. Amihud divides by dollar volume in dollars, which differs across
+# names by a large factor, so it ranks by return per dollar traded. A name whose returns
+# are the largest and whose dollar volume is also the largest therefore lands at the
+# illiquid end of one list and the liquid end of the other. The reversal is a property of
+# these three names on this session rather than something that must happen; what is
+# general is that the two estimators rank by different quantities, and the orderings above
+# are how you check which.
+#
+# What follows for practice is that "illiquid" has to name a measure, and a feasibility
+# overlay has to say which one it gates on and why. It also follows that one session of
+# three names settles none of this: the orderings above are an illustration of how far two
+# proxies can part, not an estimate of these three stocks' liquidity. In production these
+# features feed the overlay that gates position size (see `06_robustness_sensitivity`).
 
 # %% [markdown]
 # ## Summary
@@ -618,5 +830,5 @@ summary
 #
 # ### Next Notebooks
 #
-# - `03_structural_cross_instrument_features` — Cross-asset, carry, options-implied (§8.3)
-# - `04_fundamentals_macro_calendar` — Fundamentals, macro, calendar (§8.4)
+# - `03_structural_cross_instrument_features`: cross-asset, carry, options-implied (§8.3)
+# - `04_fundamentals_macro_calendar`: fundamentals, macro, calendar (§8.4)
