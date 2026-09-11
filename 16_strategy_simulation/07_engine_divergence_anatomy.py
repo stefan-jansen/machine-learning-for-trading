@@ -548,12 +548,14 @@ add_message_title(
 )
 fig.tight_layout()
 _nonzero_gap = diff_hd_bps[diff_hd_bps.abs() > 0]
-_gap_flips = ((_nonzero_gap > 0) != (_nonzero_gap > 0).shift(1)).iloc[1:].to_numpy()
-_flip_positions = [i for i, flipped in enumerate(_gap_flips) if flipped]
+_flipped = ((_nonzero_gap > 0) != (_nonzero_gap > 0).shift(1)).iloc[1:]
+# Dropping the zeros is right for counting reversals and wrong for locating them: position
+# in the zero-free subset is not position in the plotted series. Map back through the index.
+_flip_at = [diff_hd_bps.index.get_loc(stamp) for stamp in _flipped.index[_flipped.to_numpy()]]
 _flip_note = (
-    f"changing sign {len(_flip_positions)} times, the last of them "
-    f"{(_flip_positions[-1] + 1) / len(_gap_flips):.0%} of the way through the sample"
-    if _flip_positions
+    f"changing sign {len(_flip_at)} times, the last of them "
+    f"{(_flip_at[-1] + 1) / len(diff_hd_bps):.0%} of the way through the sample"
+    if _flip_at
     else "never changing sign"
 )
 show_with_alt(
