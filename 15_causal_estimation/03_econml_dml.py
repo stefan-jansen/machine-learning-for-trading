@@ -21,16 +21,20 @@
 # **Section Reference**: See Section 15.4 for DML theory and the ETF factor application
 #
 # ## Purpose
-# This notebook implements **Double Machine Learning (DML)** to estimate the causal effect
-# of momentum signals on forward returns, controlling for complex confounders. We demonstrate
-# how to move beyond correlation to establish whether momentum has genuine predictive power.
+# **Double machine learning** (DML) estimates the effect of a momentum signal on forward
+# returns while adjusting for volatility and regime, on a panel of ETFs. The estimate is one
+# of two things this notebook is about. The other is that a panel breaks every correction
+# that has a notion of "nearby": the standard error, the cross-validation folds, the
+# permutation blocks and the temporal subsets all count in rows unless they are told not to,
+# and on a stacked panel a row is a different ETF rather than the next day.
 #
 # ## Learning Objectives
-# - LO1: Understand confounding in factor research and why correlation ≠ causation
-# - LO2: Implement DML using EconML library for continuous treatment effects
-# - LO3: Compare naive vs DML estimates to quantify confounding bias
-# - LO4: Apply correct temporal cross-validation and HAC standard errors
-# - LO5: Validate causal effects with refutation tests
+# - LO1: Explain what confounding does to a factor regression, and what adjustment can and
+#   cannot recover
+# - LO2: Fit a DML estimator with EconML for a continuous treatment
+# - LO3: Compare the raw and adjusted estimates and read the direction of the bias
+# - LO4: Build folds, standard errors and permutations that count in decision times
+# - LO5: Read a refutation test, including one that cannot refute anything
 #
 # ## Cross-References
 # - **Upstream**: Chapter 8 (ETF momentum features)
@@ -38,15 +42,15 @@
 # - **Related**: [`02_dowhy_causal_graph`](02_dowhy_causal_graph.ipynb) (graphical approach), [`04_dml_crypto_regime`](04_dml_crypto_regime.ipynb) (regime effects)
 #
 # ## Methodological Notes
-# This notebook follows Chernozhukov et al. (2017) and de Prado (2018):
-# - **WalkForwardCV**: Cross-fitting with purging and embargo (ml4t-diagnostics)
-#   - Purging: Removes training samples whose labels overlap with test period
-#   - Embargo: Adds buffer after test to prevent autocorrelation leakage
-# - **HAC Standard Errors**: Newey-West correction for autocorrelated residuals
-# - **Refutation Tests**: Block permutation to validate causal claims
+# Following Chernozhukov et al. (2017) and de Prado (2018):
+# - **WalkForwardCV** from ml4t-diagnostics, with purging and embargo, built over the
+#   panel's decision times
+# - **Driscoll-Kraay standard errors**, which aggregate by decision time before applying the
+#   Newey-West kernel
+# - **Block permutation within entity**, so the placebo treatment keeps its persistence
 #
-# **Prerequisites**: [`02_dowhy_causal_graph`](02_dowhy_causal_graph.ipynb) for DoWhy concepts;
-# ETF feature data from Ch8 pipeline
+# **Prerequisites**: [`02_dowhy_causal_graph`](02_dowhy_causal_graph.ipynb) for the DoWhy
+# workflow, and an ETF modeling dataset built by the features pipeline
 #
 # ## Causal Design Contract
 #
@@ -73,7 +77,7 @@ import numpy as np
 import pandas as pd
 from ml4t.diagnostic.splitters import WalkForwardCV
 from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.linear_model import Ridge
 
 from case_studies.utils.causal import (
     block_permute,
@@ -83,7 +87,10 @@ from case_studies.utils.causal import (
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
 
-warnings.filterwarnings("ignore")
+# scikit-learn repeats a notice, once per nuisance fit, that a frame carrying feature names
+# was fitted and a bare array predicted; EconML does that internally. Convergence and
+# numerical warnings stay visible.
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.validation")
 
 # Statsmodels for HAC standard errors
 import statsmodels.api as sm
@@ -125,13 +132,13 @@ print(f"Seed: {SEED}")
 # to a synthetic substitute that would publish indistinguishable numbers.
 
 # %%
-# Real-data only - load failure is a fatal error so CI / a fresh reader
-# environment without ML4T_DATA_PATH cannot silently publish synthetic numbers.
+# A load failure is fatal rather than a fallback to synthetic data.
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
 
 treatment_col = "skip_recent_6_1"
 outcome_col = mds.label_col
 confounder_cols = ["vol_21d", "vol_126d", "regime", "yield_curve_slope"]
+entity_col = mds.entity_cols[0]
 
 available = set(mds.dataset.columns)
 missing = [c for c in [treatment_col, outcome_col] + confounder_cols if c not in available]
@@ -167,37 +174,101 @@ print(f"Date range: {df[mds.date_col].min()} to {df[mds.date_col].max()}")
 print(f"Treatment: {treatment_col}, Outcome: {outcome_col}")
 
 # %% [markdown]
-# ## 2. Naive Correlation Estimate (Biased)
+# ### The Panel Keys, and Why Everything Below Needs Them
 #
-# Simple OLS regression of returns on momentum ignores confounders.
-# This estimate is **biased** because:
-# - High volatility reduces both momentum and returns
-# - Risk-on regime increases both momentum and returns
+# A row here is an ETF *and* a date, and the frame is sorted by date, so consecutive rows
+# are usually different ETFs on the same day rather than the same ETF on consecutive days.
+# Every correction in this notebook that has a notion of "nearby" - the standard error, the
+# cross-validation folds, the permutation blocks, the temporal subsets - has to count in
+# decision times, not in rows. Counting in rows on this frame measures a slice of one day's
+# cross-section and calls it three weeks.
+#
+# The two arrays below carry that information, and each of those four places takes them.
 
 # %%
-# Naive OLS estimate
-X_naive = df[[treatment_col]].values
+decision_times = df[mds.date_col].to_numpy()
+entities = df[entity_col].to_numpy()
+
+unique_dates = np.sort(pd.unique(decision_times))
+date_position = pd.Series(np.arange(len(unique_dates)), index=unique_dates)
+row_date_position = date_position.reindex(decision_times).to_numpy()
+
+print(
+    f"{len(df):,} rows over {len(unique_dates):,} decision times "
+    f"and {df[entity_col].nunique()} entities "
+    f"({len(df) / len(unique_dates):.0f} rows per decision time)"
+)
+
+
+def panel_folds(n_splits):
+    """Walk-forward folds built over decision times, then expanded to panel rows.
+
+    WalkForwardCV counts `label_horizon` and the embargo in the positions it is handed. Fed
+    the panel's rows it would purge a fraction of one date; fed the ordered unique dates it
+    purges the 21 trading days the forward return actually spans. The row indices come back
+    by membership, so no fold boundary cuts through a cross-section.
+    """
+    splitter = WalkForwardCV(
+        n_splits=n_splits,
+        label_horizon=LABEL_HORIZON,
+        embargo_pct=EMBARGO_PCT,
+        expanding=True,
+    )
+    folds = []
+    for train_dates, test_dates in splitter.split(np.arange(len(unique_dates)).reshape(-1, 1)):
+        folds.append(
+            (
+                np.flatnonzero(np.isin(row_date_position, train_dates)),
+                np.flatnonzero(np.isin(row_date_position, test_dates)),
+            )
+        )
+    return folds
+
+
+# %% [markdown]
+# ## 2. The Unadjusted Slope
+#
+# An OLS regression of forward returns on momentum, with nothing else in it. It is the
+# benchmark the adjusted estimates are read against, and it is confounded by construction:
+# volatility and the yield-curve regime both move the momentum signal and move forward
+# returns, so its slope carries their contribution as well as momentum's. Which way that
+# pushes the slope is an empirical question the comparison below answers.
+
+# %% [markdown]
+# ### Which Robust Standard Error a Panel Takes
+#
+# Overlapping 21-day returns make consecutive observations of one ETF correlated, and the
+# usual answer is a Newey-West standard error with the bandwidth set to the label horizon.
+# On this frame that answer is applied to the wrong axis. `cov_type="HAC"` runs its kernel
+# down the rows, and 21 rows here are a fifth of one day's cross-section, so the correction
+# treats different ETFs on the same day as if they were successive days.
+#
+# **Driscoll-Kraay** is the version that fits a panel. It aggregates the regression score by
+# decision time first and applies the Newey-West kernel to that time series, which makes it
+# robust both to the serial correlation the overlap creates and to whatever the ETFs share
+# on a given day. statsmodels reaches it through `cov_type="hac-groupsum"` with a `time`
+# argument, which is the same call `case_studies/utils/causal.py` makes for every case study.
+
+# %%
 y = df[outcome_col].values
-
-naive_model = LinearRegression()
-naive_model.fit(X_naive, y)
-naive_estimate = naive_model.coef_[0]
-
-# Standard error via OLS formula (assumes IID - incorrect for time series!)
-n = len(y)
-y_pred = naive_model.predict(X_naive)
-residuals = y - y_pred
-rss = np.sum(residuals**2)
-mse = rss / (n - 2)
-se_iid = np.sqrt(mse / np.sum((X_naive - X_naive.mean()) ** 2))
-
-# HAC (Newey-West) standard error for autocorrelation-robust inference.
-# Bandwidth matches the 21-day forward outcome - shorter bandwidths
-# underestimate the variance of overlapping 21-day returns.
-HAC_LAGS = FORWARD_HORIZON
 X_with_const = sm.add_constant(df[[treatment_col]])
-ols_model = OLS(y, X_with_const).fit(cov_type="HAC", cov_kwds={"maxlags": HAC_LAGS})
-se_hac = np.sqrt(ols_model.cov_params().iloc[1, 1])
+
+ols_iid = OLS(y, X_with_const).fit()
+naive_estimate = float(ols_iid.params.iloc[1])
+se_iid = float(ols_iid.bse.iloc[1])
+
+# Driscoll-Kraay: the kernel runs over decision times, with the bandwidth at the label
+# horizon because a 21-day forward return overlaps for 20 of every 21 days.
+HAC_LAGS = FORWARD_HORIZON
+time_codes = pd.factorize(decision_times, sort=False)[0]
+ols_dk = ols_iid.get_robustcov_results(
+    cov_type="hac-groupsum",
+    time=time_codes,
+    maxlags=HAC_LAGS,
+    use_correction="hac",
+    df_correction=False,
+)
+se_hac = float(np.sqrt(np.asarray(ols_dk.cov_params())[1, 1]))
 t_stat_hac = naive_estimate / se_hac
 
 naive_ci = (naive_estimate - 1.96 * se_hac, naive_estimate + 1.96 * se_hac)
@@ -207,10 +278,10 @@ print("NAIVE ESTIMATE (ignoring confounders)")
 print("=" * 60)
 print(f"Coefficient: {naive_estimate:.6f}")
 print(f"Standard Error (IID): {se_iid:.6f}")
-print(f"Standard Error (HAC): {se_hac:.6f}")
-print(f"SE Inflation (HAC/IID): {se_hac / se_iid:.2f}x")
-print(f"95% CI (HAC): [{naive_ci[0]:.6f}, {naive_ci[1]:.6f}]")
-print(f"t-statistic (HAC): {t_stat_hac:.2f}")
+print(f"Standard Error (Driscoll-Kraay): {se_hac:.6f}")
+print(f"SE Inflation (DK/IID): {se_hac / se_iid:.2f}x")
+print(f"95% CI (Driscoll-Kraay): [{naive_ci[0]:.6f}, {naive_ci[1]:.6f}]")
+print(f"t-statistic (Driscoll-Kraay): {t_stat_hac:.2f}")
 
 # %% [markdown]
 # ## 3. Double Machine Learning Estimate under Observed-Confounder Adjustment
@@ -227,32 +298,32 @@ print(f"t-statistic (HAC): {t_stat_hac:.2f}")
 # to nuisance-model errors but does not, by itself, solve unobserved
 # confounding, simultaneity, interference, or bad-control bias.
 #
-# **Critical for Time Series**: We use `WalkForwardCV` from ml4t-diagnostics
-# (not random KFold or plain TimeSeriesSplit) to prevent temporal leakage:
-# - **Purging**: Removes training samples whose labels overlap with test period
-# - **Embargo**: Adds buffer after test set to prevent autocorrelation leakage
-# Per Chernozhukov et al. (2017) and de Prado (2018).
+# The folds come from `WalkForwardCV` rather than `KFold` or `TimeSeriesSplit`, because
+# cross-fitting a forward-looking label needs two things neither of those provides. **Purging**
+# drops training rows whose 21-day label window overlaps the test window; the **embargo**
+# leaves a gap after the test window so autocorrelation does not carry back into the next
+# training set (Chernozhukov et al. 2017, de Prado 2018).
+
+# %% [markdown]
+# The confounders go into EconML's `W` slot, which holds controls used for residualization.
+# The `X` slot is for effect modifiers, the variables along which the treatment effect is
+# allowed to vary. Putting plain confounders in `X` still produces a single ATE, so nothing
+# visibly breaks, but it teaches the wrong habit for `04_dml_crypto_regime`, where the two
+# slots carry different variables and the distinction decides what the model estimates.
 
 # %%
-# Prepare data for EconML
-# `W` is the EconML slot for controls used for residualization (the role our
-# confounders play here). EconML's `X` slot is reserved for effect modifiers
-# along which the treatment effect is allowed to vary; using `X` for plain
-# confounders works for a single ATE but blurs the role for readers and
-# transfers the wrong habit to the heterogeneity-modeling notebook
-# (`04_dml_crypto_regime`).
-Y = df[outcome_col].values.reshape(-1, 1)
-T = df[treatment_col].values.reshape(-1, 1)
-W = df[confounder_cols].values  # controls used for residualization
+Y = df[outcome_col].to_numpy()
+T = df[treatment_col].to_numpy()
+W = df[confounder_cols].to_numpy()  # controls used for residualization
 
-# Use canonical walk-forward CV with purging/embargo (no sklearn fallback).
-cv = WalkForwardCV(
-    n_splits=CV_FOLDS,
-    label_horizon=LABEL_HORIZON,
-    embargo_pct=EMBARGO_PCT,
-    expanding=True,
+# Walk-forward folds over decision times, expanded to rows (see `panel_folds` above).
+cv = panel_folds(CV_FOLDS)
+print(
+    f"Using WalkForwardCV over decision times (label_horizon={LABEL_HORIZON} trading days, "
+    f"embargo={EMBARGO_PCT:.1%})"
 )
-print(f"Using WalkForwardCV (label_horizon={LABEL_HORIZON}, embargo={EMBARGO_PCT:.1%})")
+for i, (train_idx, test_idx) in enumerate(cv):
+    print(f"  fold {i}: train {len(train_idx):,} rows, test {len(test_idx):,} rows")
 
 dml = LinearDML(
     model_y=GradientBoostingRegressor(n_estimators=50, max_depth=3, random_state=SEED),
@@ -290,9 +361,9 @@ print(f"Bias (Naive - DML): {bias:.6f}")
 print(f"Bias percentage: {bias_pct:.1f}%")
 
 if abs(naive_estimate) > abs(dml_estimate):
-    print("\n-> Confounders INFLATED the apparent effect of momentum")
+    print("\n-> The adjusted effect is smaller: the controls were inflating the raw slope")
 else:
-    print("\n-> Confounders MASKED the true effect of momentum")
+    print("\n-> The adjusted effect is larger: the controls were masking part of the slope")
 
 # %% [markdown]
 # **Interpretation**: The naive OLS estimate captures both the causal momentum effect and
@@ -305,17 +376,18 @@ else:
 # for example, high volatility reduces both momentum and returns simultaneously.
 # If the naive effect is larger, confounders *inflate* the apparent predictive power.
 #
-# **Trading implication**: The DML-adjusted effect size provides a more honest
-# estimate of factor efficacy for position sizing, particularly when volatility
-# and regime are not explicitly hedged.
+# **What it changes downstream**: a position size derived from the raw slope inherits
+# whatever the confounders contributed to it. The adjusted estimate is the one to size on
+# when volatility and regime are not separately hedged, and the gap between the two is how
+# much the raw slope was carrying.
 
 # %% [markdown]
-# ## 4. Manual DML Implementation with WalkForwardCV (Educational)
+# ## 4. The Same Estimate, Assembled by Hand
 #
-# To understand DML, let's implement it manually using temporal cross-fitting.
-# We use the shared `manual_dml_timeseries` from `utils.causal` which includes:
-# - Walk-forward temporal splitting with embargo
-# - HAC (Newey-West) standard errors
+# `manual_dml_timeseries` from `case_studies/utils/causal.py` runs the three steps in the
+# open: cross-fit the two nuisance models over walk-forward folds with an embargo, take the
+# residuals, regress one on the other. Handed `groups`, it builds those folds over decision
+# times and reports a Driscoll-Kraay standard error; without them it would do both by row.
 
 # %%
 # Use shared manual DML implementation
@@ -325,11 +397,14 @@ dml_result = manual_dml_timeseries(
     df[confounder_cols].values,
     n_folds=CV_FOLDS,
     embargo=LABEL_HORIZON,
+    groups=decision_times,
+    horizon=FORWARD_HORIZON,
 )
 
 manual_ate = dml_result["theta"]
 manual_se_iid = dml_result["se_iid"]
 manual_se_hac = dml_result["se_hac"]
+manual_t_hac = dml_result["t_stat_hac"]
 manual_ci = (manual_ate - 1.96 * manual_se_hac, manual_ate + 1.96 * manual_se_hac)
 
 print("\n" + "=" * 60)
@@ -340,6 +415,7 @@ print(f"Standard Error (IID): {manual_se_iid:.6f}")
 print(f"Standard Error (HAC): {manual_se_hac:.6f}")
 print(f"SE Inflation (HAC/IID): {manual_se_hac / manual_se_iid:.2f}x")
 print(f"95% CI (HAC): [{manual_ci[0]:.6f}, {manual_ci[1]:.6f}]")
+print(f"t-statistic (Driscoll-Kraay): {manual_t_hac:.2f}")
 
 # %% [markdown]
 # ## 5. Refutation Tests
@@ -355,15 +431,18 @@ print("\n" + "=" * 60)
 print("REFUTATION TESTS")
 print("=" * 60)
 
-# Test 1: Temporal Placebo - lead of treatment should have ~0 effect.
-# On a stacked ETF panel the shift must be *within symbol*; a row-level
-# shift mixes ETFs at the boundary and would leak treatment values from
-# one ETF into another's outcome row.
+# The lead is taken within symbol; a row-level shift would mix ETFs at the boundary.
 print("\n1. TEMPORAL PLACEBO TEST (lead of treatment)")
-entity_col = mds.entity_cols[0]
 df_placebo = df.sort_values([entity_col, mds.date_col]).copy()
 df_placebo["treatment_lead"] = df_placebo.groupby(entity_col)[treatment_col].shift(-FORWARD_HORIZON)
-df_placebo = df_placebo.dropna(subset=["treatment_lead", outcome_col])
+# Back to date order before the fit. The shift needed entity-major rows; the folds need
+# every row of a decision time adjacent, and `manual_dml_timeseries` rejects groups that
+# are not sorted and contiguous rather than silently splitting one date across two folds.
+df_placebo = (
+    df_placebo.dropna(subset=["treatment_lead", outcome_col])
+    .sort_values(mds.date_col, kind="stable")
+    .reset_index(drop=True)
+)
 
 if len(df_placebo) > 100:
     placebo_result = manual_dml_timeseries(
@@ -372,44 +451,64 @@ if len(df_placebo) > 100:
         df_placebo[confounder_cols].values,
         n_folds=CV_FOLDS,
         embargo=LABEL_HORIZON,
+        groups=df_placebo[mds.date_col].to_numpy(),
+        horizon=FORWARD_HORIZON,
     )
     placebo_effect = placebo_result["theta"]
 
     print(f"   Lead treatment effect (DML): {placebo_effect:.6f}")
     print(f"   Original DML effect:         {manual_ate:.6f}")
-
-    if abs(placebo_effect) < abs(manual_ate) * 0.5:
-        print("   PASS: Lead effect is smaller than actual effect")
-    else:
-        print(
-            "   FAIL: Lead effect is comparable to the actual effect "
-            "(expected: the treatment is highly autocorrelated)"
-        )
+    print(f"   Ratio |lead / original|:     {abs(placebo_effect) / abs(manual_ate):.3f}")
 else:
     placebo_effect = None
     print("   Insufficient data for placebo test")
 
 # %% [markdown]
-# **Reading the temporal placebo.** The lead test fails here, but not because
-# of reverse causality. The treatment is a momentum signal that is highly
-# autocorrelated over the label horizon, so the horizon-shifted "placebo"
-# treatment is nearly the same variable as the real treatment and reproduces a
-# similar effect. For an autocorrelated treatment the shifted-signal placebo is
-# a weak refutation by construction. The block-permutation test below is the
-# reliable refuter here: it shuffles treatment in blocks that preserve the
-# autocorrelation structure, so a low placebo effect cannot be manufactured by
-# persistence alone.
+# **Reading the temporal placebo.** A ratio near one is what this test returns here, and it
+# is not evidence of reverse causality. The treatment is a momentum signal that barely moves
+# over 21 trading days, so the horizon-shifted placebo is nearly the same variable as the
+# real treatment and reproduces a similar effect. For a treatment this persistent, the
+# shifted-signal placebo cannot refute anything.
+#
+# The block permutation below is the refuter that can, because it breaks the alignment
+# between treatment and outcome while keeping the treatment's own persistence intact - but
+# only if the blocks are built along time.
+
+# %% [markdown]
+# ### Blocks Along Time, Not Along Rows
+#
+# `block_permute` given a bare array counts `BLOCK_SIZE` in the positions it is handed. On
+# this frame that is about a fifth of one day's cross-section, so a "block" is a handful of
+# ETFs on a single day. Permuting those destroys the serial dependence the test is supposed
+# to preserve, which is the iid shuffle `block_permute`'s own docstring warns makes placebo
+# tests too easy to pass.
+#
+# Passing `groups` and `units` makes it permute within each ETF, where `BLOCK_SIZE` counts
+# that ETF's own ordered trading days and a block is the three weeks the name promises.
+#
+# Each placebo also runs the estimator being tested, with the same fold count and embargo. A
+# placebo fitted on three folds against an estimate fitted on five is a different estimator
+# on a different number of cross-fitted rows, and the null would then be centred wherever
+# that difference puts it rather than where the absence of an effect does. The observed
+# statistic itself moves between the two settings.
 
 # %%
 # Test 2: Block Permutation Test (uses shared block_permute)
 print(f"\n2. BLOCK PERMUTATION TEST ({N_PLACEBO_PERMUTATIONS} permutations)")
 placebo_effects = []
+placebo_t_stats = []
 permutation_failures = 0
 T_original = df[treatment_col].values
 rng = np.random.default_rng(SEED)
 
 for i in range(N_PLACEBO_PERMUTATIONS):
-    T_permuted = block_permute(T_original, BLOCK_SIZE, rng=rng)
+    T_permuted = block_permute(
+        T_original,
+        BLOCK_SIZE,
+        rng=rng,
+        groups=decision_times,
+        units=entities,
+    )
 
     df_perm = df.copy()
     df_perm[treatment_col] = T_permuted
@@ -419,9 +518,13 @@ for i in range(N_PLACEBO_PERMUTATIONS):
             df_perm[outcome_col].values,
             df_perm[treatment_col].values,
             df_perm[confounder_cols].values,
-            n_folds=3,
+            n_folds=CV_FOLDS,  # the estimate's own setting; see the markdown above
+            embargo=LABEL_HORIZON,
+            groups=decision_times,
+            horizon=FORWARD_HORIZON,
         )
-        if not np.isnan(perm_result["theta"]):
+        if np.isfinite(perm_result["t_stat_hac"]):
+            placebo_t_stats.append(perm_result["t_stat_hac"])
             placebo_effects.append(perm_result["theta"])
         else:
             permutation_failures += 1
@@ -437,42 +540,96 @@ if len(placebo_effects) < PERMUTATION_MIN_SUCCESS:
         f"runs (need ≥{PERMUTATION_MIN_SUCCESS}); refuter cannot be trusted."
     )
 
-# %%
-if len(placebo_effects) > 10:
-    placebo_mean = np.mean(placebo_effects)
-    placebo_std = np.std(placebo_effects)
-    z_score = (manual_ate - placebo_mean) / placebo_std if placebo_std > 0 else np.inf
-    # Not a false discovery rate, which is what this used to be called: it is the
-    # fraction of the permutation distribution at least as extreme as the observed
-    # effect, and it takes the plus-one correction because the observed statistic is
-    # itself one draw that distribution can produce. Without it, a run in which no
-    # placebo reaches the effect prints 0.0% - a claim no finite number of
-    # permutations can support. With n draws the smallest value is 1 / (n + 1).
-    permutation_p = empirical_permutation_p(np.asarray(placebo_effects), manual_ate)
+# %% [markdown]
+# ### Compared on t-Statistics, Not on Effect Sizes
+#
+# Permuting the treatment also frees it from the controls. The second stage regresses the
+# residualized outcome on the residualized treatment, so whatever the controls explain leaves
+# the denominator; a permuted treatment is no longer explained by them, its residual variance
+# is larger, and a placebo effect is mechanically smaller than the observed one whether or not
+# there is anything to find. Comparing raw effects against that distribution reports
+# significance the standard error does not support. Each permutation's t-statistic divides by
+# its own standard error, so the scale cancels and only the alignment between treatment and
+# outcome is left.
+#
+# The p-value is the fraction of the placebo distribution at least as extreme as the observed
+# statistic, and it carries a plus-one correction because the observed statistic is itself one
+# draw that distribution could produce. Without the correction, a run in which no placebo
+# reaches it reports zero, which no finite number of permutations can establish. With n draws
+# the smallest reportable value is 1 / (n + 1), printed beside it as the floor. It is not a
+# false discovery rate, which is what this quantity used to be called.
+#
+# **What cancelling the scale does not buy.** It removes one known bias and does not make the
+# test calibrated. A permutation test is valid when the permuted labels are exchangeable under
+# the null, and a treatment that persistent confounders predict is not: the shuffle breaks the
+# confounding along with the effect, so an estimate that is itself biased sits far from its own
+# permutation null and the test reports that distance. Measured on twelve synthetic panels with
+# a true effect of exactly zero and persistent AR(1) confounders, the studentized comparison
+# still rejects at the conventional five percent level on five of the twelve, against eleven for
+# the raw-effect comparison. The measurement is on ml4t/agent-workspace#1120 and
+# `10_case_study_insights` carries it. Read the count below as a comparison against a shuffle
+# rather than as a significance level.
 
-    print(f"   Placebo mean: {placebo_mean:.6f}")
-    print(f"   Placebo std:  {placebo_std:.6f}")
-    print(f"   Original effect: {manual_ate:.6f}")
+# %%
+if len(placebo_t_stats) > 10:
+    placebo_mean = np.mean(placebo_t_stats)
+    placebo_std = np.std(placebo_t_stats)
+    z_score = (manual_t_hac - placebo_mean) / placebo_std if placebo_std > 0 else np.inf
+    # The plus-one correction is why the floor below is 1 / (n + 1); see the markdown above.
+    permutation_p = empirical_permutation_p(np.asarray(placebo_t_stats), manual_t_hac)
+
+    print(f"   Placebo t mean: {placebo_mean:.4f}")
+    print(f"   Placebo t std:  {placebo_std:.4f}")
+    print(f"   Observed t (Driscoll-Kraay): {manual_t_hac:.4f}")
     print(f"   Z-score vs placebo: {z_score:.2f}")
     print(
-        f"   Permutation p-value: {permutation_p:.4f} (floor {1 / (len(placebo_effects) + 1):.4f})"
+        f"   Permutation p-value: {permutation_p:.4f} (floor {1 / (len(placebo_t_stats) + 1):.4f})"
     )
 
-    if abs(z_score) > 2:
-        print("   PASS: Effect distinguishable from placebo (z > 2)")
-    else:
-        print("   FAIL: Effect not distinguishable from placebo")
+    print(
+        f"   Placebo draws at least as extreme: "
+        f"{int(round(permutation_p * (len(placebo_t_stats) + 1))) - 1} of {len(placebo_t_stats)}"
+    )
+    print(
+        f"   Placebo effect spread {np.std(placebo_effects):.6f} against a Driscoll-Kraay "
+        f"standard error of {manual_se_hac:.6f}; the comparison above is on t-statistics, "
+        f"which holds whatever the ratio of those two turns out to be"
+    )
 else:
     print("   Insufficient successful permutations")
     z_score = None
     permutation_p = None
 
+# %% [markdown]
+# **The z-score and the p-value can disagree, and the count is the one that holds.** The
+# z-score measures how far the observed t-statistic sits from the placebo *mean* in placebo
+# standard deviations, which is a statement about a normal distribution centred where the
+# placebos are. The permutation p-value counts how many placebo draws reach its magnitude.
+# When the placebo distribution is not centred near zero the two answer different questions,
+# and only the count is a statement about the null the test actually built. Read the count
+# printed above, and the mean and standard deviation beside it, before reading the z-score.
+#
+# **This null is not centred at zero, and that is worth looking at rather than reporting.**
+# A permutation that implemented "no association" would put the placebo statistics around
+# zero. Two obvious explanations do not survive a check: demeaning the fitted residuals by
+# symbol leaves the placebo estimates positive, and so does demeaning them by date, so
+# neither a preserved between-symbol nor a preserved between-date component accounts for it.
+# What does is not settled here. Until it is, the count is the statistic to read - it asks
+# how often a permuted treatment reaches the observed statistic, which stays a fair question
+# whatever the distribution's centre - and the z-score, which measures distance from that
+# centre in placebo standard deviations, is a statement about a distribution the test has not
+# explained.
+
+# %% [markdown]
+# The two halves are cut at a decision time rather than at a row, so neither holds a
+# fragment of a cross-section. That is the same reason the subsample near the top keeps
+# whole dates.
+
 # %%
-# Test 3: Subset Stability
 print("\n3. SUBSET STABILITY TEST (temporal halves)")
-n_obs = len(df)
-df_first_half = df.iloc[: n_obs // 2]
-df_second_half = df.iloc[n_obs // 2 :]
+midpoint_date = unique_dates[len(unique_dates) // 2]
+df_first_half = df[decision_times < midpoint_date]
+df_second_half = df[decision_times >= midpoint_date]
 
 if len(df_first_half) > 100 and len(df_second_half) > 100:
     result_first = manual_dml_timeseries(
@@ -480,12 +637,16 @@ if len(df_first_half) > 100 and len(df_second_half) > 100:
         df_first_half[treatment_col].values,
         df_first_half[confounder_cols].values,
         n_folds=3,
+        groups=df_first_half[mds.date_col].to_numpy(),
+        horizon=FORWARD_HORIZON,
     )
     result_second = manual_dml_timeseries(
         df_second_half[outcome_col].values,
         df_second_half[treatment_col].values,
         df_second_half[confounder_cols].values,
         n_folds=3,
+        groups=df_second_half[mds.date_col].to_numpy(),
+        horizon=FORWARD_HORIZON,
     )
 
     effect_first = result_first["theta"]
@@ -502,10 +663,8 @@ if len(df_first_half) > 100 and len(df_second_half) > 100:
 
     print(f"   Difference: {diff:.6f} (z = {diff_z:.2f})")
 
-    if diff_z < 2:
-        print("   PASS: Effect stable across temporal halves")
-    else:
-        print("   CAUTION: Effect differs across halves (possible regime change)")
+    print(f"   First half: {len(df_first_half):,} rows before {midpoint_date}")
+    print(f"   Second half: {len(df_second_half):,} rows from {midpoint_date}")
 else:
     print("   Insufficient data for subset test")
 
@@ -531,9 +690,7 @@ nuisance_models = [
     ),
 ]
 
-cv_sensitivity = WalkForwardCV(
-    n_splits=3, label_horizon=LABEL_HORIZON, embargo_pct=EMBARGO_PCT, expanding=True
-)
+cv_sensitivity = panel_folds(3)
 
 for name, model_y, model_t in nuisance_models:
     dml_test = LinearDML(model_y=model_y, model_t=model_t, cv=cv_sensitivity, random_state=SEED)
@@ -546,7 +703,16 @@ print("\n" + "=" * 60)
 print("NUISANCE MODEL SENSITIVITY")
 print("=" * 60)
 print(sensitivity_df.to_string(index=False))
-print("\n-> Results vary with model choice - interpret with caution!")
+# A ratio of magnitudes reports 1.00x, which reads as no spread at all, when the
+# specifications straddle zero symmetrically - the one case where the nuisance choice
+# changes the conclusion rather than its size. The signed range cannot do that.
+lo = float(sensitivity_df["ATE Estimate"].min())
+hi = float(sensitivity_df["ATE Estimate"].max())
+print(
+    f"\nAcross {len(sensitivity_df)} nuisance specifications the estimate spans "
+    f"{lo:.6f} to {hi:.6f}, a range of {hi - lo:.6f} in {outcome_col} units"
+)
+print(f"  Specifications agreeing in sign: {'all' if lo * hi > 0 else 'not all'}")
 
 # %% [markdown]
 # ## 7. Results Summary
@@ -588,44 +754,59 @@ for key, value in results_summary.items():
 # %% [markdown]
 # ## Key Methodological Points
 #
-# ### What This Notebook Does Correctly (per Chernozhukov et al. 2017, de Prado 2018)
-# 1. **WalkForwardCV**: Cross-fitting with purging and embargo prevents leakage
-#    - Purging: Removes training samples whose labels overlap with test period
-#    - Embargo: Adds buffer after test to prevent autocorrelation leakage
-# 2. **HAC Standard Errors**: Newey-West correction for autocorrelated residuals
-# 3. **Block Permutation**: Refutation preserves autocorrelation structure
-# 4. **Sensitivity Analysis**: Multiple nuisance model specifications tested
+# ### The four choices that decide whether the estimate means anything
+# 1. **Cross-fitting with purging and embargo**, over decision times rather than rows.
+#    Purging drops training rows whose labels overlap the test window; the embargo adds a
+#    buffer after it (Chernozhukov et al. 2017, de Prado 2018).
+# 2. **Driscoll-Kraay standard errors**, so the serial-correlation correction is applied
+#    along time and the cross-sectional dependence within a date is absorbed rather than
+#    counted as extra observations.
+# 3. **Block permutation within entity**, so the placebo distribution is built from a
+#    treatment that keeps its persistence.
+# 4. **A nuisance-model sweep**, because the point estimate depends on the first stage and
+#    the spread across specifications is the honest width of the finding.
+
+# %% [markdown]
+# ### Three Intervals on One Effect
+#
+# The notebook produces three statements of uncertainty about the same quantity, and they do
+# not agree. EconML's `ate_interval` treats the residualized observations as independent
+# draws. The manual DML path reports a Driscoll-Kraay standard error, which aggregates by
+# decision time and absorbs whatever the ETFs share on a day. The permutation test compares
+# the estimate against a null built by shuffling the treatment within each ETF.
+#
+# The spread between them is not a defect in any one of them. It is the price of the panel:
+# an interval is only as good as its account of what is independent, and 52,000 ETF-days are
+# not 52,000 independent observations.
 
 # %%
-# Quantitative findings (computed, not hardcoded)
 se_inflation = se_hac / se_iid
 
 print("Quantitative Findings")
 print("-" * 40)
-print(
-    f"SE Inflation (HAC/IID): {se_inflation:.1%} - HAC standard errors are {se_inflation:.2f}x larger than IID"
-)
+print(f"SE inflation, Driscoll-Kraay over iid: {se_inflation:.2f}x")
 if dml_estimate is not None:
-    direction = "overstates" if abs(naive_estimate) > abs(dml_estimate) else "understates"
-    print(f"Confounding Bias: {abs(bias_pct):.1f}% - naive estimate {direction} the DML effect")
+    direction = "larger" if abs(naive_estimate) > abs(dml_estimate) else "smaller"
+    print(
+        f"Adjustment moves the slope by {abs(bias_pct):.1f}% - the unadjusted estimate is "
+        f"{direction} in magnitude"
+    )
     if not np.isnan(dml_ci_lower):
         print(
-            f"DML Effect Size: {dml_estimate:.6f} (95% CI: [{dml_ci_lower:.6f}, {dml_ci_upper:.6f}])"
-        )
-        ci_width = dml_ci_upper - dml_ci_lower
-        ci_includes_zero = dml_ci_lower <= 0 <= dml_ci_upper
-        print(
-            f"CI Width: {ci_width:.6f} - {'includes zero (not significant at 5%)' if ci_includes_zero else 'excludes zero (significant at 5%)'}"
+            f"EconML DML: {dml_estimate:.6f}, iid 95% CI "
+            f"[{dml_ci_lower:.6f}, {dml_ci_upper:.6f}], width {dml_ci_upper - dml_ci_lower:.6f}"
         )
     else:
-        print(
-            f"DML Effect Size: {dml_estimate:.6f} (CI unavailable - EconML inference failed with custom CV)"
-        )
-print(f"Manual DML Effect: {manual_ate:.6f} (HAC SE: {manual_se_hac:.6f})")
+        print(f"EconML DML: {dml_estimate:.6f} (interval unavailable)")
+print(
+    f"Manual DML:  {manual_ate:.6f}, Driscoll-Kraay 95% CI "
+    f"[{manual_ci[0]:.6f}, {manual_ci[1]:.6f}], width {manual_ci[1] - manual_ci[0]:.6f}"
+)
+print(
+    f"Naive OLS:   {naive_estimate:.6f}, Driscoll-Kraay 95% CI [{naive_ci[0]:.6f}, {naive_ci[1]:.6f}]"
+)
 if z_score is not None:
-    print(
-        f"Placebo Z-Score: {z_score:.2f} - {'distinguishable from noise' if abs(z_score) > 2 else 'not distinguishable from noise'}"
-    )
+    print(f"Placebo z-score (on t-statistics): {z_score:.2f}")
 if permutation_p is not None:
     print(f"Permutation p-value: {permutation_p:.4f}")
 
@@ -637,25 +818,25 @@ if permutation_p is not None:
 #    assumptions: pre-treatment controls are sufficient, positivity holds, no
 #    interference, and the specified DAG is correct.
 #
-# 2. **HAC inference is the binding inference**. IID standard errors understate
-#    uncertainty for overlapping 21-day labels; HAC widens the CI by a factor
-#    of roughly 1.5-2.2× on this dataset.
+# 2. **The robust standard error has to match the data's axis.** Overlapping 21-day labels
+#    make the iid standard error too small, and on a stacked panel the ordinary Newey-West
+#    correction fixes that along the wrong axis: its lags run across the cross-section.
+#    Driscoll-Kraay aggregates by decision time first, which is what the SE inflation
+#    printed above measures.
 #
-# 3. **Manual DML matches EconML conceptually but differs numerically**.
-#    The point estimate is sensitive to nuisance-model flexibility - the DML
-#    guarantee is on Neyman orthogonality, not on numerical stability across
-#    nuisance choices.
+# 3. **Manual DML matches EconML conceptually and differs numerically.** The point estimate
+#    moves with nuisance-model flexibility, and the sweep in section 6 shows by how much.
+#    Neyman orthogonality is a guarantee about first-order sensitivity to nuisance error,
+#    not about agreement across nuisance choices.
 #
-# 4. **Block permutation is the appropriate placebo for autocorrelated
-#    series**. Random permutation would destroy the temporal structure that
-#    makes the inference task hard in the first place.
+# 4. **A refutation counts in the units its name claims.** Block permutation preserves
+#    autocorrelation only when the blocks run along an entity's own trading days; on a
+#    flattened panel the same call permutes a slice of one day's cross-section, which is
+#    the iid shuffle the test exists to avoid. The same is true of the walk-forward folds
+#    and of the temporal halves.
 #
-# 5. **Naive factor research understates this effect, it does not overstate it**.
-#    Here the naive momentum slope (-0.038) is smaller in magnitude than the
-#    orthogonalized DML estimate (-0.054): volatility and the yield-curve regime
-#    *mask* part of the true effect rather than inflating a spurious one. Once
-#    those confounders are controlled for, the effect becomes roughly 28% more
-#    negative, so naive factor research misses part of the effect rather than
-#    overstating it. The sign of the confounding bias is an empirical result,
-#    not a rule, other treatments (for example the crypto funding premium) show
-#    the reverse pattern, where confounders inflate the apparent effect.
+# 5. **The sign of the confounding bias is a result, not a rule.** Here the controls change
+#    the momentum slope in one direction; on the crypto funding premium in
+#    `02_dowhy_causal_graph` they change it in the other. The comparison printed above says
+#    which happened on this data, and it is the printed numbers, not this sentence, that
+#    settle it.

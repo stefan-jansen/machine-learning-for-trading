@@ -432,8 +432,20 @@ def show_plotly_with_alt(fig: object, alt: str) -> None:
     directly is what carries it through.
 
     The alt text is a sentence saying what the chart shows, not a repeat of the title.
+
+    `_repr_mimebundle_` renders the PNG through kaleido, which drives a headless browser.
+    When that browser takes longer than three seconds to shut down - which it does on a
+    loaded machine - choreographer logs "Resorting to unclean kill browser." at WARNING,
+    and papermill writes it into the executed notebook as a stderr stream beside a figure
+    that rendered correctly. It reports how the browser exited, not anything about the
+    figure, so the logger is quieted here rather than in each of the notebooks that call
+    this. Errors from the same logger still come through.
     """
+    import logging
+
     from IPython.display import publish_display_data
+
+    logging.getLogger("choreographer").setLevel(logging.ERROR)
 
     bundle = fig._repr_mimebundle_()
     data, metadata = bundle if isinstance(bundle, tuple) else (bundle, {})
