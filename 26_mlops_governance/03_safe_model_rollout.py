@@ -124,7 +124,7 @@ import polars as pl
 import yaml
 from IPython.display import Markdown, display
 
-from utils.paths import get_case_study_dir
+from utils.paths import get_case_study_dir, registry_readonly_uri
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, add_message_title, format_pct_axis, show_with_alt
 
@@ -160,18 +160,23 @@ class PredictionIdentity:
 # %% [markdown]
 # The connection is opened read-only, by `mode=ro` on the URI and `PRAGMA query_only` on the
 # connection. Reviewing a candidate reads the case study's result record and must not be able
-# to write to it, and SQLite will enforce that if it is asked to. The URI deliberately leaves
-# out `immutable=1`, which promises something else: that the database cannot change while it
-# is open. The registry is what every sweep writes to, and an immutable connection skips
-# locking and ignores the write-ahead log, so it reads whatever the main file held before the
-# most recent writes - a superseded row, or a table that appears not to exist.
+# to write to it, and SQLite will enforce that if it is asked to.
+#
+# What the URI must not add here is `immutable=1`, which promises something else: that the
+# database cannot change while it is open. The registry is what every sweep writes to, and an
+# immutable connection skips locking and ignores the write-ahead log, so it reads whatever the
+# main file held before the most recent writes - a superseded row, or a table that appears not
+# to exist. The one registry the promise does hold for is a downloaded artifact bundle, whose
+# tree `scripts/download_artifacts.py` verifies and then leaves unwritable, and there the flag
+# is also required: a WAL reader has to create the `-shm` sidecar unless it is told the file
+# cannot change. `registry_readonly_uri` decides between the two by asking whether anything can
+# still write to the directory.
 
 
 # %%
 def open_registry_readonly(path: Path) -> sqlite3.Connection:
     """Open a read-only, query-only SQLite connection."""
-    uri = f"file:{path.resolve()}?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
+    connection = sqlite3.connect(registry_readonly_uri(path), uri=True)
     connection.execute("PRAGMA query_only=ON")
     return connection
 

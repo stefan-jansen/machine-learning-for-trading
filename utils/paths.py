@@ -362,6 +362,36 @@ def get_case_study_dir(strategy_id: str, *, create: bool = True) -> Path:
 
 
 # =============================================================================
+# Registry access
+# =============================================================================
+
+
+def registry_readonly_uri(registry: Path | str) -> str:
+    """Build a read-only SQLite URI for a case-study registry.
+
+    ``mode=ro`` is what makes the connection read-only. ``immutable=1`` promises SQLite
+    something else - that the file cannot change while it is open - and on that promise it
+    skips locking and never opens the ``-wal`` sidecar, so it reads whatever the main file
+    held before the most recent commits.
+
+    The promise is true of exactly one registry: one that ``scripts/download_artifacts.py``
+    installed, which verifies the bundle against its manifest and then leaves the whole
+    ``run_log`` tree unwritable. There the flag is also required, because the registries are
+    WAL-mode and a WAL reader has to create the ``-shm`` sidecar unless it is told the file
+    cannot change; without it the first query raises ``attempt to write a readonly database``.
+    So the flag is decided by whether anything can still write to the directory, which is the
+    same condition that makes the promise true.
+    """
+    path = Path(registry).resolve()
+    # `as_uri()` percent-encodes the path. Interpolating it raw would let a checkout whose
+    # path contains `?` or `#` be read as URI syntax and open some other file, or none.
+    uri = f"{path.as_uri()}?mode=ro"
+    if not os.access(path.parent, os.W_OK):
+        uri += "&immutable=1"
+    return uri
+
+
+# =============================================================================
 # Dataset IDs (Tier 2 naming)
 # =============================================================================
 
@@ -424,6 +454,7 @@ __all__ = [
     "get_chapter_dir",
     "get_output_dir",
     "get_case_study_dir",
+    "registry_readonly_uri",
     # Constants
     "CH01",
     "CH02",
