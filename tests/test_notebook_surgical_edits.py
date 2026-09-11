@@ -223,3 +223,59 @@ def test_a_stored_blob_resolves_for_the_classifiers(tmp_path: Path) -> None:
     stamped = notebook_provenance.git_blob(py, write=True)
     py.write_text(ALT_PLUS_MARKDOWN, encoding="utf-8")
     assert drift_is_alt_and_prose_only(stamped, py)
+
+
+# --- prose has to render the prose, not a flattened version of it --------------------
+
+INDENTED = """# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       format_name: percent
+# ---
+
+# %% [markdown]
+# # A heading
+#
+# ```yaml
+# features:
+#   - name: rsi
+#     params:
+#       period: 14
+# ```
+#
+# - a list item
+#   - nested under it
+
+# %%
+x = 1
+"""
+
+
+def test_prose_keeps_markdown_indentation(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """Leading whitespace carries meaning in markdown, so only the prefix comes off.
+
+    `lstrip()` after the `#` flattens a fenced YAML block and every nested list, and the
+    reviewer's case is real: `10_ml4t_library_ecosystem` has a `features:` block four levels
+    deep that rendered flat, so `prose` was showing prose the notebook does not contain.
+    """
+    args = type("Args", (), {"notebooks": [str(_py(tmp_path, INDENTED))], "all": False})()
+    notebook_provenance._cmd_prose(args)
+    out = capsys.readouterr().out
+    assert "  - name: rsi" in out
+    assert "      period: 14" in out
+    assert "  - nested under it" in out
+    assert "- name: rsi" in out and "\n- name: rsi" not in out
+
+
+def test_prose_does_not_count_the_jupytext_header(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """`_percent_cells` opens with a markerless entry for the header, and it is not a cell.
+
+    Counting it inflated every `--all` position and the total by one. INDENTED has exactly two
+    cells after the header, the markdown one first.
+    """
+    args = type("Args", (), {"notebooks": [str(_py(tmp_path, INDENTED))], "all": True})()
+    notebook_provenance._cmd_prose(args)
+    assert "(cell 1 of 2)" in capsys.readouterr().out

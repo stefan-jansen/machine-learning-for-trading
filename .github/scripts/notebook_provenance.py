@@ -1857,6 +1857,21 @@ def sync_alt(nb_path: Path) -> str:
     return stamp["source_py_blob"]
 
 
+def _uncomment(line: str) -> str:
+    """Drop the ``#`` comment prefix and at most one space after it.
+
+    Not `lstrip()`. Markdown carries meaning in leading whitespace - a nested list item, a
+    fenced YAML block, an indented continuation - and stripping all of it renders prose that
+    is not the prose in the notebook. `07_defining_the_learning_task/10_ml4t_library_ecosystem`
+    has a `features:` block four levels deep that came out flat.
+    """
+    if line.startswith("# "):
+        return line[2:]
+    if line.startswith("#"):
+        return line[1:]
+    return line
+
+
 def _cmd_prose(args: argparse.Namespace) -> int:
     """Print every markdown cell of each notebook, for a review pass that touches no code.
 
@@ -1878,6 +1893,11 @@ def _cmd_prose(args: argparse.Namespace) -> int:
             raise SystemExit(f"no such source: {path}")
         rel = display_path(path)
         cells = _percent_cells(path.read_text(encoding="utf-8"))
+        # `_percent_cells` opens with a markerless entry holding the jupytext header, before
+        # any `# %%`. It is not a cell, so counting it inflates every position and the total
+        # by one - `--all` said "cell 3 of 36" for the second cell of a 35-cell notebook.
+        if cells and not cells[0][0]:
+            cells = cells[1:]
         shown = 0
         for i, (marker, kind, body) in enumerate(cells):
             if kind == "code":
@@ -1891,8 +1911,7 @@ def _cmd_prose(args: argparse.Namespace) -> int:
                 label += f"  tags={tags.group(1)}"
             print(f"\n=== {label} ===")
             for line in body.splitlines():
-                stripped = line.lstrip()
-                print(stripped[1:].lstrip() if stripped.startswith("#") else line)
+                print(_uncomment(line))
         if shown == 0:
             print(f"{rel}: no markdown cells")
     return 0
