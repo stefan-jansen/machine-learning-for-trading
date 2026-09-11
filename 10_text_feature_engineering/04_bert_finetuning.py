@@ -247,11 +247,9 @@ dataset = create_dataset_dict(train_df, val_df, test_df)
 # %% [markdown]
 # Scoring, not training, is what this notebook spends its time on, and `MAX_TRAIN_STEPS` does
 # not touch it. Each model is scored on the validation split every `eval_steps` during training
-# and once on the test split at the end, and a full pass costs 183s on one CPU thread against
-# 727 sentences. Under `MAX_TRAIN_STEPS: 20` that is two in-training evaluations plus one pass
-# over the test split, so twenty training steps sit behind about nine minutes of inference per
-# model. Bounding the scored splits is the knob that reaches that; bounding the model count
-# would leave a three-way comparison with one entry.
+# and once on the test split at the end, so what the runtime tracks is the number of scored
+# sentences, not the number of training steps. Bounding the scored splits is the knob that
+# reaches that; bounding the model count would leave a three-way comparison with one entry.
 #
 # `MAX_EVAL_SAMPLES = 0` means score everything, which is what a real run does. The splits are
 # already shuffled and stratified by `train_test_split`, so a prefix of each is class-balanced
@@ -629,12 +627,11 @@ show_with_alt(
 #    or the confusion matrix reveals this; it is on the model card, and reading the card is
 #    the step. A domain checkpoint is the first thing anyone reaches for, which is exactly why
 #    this trap is common.
-# 2. **A leaked comparison does not announce itself as one.** FinBERT's checkpoint had already
-#    read this corpus, and it still lands second of three on accuracy and last on macro F1. The
-#    contaminated row is not the suspiciously good one, so no reading of the scores would
-#    isolate it; what marks it is provenance, which the table has to be told. Carry that as a
-#    column rather than as a caveat at the end of the notebook, because the table is what gets
-#    read and quoted.
+# 2. **A leaked comparison does not announce itself as one.** A contaminated row does not have
+#    to be the strongest row, so scanning a results table for a suspiciously good score will
+#    not find it. What marks it is provenance, and the table has to carry that as a column
+#    rather than as a caveat at the end of the notebook, because the table is what gets read
+#    and quoted.
 # 3. **Cross-notebook before-and-after comparisons need the same checkpoint on both sides.**
 #    `03_sentiment_evolution` scores `yiyanghkust/finbert-tone`, trained on analyst reports.
 #    Reading its number against this notebook's `ProsusAI/finbert` compares two different
@@ -643,13 +640,13 @@ show_with_alt(
 #    three classes equally, and the confusion matrix says which pair a model actually confuses.
 #    Read all three; a single scalar cannot distinguish a model that is unsure from one that
 #    has stopped predicting a class.
-# 5. **Fine-tuning cost and fine-tuning benefit are not on the same scale here.** The training
-#    times differ from one another by more than the scores do, so on a task this size the
-#    choice between these checkpoints is closer to an engineering decision than a modelling one.
-# 6. **A confusion matrix says what a model got wrong, not why.** Two of these three put their
-#    largest off-diagonal count in the same cell, true neutral predicted positive; the third has
-#    no cell that stands out from the rest. Even the agreement between those two is a fact about
-#    these runs. Whether the pair is genuinely ambiguous, under-represented in the training
+# 5. **Fine-tuning cost and fine-tuning benefit are not on the same scale here.** Set the
+#    spread of the training times against the spread of the scores before choosing between
+#    these checkpoints: on a task this size that choice is closer to an engineering decision
+#    than a modelling one.
+# 6. **A confusion matrix says what a model got wrong, not why.** It locates a disagreement
+#    between two classes and cannot attribute it, and two models landing on the same pair does
+#    not change that. Whether the pair is genuinely ambiguous, under-represented in the training
 #    split, or inconsistently labeled is a question about the examples, and it is answered by
 #    reading them.
 #
