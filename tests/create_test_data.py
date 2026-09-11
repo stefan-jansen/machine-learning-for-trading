@@ -13,13 +13,13 @@ from what was actually generated.
 
 ``tests/test_fixture_manifest_matches_builders.py`` checks each entry of the
 manifest against a declaration and against the data on disk. What it cannot check
-is a file no declaration mentions: DATASETS reaches 150 of the 327 files the
-test-data repo carries, and 149 are named neither by a ``Dataset.owns`` nor by
-``manifest.json``. An undeclared fixture has no builder, no recorded budget and
-nothing comparing it to the datasets it has to join against - which is how the
-FNSPID news fixture came to sit entirely past the end of its own price panel
-(ml4t/agent-workspace#1116). Adding a declaration is how a fixture stops being one
-of those 149; ml4t/agent-workspace#1117 tracks the rest.
+is a file no declaration mentions, and most of the test-data repo is still in that
+state: named neither by a ``Dataset.owns`` nor by ``manifest.json``. Such a fixture
+has no builder, no recorded budget and nothing comparing it to the datasets it has
+to join against - which is how the FNSPID news fixture came to sit entirely past
+the end of its own price panel (ml4t/agent-workspace#1116). Adding a declaration is
+how a fixture leaves that state; ml4t/agent-workspace#1117 carries the running
+count and the remaining groups.
 
 It is also not a from-empty rebuild of the fixture repo: it operates on a checkout
 of ml4t/third-edition-test-data and replaces the datasets it is asked for.
@@ -1203,6 +1203,48 @@ def build_cme_futures(source: Path, output: Path) -> list[Path]:
     return written
 
 
+# --- CFTC Commitment of Traders -----------------------------------------------
+#
+# 1.2 MB for the whole directory and nothing is transformed, so the builder copies:
+# every fixture file is byte-identical to production's, and a parquet round-trip
+# through polars would change their bytes while changing nothing a reader sees.
+#
+# It copies whatever products production carries rather than a declared list,
+# because `data/futures/loader.py::list_cot_products` answers by enumerating this
+# directory: a fixture holding a subset makes that loader return a different
+# product list under CI than the one a reader gets. What is declared is the
+# minimum - the products `04_fundamental_alternative_data/08_futures_positioning`
+# loads by name - so a production directory that has lost one fails here rather
+# than shipping a fixture the notebook cannot read.
+
+COT_DIR = Path("futures") / "positioning" / "cot"
+COT_REQUIRED_PRODUCTS = ("CL", "ES", "GC")
+
+
+def build_cot(source: Path, output: Path) -> list[Path]:
+    """Copy every per-product COT parquet production carries, verbatim."""
+    source_dir = source / COT_DIR
+    products = sorted(p.stem for p in source_dir.glob("*.parquet"))
+    if missing := sorted(set(COT_REQUIRED_PRODUCTS) - set(products)):
+        raise FileNotFoundError(
+            f"Production carries no COT reports for {missing} at {source_dir}. "
+            "08_futures_positioning loads those products by name. Fetch them with "
+            f"data/futures/positioning/cot_download.py --products {','.join(missing)}."
+        )
+
+    written: list[Path] = []
+    rows = 0
+    for product in products:
+        destination = output / COT_DIR / f"{product}.parquet"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_dir / f"{product}.parquet", destination)
+        rows += pl.scan_parquet(destination).select(pl.len()).collect().item()
+        written.append(destination)
+    size = sum(path.stat().st_size for path in written) / 1e6
+    print(f"    cot/: {len(written)} products, {rows:,} rows ({size:.1f} MB), copied verbatim")
+    return written
+
+
 # --- NASDAQ ITCH messages and the ES individual contracts ---------------------
 #
 # Four fixture files under paths that `tests/generate_test_microstructure.py`
@@ -1460,6 +1502,17 @@ DATASETS: tuple[Dataset, ...] = (
         # Named individually, not as the 13f/ directory: bulk/ sits beside them and
         # is produced elsewhere, so --clean must not take it.
         owns=tuple(Path("equities") / "positioning" / "13f" / name for name in _13F_FILES),
+        budget={"subsample": "none"},
+    ),
+    Dataset(
+        name="cot",
+        description=(
+            "the whole production CFTC Commitment of Traders directory, every "
+            "product intact, so list_cot_products() enumerates under CI what it "
+            "enumerates for a reader"
+        ),
+        build=build_cot,
+        owns=(COT_DIR,),
         budget={"subsample": "none"},
     ),
     Dataset(
