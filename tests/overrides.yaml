@@ -438,10 +438,11 @@
   # word MD&A section into ~16 windows of 512 tokens and costs over 15s per filing on CPU, so its
   # FinBERT scoring cell overran the 600s per-cell limit at both sizes measured: 639s idle with
   # MAX_SYMBOLS 5 (75 filings), and again with MAX_FILINGS 40. Reducing further is blocked,
-  # not merely slow: the IC loop skips any signal-horizon pair with `valid.height < 20`, at 12
-  # filings that is every pair, and the figure cell's `len(ic_summary)` then raises NameError
-  # because the `if ic_results:` else branch never binds it. ml4t/agent-workspace#1115; a usable
-  # reduction here needs it fixed first. ml4t/agent-workspace#1097.
+  # not merely slow: the IC loop skips any signal-horizon pair with `valid.height < 20`, and at
+  # 12 filings that is every pair. The NameError that used to follow is fixed - the else branch
+  # binds `ic_summary` now (ml4t/agent-workspace#1115) - so a smaller size runs to completion,
+  # but it draws no IC figure and writes no ic_summary.parquet, which is a weaker thing for CI
+  # to execute than it looks. Sizing this down is ml4t/agent-workspace#1097 and still open.
   gpu: true
   parameters:
     MAX_SYMBOLS: 5
