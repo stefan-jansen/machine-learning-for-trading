@@ -75,7 +75,7 @@ from utils.style import COLORS, show_with_alt
 # ### Declared parameters
 #
 # `MAX_ROWS` caps how many rows of each message type are read; zero means read them all,
-# and CI sets a small number so the notebook exercises the same code in seconds.
+# which is what the committed run does. A small cap exercises the same code in seconds.
 #
 # `REBUILD_ENRICHED` decides whether the enrichment below is recomputed. The enriched
 # files are large and take minutes to build, so a reader who already has them can skip

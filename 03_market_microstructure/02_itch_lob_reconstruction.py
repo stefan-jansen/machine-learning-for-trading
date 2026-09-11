@@ -88,8 +88,9 @@ from utils.style import show_with_alt
 # 09:31, and the book cannot subtract shares it never added.
 #
 # `MESSAGE_LIMIT` caps how many messages of each type are read. A whole symbol-day of
-# AAPL is a few million messages, which is a minute of work; CI overrides this to a small
-# number so the notebook exercises the same code path in seconds. `None` reads them all.
+# AAPL is a few million messages, which is a minute of work, so a smaller cap is what
+# makes a first pass quick while exercising the same code path. `None` reads them all,
+# which is what the committed run does.
 #
 # `SNAPSHOT_FREQ` sets how often the book is written down. One second is fine enough to
 # see liquidity move and coarse enough that a trading day fits in a frame of a few tens of

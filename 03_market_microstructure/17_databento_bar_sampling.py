@@ -535,8 +535,6 @@ def compute_bar_statistics(bars: pl.DataFrame) -> dict | None:
 # Run the calibration experiment across all days and bar types.
 # We test multiple thresholds to find those producing ~500 bars/day.
 
-# %%
-# Define calibration grid
 # %% [markdown]
 # The grid below is a range around the threshold each sampler would need to produce a
 # few hundred bars a day on a name of this size. Sweeping a range rather than picking
@@ -1660,12 +1658,12 @@ if "bar_data" in dir() and bar_data:
 if trades is not None and len(trades) > 0:
     summary_date = trades["date"].unique().sort().head(1).item()
     summary_day = trades.filter(pl.col("date") == summary_date).drop("date")
-    summary_usable = summary_day.filter(pl.col("side") != 0)
     n_summary = len(summary_day)
     buy_frac_summary = (summary_day["side"] > 0).mean()
 
+    # Every trade here carries a side already: the unclassified ones were reported and
+    # dropped at load, so a "usable" share computed now could only ever be 100%.
     print(f"Day: {summary_date}, Trades: {n_summary:,}, P[buy] = {buy_frac_summary:.3f}")
-    print(f"  Usable (with side): {len(summary_usable):,} ({len(summary_usable) / n_summary:.1%})")
 
     # Build bars with thresholds targeting ~400-500 bars/day
     summary_configs = [
@@ -1699,8 +1697,9 @@ if trades is not None and len(trades) > 0:
         if s:
             summary_results.append({"label": label, **s})
 
-    # Volume Imbalance bars (use usable trades with known side)
-    vib_bars = build_bars_for_day(summary_usable, "imbalance", 500, alpha=0.001)
+    # Imbalance bars need a classified side, which every trade here has: the
+    # unclassified ones were dropped at load.
+    vib_bars = build_bars_for_day(summary_day, "imbalance", 500, alpha=0.001)
     vib_stats = compute_bar_statistics(vib_bars)
     if vib_stats:
         summary_results.append({"label": "Vol Imbalance", **vib_stats})
