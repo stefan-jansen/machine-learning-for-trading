@@ -1443,6 +1443,44 @@ def drift_is_prose_only(stamped_blob: str, py: Path) -> bool:
     return before is not None and after is not None and before == after
 
 
+def drift_is_alt_and_prose_only(stamped_blob: str, py: Path) -> bool:
+    """Whether a stale-reading drift is confined to prose and alt literals, so ``sync-alt`` resolves it.
+
+    ``drift_is_prose_only`` compares with the alt literals left in, so a corrected alt reads to it
+    as a changed code cell and the report says "re-run". That is the wrong remedy and it is the
+    expensive one: ``sync-alt`` writes the corrected string into the output metadata, which is
+    exactly the bytes a re-run would produce, because the image comes from
+    ``fig._repr_mimebundle_()`` and never sees the alt string.
+
+    The two classifiers differ in one argument. Blanking the alts and comparing again asks whether
+    anything *other than* an alt literal moved in a code cell. Nothing did, and this is the
+    ``sync-alt`` case; something did, and it falls through to the re-run bucket where it belongs.
+
+    Markdown is free in both, because both drop the pure-markdown cells (`code_cells_only`): adding,
+    deleting, merging or retagging one cannot change what any code cell computes. That matters here
+    rather than being incidental - bringing a notebook under the results-cell rule *is* adding and
+    retagging markdown cells, and doing it in the same pass as an alt correction is the shape this
+    classifier exists to price correctly.
+
+    Naming the command is the whole point. ``sync-alt`` may still refuse the notebook for a reason
+    this cannot see - an alt passed as a variable, or a computed alt whose interpolated values are
+    not recoverable from the executed output - and it says so explicitly when it does. A report that
+    says "re-run" instead never gets that far.
+    """
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        return False  # stamped blob is gone; cannot compare, so do not soften the report
+    before = code_cells_only(_comparable(old.stdout, blank_alts=True))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=True))
+    return before is not None and after is not None and before == after
+
+
 def _output_counts(nb: dict) -> list[int]:
     """Outputs per code cell, in order. The unit a prose sync must leave untouched."""
     return [len(c.get("outputs", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code"]
@@ -1792,6 +1830,47 @@ def sync_alt(nb_path: Path) -> str:
     return stamp["source_py_blob"]
 
 
+def _cmd_prose(args: argparse.Namespace) -> int:
+    """Print every markdown cell of each notebook, for a review pass that touches no code.
+
+    The markdown is already in the ``.py`` as comment blocks under ``# %% [markdown]`` markers,
+    so this reads the source rather than the notebook and needs no kernel, no outputs and no
+    execution. What it adds over reading the file is that it shows *only* the prose, with each
+    cell's index and tags, so a reviewer reads the notebook's writing as a document instead of
+    scrolling past the code between the paragraphs.
+
+    The index it prints is the cell's position among markdown cells, which is what an editor
+    needs to find it again; ``--all`` numbers every cell instead, for a reviewer who needs to
+    know what the prose sits next to.
+    """
+    for name in args.notebooks:
+        path = Path(name).resolve()
+        if path.suffix == ".ipynb":
+            path = path.with_suffix(".py")
+        if not path.exists():
+            raise SystemExit(f"no such source: {path}")
+        rel = display_path(path)
+        cells = _percent_cells(path.read_text(encoding="utf-8"))
+        shown = 0
+        for i, (marker, kind, body) in enumerate(cells):
+            if kind == "code":
+                continue
+            shown += 1
+            tags = re.search(r"tags=(\[[^\]]*\])", marker)
+            label = f"{rel}  markdown cell {shown}"
+            if args.all:
+                label += f"  (cell {i + 1} of {len(cells)})"
+            if tags and tags.group(1) not in ("[]", ""):
+                label += f"  tags={tags.group(1)}"
+            print(f"\n=== {label} ===")
+            for line in body.splitlines():
+                stripped = line.lstrip()
+                print(stripped[1:].lstrip() if stripped.startswith("#") else line)
+        if shown == 0:
+            print(f"{rel}: no markdown cells")
+    return 0
+
+
 def _cmd_sync_alt(args: argparse.Namespace) -> int:
     for name in args.notebooks:
         path = Path(name).resolve()
@@ -1918,7 +1997,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         for r in lost:
             print(f"  {r}")
     if stale:
-        prose, executable = [], []
+        prose, alt, executable = [], [], []
         for r in stale:
             nb_path = REPO_ROOT / r
             py = paired_py(nb_path)
@@ -1928,8 +2007,12 @@ def _cmd_check(args: argparse.Namespace) -> int:
                 .get(STAMP_KEY, {})
                 .get("source_py_blob")
             )
-            if py is not None and stamped and drift_is_prose_only(stamped, py):
+            if py is None or not stamped:
+                executable.append(r)
+            elif drift_is_prose_only(stamped, py):
                 prose.append(r)
+            elif drift_is_alt_and_prose_only(stamped, py):
+                alt.append(r)
             else:
                 executable.append(r)
         if prose:
@@ -1938,6 +2021,14 @@ def _cmd_check(args: argparse.Namespace) -> int:
                 "  uv run python .github/scripts/notebook_provenance.py sync-prose <nb.py>):"
             )
             for r in prose:
+                print(f"  {r}")
+        if alt:
+            print(
+                "STALE, alt text and prose only (no code cell moved for anything but an alt "
+                "literal - fold it in, do NOT re-run:\n"
+                "  uv run python .github/scripts/notebook_provenance.py sync-alt <nb.py>):"
+            )
+            for r in alt:
                 print(f"  {r}")
         if executable:
             print(
@@ -2075,6 +2166,23 @@ def main() -> int:
     )
     yp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
     yp.set_defaults(func=_cmd_sync_prose)
+
+    pp = sub.add_parser(
+        "prose",
+        help="print every markdown cell, for a review pass that touches no code",
+        description=(
+            "Reads the paired .py, where markdown cells are comment blocks, and prints only "
+            "the prose with each cell's index and tags. Nothing is executed and nothing is "
+            "written. Edit the .py and fold the result in with sync-prose."
+        ),
+    )
+    pp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
+    pp.add_argument(
+        "--all",
+        action="store_true",
+        help="also number each markdown cell among all cells, not only among the markdown ones",
+    )
+    pp.set_defaults(func=_cmd_prose)
 
     ap_alt = sub.add_parser(
         "sync-alt",
