@@ -462,10 +462,14 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Bar chart of signal rate in percent for the two registered prediction sets under a zero "
-    "cutoff. Crypto perpetuals sit near 54 percent and ETFs near 46, each bar labelled with its "
-    "value. A rule that fires on any positive prediction is on about half the time in both sets, "
-    "so the cutoff is describing the sign distribution of the predictions rather than selecting "
+    "Bar chart of signal rate in percent for the registered prediction sets under a zero cutoff, "
+    "each bar labelled with its value: "
+    + ", ".join(
+        f"{CASE_STUDIES[cs]} {rate * 100:.1f} percent"
+        for cs, rate in zip(fixed_results["case_study"], fixed_results["signal_rate"], strict=True)
+    )
+    + ". A rule that fires on any positive prediction is on roughly half the time in both, so "
+    "the cutoff is describing the sign distribution of the predictions rather than selecting "
     "anything.",
 )
 
@@ -503,6 +507,13 @@ for case_study in CASE_STUDIES:
         )
     )
 
+_grid = {
+    cs: comparison_df.filter(
+        (pl.col("case_study") == cs) & (pl.col("method") == "rolling_percentile")
+    )
+    for cs in CASE_STUDIES
+}
+
 fig.update_layout(
     title="State-transition rate against signal rate, one point per rule",
     xaxis_title="Share of observations with a signal (%)",
@@ -512,11 +523,15 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Scatter plot with signal rate on the horizontal axis and the share of observations that "
-    "change state on the vertical, one point per rule, coloured navy for crypto perpetuals and "
-    "amber for ETFs. The two sets separate cleanly: at any given signal rate the crypto points "
-    "sit roughly ten percentage points higher in transition rate than the ETF points, and the "
-    "crypto points climb steeply with signal rate while the ETF points stay flat between about 9 "
-    "and 19 percent.",
+    "change state on the vertical, one point per rule in the grid, one colour per prediction "
+    "set. Reading the transition rates: "
+    + ", ".join(
+        f"{CASE_STUDIES[cs]} spans {_grid[cs]['transition_rate'].min() * 100:.1f} to "
+        f"{_grid[cs]['transition_rate'].max() * 100:.1f} percent"
+        for cs in CASE_STUDIES
+    )
+    + ". The two sets occupy different bands rather than one trend, so a rule's transition rate "
+    "is not predictable from its signal rate alone.",
 )
 
 # %% [markdown]
@@ -606,11 +621,14 @@ fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
 fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
 show_plotly_with_alt(
     fig,
-    "Two bar panels comparing three signal methods, navy for crypto perpetuals and amber for "
-    "ETFs. On signal rate the fixed zero cutoff is far the highest for both sets, near 54 and 46 "
-    "percent, while the trailing and cross-sectional percentile rules sit between 9 and 15 "
-    "percent. On state-transition rate the same ordering holds and the crypto bars are the taller "
-    "ones under every method.",
+    "Two bar panels comparing the three signal methods at one operating point, one colour per "
+    "prediction set, signal rate on the left and state-transition rate on the right. Signal rate "
+    f"runs from {operating_points['signal_rate'].min() * 100:.1f} to "
+    f"{operating_points['signal_rate'].max() * 100:.1f} percent across the six bars and "
+    f"state-transition rate from {operating_points['transition_rate'].min() * 100:.1f} to "
+    f"{operating_points['transition_rate'].max() * 100:.1f}. The fixed zero cutoff is the "
+    "highest bar of its panel in both sets; the two percentile rules are far lower and close to "
+    "each other.",
 )
 
 # %% [markdown]

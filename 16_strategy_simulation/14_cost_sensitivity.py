@@ -228,11 +228,14 @@ add_message_title(
 show_with_alt(
     fig,
     "Two panels of the cost sweep, both with cost per traded leg on the horizontal axis and a "
-    "dashed line at the baseline fee. The left panel is the Sharpe ratio, falling in a straight "
-    "line from about 0.77 at zero cost to slightly below zero at 200 basis points. The right "
-    "panel is the growth rate in percent per year, falling the same way from about 8.4 to -1.9, "
-    "with a dotted line marking where it crosses zero. The baseline fee sits at the far left of "
-    "both, where the curves are still near their zero-cost values.",
+    "dashed line at the baseline fee. The left panel is the Sharpe ratio, falling close to a "
+    f"straight line from {sweep['sharpe'].iloc[0]:.2f} at "
+    f"{sweep['cost_bp_per_leg'].iloc[0]:.0f} basis points to {sweep['sharpe'].iloc[-1]:.2f} at "
+    f"{sweep['cost_bp_per_leg'].iloc[-1]:.0f}. The right panel is the growth rate in percent per "
+    f"year, falling the same way from {sweep['cagr'].iloc[0] * 100:.1f} to "
+    f"{sweep['cagr'].iloc[-1] * 100:.1f}, with a dotted line at the break-even cost of "
+    f"{break_even_bp:.0f} basis points. The baseline fee of {DEFAULT_FEES * 10_000:.0f} sits "
+    "near the left edge of both panels.",
 )
 
 # %% [markdown]
@@ -310,10 +313,12 @@ waterfall.update_layout(
 )
 show_plotly_with_alt(
     waterfall,
-    "Waterfall chart in dollars over the whole sample. Gross profit and loss opens near 207,000, "
-    "a commissions bar and then a compounding-and-path-effect bar take it down, and net profit "
-    "and loss closes near 197,000. The second deduction is roughly two thirds the size of the "
-    "first, so the fees paid are not the whole of what the fees cost.",
+    f"Waterfall chart in dollars over the whole sample. Gross profit and loss opens at "
+    f"{gross_pnl_dollars:,.0f}, a commissions bar takes off {commission_dollars:,.0f}, a "
+    f"compounding-and-path-effect bar takes off a further {path_effect_dollars:,.0f}, and net "
+    f"profit and loss closes at {net_pnl_dollars:,.0f}. The second deduction is "
+    f"{path_effect_dollars / commission_dollars:.0%} of the first, so the fees paid are not the "
+    "whole of what the fees cost.",
 )
 
 # %%
@@ -331,11 +336,13 @@ sensitivity = plot_cost_sensitivity(
 )
 show_plotly_with_alt(
     sensitivity,
-    "Two panels from the library's cost-sensitivity helper, Sharpe on the left and CAGR on the "
-    "right, both against transaction cost in basis points with a marker at the current cost. Both "
-    "fall close to linearly, and a dotted line marks the break-even cost the helper computes. Its "
-    "shape matches the re-simulated sweep above but its zero crossing sits at a different cost, "
-    "because it deducts a uniform daily drag instead of re-running the strategy.",
+    "Two panels from the library's cost-sensitivity helper, Sharpe on the left and growth rate "
+    "on the right, both against transaction cost in basis points with a marker at the current "
+    "cost. Both fall close to linearly and a dotted line marks the break-even cost the helper "
+    f"computes. Compare that with the {break_even_bp:.0f} basis points the re-simulated sweep "
+    "above reports: the shapes match and the zero crossings do not, because the helper deducts a "
+    "uniform daily drag from the gross return series instead of running the strategy at each "
+    "fee.",
 )
 
 # %% [markdown]

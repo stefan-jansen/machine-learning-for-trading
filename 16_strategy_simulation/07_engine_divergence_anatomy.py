@@ -406,12 +406,12 @@ axes[1].set_xlabel("Date")
 fig.tight_layout()
 show_with_alt(
     fig,
-    "Two stacked panels sharing a date axis from 2016 to 2024. The upper panel plots portfolio "
-    "value under fractional sizing in navy and under whole-share sizing as a dashed grey line; "
-    "the two overlay so closely that only one curve is visible, rising from a million to about "
-    "1.8 million. The lower panel is fractional minus whole as a percentage: it swings between "
-    "about -0.4 and +0.5 percent through 2016, then stays positive and drifts up to roughly +0.7 "
-    "percent by 2024.",
+    "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
+    "fractional sizing in navy and under whole-share sizing as a dashed grey line; the two "
+    f"overlay so closely that only one curve is visible, running from {eq_base.min():,.0f} to "
+    f"{eq_base.max():,.0f}. The lower panel is fractional minus whole as a percentage, which "
+    f"runs from {diff_int.min():.2f} to {diff_int.max():.2f} percent and ends at "
+    f"{diff_int.iloc[-1]:.2f} - a gap the upper panel cannot show at all.",
 )
 
 print(
@@ -550,9 +550,10 @@ fig.tight_layout()
 show_with_alt(
     fig,
     "Filled area chart of the reference equity minus the headroom equity, in basis points of "
-    "reference equity, with a dashed zero line. The gap is noisy and crosses zero through 2016 "
-    "and early 2017, then stays positive and climbs steadily to roughly 70 basis points by 2024. "
-    "Cash held back for fees costs a widening amount the longer it is held back.",
+    f"reference equity, with a dashed zero line. The gap runs from {diff_hd_bps.min():.0f} to "
+    f"{diff_hd_bps.max():.0f} basis points and ends at {diff_hd_bps.iloc[-1]:.0f}, changing sign "
+    f"{int(((diff_hd_bps > 0) != (diff_hd_bps > 0).shift(1)).iloc[1:].sum())} times, all of them "
+    "early. Cash held back for fees costs a widening amount the longer it is held back.",
 )
 
 print(f"\nFinal value difference: ${val_diff_hd:,.0f} ({val_diff_hd / r_baseline.final_value:.3%})")
@@ -728,10 +729,13 @@ fig.tight_layout()
 show_with_alt(
     fig,
     "Horizontal bar chart of the impact on final value as a percentage of the reference, one bar "
-    "per configuration field plus their combination, each labelled with its value. Commission "
-    "headroom is worth about +0.67 percent and share rounding about +0.59, fill ordering is "
-    "exactly zero, and the combined change is larger than either single one but well short of "
-    "their sum.",
+    "per configuration field plus their combination, each labelled with its value. The single "
+    "fields measure "
+    + ", ".join(
+        f"{label.replace(chr(10), ' ')} {value:+.2f} percent" for label, value in effects.items()
+    )
+    + f"; the combined change is {combined:+.2f} percent against a sum of "
+    f"{sum(effects.values()):+.2f}, so the fields interact rather than add.",
 )
 
 # %%
@@ -881,8 +885,10 @@ show_with_alt(
     "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
     "snapshot, incremental and hybrid rebalance modes in navy, dashed navy and dotted amber; the "
     "three overlay throughout. The lower panel is the incremental-minus-snapshot gap as a "
-    "percentage, which rises from zero to about 0.012 percent by 2024, two orders of magnitude "
-    "smaller than the gaps the sizing and headroom fields produced.",
+    f"percentage, which runs from {diff_is.min():.4f} to {diff_is.max():.4f} percent and ends at "
+    f"{diff_is.iloc[-1]:.4f}. Set that against the {diff_int.iloc[-1]:.2f} percent the sizing "
+    "field produced on the same strategy: rebalance mode is the smallest of the choices measured "
+    "here by two orders of magnitude.",
 )
 
 

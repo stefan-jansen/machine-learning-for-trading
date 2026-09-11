@@ -348,11 +348,11 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Histogram of the observed Sharpe ratios from the simulated strategies, with a dashed "
-    "vertical line at the true Sharpe of zero and a second dashed line at the sample maximum near "
-    "2.47. The distribution is centred on zero and roughly symmetric, spanning about -2.5 to "
-    "+2.5, and the maximum sits in its right tail. Every strategy in the histogram has no edge by "
-    "construction.",
+    f"Histogram of the {NULL_STRATEGIES:,} observed Sharpe ratios from strategies simulated with "
+    "no edge at all, with a dashed vertical line at the true Sharpe of zero and a second at the "
+    f"sample maximum of {results['max_sharpe']:.2f}. The distribution is centred on zero and "
+    f"spans {results['min_sharpe']:.2f} to {results['max_sharpe']:.2f}, so searching this many "
+    "worthless strategies produces one that looks good.",
 )
 
 # %% [markdown]
@@ -446,10 +446,13 @@ fig.update_xaxes(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of the deflated Sharpe probability in percent against the number of strategies "
-    "tested on a logarithmic axis, with dashed reference lines at 95 percent and at 50. One "
-    "observed Sharpe is held fixed throughout. The curve falls from about 97 percent at a single "
-    "strategy through the 50 percent line at roughly a dozen, to about 7 percent at 500.",
+    f"Line chart of the deflated Sharpe probability in percent against the number of strategies "
+    "tested, on a logarithmic axis, with dashed reference lines at 95 percent and at 50. One "
+    f"observed Sharpe of {SELECTED_SHARPE} is held fixed throughout. The curve falls from "
+    f"{dsr_df['dsr_probability'].max() * 100:.0f} percent at "
+    f"{dsr_df['n_trials'].min():,} strategies to "
+    f"{dsr_df['dsr_probability'].min() * 100:.0f} percent at {dsr_df['n_trials'].max():,}. The "
+    "estimate never moved; only the number of strategies it was chosen from did.",
 )
 
 # %% [markdown]
@@ -543,10 +546,11 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Heatmap of the deflated Sharpe probability in percent over a grid of skewness and kurtosis "
-    "settings, each cell labelled. Every value lies between 11.6 and 15.2 percent. Reading across "
-    "a row, kurtosis moves the probability by two or three tenths of a point; reading down a "
-    "column, skewness moves it by three and a half points, from 15.2 at the most negative skew to "
-    "11.6 at the most positive.",
+    f"settings, each cell labelled. Every value lies between {z_values.min():.1f} and "
+    f"{z_values.max():.1f} percent. Within a row, changing kurtosis moves it by at most "
+    f"{max(row.max() - row.min() for row in z_values):.1f} points; within a column, changing "
+    f"skewness moves it by up to {max(col.max() - col.min() for col in z_values.T):.1f}. "
+    "Skewness is the one that matters here, and neither is large.",
 )
 
 # %% [markdown]
@@ -745,10 +749,13 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Line chart of adjusted against observed Sharpe ratio. The dashed grey line is the unadjusted "
-    "identity; the amber RAS line and the navy DSR line both run parallel below it, each a "
-    "roughly constant distance down. The DSR penalty is the larger of the two and pushes the "
-    "adjusted value below zero for every observed Sharpe under about 1.6.",
+    "Line chart of adjusted against observed Sharpe ratio. The dashed grey line is the "
+    "unadjusted identity; the RAS and DSR lines both run below it. Over the plotted range the "
+    f"DSR penalty runs from {observed_range[0] - dsr_adjusted_list[0]:.2f} to "
+    f"{observed_range[-1] - dsr_adjusted_list[-1]:.2f} and the RAS penalty from "
+    f"{observed_range[0] - ras_adjusted_list[0]:.2f} to "
+    f"{observed_range[-1] - ras_adjusted_list[-1]:.2f}, so both are close to a constant shift "
+    "rather than a change of slope. The two corrections differ in size, not in shape.",
 )
 
 # %% [markdown]
@@ -1042,16 +1049,20 @@ fig.update_yaxes(
     type="log",
     tickmode="array",
     tickvals=pbo_blocks_df["n_combinations"].to_list(),
-    ticktext=["6", "20", "70", "252", "924", "12.9k"],
+    # Formatted from the values rather than typed beside them: a different block grid would
+    # leave a hand-written list labelling the wrong ticks.
+    ticktext=[f"{n:,}" for n in pbo_blocks_df["n_combinations"].to_list()],
     secondary_y=True,
 )
 show_plotly_with_alt(
     fig,
     "Dual-axis line chart against the number of CSCV blocks. On the left axis the backtest "
-    "overfitting probability sits flat on zero for every block count, with a dashed reference "
-    "line at 50 percent well above it. On the right axis, which is logarithmic, the number of "
-    "combinations climbs from 6 at four blocks to 12,900 at sixteen. The two lines share a panel "
-    "and measure unrelated quantities.",
+    f"overfitting probability runs from {pbo_blocks_df['pbo'].min() * 100:.0f} to "
+    f"{pbo_blocks_df['pbo'].max() * 100:.0f} percent, with a dashed reference line at 50 well "
+    "above it. On the right axis, which is logarithmic, the number of combinations climbs from "
+    f"{pbo_blocks_df['n_combinations'].min():,} to "
+    f"{pbo_blocks_df['n_combinations'].max():,}. The two lines share a panel and measure "
+    "unrelated quantities, so their crossing means nothing.",
 )
 
 # %% [markdown]

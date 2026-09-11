@@ -461,10 +461,18 @@ show_with_alt(
     fig,
     "Two horizontal bar panels sharing a state axis with one bar per volatility and trend state, "
     "each state in its own colour, and a dashed line marking the pooled figure across all active "
-    "days. On annualized Sharpe, Recovery is highest near 1.5 and Caution near 1.25, both above "
-    "the pooled line; Crisis is about 0.65 and Risk-on far the lowest at about 0.15. On drawdown "
-    "along each state's own path the ordering is different: Crisis is deepest at roughly -23 "
-    "percent, Risk-on next at about -18, and every state is shallower than the pooled figure.",
+    "days. Annualized Sharpe by state: "
+    + ", ".join(
+        f"{name} {value:.2f}"
+        for name, value in zip(state_labels, regime_summary["sharpe"], strict=True)
+    )
+    + f", against {overall['sharpe']:.2f} pooled. Drawdown along each state's own path: "
+    + ", ".join(
+        f"{name} {value:.0%}"
+        for name, value in zip(state_labels, regime_summary["maximum_drawdown"], strict=True)
+    )
+    + f", against {overall['maximum_drawdown']:.0%} pooled. The two panels do not order the "
+    "states the same way, which is the reason to read both.",
 )
 
 # %% [markdown]
@@ -540,10 +548,12 @@ add_message_title(
 show_with_alt(
     fig,
     "Two step histograms of daily strategy return on a shared axis, all active days outlined in "
-    "navy and crisis days in red, with each sample's 95 percent conditional value at risk marked "
-    "by a dashed vertical line of its own colour. The two distributions have the same shape and "
-    "nearly the same centre, the crisis one is slightly taller at the mode, and the two dashed "
-    "lines sit almost on top of each other just below -1.5 percent.",
+    f"navy ({len(overall_returns):,} days) and crisis days in red ({len(crisis_returns):,}), "
+    "with each sample's 95 percent conditional value at risk marked by a dashed vertical line of "
+    f"its own colour. The two conditional values sit at {crisis_cvar_95:.2%} for crisis days and "
+    f"{overall_cvar_95:.2%} for all active days, a difference of "
+    f"{(crisis_cvar_95 - overall_cvar_95) * 10_000:.0f} basis points, so the two dashed lines "
+    "are almost on top of each other and the crisis tail is not the fatter one.",
 )
 
 # %%
@@ -615,9 +625,14 @@ add_message_title(
 show_with_alt(
     fig,
     "Horizontal bar chart of each state's additive log-return contribution to the worst drawdown, "
-    "all bars negative and drawn in red. Crisis contributes the most at about -18 percent, "
-    "Risk-on about -13.5, Caution about -4 and Recovery under -2. The peak and trough dates are "
-    "named in the subtitle and the four contributions sum to the whole decline.",
+    "every bar negative. Reading them from the largest contribution to the smallest: "
+    + ", ".join(
+        f"{row['regime']} {row['log_return_contribution']:.1%}"
+        for row in attribution.sort("log_return_contribution").iter_rows(named=True)
+    )
+    + f". The episode runs from {dates[peak_index]} to {dates[trough_index]} and the "
+    "contributions sum to its whole decline, which the assertion above checks. A longer bar can "
+    "be a more common state rather than a worse one.",
 )
 
 # %%

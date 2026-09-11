@@ -440,10 +440,7 @@ if kelly_strategy.size_history:
         yaxis_title="Target Fraction of Equity",
         height=400,
     )
-    # Both counts are properties of the run rather than of the chart: the signal is seeded and
-    # SEED is a papermill parameter, so a different seed closes trades at different times and
-    # moves where the step falls. A prefix count, not a total - the helper can return the base
-    # again later, and a sentence saying "the first N" has to mean the first N.
+    # A prefix count, not a total: the helper can return the base again later.
     _sizes = kelly_strategy.size_history
     _leading_base = len(
         list(itertools.takewhile(lambda size: size == kelly_strategy.base_size, _sizes))
@@ -936,13 +933,16 @@ if pairs_strategy.zscore_history:
     fig.update_xaxes(title_text="Date", row=3, col=1)
     show_plotly_with_alt(
         fig,
-        "Three stacked panels on a shared date axis. The top panel is the XLF and KRE closing "
-        "prices, where KRE falls from the high sixties to the low thirties in March 2023 while "
-        "XLF barely moves. The middle panel is the KRE-over-XLF ratio, which steps down from "
-        "about 1.8 to about 1.2 at the same date and does not return. The bottom panel is the "
-        "ratio's rolling z-score with dashed entry bands and dotted exit bands; it oscillates "
-        "across both bands throughout, including across the level shift, because the rolling "
-        "window re-centres on the new level.",
+        f"Three stacked panels on a shared date axis over {len(dates):,} sessions. The top panel "
+        f"is the {PAIR_A} and {PAIR_B} closing prices: {PAIR_A} runs from {close_a.min():,.0f} "
+        f"to {close_a.max():,.0f} and {PAIR_B} from {close_b.min():,.0f} to {close_b.max():,.0f}, "
+        "so one of the pair moves far more than the other. The middle panel is their ratio, "
+        f"which runs from {(close_b / close_a).min():.2f} to {(close_b / close_a).max():.2f}. "
+        "The bottom panel is the ratio's rolling z-score with dashed entry bands and dotted exit "
+        f"bands; it spans {min(z_vals):.2f} to {max(z_vals):.2f} and crosses the entry bands "
+        f"{sum(1 for a, b in zip(z_vals, z_vals[1:], strict=True) if (abs(a) > pairs_strategy.entry_zscore) != (abs(b) > pairs_strategy.entry_zscore))} "
+        "times. A level shift in the ratio does not pin the z-score, because the rolling window "
+        "re-centres on the new level.",
     )
 
 # %% [markdown]
@@ -1261,14 +1261,17 @@ if cb_strategy.multiplier_history and cb_strategy.drawdown_history:
     fig.update_xaxes(title_text="Date", row=3, col=1)
     show_plotly_with_alt(
         fig,
-        "Three stacked panels on a shared date axis from late 2019 to mid-2021. The top panel "
-        "holds two equity curves from the same signals: the unprotected one, dashed, dips in the "
-        "March 2020 crash and then climbs to a new high, while the protected one, solid, "
-        "flatlines from the crash onwards. The middle panel is the protected rule's drawdown with "
-        "dashed lines at the caution and halt thresholds; it plunges past both in one move. The "
-        "bottom panel is the sizing multiplier, which falls from one to zero at that date and "
-        "never recovers, because a halted strategy takes no new entries and so cannot earn its "
-        "way back above the threshold.",
+        f"Three stacked panels on a shared date axis over {n:,} sessions. The top panel holds "
+        "two equity curves from the same signals: the unprotected one, dashed, recovers and goes "
+        "on to a new high, while the protected one, solid, is flat from the breach onwards. The "
+        f"middle panel is the protected rule's drawdown, which reaches {min(dd_pct):.1f} percent "
+        f"against dashed lines at {-100 * cb_strategy.caution_threshold:.0f} and "
+        f"{-100 * cb_strategy.halt_threshold:.0f}, crossing both in one move. The bottom panel "
+        "is the sizing multiplier, which ends at "
+        f"{cb_strategy.multiplier_history[n - 1]:.2f} and spends "
+        f"{sum(1 for m in cb_strategy.multiplier_history[:n] if m == 0) / n:.0%} of the sample "
+        "at zero: a halted strategy takes no new entries, so it cannot earn its way back above "
+        "the threshold that halted it.",
     )
 
 # %% [markdown]

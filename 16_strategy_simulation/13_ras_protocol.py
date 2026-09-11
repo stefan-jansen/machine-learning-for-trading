@@ -328,11 +328,11 @@ fig.update_layout(
 
 show_plotly_with_alt(
     fig,
-    "Bar chart of the estimated Rademacher complexity for three candidate-class structures, with "
-    "a dashed red line marking Massart's bound just below 0.2. Uncorrelated candidates reach "
-    "about 0.156, close to the bound; correlated candidates fall to about 0.017; identical "
-    "candidates are indistinguishable from zero. The more variation the candidates share, the "
-    "less the class can fit by chance.",
+    f"Bar chart of the estimated Rademacher complexity for {len(strategies)} candidate-class "
+    f"structures, with a dashed red line marking Massart's bound at {massart_bound:.3f}. "
+    + ", ".join(f"{name} {value:.3f}" for name, value in zip(strategies, R_values, strict=True))
+    + ". The more variation the candidates share, the less the class can fit by chance, and only "
+    "the independent case approaches the bound.",
 )
 
 # %% [markdown]
@@ -486,12 +486,13 @@ fig.update_yaxes(title_text="Candidate count", row=1, col=2)
 
 show_plotly_with_alt(
     fig,
-    "Two panels over the correlated candidate sweep. The left panel scatters the RAS lower bound "
-    "against the observed Sharpe with a dashed no-adjustment diagonal; every marker sits far "
-    "below that line, on a tight band running from about -12 to -9.5 while the observed values "
-    "span -1 to +1.3. The right panel overlays the two distributions as histograms: the observed "
-    "set is a narrow spike at zero and the lower-bound set an equally narrow spike near -11, with "
-    "nothing between them.",
+    f"Two panels over the sweep of {SWEEP_CANDIDATES:,} correlated candidates. The left panel "
+    "scatters the RAS lower bound against the observed Sharpe with a dashed no-adjustment "
+    f"diagonal. Observed Sharpe ratios span {observed_sharpe.min():.2f} to "
+    f"{observed_sharpe.max():.2f}; their lower bounds span {adjusted_sharpe.min():.2f} to "
+    f"{adjusted_sharpe.max():.2f}, so every marker sits far below the diagonal and "
+    f"{int((adjusted_sharpe > 0).sum())} of them clear zero. The right panel overlays the two as "
+    "histograms: two narrow spikes with nothing between them.",
 )
 
 # %% [markdown]
