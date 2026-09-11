@@ -82,7 +82,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 import yaml
 
-from case_studies.research import open_study, supersedes_for
+from case_studies.research import causal_supersedes, open_study
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -203,7 +203,9 @@ request = study.causal(
     overrides={"nuisance_params": dict(NUISANCE_OVERRIDES)} if NUISANCE_OVERRIDES else {},
     execution_tier=EXECUTION_TIER,
     preview_reductions=preview_reductions,
-    supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=[label]),
+    supersedes=causal_supersedes(
+        study, SUPERSEDES_CAUSAL, label, labels=[label], execution_tier=EXECUTION_TIER
+    ),
 )
 resolved = request.resolve()
 

@@ -121,7 +121,7 @@ from case_studies.cme_futures.research_workflow import (
     open_study,
     product_universe_table,
 )
-from case_studies.research import supersedes_for
+from case_studies.research import causal_supersedes
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -162,7 +162,13 @@ requests = tuple(
         label=label,
         execution_tier=EXECUTION_TIER,
         preview_reductions=PREVIEW_REDUCTIONS,
-        supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=list(ALL_LABELS)),
+        supersedes=causal_supersedes(
+            study,
+            SUPERSEDES_CAUSAL,
+            label,
+            labels=list(ALL_LABELS),
+            execution_tier=EXECUTION_TIER,
+        ),
     ).resolve()
     for label in ALL_LABELS
 )

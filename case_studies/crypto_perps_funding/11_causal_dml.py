@@ -97,7 +97,7 @@ import os
 import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import open_study
-from case_studies.research import supersedes_for
+from case_studies.research import causal_supersedes
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -147,7 +147,9 @@ request = study.causal(
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
     overrides=OVERRIDES,
-    supersedes=supersedes_for(SUPERSEDES_CAUSAL, LABEL, labels=[LABEL]),
+    supersedes=causal_supersedes(
+        study, SUPERSEDES_CAUSAL, LABEL, labels=[LABEL], execution_tier=EXECUTION_TIER
+    ),
 )
 resolved = request.resolve()
 computation = resolved.spec["computation"]
@@ -184,14 +186,21 @@ pl.DataFrame(
 # estimate, and then pays for the placebo refits - which is where most of the cost is, since the
 # whole procedure is repeated once per placebo draw.
 #
-# The check below refuses a result whose specification is not the one that was resolved. That is
-# not defensive coding: the resolved specification carries the estimand, the fold geometry and the
-# refutation contract, and a result that does not match it describes a contract that no longer
-# exists. The notebook downstream would then resolve the label to two live identities and stop.
+# The check below refuses a result whose *identity* is not the one that was resolved. That is not
+# defensive coding: the identity covers the estimand, the fold geometry and the refutation
+# contract, and a result carrying a different one describes a contract that no longer exists. The
+# notebook downstream would then resolve the label to two live identities and stop.
+#
+# It compares the identity and not the whole specification, because the specification also carries
+# `provenance` - the git commit, the platform and the package versions of the run that fitted. Those
+# are a record of that run's own circumstances and are meant to differ from any later run that reads
+# the row back from cache. Comparing the whole spec makes the notebook fail on every re-run from a
+# different commit, which is the opposite of the property this check is for: the second run of this
+# notebook fits nothing, and has to say so rather than raise.
 
 # %% tags=["results"]
 result = resolved.run()
-if not result.complete or result.spec != resolved.spec:
+if not result.complete or result.hash != resolved.identity:
     raise RuntimeError("causal execution is incomplete or has conflicting identity")
 pl.DataFrame(
     {

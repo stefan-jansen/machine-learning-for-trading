@@ -139,10 +139,17 @@ from .specs import (
 from .store import (
     REGISTRY_SCHEMA_SQL,
     VALID_STAGES,
+    current_causal_identities,
     get_training_dir,
 )
 
 __all__ = [
+    # causal identity. Exported because a reader that resolves "which causal row is current"
+    # by hand gets a narrower rule: supersession alone, without the identity version or the
+    # execution tier. `current_causal_identities` is the one derivation, and its own docstring
+    # records the first draft's copies disagreeing within the hour. Importing `.store` to reach
+    # it was the friction that made the hand-rolled version attractive.
+    "current_causal_identities",
     # specs
     "DEFAULT_SEED",
     "HASH_LENGTH",

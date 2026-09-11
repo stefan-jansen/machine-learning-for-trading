@@ -177,3 +177,64 @@ class TestWhenTheRegistryReadItselfFails:
         monkeypatch.setattr(causal_module, "current_causal_identities", record)
         causal_supersedes(study, DECLARATION, "fwd_ret_1d", labels=FITTED)
         assert seen["busy_timeout"] == 60000
+
+
+class TestEveryCausalNotebookRoutesItsDeclarationThroughTheHelper:
+    """The helper only protects the reader in the notebooks that actually call it.
+
+    `causal_supersedes` withholds a declaration the registry in hand does not hold, and
+    the tests above prove it does. None of that reaches a notebook that calls
+    `supersedes_for` directly: that parses the literal and hands it straight to the
+    request, so a committed non-empty declaration is offered against a clean clone and
+    `_enforce_causal_supersedes` refuses the write - after the fit and every placebo
+    refit are paid for, which is the cost this whole mechanism exists to avoid.
+
+    The fault is invisible while the declaration is empty, which is why it needs a test
+    rather than a reading. `cme_futures` and `crypto_perps_funding` carried it dormant
+    until the #1120 refit gave them a hash, and `us_equities_panel` still had an empty
+    string and the same call, so it would have broken on whichever run first set one.
+
+    So the invariant is not "non-empty declarations use the helper", which would go green
+    again the moment a notebook is reset to empty. It is that no causal notebook hands
+    `SUPERSEDES_CAUSAL` to `supersedes_for` at all.
+    """
+
+    @staticmethod
+    def _causal_notebooks() -> list[Path]:
+        root = Path(__file__).resolve().parents[1] / "case_studies"
+        found = sorted(root.glob("*/[0-9][0-9]_causal_dml.py"))
+        assert found, "no causal notebooks found - the glob is wrong, not the corpus"
+        return found
+
+    def test_no_causal_notebook_passes_its_declaration_to_supersedes_for(self) -> None:
+        import ast
+
+        offenders = []
+        for path in self._causal_notebooks():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                if name != "supersedes_for":
+                    continue
+                args = [a for a in node.args if isinstance(a, ast.Name)]
+                if any(a.id == "SUPERSEDES_CAUSAL" for a in args):
+                    offenders.append(f"{path.relative_to(path.parents[2])}:{node.lineno}")
+        assert not offenders, (
+            "these notebooks hand SUPERSEDES_CAUSAL to supersedes_for, so the declaration "
+            "is offered against a reader's empty registry and the write is refused after "
+            f"the fit is paid for: {offenders}. Call causal_supersedes(study, ...) instead."
+        )
+
+    def test_every_causal_notebook_calls_causal_supersedes(self) -> None:
+        missing = [
+            str(path.relative_to(path.parents[2]))
+            for path in self._causal_notebooks()
+            if "causal_supersedes(" not in path.read_text(encoding="utf-8")
+        ]
+        assert not missing, (
+            "a causal notebook that never calls causal_supersedes has no way to withhold a "
+            f"declaration from a reader's clone: {missing}"
+        )
