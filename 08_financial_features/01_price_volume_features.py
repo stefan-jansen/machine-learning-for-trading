@@ -816,8 +816,13 @@ for _col, _label, _eff, _inputs in ESTIMATORS:
 # holding on to: efficiency says how much data an estimator needs to reach a given
 # precision, and it says nothing about what the estimator is precise about. A more
 # efficient estimator of the wrong quantity is still an estimator of the wrong quantity.
-# Choose the range estimators for their smoothness when the daily close-to-close return is
-# what you are modelling, and expect the level they report to be the session's.
+#
+# Which one is right follows from the return being modelled. Reach for Parkinson or
+# Garman-Klass when the question is about the session itself, such as intraday range or
+# execution risk inside the day. When the position is held overnight and the daily
+# close-to-close return is what is being scaled or sized against, their level is the wrong
+# denominator by the margin in the table above, and the choice is close-to-close for
+# simplicity or Yang-Zhang for the same quantity with less noise.
 
 # %% [markdown]
 # ### Volatility-of-Volatility (Vol-of-Vol)
