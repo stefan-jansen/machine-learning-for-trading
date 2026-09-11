@@ -85,6 +85,10 @@ def _causal_fixture(
     mds = SimpleNamespace(
         dataset=frame,
         feature_names=["feature", "treatment", "confounder"],
+        # The resolver projects its load and records the panel's own list, so the double
+        # has to carry both. Equal here because this fixture stands in for an unprojected
+        # panel: the two differ only when a caller narrows the load.
+        panel_feature_names=["feature", "treatment", "confounder"],
         label_col="fwd_ret_8h",
         label_buffer=label_buffer,
         date_col="timestamp",
@@ -657,6 +661,10 @@ def _session_causal_fixture(tmp_path, monkeypatch):
     mds = SimpleNamespace(
         dataset=frame,
         feature_names=["feature", "treatment", "confounder"],
+        # The resolver projects its load and records the panel's own list, so the double
+        # has to carry both. Equal here because this fixture stands in for an unprojected
+        # panel: the two differ only when a caller narrows the load.
+        panel_feature_names=["feature", "treatment", "confounder"],
         label_col="fwd_ret_5d",
         label_buffer="5D",
         date_col="timestamp",
@@ -723,6 +731,10 @@ def _patch_modeling_dataset(monkeypatch, frame, buffer: str = "5D") -> None:
     mds = SimpleNamespace(
         dataset=frame,
         feature_names=["feature", "treatment", "confounder"],
+        # The resolver projects its load and records the panel's own list, so the double
+        # has to carry both. Equal here because this fixture stands in for an unprojected
+        # panel: the two differ only when a caller narrows the load.
+        panel_feature_names=["feature", "treatment", "confounder"],
         label_col="fwd_ret_5d",
         label_buffer=buffer,
         date_col="timestamp",
