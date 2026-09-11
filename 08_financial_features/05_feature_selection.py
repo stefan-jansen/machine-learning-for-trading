@@ -590,7 +590,11 @@ for i, f in enumerate(final_features, 1):
 # reliable negative edge is a feature, and inverting it costs nothing. A threshold on the
 # share of positive samples would fail exactly those, contradicting the selection that
 # produced the list. So the cut is on sign consistency, counting strictly positive and
-# strictly negative samples separately and taking whichever is larger.
+# strictly negative samples separately and taking whichever is larger. The sign the table
+# reports comes from that same pair of counts rather than from the mean IC: a mean can be
+# dragged negative by a few large samples while most samples are positive, and reporting
+# the sign that way would print a feature as negative in most samples when it was negative
+# in only a handful.
 # `STABILITY_MIN_SIGN_CONSISTENCY_PCT` is declared in the parameters cell and applied
 # below, so the notebook prints which features clear it rather than describing a cut it
 # never makes.
@@ -639,16 +643,19 @@ def bootstrap_ic(
         valid = ics[~np.isnan(ics)]
         if len(valid) == 0:
             continue
+        # One pair of counts feeds both the reported sign and the consistency share; see
+        # the note above the cell for why the mean cannot supply the sign.
+        share_positive = float(np.mean(valid > 0))
+        share_negative = float(np.mean(valid < 0))
         stability_data.append(
             {
                 "feature": col,
                 "ic_mean": np.mean(valid),
                 "ic_std": np.std(valid),
                 "ic_ir": np.mean(valid) / (np.std(valid) + 1e-8),
-                "positive_pct": np.mean(valid > 0) * 100,
-                # Whichever sign dominates, not "positive": see the note above the cell.
-                "sign_consistency_pct": max(np.mean(valid > 0), np.mean(valid < 0)) * 100,
-                "reference_sign": "positive" if np.mean(valid) > 0 else "negative",
+                "positive_pct": share_positive * 100,
+                "sign_consistency_pct": max(share_positive, share_negative) * 100,
+                "reference_sign": "positive" if share_positive >= share_negative else "negative",
             }
         )
 
