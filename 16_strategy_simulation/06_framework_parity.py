@@ -498,10 +498,11 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Line chart of portfolio equity in US dollars for the same strategy under two simulators, "
-    "both starting at 100,000. The solid navy array-arithmetic curve and the dashed "
-    "sequential-engine curve follow the same path and the same turning points, rising to a peak "
-    "near 400,000 in late 2021 and falling back through 2022. The array curve sits slightly above "
-    "the sequential one from about 2015 onwards and the gap widens with time.",
+    f"both starting at {INITIAL_CASH:,.0f}. The solid navy array-arithmetic curve and the dashed "
+    "sequential-engine curve follow the same path and the same turning points: the array run "
+    f"peaks at {equity_vbt.max():,.0f} and ends at {equity_vbt.iloc[-1]:,.0f}, the sequential run "
+    f"peaks at {equity_ml4t.max():,.0f} and ends at {equity_ml4t.iloc[-1]:,.0f}. The two differ "
+    f"by {ending_gap:,.0f} at the end, which is too small to separate them on this axis.",
 )
 
 # %%
@@ -536,13 +537,14 @@ fig.update_layout(
     yaxis_title="Array minus sequential equity (USD)",
     height=400,
 )
+_sign_changes = int(((diff_series > 0) != (diff_series > 0).shift(1)).iloc[1:].sum())
 show_plotly_with_alt(
     fig,
     "Line chart of array equity minus sequential equity in US dollars, with a dashed zero line. "
-    "The difference starts at zero, stays near zero through 2012, then rises almost monotonically "
-    "to about 35,000 at the 2021 peak before settling near 24,000. It never crosses back below "
-    "zero, so the two simulators differ by a drift that compounds rather than by noise that "
-    "cancels.",
+    f"The difference runs from {diff_series.min():,.0f} to {diff_series.max():,.0f} and ends at "
+    f"{diff_series.iloc[-1]:,.0f}, changing sign {_sign_changes} times over "
+    f"{len(diff_series):,} sessions. A difference that stays on one side of zero and grows is a "
+    "drift that compounds, not noise that cancels.",
 )
 
 # %% [markdown]

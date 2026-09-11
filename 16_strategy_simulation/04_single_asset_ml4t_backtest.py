@@ -242,13 +242,16 @@ fig.update_layout(
     yaxis_title="Price (USDT)",
     yaxis2_title="RSI",
 )
+_close = prices_df["close"]
+_rsi = context_df["rsi"].drop_nulls()
 show_plotly_with_alt(
     fig,
-    "Two stacked panels on a shared date axis from 2020 to late 2023. The upper panel is the "
-    "BTC/USDT daily close, rising from under 10,000 to a peak near 67,000 in late 2021 and "
-    "trading between roughly 16,000 and 45,000 afterwards. The lower panel is the RSI in amber "
-    "with dashed lines at the entry and exit thresholds, crossing both many times a year "
-    "throughout the sample.",
+    f"Two stacked panels on a shared date axis over {len(_close):,} daily bars. The upper panel "
+    f"is the BTC/USDT close, running from {_close.min():,.0f} to {_close.max():,.0f}. The lower "
+    f"panel is the {RSI_PERIOD}-period RSI in amber with dashed lines at {RSI_LOWER} and "
+    f"{RSI_UPPER}; it spends {float((_rsi < RSI_LOWER).mean()):.0%} of its sessions below the "
+    f"entry threshold and {float((_rsi > RSI_UPPER).mean()):.0%} above the exit threshold, so "
+    "both are crossed repeatedly rather than reached once.",
 )
 
 # %% [markdown]
@@ -615,12 +618,14 @@ fig.update_layout(
     height=450,
     hovermode="x unified",
 )
+_equity = list(ec.values)
+_flat = sum(1 for a, b in zip(_equity, _equity[1:], strict=True) if a == b)
 show_plotly_with_alt(
     fig,
-    "Line chart of portfolio value in USDT from a 100,000 start. Long flat stretches, where the "
-    "rule holds cash, separate short active stretches: the path drops to about 57,000 in early "
-    "2020, steps up through 2020, peaks near 124,000 in early 2021, falls to about 44,000 in "
-    "mid-2022 and ends near 74,000.",
+    f"Line chart of portfolio value in USDT from a {INITIAL_CASH:,.0f} start. Long flat "
+    "stretches, where the rule holds cash, separate short active ones: "
+    f"{_flat:,} of {len(_equity):,} sessions show no change. The path runs from "
+    f"{min(_equity):,.0f} to {max(_equity):,.0f} and ends at {_equity[-1]:,.0f}.",
 )
 
 # %%
@@ -647,11 +652,12 @@ fig_dd.update_layout(
     height=400,
     hovermode="x unified",
 )
+_dd = [float(v) for v in drawdown_pct]
 show_plotly_with_alt(
     fig_dd,
     "Filled drawdown chart from the running peak, zero at the top and losses below. The curve "
-    "reaches about -45 percent in early 2020, returns to zero in early 2021, then falls again and "
-    "spends all of 2022 between -40 and -65 percent, ending near -40 percent.",
+    f"reaches {min(_dd):.1f} percent at its worst and ends at {_dd[-1]:.1f}, and the rule is "
+    f"below its own peak on {sum(1 for v in _dd if v < 0) / len(_dd):.0%} of sessions.",
 )
 
 # %% [markdown]
@@ -763,13 +769,14 @@ fig.update_layout(
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     hovermode="x unified",
 )
+_bh = list(benchmark_ec.values)
 show_plotly_with_alt(
     fig,
     "Portfolio value on a logarithmic axis for the RSI rule in solid navy and buy-and-hold in "
-    "dashed grey, both run through the same engine, allocation, next-open fills and costs from a "
-    "100,000 start. Buy-and-hold reaches roughly 900,000 at the late-2021 peak and ends near "
-    "600,000; the RSI rule stays between about 44,000 and 124,000 for the whole sample. The log "
-    "axis is what lets both fit on one panel.",
+    "dashed grey, both run through the same engine, allocation, next-open fills and costs from "
+    f"a {INITIAL_CASH:,.0f} start. Buy-and-hold runs from {min(_bh):,.0f} to {max(_bh):,.0f} and "
+    f"ends at {_bh[-1]:,.0f}; the RSI rule runs from {min(_equity):,.0f} to {max(_equity):,.0f} "
+    f"and ends at {_equity[-1]:,.0f}. The log axis is what lets both fit on one panel.",
 )
 
 # %% [markdown]
@@ -827,13 +834,18 @@ fig.update_layout(
     barmode="relative",
     height=450,
 )
+_mfe = (excursion_df["mfe"] * 100).to_list()
+_mae = (excursion_df["mae"] * 100).to_list()
+_realized = (excursion_df["pnl_percent"] * 100).to_list()
+_inside = sum(1 for f, a, r in zip(_mfe, _mae, _realized, strict=True) if a <= r <= f)
 show_plotly_with_alt(
     fig,
-    "Bar chart over the closed round trips, one pair of bars per trade: maximum favorable "
-    "excursion in green above zero, maximum adverse excursion in red below, with the realized "
-    "return marked as a black diamond. Every trade ran further in both directions than it "
-    "finished, several adverse excursions reach -40 percent or worse, and most realized returns "
-    "sit well inside the band their own trade travelled.",
+    f"Bar chart over the {len(_mfe)} closed round trips, one pair of bars per trade: maximum "
+    "favorable excursion above zero, maximum adverse excursion below, with the realized return "
+    f"marked as a diamond. Favorable excursions reach {max(_mfe):.0f} percent at most and "
+    f"adverse ones {min(_mae):.0f} percent at worst. {_inside} of the {len(_mfe)} realized "
+    "returns fall between their own trade's two extremes, which is the point: each trade "
+    "travelled further in both directions than where it closed.",
 )
 
 # %%

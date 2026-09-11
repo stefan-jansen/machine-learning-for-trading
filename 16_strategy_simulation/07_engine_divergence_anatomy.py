@@ -644,11 +644,12 @@ ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 fig.tight_layout()
 show_with_alt(
     fig,
-    "Line chart of portfolio value from 2016 to 2024 under four execution profiles: the "
-    "controlled reference, a backtrader profile, a vectorbt profile and VectorBT itself, drawn in "
-    "navy and amber with different dash patterns. All four trace the same path, from about a "
-    "million to roughly 1.8 million with a sharp drawdown in early 2020, and separate by a band "
-    "far thinner than the curve's own daily variation.",
+    f"Line chart of portfolio value under {len(all_results)} execution profiles - "
+    f"{', '.join(all_labels)} - drawn in navy and amber with different dash patterns. All of "
+    f"them trace the same path, ending between {min(profile_values):,.0f} and "
+    f"{max(profile_values):,.0f}. That spread is {profile_spread_pct:.2f} percent of the final "
+    "value, so the curves separate by a band far thinner than the curve's own variation and the "
+    "chart cannot be read to rank them.",
 )
 
 # %% [markdown]

@@ -184,13 +184,19 @@ fig.update_layout(
     yaxis_title="Price (USDT)",
     yaxis2_title="RSI",
 )
+_rsi_clean = rsi_series.dropna()
+_crossings = int(
+    ((_rsi_clean < RSI_LOWER) != (_rsi_clean < RSI_LOWER).shift(1)).sum()
+    + ((_rsi_clean > RSI_UPPER) != (_rsi_clean > RSI_UPPER).shift(1)).sum()
+)
 show_plotly_with_alt(
     fig,
-    "Two stacked panels on a shared date axis from 2020 to late 2023. The upper panel is the "
-    "BTC/USDT daily close, rising from under 10,000 to a peak near 67,000 in late 2021 and "
-    "falling back to the 16,000 to 45,000 range afterwards. The lower panel is the RSI in amber "
-    "with dashed lines at the entry and exit thresholds; it oscillates across both lines many "
-    "times a year in every part of the sample, including the whole of the 2022 decline.",
+    f"Two stacked panels on a shared date axis from {close.index[0].date()} to "
+    f"{close.index[-1].date()}. The upper panel is the BTC/USDT daily close, running from "
+    f"{close.min():,.0f} to {close.max():,.0f}. The lower panel is the {RSI_WINDOW}-period RSI "
+    f"in amber with dashed lines at {RSI_LOWER} and {RSI_UPPER}; it crosses one threshold or the "
+    f"other {_crossings} times over {len(_rsi_clean):,} sessions, spread across the whole "
+    "sample rather than concentrated in one regime.",
 )
 
 # %% [markdown]
@@ -324,12 +330,14 @@ fig.update_layout(
     height=450,
     hovermode="x unified",
 )
+_flat_days = int((portfolio_value.diff() == 0).sum())
 show_plotly_with_alt(
     fig,
-    "Line chart of portfolio value in USDT from a 100,000 start. The path is made of long flat "
-    "stretches where the rule holds no position, separated by short active stretches: it drops to "
-    "about 57,000 in early 2020, steps up to about 107,000 through 2020, reaches its high near "
-    "124,000 in early 2021, falls to about 44,000 in mid-2022 and ends near 74,000.",
+    f"Line chart of portfolio value in USDT from a {INITIAL_CASH:,.0f} start. The path is made "
+    "of long flat stretches where the rule holds no position, separated by short active ones: "
+    f"{_flat_days:,} of {len(portfolio_value):,} sessions show no change at all. It runs from "
+    f"{portfolio_value.min():,.0f} to {portfolio_value.max():,.0f} and ends at "
+    f"{portfolio_value.iloc[-1]:,.0f}.",
 )
 
 # %%
@@ -356,12 +364,14 @@ fig_dd.update_layout(
     height=400,
     hovermode="x unified",
 )
+_under = float((portfolio_drawdown < 0).mean())
 show_plotly_with_alt(
     fig_dd,
-    "Filled drawdown chart of the RSI portfolio from its running peak, zero at the top and losses "
-    "below. The curve reaches about -45 percent within the first months of 2020, recovers to zero "
-    "in early 2021, then falls again and spends the whole of 2022 between -40 and -65 percent, "
-    "ending the sample near -40 percent.",
+    "Filled drawdown chart of the RSI portfolio from its running peak, zero at the top and "
+    f"losses below. The curve reaches {portfolio_drawdown.min():.1f} percent at its worst and "
+    f"ends at {portfolio_drawdown.iloc[-1]:.1f}. The rule is below its own peak on "
+    f"{_under:.0%} of sessions, so the sample is mostly spent recovering rather than making new "
+    "highs.",
 )
 
 # %% [markdown]
@@ -477,11 +487,12 @@ fig.update_layout(
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], line_width=1)
 show_plotly_with_alt(
     fig,
-    "Cumulative return in percent for the RSI rule in solid navy and buy-and-hold in dashed grey, "
-    "on matched capital and costs. Buy-and-hold swings between roughly +100 and +800 percent and "
-    "ends near +460. The RSI rule never rises far above its start, falls to about -56 percent at "
-    "its mid-2022 low and ends at about -25 percent. On an axis wide enough for buy-and-hold the "
-    "RSI line reads as flat, which understates how much of the capital it actually lost.",
+    "Cumulative return in percent for the RSI rule in solid navy and buy-and-hold in dashed "
+    f"grey, on matched capital and costs. Buy-and-hold runs from {bh_cum.min():.0f} to "
+    f"{bh_cum.max():.0f} percent and ends at {bh_cum.iloc[-1]:.0f}. The RSI rule runs from "
+    f"{strategy_cum.min():.0f} to {strategy_cum.max():.0f} and ends at "
+    f"{strategy_cum.iloc[-1]:.0f}. On an axis wide enough for the first the second reads as "
+    "flat, which understates how much of its capital it actually lost.",
 )
 
 # %% [markdown]
