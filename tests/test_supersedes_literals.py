@@ -556,6 +556,40 @@ def test_a_per_label_causal_remedy_names_that_labels_current_identity(tree):
     assert findings[0].remedy == "bbbb"
 
 
+def test_a_causal_repair_is_never_the_sentinel(capsys, tree):
+    """`causal_supersedes` takes no sentinel, so the advice must not reach a causal finding.
+
+    It offers a declaration only when it is a current identity for the label
+    (`current_causal_identities`), and `"live"` never is - so a reader who followed a blanket
+    "paste live" would be withheld and refused after the DML fit and every placebo refit,
+    which is the expense this message exists to prevent.
+    """
+    repo, artifacts = tree
+    _causal_notebook(repo, "etfs", "12_causal_dml", '{"fwd_ret_21d": "gone"}')
+    _registry(artifacts, "etfs", [])
+    _causal_rows(artifacts, "etfs", [("bbbb", "fwd_ret_21d", None)])
+
+    assert _exit_status(repo, artifacts) == 1
+    message = capsys.readouterr().err
+
+    assert "takes no sentinel" in message
+    assert '"bbbb"' in message
+    assert '"live"' not in message.lower().replace("takes no sentinel", "")
+
+
+def test_a_lineage_repair_still_gets_the_sentinel_advice(capsys, tree):
+    """The control: the advice has to survive being scoped away from the causal path."""
+    repo, artifacts = tree
+    _notebook(repo, "etfs", "07_gbm", "gone", "etfs-gbm-v1")
+    _registry(artifacts, "etfs", [("aaaa", "etfs-gbm-v1", None)])
+
+    assert _exit_status(repo, artifacts) == 1
+    message = capsys.readouterr().err
+
+    assert 'paste "live"' in message.lower()
+    assert "takes no sentinel" not in message
+
+
 def test_a_multi_label_repair_says_which_entry_to_replace(capsys, tree):
     """Following "set it to <hash>" on a mapping would break the run this message saves.
 

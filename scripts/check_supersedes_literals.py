@@ -671,6 +671,15 @@ def _undeclared_heads(case_study: str, registry: Path, notebooks: list[Path]) ->
 
     Coverage is by name OR by hash, because a string-valued declaration names no set and only
     its hash can place it - the same reason this script keys on hashes everywhere else.
+
+    **A scalar ``SUPERSEDES_LIVE`` cannot be placed by either.** It states no name, and it is
+    not a hash, so a set declared through one - ``sp500_options/13_portfolio_management`` uses
+    three scalar parameters rather than a mapping - reads here as declared nowhere. Which of a
+    notebook's scalars covers which of the sets it freezes is decided at the call site, by the
+    ``name=`` each is passed, and no static reader can recover that. So such a head is still
+    reported, because inventing the coverage would let the expensive case through, but the
+    report says a sentinel was found rather than claiming nothing declares it. A mapping entry
+    needs none of this: its key IS the name, so ``{"the-set": "live"}`` covers by name.
     """
     if not registry.exists():
         return []
@@ -698,9 +707,13 @@ def _undeclared_heads(case_study: str, registry: Path, notebooks: list[Path]) ->
         declared_names: set[str] = set()
         declared_hashes: set[str] = set()
         owners: dict[str, list[str]] = {}
+        # Notebooks carrying a scalar sentinel, which states intent without stating a name.
+        sentinel_scalars: dict[str, list[str]] = {}
         for notebook in notebooks:
             source = notebook.read_text(encoding="utf-8", errors="ignore")
-            for value in _declared_literals(source).values():
+            for parameter, value in _declared_literals(source).items():
+                if value == SUPERSEDES_LIVE:
+                    sentinel_scalars.setdefault(notebook.name, []).append(parameter)
                 for lineage_name, declared in _declared_pairs(value):
                     if lineage_name:
                         declared_names.add(lineage_name)
@@ -732,15 +745,32 @@ def _undeclared_heads(case_study: str, registry: Path, notebooks: list[Path]) ->
                     if attributed
                     else "no notebook states this name as a readable template"
                 )
+            scalars = sorted({p for nb in attributed for p in sentinel_scalars.get(nb, [])})
+            if scalars:
+                # A sentinel is present and cannot be placed. Say that rather than "no
+                # declaration names it", which is false, and rather than treating it as
+                # coverage, which would let the case this check exists for through.
+                detail = (
+                    f"{name!r} is live at {tip} and no declaration in this case study names it "
+                    f"or its hash; {where}, and that notebook declares {', '.join(scalars)} = "
+                    f'"{SUPERSEDES_LIVE}" - a scalar sentinel states no name, so which set it '
+                    "covers is decided at the call site and cannot be read here. Confirm it is "
+                    "passed with this set's name; the next run that moves the members of an "
+                    "undeclared set is refused at the freeze, after the fit"
+                )
+            else:
+                detail = (
+                    f"{name!r} is live at {tip} and no SUPERSEDES_* declaration in this case "
+                    f"study names it or its hash; {where}. The next run that moves its "
+                    "members is refused at the freeze, after the fit"
+                )
             findings.append(
                 Finding(
                     case_study,
                     notebook_name,
                     tip,
                     "undeclared",
-                    f"{name!r} is live at {tip} and no SUPERSEDES_* declaration in this case "
-                    f"study names it or its hash; {where}. The next run that moves its "
-                    "members is refused at the freeze, after the fit",
+                    detail,
                     "SUPERSEDES_SETS",
                     SUPERSEDES_LIVE,
                     name,
@@ -1049,12 +1079,29 @@ def main(argv: list[str] | None = None) -> int:
                 f"      fix: {fix}",
                 file=sys.stderr,
             )
+        if any(f.parameter != _CAUSAL_NAME for f in stale):
+            # Addressed only to the lineage declarations. `causal_supersedes` resolves against
+            # `current_causal_identities` and offers the declaration only when it is one of
+            # them, so the sentinel is never a current identity and is always withheld - a
+            # reader who pasted it there would be refused after the DML fit and every placebo
+            # refit, which is the expense this message exists to prevent.
+            print(
+                '\nFor the population and candidate-set declarations, paste "live" rather '
+                "than the hash. A hash is a quotation of a value the registry moves on every "
+                "publish, so pasting the current one buys you until the next run of whatever "
+                'freezes it; "live" names the lineage instead and is resolved against the '
+                "registry at run time, so it is correct for a clean clone too.",
+                file=sys.stderr,
+            )
+        if any(f.parameter == _CAUSAL_NAME for f in stale):
+            print(
+                f"\n{_CAUSAL_NAME} takes no sentinel: `causal_supersedes` offers a declaration "
+                "only when it is a current identity for the label, so paste the hash named "
+                "above.",
+                file=sys.stderr,
+            )
         print(
-            '\nPaste "live" rather than the hash. A hash is a quotation of a value the '
-            "registry moves on every publish, so pasting the current one buys you until the "
-            'next run of whatever freezes it; "live" names the lineage instead and is '
-            "resolved against the registry at run time, so it is correct for a clean clone "
-            "too. Fix it now - you are about to pay for the run that re-renders the notebook "
+            "\nFix it now - you are about to pay for the run that re-renders the notebook "
             "you have to clear. If you know this run's membership is unchanged, so the "
             "literal is never read, pass --allow-stale-supersedes.",
             file=sys.stderr,

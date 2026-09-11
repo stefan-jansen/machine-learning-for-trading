@@ -165,6 +165,56 @@ def test_a_live_generation_that_nothing_declares_is_reported(tmp_path: Path) -> 
     assert findings[0].notebook == "06_linear.py"
 
 
+SCALAR_SENTINEL_NOTEBOOK = """
+from case_studies.research.comparison import candidate_set_supersedes
+
+SUPERSEDES_BASELINE_CANDIDATES: str = "live"
+
+for label_name in LABELS:
+    full_set_name = f"demo-{label_name}-linear-v1"
+    candidate_set_supersedes(study, name=full_set_name, declared=SUPERSEDES_BASELINE_CANDIDATES)
+"""
+
+
+def test_a_scalar_sentinel_is_reported_as_unplaceable_not_as_absent(tmp_path: Path) -> None:
+    """A scalar `"live"` states intent without stating a name, and both readings are wrong.
+
+    `sp500_options/13_portfolio_management` declares its candidate sets through three scalar
+    parameters rather than a mapping. Such a declaration is neither a name nor a hash, so
+    coverage cannot be resolved from it: which of a notebook's scalars is passed with which
+    set's `name=` is decided at the call site.
+
+    Treating it as coverage would let the case this check exists for through - the expensive
+    one, refused at the freeze after the fit. Reporting "no SUPERSEDES_* declaration in this
+    case study names it or its hash" is simply false when the notebook declares one. So the
+    head is still reported and the report says what was found.
+    """
+    registry = _registry(tmp_path, [("demo-fwd_ret_5d-linear-v1", "e7b7", None)])
+    notebook = tmp_path / "13_portfolio_management.py"
+    notebook.write_text(SCALAR_SENTINEL_NOTEBOOK)
+
+    findings = checker._undeclared_heads("demo", registry, [notebook])
+
+    assert [f.status for f in findings] == ["undeclared"]
+    assert "SUPERSEDES_BASELINE_CANDIDATES" in findings[0].detail
+    assert "cannot be read here" in findings[0].detail
+    assert "no SUPERSEDES_* declaration" not in findings[0].detail
+
+
+def test_a_mapping_entry_naming_the_sentinel_is_coverage(tmp_path: Path) -> None:
+    """The control for the test above: a key IS the name, so nothing has to be inferred."""
+    registry = _registry(tmp_path, [("demo-fwd_ret_5d-linear-v1", "e7b7", None)])
+    notebook = tmp_path / "06_linear.py"
+    notebook.write_text(
+        FREEZING_NOTEBOOK.replace(
+            "SUPERSEDES_SETS: dict = {}",
+            'SUPERSEDES_SETS: dict = {"demo-fwd_ret_5d-linear-v1": "live"}',
+        )
+    )
+
+    assert checker._undeclared_heads("demo", registry, [notebook]) == []
+
+
 def test_a_name_with_no_generation_is_not_reported(tmp_path: Path) -> None:
     """The boundary. Declaring nothing is CORRECT until a generation exists to supersede.
 
