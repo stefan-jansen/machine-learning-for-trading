@@ -347,7 +347,7 @@ except Exception as e:
     spy = None
 
 # %% [markdown]
-# ### MFE/MAE computation (21-day horizon)
+# ### MFE/MAE computation over the ETF horizon
 
 # %%
 spy_mfe_mae = None
@@ -356,7 +356,7 @@ spy_atr = None
 if spy is not None:
     spy_mfe_mae = compute_mfe_mae(spy, "timestamp", "close", ETF_HORIZON, unit="pct", side=1)
 
-    print(f"SPY MFE/MAE Statistics (21d horizon, n={len(spy_mfe_mae):,}):")
+    print(f"SPY MFE/MAE Statistics ({ETF_HORIZON}d horizon, n={len(spy_mfe_mae):,}):")
     print(
         f"  MFE mean: {spy_mfe_mae['mfe_pct'].mean():.2f}%  median: {spy_mfe_mae['mfe_pct'].median():.2f}%"
     )
@@ -517,11 +517,10 @@ try:
     print(f"BTC hourly data: {len(btc):,} bars")
     print(f"Date range: {btc['timestamp'].min()} to {btc['timestamp'].max()}")
 
-    # Compute MFE/MAE for 8-hour horizon (matches funding rate cycle)
     btc_mfe_mae = compute_mfe_mae(btc, "timestamp", "close", CRYPTO_HORIZON, unit="pct", side=1)
 
     # Summary statistics
-    print(f"\nBTC MFE/MAE Statistics (8h horizon, n={len(btc_mfe_mae):,}):")
+    print(f"\nBTC MFE/MAE Statistics ({CRYPTO_HORIZON}h horizon, n={len(btc_mfe_mae):,}):")
     print(f"  MFE mean: {btc_mfe_mae['mfe_pct'].mean():.2f}%")
     print(f"  MFE median: {btc_mfe_mae['mfe_pct'].median():.2f}%")
     print(f"  MAE mean: {btc_mfe_mae['mae_pct'].mean():.2f}%")
@@ -639,7 +638,7 @@ if btc_mfe_mae is not None:
 #
 # `load_cme_futures` returns one row per session *and tenor*, three rows per session
 # across tenors 0, 1 and 2. `compute_mfe_mae` walks a forward window with `shift(-k)` over
-# whatever row order it is handed, so on the unfiltered frame the 21-bar excursion window
+# whatever row order it is handed, so on the unfiltered frame the excursion window
 # steps across three different contracts instead of forward in time on one, and every
 # excursion statistic comes out inflated. Those statistics are exported to
 # `mfe_mae_summary.json` as the source for the chapter's barrier-width references, so the
@@ -675,8 +674,8 @@ try:
     print(f"ES futures data: {len(es):,} bars")
     print(f"Date range: {es['timestamp'].min()} to {es['timestamp'].max()}")
 
-    # Compute MFE/MAE for 21-day horizon. Excursions ride the roll-adjusted
-    # series (adj_*) so roll gaps don't register as favorable/adverse moves.
+    # Excursions ride the roll-adjusted series (adj_*) so roll gaps do not register as
+    # favorable or adverse moves.
     es_mfe_mae = compute_mfe_mae(
         es,
         "timestamp",
@@ -689,7 +688,7 @@ try:
     )
 
     # Summary statistics
-    print(f"\nES MFE/MAE Statistics (21d horizon, n={len(es_mfe_mae):,}):")
+    print(f"\nES MFE/MAE Statistics ({FUTURES_HORIZON}d horizon, n={len(es_mfe_mae):,}):")
     print(f"  MFE mean: {es_mfe_mae['mfe_pct'].mean():.2f}%")
     print(f"  MFE median: {es_mfe_mae['mfe_pct'].median():.2f}%")
     print(f"  MAE mean: {es_mfe_mae['mae_pct'].mean():.2f}%")
@@ -879,7 +878,7 @@ if spy is not None:
     for name, tp, sl in configs:
         print(f"  {name}: TP={tp:.2%} (MFE), SL={sl:.2%} (MAE)")
 
-    print("\n=== Barrier Hit Validation (SPY 21d) ===")
+    print(f"\n=== Barrier Hit Validation (SPY {ETF_HORIZON}d) ===")
 
     # triple_barrier_labels requires Datetime timestamps (numpy conversion)
     spy_dt = spy.with_columns(pl.col("timestamp").cast(pl.Datetime("ms")))
@@ -888,7 +887,7 @@ if spy is not None:
         config = LabelingConfig.triple_barrier(
             upper_barrier=tp,
             lower_barrier=sl,
-            max_holding_period=21,
+            max_holding_period=ETF_HORIZON,
             side=1,
         )
 
@@ -950,17 +949,23 @@ barrier_rows = []
 
 if spy_mfe_mae is not None:
     barrier_rows.append(
-        ("ETF (SPY)", "21d", mfe_pctls, mae_pctls, atr_scaled_stop_multiple(spy_mfe_mae, spy_atr))
+        (
+            "ETF (SPY)",
+            f"{ETF_HORIZON}d",
+            mfe_pctls,
+            mae_pctls,
+            atr_scaled_stop_multiple(spy_mfe_mae, spy_atr),
+        )
     )
 if btc_mfe_mae is not None:
     btc_mfe_pctls = compute_percentiles(btc_mfe_mae["mfe_pct"], [50, 75])
     btc_mae_pctls = compute_percentiles(btc_mfe_mae["mae_pct"], [50, 75])
-    barrier_rows.append(("Crypto (BTC)", "8h", btc_mfe_pctls, btc_mae_pctls, None))
+    barrier_rows.append(("Crypto (BTC)", f"{CRYPTO_HORIZON}h", btc_mfe_pctls, btc_mae_pctls, None))
 if es_mfe_mae is not None:
     barrier_rows.append(
         (
             "Futures (ES)",
-            "21d",
+            f"{FUTURES_HORIZON}d",
             es_mfe_pctls,
             es_mae_pctls,
             atr_scaled_stop_multiple(es_mfe_mae, es_atr),
@@ -980,13 +985,14 @@ for name, horizon, mfe_p, mae_p, stop_mult in barrier_rows:
     print(line)
 
 if spy_mfe_mae is not None and es_mfe_mae is not None:
-    print("\nES vs SPY adverse excursions, same 21-day horizon:")
+    print(f"\nES vs SPY adverse excursions, same {FUTURES_HORIZON}-day horizon:")
     for label, q in (("median", 50), ("p75", 75)):
         print(f"  MAE {label:<7} SPY {mae_pctls[q]:.2f}%   ES {es_mae_pctls[q]:.2f}%")
 
 # %% [markdown]
-# **What the table says.** BTC's 8-hour excursions are an order of magnitude smaller
-# than the daily instruments' 21-day excursions, which is horizon rather than asset:
+# **What the table says.** BTC's excursions over one funding cycle are an order of
+# magnitude smaller than the daily instruments' over a trading month, which is horizon
+# rather than asset:
 # a fixed percentage barrier is workable there because the funding cycle fixes the
 # holding period. For SPY and ES the stop that the p75 adverse excursion implies is
 # *wider* than one ATR, so an implementation that reaches for a round `1xATR` stop
@@ -1020,15 +1026,15 @@ if spy_mfe_mae is not None and es_mfe_mae is not None:
 summary = {
     "generated_at": datetime.now(UTC).isoformat(),
     "horizons": {
-        "etf_spy": 21,
+        "etf_spy": ETF_HORIZON,
         "crypto_btc": 8,
-        "futures_es": 21,
+        "futures_es": FUTURES_HORIZON,
     },
     "datasets": {},
 }
 
 if spy_mfe_mae is not None:
-    summary["datasets"]["etf_spy_21d"] = {
+    summary["datasets"][f"etf_spy_{ETF_HORIZON}d"] = {
         "n_observations": len(spy_mfe_mae),
         "mfe_median": float(spy_mfe_mae["mfe_pct"].median()),
         "mfe_75th": float(spy_mfe_mae["mfe_pct"].quantile(0.75)),
@@ -1038,12 +1044,14 @@ if spy_mfe_mae is not None:
         "mae_90th": float(spy_mfe_mae["mae_pct"].quantile(0.90)),
     }
     if spy_atr is not None:
-        summary["datasets"]["etf_spy_21d"]["atr_pct_avg"] = float(spy_atr["atr_pct"].mean())
+        summary["datasets"][f"etf_spy_{ETF_HORIZON}d"]["atr_pct_avg"] = float(
+            spy_atr["atr_pct"].mean()
+        )
 
 # %%
 # BTC and ES summary statistics
 if btc_mfe_mae is not None:
-    summary["datasets"]["crypto_btc_8h"] = {
+    summary["datasets"][f"crypto_btc_{CRYPTO_HORIZON}h"] = {
         "n_observations": len(btc_mfe_mae),
         "mfe_median": float(btc_mfe_mae["mfe_pct"].median()),
         "mfe_75th": float(btc_mfe_mae["mfe_pct"].quantile(0.75)),
@@ -1054,7 +1062,7 @@ if btc_mfe_mae is not None:
     }
 
 if es_mfe_mae is not None:
-    summary["datasets"]["futures_es_21d"] = {
+    summary["datasets"][f"futures_es_{FUTURES_HORIZON}d"] = {
         "n_observations": len(es_mfe_mae),
         "mfe_median": float(es_mfe_mae["mfe_pct"].median()),
         "mfe_75th": float(es_mfe_mae["mfe_pct"].quantile(0.75)),
@@ -1092,7 +1100,8 @@ if SAVE_OUTPUT:
 # %%
 if spy is not None:
     spy_close = spy["close"]
-    horizons = [5, 10, 21, 42]
+    # The declared ETF horizon always appears, so the comparison below has a row to read.
+    horizons = sorted({5, 10, ETF_HORIZON, 2 * ETF_HORIZON})
     result = analyze_excursions(
         spy_close,
         horizons=horizons,
@@ -1129,11 +1138,11 @@ if spy is not None:
 # %%
 # Compare manual single-horizon vs library multi-horizon
 if spy_mfe_mae is not None:
-    print("--- Manual vs Library (21d horizon) ---")
+    print(f"--- Manual vs Library ({ETF_HORIZON}d horizon) ---")
     manual_mfe_50 = spy_mfe_mae["mfe_pct"].quantile(0.5)
-    library_mfe_50 = result.get_percentile(21, 50, "mfe") * 100
+    library_mfe_50 = result.get_percentile(ETF_HORIZON, 50, "mfe") * 100
     manual_mae_50 = spy_mfe_mae["mae_pct"].quantile(0.5)
-    library_mae_50_abs = abs(result.get_percentile(21, 50, "mae") * 100)
+    library_mae_50_abs = abs(result.get_percentile(ETF_HORIZON, 50, "mae") * 100)
     print(f"Manual  MFE p50 (uses high):  {manual_mfe_50:.2f}%")
     print(f"Library MFE p50 (uses close): {library_mfe_50:.2f}%")
     print(f"Manual  |MAE| p50 (uses low):   {manual_mae_50:.2f}%")
