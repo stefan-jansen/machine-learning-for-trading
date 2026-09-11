@@ -48,6 +48,7 @@ import time
 import polars as pl
 
 from case_studies.research import (
+    OfficialPopulation,
     open_study,
     prediction_rows_at,
     reuse_disclosure,
@@ -1020,12 +1021,16 @@ elif EXECUTION_TIER != "canonical":
     # rows if they are there and otherwise leaves Section 4's ensemble line empty.
     print(f"Ensemble skipped: it is a canonical-tier object and this run is {EXECUTION_TIER}.")
 else:
+    # The same admissibility set the sweep above ran on, passed rather than recomputed so the
+    # two stages provably agree: an ensemble averaging a row the sweep refused would be a
+    # carrier this case study cannot select.
     _members = resolve_members(
         CASE_DIR,
         label=LABEL,
         family=str(_ens["member_family"]),
         split=SPLIT,
         max_num_leaves=int(_ens["max_num_leaves"]),
+        admissible=set(_admissible["prediction_hash"]),
     )
     _member_spec_json = sqlite3.connect(
         f"file:{CASE_DIR / 'run_log' / 'registry.db'}?mode=ro", uri=True
@@ -1089,9 +1094,26 @@ else:
             label=LABEL,
             case_dir=CASE_DIR,
         )
+        # Registration is not publication, and selection asks the second question. An
+        # identity is selectable only where the population its producer publishes still
+        # lists it - `selectable_validation_candidates` tests membership, not exclusion -
+        # so a prediction set no population ever named is invisible to the ranking however
+        # complete it is. Every model notebook publishes one; this is the ensemble's.
+        #
+        # Named per label because this notebook runs per label and a population is
+        # immutable once written. A population is idempotent under its own hash, so a
+        # re-run of an unchanged ensemble re-opens the one it published rather than
+        # writing a second generation.
+        _population = OfficialPopulation.create(
+            study,
+            name=f"{CASE_STUDY_ID}-ensemble-{LABEL}-{SPLIT}-v1",
+            member_kind="prediction",
+            members=(ensemble_prediction_hash,),
+        )
         print(
             f"\nEnsemble registered: {ensemble_prediction_hash} "
-            f"({_averaged.height:,} rows over {_averaged['fold_id'].n_unique()} folds)",
+            f"({_averaged.height:,} rows over {_averaged['fold_id'].n_unique()} folds), "
+            f"published as {_population.name}",
             flush=True,
         )
 

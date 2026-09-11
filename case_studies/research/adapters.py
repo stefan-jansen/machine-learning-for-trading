@@ -53,6 +53,10 @@ def registered_adapters(kind: str) -> tuple[AdapterBinding, ...]:
 
 for _name, _module in {
     "deep_learning": "case_studies.utils.deep_learning",
+    # Registered so the holdout path refuses for the ensemble by name rather than as an
+    # unsupported adapter. The module implements `rekey_holdout_spec` only, because an
+    # ensemble is not fitted and the other hooks describe a fit.
+    "ensemble": "case_studies.utils.ensemble",
     "gbm": "case_studies.utils.gbm",
     "latent_factors": "case_studies.utils.latent_factors",
     "linear": "case_studies.utils.linear",

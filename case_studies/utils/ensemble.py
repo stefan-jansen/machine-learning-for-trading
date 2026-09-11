@@ -50,6 +50,25 @@ def member_num_leaves(config_name: str) -> int:
     return int(declared) if declared is not None else LIGHTGBM_DEFAULT_NUM_LEAVES
 
 
+def admissible_prediction_hashes(case_dir: Path) -> set[str]:
+    """The prediction identities a stage of this case study may consume.
+
+    The same rule `14_backtest.py` applies to its sweep: complete, under an
+    identity this schema still recognises, and not listed by a retired generation
+    of its own population. The two stages have to agree, because an ensemble built
+    over rows the sweep refused would be a carrier the case study cannot select.
+    """
+    from case_studies.research import prediction_rows_at, superseded_members_at
+
+    retired = superseded_members_at(case_dir)
+    catalog = prediction_rows_at(case_dir)
+    return set(
+        catalog.filter(pl.col("complete") & ~pl.col("prediction_hash").is_in(list(retired)))
+        .get_column("prediction_hash")
+        .to_list()
+    )
+
+
 def resolve_members(
     case_dir: Path,
     *,
@@ -57,18 +76,31 @@ def resolve_members(
     family: str = "gbm",
     split: str = "validation",
     max_num_leaves: int | None = None,
+    admissible: set[str] | None = None,
 ) -> pl.DataFrame:
     """The prediction set of each qualifying configuration, one row per configuration.
 
-    Takes each configuration's **last** checkpoint. Any other choice - the
-    checkpoint with the best validation metric, say - would select on the window
-    the ensemble is then measured on, which is the thing the ensemble exists to
-    avoid doing.
+    Takes each configuration's **last** checkpoint among the admissible rows. Any
+    other choice - the checkpoint with the best validation metric, say - would
+    select on the window the ensemble is then measured on, which is the thing the
+    ensemble exists to avoid doing.
+
+    ``admissible`` restricts the candidates before the last-checkpoint rule is
+    applied, and defaults to :func:`admissible_prediction_hashes`. It is not
+    optional in effect: the registry keeps a retired generation's rows after a
+    refit, and a configuration name identifies a configuration rather than a
+    generation of it. Grouping by name over both generations picks whichever row
+    carries the larger checkpoint, so a refit that shortened a run would put the
+    retired generation's forecast into the ensemble and nothing downstream would
+    show it - the member list would name the right configuration and hold the
+    wrong prediction.
 
     Returns columns ``config_name``, ``training_hash``, ``prediction_hash``,
     ``checkpoint_value``, ``num_leaves``, ordered by ``config_name`` so the member
     list is stable across calls and so the registered spec is too.
     """
+    if admissible is None:
+        admissible = admissible_prediction_hashes(case_dir)
     db = sqlite3.connect(f"file:{case_dir / 'run_log' / 'registry.db'}?mode=ro", uri=True)
     try:
         rows = db.execute(
@@ -86,6 +118,14 @@ def resolve_members(
         msg = (
             f"no {family} prediction sets for {label!r} at split {split!r} in "
             f"{case_dir}; the ensemble has nothing to average"
+        )
+        raise ValueError(msg)
+    offered = len(rows)
+    rows = [row for row in rows if row[2] in admissible]
+    if not rows:
+        msg = (
+            f"all {offered} {family} prediction sets for {label!r} at split {split!r} are "
+            "incomplete or belong to a retired generation, so none may enter an ensemble"
         )
         raise ValueError(msg)
 
@@ -269,3 +309,30 @@ def load_ensemble_declaration(case_study: str) -> dict | None:
         )
         raise ValueError(msg)
     return dict(block)
+
+
+def rekey_holdout_spec(study, spec: dict[str, Any], *, validation_spec: dict[str, Any]) -> None:
+    """Refuse, naming what an ensemble holdout would have to be.
+
+    ``build_holdout_training_spec`` dispatches here through the model adapter
+    registry, and this module is registered so the refusal names the family rather
+    than reading as "unsupported model adapter". The refusal is the honest answer
+    today: an ensemble is not fitted, so there is nothing here to re-key onto the
+    holdout fold, and the holdout forecast is the mean of the members' *holdout*
+    forecasts rather than a re-fit of anything this spec describes.
+
+    Producing it needs each member re-keyed and re-fitted through its own family's
+    hook and then averaged, which is twelve training identities and one ensemble
+    identity over a window `18_holdout_predictions` documents as carrying one
+    configuration. That is a stage, not a hook, and it is not written.
+    """
+    members = (validation_spec.get("computation", {}).get("ensemble") or {}).get("members") or []
+    msg = (
+        "an ensemble has no fit to re-key onto the holdout fold. Its holdout forecast is the "
+        f"mean of its {len(members)} members' holdout forecasts, so each member has to be "
+        "re-keyed and re-fitted through its own family's hook and the results averaged under a "
+        "new ensemble identity. No stage does that yet, and this hook cannot: it is handed one "
+        "specification and returns one. If the ensemble has been selected as the carrier, the "
+        "holdout stage is what needs writing, not this function."
+    )
+    raise NotImplementedError(msg)

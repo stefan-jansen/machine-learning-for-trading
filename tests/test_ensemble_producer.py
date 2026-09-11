@@ -79,23 +79,71 @@ def test_members_are_the_last_checkpoint_of_each_qualifying_config(tmp_path):
             ("gbm", "fwd_ret_15m", "leaves_7_mae", "p_other_label", 500),
         ],
     )
-    members = resolve_members(case_dir, label="fwd_ret_60m", max_num_leaves=31)
+    admissible = {"p_l7_50", "p_l7_500", "p_l63_500", "p_def_500", "p_ols", "p_other_label"}
+    members = resolve_members(
+        case_dir, label="fwd_ret_60m", max_num_leaves=31, admissible=admissible
+    )
     assert members["config_name"].to_list() == ["default_mae", "leaves_7_mae"]
     # The 500-tree checkpoint, not the 50-tree one: one row per configuration.
     assert members["prediction_hash"].to_list() == ["p_def_500", "p_l7_500"]
     assert members["num_leaves"].to_list() == [LIGHTGBM_DEFAULT_NUM_LEAVES, 7]
 
     # Without the rule, the 63-leaf configuration joins.
-    unfiltered = resolve_members(case_dir, label="fwd_ret_60m")
+    unfiltered = resolve_members(case_dir, label="fwd_ret_60m", admissible=admissible)
     assert "leaves_63_mae" in unfiltered["config_name"].to_list()
 
 
 def test_no_qualifying_member_raises_rather_than_returning_an_empty_frame(tmp_path):
     case_dir = _registry(tmp_path, [("gbm", "fwd_ret_60m", "leaves_63_mae", "p", 500)])
     with pytest.raises(ValueError, match="more than 31 leaves"):
-        resolve_members(case_dir, label="fwd_ret_60m", max_num_leaves=31)
+        resolve_members(case_dir, label="fwd_ret_60m", max_num_leaves=31, admissible={"p"})
     with pytest.raises(ValueError, match="nothing to average"):
-        resolve_members(case_dir, label="no_such_label")
+        resolve_members(case_dir, label="no_such_label", admissible={"p"})
+    with pytest.raises(ValueError, match="retired generation"):
+        resolve_members(case_dir, label="fwd_ret_60m", admissible=set())
+
+
+def test_a_retired_generation_does_not_win_on_checkpoint_number(tmp_path):
+    """The defect the admissibility filter exists to stop.
+
+    A refit gives a configuration a second training run under the same name. If
+    the retired generation ran longer - 500 trees against the current 300 - then
+    grouping by configuration name and taking the largest checkpoint puts the
+    retired forecast in the ensemble, under the right configuration's name.
+    """
+    case_dir = tmp_path / "case"
+    (case_dir / "run_log").mkdir(parents=True)
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    db.execute(
+        "CREATE TABLE training_runs (training_hash TEXT PRIMARY KEY, family TEXT, "
+        "label TEXT, config_name TEXT)"
+    )
+    db.execute(
+        "CREATE TABLE prediction_sets (prediction_hash TEXT PRIMARY KEY, training_hash TEXT, "
+        "checkpoint_value INTEGER, split TEXT)"
+    )
+    # Two generations of one configuration, the retired one trained longer.
+    db.execute("INSERT INTO training_runs VALUES ('t_old','gbm','fwd_ret_60m','leaves_7_mae')")
+    db.execute("INSERT INTO training_runs VALUES ('t_new','gbm','fwd_ret_60m','leaves_7_mae')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p_retired','t_old',500,'validation')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p_current','t_new',300,'validation')")
+    db.execute("INSERT INTO training_runs VALUES ('t_d','gbm','fwd_ret_60m','default_mae')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p_d','t_d',500,'validation')")
+    db.commit()
+    db.close()
+
+    unfiltered = resolve_members(
+        case_dir,
+        label="fwd_ret_60m",
+        max_num_leaves=31,
+        admissible={"p_retired", "p_current", "p_d"},
+    )
+    assert "p_retired" in unfiltered["prediction_hash"].to_list()
+
+    current_only = resolve_members(
+        case_dir, label="fwd_ret_60m", max_num_leaves=31, admissible={"p_current", "p_d"}
+    )
+    assert current_only["prediction_hash"].to_list() == ["p_d", "p_current"]
 
 
 def test_one_member_is_not_an_ensemble(monkeypatch):
