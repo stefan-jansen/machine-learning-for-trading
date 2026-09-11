@@ -442,9 +442,11 @@ if kelly_strategy.size_history:
     show_plotly_with_alt(
         fig,
         "Line chart of the Kelly target fraction of equity against trade number, with a dashed "
-        "line at the base target. The first four entries sit exactly on the base target because "
-        "no realized trade has been closed yet; the fifth drops to about a fifth of it once "
-        "losses enter the win rate, and every later entry stays at that floor.",
+        "line at the base target. The first four entries sit exactly on the base target, which "
+        "is what the sizing helper returns while fewer than the required number of trades have "
+        "closed and while the closed ones are all wins or all losses. From the fifth entry on "
+        "the formula applies, and it returns the configured floor, about a fifth of the base, "
+        "for every remaining entry.",
     )
 
 # %%

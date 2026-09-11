@@ -551,10 +551,10 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Line chart of net cumulative return in percent for two rules on the same bars and costs, "
-    "direct-labelled at the right. Buy-and-hold, dashed, rises to about 600 percent in early "
-    "2021, peaks above 600 again in late 2021, falls under 100 by late 2022 and recovers to "
-    "roughly 370 by the end. The RSI rule stays in a band of about plus or minus 60 percent for "
-    "the whole sample and ends around -25 percent.",
+    "direct-labelled at the right. Buy-and-hold, dashed, rises above 600 percent twice, in early "
+    "and late 2021, falls under 100 by late 2022 and ends near +360. The RSI rule never rises far "
+    "above its start, reaches about -56 percent at its mid-2022 low and ends at about -25 "
+    "percent. The axis buy-and-hold needs is wide enough that the RSI line reads as flat.",
 )
 
 # %% [markdown]
@@ -918,7 +918,7 @@ show_plotly_with_alt(
     fig,
     "Filled drawdown chart from the high-water mark, zero at the top. The rule is under water for "
     "almost the entire sample: it reaches about -45 percent in early 2020, returns to zero only "
-    "in the first months of 2021, then falls to a marked low near -67 percent in mid-2022 and is "
+    "in the first months of 2021, then falls to a marked low near -66 percent in mid-2022 and is "
     "still about -40 percent at the end. The flat segments are the stretches with no position, "
     "where the drawdown cannot recover because nothing is at risk.",
 )

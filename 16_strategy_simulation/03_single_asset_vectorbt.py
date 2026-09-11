@@ -479,8 +479,9 @@ show_plotly_with_alt(
     fig,
     "Cumulative return in percent for the RSI rule in solid navy and buy-and-hold in dashed grey, "
     "on matched capital and costs. Buy-and-hold swings between roughly +100 and +800 percent and "
-    "ends near +470. The RSI rule stays within about plus or minus 40 percent of its start for "
-    "the entire sample and ends slightly negative, so the two are not on comparable scales.",
+    "ends near +460. The RSI rule never rises far above its start, falls to about -56 percent at "
+    "its mid-2022 low and ends at about -25 percent. On an axis wide enough for buy-and-hold the "
+    "RSI line reads as flat, which understates how much of the capital it actually lost.",
 )
 
 # %% [markdown]
