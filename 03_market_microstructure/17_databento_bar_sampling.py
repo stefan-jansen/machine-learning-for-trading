@@ -248,6 +248,32 @@ if len(trades) == 0:
     trades = None
 
 # %% [markdown]
+# ### Trades with no aggressor side
+#
+# DataBento marks a trade `N` when it cannot say which side was the aggressor, and this
+# notebook maps that to a side of zero. Volume and imbalance bars cannot use such a
+# trade: the first splits each bar's volume into buys and sells, the second accumulates
+# signed flow. Tick and dollar bars could use it, and time bars do not look at side
+# at all.
+#
+# Every bar type here is compared against the others, though, so they have to be built
+# from the same trades. The comparison set is therefore the classified trades, and the
+# share that drops out is printed rather than absorbed - on a liquid name it is not
+# small, and a reader comparing these bars to a count of the day's prints should know
+# the difference.
+
+# %%
+if trades is not None and len(trades) > 0:
+    classified = trades.filter(pl.col("side") != 0)
+    unclassified = len(trades) - len(classified)
+    print(
+        f"{unclassified:,} of {len(trades):,} trades carry no aggressor side "
+        f"({unclassified / len(trades):.1%}); every bar type below is built from the "
+        f"remaining {len(classified):,}."
+    )
+    trades = classified
+
+# %% [markdown]
 # ## 3. Daily Volume Profile
 #
 # Before calibrating bar thresholds, we need to understand the day-to-day
@@ -1020,10 +1046,11 @@ if "calibration_df" in dir() and len(calibration_df) > 0:
         alpha_vals = [col for col in pivot.columns if col != "expected_t"]
         heatmap_matrix = pivot.select(alpha_vals).to_numpy()
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
 # %%
 if imb_has_data:
+    # Created here rather than at the end of the cell above: a figure made in one cell
+    # and drawn into in the next is published empty by the inline backend.
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     ax = axes[0]
     im = ax.imshow(heatmap_matrix, cmap="YlOrRd", aspect="auto")
     ax.set_xticks(range(len(alpha_vals)))
@@ -1041,7 +1068,7 @@ if imb_has_data:
             if not np.isnan(val):
                 ax.text(j, i, f"{val:.0f}", ha="center", va="center", fontsize=10)
 
-    plt.colorbar(im, ax=ax, label="Bars/Day")
+    fig.colorbar(im, ax=ax, label="Bars/Day")
 
     # Target highlight - find cell closest to 500
     target_diff = np.abs(heatmap_matrix - TARGET_BARS_PER_DAY)
@@ -1057,9 +1084,8 @@ if imb_has_data:
         )
     )
 
-# %%
-if imb_has_data:
-    # CV heatmap (stability)
+    # The CV panel belongs in this cell: a figure drawn across two cells is published
+    # half-finished at the end of the first one, with no alt text.
     cv_pivot = (
         heatmap_data.with_columns((pl.col("std_bars") / pl.col("mean_bars")).alias("cv"))
         .pivot(index="expected_t", on="alpha", values="cv")
@@ -1084,7 +1110,7 @@ if imb_has_data:
             if not np.isnan(val):
                 ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=10)
 
-    plt.colorbar(im, ax=ax, label="CV")
+    fig.colorbar(im, ax=ax, label="CV")
 
     plt.suptitle(f"Tick Imbalance Bar Sensitivity ({SYMBOL}, α={IMBALANCE_ALPHA[0]})", y=1.02)
     show_with_alt(
@@ -1493,8 +1519,12 @@ if "bar_data" in dir() and bar_data:
     plt.suptitle(f"Cross-Perspective Bar Distributions ({first_date})", y=1.02, fontsize=14)
     show_with_alt(
         fig,
-        "Panels comparing the distributions each sampler produced on one session, including the distribution of bar durations in seconds, with the horizontal axis capped at the ninety-ninth percentile across all series.",
+        "Six panels in two rows of three, comparing what each sampler produced on one session. The top row holds three overlaid histograms, one colour per bar type: bar duration in seconds, bar volume in thousands of shares, and bar tick count. Each of those three horizontal axes is capped at the ninety-ninth percentile across the series drawn in it, so one long tail cannot push the others into the first bin. Bottom left is a grouped bar chart of the coefficient of variation of duration, volume and tick count for each bar type. Bottom centre is a box plot of bar duration by bar type. Bottom right is not a chart: it is a table drawn as text inside the figure, listing each bar type with its count, mean duration and mean volume, and the same numbers are printed below the figure.",
     )
+
+    # The table in the sixth panel is drawn as pixels, so a screen reader cannot read
+    # it. Print the same text.
+    print(summary_text)
 
     print("\nKey insight:")
     print("- Time bars: Low duration CV (fixed), high volume CV (varies)")

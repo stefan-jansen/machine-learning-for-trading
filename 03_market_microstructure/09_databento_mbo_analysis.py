@@ -212,7 +212,7 @@ def compute_book_pressure(
 
     if len(trades) > 0:
         rolling_mid = trades.with_columns(
-            pl.col("price").rolling_mean(window_size=100, min_periods=1).alias("mid_price")
+            pl.col("price").rolling_mean(window_size=100, min_samples=1).alias("mid_price")
         ).select(["timestamp", "mid_price"])
 
         df = df.sort("timestamp").join_asof(
