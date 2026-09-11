@@ -55,7 +55,6 @@
 """Compare continuous DAG learning with time-series causal discovery."""
 
 import io
-import warnings
 from collections import defaultdict
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -77,9 +76,7 @@ from tigramite.pcmci import PCMCI
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 N_SAMPLES = 2000
@@ -105,6 +102,13 @@ print(f"Bootstrap iterations: {N_BOOTSTRAP}")
 
 # %% [markdown]
 # ## 2. The NOTEARS Algorithm
+#
+# The implementation below is the notebook's own. Every other method here is imported:
+# VAR-LiNGAM from `causal-learn`, PCMCI and its partial-correlation test from `tigramite`,
+# the Granger tests from `statsmodels`. `causal-learn` is the library a reader would expect
+# NOTEARS to live in, and it ships no NOTEARS, so a continuous-optimization baseline has to
+# be written out. That suits the teaching: the augmented-Lagrangian loop is short enough to
+# read, and the acyclicity constraint is the whole idea.
 #
 # **NOTEARS** (Zheng et al., 2018) reformulates DAG learning as:
 #
@@ -326,17 +330,19 @@ def extract_edges(W: np.ndarray, labels: list, threshold: float = 0.0) -> set:
 # Before applying to real data, we validate methods on synthetic data
 # with known causal structure to measure precision and sensitivity.
 
+# %% [markdown]
+# The generator is the linear SEM that NOTEARS targets (Zheng et al. 2018): equal-variance
+# noise on a unit scale, with accumulating coefficients along the known DAG
+# X0 -> X1 -> X2, X0 -> X2, X2 -> X3 -> X4. Downstream variables inherit their parents'
+# variance, so the variance ordering lines up with the causal order and the orientation is
+# identifiable from observational data alone.
+
 # %%
-# Generate synthetic data with known DAG: X0→X1→X2, X0→X2, X2→X3→X4
 print("\n=== SYNTHETIC VALIDATION ===\n")
 
 n_synthetic = SYNTHETIC_SAMPLE_SIZE if SYNTHETIC_SAMPLE_SIZE > 0 else N_SAMPLES
 TRUE_EDGES = {(0, 1), (1, 2), (0, 2), (2, 3), (3, 4)}
 
-# Equal-variance noise (unit scale) with accumulating coefficients, the linear
-# SEM that NOTEARS targets (Zheng et al. 2018): downstream variables inherit
-# their parents' variance, so the variance ordering aligns with the causal
-# order and the orientation is identifiable from observational data alone.
 np.random.seed(SEED)
 X_syn = np.zeros((n_synthetic, 5))
 X_syn[:, 0] = np.random.randn(n_synthetic)
@@ -725,7 +731,7 @@ fig_counts = go.Figure(
 )
 fig_counts.update_layout(
     title=dict(
-        text="Discovery counts vary sharply across method assumptions",
+        text="Edges selected by each discovery method",
         x=0.02,
         xanchor="left",
     ),
@@ -734,7 +740,13 @@ fig_counts.update_layout(
     showlegend=False,
 )
 fig_counts.update_yaxes(rangemode="tozero")
-fig_counts.show()
+show_plotly_with_alt(
+    fig_counts,
+    "Bar chart with one bar per discovery method - NOTEARS, VAR-LiNGAM, Granger and PCMCI - "
+    "showing how many edges, directed pairs or lagged links each selected, with the count "
+    "printed above each bar. The four quantities are counts of different objects and are not "
+    "interchangeable.",
+)
 
 # %% [markdown]
 # ## 12. Visualize Discovered Causal Graph
@@ -847,14 +859,33 @@ def create_causal_graph_viz(
             textfont=dict(size=10, color=COLORS["silver"]),
             hoverinfo="text",
             hovertext=labels,
+            showlegend=False,
         )
     )
+    # Edge colour is the only thing carrying stability, or sign, so it needs naming on the
+    # chart: an arrow drawn in one of two colours says nothing to a reader without a key.
+    key = (
+        [("Recovered in most resamples", "positive"), ("Recovered in few", "amber")]
+        if stability
+        else [("Positive weight", "positive"), ("Negative weight", "negative")]
+    )
+    for name, color in key:
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                line=dict(color=COLORS[color], width=3),
+                name=name,
+            )
+        )
     fig.update_layout(
         title=dict(text=title, x=0.02, xanchor="left"),
-        showlegend=False,
-        height=500,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.08, xanchor="left", x=0),
+        height=520,
         width=720,
-        margin=dict(l=40, r=40, t=80, b=40),
+        margin=dict(l=40, r=40, t=80, b=60),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
     )
@@ -868,23 +899,37 @@ def create_causal_graph_viz(
 # %%
 edge_stability_dict = {edge: edge_counts.get(edge, 0) / N_BOOTSTRAP for edge in full_sample_edges}
 
-# Visualize NOTEARS graph with stability coloring
 fig1 = create_causal_graph_viz(
     W_notears,
     ASSETS,
-    f"NOTEARS retains {n_confirmed} bootstrap-confirmed contemporaneous edges",
+    "Contemporaneous edges NOTEARS retains, coloured by bootstrap frequency",
     stability=edge_stability_dict,
 )
-fig1.show()
+show_plotly_with_alt(
+    fig1,
+    "Network diagram with the assets placed around an ellipse, one labelled disc each, and "
+    "an arrow for every contemporaneous edge the NOTEARS fit retains on the full sample. "
+    "Arrow thickness follows the edge weight and arrow colour separates edges recovered in "
+    "most block-bootstrap resamples from the rest, as the legend below the plot states. Each "
+    "arrow's hover label carries its weight and its bootstrap frequency, and an asset the "
+    "fit gives no retained edge sits on the ellipse unconnected.",
+)
 
-# Visualize VAR-LiNGAM lagged effects (causal-learn library)
+# Lagged effects from the causal-learn VAR-LiNGAM fit
 n_var_lagged = int(np.sum(np.abs(B_lag) > 0))
 fig2 = create_causal_graph_viz(
     B_lag.T,
     ASSETS,
-    f"VAR-LiNGAM retains {n_var_lagged} lagged edge after pruning",
+    "Lagged edges VAR-LiNGAM retains after pruning",
 )
-fig2.show()
+show_plotly_with_alt(
+    fig2,
+    "Network diagram with the same assets in the same positions, and an arrow for every "
+    "lagged edge the pruned VAR-LiNGAM fit retains. Arrow colour separates positive from "
+    "negative coefficients, as the legend below the plot states, thickness follows the "
+    "coefficient's size, and the hover label carries its value. An asset the pruned fit "
+    "leaves with no lagged edge sits on the ellipse unconnected.",
+)
 
 # %% [markdown]
 # ## 13. Interpretation: Hypotheses for Further Investigation
@@ -894,7 +939,8 @@ fig2.show()
 # ### Validation Steps Before Any Trading Use
 #
 # 1. **Out-of-sample testing**: Split data temporally, discover on training, validate on test
-# 2. **Bootstrap stability**: Only consider edges found in ≥50% of bootstraps
+# 2. **Bootstrap stability**: consider only edges recovered in a majority of the bootstrap
+#    resamples
 # 3. **Multiple method agreement**: Edges confirmed by NOTEARS, VAR-LiNGAM, AND Granger
 # 4. **Economic rationale**: Does the relationship make economic sense?
 # 5. **DML/BSTS validation**: Use proper causal inference to estimate effect magnitude
@@ -946,7 +992,8 @@ else:
 # - **Bootstrap frequency is not enough by itself.** A robust NOTEARS claim now requires an
 #   edge to appear in the full-sample graph and in at least half of refitted bootstrap graphs.
 # - **Every discovered edge remains a hypothesis.** Latent confounding, nonstationarity,
-#   threshold sensitivity, and the lack of a sealed holdout prevent a trading interpretation.
+#   threshold sensitivity, and the absence of any out-of-sample test prevent a trading
+#   interpretation.
 #
 # Next, use `09_adia_causal_benchmark` to examine what supervised discovery can learn when
 # many labeled synthetic graphs are available. See Chapter 15, Section 15.6.
