@@ -52,7 +52,7 @@ from ml4t.diagnostic.metrics import sharpe_ratio, sortino_ratio
 from ml4t.diagnostic.metrics.ic_inference import compute_ic_hac_stats
 from ml4t.diagnostic.signal.signal_ic import extract_signal_ic_series
 
-from utils.paths import get_case_study_dir
+from utils.paths import get_case_study_dir, registry_readonly_uri
 from utils.style import COLORS, FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
 # %% tags=["parameters"]
@@ -113,15 +113,16 @@ BEST_GBM = {
 }
 
 # %% [markdown]
-# Registry reads are opened in SQLite read-only, immutable mode. The query excludes
-# prediction sets with a degenerate fold before ranking by the daily-pooled IC.
+# Registry reads are opened read-only, which is what stops this notebook writing to a
+# registry the case studies own. The query excludes prediction sets with a degenerate
+# fold before ranking by the daily-pooled IC.
 
 
 # %%
 def resolve_best_prediction(case_study: str, label: str) -> dict[str, str | float]:
     """Resolve the top validation GBM prediction set without writing to the registry."""
     registry = REGISTRY_ROOTS[case_study] / "registry.db"
-    connection = sqlite3.connect(f"file:{registry}?mode=ro&immutable=1", uri=True)
+    connection = sqlite3.connect(registry_readonly_uri(registry), uri=True)
     try:
         metric_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(prediction_metrics)")
