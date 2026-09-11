@@ -468,7 +468,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Four growth-of-one-dollar paths on a logarithmic axis for the value, momentum, carry and defensive aggregates of the Century of Factor Premia data, all rising across the sample.",
+    "Four growth-of-one-dollar paths on a logarithmic axis for the value, momentum, carry and defensive aggregates of the Century of Factor Premia data, each ending far above one, momentum highest, with value and carry roughly flat since about 2010.",
 )
 
 # %% [markdown]

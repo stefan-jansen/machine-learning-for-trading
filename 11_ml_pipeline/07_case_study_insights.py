@@ -75,7 +75,7 @@ from case_studies.utils.insight_chapter import (
 from case_studies.utils.model_analysis import (
     load_predictions,
 )
-from utils.paths import get_case_study_dir
+from utils.paths import get_case_study_dir, registry_readonly_uri
 from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
@@ -144,7 +144,7 @@ def load_complete_metrics(
     if label is not None:
         query += " AND t.label = ?"
         params.append(label)
-    with sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True) as connection:
+    with sqlite3.connect(registry_readonly_uri(db_path), uri=True) as connection:
         connection.row_factory = sqlite3.Row
         rows = [dict(row) for row in connection.execute(query, params).fetchall()]
         retired = retired_prediction_hashes(connection)
@@ -401,7 +401,7 @@ def collect_selected_fold_ic(selected: pl.DataFrame) -> pl.DataFrame:
     frames = []
     for row in selected.iter_rows(named=True):
         db_path = get_case_study_dir(row["case_study"]) / "run_log" / "registry.db"
-        with sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True) as connection:
+        with sqlite3.connect(registry_readonly_uri(db_path), uri=True) as connection:
             records = connection.execute(
                 """
                 SELECT fold_id, ic, ic_std, n_entities, rmse, mae
