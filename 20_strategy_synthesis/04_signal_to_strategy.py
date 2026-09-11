@@ -33,7 +33,7 @@
 # - Compare validation and holdout Sharpe (does the translation persist?)
 # - Understand which implementation factors mediate conversion
 #
-# **Book Reference**: Chapter 20, Section 20.3 (Translation to Strategy)
+# **Book Reference**: Chapter 20, Section 20.4 (From signals to strategies)
 #
 # **Prerequisites**: Run [`01_aggregate_synthesis`](01_aggregate_synthesis.ipynb) first.
 

@@ -53,10 +53,13 @@ dependencies = [
     # ===================
     # ML4T Libraries (PyPI)
     # ===================
-    # ml4t-data 0.1.2: HiveStorage.partitions() reports what a write committed, the anomaly
-    # detectors accept a date-typed timestamp column, and get_metadata() no longer lets a
-    # null in the provider block erase the timestamp an update just wrote.
-    "ml4t-data>=0.1.2",
+    # ml4t-data 0.1.6: an empty yf.download frame is no longer read as "symbol not
+    # found". Yahoo returns that one shape for a rate limit, a network error and a
+    # delisted ticker alike, so a throttled reader was told AAPL does not exist. The
+    # empty branch now refetches through Ticker.history(raise_errors=True) and reports
+    # what the vendor said. 0.1.4 also drops the current session's placeholder bar
+    # instead of raising on it, which is the behaviour chapter 2 documents.
+    "ml4t-data>=0.1.6",
     # ml4t-diagnostic 0.1.2: cross_sectional_ic_series() reports an undefined date
     # (all predictions or all returns tied) as null rather than NaN, so a
     # drop_nulls("ic") followed by .mean() can no longer come back nan.

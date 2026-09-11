@@ -32,6 +32,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
@@ -121,6 +123,55 @@ def test_an_already_rewritten_path_is_not_rewritten_again() -> None:
     """
     nested = "~/.claude/jobs/7c96381e/tmp/dpgan_final_out.ipynb"
     assert sanitize_text(nested) == (nested, 0)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The absolute spelling, which a fresh render produces.
+        ("/home/stefan/ml4t/public-teach-e/10_text/out.parquet", "10_text/out.parquet"),
+        (
+            "/home/runner/ml4t/public/16_strategy_simulation/fig.png",
+            "16_strategy_simulation/fig.png",
+        ),
+        # The `~/` spelling, which the generic `~/ml4t/` rule has been producing
+        # since worktrees came in and which nothing downstream could see.
+        ("~/ml4t/public-s6-us_equities_panel/out.parquet", "out.parquet"),
+        (
+            "~/ml4t/public/16_strategy_simulation/output/fig.png",
+            "16_strategy_simulation/output/fig.png",
+        ),
+        ("~/ml4t/public-teach-b6/a/b.csv", "a/b.csv"),
+        ("Saved summary to: ~/ml4t/public-gpu-flags/x.parquet", "Saved summary to: x.parquet"),
+    ],
+)
+def test_a_worktree_root_is_rewritten_in_both_spellings(text: str, expected: str) -> None:
+    """A worktree is a repo root, so its paths come out repo-relative.
+
+    The second spelling is the one that matters here. `~/ml4t/public-teach-e/x` is
+    what the generic `/home/[^/]+/ml4t/` rule produced from the first, and neither
+    this module's CI guard nor `nbcheck` could match it - both look for the
+    `/home/` form. So the leak was detectable right up until the tool whose job is
+    to remove it ran, and undetectable afterwards.
+    """
+    assert sanitize_text(text) == (expected, 1)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # `public` has to be a whole path segment. A bare `public[^/]*` eats this.
+        "~/ml4t/publications/paper.pdf",
+        # A sibling of the worktrees, not one of them.
+        "~/ml4t/case_studies/etfs/run_log/registry.db",
+        "~/ml4t/",
+        # No trailing slash, so it is not a path prefix and has nothing to strip.
+        "~/ml4t/public",
+        "the public filings dataset",
+    ],
+)
+def test_a_worktree_rule_does_not_eat_its_neighbours(text: str) -> None:
+    assert sanitize_text(text) == (text, 0)
 
 
 def test_the_sanitizer_reports_a_string_it_cannot_safely_rewrite() -> None:
@@ -420,7 +471,6 @@ KNOWN_HOUSE_FIGURE_WARNINGS = frozenset(
         "23_knowledge_graphs/02_supply_chain_kg_construction_qwen3.ipynb",
         "23_knowledge_graphs/08_8k_event_extraction_qwen3.ipynb",
         "case_studies/fx_pairs/19_strategy_analysis.ipynb",
-        "case_studies/us_firm_characteristics/09_causal_dml.ipynb",
     }
 )
 
@@ -576,3 +626,89 @@ def test_a_runners_transient_notebook_is_not_walked(tmp_path, monkeypatch) -> No
 
     assert real in walked
     assert not [p for p in walked if p.name.startswith(".")]
+
+
+def _top_level_names(source: str) -> set[str]:
+    """Names bound at module level by `source`, or a marker when it will not parse."""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return {f"<unparseable: {exc}>"}
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return names
+
+
+def _dropped_marker_offenders() -> dict[str, list[str]]:
+    """{relative path: names} the paired .py defines and the notebook's code cells do not."""
+    out: dict[str, list[str]] = {}
+    for nb in iter_committed_notebooks():
+        py = nb.with_suffix(".py")
+        if not py.exists():
+            continue
+        py_code = "\n".join(
+            line for line in py.read_text(encoding="utf-8").splitlines() if not line.startswith("#")
+        )
+        cells = json.loads(nb.read_text(encoding="utf-8")).get("cells", [])
+        nb_code = "\n".join(
+            "".join(c.get("source", [])) for c in cells if c.get("cell_type") == "code"
+        )
+        missing = sorted(_top_level_names(py_code) - _top_level_names(nb_code))
+        if missing:
+            out[str(nb.relative_to(REPO_ROOT))] = missing
+    return out
+
+
+def test_no_committed_notebook_lost_a_cell_marker() -> None:
+    """A `# %%` deleted while editing the .py lands the code below it in the markdown cell above.
+
+    Execution catches this on its own - a fresh kernel raises NameError at the first use - so
+    this test is for the two moments execution is not there to catch it. One is editing time,
+    where the alternative is finding out part-way through a run that costs twenty minutes. The
+    other is the path where nothing executes at all: a source-only fix may be committed after
+    `notebook_provenance.py clear`, and a marker lost in that commit reaches main unopposed.
+    Jupytext round-trips the file happily either way, and the .py still parses, so no other
+    check in this repository sees it.
+    """
+    offenders = [f"{p}: {', '.join(names)}" for p, names in _dropped_marker_offenders().items()]
+    assert not offenders, (
+        "These notebooks' code cells do not define names their paired .py does, which is what "
+        "a deleted `# %%` marker looks like - the code is sitting in a markdown cell. Restore "
+        "the marker and re-run `uv run jupytext --to ipynb <nb>.py`:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_dropped_marker_check_sees_a_dropped_marker() -> None:
+    """The no-hit sweep above proves nothing unless the query can produce a hit."""
+    py_source = "# %% [markdown]\n# Some prose.\n\n\ndef helper():\n    return 1\n"
+    markdown_only = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "source": ["Some prose.\n", "\n", "def helper():\n", "    return 1\n"],
+                "metadata": {},
+            }
+        ]
+    }
+    py_code = "\n".join(line for line in py_source.splitlines() if not line.startswith("#"))
+    nb_code = "\n".join(
+        "".join(c["source"]) for c in markdown_only["cells"] if c["cell_type"] == "code"
+    )
+    assert _top_level_names(py_code) - _top_level_names(nb_code) == {"helper"}
+
+    with_marker = {
+        "cells": [
+            {"cell_type": "markdown", "source": ["Some prose.\n"], "metadata": {}},
+            {"cell_type": "code", "source": ["def helper():\n", "    return 1\n"], "metadata": {}},
+        ]
+    }
+    nb_code = "\n".join(
+        "".join(c["source"]) for c in with_marker["cells"] if c["cell_type"] == "code"
+    )
+    assert not _top_level_names(py_code) - _top_level_names(nb_code)

@@ -833,14 +833,14 @@ print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')} under digest {r
 # every family at once before any of them is fitted.
 #
 # A shortfall against that reference is not by itself a defect, so the matrix declares where it is
-# entitled to be short first. One null policy is applied and it names one carrier, and that
-# carrier's cost is the sum of two windows rather than one: `zscore_126d` standardizes a
-# 126-session return over a 252-session trailing window, so a pair owes nothing until it has both -
-# 377 prior sessions, not the 252 the z-score window alone would suggest. Naming only the outer
-# window would report the inner one as a defect on every pair at once. The budget below is
-# assembled from the carrier's own name and the configured windows rather than typed in, and it is
-# counted per pair. What the sign-off answers for is the residual: keys inside a pair's own span,
-# where no window explains them.
+# entitled to be short first. One null policy is applied and it names the single feature every row
+# must hold, and that feature's cost is the sum of two windows rather than one: `zscore_126d`
+# standardizes a 126-session return over a 252-session trailing window, so a pair owes nothing
+# until it has both - 377 prior sessions, not the 252 the z-score window alone would suggest.
+# Naming only the outer window would report the inner one as a defect on every pair at once. The
+# budget below is assembled from that feature's own name and the configured windows rather than
+# typed in, and it is counted per pair. What the sign-off answers for is the residual: keys inside
+# a pair's own span, where no window explains them.
 
 # %%
 CARRIER_HORIZON = int(CARRIER.split("_")[1].rstrip("d"))
@@ -871,7 +871,7 @@ render_quality_report(report)
 # ### Sign-off
 #
 # **Coverage is 90.27% of the keys the labels declare, and every one of the 7,540 missing keys is
-# the carrier warming up.** All 20 pairs lose exactly 377 sessions and not one loses 378: the
+# that feature warming up.** All 20 pairs lose exactly 377 sessions and not one loses 378: the
 # median and the maximum are the same number, so there is no distribution here to interpret. That
 # is `zscore_126d` needing 126 sessions of return and 252 more to standardize it over, and it is
 # the whole of the shortfall. **The residual is zero.**

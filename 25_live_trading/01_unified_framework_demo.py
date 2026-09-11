@@ -34,7 +34,7 @@
 # - Compare two signal tapes field by field, and fail the comparison rather than describe it
 # - Say what a parity test on replayed bars establishes, and what it leaves untested
 #
-# **Book Reference**: Chapter 25, Section 25.1 (The unified framework advantage)
+# **Book Reference**: Chapter 25, Section 25.1 (The unified research-to-production framework)
 #
 # **Prerequisites**: The `Strategy` interface, and the distinction between an engine that pulls bars
 # from history and one that receives them from a feed.

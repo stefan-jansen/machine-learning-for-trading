@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,13 @@ VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
 # through no change of its own. Nothing else is filled on NULL: see the comment at the
 # backfill itself for why a nullable column is not the same as a migrated one.
 MIGRATION_BACKFILLED_COLUMNS = frozenset(
-    {"refutation_n_successful", "refutation_placebo_json", "refutation_frozen_fraction"}
+    {
+        "refutation_n_successful",
+        "refutation_placebo_json",
+        "refutation_placebo_t_json",
+        "refutation_frozen_fraction",
+        "covariance_type",
+    }
 )
 MAX_PREDICTION_STD_RATIO = 100.0
 
@@ -88,13 +95,83 @@ def _sampling_reduced(spec_json: str | None) -> bool:
     return False
 
 
+def _artifacts_mapping(artifacts: object) -> dict[str, str]:
+    """``{name: {"sha256": ...}}`` as a flat mapping, dropping records that pin nothing.
+
+    The ``sha256:`` prefix is stripped here as well as in :func:`_files_mapping`, because a
+    prefixed digest compared against a bare one can never match and the guard would pass such
+    a run in silence. All 3,359 records in the nine live registries are bare, so this changes
+    nothing today - but ``darts_forecasting.py`` already builds a record as
+    ``{"dataset": ..., "sha256": f"sha256:{...}"}``, and ``tests/fixture_registry.py`` has
+    been stripping the prefix on this shape since before it delegated here.
+    """
+    if not isinstance(artifacts, dict):
+        return {}
+    return {
+        str(name): str(record["sha256"]).removeprefix("sha256:")
+        for name, record in sorted(artifacts.items())
+        if isinstance(record, dict) and record.get("sha256")
+    }
+
+
+#: The latent adapter's ``files`` roles that name the same artifact under a different word.
+#: The guard compares per NAME, so ``evaluation_label`` and ``eval_label`` would never be
+#: compared to each other however wide the reader got - the same file pinned twice, checked
+#: never. Measured across the nine live registries before this was added: the only case is
+#: ``us_firm_characteristics/fwd_class_1m``, where the four latent runs pin 04c53aa6a847 as
+#: ``evaluation_label`` and the gbm, linear and tabular_dl runs pin that same sha as
+#: ``eval_label``. Every eval-label sha agrees within its label, so folding the names
+#: together refuses nothing that registers today.
+_FILES_ROLE_ALIASES = {"evaluation_label": "eval_label"}
+
+
+def _files_mapping(files: object) -> dict[str, str]:
+    """A ``files`` list of ``{role, sha256}`` as the same mapping, keyed by role.
+
+    The ``sha256:`` prefix is stripped so a latent run's pin compares against the bare digest
+    every other family records, and a role in ``_FILES_ROLE_ALIASES`` is renamed to the word
+    the other families use. Two records naming one role would be a spec defect rather than a
+    legitimate second vintage, so the later one is not allowed to win silently.
+    """
+    if not isinstance(files, list):
+        return {}
+    mapping: dict[str, str] = {}
+    for record in files:
+        if not isinstance(record, dict):
+            continue
+        role, sha = record.get("role"), record.get("sha256")
+        if not role or not sha:
+            continue
+        digest = str(sha).removeprefix("sha256:")
+        name = _FILES_ROLE_ALIASES.get(str(role), str(role))
+        if mapping.setdefault(name, digest) != digest:
+            raise ValueError(
+                f"input_data_spec.files pins two shas for role {role!r}: "
+                f"{mapping[name]} and {digest}"
+            )
+    return dict(sorted(mapping.items()))
+
+
 def _input_artifact_shas(spec: dict | str | None) -> dict[str, str]:
     """The whole-file sha256 a training spec pins per input artifact.
 
-    ``computation.input_data_spec.artifacts`` is what six of the seven producers build from
-    ``mds.input_lineage``; the latent adapter records a ``files`` list instead
-    (ml4t/agent-workspace#891) and reaches this as an empty mapping, which is a weaker check
-    for that family rather than a wrong one.
+    Three shapes, because the producers write three and reading only one left 119 of the
+    1,156 registered runs vintage-checked by nothing at all (ml4t/agent-workspace#1137):
+
+    - ``computation.input_data_spec.artifacts``, what ``gbm``, ``linear`` and ``tabular_dl``
+      build from ``mds.input_lineage``.
+    - ``computation.input_data_spec.input_data_spec.artifacts``. ``deep_learning`` builds its
+      payload as ``{"input_data_spec": mds.input_lineage, ...}``
+      (``case_studies/utils/deep_learning.py``), so the same mapping ends up one level down.
+      A nesting slip, not a different contract.
+    - ``computation.input_data_spec.files``, a list of ``{role, sha256}`` with a ``sha256:``
+      prefix, which is what the latent adapter records (ml4t/agent-workspace#891).
+
+    Reading all three is what makes ``_enforce_input_artifact_vintage`` cover the population
+    it claims to. Measured across the nine live registries before the widening landed: the
+    119 newly-read runs introduce no conflict the rule would refuse - every (label, artifact)
+    pair they pin already agrees with itself - so this changes what is checked from here on
+    without retroactively refusing anything already registered.
     """
     if isinstance(spec, str):
         try:
@@ -109,14 +186,12 @@ def _input_artifact_shas(spec: dict | str | None) -> dict[str, str]:
     input_data_spec = computation.get("input_data_spec")
     if not isinstance(input_data_spec, dict):
         return {}
-    artifacts = input_data_spec.get("artifacts")
-    if not isinstance(artifacts, dict):
-        return {}
-    return {
-        str(name): str(record["sha256"])
-        for name, record in sorted(artifacts.items())
-        if isinstance(record, dict) and record.get("sha256")
-    }
+    if mapping := _artifacts_mapping(input_data_spec.get("artifacts")):
+        return mapping
+    nested = input_data_spec.get("input_data_spec")
+    if isinstance(nested, dict) and (mapping := _artifacts_mapping(nested.get("artifacts"))):
+        return mapping
+    return _files_mapping(input_data_spec.get("files"))
 
 
 def _registered_artifact_shas(db, *, label: str) -> dict[str, set[str]]:
@@ -192,7 +267,39 @@ def _enforce_input_artifact_vintage(db, spec: dict) -> None:
     incoming = _input_artifact_shas(spec)
     if not incoming or not label:
         return
-    registered = _registered_artifact_shas(db, label=str(label))
+    for conflict in input_artifact_vintage_conflicts(db, label=str(label), incoming=incoming):
+        raise ValueError(conflict.message)
+
+
+@dataclass(frozen=True)
+class ArtifactVintageConflict:
+    """One artifact whose on-disk vintage the population does not carry and nothing retires."""
+
+    artifact_name: str
+    label: str
+    sha256: str
+    undeclared: tuple[str, ...]
+    message: str
+
+
+def input_artifact_vintage_conflicts(
+    db, *, label: str, incoming: dict[str, str]
+) -> list[ArtifactVintageConflict]:
+    """The refusals :func:`_enforce_input_artifact_vintage` would raise, as values.
+
+    Separated from the raise so the same question can be asked BEFORE a chain is queued.
+    The refusal costs a launch rather than a fit - ``register_training_run`` runs ahead of
+    the fit on every path - but it still stops the chain ten seconds in, and until
+    ``scripts/check_input_artifact_vintage.py`` existed the only warning was that stop
+    (ml4t/agent-workspace#1123).
+
+    The pre-flight has to ask THIS function rather than its own version of the comparison.
+    A check that re-implements the rule can disagree with it, and a pre-flight that passes
+    where registration refuses is worse than no pre-flight: it is a green light for a chain
+    that will not run.
+    """
+    conflicts: list[ArtifactVintageConflict] = []
+    registered = _registered_artifact_shas(db, label=label)
     for name, sha in incoming.items():
         known = registered.get(name)
         if not known or sha in known:
@@ -204,16 +311,26 @@ def _enforce_input_artifact_vintage(db, spec: dict) -> None:
         )
         if not undeclared:
             continue
-        raise ValueError(
-            f"input artifact {name!r} on disk hashes {sha}, but every training run "
-            f"registered for label {label!r} was fitted on {undeclared if len(undeclared) > 1 else undeclared[0]}. "
-            f"Registering this run would put two vintages of one artifact in the same "
-            f"population with nothing recording it. If the artifact was regenerated on "
-            f"purpose, declare it: declare_artifact_supersession(case_study, {name!r}, "
-            f"sha256={sha!r}, supersedes_sha256={undeclared[0]!r}). If it was not, the "
-            f"artifact on disk is not the one this population was built from - restore it "
-            f"rather than fitting on it."
+        conflicts.append(
+            ArtifactVintageConflict(
+                artifact_name=name,
+                label=label,
+                sha256=sha,
+                undeclared=tuple(undeclared),
+                message=(
+                    f"input artifact {name!r} on disk hashes {sha}, but every training run "
+                    f"registered for label {label!r} was fitted on "
+                    f"{undeclared if len(undeclared) > 1 else undeclared[0]}. "
+                    f"Registering this run would put two vintages of one artifact in the same "
+                    f"population with nothing recording it. If the artifact was regenerated on "
+                    f"purpose, declare it: declare_artifact_supersession(case_study, {name!r}, "
+                    f"sha256={sha!r}, supersedes_sha256={undeclared[0]!r}). If it was not, the "
+                    f"artifact on disk is not the one this population was built from - restore "
+                    f"it rather than fitting on it."
+                ),
+            )
         )
+    return conflicts
 
 
 def declare_artifact_supersession(
@@ -2359,12 +2476,14 @@ def register_causal_run(
     n_obs: int,
     dml_effect: float,
     dml_se_hac: float,
+    covariance_type: str | None = None,
     p_value_hac: float | None,
     naive_effect: float | None,
     confounding_bias_pct: float | None,
     refutation_p: float | None,
     refutation_n_successful: int | None = None,
     refutation_placebo_json: str | None = None,
+    refutation_placebo_t_json: str | None = None,
     refutation_frozen_fraction: float | None = None,
     spec_json: str,
     notebook: str | None,
@@ -2420,6 +2539,7 @@ def register_causal_run(
             "n_obs",
             "dml_effect",
             "dml_se_hac",
+            "covariance_type",
             "p_value_hac",
             "naive_effect",
             "confounding_bias_pct",
@@ -2448,6 +2568,7 @@ def register_causal_run(
             n_obs,
             dml_effect,
             dml_se_hac,
+            covariance_type,
             p_value_hac,
             naive_effect,
             confounding_bias_pct,
@@ -2512,13 +2633,14 @@ def register_causal_run(
             """
             INSERT INTO causal_runs (
                 causal_hash, label, treatment, confounders_json, embargo,
-                n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
+                n_folds, n_obs, dml_effect, dml_se_hac, covariance_type, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
                 refutation_n_successful, refutation_placebo_json,
+                refutation_placebo_t_json,
                 refutation_frozen_fraction,
                 spec_json, notebook, started_at, elapsed_s, git_commit,
                 supersedes_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -2528,6 +2650,10 @@ def register_causal_run(
                 n_obs=excluded.n_obs,
                 dml_effect=excluded.dml_effect,
                 dml_se_hac=excluded.dml_se_hac,
+                -- Plain, not COALESCE: it is in `comparable_columns`, so an immutable
+                -- row has already had it backfilled or matched. The
+                -- `refutation_frozen_fraction` shape.
+                covariance_type=excluded.covariance_type,
                 p_value_hac=excluded.p_value_hac,
                 naive_effect=excluded.naive_effect,
                 confounding_bias_pct=excluded.confounding_bias_pct,
@@ -2538,6 +2664,13 @@ def register_causal_run(
                 -- should fill it; one that does not must not erase them.
                 refutation_placebo_json=COALESCE(
                     excluded.refutation_placebo_json, causal_runs.refutation_placebo_json
+                ),
+                -- Fill-once for the same reason, and separately: a row whose p-value was
+                -- computed on raw thetas (before ml4t/agent-workspace#1120) has no t-scale
+                -- draws to recover, so NULL here is what distinguishes it from a corrected
+                -- one. Erasing a filled value would lose that distinction.
+                refutation_placebo_t_json=COALESCE(
+                    excluded.refutation_placebo_t_json, causal_runs.refutation_placebo_t_json
                 ),
                 -- Plain, not COALESCE: this column is in `comparable_columns`, so by the
                 -- time the UPDATE runs the value either matched the stored one or was
@@ -2564,6 +2697,7 @@ def register_causal_run(
                OR causal_runs.n_obs IS NOT excluded.n_obs
                OR causal_runs.dml_effect IS NOT excluded.dml_effect
                OR causal_runs.dml_se_hac IS NOT excluded.dml_se_hac
+               OR causal_runs.covariance_type IS NOT excluded.covariance_type
                OR causal_runs.p_value_hac IS NOT excluded.p_value_hac
                OR causal_runs.naive_effect IS NOT excluded.naive_effect
                OR causal_runs.confounding_bias_pct IS NOT excluded.confounding_bias_pct
@@ -2586,12 +2720,14 @@ def register_causal_run(
                 n_obs,
                 dml_effect,
                 dml_se_hac,
+                covariance_type,
                 p_value_hac,
                 naive_effect,
                 confounding_bias_pct,
                 refutation_p,
                 refutation_n_successful,
                 refutation_placebo_json,
+                refutation_placebo_t_json,
                 refutation_frozen_fraction,
                 spec_json,
                 notebook,

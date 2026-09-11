@@ -798,8 +798,7 @@ for label in labels:
         executions.append((label, scheme["name"], execution))
         print(
             f"{label} / {scheme['name']}: {len(execution.results)} backtests registered\n"
-            f"  this execution: {execution.n_computed} computed, "
-            f"{execution.n_reused} served from the registry"
+            f"  this execution: {execution.disclosure()}"
         )
 
 # %% [markdown]

@@ -19,10 +19,10 @@
 # **Chapter 15: Causal Estimation with ML**
 # **Docker image**: `ml4t`
 #
-# This notebook demonstrates how causal inference methodology applies to trading
-# research, with honest assessment of what it can and cannot prove.
+# Causal inference applied to a trading decision, and what it does and does not settle once
+# the strategy meets a holdout period.
 #
-# **Book Reference**: Chapter 15, §15.4 (Isolating Factor Effects with DML)
+# **Section Reference**: Section 15.4, and its regime-conditional position-sizing case study
 #
 # **The Question**: Does momentum have a causal effect on forward returns, and
 # does this effect vary by volatility regime?
@@ -34,16 +34,18 @@
 # 4. Compare to naive baseline and simple alternatives
 # 5. Include transaction costs
 #
-# **Key Insight**: We demonstrate the *workflow* of causal-informed trading,
-# while being honest that in-sample improvements often don't persist out-of-sample.
+# What the notebook shows is the workflow, and what the workflow produces on this data is a
+# case where the in-sample improvement does not carry to the holdout. That is the usual
+# outcome and it is the reason the split exists.
 #
 # **Learning Outcomes**:
-# - Apply proper train/test methodology to causal trading research
-# - Understand the difference between in-sample fit and out-of-sample value
-# - See how regime-conditional effects (CATE) inform allocation decisions
+# - Estimate causal effects on training data alone and apply them to a holdout period
+# - Separate what a causal estimate establishes from what it earns in a backtest
+# - Turn a regime-conditional effect into a position size, and compare it against a
+#   baseline that uses no causal machinery at all
 #
-# **Prerequisites**: [`03_econml_dml`](03_econml_dml.ipynb) for DML methodology;
-# ETF feature data from Ch8 pipeline
+# **Prerequisites**: [`03_econml_dml`](03_econml_dml.ipynb) for the DML machinery, and an
+# ETF modeling dataset built by the features pipeline
 #
 # ## Causal Design Contract
 #
@@ -81,9 +83,12 @@ from utils.cv_splits import most_recent_split
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
-warnings.filterwarnings("ignore")
+# scikit-learn repeats a notice, once per nuisance fit, that a frame carrying feature names
+# was fitted and a bare array predicted; EconML does that internally. Convergence and
+# numerical warnings stay visible.
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.validation")
 
 # Try to import EconML
 try:
@@ -102,7 +107,7 @@ CASE_STUDY_ID = "etfs"
 PRIMARY_LABEL = "fwd_ret_21d"
 MAX_SYMBOLS = 0
 SEED = 42
-RETRAIN = False  # Set True to force retraining; False loads cached artifacts
+RETRAIN = True  # Refit from raw; set False to reuse a cache you built earlier
 MAX_SAMPLES = 0
 
 # Momentum parameters
@@ -110,6 +115,9 @@ FORWARD_DAYS = 21  # Forward return horizon (matches label)
 
 # Strategy parameters
 N_QUANTILES = 5  # Quintile portfolios
+# A date needs at least this many complete pairs before its cross-sectional rank
+# correlation is worth averaging into the IC; a five-name cross-section is noise.
+MIN_IC_NAMES = 20
 
 # Transaction Costs: 10 bps round-trip for liquid ETFs
 TRANSACTION_COST_BPS = 10
@@ -129,9 +137,6 @@ CACHE_TAG = RUN_TAG
 OUTPUT_DIR = get_output_dir(15, "momentum_causal_trading")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 DML_CACHE_PATH = OUTPUT_DIR / f"dml_artifacts_{CASE_STUDY_ID}_{PRIMARY_LABEL}_{CACHE_TAG}.json"
-RESULTS_PATH = (
-    OUTPUT_DIR / f"momentum_causal_trading_{CASE_STUDY_ID}_{PRIMARY_LABEL}_{CACHE_TAG}.json"
-)
 
 print("Momentum Causal Trading Configuration:")
 print(f"  Forward: {FORWARD_DAYS} days")
@@ -183,7 +188,7 @@ if SYMBOL_SUBSET:
     print(f"Reduced to {features_df['symbol'].n_unique()} assets")
 
 # %% [markdown] tags=[]
-# ### 2.1 Define Market Volatility Regime
+# ### Defining the Market Volatility Regime
 #
 # We define regime based on market-wide volatility (SPY as proxy).
 # This is a potential confounder OR effect modifier.
@@ -261,15 +266,14 @@ def assign_volatility_regime(features_df, date_col, splits):
 features_df = assign_volatility_regime(features_df, date_col, splits)
 
 # %% [markdown] tags=[]
-# ### 2.2 Train/Test Split
+# ### The Train/Test Split
 #
 # We use the walk-forward splits from the modeling pipeline.
 # Training: all folds except last validation period.
 # Test: last validation period (most recent data).
 
 # %% tags=[]
-# The test period is the latest fold, read from the window rather than from a
-# list position.
+# The latest fold, read from the window rather than from a list position.
 _latest_split = most_recent_split(splits)
 TRAIN_END = _latest_split["train_end"]
 TEST_START = _latest_split["val_start"]
@@ -312,20 +316,40 @@ print("=" * 60)
 
 train_pd = train_df.to_pandas()
 
-# Overall IC (Information Coefficient) - training period
-train_ic = stats.spearmanr(train_pd[treatment_col], train_pd[outcome_col])[0]
+
+def cross_sectional_ic(frame: pd.DataFrame) -> float:
+    """Mean over dates of the cross-sectional Spearman correlation.
+
+    The strategy sorts each date's cross-section into quintiles, so the association it
+    trades is a within-date one. Pooling every symbol-date row into a single Spearman
+    mixes that with the market's own time series, and the two need not even share a sign.
+    Ranks are taken within a date, and dates with fewer than `MIN_IC_NAMES` complete pairs
+    contribute nothing.
+    """
+    pairs = frame[[date_col, treatment_col, outcome_col]].dropna()
+    per_date = pairs.groupby(date_col).apply(
+        lambda g: (
+            stats.spearmanr(g[treatment_col], g[outcome_col])[0]
+            if len(g) >= MIN_IC_NAMES
+            else np.nan
+        ),
+        include_groups=False,
+    )
+    return float(per_date.mean())
+
+
+train_ic = cross_sectional_ic(train_pd)
 print(f"\nMomentum IC (train): {train_ic:.4f}")
 
-# IC by regime - training period
 print("\nIC by Regime (train):")
 for regime_label in ["low_vol", "mid_vol", "high_vol"]:
     regime_data = train_pd[train_pd["regime_label"] == regime_label]
     if len(regime_data) > 50:
-        ic = stats.spearmanr(regime_data[treatment_col], regime_data[outcome_col])[0]
+        ic = cross_sectional_ic(regime_data)
         print(f"  {regime_label}: IC = {ic:.4f} (n={len(regime_data):,})")
 
 # %% [markdown] tags=[]
-# ### 3.1 Causal Effect Estimation with DML
+# ### Estimating the Effect with DML
 #
 # We estimate:
 # 1. Average Treatment Effect (ATE) - overall momentum effect
@@ -374,7 +398,7 @@ else:
 
 
 # %% [markdown] tags=[]
-# ### 3.2 Build ML4T Walk-Forward Cross-Fitting Splits
+# ### Walk-Forward Cross-Fitting Splits
 #
 # Cross-fitting uses the chapter pipeline's walk-forward schedule (`mds.splits`)
 # restricted to the training period. No sklearn `TimeSeriesSplit` fallback is used.
@@ -420,10 +444,18 @@ def build_walk_forward_cv_splits(train_dates: pd.Series, valid_mask: np.ndarray)
 
 
 # %% [markdown] tags=[]
-# ### 3.3 Cache-First DML Artifacts
+# ### Cached DML Artifacts
 #
-# Expensive DML/CATE fits are loaded from cache by default. Set `RETRAIN=True`
-# to regenerate artifacts intentionally.
+# The causal-forest fit is the expensive step, so the estimates it produces are written to a
+# cache beside the notebook. `RETRAIN` defaults to `True`, which means every run refits from
+# the raw modeling dataset and the cache is only ever written. A published render has to be
+# something the shipped code reproduces, and a cache hit is not a reproduction: the cached
+# numbers came from whatever the estimator looked like when they were written.
+#
+# Set it to `False` while iterating on the strategy code below, where the causal estimates
+# are an input you are not changing. The cache records the effect-modifier and control
+# columns it was built with and refuses itself if either has moved, so it cannot silently
+# answer for a different specification - but it cannot detect a change inside the estimator.
 
 # %% tags=[]
 DML_CACHE_SCHEMA = "v3_xw_wfcv"
@@ -459,7 +491,7 @@ if ECONML_AVAILABLE:
 
 
 # %% [markdown] tags=[]
-# ### 3.4 Fit LinearDML + CausalForestDML When Cache Is Missing
+# ### Fitting LinearDML and CausalForestDML
 
 # %% tags=[]
 if ECONML_AVAILABLE and need_dml_fit:
@@ -527,7 +559,7 @@ if ECONML_AVAILABLE and need_dml_fit:
 
 
 # %% [markdown] tags=[]
-# ### 3.5 Report ATE and CATE Estimates
+# ### The ATE and the CATE by Regime
 
 # %% tags=[]
 if ECONML_AVAILABLE:
@@ -549,12 +581,13 @@ if ECONML_AVAILABLE:
 # 2. **Causal-Informed**: Scale by estimated CATE from training
 # 3. **Simple Heuristic**: Reduce exposure in high-vol (no causal machinery)
 #
-# ### Heuristic Scaling Rationale
+# ### Where the Heuristic Factors Come From
 #
-# The `SIMPLE_HEURISTIC` scaling factors represent practitioner intuition:
-# - **Low volatility (1.2x)**: Momentum signals more reliable in calm markets
-# - **Mid volatility (1.0x)**: Neutral baseline
-# - **High volatility (0.6x)**: Momentum often fails during crisis periods
+# `SIMPLE_HEURISTIC` encodes practitioner intuition rather than an estimate: raise exposure
+# in calm markets, hold it neutral in the middle, cut it when volatility is high, because
+# momentum is widely held to break down in crises. The factors are printed below. They exist
+# to give the causal strategy something to beat that costs nothing to build, which is the
+# comparison that decides whether the causal machinery earned its place.
 
 # %% tags=[]
 MIN_SCALING_FLOOR = 0.5
@@ -568,20 +601,21 @@ def compute_regime_scaling(
 ) -> dict:
     """Convert CATE estimates to regime scaling factors using signal-to-noise.
 
-    Each regime's scaling factor combines (i) the sign and magnitude of the
-    training-period CATE point estimate with (ii) the estimation uncertainty
-    measured by the within-regime standard deviation. Regimes with weak or
-    noisy estimates are shrunk toward neutral exposure (scale = 1.0); the
-    output is clipped to [MIN_SCALING_FLOOR, MAX_SCALING_CAP].
+    Each regime's factor combines the sign and magnitude of the training-period CATE with
+    the estimation uncertainty, measured by the within-regime standard deviation. A regime
+    whose estimate is weak or noisy is shrunk toward neutral exposure; the output is clipped
+    to [MIN_SCALING_FLOOR, MAX_SCALING_CAP].
+
+    Every regime is scored in the same unit. When at least one regime has a usable standard
+    deviation, a missing or zero one is imputed with the median of the others, so all scores
+    are signal-to-noise ratios. Only when no regime has a usable standard deviation does the
+    function fall back to raw point estimates, and then for every regime at once, so
+    ``max_abs_score`` never divides a signal-to-noise ratio by a raw CATE.
     """
     if not cate_by_regime:
         return {"low_vol": 1.0, "mid_vol": 1.0, "high_vol": 1.0}
 
-    # Keep every regime in the same unit. If at least one regime has a usable
-    # std, missing/zero stds are imputed with the median of the available ones
-    # so all scores are signal-to-noise ratios. Only when NO regime has a usable
-    # std do we fall back to raw point estimates - uniformly, for every regime -
-    # so ``max_abs_score`` never mixes S/N ratios (O(1-10)) with raw CATEs (~1e-2).
+    # Every regime scored in the same unit; see the markdown above for why that matters.
     stds = cate_std_by_regime or {}
     usable_stds = [float(s) for s in stds.values() if np.isfinite(s) and s > 0]
     median_std = float(np.median(usable_stds)) if usable_stds else None
@@ -631,18 +665,23 @@ print(f"  Heuristic: {SIMPLE_HEURISTIC}")
 
 
 # %% tags=[]
-def _assign_quintiles(group, treatment_col, n_quantiles):
-    """Assign quintile ranks within a cross-section."""
-    try:
-        group["quantile"] = pd.qcut(
-            group[treatment_col],
-            q=n_quantiles,
-            labels=range(1, n_quantiles + 1),
-            duplicates="drop",
-        )
-    except ValueError:
-        group["quantile"] = n_quantiles // 2 + 1
-    return group
+def _assign_quintiles(frame, treatment_col, n_quantiles):
+    """Quintile rank of each row within its own date's cross-section."""
+
+    def bucket(values):
+        try:
+            return pd.qcut(
+                values,
+                q=n_quantiles,
+                labels=range(1, n_quantiles + 1),
+                duplicates="drop",
+            ).astype(float)
+        except ValueError:
+            # Fewer distinct values than quantiles on this date; everything goes to the
+            # middle bucket, which carries no position either way.
+            return pd.Series(float(n_quantiles // 2 + 1), index=values.index)
+
+    return frame.groupby(date_col)[treatment_col].transform(bucket)
 
 
 # %% [markdown] tags=[]
@@ -653,17 +692,14 @@ def _assign_quintiles(group, treatment_col, n_quantiles):
 
 
 # %% tags=[]
-def _assign_base_weights(group, n_quantiles):
-    """Convert quintile assignments into gross-normalized long-short weights."""
-    raw_signal = np.zeros(len(group), dtype=float)
-    quantile_values = group["quantile"].to_numpy()
-    raw_signal[quantile_values == n_quantiles] = 1.0
-    raw_signal[quantile_values == 1] = -1.0
-
-    gross = float(np.abs(raw_signal).sum())
-    group = group.copy()
-    group["base_weight"] = raw_signal / gross if gross > 0 else 0.0
-    return group
+def _assign_base_weights(frame, n_quantiles):
+    """Gross-normalized long-short weight for each row, normalized within its date."""
+    raw_signal = np.select(
+        [frame["quantile"] == n_quantiles, frame["quantile"] == 1], [1.0, -1.0], default=0.0
+    )
+    raw = pd.Series(raw_signal, index=frame.index)
+    gross = raw.abs().groupby(frame[date_col]).transform("sum")
+    return (raw / gross).where(gross > 0, 0.0)
 
 
 # %% [markdown] tags=[]
@@ -674,11 +710,8 @@ def _assign_base_weights(group, n_quantiles):
 # %% tags=[]
 def _compute_portfolio_returns(df, outcome_col, cost_bps):
     """Compute gross return, turnover, cost, and net return from weights."""
-    portfolio_returns = (
-        df.groupby(date_col)
-        .apply(lambda x: float((x["weight"] * x[outcome_col]).sum()))
-        .reset_index(name="strategy_return")
-    )
+    contribution = df["weight"] * df[outcome_col]
+    portfolio_returns = contribution.groupby(df[date_col]).sum().reset_index(name="strategy_return")
 
     df_sorted = df.sort_values(["symbol", date_col]).copy()
     df_sorted["weight_change"] = (
@@ -712,10 +745,8 @@ def backtest_momentum_strategy(
     """Backtest a regime-scaled long-short momentum strategy on portfolio weights."""
     df = df.copy()
 
-    df = df.groupby(date_col, group_keys=False).apply(
-        _assign_quintiles, treatment_col=treatment_col, n_quantiles=n_quantiles
-    )
-    df = df.groupby(date_col, group_keys=False).apply(_assign_base_weights, n_quantiles=n_quantiles)
+    df["quantile"] = _assign_quintiles(df, treatment_col, n_quantiles)
+    df["base_weight"] = _assign_base_weights(df, n_quantiles)
 
     df["weight"] = df["base_weight"]
     for regime, scale in regime_scaling.items():
@@ -728,8 +759,9 @@ def backtest_momentum_strategy(
 # %% [markdown] tags=[]
 # ## 5. Out-of-Sample Evaluation
 #
-# **Critical**: We now apply the strategies learned from training to the
-# held-out test period. This is the honest evaluation.
+# Everything above was fitted on the training period alone: the regime thresholds, the CATE
+# estimates and the scaling factors they produce. All three are now fixed, and the test
+# period sees them for the first time.
 
 # %% tags=[]
 print("\n" + "=" * 60)
@@ -738,8 +770,8 @@ print("=" * 60)
 
 test_pd = test_df.to_pandas()
 
-# Test period IC
-test_ic = stats.spearmanr(test_pd[treatment_col].dropna(), test_pd[outcome_col].dropna())[0]
+# Test period IC, on the same within-date definition as the training one
+test_ic = cross_sectional_ic(test_pd)
 print(f"\nMomentum IC (test): {test_ic:.4f}")
 print(f"IC change from train: {test_ic - train_ic:+.4f}")
 
@@ -801,7 +833,7 @@ for name, strat_df in [
     print()
 
 # %% [markdown] tags=[]
-# ### 5.1 Compare In-Sample vs Out-of-Sample
+# ### In-Sample Against Out-of-Sample
 
 # %% tags=[]
 print("=== TRAINING PERIOD PERFORMANCE (For Comparison) ===\n")
@@ -836,7 +868,7 @@ for train_m, test_m in zip(train_results, results, strict=False):
     )
 
 # %% [markdown] tags=[]
-# ### 5.2 Transaction Cost Sensitivity
+# ### Sensitivity to the Transaction-Cost Assumption
 
 # %% tags=[]
 print("\n=== TRANSACTION COST SENSITIVITY (HOLDOUT PERIOD) ===\n")
@@ -872,7 +904,7 @@ for cost_bps in COST_SCENARIOS:
     print(f"{cost_bps:<12} {row['Naive']:>10.2f} {row['Causal']:>10.2f} {row['Heuristic']:>10.2f}")
 
 # %% [markdown] tags=[]
-# ### 5.3 Visualize Results
+# ### The Three Strategies Side by Side
 
 # %% tags=[]
 # Merge strategy returns into comparison DataFrame
@@ -885,9 +917,9 @@ comparison = comparison.merge(
     heuristic_test[[date_col, "net_return"]].rename(columns={"net_return": "heuristic"}),
     on=date_col,
 )
-# Each row is an overlapping 21-day forward return, so naive cumprod
-# double-counts each day's P&L twenty times. Subsample to non-overlapping
-# cohorts (every FORWARD_DAYS rows) so the wealth curve compounds honestly.
+# Each row is an overlapping 21-day forward return, so compounding the full series would
+# count each day's P&L twenty times. Every FORWARD_DAYS-th row gives a non-overlapping
+# sequence, which is what a wealth curve can be built from.
 non_overlap = comparison.iloc[::FORWARD_DAYS].copy()
 for strat in ["naive", "causal", "heuristic"]:
     non_overlap[f"cum_{strat}"] = (1 + non_overlap[strat]).cumprod()
@@ -905,7 +937,7 @@ fig = make_subplots(
     cols=2,
     subplot_titles=(
         "Cumulative Returns",
-        "Rolling 6-month Sharpe (126-day window, daily-annualized)",
+        "Rolling 6-month Sharpe (126 rows of 21-day returns, annualized)",
         "Regime Scaling",
         "Drawdown",
     ),
@@ -930,11 +962,13 @@ for col, label in [
 
 # %% tags=[]
 for col, label in [("naive", "Naive"), ("causal", "Causal"), ("heuristic", "Heuristic")]:
-    # 126-day rolling window ≈ 6 months on the daily comparison frame; the
-    # underlying series is overlapping 21-day returns sampled daily, so the
-    # sqrt(252) annualization is an approximation.
+    # 126 rows ≈ 6 months here. Each row is a 21-day forward return, so mean over standard
+    # deviation is a 21-day Sharpe and sqrt(252 / FORWARD_DAYS) annualizes it, the factor
+    # `compute_metrics` uses; sqrt(252) would scale this panel by sqrt(21) against the table.
     roll_sharpe = (
-        comparison[col].rolling(126).mean() / comparison[col].rolling(126).std() * np.sqrt(252)
+        comparison[col].rolling(126).mean()
+        / comparison[col].rolling(126).std()
+        * np.sqrt(252 / FORWARD_DAYS)
     )
     fig.add_trace(
         go.Scatter(
@@ -983,83 +1017,68 @@ for col, label in [("naive", "Naive"), ("causal", "Causal"), ("heuristic", "Heur
     )
 
 fig.update_layout(
-    title="Causal regime scaling does not improve on the naive baseline out-of-sample",
+    title="Holdout performance of the three regime-scaling rules",
     height=720,
     width=1100,
     barmode="group",
     margin=dict(t=80, b=80, l=70, r=50),
 )
-# Regime-scaling x-axis labels are dense (9 categories at -45°); enforce smaller
-# tick font so they don't crowd, and a tight margin so they fit.
+# Nine categories at -45 degrees crowd at the default tick size.
 fig.update_xaxes(tickfont=dict(size=9), row=2, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four panels comparing the naive, causal and heuristic regime-scaling rules over the "
+    "holdout period, one line per rule in three of them. Top left plots cumulative net "
+    "return from the non-overlapping series; top right plots a rolling six-month Sharpe "
+    "ratio; bottom left is a grouped bar chart of the scaling factor each rule applies in "
+    "the low, mid and high volatility regimes; bottom right plots drawdown from each rule's "
+    "running peak. In all three line panels the rules track each other closely, and the "
+    "cumulative curves end the holdout below where they started.",
+)
 
 # %% [markdown] tags=[]
-# ## 6. Honest Assessment and Key Takeaways
+# ## 6. What the Holdout Settles
 
 # %% tags=[]
 print("\n" + "=" * 60)
-print("SUMMARY: HONEST ASSESSMENT")
+print("TRAIN AGAINST HOLDOUT")
 print("=" * 60)
 
-test_sharpes = {r["name"]: r["sharpe"] for r in results}
-best_strat = max(test_sharpes, key=test_sharpes.get)
-worst_strat = min(test_sharpes, key=test_sharpes.get)
+print(f"\nMomentum IC: {train_ic:.4f} in training, {test_ic:.4f} in the holdout")
 
-print(f"""
-TRAINING PERIOD FINDINGS:
-  - Momentum IC: {train_ic:.4f}
-  - DML reveals potential confounding from volatility regime
-  - CATE estimates suggest regime-conditional effects
-
-OUT-OF-SAMPLE REALITY CHECK:
-  - Momentum IC (test): {test_ic:.4f} (vs {train_ic:.4f} train)
-  - Best strategy: {best_strat} (Sharpe: {test_sharpes[best_strat]:.2f})
-  - Worst strategy: {worst_strat} (Sharpe: {test_sharpes[worst_strat]:.2f})
-""")
-
-
-# %% tags=[]
-print("""
-KEY INSIGHTS:
-  1. Causal analysis provides a rigorous framework for thinking about
-     confounding, but does not guarantee out-of-sample improvement.
-
-  2. The regime-conditional effects estimated in training may or may
-     not persist - this is an empirical question, not a given.
-
-  3. Simple heuristics (reduce exposure in high-vol) often perform
-     comparably to sophisticated causal methods.
-
-  4. Transaction costs meaningfully impact net returns - any strategy
-     comparison must include them.
-
-METHODOLOGICAL LESSONS:
-  - Always use proper train/test splits for honest evaluation
-  - In-sample improvements often degrade out-of-sample
-  - Causal inference is about understanding mechanisms, not
-    guaranteeing alpha
-  - Compare to simple baselines before claiming sophistication adds value
-  - Test sensitivity to transaction cost assumptions
-""")
+# %% [markdown] tags=[]
+# ### Reading the comparison
+#
+# The information coefficient printed above is a property of the signal rather than of any
+# strategy built on it: the average, over dates, of the rank correlation between momentum
+# and the forward return within that date's cross-section. A sign change between the
+# training period and the holdout says the association the three rules all lean on was not
+# stable, which is the first thing to know about any of them. It does not by itself settle
+# what a strategy earned - the rules trade quintile spreads with regime-dependent exposure,
+# and an average that flips sign is consistent with several quintile patterns. The three
+# Sharpe ratios below say what each rule actually did, and neither they nor the IC are
+# evidence about the causal estimate that produced the scaling.
+#
+# What the causal analysis establishes is a statement about confounding in the training
+# period, conditional on the controls being adequate. It is not a forecast, and the holdout
+# is not a test of it. A regime-conditional effect can be correctly estimated and still fail
+# to earn anything, because whether it persists is a separate empirical question that the
+# estimate makes no claim about.
+#
+# Three practical consequences:
+#
+# - **Compare against a baseline that costs nothing.** `SIMPLE_HEURISTIC` uses no causal
+#   machinery. Any gap between it and the causal rule is what the machinery bought; where
+#   there is no gap, it bought nothing here.
+# - **Read the sizing rule's floor and cap.** The scaling is clipped to
+#   `[MIN_SCALING_FLOOR, MAX_SCALING_CAP]` and shrunk toward neutral by `SHRINKAGE`, so a
+#   noisy CATE cannot produce a large position. That bounds the damage and it also bounds
+#   the upside.
+# - **Vary the cost assumption before believing any of it.** The sensitivity table above
+#   sweeps the round-trip cost, and a ranking that changes across that sweep is a ranking
+#   about the cost assumption rather than about the strategies.
 
 # %% tags=[]
-final_results = {
-    "train_ic": float(train_ic),
-    "test_ic": float(test_ic),
-    "ate": float(ate) if ECONML_AVAILABLE and ate is not None else None,
-    "cate_by_regime": (
-        {k: float(v) for k, v in cate_by_regime.items()}
-        if ECONML_AVAILABLE and cate_by_regime is not None
-        else None
-    ),
-    "causal_scaling": {k: float(v) for k, v in CAUSAL_SCALING.items()},
-    "test_results": {r["name"]: float(r["sharpe"]) for r in results},
-    "train_results": {r["name"]: float(r["sharpe"]) for r in train_results},
-}
-
-with open(RESULTS_PATH, "w", encoding="utf-8") as f:
-    json.dump(final_results, f, indent=2)
-
-print(f"\nResults saved to {RESULTS_PATH}")
-print(f"Test period Sharpe ratios: {final_results['test_results']}")
+print("\nHoldout Sharpe by strategy:")
+for r in results:
+    print(f"  {r['name']:<12} {r['sharpe']:>6.2f}")

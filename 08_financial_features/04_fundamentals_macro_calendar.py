@@ -31,7 +31,7 @@
 # ## Key Principle
 #
 # Slow features update infrequently (quarterly, monthly, or by schedule) but
-# condition daily decisions. The binding constraint is **data integrity** —
+# condition daily decisions. The binding constraint is **data integrity**:
 # ensuring each observation reflects only what was knowable at decision time.
 #
 # ## Data Policy
@@ -41,7 +41,7 @@
 # ## References
 #
 # - Fama and French (1992, 1993): Value, size, profitability factors
-# - Cochrane (2011): "Presidential Address: Discount Rates" — factor zoo
+# - Cochrane (2011): "Presidential Address: Discount Rates", on the factor zoo
 # - Harvey, Liu, and Zhu (2016): "...and the Cross-Section of Expected Returns"
 #
 # ## Case Study Mapping
@@ -53,25 +53,32 @@
 # | S&P 500 Equity+Options (`sp500_equity_option_analytics`) | Macro + VIX regime |
 
 # %%
-"""Slow Features and Context: Fundamentals, Macro, Calendar — contextual features that condition faster signals."""
+"""Slow Features and Context: fundamentals, macro and calendar features that condition faster signals."""
 
 from __future__ import annotations
 
 import logging
 import warnings
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
-# Importing utils.style registers and activates the ML4T Plotly template.
-from utils.style import COLORS
-
-warnings.filterwarnings("ignore")
-
 from data import load_macro as _load_macro_canonical
 from data import load_sec_xbrl_fundamentals
+
+# Importing utils.style registers and activates the ML4T Plotly template.
+from utils.style import COLORS, show_plotly_with_alt
+
+# polars cannot verify per-group sortedness once join_asof is given `by`, so it warns on
+# every such call; both calls below pass frames sorted by [symbol, join-key], which is what
+# the join requires. Naming the message keeps every other polars warning visible.
+warnings.filterwarnings(
+    "ignore",
+    message="Sortedness of columns cannot be checked when 'by' groups provided",
+    category=UserWarning,
+)
 
 # %% tags=["parameters"]
 SEED = 42
@@ -90,13 +97,13 @@ CALENDAR_START_DATE = "2015-01-01"
 # - Factor staleness between announcements
 
 # %% [markdown]
-# ## 1.1 Load Fundamental Data
+# ## Load Fundamental Data
 #
 # ### Scope: scaffolding for the construction mechanics, not a real-data value pipeline
 #
 # `load_fundamentals()` reads SEC XBRL filings. XBRL publishes accounting numbers
 # (book equity, earnings, operating cash flow, capex) but does **not** publish
-# market capitalization — that comes from market prices on the announcement
+# market capitalization, which comes from market prices on the announcement
 # date. To keep the value-factor cells below executable on the XBRL output
 # alone, this notebook approximates `market_cap = 2 × book_value`. This is a
 # **scaffolding** value: it lets the downstream `compute_value_factors()` cell
@@ -115,9 +122,11 @@ CALENDAR_START_DATE = "2015-01-01"
 EPSILON = 1e-10
 
 
+# %% [markdown]
+# The XBRL loader exposes one column per us-gaap concept, lowercased. The map below gives
+# them the shorter names the rest of this notebook uses.
+
 # %%
-# Map lowercase us-gaap concepts to the shorter names used downstream.
-# The XBRL loader exposes one column per us-gaap concept in lowercase.
 _XBRL_RENAMES = {
     "stockholdersequity": "book_value",
     "netincomeloss": "earnings",
@@ -140,7 +149,7 @@ def load_fundamentals() -> pl.DataFrame:
     # `assets` preserves its lowercase concept name; alias for downstream code.
     df = df.with_columns(
         [
-            # Market cap approximation — SCAFFOLDING only (XBRL has no market cap)
+            # Market cap approximation, SCAFFOLDING only: XBRL carries no market cap
             (pl.col("book_value") * 2.0).alias("market_cap"),
             pl.col("assets").alias("total_assets"),
         ]
@@ -163,7 +172,7 @@ print(f"Fundamental data: {len(fundamentals):,} rows, {fundamentals['symbol'].n_
 fundamentals.head(5)
 
 # %% [markdown]
-# ## 1.2 Value Factors
+# ## Value Factors
 #
 # Value factors identify stocks trading at discounts relative to fundamentals.
 #
@@ -200,20 +209,32 @@ def compute_value_factors(df: pl.DataFrame) -> pl.DataFrame:
 
 value_df = compute_value_factors(fundamentals)
 print("Value factors computed:")
-value_df.select(["symbol", "fiscal_quarter_end", "book_to_market", "earnings_yield"]).tail(10)
+print(value_df.select(["symbol", "fiscal_quarter_end", "book_to_market", "earnings_yield"]).tail(5))
+
+# Book-to-market is pinned by the scaffolding rather than measured. Show that rather than
+# asserting it, so a reader who later swaps in real market caps sees the claim change.
+_btm = value_df["book_to_market"].drop_nulls()
+print()
+print(f"book_to_market takes {_btm.n_unique()} distinct value(s) across {len(_btm)} rows")
+print(f"  min {_btm.min():.6f}, max {_btm.max():.6f}")
+print(f"earnings_yield takes {value_df['earnings_yield'].drop_nulls().n_unique()} distinct values")
 
 # %% [markdown]
-# **Interpretation**: On real data, a book-to-market ratio of 0.5 means the
-# stock trades at 2x its book value - the market assigns a significant
-# intangible/growth premium. Here every book-to-market equals exactly 0.5 by
-# construction, because the scaffolding sets `market_cap = 2 x book_value`; the
-# cell demonstrates the *formula*, not a cross-section of values. Earnings yield
-# (earnings / market_cap) is the inverse of the P/E ratio, so higher values are
-# more "value-oriented"; it varies across quarters because earnings vary even
-# when the book-to-market is pinned.
+# **Interpretation**: read the distinct-value counts printed above before reading anything
+# into the ratios. Book-to-market takes a single value across every row, because this
+# scaffolding derives `market_cap` from `book_value` by a fixed multiple rather than
+# reading a market price. The cell demonstrates the formula; it does not show a
+# cross-section, and no ranking can be built from a column that is constant.
+#
+# On real data the ratio would vary, and a low book-to-market would say the market prices
+# the firm well above its book value, which is usually read as a premium for intangibles
+# or expected growth. Earnings yield is earnings over market cap, the inverse of the P/E
+# ratio, so higher is more value-oriented. It does vary here, because earnings move across
+# quarters even while the book-to-market is pinned, which is why its distinct-value count
+# is the larger of the two.
 
 # %% [markdown]
-# ## 1.3 Quality Factors
+# ## Quality Factors
 #
 # Quality factors identify financially healthy companies.
 
@@ -246,7 +267,7 @@ print("Quality factors computed:")
 quality_df.select(["symbol", "fiscal_quarter_end", "roe", "roa", "accruals_ratio"]).tail(10)
 
 # %% [markdown]
-# ## 1.4 Daily Alignment with Correct ASOF Join
+# ## Daily Alignment with Correct ASOF Join
 #
 # **Critical**: Both DataFrames must be sorted by the join keys.
 #
@@ -318,10 +339,13 @@ print(f"Daily aligned: {len(aligned):,} rows across {aligned['symbol'].n_unique(
 # the amber dashed lines mark the quarterly announcement dates that create each
 # step.
 
+# %% [markdown]
+# `unique()` does not promise a stable order, and a few symbols carry all-null ROE on this
+# slice because their XBRL earnings are missing. The selection below is therefore
+# deterministic: the symbol whose daily ROE has the fewest gaps, which gives the figure an
+# unbroken staircase to draw.
+
 # %%
-# unique() order is not stable, and a few symbols have all-null ROE on this
-# scaffolding slice (e.g. missing XBRL earnings), so select deterministically:
-# the symbol whose daily ROE has the fewest gaps gives an unbroken staircase.
 viz_symbol = (
     aligned.group_by("symbol")
     .agg(pl.col("roe").is_not_null().sum().alias("n_obs"))
@@ -365,10 +389,21 @@ fig.update_yaxes(
     title_text="Return on equity (earnings / book value)",
     range=[lo - pad, hi + pad],
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "A step chart of return on equity for one company across 2024, drawn as a dark "
+        "line against a vertical axis labelled earnings over book value. The line holds "
+        "perfectly flat between filings and changes level only where a dashed amber "
+        "vertical line marks an announcement date; three such lines sit in early May, "
+        "early August and early November. The first announcement steps the level down, "
+        "the second steps it up past where it began, and the third steps it up again to "
+        "the highest level of the year, which then holds to the right edge."
+    ),
+)
 
 # %% [markdown]
-# ### 1.5 Inflated Sample-Size Warning
+# ### Inflated Sample-Size Warning
 #
 # Forward-filling quarterly data to daily frequency inflates the apparent
 # sample size. Each fundamental observation is repeated across every trading
@@ -411,7 +446,7 @@ if len(aligned) > 0:
 # - **Forward-fill carefully**: Limit to avoid stale data
 
 # %% [markdown]
-# ## 2.1 Load Macro Data
+# ## Load Macro Data
 #
 # > **Publication Lag Warning**: Macro data has significant publication delays.
 # > Conservative approach: Lag monthly data by 30+ days.
@@ -423,7 +458,7 @@ print(f"Macro data: {len(macro):,} rows")
 print(f"Columns: {[c for c in macro.columns if c != 'timestamp'][:10]}")
 
 # %% [markdown]
-# ## 2.2 Trend Features with Publication Lag
+# ## Trend Features with Publication Lag
 #
 # > **Conservative Lagging**: For monthly data, add 30-day lag to ensure
 # > the data was actually available at the trading date.
@@ -485,11 +520,11 @@ print(f"Macro features: {len(macro_features.columns)} columns")
 # %% [markdown]
 # **Interpretation**: Z-scored macro data measures whether the current indicator
 # level is unusual relative to its recent history. A VIX z-score of +2 means
-# fear is elevated relative to the last 21 or 63 days — this conditions how
+# fear is elevated relative to the last 21 or 63 days, which conditions how
 # momentum and carry signals perform.
 
 # %% [markdown]
-# ## 2.3 Monthly Features with Correct Forward-Fill
+# ## Monthly Features with Correct Forward-Fill
 #
 # **Fix**: Use forward-filled version for YoY/3m changes, not raw monthly.
 
@@ -534,7 +569,7 @@ if "unrate" in macro.columns:
     macro_features = create_monthly_features(macro_features, ["unrate"], conservative_lag=30)
 
 # %% [markdown]
-# ## 2.4 Relative Value Features
+# ## Relative Value Features
 #
 # **Naming fix**: Rolling median ≠ percentile rank. Be precise.
 
@@ -577,42 +612,72 @@ def create_relative_value_features(df: pl.DataFrame) -> pl.DataFrame:
 macro_features = create_relative_value_features(macro_features)
 
 # %% [markdown]
-# ## 2.4b Yield-Curve Slope Feature
+# ## Yield-Curve Slope Feature
 #
-# The yield-curve slope (10Y-2Y spread) is loaded as `t10y2y`, but the text
-# specifies additional processing: a 5-day EMA for smoothing and a 250-day
-# z-score for regime-relative positioning.
+# The yield-curve slope, the ten-year minus two-year spread, arrives as `t10y2y`. Two
+# transforms follow, with their windows declared as constants in the next cell: an
+# exponential moving average to smooth the daily series, and a rolling z-score so the
+# level is read against its own recent range rather than in absolute basis points.
+#
+# Both windows count **calendar** days, which is the thing to check before copying a
+# window length from a notebook that works on price bars. This macro panel carries a row
+# for every date, weekends and holidays included, because FRED series are forward-filled
+# onto a daily grid. A window of 250 rows on price bars is a trading year; the same 250
+# rows here reach back about eight months. The cell below asserts the grid spacing rather
+# than trusting it.
 
 # %%
-# Yield-curve slope: EMA smoothing + rolling z-score
+# Named in calendar days because the macro panel is a calendar-day grid; see above.
+YC_EMA_SPAN_DAYS = 7  # one week of smoothing on the daily spread
+YC_ZSCORE_WINDOW_DAYS = 365  # one year, for the regime-relative z-score
+
+_gaps = macro_features["timestamp"].sort().diff().drop_nulls().dt.total_days().unique().to_list()
+print(f"spacing between macro rows, in days: {sorted(_gaps)}")
+if sorted(_gaps) != [1]:
+    raise ValueError(
+        "the macro panel is not on a one-calendar-day grid, so the window constants above "
+        f"do not mean what they say; observed gaps: {sorted(_gaps)}"
+    )
+
 macro_features = macro_features.with_columns(
-    pl.col("t10y2y").ewm_mean(span=5, ignore_nulls=True).alias("yc_slope_ema5"),
+    pl.col("t10y2y").ewm_mean(span=YC_EMA_SPAN_DAYS, ignore_nulls=True).alias("yc_slope_ema"),
 ).with_columns(
     [
         (
-            (pl.col("yc_slope_ema5") - pl.col("yc_slope_ema5").rolling_mean(250))
-            / pl.col("yc_slope_ema5").rolling_std(250).clip(EPSILON, None)
-        ).alias("yc_slope_zscore_250d"),
+            (pl.col("yc_slope_ema") - pl.col("yc_slope_ema").rolling_mean(YC_ZSCORE_WINDOW_DAYS))
+            / pl.col("yc_slope_ema").rolling_std(YC_ZSCORE_WINDOW_DAYS).clip(EPSILON, None)
+        ).alias("yc_slope_zscore"),
     ]
 )
 # %% [markdown]
-# The two panels below trace the whole history. The top panel shows the raw
-# 10Y-2Y spread with its 5-day EMA; the shaded band marks inversions (spread
-# below zero), the classic recession precursor. The bottom panel shows the
-# 250-day z-score, which restates the same slope relative to its own recent
-# regime.
+# The two panels below trace the whole history. The top panel shows the raw ten-year minus
+# two-year spread with its smoothed version; the shaded band marks inversions, where the
+# spread sits below zero, which is the classic recession precursor. The bottom panel shows
+# the z-score, which restates the same slope relative to its own recent regime, so a
+# reading far from zero means the curve is unusual for this period rather than unusual in
+# absolute terms.
+#
+# The count of shaded episodes printed with the figure includes several that lasted a
+# single day. Those bands are drawn, and at this width they are narrower than a pixel:
+# twenty-five years across a nine-hundred-pixel figure leaves each day about a tenth of
+# one. Read the count rather than trying to find them, and note that an inversion lasting
+# one day is a fact about the series that a chart of this span cannot show, which is a
+# reason to keep the count beside the chart rather than to redraw it.
 
 # %%
-yc = macro_features.select(
-    ["timestamp", "t10y2y", "yc_slope_ema5", "yc_slope_zscore_250d"]
-).drop_nulls("yc_slope_zscore_250d")
+yc = macro_features.select(["timestamp", "t10y2y", "yc_slope_ema", "yc_slope_zscore"]).drop_nulls(
+    "yc_slope_zscore"
+)
 
 fig = make_subplots(
     rows=2,
     cols=1,
     shared_xaxes=True,
     vertical_spacing=0.08,
-    subplot_titles=["10Y-2Y spread and 5-day EMA", "250-day z-score of the EMA slope"],
+    subplot_titles=[
+        f"10Y-2Y spread and its {YC_EMA_SPAN_DAYS}-calendar-day EMA",
+        f"{YC_ZSCORE_WINDOW_DAYS}-calendar-day z-score of the EMA slope",
+    ],
 )
 fig.add_trace(
     go.Scatter(
@@ -628,18 +693,54 @@ fig.add_trace(
 fig.add_trace(
     go.Scatter(
         x=yc["timestamp"].to_list(),
-        y=yc["yc_slope_ema5"].to_list(),
-        name="5-day EMA",
+        y=yc["yc_slope_ema"].to_list(),
+        name=f"{YC_EMA_SPAN_DAYS}-day EMA",
         line=dict(color=COLORS["blue"], width=2),
     ),
     row=1,
     col=1,
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["copper"], row=1, col=1)
+
+# Shade each inversion episode, meaning each contiguous run of days with the spread below
+# zero. Runs are found by numbering the sign changes and grouping on that number, so two
+# inversions separated by a single positive day stay two episodes rather than merging.
+_inv = yc.with_columns((pl.col("t10y2y") < 0).alias("inverted")).with_columns(
+    (pl.col("inverted") != pl.col("inverted").shift(1)).fill_null(True).cum_sum().alias("episode")
+)
+# Half a day of padding each side, so a one-day episode is a visible band rather than a
+# zero-width rectangle that draws nothing. Endpoints become datetimes first: these are
+# pl.Date, and date arithmetic keeps only the whole-day part of a timedelta.
+_pad = timedelta(hours=12)
+_episodes = (
+    _inv.filter("inverted")
+    .group_by("episode")
+    .agg([pl.col("timestamp").min().alias("start"), pl.col("timestamp").max().alias("end")])
+    .sort("start")
+    .iter_rows(named=True)
+)
+_single_day = 0
+for _ep in _episodes:
+    _x0 = datetime.combine(_ep["start"], time.min) - _pad
+    _x1 = datetime.combine(_ep["end"], time.min) + _pad
+    if _x0 >= _x1:
+        raise ValueError(f"inversion band {_ep['start']}..{_ep['end']} has no width to draw")
+    _single_day += _ep["start"] == _ep["end"]
+    fig.add_vrect(
+        x0=_x0,
+        x1=_x1,
+        fillcolor=COLORS["copper"],
+        opacity=0.12,
+        line_width=0,
+        row=1,
+        col=1,
+    )
+print(f"shaded inversion episodes, of which single-day: {_single_day}")
+
 fig.add_trace(
     go.Scatter(
         x=yc["timestamp"].to_list(),
-        y=yc["yc_slope_zscore_250d"].to_list(),
+        y=yc["yc_slope_zscore"].to_list(),
         name="z-score",
         line=dict(color=COLORS["blue"], width=1.5),
     ),
@@ -656,7 +757,23 @@ fig.update_layout(
 fig.update_yaxes(title_text="Spread (pct points)", row=1, col=1)
 fig.update_yaxes(title_text="z-score (std devs)", row=2, col=1)
 fig.update_xaxes(title_text="Date", row=2, col=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Two stacked panels sharing a date axis running from the early 2000s to the "
+        "mid-2020s. The top panel plots the ten-year minus two-year Treasury spread in "
+        "percentage points, a faint grey raw series under a darker smoothed line, "
+        "against a dashed zero line. The spread rises to a broad peak in the early "
+        "2000s, falls to around zero by the middle of that decade, peaks again around "
+        "2010, then declines in steps to sit below zero for the last stretch before "
+        "recovering at the right edge. Pale copper vertical bands shade the periods "
+        "where the spread is below zero: two narrow bands close together in the middle "
+        "2000s, and one wide band covering most of the final years. The bottom panel "
+        "plots the same slope as a rolling z-score in standard deviations, which swings "
+        "much faster than the level above it and crosses outside the dashed reference "
+        "lines at plus and minus two repeatedly across the span."
+    ),
+)
 
 # %% [markdown]
 # **Interpretation**: The z-score centers the slope relative to its recent history.
@@ -665,7 +782,7 @@ fig.show()
 # without introducing significant lag.
 
 # %% [markdown]
-# ## 2.5 Risk Regime Features
+# ## Risk Regime Features
 
 
 # %%
@@ -720,7 +837,7 @@ macro_features.select([c for c in macro_features.columns if "regime" in c or "re
 # **phase and proximity**, not outcomes.
 
 # %% [markdown]
-# ## 3.1 Cyclical Encoding
+# ## Cyclical Encoding
 #
 # Encoding month as an integer (1-12) implies an ordinal relationship
 # (December > January). Cyclical sin/cos encoding removes this artifact:
@@ -804,7 +921,19 @@ fig.update_layout(
 )
 fig.update_xaxes(title_text="month_cos", range=[-1.6, 1.6], zeroline=True)
 fig.update_yaxes(title_text="month_sin", range=[-1.6, 1.6], zeroline=True, scaleanchor="x")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "A scatter of twelve points arranged evenly around a circle of radius one, "
+        "centred on the origin, with faint horizontal and vertical axis lines through "
+        "the centre and a dashed line joining consecutive points. The horizontal axis "
+        "is labelled month_cos and the vertical month_sin. Each point carries a month "
+        "abbreviation: March sits at the top, June at the left, September at the "
+        "bottom and December at the right, with the remaining months spaced between "
+        "them in calendar order. December and January sit side by side on the ring, "
+        "separated by the same gap as any other consecutive pair."
+    ),
+)
 
 # %% [markdown]
 # **Usage**: Calendar features are primarily **state variables** for conditioning.
@@ -819,7 +948,7 @@ fig.show()
 # `06_robustness_sensitivity`.
 
 # %% [markdown]
-# ## 3.2 Time-to-Event Encoding
+# ## Time-to-Event Encoding
 #
 # Time-to-event measures proximity to a known future event (earnings, FOMC,
 # rebalance). The text specifies:
@@ -829,9 +958,12 @@ fig.show()
 # where $T_{\text{next}}$ is the next event date and $H_{\max}$ caps the
 # feature to avoid extreme values far from events.
 
+# %% [markdown]
+# The earnings calendar below is synthetic, placed a fixed number of days after each
+# quarter end. A real system reads filing dates from SEC EDGAR; the point here is the
+# encoding, not the dates.
+
 # %%
-# Synthetic earnings calendar for demonstration
-# Real systems would load from SEC EDGAR filing dates
 earnings_dates = []
 for symbol in ["AAPL", "MSFT", "GOOGL"]:
     # Quarterly earnings approximately 45 days after quarter end
@@ -923,10 +1055,21 @@ fig.update_layout(
 )
 fig.update_xaxes(title_text="Date")
 fig.update_yaxes(title_text="Trading days to next earnings (capped at H_max)")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "A sawtooth line chart across roughly two years, with the vertical axis giving "
+        "trading days to the next earnings announcement and a dashed amber horizontal "
+        "line marking the cap near the top of the axis. The series rides flat along "
+        "that cap, then falls in a straight diagonal to zero at each announcement, "
+        "where it jumps vertically back to the cap and begins again. Eight such "
+        "descents appear, spaced about a quarter apart, and the final one is still "
+        "part-way down at the right edge."
+    ),
+)
 
 # %% [markdown]
-# **Interpretation**: Time-to-event serves as a **state variable** — a label
+# **Interpretation**: Time-to-event serves as a **state variable**: a label
 # that partitions trading days into discrete proximity windows
 # (pre-2d, pre-5d, normal, far). These windows feed downstream signal × state
 # interactions (see `06_robustness_sensitivity` for the IC-conditioning
@@ -961,5 +1104,5 @@ fig.show()
 #
 # ### Next Notebooks
 #
-# - `05_feature_selection` — Feature selection and deduplication (§8.6)
-# - `06_robustness_sensitivity` — Regime conditioning, interactions (§8.6)
+# - `05_feature_selection`: feature selection and deduplication (§8.6)
+# - `06_robustness_sensitivity`: regime conditioning and interactions (§8.6)

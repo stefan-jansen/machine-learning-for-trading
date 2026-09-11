@@ -36,7 +36,7 @@
 # - Model the interaction between signal decay and transaction costs
 # - Use a persistence-cost scenario to explain when a faster signal may still be worth trading
 #
-# **Book Reference:** Chapter 18: Section 18.8 (Practical Guardrails)
+# **Book Reference:** Chapter 18: Section 18.8 (Designing practical cost guardrails)
 #
 # **Prerequisites:** Read [`01_cost_taxonomy`](01_cost_taxonomy.ipynb) for breakeven framing and
 # [`10_gross_vs_net_performance`](10_gross_vs_net_performance.ipynb) for the full net-of-cost waterfall.
@@ -893,13 +893,22 @@ summary_df
 # %%
 _daily_high = _high_friction_results.filter(pl.col("frequency") == "Daily").row(0, named=True)
 _monthly_high = _high_friction_results.filter(pl.col("frequency") == "Monthly").row(0, named=True)
+# Through the same function the break-even table calls, rather than inlining its body here.
+# The two agree today because the body is that product; they stop agreeing the moment it is
+# not, and nothing would report the sentence and the table disagreeing.
+_daily_break_even = calculate_break_even_alpha(
+    _daily["annual_turnover"], HIGH_FRICTION_COSTS.round_trip
+)
+_monthly_break_even = calculate_break_even_alpha(
+    _monthly["annual_turnover"], HIGH_FRICTION_COSTS.round_trip
+)
 display(
     Markdown(
         f"""
 1. **Break-even alpha scales with measured turnover**: daily turnover is
-   {_daily["annual_turnover"]:.1f}x and requires {_daily["annual_turnover"] * HIGH_FRICTION_COSTS.round_trip:.0f}
+   {_daily["annual_turnover"]:.1f}x and requires {_daily_break_even:.0f}
    bps under the high-friction scenario; monthly turnover is {_monthly["annual_turnover"]:.1f}x
-   and requires {_monthly["annual_turnover"] * HIGH_FRICTION_COSTS.round_trip:.0f} bps.
+   and requires {_monthly_break_even:.0f} bps.
 
 2. **The historical cadence comparison is descriptive**: in the fixed {GROSS_START_DATE} to
    {GROSS_END_DATE} sample,

@@ -26,7 +26,13 @@ PINNED_SEQUENCE_STATE = 1
 PINNED_TABM_RUNNER = 1
 PINNED_TABM_STATE = 1
 PINNED_LATENT_ADAPTER = 1
-PINNED_CAUSAL_RUNNER = 1
+# 1 -> 2 on 2026-09-10: the block-permutation refutation compares HAC t-statistics rather
+# than raw effects (ml4t/agent-workspace#1120). Permuting the treatment frees it from the
+# controls, so var(T_res) inflates and every placebo effect is shrunk toward zero by
+# arithmetic - the permutation distribution was narrower than the null it stood for, and
+# the bias ran one way, toward "Passes". refutation_p is a registered value, so the change
+# has to move the identity; causal rows have no migration path and refit.
+PINNED_CAUSAL_RUNNER = 2
 
 
 def _training_spec(source_identity: dict) -> dict:
@@ -105,7 +111,7 @@ def test_latent_identity_is_declared_and_model_scoped(model: str) -> None:
 
 def test_causal_identity_is_declared() -> None:
     assert causal.CAUSAL_RUNNER_VERSION == PINNED_CAUSAL_RUNNER
-    assert causal._causal_source_identity() == {"causal_runner": 1}
+    assert causal._causal_source_identity() == {"causal_runner": 2}
 
 
 @pytest.mark.parametrize(

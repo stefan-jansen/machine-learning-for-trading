@@ -14,7 +14,7 @@ The chapter explains why good forecasts are not yet portfolios. It frames alloca
 
 ## Sections
 
-### 17.1 From Signals to Positions: Defining the Allocation Problem
+### 17.1 Defining the Allocation Problem
 
 This section explains why good forecasts are not yet portfolios. It frames allocation as the step that combines expected returns, risk estimates, and admissible-risk constraints into actual weights, leverage, and rebalancing choices. It matters because small modeling decisions at this stage can amplify a weak edge or destroy a strong one through concentration, unstable sizing, or excess turnover.
 

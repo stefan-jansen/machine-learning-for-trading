@@ -30,7 +30,7 @@
 # - Construct network-diversified portfolios that underweight central nodes
 # - Run a stylized, order-independent shock-propagation sensitivity
 #
-# **Book Reference**: Chapter 23, Section 23.5 (Financial Networks: From Correlations to Portfolios)
+# **Book Reference**: Chapter 23, Section 23.5 (Correlations and portfolios in financial networks)
 #
 # **Prerequisites**: Familiarity with correlation matrices and portfolio construction.
 # Requires the US equities dataset (3,199 current and delisted securities).

@@ -244,18 +244,18 @@ def create_dataset_dict(train_df: pl.DataFrame, val_df: pl.DataFrame, test_df: p
 
 dataset = create_dataset_dict(train_df, val_df, test_df)
 
-# Scoring, not training, is what this notebook spends its time on, and MAX_TRAIN_STEPS
-# does not touch it. Each model is scored on the validation split every `eval_steps`
-# during training and once on the test split at the end, and a full pass costs 183s on
-# one CPU thread against 727 sentences. Under `MAX_TRAIN_STEPS: 20` that is two
-# in-training evaluations plus two passes over the test split, so twenty training steps
-# sit behind about twelve minutes of inference per model. Bounding the scored splits is
-# the knob that reaches that; bounding the model count would leave a three-way
-# comparison with one entry.
+# %% [markdown]
+# Scoring, not training, is what this notebook spends its time on, and `MAX_TRAIN_STEPS` does
+# not touch it. Each model is scored on the validation split every `eval_steps` during training
+# and once on the test split at the end, so what the runtime tracks is the number of scored
+# sentences, not the number of training steps. Bounding the scored splits is the knob that
+# reaches that; bounding the model count would leave a three-way comparison with one entry.
 #
-# 0 means score everything, which is what a real run does. The splits are already
-# shuffled and stratified by `train_test_split`, so a prefix of each is class-balanced
+# `MAX_EVAL_SAMPLES = 0` means score everything, which is what a real run does. The splits are
+# already shuffled and stratified by `train_test_split`, so a prefix of each is class-balanced
 # in expectation.
+
+# %%
 if MAX_EVAL_SAMPLES > 0:
     dataset = DatasetDict(
         {
@@ -437,16 +437,11 @@ def fine_tune_model(model_name: str, spec: dict, dataset: DatasetDict) -> dict:
     train_result = trainer.train()
     train_time = time.time() - start_time
 
-    # `evaluate` and `predict` both make a full forward pass over the test split and
-    # report the same accuracy and macro F1, so this scores it twice. Collapsing them
-    # into a single `predict(..., metric_key_prefix="eval")` is correct and saves a
-    # pass per model, but it moves the two models fine-tuned after it - DeBERTa-v3 to
-    # 96.8% and ModernBERT to 97.9%, which puts ModernBERT above FinBERT and makes the
-    # "scores highest" in takeaway 2 false. ml4t/agent-workspace#1121 carries it.
-    test_results = trainer.evaluate(tokenized["test"])
-
-    # Get predictions for confusion matrix
-    predictions = trainer.predict(tokenized["test"])
+    # One forward pass over the test split, not two. `predict` computes the same metrics
+    # `evaluate` does when `compute_metrics` is set, and `metric_key_prefix="eval"` keeps
+    # the keys the caller reads below.
+    predictions = trainer.predict(tokenized["test"], metric_key_prefix="eval")
+    test_results = predictions.metrics
     y_pred = np.argmax(predictions.predictions, axis=-1)
     y_true = predictions.label_ids
 
@@ -483,7 +478,7 @@ def fine_tune_model(model_name: str, spec: dict, dataset: DatasetDict) -> dict:
 # meanings are permuted against the labels it is now scored on, so fine-tuning has to undo
 # the permutation before it can improve on anything.
 #
-# Which sharpens what the leakage is. FinBERT's advantage here is not a ready-made head - it
+# Which sharpens what the leakage is. What FinBERT brings here is not a ready-made head - it
 # starts with a misaligned one - it is an encoder that has already read the sentences this
 # notebook is about to test it on.
 
@@ -632,10 +627,11 @@ show_with_alt(
 #    or the confusion matrix reveals this; it is on the model card, and reading the card is
 #    the step. A domain checkpoint is the first thing anyone reaches for, which is exactly why
 #    this trap is common.
-# 2. **A leaked comparison does not announce itself as one.** The contaminated row sits in the
-#    same table as the clean ones and scores highest. Carry the provenance into the
-#    table as a column rather than into a caveat at the end of the notebook, because the table
-#    is what gets read and quoted.
+# 2. **A leaked comparison does not announce itself as one.** A contaminated row does not have
+#    to be the strongest row, so scanning a results table for a suspiciously good score will
+#    not find it. What marks it is provenance, and the table has to carry that as a column
+#    rather than as a caveat at the end of the notebook, because the table is what gets read
+#    and quoted.
 # 3. **Cross-notebook before-and-after comparisons need the same checkpoint on both sides.**
 #    `03_sentiment_evolution` scores `yiyanghkust/finbert-tone`, trained on analyst reports.
 #    Reading its number against this notebook's `ProsusAI/finbert` compares two different
@@ -644,13 +640,15 @@ show_with_alt(
 #    three classes equally, and the confusion matrix says which pair a model actually confuses.
 #    Read all three; a single scalar cannot distinguish a model that is unsure from one that
 #    has stopped predicting a class.
-# 5. **Fine-tuning cost and fine-tuning benefit are not on the same scale here.** The training
-#    times differ from one another by more than the scores do, so on a task this size the
-#    choice between these checkpoints is closer to an engineering decision than a modelling one.
-# 6. **A confusion matrix says what a model got wrong, not why.** Three models confusing the
-#    same pair of classes is a fact about these three runs. Whether the pair is genuinely
-#    ambiguous, under-represented in the training split, or inconsistently labeled is a
-#    question about the examples, and it is answered by reading them.
+# 5. **Fine-tuning cost and fine-tuning benefit are not on the same scale here.** Set the
+#    spread of the training times against the spread of the scores before choosing between
+#    these checkpoints: on a task this size that choice is closer to an engineering decision
+#    than a modelling one.
+# 6. **A confusion matrix says what a model got wrong, not why.** It locates a disagreement
+#    between two classes and cannot attribute it, and two models landing on the same pair does
+#    not change that. Whether the pair is genuinely ambiguous, under-represented in the training
+#    split, or inconsistently labeled is a question about the examples, and it is answered by
+#    reading them.
 #
 # ### The scope these numbers have
 #

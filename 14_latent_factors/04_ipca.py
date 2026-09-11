@@ -46,7 +46,7 @@
 #
 # **Prerequisite**: [`01_pca_equity_sectors`](01_pca_equity_sectors.ipynb)
 #
-# **Book section**: Section 14.5, "Dynamic betas with instrumented PCA"
+# **Book section**: Section 14.5, "Bridging economics and statistics with advanced models"
 #
 # **Next**: [`05_rp_pca`](05_rp_pca.ipynb) changes the Stage 1 objective to
 # emphasize priced variation.

@@ -8,6 +8,9 @@ to avoid overwriting production artifacts during tests.
 
 from __future__ import annotations
 
+import sqlite3
+import stat
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -20,6 +23,7 @@ from utils.paths import (
     get_case_study_dir,
     get_chapter_dir,
     get_output_dir,
+    registry_readonly_uri,
     require_chapter_inputs,
 )
 
@@ -264,3 +268,76 @@ class TestRequireChapterInputs:
         messages.mkdir()
 
         require_chapter_inputs({messages: "01_itch_parser"})
+
+
+# -----------------------------------------------------------------------------
+# registry_readonly_uri
+# -----------------------------------------------------------------------------
+
+
+def _wal_registry(directory: Path) -> Path:
+    """Write a WAL-mode registry with one committed row, as the case studies do."""
+    path = directory / "registry.db"
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("CREATE TABLE training_runs (config_name TEXT)")
+        db.execute("INSERT INTO training_runs VALUES ('ols')")
+        db.commit()
+    return path
+
+
+def _unwritable(directory: Path) -> None:
+    """Strip the write bits the way scripts/download_artifacts.py installs a bundle."""
+    for path in [directory, *directory.rglob("*")]:
+        path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+
+class TestRegistryReadonlyUri:
+    def test_a_live_registry_is_read_through_the_write_ahead_log(self, tmp_path: Path) -> None:
+        """A row committed after the reader connects is in the -wal file, not the main file."""
+        registry = _wal_registry(tmp_path)
+        with closing(sqlite3.connect(registry)) as writer:
+            reader = sqlite3.connect(registry_readonly_uri(registry), uri=True)
+            with closing(reader):
+                writer.execute("INSERT INTO training_runs VALUES ('ridge')")
+                writer.commit()
+
+                names = {row[0] for row in reader.execute("SELECT config_name FROM training_runs")}
+
+        assert names == {"ols", "ridge"}
+
+    def test_a_live_registry_connection_cannot_write(self, tmp_path: Path) -> None:
+        registry = _wal_registry(tmp_path)
+
+        with (
+            closing(sqlite3.connect(registry_readonly_uri(registry), uri=True)) as reader,
+            pytest.raises(sqlite3.OperationalError),
+        ):
+            reader.execute("INSERT INTO training_runs VALUES ('gbm')")
+
+    def test_a_question_mark_in_the_path_is_not_read_as_uri_syntax(self, tmp_path: Path) -> None:
+        """A raw f-string would end the path at the `?` and open a different file, or none."""
+        awkward = tmp_path / "run?log#1"
+        awkward.mkdir()
+        registry = _wal_registry(awkward)
+
+        with closing(sqlite3.connect(registry_readonly_uri(registry), uri=True)) as reader:
+            names = {row[0] for row in reader.execute("SELECT config_name FROM training_runs")}
+
+        assert names == {"ols"}
+
+    def test_an_installed_bundle_is_readable_from_an_unwritable_tree(self, tmp_path: Path) -> None:
+        """A WAL reader must create the -shm sidecar unless told the file cannot change."""
+        run_log = tmp_path / "run_log"
+        run_log.mkdir()
+        registry = _wal_registry(run_log)
+        _unwritable(run_log)
+
+        try:
+            with closing(sqlite3.connect(registry_readonly_uri(registry), uri=True)) as reader:
+                names = {row[0] for row in reader.execute("SELECT config_name FROM training_runs")}
+        finally:
+            for path in [run_log, *run_log.rglob("*")]:
+                path.chmod(path.stat().st_mode | stat.S_IWUSR)
+
+        assert names == {"ols"}

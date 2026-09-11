@@ -15,7 +15,7 @@
 
 # %% [markdown]
 # # Feature Drift Detection for Production ML Strategies
-# **Docker image**: `ml4t-gpu` (CUDA required; execution fails closed without it)
+# **Docker image**: `ml4t`
 #
 # **Purpose**: Walk through the `ml4t.diagnostic.evaluation.drift` toolkit (PSI,
 # Wasserstein distance, domain classifier, unified `analyze_drift`) on real
@@ -26,8 +26,8 @@
 # **Learning objectives**:
 # 1. Compute Population Stability Index (PSI) and read its bin-level breakdown.
 # 2. Compare PSI to the Wasserstein distance interpretation.
-# 3. Use a GPU-trained domain classifier on stacked reference + test samples
-#    for multivariate drift detection.
+# 3. Use a domain classifier on stacked reference + test samples for multivariate
+#    drift detection.
 # 4. Translate per-method drift scores into alert levels and a retraining
 #    recommendation via `ProductionDriftMonitor.should_retrain()`.
 #
@@ -59,7 +59,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-import torch
 from IPython.display import Markdown, display
 
 # ml4t-diagnostic imports
@@ -89,6 +88,7 @@ PSI_CRITICAL_THRESHOLD = 0.25
 DOMAIN_AUC_WARNING_THRESHOLD = 0.60
 DOMAIN_AUC_CRITICAL_THRESHOLD = 0.70
 DOMAIN_CV_TIME_BLOCKS = 20
+LGB_DEVICE = "cpu"
 
 # %% [markdown]
 # What each setting decides:
@@ -103,6 +103,8 @@ DOMAIN_CV_TIME_BLOCKS = 20
 #   cross-validation splits into. Splitting by block rather than at random keeps neighbouring days
 #   out of opposite folds, which would otherwise let the classifier separate the samples by
 #   memorizing a period rather than by detecting drift.
+# - `LGB_DEVICE` is the LightGBM backend the domain classifier asks for, and the value every
+#   fitted booster is checked against.
 #
 # All four thresholds are the conventional rules of thumb. Calibrate them against a period where
 # you know whether drift occurred before trusting them to page anyone.
@@ -216,18 +218,15 @@ def alert_count_condition(
 
 
 # %% [markdown]
-# Publication execution is GPU-only. This fail-closed check runs before data loading so a CPU
-# environment cannot produce a certifiable-looking partial artifact.
+# The domain classifier declares the LightGBM backend it wants rather than taking whatever the
+# install happens to provide. A build without the requested tree learner raises at `fit()`, so
+# the checks below are not catching a silent fallback: each reads back the device its booster
+# kept, and a requested value that never reached it would otherwise leave no trace.
 
 # %%
-if not torch.cuda.is_available():
-    raise RuntimeError("CUDA is required for this notebook; CPU fallback is disabled")
-GPU_DEVICE_INDEX = torch.cuda.current_device()
-GPU_DEVICE_NAME = torch.cuda.get_device_name(GPU_DEVICE_INDEX)
 print(
-    "GPU_DEVICE_PROOF "
-    f"cuda_available=True device_index={GPU_DEVICE_INDEX} "
-    f"device_name={GPU_DEVICE_NAME!r} lightgbm_device='cuda' cpu_fallback=False"
+    f"LightGBM {lgb.__version__} requested with device_type={LGB_DEVICE!r}; "
+    "each fit below is checked against that value"
 )
 
 # %% [markdown]
@@ -283,17 +282,17 @@ def relative_time_blocks(frame: pd.DataFrame) -> np.ndarray:
 
 
 # %% [markdown]
-# The CUDA fit helper performs the same five blocked folds and final all-row fit. It verifies the
-# retained LightGBM backend before returning any result.
+# The fit helper performs five blocked folds and a final all-row fit. It verifies the backend
+# the booster retained before returning any result.
 
 
 # %%
-def fit_cuda_domain_model(
+def fit_domain_model(
     reference: pd.DataFrame,
     current: pd.DataFrame,
     features: list[str],
 ) -> tuple[pd.DataFrame, lgb.LGBMClassifier, list[float], int]:
-    """Fit blocked validation folds and the final CUDA model."""
+    """Fit blocked validation folds and the final all-row model."""
     X = pd.concat([reference[features], current[features]], ignore_index=True)
     y = np.concatenate(
         [np.zeros(len(reference), dtype=np.int8), np.ones(len(current), dtype=np.int8)]
@@ -303,7 +302,7 @@ def fit_cuda_domain_model(
         n_estimators=100,
         max_depth=5,
         random_state=SEED,
-        device_type="cuda",
+        device_type=LGB_DEVICE,
         n_jobs=1,
         verbose=-1,
     )
@@ -314,18 +313,21 @@ def fit_cuda_domain_model(
         fold_device = fold_model.booster_.params.get(
             "device_type", fold_model.booster_.params.get("device")
         )
-        if fold_device != "cuda":
-            raise RuntimeError("A domain-classifier fold did not use the CUDA backend")
+        if fold_device != LGB_DEVICE:
+            raise RuntimeError(
+                f"A domain-classifier fold trained on {fold_device or 'unset'}, not {LGB_DEVICE}"
+            )
         predictions = fold_model.predict_proba(X.iloc[validation_index])[:, 1]
         cv_scores.append(roc_auc_score(y[validation_index], predictions))
     model.fit(X, y)
     actual_device = model.booster_.params.get("device_type", model.booster_.params.get("device"))
-    if actual_device != "cuda":
-        raise RuntimeError("LightGBM did not retain the required CUDA device selection")
+    if actual_device != LGB_DEVICE:
+        raise RuntimeError(
+            f"LightGBM retained device {actual_device or 'unset'}, not the requested {LGB_DEVICE}"
+        )
     print(
-        "LIGHTGBM_DEVICE_PROOF "
-        f"backend={actual_device!r} cv_folds={splitter.n_splits} "
-        "n_jobs=1 cpu_fallback=False"
+        f"Domain classifier: LightGBM backend={actual_device!r}, "
+        f"{splitter.n_splits} blocked folds, n_jobs=1"
     )
     return X, model, cv_scores, splitter.n_splits
 
@@ -361,7 +363,7 @@ def domain_auc_interpretation(
 
 
 # %% [markdown]
-# Metadata records the blocked-CV design and fail-closed CUDA environment alongside the result.
+# Metadata records the blocked-CV design and the verified backend alongside the result.
 
 
 # %%
@@ -380,9 +382,8 @@ def domain_result_metadata(
         "cv_folds": cv_folds,
         "cv_scheme": "stratified relative-time blocks",
         "cv_time_blocks": DOMAIN_CV_TIME_BLOCKS,
-        "device": "cuda",
-        "device_name": GPU_DEVICE_NAME,
-        "cpu_fallback": False,
+        "device": LGB_DEVICE,
+        "lightgbm_version": lgb.__version__,
         "random_state": SEED,
     }
 
@@ -421,7 +422,7 @@ def build_domain_classifier_result(
         n_reference=len(reference),
         n_test=len(current),
         n_features=len(features),
-        model_type="lightgbm-cuda",
+        model_type=f"lightgbm-{LGB_DEVICE}",
         cv_auc_mean=cv_auc,
         cv_auc_std=float(np.std(cv_scores)),
         interpretation=interpretation,
@@ -433,24 +434,24 @@ def build_domain_classifier_result(
 
 
 # %% [markdown]
-# The public adapter validates the feature schema, runs the unchanged CUDA computation, and returns
-# a complete `DomainClassifierResult` without a CPU fallback.
+# The public adapter validates the feature schema, runs the fit, and returns a complete
+# `DomainClassifierResult` or raises.
 
 
 # %%
-def gpu_domain_classifier(
+def domain_classifier(
     reference: pd.DataFrame,
     current: pd.DataFrame,
     features: list[str],
     warning_threshold: float = DOMAIN_AUC_WARNING_THRESHOLD,
     critical_threshold: float = DOMAIN_AUC_CRITICAL_THRESHOLD,
 ) -> DomainClassifierResult:
-    """Fit on CUDA and score folds that hold out complete relative-time blocks."""
+    """Fit the classifier and score folds that hold out complete relative-time blocks."""
     required = {"timestamp", *features}
     if not required.issubset(reference.columns) or not required.issubset(current.columns):
         raise ValueError("Both domains must contain timestamp and every requested feature")
     started = time.perf_counter()
-    _, model, cv_scores, cv_folds = fit_cuda_domain_model(reference, current, features)
+    _, model, cv_scores, cv_folds = fit_domain_model(reference, current, features)
     return build_domain_classifier_result(
         reference,
         current,
@@ -465,8 +466,8 @@ def gpu_domain_classifier(
 
 
 # %% [markdown]
-# The summary finalizer attaches the validated CUDA result to the two univariate methods without
-# changing the library result schema.
+# The summary finalizer attaches the validated domain result to the two univariate methods
+# without changing the library result schema.
 
 
 # %%
@@ -490,8 +491,9 @@ def finalize_drift_summary(
 
 # %% [markdown]
 # The unified helper requires both univariate methods to complete, applies reference-only PSI
-# settings, and adds the blocked out-of-fold CUDA classifier. GPU histogram construction is seeded
-# but not bitwise deterministic, so conclusions near either AUC cutoff require investigation.
+# settings, and adds the blocked out-of-fold domain classifier. One CPU thread and a fixed seed
+# make the fit reproducible to the digit, so an AUC that lands near either cutoff is a statement
+# about this sample rather than about the arithmetic, and the way to settle it is another window.
 
 
 # %%
@@ -520,7 +522,7 @@ def checked_drift_analysis(
     )
     if any(result.n_methods_run != 2 for result in summary.feature_results):
         raise RuntimeError("Drift analysis did not complete all requested methods")
-    domain = gpu_domain_classifier(
+    domain = domain_classifier(
         reference,
         current,
         features,
@@ -930,7 +932,7 @@ show_plotly_with_alt(
 
 # %%
 # Domain classifier for multivariate drift. DataFrames preserve real feature names.
-result = gpu_domain_classifier(
+result = domain_classifier(
     reference=baseline_features,
     current=covariate_drift_features,
     features=features,
@@ -991,7 +993,7 @@ def plot_domain_classifier_results(result: DomainClassifierResult):
     fig.update_layout(
         title=(
             "Which features let a classifier tell the two samples apart"
-            "<br><sup>Split counts from the cross-validated domain classifier</sup>"
+            "<br><sup>Split counts from the final all-row domain classifier</sup>"
         ),
         xaxis_title="LightGBM split count",
         yaxis_title="Feature",
@@ -1274,7 +1276,7 @@ fig.update_yaxes(
 )
 show_plotly_with_alt(
     fig,
-    "A heatmap of PSI by feature and quarter on a logarithmic colour scale, with the crisis quarter far darker than the rest across every feature.",
+    "Four panels sharing a quarterly horizontal axis: mean PSI, cross-validated AUC from the domain classifier, maximum PSI, and the resulting alert state. Both PSI panels peak in the second quarter shown and fall back after it, the mean-PSI series staying above the two dashed thresholds drawn beneath it while the maximum-PSI panel carries no threshold lines at all. The AUC bars clear both of their dashed thresholds in each of the four quarters, and each of the four alert markers sits in the drift state.",
 )
 
 # %% [markdown]
@@ -1491,7 +1493,7 @@ fig.update_xaxes(title_text="Market window", tickangle=-30, row=1, col=2)
 fig.update_yaxes(title_text="Cross-validated AUC", range=[0, 1], row=1, col=2)
 show_plotly_with_alt(
     fig,
-    "A heatmap of PSI by crypto feature and comparison window on a logarithmic scale, with the collapse window standing out sharply from the bull-market ones.",
+    "Two panels side by side over the same market windows. On the left a heatmap of PSI by crypto feature, with the two lower feature rows carrying the strongest colour and the bottom row strongest in the later windows; on the right the cross-validated domain AUC per window as bars against two dashed thresholds, the first bar between the two and the rest above both.",
 )
 
 # %% [markdown]

@@ -96,7 +96,7 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -248,7 +248,7 @@ def make_signals(
 # $$f^* = W - \frac{1 - W}{R}$$
 #
 # where $W$ = win rate and $R$ = average win / average loss.
-# We use **half-Kelly** ($0.5 \times f^*$) for safety.
+# We use **half-Kelly**, meaning half the fraction the formula returns, for safety.
 
 
 # %% [markdown]
@@ -428,18 +428,30 @@ if kelly_strategy.size_history:
         y=kelly_strategy.base_size,
         line_dash="dash",
         line_color=COLORS["neutral"],
-        annotation_text="Base target (10%)",
+        annotation_text=f"Base target ({kelly_strategy.base_size:.0%})",
     )
     fig.update_layout(
         title=(
-            "Realized outcomes move the Kelly target away from its base"
+            "Kelly target fraction of equity, by entry"
             "<br><sup>QQQ, signal-time target fraction by entry; full teaching sample</sup>"
         ),
         xaxis_title="Trade Number",
         yaxis_title="Target Fraction of Equity",
         height=400,
     )
-    fig.show()
+    # A prefix count, not a total: the helper can return the base again later.
+    show_plotly_with_alt(
+        fig,
+        (
+            "Line chart of the Kelly target fraction of equity against trade number, one point per "
+            "entry in the order the trades were taken, with a dashed horizontal line at the "
+            "configured base target. The sizing helper returns the base target until enough "
+            "trades have closed to estimate a win rate and a payoff ratio, and until the closed "
+            "trades include both a win and a loss; past that point the Kelly formula sets the "
+            "fraction. Drawn against trade number rather than date because the sizing changes on "
+            "trade events, not on the calendar."
+        ),
+    )
 
 # %%
 kelly_size_min = min(kelly_strategy.size_history)
@@ -460,7 +472,7 @@ display(
 # %% [markdown]
 # ### Compare to Fixed-Size Baseline
 #
-# To see the impact of adaptive sizing, run the same signals with a fixed 10% position.
+# To see the impact of adaptive sizing, run the same signals at the fixed base fraction.
 
 
 # %%
@@ -556,11 +568,11 @@ display(
 #
 # ### Spread Trading Logic
 #
-# 1. Compute rolling z-score of the price ratio B/A
-# 2. If z-score > 2.0: open the long A lead leg, then hedge with short B
-# 3. If z-score < -2.0: open the long B lead leg, then hedge with short A
+# 1. Compute the rolling z-score of the price ratio B/A
+# 2. Above the entry threshold: open the long A lead leg, then hedge with short B
+# 3. Below the negative entry threshold: open the long B lead leg, then hedge with short A
 # 4. Size the hedge from the realized lead-leg fill, not the intended target
-# 5. If |z-score| < 0.5 or the hedge cannot be completed, exit the pair
+# 5. Inside the exit band, or when the hedge cannot be completed, exit the pair
 
 
 # %% [markdown]
@@ -901,7 +913,7 @@ if pairs_strategy.zscore_history:
     fig.update_layout(
         height=700,
         title=(
-            "A correlated ETF pair can still experience a persistent ratio shift"
+            "XLF and KRE prices, their ratio, and the ratio z-score"
             "<br><sup>XLF/KRE, 20-day ratio z-score; full teaching sample</sup>"
         ),
         showlegend=True,
@@ -910,7 +922,17 @@ if pairs_strategy.zscore_history:
     fig.update_yaxes(title_text="KRE / XLF", row=2, col=1)
     fig.update_yaxes(title_text="Z-Score", row=3, col=1)
     fig.update_xaxes(title_text="Date", row=3, col=1)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            f"Three stacked panels on a shared date axis. The top panel is the {PAIR_A} and "
+            f"{PAIR_B} closing prices on one axis. The middle panel is their ratio. The bottom "
+            "panel is that ratio's rolling z-score, with dashed lines at the entry bands and "
+            "dotted lines at the exit bands. The z-score is taken over a rolling window rather "
+            "than the whole sample, so it re-centres as the ratio's level moves, and the three "
+            "panels are stacked to show the same dates through each transform the rule applies."
+        ),
+    )
 
 # %% [markdown]
 # **Key observation**: The spread signal can be precomputed, but the trade itself
@@ -933,11 +955,18 @@ if pairs_strategy.zscore_history:
 #
 # ### Three Drawdown Zones
 #
-# | Zone | Drawdown Range | Behavior |
-# |------|---------------|----------|
-# | **Normal** | 0% to 3% | Full sizing (multiplier recovers toward 1.0) |
-# | **Caution** | 3% to 6% | Reduced sizing (linearly interpolated to 0) |
-# | **Halt** | > 6% | No new entries (multiplier = 0) |
+# Drawdown is measured as a positive loss fraction from the running peak, so a larger number is
+# a worse position and the zones are read upwards from zero.
+#
+# | Zone | Drawdown from the peak | Behavior |
+# |------|------------------------|----------|
+# | **Normal** | below the caution threshold | Full sizing; the multiplier recovers toward one |
+# | **Caution** | between the two thresholds | Reduced sizing, interpolated linearly to zero |
+# | **Halt** | past the halt threshold | No new entries; the multiplier is zero |
+#
+# The run below sets both thresholds explicitly and the drawdown panel of its figure annotates
+# each one, so the zone boundaries a run actually used are readable from its own output rather
+# than fixed in this table.
 
 
 # %% [markdown]
@@ -1028,7 +1057,7 @@ class DrawdownCircuitBreakerStrategy(Strategy):
 #
 # We load SPY daily bars from 2019-08 through 2021-07 (500 trading days). The
 # window covers calm late-2019, the February–March 2020 COVID crash (peak-to-
-# trough drawdown around 33% in five weeks), and the subsequent recovery into
+# trough drawdown of about a third in five weeks), and the subsequent recovery into
 # 2021. An alternating entry/exit signal forces the strategy to consider re-
 # entry while the equity path is still impaired, which is exactly when the
 # circuit breaker must override the signal.
@@ -1211,7 +1240,7 @@ if cb_strategy.multiplier_history and cb_strategy.drawdown_history:
     fig.update_layout(
         height=800,
         title=(
-            f"A {cb_strategy.halt_threshold:.0%} drawdown breach halts new entries"
+            "Equity, drawdown and sizing multiplier under the circuit breaker"
             "<br><sup>SPY, protected and unprotected rules; full teaching sample</sup>"
         ),
     )
@@ -1219,7 +1248,19 @@ if cb_strategy.multiplier_history and cb_strategy.drawdown_history:
     fig.update_yaxes(title_text="Drawdown (%)", range=[min(dd_pct) * 1.1, 0], row=2, col=1)
     fig.update_yaxes(title_text="Target Multiplier", range=[-0.05, 1.05], row=3, col=1)
     fig.update_xaxes(title_text="Date", row=3, col=1)
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "Three stacked panels on a shared date axis. The top panel holds two equity curves "
+            "built from the same signals, one with the circuit breaker active and one without, so "
+            "the only difference between them is the breaker. The middle panel is the protected "
+            "rule's drawdown as a negative percentage below zero, against dashed lines at the "
+            "caution and halt thresholds drawn with the same sign; the breaker itself compares a "
+            "positive loss fraction internally, and the panel negates it so losses read downward. "
+            "The bottom panel is the sizing multiplier the breaker applies, which is the mechanism "
+            "connecting the other two panels."
+        ),
+    )
 
 # %% [markdown]
 # **Key observation**: A new-entry breaker cannot undo losses on a position that
@@ -1251,7 +1292,7 @@ if cb_strategy.multiplier_history and cb_strategy.drawdown_history:
 # The library's `examples/stateful_strategies.py` includes two more patterns not
 # shown here:
 #
-# - **Pyramiding**: Add to winners based on unrealized P&L thresholds
+# - **Pyramiding**: Add to a position that is already ahead, at unrealized P&L thresholds
 # - **Grid Trading**: Reactive limit order management where each fill triggers
 #   new orders at adjacent price levels
 #

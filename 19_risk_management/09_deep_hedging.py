@@ -663,7 +663,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Training and validation tail loss against epoch on a log scale. Both fall steeply in the first epochs and then flatten, staying close to each other throughout.",
+    "Training and validation tail loss against epoch on a log scale. The training curve starts several times higher than the validation curve, both fall steeply over the first twenty epochs, and from there the two run together and flat.",
 )
 
 # %% [markdown]

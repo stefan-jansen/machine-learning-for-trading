@@ -579,7 +579,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "A heatmap of Calmar over the stop-loss by take-profit grid, with a broad region of similar values rather than a sharp optimum.",
+    "Four heatmap panels of change against the no-rule baseline: the stop-loss by take-profit grid on the top row and the stop-loss by trailing-stop grid on the bottom, with the Sharpe change in the left column and the Calmar change in the right. Each cell is labelled with its value, and each metric has one colour scale shared by both of its panels.",
 )
 
 # %% tags=["results"]
@@ -670,7 +670,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "A heatmap of Calmar over the stop-loss by trailing-stop grid on the same colour scale as the previous one.",
+    "A scatter of maximum favorable excursion against maximum adverse excursion for the closed calibration trades, each point coloured by its realized return. A dashed vertical line marks the stop percentile and a dashed horizontal line the target percentile. Most points sit near the origin with a few reaching far up the favorable axis.",
 )
 
 # %% [markdown]

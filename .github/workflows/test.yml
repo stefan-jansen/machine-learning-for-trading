@@ -119,6 +119,17 @@ jobs:
               - 'case_studies/config/**'
               - 'data/**'
               - 'pyproject.toml'
+              # And the lock, which is what `uv sync --locked` actually installs.
+              # A `uv lock --upgrade-package <x>` that does not touch
+              # pyproject.toml changes the library version every notebook imports
+              # and, without this line, matches only `image-inputs` - so the whole
+              # chapter and case-study matrix is skipped and the PR reports green
+              # on `test-unit`, which pins nothing about notebook behaviour.
+              # Dependabot opens no PRs against this repo
+              # (.github/dependabot.yml, open-pull-requests-limit: 0), so this
+              # costs a full matrix only on a deliberate bump, which is the case
+              # that needs one.
+              - 'uv.lock'
               - '.github/workflows/test.yml'
               - 'matplotlibrc'
               - 'tests/__init__.py'
@@ -464,6 +475,21 @@ jobs:
         run: |
           source .venv/bin/activate
           python .github/scripts/check_import_resolution.py
+      # An int constant subscripting a container built from a SECOND constant is
+      # a coupling nothing checks: `STATE_COUNTS = [2, 3, 4]` fills a dict and
+      # `N_STATES = 2` reads it back. Edit either and the notebook raises
+      # KeyError the next time it runs, while ruff, the formatter, py_compile and
+      # tests/overrides.yaml all stay green. Four review rounds produced five
+      # execution failures of this shape (ml4t/agent-workspace#1128).
+      #
+      # Stdlib-only AST, nothing imported or executed, so it belongs here rather
+      # than in a built image. `--selftest` is run first: the rule is only worth
+      # gating on if it can be shown to fail on a constructed case.
+      - name: No int constant subscripts a container built from another constant
+        run: |
+          source .venv/bin/activate
+          python .github/scripts/check_constant_subscripts.py --selftest
+          python .github/scripts/check_constant_subscripts.py
       - name: Notebook output hygiene
         run: |
           source .venv/bin/activate
@@ -712,11 +738,26 @@ jobs:
       #
       # test_awaiting_rebuild, test_cme_futures_research and
       # test_cross_sectional_ic_mean are here for the same reason, having been
-      # committed to tests/ without any job naming them. Every job in this file
-      # selects by explicit path, so a file nobody lists never runs. It matters
-      # most for test_awaiting_rebuild: what it holds is that a skip expires
-      # when the input it waits for arrives, and a skip mechanism whose expiry
-      # check never runs is just a permanent skip.
+      # committed to tests/ without any job naming them. That was written when
+      # every step in this job selected by explicit path; the "Every other test
+      # file" step below has swept the rest of tests/ by subtraction since
+      # 2026-08-24, so an unnamed file now runs. What naming a file here still
+      # buys is the per-file record of what its guard was written for, and a -v
+      # failure before the sweep. It matters most for test_awaiting_rebuild: what
+      # it holds is that a skip expires when the input it waits for arrives, and a
+      # skip mechanism whose expiry check never runs is just a permanent skip.
+      #
+      # test_one_producer_per_fixture_file and
+      # test_fixture_builders_require_their_inputs are named on 2026-09-11 for
+      # that record. Both were already passing in the sweep.
+      #
+      # Their companion test_every_fixture_file_has_a_producer went to
+      # test-unit-data instead, and that one was a real gap rather than a missing
+      # record: it enumerates the fixture checkout, so here it collected and then
+      # skipped all four of its tests on "not a test-data checkout (no
+      # manifest.json)" from the day it landed. A skip is not a pass and this job
+      # does not fail on one. test-unit-data has the checkout and fails on any
+      # skip, which is what makes the gate mean something.
       - name: Run shared case-study helper tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -743,6 +784,8 @@ jobs:
             tests/test_sp500_equity_option_analytics_research.py \
             tests/test_research_declared_menu_coverage.py \
             tests/test_awaiting_rebuild.py \
+            tests/test_one_producer_per_fixture_file.py \
+            tests/test_fixture_builders_require_their_inputs.py \
             tests/test_cme_futures_research.py \
             tests/test_cross_sectional_ic_mean.py \
             -v --tb=short
@@ -1027,11 +1070,18 @@ jobs:
           # whether that file reads a redirect or the source tree. Both orders were
           # measured before this change landed and both are green: the roster tests
           # read a SEEDED redirect, which is the case the unset above never covered.
+          # tests/test_skip_blockers.py belongs here and in no other job. Its expiry checks
+          # measure a declared skip condition against the fixture - files under
+          # ML4T_DATA_PATH and the registries seeded_output_dir builds - so in test-unit,
+          # which checks out no test data, every one of them skips and the guard asserts
+          # nothing. That is the same "runs in no job at all" state this job was created for.
           .venv/bin/python -m pytest \
+            tests/test_skip_blockers.py \
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \
             tests/test_reduced_universe_is_shared.py \
             tests/test_fixture_manifest_matches_builders.py \
+            tests/test_every_fixture_file_has_a_producer.py \
             tests/test_artifact_specs.py \
             tests/test_backtest_presets.py \
             tests/test_etf_baseline_parity.py \
@@ -1366,14 +1416,12 @@ jobs:
             cp test-data/intermediates/ch20_synthesis/output/* 20_strategy_synthesis/output/
             echo "Seeded Ch20 synthesis outputs"
           fi
-          # Ch24/11 research_operator: artifacts dir is gitignored in this repo;
-          # source them from test-data into the notebook dir.
-          if [ -d test-data/data/autonomous_agents/operator_artifacts ]; then
-            mkdir -p 24_autonomous_agents/operator_artifacts
-            cp test-data/data/autonomous_agents/operator_artifacts/*.json \
-              24_autonomous_agents/operator_artifacts/
-            echo "Seeded ch24/11 operator artifacts"
-          fi
+          # Ch24/11's two operator traces are not seeded here. They are tracked in
+          # this repo under 24_autonomous_agents/operator_artifacts/ (force-added
+          # past the .gitignore), so the checkout already carries them and CI reads
+          # what a reader reads. The copy that used to stand here overwrote both
+          # with the test-data fixture's unsanitized originals, which carry the
+          # author's absolute home directory in every skill path.
 
       - name: Run chapter notebooks (${{ matrix.name }})
         if: steps.reach.outputs.have_key

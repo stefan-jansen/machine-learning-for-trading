@@ -58,7 +58,7 @@
 # per rebalance, and how many names the long leg spans. Production overrides flow through Papermill.
 
 # %%
-"""IB Basket Rebalance Demo — daily rebalance of a 20-name US large-cap universe via IB paper."""
+"""IB Basket Rebalance Demo: daily rebalance of a 20-name US large-cap universe via IB paper."""
 
 import asyncio
 import hashlib
@@ -76,7 +76,7 @@ from ml4t.live import LiveRiskConfig, SafeBroker
 from ml4t.live.brokers.ib import IBBroker
 
 from utils.paths import display_path, get_output_dir
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 
 def run_demo(awaitable):
@@ -280,7 +280,7 @@ print(f"Reconciliation: clean (state file {display_path(STATE_FILE)})")
 #
 # The rebalance ranks names against a 20-day momentum signal, so the notebook needs roughly three months
 # of recent daily history. A live-trading notebook must source warmup bars from the same broker session
-# that will execute the orders — using a research-time loader risks ranking names on stale prices and
+# that will execute the orders. Using a research-time loader risks ranking names on stale prices and
 # computing position sizes against historical levels that no longer reflect the live tape. We pull
 # `WARMUP_DAYS` of daily bars per universe symbol via `reqHistoricalDataAsync`, parallelising the 20
 # requests through `asyncio.gather`.
@@ -376,7 +376,7 @@ async def fetch_warmup_bars(ib_app: object, universe: list[str], days: int) -> p
     rows = [r for symbol_rows in per_symbol for r in symbol_rows]
     if not rows:
         raise RuntimeError(
-            "IB returned zero bars for the entire universe — check market-data subscriptions"
+            "IB returned zero bars for the entire universe; check market-data subscriptions"
         )
     return pl.DataFrame(rows).sort(["symbol", "timestamp"])
 
@@ -489,10 +489,14 @@ ax.set(xlabel="20-day log return (decimal)", ylabel="US equity")
 add_message_title(
     ax,
     "The strongest 20-day momentum names form the target basket",
-    subtitle="Completed IB daily bars; green identifies the five planned long positions",
+    subtitle="Completed IB daily bars; green identifies the planned long leg",
 )
-fig.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Horizontal bar chart of the 20-day log return for each name in the universe, sorted by "
+    "signal, with a dashed line at zero. Colour marks membership: the names taken as the "
+    "long leg of the target basket are drawn in one colour and the names left flat in another.",
+)
 
 # %% [markdown]
 # Printing the head of the target basket before any order is sent makes the intended
@@ -701,7 +705,7 @@ else:
     print("\nPost-submission reconciliation skipped: planning mode made no broker mutations.")
 
 # %% [markdown]
-# **Finding:** A non-empty post-submission residual is not automatically a bug — it can also mean a
+# **Finding:** A non-empty post-submission residual is not automatically a bug. It can also mean a
 # kill-switch or risk-cap triggered mid-basket and blocked a leg. Distinguishing the two requires the
 # per-order status from step 7, which is why both are printed side by side.
 
@@ -709,7 +713,7 @@ else:
 # ## 9. Execution Cost and Expected-versus-Realised P\&L
 #
 # The final check estimates execution cost per leg and aggregates it against the notional deployed. In
-# production this number feeds Chapter 26 (MLOps and Governance) — sustained drift between `fill_price`
+# production this number feeds Chapter 26 (MLOps and Governance): sustained drift between `fill_price`
 # and `last_close` is the first signal that venue or router assumptions have changed.
 
 

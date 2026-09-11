@@ -114,7 +114,7 @@ WORKSPACE: str = ""
 # the concentration and the allocator are held exactly as registered, and the only thing added is
 # the rule. That is what makes each overlay's Sharpe comparable with the baseline it came from -
 # and what lets [`17_costs`](17_costs.ipynb), which runs after this stage, decide between an
-# overlaid and an un-overlaid carrier on the measurement rather than on the order of the chain.
+# overlaid and an un-overlaid combination on the measurement rather than on the order of the chain.
 #
 # **Position rules need a bar-by-bar engine.** A stop-loss has to be evaluated on every bar of the
 # holding period to know whether it fired, so a case study whose backtests are computed as a
@@ -492,6 +492,6 @@ show_plotly_with_alt(
 # is not consulted.
 
 # %% [markdown]
-# **Next**: [`17_costs`](17_costs.ipynb) prices whichever carrier wins across the baseline, the
+# **Next**: [`17_costs`](17_costs.ipynb) prices whichever combination wins across the baseline, the
 # allocation sweep and this overlay stage, and [`20_strategy_analysis`](20_strategy_analysis.ipynb)
 # then reads the whole progression and opens the holdout.

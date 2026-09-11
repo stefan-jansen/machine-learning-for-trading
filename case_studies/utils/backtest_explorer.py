@@ -170,7 +170,13 @@ class BacktestExplorer:
             rows = db.execute(sql, params).fetchall()
             if not rows:
                 return pl.DataFrame()
-            return pl.DataFrame([dict(r) for r in rows])
+            # Scan every row for the schema, not the default first 100. A metric added after a
+            # registry was first written is NULL on every earlier row, so a query returning more
+            # than 100 of those before the first real value types the column `Null` and then
+            # raises `could not append value: 0.0 of type: f64` on it. `ruin` did exactly that to
+            # `etfs` once #834 started recording it: 180 NULLs, then a float. The cost is one
+            # extra pass over rows already in memory.
+            return pl.DataFrame([dict(r) for r in rows], infer_schema_length=None)
         finally:
             db.close()
 

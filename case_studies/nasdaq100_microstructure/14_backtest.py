@@ -45,7 +45,12 @@ import time
 
 import polars as pl
 
-from case_studies.research import open_study, prediction_rows_at, superseded_members_at
+from case_studies.research import (
+    open_study,
+    prediction_rows_at,
+    reuse_disclosure,
+    superseded_members_at,
+)
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
     build_backtest_spec,
@@ -523,8 +528,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
 
 elapsed = time.time() - t0
 print(
-    f"\nSweep complete: completed={completed}, skipped={skipped}, failed={failed} "
-    f"in {elapsed:.0f}s",
+    f"\nSweep complete in {elapsed:.0f}s: {reuse_disclosure(completed, skipped, failed)}",
     flush=True,
 )
 

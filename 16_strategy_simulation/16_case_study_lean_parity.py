@@ -17,7 +17,7 @@
 # # Real-Strategy Cross-Framework Audit
 #
 # This notebook reports the current framework comparison on ETF allocation, CME futures, crypto
-# perpetual futures with funding, foreign exchange, and a 3,175-asset US equity panel. Every engine
+# perpetual futures with funding, foreign exchange, and a broad US equity panel. Every engine
 # in a required pair receives the same content-addressed market data and frozen model-derived
 # targets. Unsupported pairs are disclosed instead of being approximated with a different asset or
 # accounting model.
@@ -48,7 +48,7 @@ import polars as pl
 from IPython.display import Markdown, display
 
 from utils.paths import get_chapter_dir
-from utils.style import show_with_alt
+from utils.style import FIGSIZE, show_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -70,7 +70,7 @@ CASE_NAMES = {
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
     "fx_pairs": "FX allocation (USD-quoted pairs)",
-    "us_equities_panel": "US equity panel (3,175 assets)",
+    "us_equities_panel": "US equity panel",
 }
 
 display(
@@ -221,7 +221,11 @@ labels = [f"{row.strategy}\n{row.engine}" for row in plot_data.itertuples()]
 y = list(range(len(plot_data)))
 height = 0.36
 
-fig, ax = plt.subplots(figsize=(10, 5.5), layout="constrained")
+# Height scales with the row count, width does not. Each tick label is two lines, so a fixed
+# preset height crushes them together as soon as the audit grows: the committed artifact
+# carries seventeen correctness-passing pairs. The width stays at the typeset column.
+_fig_height = 0.32 * len(plot_data) + 0.9
+fig, ax = plt.subplots(figsize=(FIGSIZE["single_tall"][0], _fig_height), layout="constrained")
 ax.barh(
     [value + height / 2 for value in y], plot_data["external_seconds"], height, label="External"
 )
@@ -237,10 +241,13 @@ ax.grid(axis="x", alpha=0.25)
 _ml4t_faster = int((plot_data["ml4t_seconds"] < plot_data["external_seconds"]).sum())
 show_with_alt(
     fig,
-    "Paired horizontal bars on a logarithmic seconds axis, one pair per strategy and engine, "
-    "with the external engine above and ML4T below in each pair. Read from the underlying "
-    f"frame: ML4T is the faster of the two in {_ml4t_faster} of {len(plot_data)} pairs, and the "
-    "direction is not the same across engines.",
+    (
+        "Paired horizontal bars on a logarithmic seconds axis, one pair per strategy and "
+        "engine, with the external engine above and ML4T below in each pair. The axis is "
+        "logarithmic so that runtimes of very different magnitude share one scale. Paired "
+        "rather than grouped by engine so each comparison is between two bars measuring the "
+        "same strategy."
+    ),
 )
 
 # %% [markdown]

@@ -220,19 +220,164 @@ def test_another_label_is_compared_against_its_own_runs(tmp_path: Path) -> None:
     assert _registered(tmp_path) == 2
 
 
-def test_a_run_pinning_no_artifacts_is_not_blocked(tmp_path: Path) -> None:
-    """The latent adapter records a `files` list rather than `artifacts` (#891).
+def _latent_spec(*, model_based: str, config_name: str = "pca_5", prefix: str = "sha256:"):
+    """The shape the latent adapter records: a `files` list of {role, sha256} (#891).
 
-    Reaching this guard with nothing to compare has to be a weaker check for that family
-    rather than a refusal it can never satisfy.
+    The `sha256:` prefix is the adapter's own, and it is what made these look like a
+    different contract rather than the same one written differently.
+    """
+    spec = _spec(model_based=model_based, config_name=config_name)
+    spec["family"] = "latent_factors"
+    spec["computation"]["input_data_spec"] = {
+        "schema_version": 1,
+        "files": [
+            {"role": "financial", "sha256": f"{prefix}{'f' * 64}"},
+            {"role": "label", "sha256": f"{prefix}{'1' * 64}"},
+            {"role": "model_based", "sha256": f"{prefix}{model_based}"},
+        ],
+    }
+    return spec
+
+
+def _sequence_spec(*, model_based: str, config_name: str = "tcn_default"):
+    """The shape `deep_learning` records: `mds.input_lineage` nested one level too deep.
+
+    `case_studies/utils/deep_learning.py` builds the payload as
+    `{"input_data_spec": mds.input_lineage, ...}`, so the artifacts mapping lands at
+    `computation.input_data_spec.input_data_spec.artifacts`. A nesting slip rather than a
+    different contract, and it put 77 runs outside the guard.
+    """
+    spec = _spec(model_based=model_based, config_name=config_name)
+    spec["family"] = "deep_learning"
+    spec["computation"]["input_data_spec"] = {
+        "input_data_spec": spec["computation"]["input_data_spec"],
+        "lookback": 32,
+    }
+    return spec
+
+
+def test_a_latent_run_on_the_registered_vintage_registers(tmp_path: Path) -> None:
+    """The control for the `files` shape: the prefix is stripped, not compared."""
+    register_training_run("etfs", _spec(model_based=SHA_A), case_dir=tmp_path)
+    register_training_run("etfs", _latent_spec(model_based=SHA_A), case_dir=tmp_path)
+    assert _registered(tmp_path) == 2
+
+
+def test_a_latent_run_on_a_regenerated_artifact_is_refused(tmp_path: Path) -> None:
+    """What #1137 changes. This registered silently before: `_input_artifact_shas` read
+    `artifacts` only, returned an empty mapping for a `files` spec, and the guard returns
+    early on an empty mapping - so 42 latent runs were vintage-checked by nothing."""
+    register_training_run("etfs", _spec(model_based=SHA_A), case_dir=tmp_path)
+    with pytest.raises(ValueError, match="model_based"):
+        register_training_run("etfs", _latent_spec(model_based=SHA_B), case_dir=tmp_path)
+    assert _registered(tmp_path) == 1
+
+
+def test_an_unprefixed_files_sha_compares_the_same(tmp_path: Path) -> None:
+    """The prefix is cosmetic, so its absence must not make a run unrefusable."""
+    register_training_run("etfs", _spec(model_based=SHA_A), case_dir=tmp_path)
+    with pytest.raises(ValueError, match="model_based"):
+        register_training_run("etfs", _latent_spec(model_based=SHA_B, prefix=""), case_dir=tmp_path)
+
+
+def test_a_sequence_run_on_the_registered_vintage_registers(tmp_path: Path) -> None:
+    """The control for the nested shape."""
+    register_training_run("etfs", _spec(model_based=SHA_A), case_dir=tmp_path)
+    register_training_run("etfs", _sequence_spec(model_based=SHA_A), case_dir=tmp_path)
+    assert _registered(tmp_path) == 2
+
+
+def test_a_sequence_run_on_a_regenerated_artifact_is_refused(tmp_path: Path) -> None:
+    """The other half of #1137, and the larger one: 77 deep_learning runs."""
+    register_training_run("etfs", _spec(model_based=SHA_A), case_dir=tmp_path)
+    with pytest.raises(ValueError, match="model_based"):
+        register_training_run("etfs", _sequence_spec(model_based=SHA_B), case_dir=tmp_path)
+    assert _registered(tmp_path) == 1
+
+
+def test_a_sequence_run_is_what_a_later_run_is_compared_against(tmp_path: Path) -> None:
+    """Reading a shape is only half of covering it.
+
+    A widened reader that still wrote nothing comparable would leave the population exactly
+    as unchecked, because `_registered_artifact_shas` builds the set every later run is
+    measured against from the same function. So the direction that matters is this one: a
+    sequence run registers FIRST, and an ordinary run on a different vintage is then refused
+    against it.
+    """
+    register_training_run("etfs", _sequence_spec(model_based=SHA_A), case_dir=tmp_path)
+    with pytest.raises(ValueError, match="model_based"):
+        register_training_run("etfs", _spec(model_based=SHA_B), case_dir=tmp_path)
+    assert _registered(tmp_path) == 1
+
+
+def test_the_latent_eval_label_role_is_compared_against_the_other_families(
+    tmp_path: Path,
+) -> None:
+    """Two words for one artifact is checked never, however wide the reader gets.
+
+    The guard compares per NAME. The latent adapter's `files` list calls the evaluation
+    label `evaluation_label` and gbm, linear and tabular_dl call it `eval_label`, so the
+    same file was pinned under two names and a latent run's pin was only ever compared
+    against other latent runs'. Measured before the alias landed, the only live case is
+    `us_firm_characteristics/fwd_class_1m`, where all four families pin 04c53aa6a847 - so
+    folding the names together refuses nothing that registers today and starts comparing
+    what it was not comparing.
+    """
+    ordinary = _spec(model_based=SHA_A)
+    ordinary["computation"]["input_data_spec"]["artifacts"]["eval_label"] = {
+        "sha256": "e" * 64,
+        "size": 14,
+    }
+    register_training_run("etfs", ordinary, case_dir=tmp_path)
+
+    latent = _latent_spec(model_based=SHA_A, config_name="pca_eval")
+    latent["computation"]["input_data_spec"]["files"].append(
+        {"role": "evaluation_label", "sha256": "sha256:" + "9" * 64}
+    )
+    with pytest.raises(ValueError, match="eval_label"):
+        register_training_run("etfs", latent, case_dir=tmp_path)
+    assert _registered(tmp_path) == 1
+
+
+def test_the_alias_does_not_refuse_the_vintage_the_population_holds(tmp_path: Path) -> None:
+    """The other half, and the one that says the alias is safe rather than merely strict."""
+    ordinary = _spec(model_based=SHA_A)
+    ordinary["computation"]["input_data_spec"]["artifacts"]["eval_label"] = {
+        "sha256": "e" * 64,
+        "size": 14,
+    }
+    register_training_run("etfs", ordinary, case_dir=tmp_path)
+
+    latent = _latent_spec(model_based=SHA_A, config_name="pca_eval")
+    latent["computation"]["input_data_spec"]["files"].append(
+        {"role": "evaluation_label", "sha256": "sha256:" + "e" * 64}
+    )
+    register_training_run("etfs", latent, case_dir=tmp_path)
+    assert _registered(tmp_path) == 2
+
+
+def test_a_files_list_pinning_one_role_twice_is_refused(tmp_path: Path) -> None:
+    """A spec defect rather than a second vintage, so the later record must not win quietly."""
+    latent = _latent_spec(model_based=SHA_A)
+    latent["computation"]["input_data_spec"]["files"].append(
+        {"role": "financial", "sha256": "sha256:" + "7" * 64}
+    )
+    with pytest.raises(ValueError, match="two shas for role"):
+        register_training_run("etfs", latent, case_dir=tmp_path)
+
+
+def test_a_run_pinning_no_artifacts_at_all_is_not_blocked(tmp_path: Path) -> None:
+    """A spec carrying none of the three shapes still pins nothing and is not refused.
+
+    The guard returns early on an empty mapping, and that has to stay true: a family whose
+    inputs this cannot see is a weaker check for that family rather than a refusal it can
+    never satisfy. With all three shapes read, nothing in the nine live registries is in
+    this state - but a spec that predates them, or a future producer, can be.
     """
     register_training_run("etfs", _spec(model_based=SHA_A), case_dir=tmp_path)
-    latent = _spec(model_based=SHA_A, config_name="pca_5")
-    latent["family"] = "latent_factors"
-    latent["computation"]["input_data_spec"] = {
-        "files": [{"role": "financial", "sha256": "f" * 64}]
-    }
-    register_training_run("etfs", latent, case_dir=tmp_path)
+    bare = _spec(model_based=SHA_B, config_name="bare")
+    bare["computation"]["input_data_spec"] = {"schema_version": 1, "fingerprint": "none"}
+    register_training_run("etfs", bare, case_dir=tmp_path)
     assert _registered(tmp_path) == 2
 
 

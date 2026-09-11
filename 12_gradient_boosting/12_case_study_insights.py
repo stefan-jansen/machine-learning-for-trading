@@ -38,7 +38,7 @@
 # - Inspect feature-importance rank shift versus the linear baseline, per-fold rank
 #   stability, and the TabM-vs-GBM-vs-linear three-way picture
 #
-# **Book reference**: Section 12.6 - Gradient Boosting Across Nine Case Studies.
+# **Book reference**: Section 12.6 - Case study insights.
 #
 # **Prerequisites**: each case study's `07_gbm.py` pipeline has populated
 # `run_log/registry.db` for the GBM family. Where present, `tabular_dl.py`

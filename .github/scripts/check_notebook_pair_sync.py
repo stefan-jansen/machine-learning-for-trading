@@ -79,8 +79,16 @@ def main(argv: list[str]) -> int:
         print(f"  {nb.relative_to(REPO_ROOT)}")
     print(
         "\nReaders see a 'File Load Error' dialog, not a notebook (cf. public #372).\n"
-        "Fix: `uv run python .github/scripts/strip_empty_cell_tags.py` if it is empty `tags: []`,\n"
-        "otherwise re-sync the pair (`jupytext --sync <nb>.py`) and re-execute if code changed."
+        "Fix: `uv run python .github/scripts/strip_empty_cell_tags.py` if it is empty `tags: []`.\n"
+        "Otherwise bring the .ipynb forward with the smallest command that covers the edit, and\n"
+        "re-execute only if code that computes something changed:\n"
+        "  markdown only, including adding/deleting/merging/retagging a markdown cell:\n"
+        "    notebook_provenance.py sync-prose <nb.py>\n"
+        "  figure alt text, alone or together with any of the above:\n"
+        "    notebook_provenance.py sync-alt <nb.py>\n"
+        "Both keep every output and the original executed_at. A bare `jupytext --sync` is not the\n"
+        "route: it brings the pair into agreement without checking that the outputs still belong\n"
+        "to the source, which is the claim the provenance stamp makes."
     )
     return 1
 

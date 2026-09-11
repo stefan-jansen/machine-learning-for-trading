@@ -42,7 +42,7 @@
 # - Read the estimand and its temporal controls off the resolved specification
 # - Compare the adjusted estimate with naive OLS and a block-permutation null
 #
-# **Book Reference**: Chapter 15, Section 15.6 (Cross-Dataset Causal Evidence)
+# **Book Reference**: Chapter 15, Section 15.7 (Case study causal evidence)
 #
 # **Prerequisites**: `03_financial_features.py`, `04_model_based_features.py`
 
@@ -85,21 +85,25 @@ FORCE_RETRAIN = False
 # production path. WORKSPACE is the other half - a preview has nowhere else to write.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
-# Empty because this registry holds no *current* causal identity for the label, not because
-# nothing came before. `b47bd0ec208a` is the capped fit of 2026-08-26 - 37,240 rows, 9.9% of
-# the panel this request resolves - and it was written by the previous notebook under a spec
-# with no `identity_version`, so `current_causal_identities` does not return it and no reader
-# resolves it. There is nothing to retire: it is stranded rather than superseded, and naming it
-# would fail the write for declaring a predecessor that is not current.
+# `b47bd0ec208a` is not the hash named here. That is the capped fit of 2026-08-26 - 37,240
+# rows, 9.9% of the panel this request resolves - written under a spec with no
+# `identity_version`, so `current_causal_identities` does not return it and no reader resolves
+# it. It is stranded rather than superseded, and naming it would fail the write for declaring a
+# predecessor that is not current. `18f777683c40` is the full-panel row that followed it and is
+# current, so that is the one this run retires.
 #
-# Declare the hash here once this run leaves a current identity and a later change moves it -
-# a refit under a changed block size, fold count or population - or registration refuses the
-# write after the fit and all 100 placebo refits have been paid for. `causal_supersedes` then
-# withholds the declaration against a reader's clone, which holds no causal rows at all, so one
-# committed value is right for both. That resolution has to happen against the registry rather
-# than at run time: `run-production-notebook.sh` executes with no parameter overrides, so a
-# value supplied only as an override could never be stamped.
-SUPERSEDES_CAUSAL: str = ""
+# The value has to be resolved against the registry rather than supplied at run time:
+# `run-production-notebook.sh` executes with no parameter overrides, so a hash given only as an
+# override could never be stamped. `causal_supersedes` withholds the declaration against a
+# reader's clone, which holds no causal rows at all, so one committed value is right for both.
+# Get it wrong and registration refuses the write after the fit and all 100 placebo refits have
+# been paid for.
+# Retired by this run: the block-permutation refutation now compares the HAC t-statistic
+# rather than the raw effect, so CAUSAL_RUNNER_VERSION moved and every causal identity with
+# it. The rows named here hold a p-value computed on the shrunken placebo effects; this run
+# supersedes them rather than correcting them, because the statistic is different, not the
+# arithmetic. Read out of each registry's current canonical identity per label, 2026-09-10.
+SUPERSEDES_CAUSAL: str = "18f777683c40"
 
 # %% [markdown]
 # ## Resolve the estimand and analysis population
@@ -317,31 +321,40 @@ print(
 # %% [markdown]
 # ### Permutation Distribution
 #
-# The adjusted estimate against the distribution of placebo effects from
-# within-entity block permutations of the treatment.
+# The adjusted estimate against the distribution of placebo draws from within-entity block
+# permutations of the treatment, read on the t-statistic rather than on the effect. The
+# permutation frees the treatment from the confounders, so the residual it leaves the
+# second stage keeps its variance and every placebo effect divides by a larger number than
+# the observed one does. On the effect scale that shrinks the placebo distribution toward
+# zero whether or not there is anything to find; dividing each draw by its own standard
+# error removes it.
 
 # %%
-placebo_arr = np.asarray(metrics["placebo_effects"], dtype=float)
-if placebo_arr.size == 0:
+placebo_t_arr = np.asarray(metrics.get("placebo_t_stats") or [], dtype=float)
+if placebo_t_arr.size == 0:
     # The registry stores the draws beside the p-value, so an empty array here is a row written
     # before that column existed rather than a refutation that did not run. Say which, instead
     # of showing an empty axis.
-    print("This causal row predates the stored placebo draws; the p-value above is the test.")
+    print(
+        "This causal row predates the stored placebo t-statistics, which are the scale the "
+        "p-value is computed on; the p-value above is the test."
+    )
 else:
+    observed_t = dml_effect / se_hac
     fig, ax = plt.subplots(figsize=FIGSIZE["single"])
     ax.hist(
-        placebo_arr,
+        placebo_t_arr,
         bins=30,
         color=COLORS["silver_muted"],
         edgecolor=COLORS["neutral"],
         linewidth=0.5,
-        label="Placebo effects",
+        label="Placebo t-statistics",
     )
     ax.axvline(
-        dml_effect,
-        color=COLORS["negative"] if dml_effect < 0 else COLORS["positive"],
+        observed_t,
+        color=COLORS["negative"] if observed_t < 0 else COLORS["positive"],
         linewidth=2,
-        label=f"Adjusted estimate ({dml_effect:.6f})",
+        label=f"Observed t-statistic ({observed_t:+.2f})",
     )
     relation = "outside" if refutation_p < 0.05 else "inside"
     add_message_title(
@@ -352,7 +365,7 @@ else:
             f"{computation['refutation']['block_size']} sessions"
         ),
     )
-    ax.set_xlabel("5-day forward return per 1.0 annualized IV-RV spread")
+    ax.set_xlabel("Driscoll-Kraay t-statistic")
     ax.set_ylabel("Count")
     ax.legend()
     plt.show()

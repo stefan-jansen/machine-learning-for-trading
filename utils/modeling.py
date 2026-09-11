@@ -245,6 +245,14 @@ class ModelingDataset:
     # None for regression labels. When set, the column lives in ``dataset`` and
     # downstream IC computation must use it instead of the binary ``label_col``.
     eval_label_col: str | None = None
+    # The feature list the panel carries, independent of any ``columns`` projection the load
+    # was asked for. ``feature_names`` describes the frame in ``dataset`` and narrows with the
+    # projection; this one describes the artifacts and does not, which is what the recorded
+    # identity has to read so a caller narrowing its own load does not re-key runs it never
+    # touched. Equal to ``feature_names`` whenever nothing was projected. Empty only on a
+    # ``ModelingDataset`` built by hand rather than by ``load_modeling_dataset``, where
+    # ``input_lineage`` falls back to ``feature_names`` and behaves exactly as it did before.
+    panel_feature_names: list[str] = field(default_factory=list)
     # Inputs ``input_lineage`` is derived from: the artifact paths and the
     # universe reduction, which are not otherwise recoverable from this object.
     lineage_inputs: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -269,7 +277,7 @@ class ModelingDataset:
                 )
             self._input_lineage = build_modeling_input_lineage(
                 artifacts=self.lineage_inputs["artifacts"],
-                feature_names=self.feature_names,
+                feature_names=self.panel_feature_names or self.feature_names,
                 splits=self.splits,
                 label_buffer=self.label_buffer,
                 task_type=self.task_type,
@@ -739,6 +747,7 @@ def load_modeling_dataset(
     max_symbols: int = 0,
     symbols: list[str] | None = None,
     verify_input_digests: bool = False,
+    columns: Sequence[str] | None = None,
 ) -> ModelingDataset:
     """Load and join features + temporal + labels for a case study.
 
@@ -761,6 +770,15 @@ def load_modeling_dataset(
         is guaranteed to exist in the reduced test-data (e.g. the Darts base
         return series), rather than the top-by-history selection ``max_symbols``
         makes — which can pick symbols absent from a sampled data set.
+    columns : sequence of str, optional
+        Feature columns to keep, projected into the scans so the panel is never
+        materialized at full width. ``max_symbols`` narrows the row axis and this
+        narrows the column axis; a caller that needs the whole universe can still
+        use this one. The join keys, the detected date and entity columns and the
+        label are always added, so the returned frame is the requested columns
+        plus what the join and the fold geometry need. A name that is in none of
+        the three artifacts raises rather than being dropped silently. Passing
+        nothing keeps the full width.
 
     Returns
     -------
@@ -879,6 +897,47 @@ def load_modeling_dataset(
     # comes first. Important when downstream code uses entity_cols[0] for IC
     # (e.g., CME futures: 'product' has 30 values vs 'position' has 3).
     entity_cols = sorted(entity_cols, key=lambda c: cardinality[c], reverse=True)
+
+    # Column projection, pushed into the SCANS for the reason the universe reduction below is:
+    # a caller that projects the frame it is handed has already paid the full width.
+    # ``us_equities_panel``'s DML estimand reads 7 of the 74 columns the join returns and
+    # peaked at 17.6 GiB doing it, against 0.47 GB for the seven.
+    #
+    # The request is unioned with what the join and the fold geometry need rather than taken
+    # literally: without the join keys the frames cannot be joined, without the label there is
+    # nothing to model, and without ``fold`` the per-fold substitution has no key to select on.
+    # That union is why the parameter belongs here instead of in each caller.
+    #
+    # The projection must not reach the recorded identity. ``feature_names`` below is derived
+    # from the joined frame, and it is hashed twice into every registered run - directly as
+    # ``computation.feature_names`` and again inside ``input_data_spec`` - so narrowing the load
+    # would re-key every run whose caller passed ``columns``, while the artifacts read and the
+    # values retained are identical. ``build_modeling_input_lineage`` already states the rule for
+    # the same event in the other direction, about adding ``feature_dtype``: a change that moves
+    # the fingerprint of a case study whose declaration did not change invalidates every run
+    # registered against it. So the panel's own feature list is recorded here, before the
+    # projection narrows the column lists, and ``panel_feature_names`` below is what the identity
+    # reads. What the caller asked for narrows the load and nothing else.
+    panel_feature_columns = list(feature_columns)
+    panel_temporal_columns = list(temporal_columns)
+
+    if columns is not None:
+        requested = list(dict.fromkeys(columns))
+        known = set(feature_columns) | set(temporal_columns) | set(label_columns)
+        unknown = [c for c in requested if c not in known]
+        if unknown:
+            raise ValueError(
+                f"load_modeling_dataset({case_study_id!r}, {primary_label!r}) was asked for "
+                f"columns no artifact carries: {unknown}. The three artifacts carry "
+                f"{sorted(known)}."
+            )
+        keep_cols = set(requested) | set(join_cols) | set(feature_keys) | set(entity_cols)
+        keep_cols |= {date_col, label_col}
+        feature_columns = [c for c in feature_columns if c in keep_cols]
+        features_lazy = features_lazy.select(feature_columns)
+        if temporal is not None:
+            temporal_columns = [c for c in temporal_columns if c in keep_cols | {"fold"}]
+            temporal = temporal.select(temporal_columns)
 
     # Universe reduction, pushed into the SCANS instead of applied to the finished panel.
     #
@@ -1004,6 +1063,46 @@ def load_modeling_dataset(
     # Feature columns = everything except IDs and label
     feature_names = [c for c in dataset.columns if c not in ID_COLS and c != label_col]
 
+    # The same list the unprojected load would have produced, reconstructed from the column
+    # lists captured before the projection. The joins concatenate left columns then the right
+    # frame's non-key columns, in source order, so the unprojected order is the three source
+    # lists in sequence under the same filters applied to ``feature_names`` above.
+    #
+    # The one case this reconstruction cannot express is a name carried by both the financial
+    # and the model-based artifact: polars would suffix the second ``_t`` and the position of
+    # the suffixed name is not recoverable from the source lists. No case study has one -
+    # checked across all eight on 2026-09-11 - so it is refused rather than guessed, and only
+    # when a projection is actually in play, because the unprojected path takes ``feature_names``
+    # itself and is exact by construction.
+    if columns is None:
+        panel_feature_names = list(feature_names)
+    else:
+        collisions = sorted(
+            (set(panel_feature_columns) & set(panel_temporal_columns)) - set(_temporal_keys)
+        )
+        if collisions:
+            raise ValueError(
+                f"{case_study_id}: the financial and model-based artifacts both carry "
+                f"{collisions}, so a projected load cannot reconstruct the panel's feature "
+                "order and would register an identity that differs from the unprojected "
+                "load's. Rename the duplicate column in one artifact, or load without "
+                "`columns`."
+            )
+        ordered = [
+            *panel_feature_columns,
+            *[c for c in panel_temporal_columns if c not in set(_temporal_keys) | {"fold"}],
+            *[c for c in label_columns if c not in set(join_cols)],
+        ]
+        seen: set[str] = set()
+        panel_feature_names = [
+            c
+            for c in ordered
+            if c not in ID_COLS
+            and c not in META_LEAK
+            and c != label_col
+            and not (c in seen or seen.add(c))
+        ]
+
     # CV splits — read buffer from setup.yaml (explicit, handles non-standard labels)
     setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
     label_buffer = resolve_label_buffer(case_study_id, primary_label, setup)
@@ -1112,6 +1211,7 @@ def load_modeling_dataset(
         feature_names = [
             c for c in dataset.columns if c not in ID_COLS and c not in {label_col, eval_label_col}
         ]
+        panel_feature_names = [c for c in panel_feature_names if c != eval_label_col]
 
     input_artifacts = {
         "financial": features_path,
@@ -1139,6 +1239,7 @@ def load_modeling_dataset(
     return ModelingDataset(
         dataset=dataset,
         feature_names=feature_names,
+        panel_feature_names=panel_feature_names,
         label_col=label_col,
         date_col=date_col,
         entity_cols=entity_cols,

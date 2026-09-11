@@ -248,7 +248,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Bars of market beta and annualized alpha per ETF from the single-factor regression, with the betas clustered near one and the alphas small by comparison.",
+    "Bars of full-sample market beta per ETF from the single-factor regression, each labelled with its value, against a dashed reference line at a beta of one. The bars sit close to that line on both sides of it.",
 )
 
 # %% [markdown]
@@ -419,7 +419,7 @@ fig = px.bar(
 fig.update_layout(height=400)
 show_plotly_with_alt(
     fig,
-    "Grouped bars of five-factor loadings per ETF, with the two additional factors adding modest loadings that differ in sign across the funds.",
+    "Grouped bars of regression R-squared per ETF, one bar each for the single-factor, three-factor and five-factor models. Adding factors raises R-squared for each fund shown, and the gain from three factors to five is small next to the gain from one to three.",
 )
 
 # %% [markdown]
@@ -636,7 +636,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Bars of annualized factor contribution with confidence intervals. Some intervals straddle zero and others clear it.",
+    "Three cumulative contribution paths for one ETF over the sample, in percentage points. The excess-return line and the model-explained line rise together and stay close to each other, while the residual line runs flat near zero.",
 )
 
 # %%
@@ -777,7 +777,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "A heatmap of residual correlations between the ETFs after the factor model, with off-diagonal cells showing what the factors did not absorb.",
+    "Point estimates with horizontal confidence intervals, one row per factor. The market row sits well to the right of zero with an interval that clears it; the remaining rows sit on zero with intervals too narrow to separate from it at this scale.",
 )
 
 # %% [markdown]
@@ -852,7 +852,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Two lines of covariance condition number over time on a log axis, sample against shrunk. The shrunk series is lower and far less spiky throughout.",
+    "A heatmap of residual correlations between the ETFs after the factor model, with off-diagonal cells showing what the factors did not absorb.",
 )
 
 # %% [markdown]
@@ -930,7 +930,7 @@ fig.update_layout(
 )
 show_plotly_with_alt(
     fig,
-    "Grouped bars of annualized contribution by factor coordinate under the original and rotated bases. Individual bars move substantially while their sum is unchanged.",
+    "Two lines of covariance condition number over time on a log axis, sample against shrunk. The shrunk series is lower and far less spiky throughout.",
 )
 
 # %% [markdown]
@@ -1023,7 +1023,7 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(height=430)
 show_plotly_with_alt(
     fig,
-    "Bars of risk contribution by factor from the library decomposition, with the market factor dominating and the residual share small.",
+    "Grouped bars of annualized contribution by factor coordinate under the original and rotated bases. Individual bars move substantially while their sum is unchanged.",
 )
 
 # %% [markdown]

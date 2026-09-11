@@ -100,7 +100,11 @@ def cross_sectional_ic_mean(
 
 
 # %% tags=["parameters"]
-MAX_SYMBOLS = 0  # 0 = all symbols
+# 0 is the full universe. The cap reaches this notebook's ETF fold and both panels of
+# the publication beeswarm, which load their own case studies. Keep any explanation
+# above the declaration: an `=` in a trailing comment makes papermill's inspector
+# unable to parse the line, and the override then never arrives.
+MAX_SYMBOLS = 0
 SEED = 42
 # Anchored at the repo root, so the artifact lands in the chapter's output directory
 # whatever the kernel's working directory is.
@@ -113,7 +117,7 @@ set_global_seeds(SEED)
 # ## 2. Load Data
 
 # %%
-mds = load_modeling_dataset("etfs", "fwd_ret_21d")
+mds = load_modeling_dataset("etfs", "fwd_ret_21d", max_symbols=MAX_SYMBOLS)
 df = mds.dataset.to_pandas()
 date_col = mds.date_col
 FEATURE_COLS = mds.feature_names
@@ -623,7 +627,7 @@ MAX_BEESWARM_SAMPLES = 5000
 
 
 def _build_beeswarm_panel(cs_id: str, label: str) -> dict[str, np.ndarray | str | int]:
-    mds_panel = load_modeling_dataset(cs_id, label)
+    mds_panel = load_modeling_dataset(cs_id, label, max_symbols=MAX_SYMBOLS)
     df_panel = mds_panel.dataset.to_pandas()
     features_panel = mds_panel.feature_names
     split_panel = mds_panel.splits[0]

@@ -55,7 +55,7 @@ from ml4t.diagnostic.evaluation import PortfolioAnalysis
 from plotly.subplots import make_subplots
 
 from data import load_crypto_perps
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, ml4t_diverging, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides for CI
@@ -176,7 +176,7 @@ fig.add_hline(y=RSI_UPPER, line_dash="dash", line_color=COLORS["negative"], row=
 fig.update_layout(
     height=600,
     title=(
-        "RSI thresholds isolate BTC price extremes"
+        "BTC/USDT close and its RSI, with the entry and exit thresholds marked"
         "<br><sup>Daily BTCUSDT; trailing close-based indicator</sup>"
     ),
     showlegend=True,
@@ -184,7 +184,16 @@ fig.update_layout(
     yaxis_title="Price (USDT)",
     yaxis2_title="RSI",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Two stacked panels on a shared date axis. The upper panel is the BTC/USDT daily "
+        f"close in USDT. The lower panel is the {RSI_WINDOW}-period RSI computed from those "
+        "same closes, in amber, with dashed horizontal lines at the entry and exit "
+        "thresholds. Stacked on one date axis so the indicator and the thresholds that act on "
+        "it can be read against the price history they are derived from."
+    ),
+)
 
 # %% [markdown]
 # ## 3. Generate Trading Signals
@@ -309,7 +318,7 @@ fig = go.Figure(
 )
 fig.update_layout(
     title=(
-        "The RSI rule creates an intermittent portfolio path"
+        "Portfolio value under the RSI rule"
         "<br><sup>Net of configured fees and slippage; full sample, in-sample</sup>"
     ),
     xaxis_title="Date",
@@ -317,7 +326,16 @@ fig.update_layout(
     height=450,
     hovermode="x unified",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Line chart of the RSI rule's portfolio value in USDT over the sample, starting from "
+        "the configured initial cash. The rule is in the market only between an entry and its "
+        "exit, so the series is flat wherever it holds no position and moves only on the "
+        "sessions it is invested. Drawn to show the shape of a rule that trades "
+        "intermittently rather than holding continuously."
+    ),
+)
 
 # %%
 portfolio_drawdown = portfolio.drawdown() * 100
@@ -334,7 +352,7 @@ fig_dd = go.Figure(
 )
 fig_dd.update_layout(
     title=(
-        "The RSI portfolio spends extended periods below its prior peak"
+        "Drawdown of the RSI portfolio from its running peak"
         "<br><sup>Close-to-close peak-to-trough drawdown; net, in-sample</sup>"
     ),
     xaxis_title="Date",
@@ -343,7 +361,16 @@ fig_dd.update_layout(
     height=400,
     hovermode="x unified",
 )
-fig_dd.show()
+show_plotly_with_alt(
+    fig_dd,
+    (
+        "Filled drawdown chart of the RSI portfolio measured from its own running peak, zero "
+        "at the top and losses below, in percent. Each point is the distance from the highest "
+        "portfolio value reached up to that date, so the series returns to zero only on a new "
+        "high. Drawn beside the equity curve above because the same path answers a different "
+        "question when it is measured against its own maximum."
+    ),
+)
 
 # %% [markdown]
 # ## 7. Compare to Buy-and-Hold Benchmark
@@ -446,7 +473,7 @@ fig.add_trace(
 
 fig.update_layout(
     title=(
-        f"{return_leader} leads cumulative return in this sample"
+        "Cumulative return, RSI rule against buy-and-hold"
         "<br><sup>Matched capital allocation and costs; full sample, in-sample</sup>"
     ),
     xaxis_title="Date",
@@ -456,13 +483,22 @@ fig.update_layout(
     hovermode="x unified",
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], line_width=1)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Cumulative return in percent for the RSI rule in solid navy and buy-and-hold in "
+        "dashed grey, on one linear axis. Both are run on the same bars, from the same "
+        "capital, and net of the same fees and slippage, so the only difference between them "
+        "is when each is in the market. Drawn on a shared axis, which is what makes the two "
+        "directly comparable and also what compresses the smaller of them."
+    ),
+)
 
 # %% [markdown]
 # ## 8. Parameter Sensitivity
 #
 # VectorBT makes parameter sweeps inexpensive. This section measures in-sample sensitivity; it does
-# not call the best row an optimized deployment choice because no holdout is used.
+# not treat its highest-Sharpe row as a deployment choice, because no holdout is used.
 
 # %%
 rsi_windows = [7, 14, 21]
@@ -557,25 +593,42 @@ fig = go.Figure(
 
 fig.update_layout(
     title=(
-        f"At window {RSI_WINDOW}, in-sample Sharpe peaks at thresholds "
-        f"{window_best['lower']}/{window_best['upper']}"
+        f"In-sample Sharpe by threshold pair, RSI window {RSI_WINDOW}"
         "<br><sup>Full-sample sensitivity, net of costs; no holdout ranking</sup>"
     ),
     xaxis_title="Lower Threshold",
     yaxis_title="Upper Threshold",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Heatmap of in-sample Sharpe ratio over the RSI threshold grid, lower threshold on "
+        "the horizontal axis and upper threshold on the vertical, one cell per pair, on a "
+        f"diverging colour scale centred at zero. The RSI window is held at {RSI_WINDOW} "
+        "throughout, so the surface varies in the two thresholds alone. Every cell is scored "
+        "on the whole sample with no holdout, which is what makes this a sensitivity surface "
+        "rather than a selection procedure."
+    ),
+)
 
 # %% [markdown]
 #
 # %%
+lower_column = window_results.filter(pl.col("lower") == window_best["lower"])["sharpe"]
+
 display(
     Markdown(
-        f"The best grid row has an in-sample Sharpe of **{best_parameters['sharpe']:.2f}**, versus "
+        f"The highest-Sharpe grid row reaches **{best_parameters['sharpe']:.2f}** in sample, versus "
         f"**{baseline_sharpe:.2f}** for the configured baseline. That gap measures full-sample "
         "selection, not forecast improvement: every candidate was ranked after observing the same "
         "return path. NB 12 introduces the Deflated Sharpe Ratio for this multiple-testing problem."
+        f"\n\nInside the window-{RSI_WINDOW} surface the peak sits at "
+        f"{window_best['lower']}/{window_best['upper']} with a Sharpe of "
+        f"{window_best['sharpe']:.2f}, but the whole lower-threshold-{window_best['lower']} column "
+        f"spans only {float(lower_column.min()):.2f} to {float(lower_column.max()):.2f} across the "
+        "four upper thresholds. The lower threshold is what moves this surface; reading the single "
+        "best cell as a choice of upper threshold reads noise."
     )
 )
 

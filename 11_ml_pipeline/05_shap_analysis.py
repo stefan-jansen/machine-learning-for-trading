@@ -40,8 +40,7 @@
 # - Compare feature drivers for correct vs incorrect high-conviction predictions
 # - Build a SHAP stability chart and bootstrap confidence bands within a fold
 #
-# **Book reference**: Section 11.4 - Inside the Black Box: Model
-# Interpretability with SHAP.
+# **Book reference**: Section 11.4 - Interpreting models with SHAP.
 #
 # **Prerequisites**
 #

@@ -36,7 +36,7 @@ This section explains why cost parameters are not stationary and must be conditi
 - [`02_spread_estimation`](02_spread_estimation.ipynb) — This notebook estimates bid-ask spreads from OHLCV data using two classical estimators, validates them against ground-truth microstructure data, and applies them across all seven asset classes. Uses cme_futures, crypto_perps, etfs and 5 more data.
 - [`03_market_impact_calibration`](03_market_impact_calibration.ipynb) — This notebook calibrates market impact models using real market data, estimates Kyle's lambda from NASDAQ-100 trade classification data, maps intraday volume profiles, and estimates strategy capacity limits for each asset class. Uses cme_futures, crypto_perps, etfs and 5 more data.
 
-### 18.4 Baseline Backtest Cost Models
+### 18.4 Baseline Backtesting Cost Models
 
 This section gives readers a practical ladder of cost models, from spread-only assumptions to linear slippage and square-root impact. It is useful because it offers a concrete modeling toolkit for research backtests while making clear when simple models are acceptable, when they are too optimistic, and why conservative calibration is often the right default.
 
@@ -51,20 +51,20 @@ This section demystifies execution algorithms by presenting TWAP, VWAP, and regi
 - [`07_ml4t_volume_participation`](07_ml4t_volume_participation.ipynb) — This notebook demonstrates VolumeParticipationLimit from ml4t.backtest.execution for realistic institutional order execution: Uses synthetic data.
 - [`08_ml_dynamic_execution`](08_ml_dynamic_execution.ipynb) — This notebook explores how machine learning can be used to dynamically adapt execution strategies based on real-time market conditions. Instead of following a fixed VWAP/TWAP schedule, we use ML to predict optimal execution parameters.
 
-### 18.6 Optimal Execution: Almgren-Chriss as a Unifying Framework
+### 18.6 Optimizing Execution with Almgren-Chriss as a Unifying Framework
 
 This section introduces Almgren-Chriss as the cleanest framework for thinking about impact, timing risk, and urgency in one model. Its importance is less in deriving a perfect trading schedule than in giving readers a disciplined way to reason about execution feasibility and to connect portfolio intent with execution reality.
 
 - [`05_almgren_chriss_optimal_execution`](05_almgren_chriss_optimal_execution.ipynb) — This notebook implements the seminal Almgren-Chriss (2001) framework for optimal trade execution. We derive the efficient frontier of execution strategies, compute optimal trajectories, and demonstrate Transaction Cost Analysis (TCA) methodology.
 
-### 18.7 Transaction Cost Analysis (TCA) and Model Validation
+### 18.7 Transaction Cost Analysis and Model Validation
 
 This section turns realized fills into model feedback through implementation shortfall, decomposition, regime-aware benchmarking, and calibration. It matters because it closes the loop: cost assumptions stop being static research inputs and become hypotheses that are tested, decomposed, and revised against live evidence.
 
 - [`01_cost_taxonomy`](01_cost_taxonomy.ipynb) — This notebook maps the transaction cost landscape across our seven asset classes, comparing exchange fee structures, spread regimes, and the resulting breakeven alpha requirements for each case study. Uses cme_futures, crypto_perps, etfs and 3 more data.
 - [`10_gross_vs_net_performance`](10_gross_vs_net_performance.ipynb) — This notebook provides a comprehensive framework for analyzing the gap between gross (theoretical) and net (realized) strategy performance. This is the ultimate reality check for any trading strategy.
 
-### 18.8 Practical Guardrails: When Costs Should Kill a Strategy
+### 18.8 Designing Practical Cost Guardrails
 
 This section provides decision rules such as break-even turnover, minimum required edge, alpha-to-go, capacity analysis, and kill criteria. Readers should care because this is where the chapter becomes operational: it shows how to decide whether a strategy can be deployed, scaled, modified, or abandoned once trading frictions are treated honestly.
 

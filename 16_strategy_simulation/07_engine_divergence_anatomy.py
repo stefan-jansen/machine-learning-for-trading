@@ -82,7 +82,7 @@ from validation.adapters.ml4t_adapter import (
 from validation.adapters.vectorbt_adapter import run_vectorbt
 from validation.weights import load_case_study_data
 
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY = "etfs"
@@ -394,7 +394,7 @@ axes[0].legend()
 axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 add_message_title(
     axes[0],
-    "Whole-share rounding costs trades before it costs return",
+    "Equity under fractional and whole-share sizing",
     subtitle="ETF linear-model signals, one configuration field changed from the reference",
 )
 
@@ -403,8 +403,16 @@ zero_line(axes[1])
 axes[1].set_ylabel("Fractional minus whole (%)")
 axes[1].set_xlabel("Date")
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    (
+        "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
+        "fractional sizing in navy and under whole-share sizing as a dashed grey line. The "
+        "lower panel is fractional minus whole as a percentage of the fractional run, with a "
+        "line at zero. The two runs differ in one configuration field and nothing else, so "
+        "the lower panel isolates what rounding an order to whole shares costs."
+    ),
+)
 
 print(
     f"\nFinal value difference: ${val_diff_int:,.0f} ({val_diff_int / r_baseline.final_value:.3%})"
@@ -535,11 +543,20 @@ ax.set_ylabel("Equity-curve gap (bps)")
 ax.set_xlabel("Date")
 add_message_title(
     ax,
-    "Holding back cash for fees costs more the longer it is held back",
+    "Equity gap from holding cash back for fees",
     subtitle="Reference equity minus headroom equity, in basis points of reference equity",
 )
-fig.tight_layout()
-fig.show()
+# Dropping the zeros is right for counting reversals and wrong for locating them: position
+# in the zero-free subset is not position in the plotted series. Map back through the index.
+show_with_alt(
+    fig,
+    (
+        "Filled area chart of the reference equity minus the headroom equity, in basis points "
+        "of reference equity, against date, with a dashed line at zero. The headroom run "
+        "holds a fraction of capital back to cover fees and is otherwise identical, so the "
+        "area is the cost of that buffer expressed against the run that does not hold it."
+    ),
+)
 
 print(f"\nFinal value difference: ${val_diff_hd:,.0f} ({val_diff_hd / r_baseline.final_value:.3%})")
 
@@ -622,13 +639,21 @@ ax.set_ylabel("Portfolio value (USD)")
 ax.set_xlabel("Date")
 add_message_title(
     ax,
-    "One strategy, four execution profiles, four track records",
+    "Portfolio value under four execution profiles",
     subtitle="Same signals and same commission rate throughout; only execution assumptions differ",
 )
 ax.legend()
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    (
+        f"Line chart of portfolio value under {len(all_results)} execution profiles - "
+        f"{', '.join(all_labels)} - drawn in navy and amber with different dash patterns on "
+        "one axis. Each profile is a different set of fill and cost conventions applied to "
+        "the same signals and the same prices. Drawn together so the profiles can be compared "
+        "against each other and against the level they are all a fraction of."
+    ),
+)
 
 # %% [markdown]
 # Two of these four fill at the same close the signal was read from, which is not a chronology any
@@ -698,12 +723,20 @@ for bar, val in zip(bars, values, strict=True):
 ax.set_xlabel("Impact on final value (% of reference)")
 add_message_title(
     ax,
-    "The one-factor effects do not add up to the combined effect",
+    "Impact on final value, one configuration field at a time",
     subtitle="Each bar is the reference minus one variant, as a percentage of reference final value",
 )
 zero_line(ax, axis="x")
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    (
+        "Horizontal bar chart of the impact on final portfolio value as a percentage of the "
+        "reference run, one bar per configuration field changed on its own plus one for all "
+        "of them changed together, each bar labelled with its own value. The single-field "
+        "bars and the combined bar are computed the same way, which is what allows the "
+        "combined effect to be read against the sum of the parts."
+    ),
+)
 
 # %%
 sum_individual = sum(effects.values())
@@ -832,7 +865,7 @@ axes[0].legend()
 axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 add_message_title(
     axes[0],
-    "Rebalance mode moves the result far less than timing or sizing",
+    "Portfolio value under three rebalance modes",
     subtitle="Same-bar close fills throughout, which is not a tradable chronology",
 )
 
@@ -846,8 +879,17 @@ axes[1].set_ylabel("Equity gap (%)")
 axes[1].set_xlabel("Date")
 axes[1].legend(fontsize=9)
 
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    (
+        "Two stacked panels sharing a date axis. The upper panel plots portfolio value under "
+        "the snapshot, incremental and hybrid rebalance modes in navy, dashed navy and dotted "
+        "amber. The lower panel is the incremental-minus-snapshot gap as a percentage of the "
+        "snapshot run. The three modes differ in when the target weights are recomputed "
+        "against the book, and the lower panel is drawn on its own scale because the gap is "
+        "orders of magnitude smaller than the level above it."
+    ),
+)
 
 
 # %% [markdown]

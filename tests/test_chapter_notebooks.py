@@ -34,6 +34,7 @@ from tests.pm_helpers import (
     run_notebook,
     sole_invocation,
 )
+from tests.skip_blockers import honoured_skip_reason
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -77,9 +78,12 @@ def test_chapter_notebook(notebook_path, populated_data_dir, seeded_output_dir):
     if nb_tier != run_tier:
         pytest.skip(f"Tier {nb_tier} — current run tier is {run_tier}")
 
-    # Skip if overrides say so (e.g., missing test data)
-    if overrides.get("skip"):
-        pytest.skip(f"Skipped: {overrides.get('skip_reason', 'marked skip in overrides')}")
+    # Skip if overrides say so (e.g., missing test data). The skip is honoured only while the
+    # condition its reason rests on still holds, so a fixture that grows the file or an image
+    # that gains the module retires it with no edit here; tests/test_skip_blockers.py fails the
+    # build on a declaration that has expired.
+    if reason := honoured_skip_reason(overrides):
+        pytest.skip(f"Skipped: {reason}")
 
     # Credentials the notebook cannot run without (e.g. EDGAR_IDENTITY).
     if absent := missing_required_env(overrides):

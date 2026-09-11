@@ -15,7 +15,7 @@
 
 # %% [markdown]
 # # Trade SHAP Diagnostics: Model-to-Trading Feedback
-# **Docker image**: `ml4t-gpu`
+# **Docker image**: `ml4t`
 #
 # **Purpose**: Demonstrate the `TradeShapAnalyzer` workflow that converts post-hoc
 # trade failures into actionable model-improvement hypotheses by clustering SHAP
@@ -27,7 +27,8 @@
 # 3. Read clustered error patterns and the hypotheses the library generates.
 # 4. Connect SHAP-driven diagnosis to feature-engineering or regime decisions.
 #
-# **Book reference**: §19.5 (Trade-Level SHAP as Diagnostic Tool).
+# **Book reference**: §19.5 (Decomposing factor, sector, and macro exposures), under
+# "Trade-level SHAP as a diagnostic tool".
 #
 # **Prerequisites**: Familiarity with SHAP values (Lundberg & Lee 2017), gradient
 # boosting on cross-sectional features, and the ML4T trade-record contract
@@ -65,6 +66,7 @@ from utils.style import COLORS, show_plotly_with_alt
 START_DATE = "2006-01-01"
 END_DATE = "2025-12-31"
 N_ESTIMATORS = 100
+MAX_BIN = 255
 TRAIN_FRACTION = 0.70
 WORST_N = 20
 MIN_EXPECTED_RETURN_BPS = 5
@@ -73,12 +75,11 @@ MOMENTUM_WINDOW = 20
 VOLATILITY_WINDOW = 20
 VOLUME_WINDOW = 60
 SEED = 42
+LGB_DEVICE = "cpu"
 
 # %%
 FEATURE_COLS = ["momentum", "volatility", "volume_zscore", "regime", "yield_slope"]
 LABEL_HORIZON = 1
-GPU_DEVICE = "cuda"
-GPU_MAX_BIN = 63
 MIN_EXPECTED_RETURN = MIN_EXPECTED_RETURN_BPS / 10_000
 
 # %%
@@ -100,8 +101,10 @@ set_global_seeds(SEED)
 #   which is the `regime` feature. It is a round number, not a fitted boundary.
 # - `MOMENTUM_WINDOW`, `VOLATILITY_WINDOW` and `VOLUME_WINDOW` are the lookbacks the three
 #   price-derived features are computed over.
-# - `N_ESTIMATORS` bounds model capacity, and `GPU_MAX_BIN` sets the histogram resolution
-#   LightGBM's CUDA implementation uses.
+# - `N_ESTIMATORS` bounds model capacity, and `MAX_BIN` is how many buckets each feature is
+#   binned into before the split search runs; 255 is LightGBM's own default.
+# - `LGB_DEVICE` is the backend LightGBM is asked for. It is `cpu`, which every install has, and
+#   the fitted booster is checked against it after the fit.
 
 # %% [markdown]
 # ## 1. Build a Real Single-Asset Feature Panel
@@ -207,19 +210,22 @@ X_test = test_df.select(FEATURE_COLS).to_numpy()
 y_test = test_df["fwd_return"].to_numpy()
 
 # %% [markdown]
-# LightGBM trains on CUDA with GPU-oriented histogram bins. Fixed seeds control
-# its statistical choices, but CUDA histogram reductions are not bitwise
-# deterministic. The evidence bundle reports raw prediction drift and requires
-# identical buffered trade selections and explanation identities across fresh
-# GPU processes in the same pinned image.
+# LightGBM fits on one CPU thread with every seed fixed, which makes the boosted trees
+# bitwise reproducible: the same predictions, the same trades, and the same SHAP vectors on
+# every run. That is a property of the backend rather than of the seeds - a CUDA fit with
+# these same seeds would not give it, because its histogram reductions vary with how the
+# card schedules them. Asking for a backend this LightGBM was not built with raises at `fit()`
+# rather than quietly substituting another, so the assertion below is not catching a fallback:
+# it reads back the device the booster kept, and a requested value that never reached it would
+# otherwise leave no trace.
 
 # %% tags=["results"]
 model = lgb.LGBMRegressor(
     n_estimators=N_ESTIMATORS,
     max_depth=3,
     learning_rate=0.1,
-    max_bin=GPU_MAX_BIN,
-    device_type=GPU_DEVICE,
+    max_bin=MAX_BIN,
+    device_type=LGB_DEVICE,
     random_state=SEED,
     data_random_seed=SEED,
     feature_fraction_seed=SEED,
@@ -228,14 +234,17 @@ model = lgb.LGBMRegressor(
     verbose=-1,
 )
 model.fit(X_train, y_train)
-assert model.booster_.params["device_type"] == GPU_DEVICE
+fitted_device = str(model.booster_.params.get("device_type", "")).lower()
+assert fitted_device == LGB_DEVICE, (
+    f"LightGBM device mismatch: required {LGB_DEVICE}, observed {fitted_device or 'unset'}"
+)
 
 predictions = model.booster_.predict(X_test)
 display(
     Markdown(
-        f"CUDA LightGBM fits **{len(X_train):,} training rows** and diagnoses "
-        f"**{len(X_test):,} later rows**. The one-session purge ends training labels before "
-        f"the test boundary at {test_df['timestamp'].min().date()}."
+        f"LightGBM fits **{len(X_train):,} training rows** on {fitted_device.upper()} "
+        f"and diagnoses **{len(X_test):,} later rows**. The one-session purge ends training "
+        f"labels before the test boundary at {test_df['timestamp'].min().date()}."
     )
 )
 
@@ -634,10 +643,12 @@ display(
 #    something nameable - a regime, a data problem, a missing feature - and that check happens
 #    outside the clustering.
 #
-# 6. **A GPU fit is reproducible in its conclusions, not in its bits.** CUDA histogram reductions
-#    are not deterministic across processes, so fixed seeds do not pin the raw predictions. What
-#    can be required is that the same trades get selected and the same explanations attach, which
-#    is what the evidence bundle checks.
+# 6. **Reproducibility is a property of the backend, not of the seed.** These fits are bitwise
+#    reproducible because they run on one CPU thread with every seed fixed. The same code on a
+#    CUDA build would repeat the conclusions and not the digits, because its histogram reductions
+#    depend on the order the card finishes them in. Anything that reads a prediction to the last
+#    decimal - a cached explanation, a hash of the trade set - has to know which of the two it is
+#    running on.
 #
 # ### Known limitations
 #
@@ -647,7 +658,7 @@ display(
 #   The yield slope and the volatility index are both revised rarely, but the panel is not
 #   point-in-time and no macro conclusion should be drawn from it.
 # - No cost is charged. The expected-return buffer screens small forecasts but is not a cost model,
-#   and 746 overnight round trips would pay a great deal more than it.
+#   and 620 overnight round trips would pay a great deal more than it.
 # - The worst trades are selected by realized loss, which is an outcome. A set of trades chosen
 #   that way contains the model's genuine failures and also its unlucky correct calls, and SHAP
 #   cannot separate the two.

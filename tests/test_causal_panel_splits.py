@@ -559,3 +559,16 @@ def test_a_zero_length_buffer_is_zero_periods_in_every_unit() -> None:
     for buffer in ("0D", "0min", "0H"):
         assert embargo_from_buffer(buffer, periods_per_year=12) == 0
         assert embargo_from_buffer(buffer, observed_step=pd.Timedelta("1D")) == 0
+
+
+def test_entity_sorted_groups_are_refused_rather_than_split() -> None:
+    """An entity-major frame restarts its dates at every entity boundary.
+
+    Accepting it would put one decision time in two folds. `03_econml_dml` builds its
+    temporal-placebo frame entity-major, because the lead has to be taken within symbol,
+    and has to sort back to date order before fitting.
+    """
+    entity_major = np.tile(np.arange(6), 3)
+
+    with pytest.raises(ValueError, match="sorted and contiguous"):
+        _walk_forward_indices(n_rows=len(entity_major), n_folds=2, embargo=1, groups=entity_major)

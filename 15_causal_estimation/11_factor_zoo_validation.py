@@ -30,8 +30,8 @@
 # - carry the selected union into an intercept-inclusive OLS regression with HAC inference;
 # - interpret what the exercise does and does not establish about the factor zoo.
 #
-# **Book references**: Chapter 14, Section 14.5 (Taming the Factor Zoo), and
-# Chapter 15, Section 15.3 (Double Machine Learning).
+# **Book references**: Chapter 14, Section 14.1 (Making the case for latent factors), and
+# Chapter 15, Section 15.4 (Isolating factor effects with DML).
 #
 # **Prerequisites**: [`01_pca_equity_sectors`](../14_latent_factors/01_pca_equity_sectors.ipynb)
 # and [`03_econml_dml`](03_econml_dml.ipynb).
@@ -45,8 +45,6 @@
 # %%
 """Factor-spanning validation with post-double-selection LASSO."""
 
-import warnings
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -59,9 +57,7 @@ from sklearn.preprocessing import StandardScaler
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 START_DATE = "2006-01-01"
@@ -89,7 +85,7 @@ set_global_seeds(SEED)
 #
 # This eligibility rule uses the current curated ETF list and is not a point-in-time
 # historical universe. The result is an in-sample teaching exercise, not a
-# survivorship-free backtest or a sealed holdout estimate.
+# survivorship-free backtest, and nothing here is held out.
 
 # %%
 etf_data = load_etfs(start_date=START_DATE, end_date=END_DATE).sort(["symbol", "timestamp"])
@@ -307,7 +303,9 @@ def fit_lasso_selector(target: np.ndarray, pca_inputs: np.ndarray) -> dict:
         {"lasso__alpha": alpha_grid},
         cv=TimeSeriesSplit(n_splits=N_CV_SPLITS),
         scoring="neg_mean_squared_error",
-        n_jobs=-1,
+        # The grid is small and the design is a few thousand rows; a worker per core would
+        # take the whole machine from every other notebook executing beside this one.
+        n_jobs=1,
     )
     search.fit(pca_inputs, target)
     coefficients = search.best_estimator_.named_steps["lasso"].coef_
@@ -386,9 +384,12 @@ post_table
 # %% [markdown]
 # ## 7. Compare uncertainty and selection breadth
 #
-# The left panel compares the same SPY loading before and after PCA conditioning;
-# error bars are Newey-West 95% intervals. The right panel shows how many of the ten
-# PCA controls enter the post-selection union.
+# The left panel compares the same SPY loading before and after PCA conditioning, with
+# Newey-West intervals at the conventional two-sided level. The right panel shows what each
+# of the two LASSO steps selected, since the union that enters the final regression is only
+# as interesting as the two selections behind it: an outcome equation that keeps the whole
+# basis makes the union the whole basis whatever the candidate equation chose, and
+# post-double-selection then reduces to controlling for everything.
 
 # %%
 factor_positions = np.arange(len(candidate_names))
@@ -396,7 +397,8 @@ naive_coef = np.array([result["coef"] for result in naive_results])
 naive_se = np.array([result["se"] for result in naive_results])
 post_coef = np.array([result["coef"] for result in post_results])
 post_se = np.array([result["se"] for result in post_results])
-union_size = np.array([result["n_union"] for result in post_results])
+outcome_selected = np.array([result["n_outcome"] for result in post_results])
+candidate_selected = np.array([result["n_candidate"] for result in post_results])
 figure_subtitle = (
     f"HAC estimates; {N}-ETF factor zoo; {return_wide['timestamp'].min()} "
     f"to {return_wide['timestamp'].max()}"
@@ -432,17 +434,45 @@ axes[0].set_yticks(factor_positions, candidate_names)
 axes[0].set_xlabel("SPY loading (slope)")
 _ = axes[0].legend(loc="best")
 
-axes[1].barh(factor_positions, union_size, color=COLORS["blue"], alpha=0.85)
+axes[1].barh(
+    factor_positions - 0.18,
+    outcome_selected,
+    height=0.34,
+    color=COLORS["blue"],
+    alpha=0.85,
+    label="Selected for SPY",
+)
+axes[1].barh(
+    factor_positions + 0.18,
+    candidate_selected,
+    height=0.34,
+    color=COLORS["amber"],
+    alpha=0.85,
+    label="Selected for the candidate",
+)
 axes[1].set_xlim(0, N_PCA_FACTORS)
 axes[1].set_xlabel("Selected PCA controls (count)")
+# The outcome LASSO retains all ten components for every candidate, so every navy bar spans
+# the full axis and no corner inside the panel is free. A key placed in one sits on a bar of
+# its own colour and cannot be read; it goes above the panel instead.
+axes[1].legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=2, frameon=False, fontsize=8)
 axes[1].invert_yaxis()
 
 add_message_title(
     axes[0],
-    "PCA controls erase naive SPY loadings",
+    "SPY loading before and after PCA conditioning",
     subtitle=figure_subtitle,
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels sharing a vertical axis of candidate factor names. The left panel plots each "
+    "factor's SPY loading twice, the naive estimate and the post-double-selection estimate at "
+    "slightly offset heights with different marker shapes, each with a horizontal "
+    "Newey-West interval and a vertical line at zero. The right panel is a grouped "
+    "horizontal bar chart of how many of the ten PCA controls each LASSO selected for that "
+    "factor, one bar for the SPY equation and one for the candidate equation, with a legend "
+    "naming them; the regression uses their union.",
+)
 
 # %% [markdown]
 # **Interpretation**: the naive slopes mix each managed factor's association with

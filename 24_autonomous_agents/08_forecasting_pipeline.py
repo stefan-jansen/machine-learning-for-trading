@@ -98,9 +98,11 @@ from utils.style import COLORS, add_message_title, show_with_alt
 # aggregated.
 #
 # Three weights decide how much each later stage can move the answer, and they are the numbers
-# to argue with. `DEBATE_WEIGHT` is the debate midpoint's share of the post-debate probability.
-# `SUPERVISOR_MEDIUM_WEIGHT` is the supervisor's share when it states medium confidence; at
-# high confidence it replaces the value outright and at low confidence it is ignored.
+# to argue with - on a live run. `DEBATE_WEIGHT` is the debate midpoint's share of the
+# post-debate probability. `SUPERVISOR_MEDIUM_WEIGHT` is the supervisor's share when it states
+# medium confidence; at high confidence it replaces the value outright and at low confidence it
+# is ignored. A replay reports the probabilities its capture recorded, so changing either weight
+# with `RUN_LIVE` left at `False` changes nothing: the run that produced the numbers is over.
 #
 # The three `CONFIDENCE_WHEN_*` values are what the pipeline reports as its own confidence in
 # each of those three cases. They are an ordering, not an estimate: a forecast the supervisor
@@ -406,6 +408,8 @@ def _run_research_agents(
 def _blend_final_probability(
     post_debate: float,
     supervisor_artifact: SupervisorArtifact,
+    *,
+    medium_weight: float = SUPERVISOR_MEDIUM_WEIGHT,
 ) -> tuple[float, float]:
     """Phase 4 to final: confidence-gated supervisor override. Returns (p_yes, confidence)."""
     final_p = post_debate
@@ -415,8 +419,8 @@ def _blend_final_probability(
         final_confidence = CONFIDENCE_WHEN_OVERRIDDEN
     elif supervisor_artifact.confidence == "medium":
         if supervisor_artifact.p_yes is not None:
-            final_p = (1 - SUPERVISOR_MEDIUM_WEIGHT) * post_debate + (
-                SUPERVISOR_MEDIUM_WEIGHT * supervisor_artifact.p_yes
+            final_p = (1 - medium_weight) * post_debate + (
+                medium_weight * supervisor_artifact.p_yes
             )
             final_confidence = CONFIDENCE_WHEN_BLENDED
     return max(0.01, min(0.99, final_p)), final_confidence
@@ -461,7 +465,9 @@ def _forecast_one(forecaster, question: ForecastQuestion) -> ForecastResult:
         question.question, summaries, cutoff_date=cutoff
     )
     post_debate = (1 - DEBATE_WEIGHT) * aggregate_p + DEBATE_WEIGHT * midpoint
-    final_p, confidence = _blend_final_probability(post_debate, supervisor)
+    final_p, confidence = _blend_final_probability(
+        post_debate, supervisor, medium_weight=SUPERVISOR_MEDIUM_WEIGHT
+    )
     tokens = sum((agent.token_usage for agent in agents), start=TokenUsage())
     tokens = tokens + debate.token_usage + supervisor.token_usage
     return ForecastResult(
@@ -575,6 +581,8 @@ def _run_live_questions(questions_to_run: list[ForecastQuestion]) -> tuple[list,
                 "max_steps": MAX_STEPS,
                 "debate_rounds": DEBATE_ROUNDS,
                 "correlation": NEYMAN_CORRELATION,
+                "debate_weight": DEBATE_WEIGHT,
+                "supervisor_medium_weight": SUPERVISOR_MEDIUM_WEIGHT,
             },
             llm_calls=tracer.calls,
             notes="Full AIA pipeline: research, aggregate, debate, supervisor.",
@@ -700,13 +708,64 @@ else:
 # pipeline: the aggregate over the research agents, the post-debate blend, and the final
 # probability. Those are what the line below joins. Everything else a stage produced is an
 # input to one of them - the market price the agents were shown, the agents' own answers, the
-# debate midpoint that enters the post-debate blend at weight `DEBATE_WEIGHT`, and the
+# debate midpoint that enters the post-debate blend at the run's own debate weight, and the
 # supervisor's own probability - and is drawn as an open marker at the stage that read it.
 #
 # The distinction decides what a gap on this chart means. Between two carried values it is
 # movement, and a stage that never moves anything on any question is being paid for and not
 # used. Between two research agents it is disagreement: they answer in parallel and neither
 # saw the other.
+
+# %% [markdown]
+# The post-debate value is the one number on the line that no stage stores: it is rebuilt from
+# the aggregate and the debate midpoint. On a replay it has to be rebuilt with the weights the
+# capture was recorded with rather than the ones set in this notebook now. Mixing the two
+# recomputes the middle point of the line and leaves the points either side of it at their
+# recorded values. Raising `DEBATE_WEIGHT` far enough would pull the post-debate point above
+# both of its neighbours and draw a large supervisor correction that never happened. So the
+# weights take effect on a live run, and are read back from the trace on a replay.
+#
+# Neither weight was recorded when the two committed captures were taken, so they fall back to
+# the values in use then. `carried_probabilities` re-derives each capture's final probability
+# from its own parts and raises if the fallback does not reproduce it, which is what keeps the
+# fallback from becoming an assumption nobody checks.
+
+
+# %%
+CAPTURED_DEBATE_WEIGHT = 0.3
+CAPTURED_SUPERVISOR_MEDIUM_WEIGHT = 0.4
+
+
+def carried_probabilities(result: ForecastResult, run: RunTrace) -> tuple[float, float, float]:
+    """Return (aggregate, debate midpoint, post-debate) under the run's own weights."""
+    debate_weight = float(run.params.get("debate_weight", CAPTURED_DEBATE_WEIGHT))
+    medium_weight = float(
+        run.params.get("supervisor_medium_weight", CAPTURED_SUPERVISOR_MEDIUM_WEIGHT)
+    )
+    aggregate_p = (
+        result.aggregation.extremized_probability
+        if result.aggregation.extremized_probability is not None
+        else result.aggregation.raw_probability
+    )
+    midpoint = (
+        (result.debate.bull_final_probability + result.debate.bear_final_probability) / 2
+        if result.debate and result.debate.bull_final_probability is not None
+        else aggregate_p
+    )
+    post_debate = (1 - debate_weight) * aggregate_p + debate_weight * midpoint
+
+    if result.supervisor is not None:
+        rebuilt, _ = _blend_final_probability(
+            post_debate, result.supervisor, medium_weight=medium_weight
+        )
+        if abs(round(rebuilt, 4) - result.final_probability) > 1e-4:
+            raise RuntimeError(
+                f"Rebuilt final probability {rebuilt:.4f} does not match the recorded "
+                f"{result.final_probability:.4f} for {result.question.question[:50]}: "
+                f"the weights this line is drawn with are not the ones the run used."
+            )
+    return aggregate_p, midpoint, post_debate
+
 
 # %%
 STAGE_X = {
@@ -719,20 +778,9 @@ STAGE_X = {
 }
 
 carried_rows, input_rows = [], []
-for r in results:
+for r, run in zip(results, run_traces, strict=True):
     q_short = textwrap.shorten(r.question.question, width=44, placeholder="...")
-
-    aggregate_p = (
-        r.aggregation.extremized_probability
-        if r.aggregation.extremized_probability is not None
-        else r.aggregation.raw_probability
-    )
-    midpoint = (
-        (r.debate.bull_final_probability + r.debate.bear_final_probability) / 2
-        if r.debate and r.debate.bull_final_probability is not None
-        else aggregate_p
-    )
-    post_debate = (1 - DEBATE_WEIGHT) * aggregate_p + DEBATE_WEIGHT * midpoint
+    aggregate_p, midpoint, post_debate = carried_probabilities(r, run)
 
     carried_rows += [
         {"question": q_short, "stage": "Aggregate", "p_yes": aggregate_p},

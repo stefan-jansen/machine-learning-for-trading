@@ -25,11 +25,52 @@ meant missing 8 of 17 literals including 3 of the 6 stale ones. Looking the decl
 in ``official_populations`` and resolving the lineage of whatever name owns it reads all of
 them. Do not simplify this back to a name lookup.
 
+**Two lineages, and every declaration name.** A hash is looked up in ``official_populations``
+and in ``candidate_set_names``, which have the same shape and the same resolver rule -
+``candidate_set_supersedes`` offers a declared hash when it is the head or what the head
+replaced, exactly as ``population_supersedes`` does. And every ``SUPERSEDES_*`` constant is
+read, not a list of two: the corpus holds 24 distinct names, and the candidate-set ones hold a
+``dict`` keyed by set name rather than a string.
+
+**The declaration that is ABSENT is the one that costs a fit**, and no literal check can see
+it. ``us_equities_panel/06_linear`` ran with ``SUPERSEDES_SETS = {}`` - nothing to classify, so
+every literal passed - and was refused at registration after 78 minutes of cold fit and 19.2 h
+of registered fit over 64 configs: ``a changed candidate set named
+'us-equities-fwd-ret-1d-linear-v1' must explicitly supersedes 454f73021f33``. So the check runs
+per LIVE GENERATION as well as per literal: a candidate set with a head that no declaration in
+the case study names, by name or by hash, is reported with the hash to paste.
+
+The condition there is a head existing at check time, never a name appearing in source.
+Declaring nothing is correct until a generation exists to supersede - ``create`` refuses a
+first version that claims to replace one - so a rule keyed on the source would have failed
+``06_linear`` on the run where it was right. Reported by default and fatal only under
+``--require-declarations``, because the declaration is resolved in the worktree at launch
+rather than committed ahead of the run: a notebook on ``main`` is expected to name only what
+it has already replaced.
+
 Usage::
 
     python scripts/check_supersedes_literals.py                    # every case study
     python scripts/check_supersedes_literals.py --case-study etfs  # one
     python scripts/check_supersedes_literals.py --json             # machine-readable
+    python scripts/check_supersedes_literals.py --case-study etfs --require-declarations
+
+**A literal one generation behind is a refusal, not a pass.** The resolvers offer a declared
+hash when it is the tip OR when it is what the tip replaced, and the second arm made this script
+report "live: names what the tip of X replaced; a re-run resolves to it". That reading is true of
+an unchanged re-run and false of every other run: ``create`` accepts the tip and nothing else,
+so the run whose membership MOVES is refused at the freeze. On 2026-09-11 that was 19 of the 25
+literals this script called live, including the two in ``us_equities_panel/06_linear`` that had
+just cost 78 minutes of cold fitting - reproduced end to end against ``OfficialPopulation.create``
+and ``CandidateSet.create`` in ``tests/test_supersedes_declares_intent.py``. They are reported
+``behind`` and refuse exactly as ``stale`` does.
+
+**The repair this prints is ``"live"``, never the current hash.** Pasting the tip is correct
+until the next publish of whatever freezes that lineage, which is the loop these literals have
+been in since #944. ``SUPERSEDES_LIVE`` names the lineage rather than quoting a generation of it
+and is resolved against the registry at run time, so a declaration that carries it is reported
+``intent`` and has nothing left to go stale - and it is right on a reader's clean clone, where
+there is no generation and the resolvers withhold it.
 
 **What a stale literal does and does not cost, because the difference decides what this
 refuses.** ``OfficialPopulation.create`` reads the declared predecessor only when the member
@@ -39,8 +80,8 @@ fires on the run whose membership changes, which is the refit a chain is queued 
 which is exactly the run that has already paid for its fit by the time it is refused. That
 is why this refuses rather than warns, and why the refusal is waivable by name.
 
-Exit status is 1 when a literal is dead AND the registry can name the head it should have
-named. `unresolved` - the hash is in no lineage and the notebook's population name cannot be
+Exit status is 1 when a literal is refused at the freeze - dead, or one generation behind -
+AND the registry can name the head it should have named. `unresolved` - the hash is in no lineage and the notebook's population name cannot be
 read without executing it - is reported and never blocks: refusing there would be the check
 asserting knowledge it does not have. A case study with no registry on disk is reported and
 does not fail either; that is a reader's clone. ``--allow-stale-supersedes`` waives the
@@ -60,6 +101,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from case_studies.research.population import SUPERSEDES_LIVE  # noqa: E402
 from case_studies.utils.registry.store import current_causal_identities  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,15 +113,27 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # which is the failure this script exists to prevent, arriving inside the script itself.
 _POPULATION_NAME = "SUPERSEDES_POPULATION"
 _CAUSAL_NAME = "SUPERSEDES_CAUSAL"
+_SUPERSEDES_PREFIX = "SUPERSEDES"
+
+# Every `SUPERSEDES_*` constant, not the two that were named here first. The committed corpus
+# uses 24 distinct names - `SUPERSEDES_SETS`, `SUPERSEDES_CANDIDATE_SETS`,
+# `SUPERSEDES_MODEL_POPULATION`, `SUPERSEDES_COST_BACKTESTS` and 20 more - and reading two of
+# them is how `us_equities_panel` reported "0 declared literal(s); 0 stale" on 2026-09-11 while
+# `06_linear.py:124` declared two live ones. Keying on the prefix rather than a list is what
+# keeps the 25th name from being invisible the day it is written.
+#
+# The value is a string for a single lineage and a `dict[name, hash]` where one notebook freezes
+# several - and a dict is not an `ast.Constant`, so the old reader skipped every dict-valued
+# declaration in the corpus whatever it was called.
 
 
-def _declared_literals(source: str) -> dict[str, str]:
-    """The string value assigned to each SUPERSEDES_* name, whatever the assignment shape."""
+def _declared_literals(source: str) -> dict[str, str | dict[str, str]]:
+    """The value assigned to each ``SUPERSEDES*`` name, whatever the assignment shape."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return {}
-    found: dict[str, str] = {}
+    found: dict[str, str | dict[str, str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.AnnAssign):
             targets = [node.target]
@@ -87,13 +141,45 @@ def _declared_literals(source: str) -> dict[str, str]:
             targets = node.targets
         else:
             continue
-        value = node.value
-        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
-            continue
         for target in targets:
-            if isinstance(target, ast.Name) and target.id in (_POPULATION_NAME, _CAUSAL_NAME):
-                found[target.id] = value.value
+            if not isinstance(target, ast.Name) or not target.id.startswith(_SUPERSEDES_PREFIX):
+                continue
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, SyntaxError):
+                # Built at runtime. Unreadable here and reported as such by the caller rather
+                # than guessed at, which is the same answer `_population_name` gives.
+                continue
+            if isinstance(value, str) or (
+                isinstance(value, dict)
+                and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+            ):
+                found[target.id] = value
     return found
+
+
+def _declared_pairs(value: str | dict[str, str]) -> list[tuple[str | None, str]]:
+    """``(lineage name, hash)`` for a declaration, where a dict states its own names."""
+    if isinstance(value, dict):
+        return [(name, h) for name, h in value.items() if h]
+    return [(None, value)] if value else []
+
+
+# Every verdict this script can reach. Named once, because the corpus scan's allowlist was a
+# second copy of it and drifted: `undeclared` was added in #944 and never reached the test, which
+# skips wherever there is no registry - so the drift was invisible in CI by construction and the
+# scan asserted a status set two releases old on the one machine that runs it.
+STATUSES = (
+    "live",  # the declaration names the tip; a refit publishes over it
+    "intent",  # SUPERSEDES_LIVE: the lineage is named and the generation is looked up
+    "behind",  # names the generation the tip replaced; refused on a membership move
+    "stale",  # names no generation of a lineage that has one; refused
+    "superseded",  # causal only: no longer current, which an unchanged re-run is entitled to
+    "undeclared",  # a live generation no declaration in the case study names
+    "unresolved",  # in no lineage, and nothing here can say whether that is dead or first
+    "forked",  # two generations nothing supersedes; no defensible answer
+    "no-registry",  # a reader's clone
+)
 
 
 @dataclass
@@ -113,8 +199,36 @@ class Finding:
     label: str | None = None
 
     @property
-    def is_stale(self) -> bool:
-        return self.status == "stale"
+    def refused_at_the_freeze(self) -> bool:
+        """Whether ``create`` refuses this declaration on the run that moves its members.
+
+        Two statuses do, and reading only ``stale`` is how 19 of the corpus's 25 ``live``
+        verdicts were reported green while every one of them was a refusal. ``behind`` is the
+        common one: the literal names the generation the tip replaced, which the resolver offers
+        and ``create`` then rejects because it accepts the tip and nothing else.
+        """
+        return self.status in ("stale", "behind")
+
+
+def _intent_finding(case_study: str, notebook: str, parameter: str, name: str | None) -> Finding:
+    """A declaration that names the live generation instead of quoting a hash.
+
+    Nothing to classify and nothing that can decay. It is reported rather than dropped because
+    a name that appears nowhere in the output reads as a name nobody declared, which is the
+    absence this script exists to make visible.
+    """
+    return Finding(
+        case_study,
+        notebook,
+        SUPERSEDES_LIVE,
+        "intent",
+        f"names the live generation of {name!r} rather than a hash; nothing here goes stale"
+        if name
+        else "names the live generation of whatever lineage this notebook publishes under, "
+        "rather than a hash; nothing here goes stale",
+        parameter,
+        label=name,
+    )
 
 
 _POPULATION_NAME_ASSIGN = re.compile(
@@ -139,14 +253,33 @@ def _registry_for(case_study: str, artifacts_root: Path) -> Path:
     return artifacts_root / case_study / "run_log" / "registry.db"
 
 
-def _current_generation(db: sqlite3.Connection, name: str) -> tuple[str, str | None] | None:
+# The two lineage tables a declared hash can live in. They have the same shape - a name, a
+# hash, and the hash it supersedes - and `candidate_set_supersedes` makes the same decision
+# about a candidate set that `population_supersedes` makes about a population: it offers the
+# declared hash when it is the head or what the head replaced, and withholds it otherwise
+# (`case_studies/research/comparison.py:112-123`). So one classifier serves both, and the
+# only thing that differs is which table to read.
+_LINEAGES: tuple[tuple[str, str], ...] = (
+    ("official_populations", "population_hash"),
+    ("candidate_set_names", "set_hash"),
+)
+
+
+def _current_generation(
+    db: sqlite3.Connection,
+    name: str,
+    *,
+    table: str = "official_populations",
+    hash_column: str = "population_hash",
+) -> tuple[str, str | None] | None:
     """The snapshot in force under *name*: the one nothing supersedes.
 
-    The same rule as ``OfficialPopulation.one``. A fork - two snapshots nothing supersedes -
-    has no defensible answer and is reported rather than picked between.
+    The same rule as ``OfficialPopulation.one`` and ``CandidateSet.one``. A fork - two
+    snapshots nothing supersedes - has no defensible answer and is reported rather than
+    picked between.
     """
     rows = db.execute(
-        "SELECT population_hash, supersedes_hash FROM official_populations WHERE name = ?",
+        f"SELECT {hash_column}, supersedes_hash FROM {table} WHERE name = ?",  # noqa: S608
         (name,),
     ).fetchall()
     if not rows:
@@ -156,6 +289,29 @@ def _current_generation(db: sqlite3.Connection, name: str) -> tuple[str, str | N
     if len(heads) != 1:
         raise ValueError(f"{len(heads)} current snapshots among {len(rows)} under {name!r}")
     return heads[0]
+
+
+def _owning_lineage(db: sqlite3.Connection, declared: str) -> tuple[str, str, str] | None:
+    """``(table, hash column, name)`` for whichever lineage holds *declared*.
+
+    Keyed on the hash rather than the name, which is the rule this whole script is built on:
+    the declaration's variable name does not say which lineage it belongs to, and on the
+    committed corpus the same file declares a population hash and a candidate-set hash under
+    two different ``SUPERSEDES_*`` names.
+    """
+    for table, hash_column in _LINEAGES:
+        try:
+            row = db.execute(
+                f"SELECT name FROM {table} WHERE {hash_column} = ?",  # noqa: S608
+                (declared,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            continue
+        if row is not None:
+            return table, hash_column, row[0]
+    return None
 
 
 def _declared_causal_hashes(literal: str) -> list[tuple[str, str | None]]:
@@ -301,18 +457,366 @@ def _check_causal(case_study: str, notebook: Path, registry: Path, literal: str)
     return findings
 
 
+def _check_lineage_literal(
+    case_study: str,
+    notebook: Path,
+    registry: Path,
+    parameter: str,
+    pairs: list[tuple[str | None, str]],
+) -> list[Finding]:
+    """Classify a declared hash against whichever lineage table holds it.
+
+    This is the population classifier applied to every other ``SUPERSEDES_*`` name, and the
+    verdicts are the same three because the resolver is the same: a hash that names the head
+    publishes over it, a hash that names what the head replaced resolves to the head, and
+    anything else is withheld and refused by ``create`` after the fit is paid for.
+
+    A dict-valued declaration states the lineage name itself, which is strictly more than the
+    population path can read: when the hash is in no lineage at all, the name still says
+    whether a generation exists to supersede, so a dead hash can be answered with the head to
+    paste instead of being reported as unresolved.
+    """
+    findings: list[Finding] = []
+    if not registry.exists():
+        return [
+            Finding(
+                case_study,
+                notebook.name,
+                declared,
+                "no-registry",
+                "no registry on disk; a clone publishes generation one and withholds this",
+                parameter,
+                label=name,
+            )
+            for name, declared in pairs
+        ]
+
+    db = sqlite3.connect(f"file:{registry}?mode=ro", uri=True)
+    try:
+        for name, declared in pairs:
+            if declared == SUPERSEDES_LIVE:
+                findings.append(_intent_finding(case_study, notebook.name, parameter, name))
+                continue
+            owner = _owning_lineage(db, declared)
+            if owner is None:
+                # Absent is not evidence on its own - a reset or a reader's empty registry
+                # withholds the hash and `create` publishes generation one. It is wrong only
+                # when a generation already exists under the name this declaration states.
+                head = None
+                if name:
+                    for table, hash_column in _LINEAGES:
+                        try:
+                            head = _current_generation(
+                                db, name, table=table, hash_column=hash_column
+                            )
+                        except sqlite3.OperationalError:
+                            continue
+                        except ValueError as exc:
+                            findings.append(
+                                Finding(
+                                    case_study,
+                                    notebook.name,
+                                    declared,
+                                    "forked",
+                                    str(exc),
+                                    parameter,
+                                    label=name,
+                                )
+                            )
+                            head = None
+                            break
+                        if head is not None:
+                            break
+                if head is not None:
+                    tip, tip_supersedes = head
+                    findings.append(
+                        Finding(
+                            case_study,
+                            notebook.name,
+                            declared,
+                            "stale",
+                            f"{name!r} is at {tip} (superseding {tip_supersedes}) and this "
+                            "hash is in no lineage the registry holds",
+                            parameter,
+                            SUPERSEDES_LIVE,
+                            name,
+                        )
+                    )
+                else:
+                    findings.append(
+                        Finding(
+                            case_study,
+                            notebook.name,
+                            declared,
+                            "unresolved",
+                            "this hash is in no lineage the registry holds, and no generation "
+                            f"was found under {name!r}"
+                            if name
+                            else "this hash is in no lineage the registry holds, and the "
+                            "declaration states no name to look one up under",
+                            parameter,
+                            label=name,
+                        )
+                    )
+                continue
+
+            table, hash_column, owner_name = owner
+            try:
+                head = _current_generation(db, owner_name, table=table, hash_column=hash_column)
+            except ValueError as exc:
+                findings.append(
+                    Finding(
+                        case_study,
+                        notebook.name,
+                        declared,
+                        "forked",
+                        str(exc),
+                        parameter,
+                        label=name,
+                    )
+                )
+                continue
+            assert head is not None  # a hash we just found has at least its own row
+            tip, tip_supersedes = head
+            remedy = None
+            if declared == tip:
+                status, detail = (
+                    "live",
+                    f"names the tip of {owner_name!r}; a refit publishes over it",
+                )
+            elif declared == tip_supersedes:
+                status, detail = (
+                    "behind",
+                    f"{owner_name!r} is at {tip} and this names the generation {tip} replaced. "
+                    "An unchanged re-run resolves to the tip and is fine; the run that MOVES "
+                    "its members is refused at the freeze, because create accepts the tip and "
+                    "nothing else",
+                )
+                remedy = SUPERSEDES_LIVE
+            else:
+                status, detail = (
+                    "stale",
+                    f"{owner_name!r} is at {tip} (superseding {tip_supersedes}); this literal "
+                    "is neither",
+                )
+                remedy = SUPERSEDES_LIVE
+            findings.append(
+                Finding(
+                    case_study, notebook.name, declared, status, detail, parameter, remedy, name
+                )
+            )
+    finally:
+        db.close()
+    return findings
+
+
+# A notebook that freezes a candidate set. Only these owe a declaration: a notebook that
+# reads one with `CandidateSet.one` is handed whatever generation is in force and supersedes
+# nothing.
+_FREEZES = re.compile(r"candidate_set_supersedes|CandidateSet\.create|\.freeze\(")
+
+# An f-string that could name a lineage, as a SQL LIKE pattern. `f"us-equities-{label}-linear-v1"`
+# becomes `us-equities-%-linear-v1`, which is what lets a static reader enumerate the sets a
+# notebook will freeze without executing it - the dict keys cannot do that, because the missing
+# declaration is exactly the entry that is not in the dict.
+_MIN_TEMPLATE_LITERAL = 8
+
+
+def _freeze_templates(source: str) -> set[str]:
+    """LIKE patterns for the lineage names *source* builds, where they can be read.
+
+    Degenerate templates are dropped rather than guessed at. `f"{a}-{b}"` becomes `%-%` and
+    matches every name in the table, which would attribute the whole registry to one notebook;
+    so a pattern needs real literal text and must not open with a wildcard.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    patterns: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        pattern = ""
+        literal_chars = 0
+        for part in node.values:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                pattern += part.value.replace("%", r"\%").replace("_", r"\_")
+                literal_chars += len(part.value)
+            else:
+                pattern += "%"
+        if (
+            literal_chars >= _MIN_TEMPLATE_LITERAL
+            and "%" in pattern
+            and not pattern.startswith("%")
+        ):
+            patterns.add(pattern)
+    return patterns
+
+
+def _undeclared_heads(case_study: str, registry: Path, notebooks: list[Path]) -> list[Finding]:
+    """Live candidate-set generations that no declaration in this case study covers.
+
+    This is the half that costs a fit, and it is not a stale-literal check. `us_equities_panel`
+    on 2026-09-10 declared `SUPERSEDES_SETS = {}` - nothing to classify, so every literal check
+    passes - and `06_linear` then ran 78 minutes of cold fit, 19.2 h of registered fit over 64
+    configs, and was refused at registration with `a changed candidate set named
+    'us-equities-fwd-ret-1d-linear-v1' must explicitly supersedes 454f73021f33`.
+
+    The condition is a live head existing NOW, not a name appearing in source. A first
+    generation must not be reported: before that run `fwd_ret_5d` and `fwd_ret_21d` had no
+    generation and declaring nothing for them was correct, and `create` refuses a first version
+    that claims to replace one. They have heads now, so the next run that moves their members
+    is refused unless they are declared.
+
+    Coverage is by name OR by hash, because a string-valued declaration names no set and only
+    its hash can place it - the same reason this script keys on hashes everywhere else.
+
+    **A scalar ``SUPERSEDES_LIVE`` cannot be placed by either.** It states no name, and it is
+    not a hash, so a set declared through one - ``sp500_options/13_portfolio_management`` uses
+    three scalar parameters rather than a mapping - reads here as declared nowhere. Which of a
+    notebook's scalars covers which of the sets it freezes is decided at the call site, by the
+    ``name=`` each is passed, and no static reader can recover that. So such a head is still
+    reported, because inventing the coverage would let the expensive case through, but the
+    report says a sentinel was found rather than claiming nothing declares it. A mapping entry
+    needs none of this: its key IS the name, so ``{"the-set": "live"}`` covers by name.
+    """
+    if not registry.exists():
+        return []
+    db = sqlite3.connect(f"file:{registry}?mode=ro", uri=True)
+    try:
+        try:
+            rows = db.execute(
+                "SELECT name, set_hash, supersedes_hash FROM candidate_set_names"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return []
+
+        by_name: dict[str, list[tuple[str, str | None]]] = {}
+        for name, set_hash, supersedes in rows:
+            by_name.setdefault(name, []).append((set_hash, supersedes))
+        heads: dict[str, tuple[str, str | None]] = {}
+        for name, generations in by_name.items():
+            superseded = {s for _, s in generations if s}
+            live = [g for g in generations if g[0] not in superseded]
+            if len(live) == 1:
+                heads[name] = live[0]
+
+        declared_names: set[str] = set()
+        declared_hashes: set[str] = set()
+        owners: dict[str, list[str]] = {}
+        # Notebooks carrying a scalar sentinel, which states intent without stating a name.
+        sentinel_scalars: dict[str, list[str]] = {}
+        for notebook in notebooks:
+            source = notebook.read_text(encoding="utf-8", errors="ignore")
+            for parameter, value in _declared_literals(source).items():
+                if value == SUPERSEDES_LIVE:
+                    sentinel_scalars.setdefault(notebook.name, []).append(parameter)
+                for lineage_name, declared in _declared_pairs(value):
+                    if lineage_name:
+                        declared_names.add(lineage_name)
+                    declared_hashes.add(declared)
+            if not _FREEZES.search(source):
+                continue
+            for pattern in _freeze_templates(source):
+                for name in heads:
+                    if db.execute("SELECT ? LIKE ? ESCAPE '\\'", (name, pattern)).fetchone()[0]:
+                        owners.setdefault(name, []).append(notebook.name)
+
+        findings: list[Finding] = []
+        for name, (tip, tip_supersedes) in sorted(heads.items()):
+            if name in declared_names or tip in declared_hashes:
+                continue
+            if tip_supersedes and tip_supersedes in declared_hashes:
+                continue
+            attributed = sorted(set(owners.get(name, [])))
+            # Attribution is an annotation, never the key. A name whose template no notebook
+            # states - `cme_futures` builds all eleven of its names as plain literals - is
+            # still a live head nothing declares, and reporting it under the case study is
+            # more useful than dropping it because the owner could not be worked out.
+            if len(attributed) == 1:
+                notebook_name, where = attributed[0], f"{attributed[0]} freezes it"
+            else:
+                notebook_name = "-"
+                where = (
+                    f"frozen by one of {attributed}"
+                    if attributed
+                    else "no notebook states this name as a readable template"
+                )
+            scalars = sorted({p for nb in attributed for p in sentinel_scalars.get(nb, [])})
+            if scalars:
+                # A sentinel is present and cannot be placed. Say that rather than "no
+                # declaration names it", which is false, and rather than treating it as
+                # coverage, which would let the case this check exists for through.
+                detail = (
+                    f"{name!r} is live at {tip} and no declaration in this case study names it "
+                    f"or its hash; {where}, and that notebook declares {', '.join(scalars)} = "
+                    f'"{SUPERSEDES_LIVE}" - a scalar sentinel states no name, so which set it '
+                    "covers is decided at the call site and cannot be read here. Confirm it is "
+                    "passed with this set's name; the next run that moves the members of an "
+                    "undeclared set is refused at the freeze, after the fit"
+                )
+            else:
+                detail = (
+                    f"{name!r} is live at {tip} and no SUPERSEDES_* declaration in this case "
+                    f"study names it or its hash; {where}. The next run that moves its "
+                    "members is refused at the freeze, after the fit"
+                )
+            findings.append(
+                Finding(
+                    case_study,
+                    notebook_name,
+                    tip,
+                    "undeclared",
+                    detail,
+                    "SUPERSEDES_SETS",
+                    SUPERSEDES_LIVE,
+                    name,
+                )
+            )
+        return findings
+    finally:
+        db.close()
+
+
 def check_case_study(case_study: str, *, repo_root: Path, artifacts_root: Path) -> list[Finding]:
     findings: list[Finding] = []
     registry = _registry_for(case_study, artifacts_root)
+    notebooks = sorted((repo_root / "case_studies" / case_study).glob("[0-9]*.py"))
+    findings.extend(_undeclared_heads(case_study, registry, notebooks))
 
-    for notebook in sorted((repo_root / "case_studies" / case_study).glob("[0-9]*.py")):
+    for notebook in notebooks:
         declared_by_name = _declared_literals(notebook.read_text(encoding="utf-8", errors="ignore"))
         causal = declared_by_name.get(_CAUSAL_NAME, "")
-        if causal:
+        if causal and isinstance(causal, str):
             findings.extend(_check_causal(case_study, notebook, registry, causal))
 
+        # Every other `SUPERSEDES_*` name goes through the shared lineage classifier. The
+        # population one keeps its own branch below because it can fall back on
+        # `_population_name` to read the name out of the source when the hash is absent.
+        for parameter, value in sorted(declared_by_name.items()):
+            if parameter in (_CAUSAL_NAME, _POPULATION_NAME):
+                continue
+            pairs = _declared_pairs(value)
+            if pairs:
+                findings.extend(
+                    _check_lineage_literal(case_study, notebook, registry, parameter, pairs)
+                )
+
         declared = declared_by_name.get(_POPULATION_NAME, "")
-        if not declared:
+        if not declared or not isinstance(declared, str):
+            continue
+
+        if declared == SUPERSEDES_LIVE:
+            # The one declaration this script does not have to read a name for. Every other
+            # population verdict needs `_population_name`, which is deliberately partial - a
+            # name built from an f-string or a module constant cannot be read without executing
+            # the notebook, and that is what leaves five of the corpus's literals unresolvable.
+            # The sentinel is resolved at run time against the name the call site already holds,
+            # so there is nothing here to look up and nothing that can drift.
+            findings.append(_intent_finding(case_study, notebook.name, _POPULATION_NAME, None))
             continue
 
         if not registry.exists():
@@ -363,7 +867,7 @@ def check_case_study(case_study: str, *, repo_root: Path, artifacts_root: Path) 
                             f"{statically_named!r} is at {tip} (superseding {tip_supersedes}) "
                             "and this hash is in no lineage the registry holds",
                             _POPULATION_NAME,
-                            tip,
+                            SUPERSEDES_LIVE,
                         )
                     )
                 else:
@@ -407,15 +911,19 @@ def check_case_study(case_study: str, *, repo_root: Path, artifacts_root: Path) 
             status, detail = "live", f"names the tip of {name!r}; a refit publishes over it"
         elif declared == tip_supersedes:
             status, detail = (
-                "live",
-                f"names what the tip of {name!r} replaced; a re-run resolves to it",
+                "behind",
+                f"{name!r} is at {tip} and this names the generation {tip} replaced. An "
+                "unchanged re-run resolves to the tip and is fine; the run that MOVES its "
+                "members is refused at the freeze, because create accepts the tip and nothing "
+                "else",
             )
+            remedy = SUPERSEDES_LIVE
         else:
             status, detail = (
                 "stale",
                 f"{name!r} is at {tip} (superseding {tip_supersedes}); this literal is neither",
             )
-            remedy = tip
+            remedy = SUPERSEDES_LIVE
         findings.append(
             Finding(case_study, notebook.name, declared, status, detail, _POPULATION_NAME, remedy)
         )
@@ -454,6 +962,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit findings as JSON")
     parser.add_argument(
+        "--require-declarations",
+        action="store_true",
+        help=(
+            "exit non-zero when a live candidate-set generation is declared nowhere. Off by "
+            "default and meant for the launch of the case study being queued: the declaration "
+            "is resolved in the worktree at launch, not committed ahead of the run, so a "
+            "notebook on main is expected to name only what it has already replaced."
+        ),
+    )
+    parser.add_argument(
         "--allow-stale-supersedes",
         action="store_true",
         help=(
@@ -472,15 +990,44 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps([asdict(f) for f in findings], indent=1))
     else:
         for finding in findings:
-            mark = "STALE" if finding.is_stale else finding.status.upper()
-            print(f"{mark:<11} {finding.case_study}/{finding.notebook}  {finding.declared}")
+            print(
+                f"{finding.status.upper():<11} {finding.case_study}/{finding.notebook}  "
+                f"{finding.declared}"
+            )
             print(f"            {finding.detail}")
-        checked = len(findings)
-        stale = sum(f.is_stale for f in findings)
-        print(f"\n{checked} declared literal(s); {stale} stale")
+        undeclared_count = sum(f.status == "undeclared" for f in findings)
+        checked = len(findings) - undeclared_count
+        refused = sum(f.refused_at_the_freeze for f in findings)
+        behind = sum(f.status == "behind" for f in findings)
+        print(
+            f"\n{checked} declared literal(s); {refused} refused at the freeze "
+            f"({behind} of them one generation behind); "
+            f"{undeclared_count} live generation(s) declared nowhere"
+        )
 
-    stale = [f for f in findings if f.is_stale]
+    stale = [f for f in findings if f.refused_at_the_freeze]
     unresolved = [f for f in findings if f.status == "unresolved"]
+    undeclared = [f for f in findings if f.status == "undeclared"]
+
+    if undeclared:
+        # The expensive one. A stale literal at least tells the reader a lineage exists; an
+        # absent declaration reads as "nothing to check" and every literal check passes, which
+        # is how `us_equities_panel/06_linear` reached registration having already paid for
+        # 19.2 h of registered fit.
+        print(
+            f"\n{len(undeclared)} live candidate-set generation(s) that no declaration names. "
+            "Each is refused at the freeze - after the fit - on the next run that moves its "
+            "members:\n",
+            file=sys.stderr,
+        )
+        for finding in undeclared:
+            print(
+                f"  {finding.case_study}: {finding.label}\n"
+                f"      {finding.detail}\n"
+                f'      fix: declare "{finding.label}": "{finding.remedy}" in the freezing '
+                "notebook's SUPERSEDES_* mapping, in the worktree you are about to launch",
+                file=sys.stderr,
+            )
 
     for finding in unresolved:
         # Warned, never blocked. Refusing on "I could not resolve this" would be the check
@@ -492,13 +1039,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if undeclared and args.require_declarations:
+        print(
+            "\nRefusing because --require-declarations was passed.",
+            file=sys.stderr,
+        )
+        return 1
+
     if stale and not args.allow_stale_supersedes:
         # Addressed to the person about to queue a chain, because that is the only person for
         # whom this is free. Editing the literal makes the paired .ipynb stale, and the only
         # sanctioned way to commit that drops its outputs - a live render lost, unless a run
         # is coming anyway. Theirs is.
         print(
-            "\nA stale literal does not make any committed output wrong, and it does not "
+            "\nA refused literal does not make any committed output wrong, and it does not "
             "fail every run: an unchanged re-run returns the published population without "
             "ever reading it. It fails the run whose membership MOVES - which is the refit "
             "you are about to queue - after that run has paid for its fit:\n",
@@ -517,11 +1071,33 @@ def main(argv: list[str] | None = None) -> int:
                 fix = f'set it to "{finding.remedy}"'
             else:
                 fix = "look up the current identity for the label this notebook fits"
+            reading = "is dead" if finding.status == "stale" else "is one generation behind"
             print(
                 f"  case_studies/{finding.case_study}/{finding.notebook}\n"
-                f"      {finding.parameter} = {finding.declared!r} is dead\n"
+                f"      {finding.parameter} = {finding.declared!r} {reading}\n"
                 f"      {finding.detail}\n"
                 f"      fix: {fix}",
+                file=sys.stderr,
+            )
+        if any(f.parameter != _CAUSAL_NAME for f in stale):
+            # Addressed only to the lineage declarations. `causal_supersedes` resolves against
+            # `current_causal_identities` and offers the declaration only when it is one of
+            # them, so the sentinel is never a current identity and is always withheld - a
+            # reader who pasted it there would be refused after the DML fit and every placebo
+            # refit, which is the expense this message exists to prevent.
+            print(
+                '\nFor the population and candidate-set declarations, paste "live" rather '
+                "than the hash. A hash is a quotation of a value the registry moves on every "
+                "publish, so pasting the current one buys you until the next run of whatever "
+                'freezes it; "live" names the lineage instead and is resolved against the '
+                "registry at run time, so it is correct for a clean clone too.",
+                file=sys.stderr,
+            )
+        if any(f.parameter == _CAUSAL_NAME for f in stale):
+            print(
+                f"\n{_CAUSAL_NAME} takes no sentinel: `causal_supersedes` offers a declaration "
+                "only when it is a current identity for the label, so paste the hash named "
+                "above.",
                 file=sys.stderr,
             )
         print(
@@ -533,7 +1109,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if stale:
         print(
-            f"\n{len(stale)} stale literal(s) allowed by --allow-stale-supersedes.",
+            f"\n{len(stale)} refused literal(s) allowed by --allow-stale-supersedes.",
             file=sys.stderr,
         )
     return 0

@@ -37,7 +37,7 @@
 # - Enforce dated queries and row limits against queries written to defeat them
 # - Audit the validator with a hostile control set, not only with queries built to pass
 #
-# **Book Reference**: Chapter 23, Section 23.3 (Graph RAG: Deterministic Relational Reasoning)
+# **Book Reference**: Chapter 23, Section 23.3 (Deterministic relational reasoning with graph RAG)
 #
 # **Prerequisites**: Run `05_institutional_holdings_kg` to load the 13F graph into
 # Neo4j. This notebook requires a live Neo4j connection and does not use canned

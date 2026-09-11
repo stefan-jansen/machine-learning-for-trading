@@ -176,12 +176,26 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     n_obs            INTEGER,
     dml_effect       REAL,
     dml_se_hac       REAL,
+    -- Which estimator produced dml_se_hac: "driscoll_kraay", "newey_west", or
+    -- "failed". Without it the row cannot say what its own standard error is, and
+    -- the two robust estimators differ by whether the caller supplied decision-time
+    -- groups. manual_dml_timeseries used to seed se_hac with the HC0 value and report
+    -- a successful Driscoll-Kraay whatever happened, so a fallback was indistinguishable
+    -- from a robust result in the row, in the p-value, and in the prose.
+    covariance_type  TEXT,
     p_value_hac      REAL,
     naive_effect     REAL,
     confounding_bias_pct REAL,
     refutation_p     REAL,
     refutation_n_successful INTEGER,
     refutation_placebo_json TEXT,
+    -- The placebo t-statistics behind refutation_p, which since
+    -- ml4t/agent-workspace#1120 is the statistic the test is computed on. The thetas
+    -- above stay because they are still what a reader wants to see on the effect scale,
+    -- but a figure drawn from them no longer shows the distribution the p-value came
+    -- from: permuting the treatment inflates var(T_res) and shrinks every placebo theta
+    -- toward zero, which is the defect. Two columns because these are two quantities.
+    refutation_placebo_t_json TEXT,
     -- The share of treatment rows block permutation could not move, because they sit in
     -- segments too short to hold two blocks. The runner warns that it must be read
     -- alongside the p-value - the bias runs toward p = 1 - and the warning fires only on
@@ -901,6 +915,24 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         db, "causal_runs", "refutation_placebo_json"
     ):
         db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_placebo_json TEXT")
+
+    # The placebo t-statistics, which since ml4t/agent-workspace#1120 are what
+    # refutation_p is computed on. Additive and outside the causal computation
+    # specification, so it moves no causal hash. A row written before this column existed
+    # carries NULL, which is the truthful answer: that run's p-value was computed on raw
+    # thetas and the draws behind it are not recoverable on the t scale.
+    if "causal_runs" in tables and not _table_has_column(
+        db, "causal_runs", "refutation_placebo_t_json"
+    ):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_placebo_t_json TEXT")
+
+    # Which covariance estimator produced dml_se_hac. Additive and outside the causal
+    # computation specification, so it moves no causal hash and invalidates no registered
+    # row. A row written before this column carries NULL, which is the truthful answer:
+    # nothing recorded it at the time, and the number cannot be re-attributed after the
+    # fact because the fallback returned an HC0 value under the robust name.
+    if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "covariance_type"):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN covariance_type TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

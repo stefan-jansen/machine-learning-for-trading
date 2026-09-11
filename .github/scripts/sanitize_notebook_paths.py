@@ -75,6 +75,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"/home/[^/]+/ml4t/third_edition/code/"), ""),
     (re.compile(r"/home/[^/]+/ml4t/code/"), ""),
+    # A worktree is a repo root too. `~/ml4t/public` is the main checkout and
+    # `~/ml4t/public-<lane>` a per-lane worktree, so both map to "" like the two
+    # repo roots above rather than falling through to the generic `~/ml4t/` rule,
+    # which strips the username and leaves the lane name - a directory that exists
+    # on one machine and belongs to a lane rather than to the book.
+    #
+    # The second spelling is not redundant. The generic rule below has been turning
+    # the first into the second since worktrees came in, so 410 committed notebooks
+    # already carry the `~/` form and nothing downstream can see it: `nbcheck`'s
+    # ABSOLUTE_PATH and this file's own CI guard both only match the `/home/` form.
+    # Without the second rule the sweep finds nothing to fix.
+    #
+    # `(?=/)` after the optional lane suffix is what keeps a hypothetical
+    # `~/ml4t/publications/` out; a bare `public[^/]*` would eat it.
+    (re.compile(r"/home/[^/]+/ml4t/public(?:-[A-Za-z0-9._-]+)?/"), ""),
+    (re.compile(r"~/ml4t/public(?:-[A-Za-z0-9._-]+)?/"), ""),
     # Docker container repo root: GPU notebooks (e.g. Ch12 02_gbm_comparison run
     # in the ml4t-gpu image) bake the container working dir /app into outputs.
     (re.compile(r"/app/"), ""),

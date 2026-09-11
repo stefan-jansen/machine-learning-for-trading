@@ -23,7 +23,7 @@
 # ## Purpose
 #
 # This notebook is the cross-case-study inventory and presentation layer: it
-# aggregates engineered features and the best registry IC per case study across
+# aggregates engineered features and the strongest registry IC per case study across
 # all 9 asset classes. It surfaces:
 # - **Feature counts and families**: how large each case study's feature space is
 # - **Best IC per case study** (from the model registry): how predictive the
@@ -49,25 +49,24 @@
 # %%
 """Cross-case-study feature evaluation summary."""
 
-import warnings
-
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 from IPython.display import display
 from plotly.subplots import make_subplots
 
-warnings.filterwarnings("ignore")
-
 from utils.paths import get_case_study_dir
-from utils.style import COLORS  # importing utils.style registers the ml4t Plotly template
+from utils.style import (  # importing utils.style registers the ml4t Plotly template
+    COLORS,
+    show_plotly_with_alt,
+)
 
 # %% tags=["parameters"]
 # Scale parameters (Papermill overrides for testing; readers see production values)
 START_DATE = None  # use full dataset
 
 # %% [markdown]
-# ## 1. Load Feature Data
+# ## Load Feature Data
 #
 # Scan all case study `data/features/` directories for the `financial.parquet`
 # produced by the feature engineering notebooks. We introspect schemas to count
@@ -151,7 +150,7 @@ if awaiting:
     print(f"  No features: {', '.join(DISPLAY_NAMES.get(cs, cs) for cs in awaiting)}")
 
 # %% [markdown]
-# ## 2. Feature Inventory Summary
+# ## Feature Inventory Summary
 #
 # How many features and feature families does each case study engineer, and what
 # are its largest families? (The multiple-testing survival counts are produced
@@ -180,7 +179,7 @@ else:
     print("No feature data available yet. Run case study feature notebooks first.")
 
 # %% [markdown]
-# ## 3. Feature Count Comparison
+# ## Feature Count Comparison
 #
 # How does feature set size vary across case studies? More features provide
 # a richer signal space but also increase the multiple testing burden.
@@ -201,17 +200,32 @@ if evaluated:
         )
     )
     fig.update_layout(
-        title="Each case study engineers 39-66 financial features",
+        title="Engineered financial features per case study",
         xaxis_title="Case study",
         yaxis_title="Number of features",
         height=450,
     )
-    fig.show()
+    print(
+        f"feature counts range from {min(n_features)} to {max(n_features)} "
+        f"across {len(n_features)} case studies"
+    )
+    show_plotly_with_alt(
+        fig,
+        (
+            "A bar chart of the number of engineered financial features in each case "
+            "study, with the case studies along the horizontal axis and the count on the "
+            "vertical axis. Each bar is annotated with its exact count above it. The bars "
+            "are of broadly similar height: the tallest belongs to the futures case study "
+            "and the shortest to the crypto perpetuals one, with the rest clustered "
+            "between them. No case study has a feature space dramatically larger or "
+            "smaller than the others."
+        ),
+    )
 else:
     print("No feature data available.")
 
 # %% [markdown]
-# ## 4. Feature Family Distribution
+# ## Feature Family Distribution
 #
 # We group features into *families* by their name prefix (the token before the
 # first underscore: `mom_21` and `mom_63` both count as `mom`). This is a coarse,
@@ -284,7 +298,7 @@ if evaluated:
             vertical_spacing=0.09,
             subplot_titles=(
                 f"{len(recurring)} prefixes recur across two or more asset classes",
-                "Each asset class also adds its own specialized measures",
+                "Feature prefixes appearing in only one case study",
             ),
         )
         fig.add_trace(
@@ -327,23 +341,39 @@ if evaluated:
         fig.update_annotations(font={"size": 13, "color": COLORS["slate"]})
         fig.update_layout(
             title={
-                "text": "A few families recur across asset classes; most are asset-specific",
+                "text": "Feature families by case study, ordered by how many share each",
                 "font": {"size": 19},
             },
             height=max(500, len(recurring) * 26 + 280),
             width=max(700, len(cs_list) * 90 + 260),
         )
-        fig.show()
+        show_plotly_with_alt(
+            fig,
+            (
+                "Two stacked panels sharing a case-study axis along the bottom. The upper panel "
+                "is a heatmap of feature prefix against case study, one row per prefix, with "
+                "each filled cell annotated by how many features that case study has under "
+                "that prefix and shaded darker for larger counts; empty cells are blank rather "
+                "than zero. Rows are ordered so the prefixes shared by the most case studies "
+                "sit at the top: volatility, return, momentum, Sharpe and a residual catch "
+                "prefix appear across several columns, while implied-volatility and "
+                "variance-premium prefixes appear only in the two options-bearing case "
+                "studies, and several prefixes near the bottom appear in one or two columns "
+                "only. The lower panel is a bar chart in amber counting the prefixes that "
+                "appear in one case study alone, annotated with its count; each of the "
+                "seven has some, with the equity ETF and futures studies carrying the most."
+            ),
+        )
     else:
         print("No family-level data available.")
 else:
     print("No feature data available.")
 
 # %% [markdown]
-# ## 5. Representative Features Across Case Studies
+# ## Representative Features Across Case Studies
 #
-# A sample of each case study's feature space — the first few feature names in
-# schema order — to illustrate the engineered inputs. This is an inventory view,
+# A sample of each case study's feature space, the first few feature names in schema
+# order, to illustrate the engineered inputs. This is an inventory view,
 # not an IC ranking (per-feature IC is computed in each case study's evaluation
 # notebook).
 
@@ -367,15 +397,26 @@ else:
     print("No feature data available.")
 
 # %% [markdown]
-# ## 6. Breadth vs IC: The Fundamental Law Perspective
+# ## Breadth vs IC: The Fundamental Law Perspective
 #
 # The Fundamental Law of Active Management says:
 #
 # $$IR \approx IC \times \sqrt{BR}$$
 #
-# where $BR$ is the number of independent bets (roughly the universe size).
-# A case study with IC = 0.01 and 3,000 stocks achieves IR = 0.55,
-# while IC = 0.03 with 20 pairs gives IR = 0.13. Breadth matters enormously.
+# where $BR$ is the number of independent bets, roughly the universe size. The cell below
+# works the law through two contrasting cases so the arithmetic is visible rather than
+# asserted: a wide universe with a small IC against a narrow one with an IC three times
+# larger. Read which of the two reaches the higher information ratio, and by how much.
+
+# %%
+# The two contrasting cases the text describes, worked rather than quoted.
+LAW_EXAMPLES = [
+    ("wide universe, small IC", 0.01, 3000),
+    ("narrow universe, larger IC", 0.03, 20),
+]
+print("IR = IC * sqrt(BR)")
+for _label, _ic, _br in LAW_EXAMPLES:
+    print(f"  {_label:<28} IC {_ic:.2f}, BR {_br:>5,}  ->  IR {_ic * np.sqrt(_br):.2f}")
 
 # %%
 from case_studies.utils.analytics import DATASET_META, load_best_ic_per_family
@@ -424,6 +465,13 @@ else:
 # %%
 # Visualize breadth vs IC
 if evaluated and "breadth_data" in dir() and breadth_data:
+    # sizemode="area" is what makes the area proportional to the value. Plotly's default
+    # reads `size` as a diameter, so passing the ratio there makes the AREA scale with its
+    # square and overstates the spread between case studies by that power.
+    MAX_MARKER_DIAMETER = 60
+    _irs = [brow["estimated_ir"] for brow in breadth_data]
+    _sizeref = 2.0 * max(_irs) / (MAX_MARKER_DIAMETER**2)
+
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -433,7 +481,10 @@ if evaluated and "breadth_data" in dir() and breadth_data:
             text=[brow["case_study"] for brow in breadth_data],
             textposition="top center",
             marker=dict(
-                size=[brow["estimated_ir"] * 20 + 5 for brow in breadth_data],
+                size=_irs,
+                sizemode="area",
+                sizeref=_sizeref,
+                sizemin=4,
                 color=COLORS["blue"],
                 opacity=0.75,
                 line=dict(width=1, color=COLORS["slate"]),
@@ -443,22 +494,58 @@ if evaluated and "breadth_data" in dir() and breadth_data:
     )
 
     fig.update_layout(
-        title="Breadth lifts risk-adjusted signal even where per-bet IC is small",
+        title="Best model |IC| against universe size, marker area by estimated IR",
         xaxis_title="Universe size (number of instruments, log scale)",
         yaxis_title="Best model |IC|",
         xaxis_type="log",
         height=450,
     )
-    fig.show()
+    show_plotly_with_alt(
+        fig,
+        (
+            "A scatter plot of a case study's best model absolute information coefficient "
+            "against the size of its instrument universe, with the horizontal axis on a "
+            "logarithmic scale from about twenty instruments to several thousand. Each "
+            "case study is one labelled marker whose area encodes its estimated "
+            "information ratio, so a larger circle means a higher ratio. The markers do "
+            "not line up along any trend: the highest coefficient belongs to a case study "
+            "with about a hundred instruments, and two of the largest universes sit at "
+            "middling and low coefficients. Marker area tells a different story from "
+            "vertical position, with much the largest circles at the right-hand end of the "
+            "axis, where the universes are widest."
+        ),
+    )
+
+# %% [markdown]
+# Read the two encodings in that figure separately, because they say different things.
+#
+# Vertical position is the per-bet information coefficient, and it does not rise with
+# universe size. The highest coefficient in the panel comes from a case study of about a
+# hundred instruments, and two of the widest universes sit well below it. Nothing here
+# supports "more instruments, better signal".
+#
+# Marker area is the estimated information ratio, and the largest circles are at the
+# right-hand end of the axis. That is the law at the top of this section doing its work:
+# an information ratio is a coefficient multiplied by the square root of breadth, so a
+# universe a hundred times wider turns a coefficient ten times smaller into the same
+# ratio. The wide-universe case studies reach competitive ratios on individually weaker
+# signals.
+#
+# Two cautions about reading this as a result. The estimated ratio is the law applied to
+# the plotted coefficient rather than a measured backtest quantity, so the relationship
+# between area and position is partly arithmetic rather than empirical. And breadth in the
+# law means *independent* bets; a universe of three thousand equities that move together
+# supplies far fewer than three thousand, which is the correction the law is most often
+# used without.
 
 # %% [markdown]
 # ## What the Panels Above Show
 #
 # The notebook aggregates whatever is present in each case study's
 # `data/features/financial.parquet` and the model registry. The substantive
-# findings — which feature families have predictive content for which label
+# findings, meaning which feature families have predictive content for which label
 # and horizon, how many features survive HAC + BH-FDR, and how breadth
-# interacts with IC magnitude — are produced by the per-case-study evaluation
+# and how breadth interacts with IC magnitude, are produced by the per-case-study evaluation
 # notebooks (`13_model_analysis.py` in each case study). This summary
 # notebook is a cross-case-study inventory and presentation layer; it does
 # not itself compute IC or run multiple-testing correction.

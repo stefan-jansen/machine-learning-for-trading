@@ -56,6 +56,9 @@
 # %%
 """Build an auditable performance report from protocol-matched BTC backtests."""
 
+import itertools
+import re
+
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
@@ -73,7 +76,7 @@ from ml4t.diagnostic.visualization.portfolio import (
 )
 
 from data import load_crypto_perps
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, ml4t_diverging, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -538,15 +541,31 @@ for trace in fig.data:
     )
 fig.update_layout(
     title=(
-        "An RSI rule and buy-and-hold over the same bars and the same costs"
+        "Cumulative return, RSI rule against buy-and-hold"
         f"<br><sup>Net cumulative return; both target {POSITION_SIZE:.0%} of equity and fill at "
         "the next open</sup>"
     ),
-    yaxis_title="Cumulative return (%)",
+    yaxis_title="Cumulative return",
     height=500,
     margin={"r": 105},
 )
-fig.show()
+_curves = {
+    trace.name: [float(v) for v in trace.y if v is not None and np.isfinite(v)]
+    for trace in fig.data
+}
+_curve_phrase = "; ".join(
+    f"{name} runs from {min(vals):.0%} to {max(vals):.0%} and ends at {vals[-1]:.0%}"
+    for name, vals in _curves.items()
+    if vals
+)
+show_plotly_with_alt(
+    fig,
+    (
+        "Line chart of net cumulative return in percent for two rules run on the same bars "
+        "with the same costs, each direct-labelled at the right rather than in a legend. Both "
+        "share one linear axis, so the taller series sets the scale for both."
+    ),
+)
 
 # %% [markdown]
 # ## 4. How much of the time capital was at risk
@@ -616,16 +635,26 @@ fig.add_trace(
 )
 fig.update_layout(
     title=(
-        "Gross and net exposure coincide for the long-only rule"
+        "Gross and net exposure over the sample"
         "<br><sup>Position value divided by contemporaneous equity; net backtest</sup>"
     ),
     xaxis_title="Date",
-    yaxis_title="Share of equity at risk (%)",
+    yaxis_title="Share of equity at risk",
     yaxis_tickformat=".0%",
     height=420,
     hovermode="x unified",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Line chart of gross exposure in solid navy and net exposure in dotted amber, each as "
+        "position value divided by contemporaneous equity, against date. Both are marked "
+        "daily, so a position's exposure drifts between fills as prices move rather than "
+        "holding at the level it was opened at. Gross counts position value regardless of "
+        "direction and net counts it signed, so the two coincide only for a book that is "
+        "entirely on one side and long; this strategy is long-only."
+    ),
+)
 
 # %% [markdown]
 # ## 5. What the completed round trips looked like
@@ -892,14 +921,27 @@ fig.data[0].opacity = 0.3
 fig.data[1].marker.color = COLORS["negative"]
 fig.update_layout(
     title=(
-        "Time under water, not just the depth of the worst fall"
+        "Drawdown from the high-water mark"
         "<br><sup>Net peak-to-trough return; zero is the high-water mark</sup>"
     ),
     xaxis_title="Date",
-    yaxis_title="Drawdown (%)",
+    yaxis_title="Drawdown",
     height=360,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    (
+        "Filled drawdown chart from the high-water mark, zero at the top and losses below, "
+        "against date. Each point is the distance from the highest portfolio value reached up "
+        "to that date, so the series is flat wherever the rule holds no position and nothing "
+        "is at risk."
+    ),
+)
+
+# %% [markdown]
+# The library labels its two reference lines with adjectives as well as levels. An adjective
+# printed on an axis rules on a strategy this notebook has not finished measuring, and a reader
+# cannot argue with it, so the chart below keeps the levels and drops the words.
 
 # %%
 rolling = analysis_net.compute_rolling_metrics(windows=[ROLLING_WINDOW_DAYS], metrics=["sharpe"])
@@ -909,29 +951,64 @@ for shape in fig.layout.shapes:
     shape.line.color = COLORS["neutral"]
 for annotation in fig.layout.annotations:
     annotation.font.color = COLORS["neutral"]
+# Read the level back out of the label, not off the shape: three lines, two annotations.
+for annotation in fig.layout.annotations:
+    level = re.search(r"\(([\d.]+)\)", annotation.text or "")
+    if level:
+        annotation.text = f"Sharpe {level.group(1)}"
 fig.update_layout(
     title=(
-        "Risk-adjusted performance varies across the sample"
+        "Rolling Sharpe ratio over the sample"
         f"<br><sup>{ROLLING_WINDOW_DAYS}-day rolling Sharpe, annualized on a 365-day year</sup>"
     ),
     xaxis_title="Date",
     yaxis_title="Rolling Sharpe ratio",
     height=420,
 )
-fig.show()
+_roll = [float(v) for v in fig.data[0].y if v is not None and np.isfinite(v)]
+_roll_signs = [v > 0 for v in _roll if v != 0]
+_crossings = sum(1 for a, b in itertools.pairwise(_roll_signs) if a != b)
+show_plotly_with_alt(
+    fig,
+    (
+        f"Line chart of the {ROLLING_WINDOW_DAYS}-day rolling Sharpe ratio against date, with "
+        "dashed horizontal reference lines at the library's two conventional levels. The "
+        "series starts one window into the sample, because that is the first date a full "
+        "window exists. Each point is computed from that window alone, so the line says what "
+        "the same rule would have looked like to someone measuring over a window ending "
+        "there."
+    ),
+)
 
 # %%
 fig = plot_monthly_returns_heatmap(analysis_net)
 fig.data[0].colorscale = ml4t_diverging()
 fig.update_layout(
     title=(
-        "Monthly outcomes are concentrated in active-position windows"
+        "Return by calendar month and year"
         "<br><sup>Net calendar-month return; annual column compounds monthly observations</sup>"
     ),
     xaxis_title="Month",
     yaxis_title="Year",
 )
-fig.show()
+_month_columns = [i for i, label in enumerate(fig.data[0].x) if label != "Annual"]
+_months = [
+    float(row[i])
+    for row in fig.data[0].z
+    for i in _month_columns
+    if row[i] is not None and np.isfinite(row[i])
+]
+_zero_months = sum(1 for v in _months if v == 0)
+show_plotly_with_alt(
+    fig,
+    (
+        "Heatmap of net return by calendar month and year, one row per year and one column "
+        "per month, with a compounded annual column at the right, on a diverging scale where "
+        "positive is green and negative red and each cell is labelled. The annual column "
+        "compounds its row: one plus each monthly return multiplied together, minus one. That "
+        "is a different quantity from the cells beside it, which is why it sits apart."
+    ),
+)
 
 # %%
 fig = go.Figure()
@@ -955,16 +1032,26 @@ fig.add_vline(
 )
 fig.update_layout(
     title=(
-        "Daily returns combine many flat days with a heavy active tail"
+        "Distribution of daily returns"
         "<br><sup>Net calendar-day returns; vertical line marks the empirical 95% VaR</sup>"
     ),
-    xaxis_title="Daily return (%)",
+    xaxis_title="Daily return",
     yaxis_title="Number of days",
     xaxis_tickformat=".1%",
     bargap=0.04,
     height=420,
 )
-fig.show()
+_daily = daily_returns["net_return"].to_list()
+_flat_days = sum(1 for r in _daily if r == 0)
+show_plotly_with_alt(
+    fig,
+    (
+        "Histogram of daily net returns with a dotted red vertical line at the empirical "
+        "95 percent value at risk and a thin line at zero. The rule is out of the market on "
+        "many sessions, so a zero return is a distinct outcome rather than a small one, and "
+        "it collects in the bar at zero rather than spreading across neighbouring bins."
+    ),
+)
 
 # %% [markdown]
 # ## 8. The report itself

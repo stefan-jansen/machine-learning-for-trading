@@ -1179,7 +1179,11 @@ for label, why in unresolved.items():
 # effect sizes in the table above, which are in the same units as each other.
 #
 # The second is the placebo test, which re-estimates the effect on permuted treatment
-# histories and asks where the real estimate falls among them. A placebo p-value near
+# histories and asks where the real run's HAC t-statistic falls among theirs. It compares
+# t-statistics and not effects: permuting the treatment frees it from the controls, so its
+# residual keeps nearly all its variance, and that variance is the denominator of the
+# second-stage effect. Comparing effects divides every placebo by a larger number than the
+# observed one and narrows the null toward a pass. A placebo p-value near
 # one does not mean the effect is absent; it means the estimate sits at the wrong end
 # of the placebo distribution to be read as evidence, and the notebook that produced it
 # says so directly. Neither gate is a substitute for the other, and an estimate that
