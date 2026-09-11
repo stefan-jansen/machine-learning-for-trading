@@ -462,7 +462,17 @@
 11_ml_pipeline/03_logistic_classification:
   parameters:
     MAX_SYMBOLS: 10
-  timeout: 300
+  # Not the 300s default. The L1 cell sweeps five C values through eight
+  # walk-forward folds on liblinear, and the cost sits at the weakly regularized
+  # end: single-threaded at MAX_SYMBOLS=10 (46,551 rows, 57 features, 8 folds)
+  # the five values cost 0.34s, 1.29s, 11.39s, 114.07s and 80.54s - 207.63s in
+  # total. That fits 300s on this workstation and does not fit it on a hosted
+  # runner, which is why ch11-12 alternated pass and fail rather than staying
+  # red. Nothing here fails to converge: n_iter peaks at 81 against
+  # MODEL_MAX_ITER = 1000. Cutting the universe instead was measured and not
+  # taken - MAX_SYMBOLS 6 costs 115.2s and 4 costs 44.4s, both keeping 8 folds -
+  # because 01, 02, 05, 06 and 08 all read these same features and labels at 10.
+  timeout: 900
 11_ml_pipeline/04_nested_cv_hpo:
   parameters:
     ALPHA_GRID_POINTS: 10
