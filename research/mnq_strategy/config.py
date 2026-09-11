@@ -171,6 +171,7 @@ class StrategyConfig:
     def validate_fixed_contract(self) -> bool:
         """Ensure fixed signal thresholds match the Task 3 implementation."""
         expected = {
+            "point_value": MNQ_POINT_VALUE,
             "rejection_wick_ratio": signals.REJECTION_WICK_RATIO,
             "rejection_close_pct": signals.REJECTION_CLOSE_PCT,
             "momentum_body_range": signals.MOMENTUM_BODY_RANGE,

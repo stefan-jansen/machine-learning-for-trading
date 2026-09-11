@@ -128,10 +128,11 @@ def make_confirmed_signal_fixture() -> pl.DataFrame:
 def make_overlapping_signals_fixture() -> pl.DataFrame:
     """Return two signals whose five-minute eligible entry windows overlap."""
     first_signal = datetime(2024, 2, 5, 9, 45)
-    second_signal = datetime(2024, 2, 5, 9, 50)
-    first_start = first_signal + timedelta(minutes=10)
-    second_start = second_signal + timedelta(minutes=10)
-    window_end = first_start + timedelta(minutes=10)
+    second_signal = datetime(2024, 2, 5, 9, 55)
+    first_entry = first_signal + timedelta(minutes=5)
+    second_entry = second_signal + timedelta(minutes=5)
+    first_window_end = first_entry + timedelta(minutes=15)
+    second_window_end = second_entry + timedelta(minutes=10)
     rows = [
         _row(
             first_signal,
@@ -142,10 +143,11 @@ def make_overlapping_signals_fixture() -> pl.DataFrame:
             signal=True,
             direction="long",
             signal_type="rejection",
-            entry_time=first_start,
-            entry_window_start=first_start,
-            entry_window_end=window_end,
+            entry_time=first_entry,
+            entry_window_start=first_entry,
+            entry_window_end=first_window_end,
         ),
+        _row(first_entry, 100.75, 101.00, 100.50, 100.75),
         _row(
             second_signal,
             100.50,
@@ -155,13 +157,12 @@ def make_overlapping_signals_fixture() -> pl.DataFrame:
             signal=True,
             direction="short",
             signal_type="lvn_break_retest",
-            entry_time=second_start,
-            entry_window_start=second_start,
-            entry_window_end=window_end + timedelta(minutes=5),
+            entry_time=second_entry,
+            entry_window_start=second_entry,
+            entry_window_end=second_window_end,
         ),
-        _row(first_start, 100.75, 101.00, 100.50, 100.75),
-        _row(second_start, 100.75, 101.00, 100.25, 100.50),
-        _row(second_start + timedelta(minutes=5), 100.50, 100.75, 100.00, 100.25),
+        _row(second_entry, 100.75, 101.00, 100.25, 100.50),
+        _row(second_entry + timedelta(minutes=10), 100.50, 100.75, 100.00, 100.25),
     ]
     return _canonical_frame(rows)
 

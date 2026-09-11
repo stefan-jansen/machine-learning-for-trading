@@ -95,6 +95,56 @@ def test_walk_forward_keeps_test_window_out_of_parameter_selection():
     assert report["selection_policy"]["test_data_used_for_selection"] is False
 
 
+def test_walk_forward_supports_multiple_chronological_windows():
+    windows = [
+        WalkForwardWindow("2024-01-01", "2024-06-30", "2024-07-01", "2024-07-31"),
+        WalkForwardWindow("2024-08-01", "2024-08-31", "2024-09-01", "2024-09-30"),
+    ]
+
+    report = walk_forward_evaluate(_metric_fixture(), windows, _config())
+
+    assert report["selection_policy"]["window_count"] == 2
+    assert len(report["windows"]) == 2
+    assert report["lookahead_check"] is True
+
+
+def test_walk_forward_normalizes_utc_timestamp_before_date_window_masking():
+    bars = pl.DataFrame(
+        {
+            "timestamp": [
+                datetime(2024, 6, 30, 23, 30),
+                datetime(2024, 7, 1, 0, 30),
+                datetime(2024, 7, 1, 14, 0),
+            ],
+            "open": [100.0, 100.0, 100.0],
+            "high": [100.5, 100.5, 100.5],
+            "low": [99.5, 99.5, 99.5],
+            "close": [100.0, 100.0, 100.0],
+            "volume": [100, 100, 100],
+            "bar_closed": [True, True, True],
+            "signal": [False, False, False],
+            "direction": [None, None, None],
+            "signal_type": [None, None, None],
+            "session_date": [date(2024, 6, 30), date(2024, 7, 1), date(2024, 7, 1)],
+        }
+    ).with_columns(
+        pl.col("timestamp").cast(pl.Datetime(time_zone="UTC")),
+        pl.col("session_date").cast(pl.Date),
+        pl.col("bar_closed").cast(pl.Boolean),
+        pl.col("signal").cast(pl.Boolean),
+        pl.col("direction").cast(pl.Utf8),
+        pl.col("signal_type").cast(pl.Utf8),
+    )
+    window = WalkForwardWindow("2024-06-01", "2024-06-30", "2024-07-01", "2024-07-01")
+
+    report = walk_forward_evaluate(bars, [window], _config())
+
+    assert report["windows"][0]["train_rows"] == 2
+    assert report["windows"][0]["test_rows"] == 1
+    assert report["lookahead_check"] is True
+    assert report["test_results"] == []
+
+
 def test_walk_forward_report_calculates_trade_metrics_without_division_by_zero():
     window = WalkForwardWindow(
         train_start=date(2024, 6, 1),
@@ -117,6 +167,32 @@ def test_walk_forward_report_calculates_trade_metrics_without_division_by_zero()
     assert report["cost_share"] == pytest.approx(0.0)
     assert report["per_setup"]["metric"]["trade_count"] == 3
     assert report["config_hash"] == _config().config_hash
+
+
+def test_walk_forward_resets_loss_streak_at_each_session_date():
+    rows = []
+    for index, session_day in enumerate((date(2024, 7, 1), date(2024, 7, 2))):
+        signal_time = datetime.combine(session_day, datetime.min.time()).replace(hour=10)
+        rows.append(_row(signal_time, signal=True, direction="long", setup="loss"))
+        rows.append(
+            _row(
+                signal_time + timedelta(minutes=5),
+                open_=100.0,
+                low=89.0,
+                close=95.0,
+            )
+        )
+    bars = _bars(rows)
+    window = WalkForwardWindow("2024-06-01", "2024-06-30", "2024-07-01", "2024-07-31")
+
+    report = walk_forward_evaluate(bars, [window], _config())
+
+    assert report["trade_count"] == 2
+    assert report["consecutive_loss_breaches"] == 0
+    assert {row["session_date"] for row in report["test_results"]} == {
+        date(2024, 7, 1),
+        date(2024, 7, 2),
+    }
 
 
 def test_walk_forward_rejects_overlapping_or_reversed_windows():

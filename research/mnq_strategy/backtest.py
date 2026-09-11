@@ -17,6 +17,7 @@ RESULT_COLUMNS = (
     "exit_time",
     "setup",
     "direction",
+    "session_date",
     "contracts",
     "stop",
     "target",
@@ -129,7 +130,21 @@ def _prepare_bars(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
     timestamps = result["timestamp_ny"].to_list()
     if len(timestamps) != len(set(timestamps)):
         raise ValueError("backtest timestamps must be unique")
-    return result
+    raw_rows = result.to_dicts()
+    blocked_entries = {
+        row["timestamp_ny"]
+        for index, row in enumerate(raw_rows[:-1])
+        if row["signal"] and row["bar_closed"] and not raw_rows[index + 1]["bar_closed"]
+    }
+    result = result.filter(pl.col("bar_closed"))
+    return result.with_columns(
+        pl.col("timestamp_ny")
+        .is_in(list(blocked_entries))
+        .fill_null(False)
+        .alias("_entry_blocked_by_unclosed")
+        if blocked_entries
+        else pl.lit(False).alias("_entry_blocked_by_unclosed")
+    )
 
 
 def _result_schema(timestamp_dtype: pl.DataType) -> dict[str, pl.DataType]:
@@ -139,6 +154,7 @@ def _result_schema(timestamp_dtype: pl.DataType) -> dict[str, pl.DataType]:
         "exit_time": timestamp_dtype,
         "setup": pl.Utf8,
         "direction": pl.Utf8,
+        "session_date": pl.Date,
         "contracts": pl.Int64,
         "stop": pl.Float64,
         "target": pl.Float64,
@@ -211,6 +227,7 @@ def _exit_for_bar(row: dict[str, Any], position: _Position) -> tuple[float, str]
 def _closed_row(
     position: _Position,
     exit_time: datetime,
+    session_date: date,
     exit_price: float,
     exit_reason: str,
     config: StrategyConfig,
@@ -230,6 +247,7 @@ def _closed_row(
         "exit_time": exit_time,
         "setup": position.setup,
         "direction": position.direction,
+        "session_date": session_date,
         "contracts": position.contracts,
         "stop": position.stop,
         "target": position.target,
@@ -259,6 +277,7 @@ def _rejected_row(
         "exit_time": None,
         "setup": setup,
         "direction": signal.get("direction"),
+        "session_date": _session_date(signal),
         "contracts": 0,
         "stop": None,
         "target": None,
@@ -359,6 +378,7 @@ def run_backtest(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
                 closed = _closed_row(
                     position,
                     row["timestamp_ny"],
+                    row_date,
                     exit_price,
                     exit_reason,
                     config,
@@ -381,7 +401,7 @@ def run_backtest(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
         if position is not None:
             results.append(_rejected_row(row, next_time, setup, "position_already_open"))
             continue
-        if next_index >= len(rows):
+        if row.get("_entry_blocked_by_unclosed") or next_index >= len(rows):
             results.append(_rejected_row(row, None, setup, "no_eligible_entry_bar"))
             continue
         if not isinstance(row.get("direction"), str) or row["direction"] not in {"long", "short"}:
@@ -424,15 +444,20 @@ def run_backtest(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
         )
 
     if position is not None:
-        last_row = rows[-1]
-        closed = _closed_row(
-            position,
-            last_row["timestamp_ny"],
-            float(last_row["close"]),
-            "end_of_data",
-            config,
+        last_closed_row = next(
+            (candidate for candidate in reversed(rows) if candidate["bar_closed"]),
+            None,
         )
-        results.append(closed)
+        if last_closed_row is not None:
+            closed = _closed_row(
+                position,
+                last_closed_row["timestamp_ny"],
+                _session_date(last_closed_row),
+                float(last_closed_row["close"]),
+                "end_of_data",
+                config,
+            )
+            results.append(closed)
 
     results.sort(key=lambda result: result["signal_time"])
     return _frame_from_rows(results, timestamp_dtype)

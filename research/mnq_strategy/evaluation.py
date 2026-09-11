@@ -110,6 +110,44 @@ def _as_comparable(
     return boundary.astimezone(reference.tzinfo)
 
 
+def _normalize_evaluation_bars(bars: pl.DataFrame, config: StrategyConfig) -> pl.DataFrame:
+    """Normalize the selected timestamp before chronology or window masking."""
+    timestamp_column = "timestamp_ny" if "timestamp_ny" in bars.columns else "timestamp"
+    if timestamp_column not in bars.columns:
+        raise ValueError("required input column missing: timestamp_ny")
+
+    result = bars.clone()
+    dtype = result.schema[timestamp_column]
+    if dtype == pl.Utf8:
+        try:
+            result = result.with_columns(
+                pl.col(timestamp_column).str.to_datetime(strict=True).alias(timestamp_column)
+            )
+        except (pl.exceptions.ComputeError, ValueError) as exc:
+            raise ValueError(f"{timestamp_column} contains invalid datetime values") from exc
+        dtype = result.schema[timestamp_column]
+    if not isinstance(dtype, pl.Datetime):
+        try:
+            result = result.with_columns(
+                pl.col(timestamp_column).cast(pl.Datetime, strict=True).alias(timestamp_column)
+            )
+        except (pl.exceptions.ComputeError, ValueError) as exc:
+            raise ValueError(f"{timestamp_column} must contain datetime values") from exc
+        dtype = result.schema[timestamp_column]
+    if result[timestamp_column].null_count():
+        raise ValueError(f"{timestamp_column} must not contain null values")
+
+    expression = pl.col(timestamp_column)
+    if dtype.time_zone is None:
+        source_timezone = "UTC" if timestamp_column == "timestamp" else config.timezone
+        expression = expression.dt.replace_time_zone(source_timezone)
+    expression = expression.dt.convert_time_zone(config.timezone)
+    return result.with_columns(
+        expression.alias("_normalized_timestamp"),
+        expression.alias("timestamp_ny"),
+    )
+
+
 def _within_boundaries(
     timestamps: list[datetime], start: date | datetime, end: date | datetime
 ) -> list[bool]:
@@ -177,22 +215,36 @@ def _max_drawdown(pnls: list[float]) -> float:
 def _breach_counts(trades: pl.DataFrame, config: StrategyConfig) -> tuple[int, int]:
     if trades.is_empty():
         return 0, 0
-    daily_pnl: dict[date, float] = {}
-    daily_breaches: set[date] = set()
+    current_session: date | None = None
+    daily_pnl = 0.0
     consecutive_losses = 0
+    daily_breaches = 0
     consecutive_breaches = 0
     for trade in trades.to_dicts():
-        trade_date = trade["entry_time"].date()
-        daily_pnl[trade_date] = daily_pnl.get(trade_date, 0.0) + float(trade["net_pnl"])
-        if daily_pnl[trade_date] <= -config.daily_stop:
-            daily_breaches.add(trade_date)
+        trade_date = trade["session_date"]
+        if trade_date != current_session:
+            current_session = trade_date
+            daily_pnl = 0.0
+            consecutive_losses = 0
+        daily_pnl += float(trade["net_pnl"])
+        if (
+            daily_pnl <= -config.daily_stop
+            and daily_pnl - float(trade["net_pnl"]) > -config.daily_stop
+        ):
+            daily_breaches += 1
         if trade["net_pnl"] < 0:
             consecutive_losses += 1
-            if consecutive_losses >= config.max_consecutive_losses:
+            if consecutive_losses == config.max_consecutive_losses:
                 consecutive_breaches += 1
         else:
             consecutive_losses = 0
-    return len(daily_breaches), consecutive_breaches
+    return daily_breaches, consecutive_breaches
+
+
+def _session_date_column(results: pl.DataFrame) -> pl.DataFrame:
+    if "session_date" not in results.columns:
+        raise ValueError("backtest results must include session_date for risk metrics")
+    return results
 
 
 def _per_setup(trades: pl.DataFrame) -> dict[str, dict[str, float | int]]:
@@ -212,7 +264,7 @@ def _per_setup(trades: pl.DataFrame) -> dict[str, dict[str, float | int]]:
 
 
 def _metrics(results: pl.DataFrame, config: StrategyConfig) -> dict[str, Any]:
-    trades = _closed_trades(results)
+    trades = _session_date_column(_closed_trades(results))
     if trades.is_empty():
         return {
             "trade_count": 0,
@@ -272,27 +324,24 @@ def walk_forward_evaluate(
     if not isinstance(bars, pl.DataFrame):
         raise TypeError("bars must be a polars.DataFrame")
 
-    timestamp_column = "timestamp_ny" if "timestamp_ny" in bars.columns else "timestamp"
-    if timestamp_column not in bars.columns:
-        raise ValueError("required input column missing: timestamp_ny")
-    raw_timestamps = bars[timestamp_column].to_list()
-    if raw_timestamps and not isinstance(raw_timestamps[0], datetime):
+    normalized_bars = _normalize_evaluation_bars(bars, config)
+    normalized_timestamps = normalized_bars["_normalized_timestamp"].to_list()
+    if normalized_timestamps and not isinstance(normalized_timestamps[0], datetime):
         raise ValueError("walk-forward input timestamps must be datetime values")
-    chronological = sorted(raw_timestamps)
-    if raw_timestamps != chronological:
+    if normalized_timestamps != sorted(normalized_timestamps):
         raise ValueError("walk-forward input must be chronological")
 
     test_frames: list[pl.DataFrame] = []
     window_reports: list[dict[str, Any]] = []
     for window in windows:
-        timestamps = bars[timestamp_column].to_list()
+        timestamps = normalized_bars["_normalized_timestamp"].to_list()
         train_mask = _within_boundaries(timestamps, window.train_start, window.train_end)
         test_mask = _within_boundaries(timestamps, window.test_start, window.test_end)
-        train_rows = bars.filter(pl.Series("train", train_mask, dtype=pl.Boolean))
-        test_rows = bars.filter(pl.Series("test", test_mask, dtype=pl.Boolean))
+        train_rows = normalized_bars.filter(pl.Series("train", train_mask, dtype=pl.Boolean))
+        test_rows = normalized_bars.filter(pl.Series("test", test_mask, dtype=pl.Boolean))
         if train_rows.height and test_rows.height:
-            if max(train_rows[timestamp_column].to_list()) >= min(
-                test_rows[timestamp_column].to_list()
+            if max(train_rows["_normalized_timestamp"].to_list()) >= min(
+                test_rows["_normalized_timestamp"].to_list()
             ):
                 raise ValueError("test rows must occur after train rows")
         test_results = run_backtest(test_rows, config)
@@ -304,10 +353,12 @@ def walk_forward_evaluate(
                 "test_rows": test_rows.height,
                 "test_trade_count": int(test_results.filter(pl.col("status") == "closed").height),
                 "train_last_timestamp": (
-                    max(train_rows[timestamp_column].to_list()) if train_rows.height else None
+                    max(train_rows["_normalized_timestamp"].to_list())
+                    if train_rows.height
+                    else None
                 ),
                 "test_first_timestamp": (
-                    min(test_rows[timestamp_column].to_list()) if test_rows.height else None
+                    min(test_rows["_normalized_timestamp"].to_list()) if test_rows.height else None
                 ),
             }
         )

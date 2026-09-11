@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
@@ -94,6 +95,19 @@ def test_one_position_at_a_time_rejects_overlapping_entry_window():
     assert rejected.height == 1
 
 
+def test_overlapping_fixture_declares_actual_next_bar_entries():
+    bars = make_overlapping_signals_fixture()
+    signals = bars.filter(pl.col("signal")).sort("timestamp_ny")
+
+    for signal in signals.to_dicts():
+        next_bar = (
+            bars.filter(pl.col("timestamp_ny") > signal["timestamp_ny"])
+            .sort("timestamp_ny")
+            .row(0, named=True)
+        )
+        assert signal["entry_time"] == next_bar["timestamp_ny"]
+
+
 def test_long_trade_uses_direction_aware_pnl():
     signal_time = datetime(2024, 1, 8, 10, 0)
     bars = _bars(
@@ -172,6 +186,54 @@ def test_costs_are_reported_separately_from_raw_entry_price():
     assert result["total_costs"][0] == pytest.approx(20.0)
     assert result["gross_pnl"][0] == pytest.approx(4.0)
     assert result["net_pnl"][0] == pytest.approx(-16.0)
+
+
+def test_unclosed_next_bar_cannot_be_used_as_entry():
+    bars = make_confirmed_signal_fixture().with_columns(
+        pl.when(pl.col("timestamp_ny") == datetime(2024, 1, 8, 10, 5, tzinfo=ZoneInfo(NEW_YORK)))
+        .then(False)
+        .otherwise(pl.col("bar_closed"))
+        .alias("bar_closed")
+    )
+
+    result = run_backtest(bars, _four_contract_config())
+
+    assert result.height == 1
+    assert result["status"][0] == "rejected"
+    assert result["rejection_reason"][0] == "no_eligible_entry_bar"
+    assert result["entry_time"][0] is None
+
+
+def test_unclosed_bar_cannot_trigger_an_ohlc_exit_or_end_of_data_fill():
+    signal_time = datetime(2024, 1, 8, 10, 0)
+    bars = _bars(
+        [
+            _row(signal_time, signal=True, direction="long", setup="10am"),
+            _row(signal_time + timedelta(minutes=5), open_=100.0, close=100.0),
+            _row(
+                signal_time + timedelta(minutes=10),
+                high=100.5,
+                low=80.0,
+                close=80.0,
+                bar_closed=False,
+            ),
+            _row(signal_time + timedelta(minutes=15), open_=100.0, close=101.0),
+        ]
+    )
+
+    result = run_backtest(bars, _four_contract_config())
+
+    assert result["exit_reason"][0] == "end_of_data"
+    assert result["exit_time"][0].hour == 5
+    assert result["exit_time"][0].minute == 15
+    assert result["exit_price"][0] == pytest.approx(101.0)
+
+
+def test_non_mnq_point_value_is_rejected_before_execution():
+    config = _four_contract_config(point_value=1.0)
+
+    with pytest.raises(ValueError, match="point_value"):
+        run_backtest(make_confirmed_signal_fixture(), config)
 
 
 def test_position_size_rejection_is_emitted_as_a_row():

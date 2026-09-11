@@ -109,3 +109,104 @@ commands above pass.
 ## Report Path
 
 `/Users/theinnerchild/quant-references/machine-learning-for-trading-mnq-strategy/.superpowers/sdd/2026-09-11-mnq-objective-strategy/task-5-report.md`
+
+## Review Fixes
+
+Applied the five Task 5 review findings without touching the prohibited
+project files:
+
+- Normalized the selected `timestamp`/`timestamp_ny` to the configured
+  timezone before chronology checks or train/test date masks. Added a UTC
+  previous-New-York-date regression test and normalized timestamp metadata.
+- Added `session_date` to every result row and reset evaluator daily and
+  consecutive-loss counters at each new session date, matching
+  `DailyRiskGuard`/backtest behavior.
+- Repaired the overlapping fixture's declared entry times to equal each
+  signal's next chronological bar while retaining overlapping windows and the
+  one-position rejection case.
+- Added fixed MNQ `point_value == 2.0` validation to
+  `StrategyConfig.validate_fixed_contract()` and a backtest regression test.
+- Filtered unclosed bars out of simulation while preserving an explicit
+  `no_eligible_entry_bar` rejection for signals whose next bar is unclosed;
+  unclosed OHLC rows cannot trigger exits or end-of-data fills.
+
+### Review RED
+
+```bash
+uv run pytest tests/research/test_backtest.py tests/research/test_evaluation.py -q
+```
+
+```text
+25 collected; 6 failed, 19 passed
+```
+
+The failures reproduced the fixture timing, timezone masking, session breach,
+point-value, and unclosed-bar defects before the fixes.
+
+### Review GREEN and Final Verification
+
+```bash
+uv run pytest tests/research/test_backtest.py tests/research/test_evaluation.py -q
+25 passed in 0.26s
+
+uv run pytest tests/research -q
+139 passed in 0.23s
+```
+
+The final focused and complete research suites passed after the fixes. The
+review regression additions preserve the raw-versus-adjusted entry/cost
+semantics and conservative stop-first ordering.
+
+After adding the multiple-window regression, the final rerun collected 26
+focused tests and 140 research tests; the exact final results are recorded
+below.
+
+### Exact Fix Verification Commands
+
+```bash
+uv run ruff check research/mnq_strategy/backtest.py research/mnq_strategy/evaluation.py research/mnq_strategy/config.py research/mnq_strategy/fixtures.py tests/research/test_backtest.py tests/research/test_evaluation.py
+```
+
+```text
+All checks passed!
+```
+
+```bash
+uv run ruff format --check research/mnq_strategy/backtest.py research/mnq_strategy/evaluation.py research/mnq_strategy/config.py research/mnq_strategy/fixtures.py tests/research/test_backtest.py tests/research/test_evaluation.py
+```
+
+```text
+6 files already formatted
+```
+
+```bash
+uv run python -m compileall -q research/mnq_strategy/backtest.py research/mnq_strategy/evaluation.py research/mnq_strategy/config.py research/mnq_strategy/fixtures.py tests/research/test_backtest.py tests/research/test_evaluation.py
+```
+
+```text
+Completed without output or errors.
+```
+
+```bash
+uv run pytest tests/research/test_backtest.py tests/research/test_evaluation.py -q
+```
+
+```text
+26 passed in 0.24s
+```
+
+```bash
+uv run pytest tests/research -q
+```
+
+```text
+140 passed in 0.21s
+```
+
+```bash
+git diff --check
+```
+
+```text
+Completed without output or errors.
+```
