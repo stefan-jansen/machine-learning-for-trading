@@ -1378,6 +1378,45 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      # Six chapter jobs download checkpoints from HuggingFace while the notebook
+      # runs: ch04, ch22 and ch23 (all-MiniLM-L6-v2), ch10 (finbert-tone,
+      # ProsusAI/finbert, ModernBERT-base, deberta-v3-small and two datasets),
+      # ch11-12 (finbert-tone) and ch13 (granite-timeseries-ttm-v1, chronos-t5-tiny).
+      # Nothing cached them, so every job of every run fetched them again,
+      # unauthenticated, several jobs at once from the same runner pool. Measured
+      # 2026-09-12: ch11-12 red on #994 with `429 Too Many Requests` loading
+      # yiyanghkust/finbert-tone, and ch13 red on `main` two hours later with
+      # "couldn't connect to https://huggingface.co" on ibm-granite. Neither failure
+      # names the commit under test, and both read as that commit's.
+      #
+      # A cache hit cannot serve the wrong checkpoint. HuggingFace stores each
+      # snapshot under its own revision sha, so a hit either holds the revision the
+      # notebook asks for or falls through to the network; the key decides how much
+      # of the download is skipped, never which bytes load. That is what makes a
+      # coarse key safe here.
+      #
+      # The key buckets by ISO week rather than pinning content, because nothing in
+      # the repo declares which checkpoints a chapter pulls - the model ids are
+      # literals inside the notebooks, and a manifest listing them would be a second
+      # place to keep in step. A weekly bucket picks up a newly added model within a
+      # week at the cost of one download, and `restore-keys` starts that week's first
+      # run from the previous week's entry instead of empty. A constant key would
+      # never save again after the first run, freezing the cache at whatever the
+      # chapters needed that day.
+      - name: HuggingFace cache key
+        id: hfkey
+        if: steps.reach.outputs.have_key
+        run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache HuggingFace checkpoints
+        if: steps.reach.outputs.have_key
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ matrix.name }}-${{ steps.hfkey.outputs.week }}
+          restore-keys: |
+            hf-${{ matrix.name }}-
+
       - name: Resolve the image this commit declares
         id: image
         if: steps.reach.outputs.have_key
@@ -1430,16 +1469,21 @@ jobs:
           TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
           MATRIX_FILTER: ${{ matrix.filter }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          HF_HOME: /hf-cache
         run: |
           FILTER="${TEST_FILTER_INPUT:-$MATRIX_FILTER}"
           mkdir -p "$ML4T_OUTPUT_DIR"
+          # actions/cache creates the path on a hit and leaves it absent on a miss,
+          # and docker would then create the bind source itself as root-owned.
+          mkdir -p "$HOME/.cache/huggingface"
           docker run --rm \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -v "$ML4T_OUTPUT_DIR:$ML4T_OUTPUT_DIR" \
+            -v "$HOME/.cache/huggingface:/hf-cache" \
             -w "$GITHUB_WORKSPACE" \
             -e PYTHONPATH -e ML4T_DATA_PATH -e ML4T_OUTPUT_DIR \
             -e MPLBACKEND -e PLOTLY_RENDERER \
-            -e FRED_API_KEY \
+            -e FRED_API_KEY -e HF_HOME \
             "${{ steps.image.outputs.ref }}" \
             python -m pytest tests/test_chapter_notebooks.py \
               -v --tb=short \
