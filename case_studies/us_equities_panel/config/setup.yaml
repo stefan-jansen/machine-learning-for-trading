@@ -275,7 +275,9 @@ causal:
   confounders: [vol_21d, illiq_rank, volume_ratio]
   method: walk_forward_dml
 
-# Read by 20_strategy_analysis.py to gate the headline strategy summary.
+# Declared here and cited in prose, not loaded by any notebook. 01_feasibility_analysis
+# section C.2 names the four thresholds and says where each one is measured; no code reads
+# this block, so nothing gates on it.
 kill_conditions:
   ic_floor: 0.01
   ic_floor_note: Cross-sectional IC below 0.01 across all features.
