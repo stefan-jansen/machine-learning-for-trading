@@ -213,3 +213,83 @@ def test_every_decidable_kind_is_exercised_by_the_declarations():
         "these kinds are implemented but no row declares one, so nothing exercises them "
         f"against the fixture: {', '.join(unused)}"
     )
+
+
+def _run_docker_runner(monkeypatch, overrides, tmp_path):
+    """Drive ``test_docker_notebook`` with one declaration and report what it did.
+
+    Returns ``("skipped", reason)`` or ``("executed", None)``. ``run_notebook`` is replaced by
+    a sentinel so a regression reports itself instead of executing a notebook inside the unit
+    suite; every decision the runner makes before that point is the real one.
+    """
+    from tests import test_docker_notebooks as runner
+
+    monkeypatch.setattr(runner, "get_overrides", lambda _: overrides)
+    monkeypatch.setattr(runner, "get_tier", lambda _: runner.current_test_tier())
+    executed = []
+    monkeypatch.setattr(
+        runner, "run_notebook", lambda **kwargs: executed.append(kwargs) or {"status": "ok"}
+    )
+    notebook = tmp_path / "15_causal_estimation" / "05_stand_in.py"
+    notebook.parent.mkdir(parents=True, exist_ok=True)
+    notebook.write_text("# %%\n")
+    monkeypatch.setattr(runner, "REPO_ROOT", tmp_path)
+    try:
+        runner.test_docker_notebook(notebook, tmp_path, tmp_path)
+    except pytest.skip.Exception as exc:
+        # Skipped derives from BaseException, not Exception. Catching Exception here lets the
+        # skip escape and marks THIS test skipped, which reads as a pass in the summary and
+        # asserts nothing - the first version of this helper did exactly that.
+        return "skipped", str(exc)
+    return ("executed", None) if executed else ("returned without executing", None)
+
+
+def test_the_docker_runner_honours_a_skip_whose_blocker_still_holds(monkeypatch, tmp_path):
+    """The defect this replaced: the runner ignored ``skip`` and executed the notebook anyway.
+
+    ``15_causal_estimation/05_momentum_causal_trading`` declared a ``fixture_shortfall`` naming
+    the exact ValueError it raises, and the docker runner ran it regardless and collected that
+    failure. An image supplies a module; it does not widen the fixture window, so there was
+    never a cured condition here to run under.
+    """
+    outcome, reason = _run_docker_runner(
+        monkeypatch,
+        {
+            "skip": True,
+            "skip_reason": "Walk-forward CV needs more bars than the test-data window provides",
+            "skip_blocker": {"fixture_shortfall": {"note": "...", "verified": "2026-09-11"}},
+        },
+        tmp_path,
+    )
+    assert outcome == "skipped", (
+        "the docker runner executed a notebook whose blocker still holds; a skip it ignores "
+        "is a declaration that costs nothing and a failure nobody can act on"
+    )
+    assert "more bars than the test-data window" in reason
+
+
+def test_the_docker_runner_still_executes_once_the_blocker_expires(monkeypatch, tmp_path):
+    """The negative half: honouring a skip must not become skipping unconditionally.
+
+    Without this, deleting the blocker check entirely - or honouring ``skip`` without asking
+    whether its condition still holds - passes the test above while silently dropping every
+    docker notebook from CI.
+    """
+    fixture_root = tmp_path / "fixture"
+    (fixture_root / "futures").mkdir(parents=True)
+    (fixture_root / "futures" / "continuous.parquet").touch()
+    monkeypatch.setattr("tests.skip_blockers._fixture_root", lambda: fixture_root)
+
+    outcome, _ = _run_docker_runner(
+        monkeypatch,
+        {
+            "skip": True,
+            "skip_reason": "the fixture carries no continuous futures",
+            "skip_blocker": {"absent_fixture_path": "futures/continuous.parquet"},
+        },
+        tmp_path,
+    )
+    assert outcome == "executed", (
+        "the blocker names a file the fixture now carries, so the skip has expired and the "
+        "notebook must run again with no edit to overrides.yaml"
+    )
