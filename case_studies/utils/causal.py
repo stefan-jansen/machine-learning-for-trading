@@ -387,6 +387,10 @@ def _walk_forward_indices(
     """Build expanding-window folds in rows or complete decision-time groups."""
     if groups is None:
         fold_size = n_rows // (n_folds + 1)
+        if fold_size == 0:
+            raise ValueError(
+                f"{n_folds}-fold walk-forward needs at least {n_folds + 1} rows, got {n_rows}."
+            )
         folds = []
         for fold in range(n_folds):
             train_end = (fold + 1) * fold_size
@@ -405,7 +409,24 @@ def _walk_forward_indices(
     ):
         raise ValueError("groups must be sorted and contiguous")
 
+    # A fold is `len(ordered_groups) // (n_folds + 1)` decision times wide, and integer
+    # division makes that 0 whenever the panel holds fewer complete decision times than
+    # folds. Every train and test slice is then empty, every fold is skipped downstream,
+    # and the estimate comes back NaN over zero observations with nothing raised - the
+    # caller's guard counts ROWS (`(n_folds + 1) * 50 + n_folds * embargo`), which a wide
+    # panel clears on a handful of dates. Measured on a 10,000-row cap of
+    # us_firm_characteristics/09_causal_dml: 8,180 rows, 4 complete decision months,
+    # 5 folds, `4 // 6 == 0`, full summary printed, DML effect nan.
+    #
+    # The count that has to clear the geometry is decision times, so it is checked here,
+    # at the one place the geometry is built, rather than in each caller.
     fold_size = len(ordered_groups) // (n_folds + 1)
+    if fold_size == 0:
+        raise ValueError(
+            f"{n_folds}-fold walk-forward needs at least {n_folds + 1} complete decision "
+            f"times, got {len(ordered_groups)}. On a panel the fold geometry is sized in "
+            f"decision times, not rows, so a row-count minimum does not constrain it."
+        )
     folds = []
     for fold in range(n_folds):
         train_end = (fold + 1) * fold_size
