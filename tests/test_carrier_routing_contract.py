@@ -167,11 +167,12 @@ def test_the_selection_restrictions_are_declared_once() -> None:
     answer here and it only ever asked whether two values agreed today; there is now one
     value, and this asks that the second declaration has not come back.
 
-    Read by parsing rather than by importing, because `holdout.py` reaches torch - now
-    transitively, through `case_studies.utils.strategy_analysis`, rather than through the
-    family training paths it used to dispatch to - and this job does not install it.
-    `tests/test_holdout_selection_is_single_sourced.py` asserts the runtime identity in
-    the job that does.
+    Read by parsing rather than by importing. That began as a way around `holdout.py`
+    importing torch and lightgbm at module scope, which stopped being true when the
+    holdout generation half was retired; it stays because the property is a source-level
+    one - whether the file DECLARES the name or imports it - and an imported module
+    cannot tell those apart. `tests/test_holdout_selection_is_single_sourced.py` asserts
+    the runtime identity.
     """
     tree = ast.parse(
         (Path(__file__).parents[1] / "20_strategy_synthesis" / "holdout.py").read_text()

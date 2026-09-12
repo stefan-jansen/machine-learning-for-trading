@@ -26,10 +26,12 @@ What is left is the selection and read side:
 * ``load_existing_holdout`` and ``has_holdout_predictions``, which read what is there.
 * ``_is_degenerate_predictions``, the rule ``01_aggregate_synthesis`` cites.
 
-The ``_train_*`` family took lightgbm out of this module's import closure, measured by
-executing it and reading ``sys.modules``. torch is still in it, reached transitively
-through ``case_studies.utils.strategy_analysis``, so the tests that load this file stay
-behind the same boundary in ``.github/ci/unit-test-quarantine.txt``.
+The ``_train_*`` family took torch and lightgbm with it, so this module is importable
+in a job that installs neither and ``tests/test_holdout_selection_is_single_sourced.py``
+has left ``.github/ci/unit-test-quarantine.txt``. Measured with both packages hidden
+from the finder, not with ``sys.modules`` stubbed: torch is still LOADED when it is
+installed, by polars probing for it and by a guarded CUDA fixup in ``utils/config.py``,
+and "loaded" is a different question from "required".
 """
 
 from __future__ import annotations
