@@ -162,10 +162,13 @@ def test_an_exact_sharpe_tie_resolves_to_the_specification_the_holdout_replays(
     nothing about that rule, and ordered on the stage it happened to visit first - which
     is how `fx_pairs` got two answers for one tie.
     """
+    # `aa_allocation_row` sorts first on the final `backtest_hash ASC` key, so the only
+    # thing that can put the signal-only row in front of it is the tie-break itself.
+    # Naming it `zz_` made the assertion pass whether the rule was applied or not.
     _registry(
         case_dir / "run_log" / "registry.db",
         [
-            ("zz_allocation_row", "pred_b", "allocation", 2.0, _WITH_ALLOCATION),
+            ("aa_allocation_row", "pred_b", "allocation", 2.0, _WITH_ALLOCATION),
             ("mm_signal_row", "pred_a", "signal", 2.0, _SIGNAL_ONLY),
         ],
     )
