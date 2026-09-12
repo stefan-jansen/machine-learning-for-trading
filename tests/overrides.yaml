@@ -2707,6 +2707,12 @@ case_studies/nasdaq100_microstructure/08_dl_nlinear:
   # max_train_sequences is what keeps this affordable on a minute panel, where five symbols of
   # a fold still hold six figures of overlapping windows. It is a reduction below the declared
   # `modeling.dl.max_train_sequences`, which a preview may lower and cannot raise.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-09-11 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the declared
+  # preset at this case study's own width - 90 features, lookback 60, batch 2048 - which is
+  # the shape the canonical run trains: nlinear peaked at 0.14 GiB. Declared value is that
+  # peak plus the CUDA context and allocator fragmentation, rounded up.
+  vram_gb: 2
   parameters:
     DEVICE: cpu
     POPULATION_NAME: nasdaq100_microstructure-nlinear-preview
@@ -2727,6 +2733,12 @@ case_studies/nasdaq100_microstructure/09_dl_lstm:
   # max_train_sequences is what keeps this affordable on a minute panel, where five symbols of
   # a fold still hold six figures of overlapping windows. It is a reduction below the declared
   # `modeling.dl.max_train_sequences`, which a preview may lower and cannot raise.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-09-11 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the declared
+  # preset at this case study's own width - 90 features, lookback 60, batch 2048 - which is
+  # the shape the canonical run trains: lstm_h64 peaked at 1.25 GiB. Declared value is that
+  # peak plus the CUDA context and allocator fragmentation, rounded up.
+  vram_gb: 3
   parameters:
     DEVICE: cpu
     POPULATION_NAME: nasdaq100_microstructure-lstm_h64-preview
@@ -2747,6 +2759,12 @@ case_studies/nasdaq100_microstructure/10_dl_tcn:
   # max_train_sequences is what keeps this affordable on a minute panel, where five symbols of
   # a fold still hold six figures of overlapping windows. It is a reduction below the declared
   # `modeling.dl.max_train_sequences`, which a preview may lower and cannot raise.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-09-11 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the declared
+  # preset at this case study's own width - 90 features, lookback 60, batch 2048 - which is
+  # the shape the canonical run trains: tcn peaked at 0.49 GiB. Declared value is that
+  # peak plus the CUDA context and allocator fragmentation, rounded up.
+  vram_gb: 2
   parameters:
     DEVICE: cpu
     POPULATION_NAME: nasdaq100_microstructure-tcn-preview
@@ -2763,6 +2781,17 @@ case_studies/nasdaq100_microstructure/11_dl_patchtst:
   # every runner without a card - which is all of them - so the attention architecture had no
   # coverage at all. The declared cap is what makes CPU affordable: the run is bounded by
   # max_train_sequences rather than by the panel, so it no longer scales with the fixture.
+  # vram_gb: free VRAM this run needs before nb-run lets it start. Measured 2026-09-11 on the
+  # RTX 3090 with torch.cuda.max_memory_allocated over three optimizer steps of the declared
+  # preset at this case study's own width - 90 features, lookback 60, batch 2048 - which is
+  # the shape the canonical run trains: patchtst peaked at 14.52 GiB. Declared value is that
+  # peak plus the CUDA context and allocator fragmentation, rounded up.
+  #
+  # patchtst is the one that needs the gate. It is channel-independent, so its batch dimension
+  # is B x n_features and its demand scales with feature width where the other three are flat
+  # in it: the same preset and batch measured 7.74 GiB at 48 features. 17 GB of a 24 GB card
+  # means this run waits for the card rather than starting beside a job already holding it.
+  vram_gb: 17
   parameters:
     DEVICE: cpu
     POPULATION_NAME: nasdaq100_microstructure-patchtst-preview

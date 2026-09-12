@@ -116,6 +116,13 @@ KNOWN_OVERRIDE_KEYS = frozenset(
         "skip_reason",  # tests/test_chapter_notebooks.py
         "tier",  # pm_helpers.get_tier
         "timeout",  # tests/test_chapter_notebooks.py -> run_notebook
+        # Free VRAM in whole GB a canonical run of this notebook needs before it may
+        # start. Read by the launcher outside this repo (agents/scripts/nb-run.sh,
+        # `needs_vram`), which is why no test here consumes it: the key is declared
+        # beside the notebook because the measurement belongs to the notebook, and a
+        # scheduling gate that lived in the runner alone had to guess from the model
+        # name. Nothing in CI reads it - CI has no card.
+        "vram_gb",  # agents/scripts/nb-run.sh needs_vram
     }
 )
 
