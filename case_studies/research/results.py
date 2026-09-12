@@ -696,6 +696,9 @@ class ResultsCatalog:
             # measured 2026-09-12 over the 53 notebooks calling `run_model_population`, 20 declare
             # `entry_point`, 13 declare only `notebook`, and 20 declare neither. Without this the
             # 13 register a NULL column while carrying the answer in the row they are writing.
+            # The column is NULL on 785 of the 1160 training rows across the nine production
+            # registries; only nasdaq100_microstructure and sp500_equity_option_analytics, whose
+            # notebooks all declare `entry_point`, are clean.
             #
             # The direction is fixed by the decision recorded in `tests/test_model_registry.py`
             # (2026-08-25): the COLUMN is the half that survives when the migration finishes, and
