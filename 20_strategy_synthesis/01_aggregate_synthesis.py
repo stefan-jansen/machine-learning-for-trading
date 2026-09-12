@@ -569,8 +569,8 @@ overview_df.select("case_study", "asset_class", "frequency", "universe", "cost_b
 # %% [markdown]
 # The test bed covers equity ETFs, crypto perpetuals, intraday microstructure, equity plus
 # options, firm characteristics, FX, futures, pure options, and a broad equity panel. The
-# `cost_bps` column of the table above spans a factor of two across them, which is the
-# diversity of transaction-cost regimes the nine asset classes carry.
+# `cost_bps` column of the table above records the transaction-cost assumption each one
+# carries, so a later result can be read against the cost regime it was measured under.
 
 # %% [markdown]
 # ## Model IC Comparison
@@ -643,12 +643,13 @@ else:
 ic_pivot
 
 # %% [markdown]
-# No single model family leads across all nine case studies. GBM is at or near the top of the
-# IC column in most datasets, particularly futures and options, while linear models lead for
-# ETFs. A negative mean IC - FX Pairs shows one across every family - marks a case study where
-# prediction is genuinely difficult. S&P 500 Options carries the highest raw ICs in the table,
-# and single-name option execution costs then compress the translated Sharpe; §20.5 works
-# through that compression variant by variant.
+# Each cell is a mean IC over that family's configurations under the case study's primary
+# label. Families are comparable within a row, because the label and the evaluation window are
+# fixed across the row; they are not comparable across rows, since each case study prices a
+# different instrument over a different horizon. A negative mean IC marks a case study where
+# prediction is difficult under that label rather than a defect in the family. §20.2 reads the
+# pattern across rows, and §20.5 works through how an option case study's raw IC translates
+# into Sharpe once single-name execution costs are charged.
 
 # %% [markdown]
 # ## Backtest Comparison
@@ -1896,11 +1897,9 @@ else:
 prog_pivot
 
 # %% [markdown]
-# Most case studies carry complete data only through the baseline and allocation stages for
-# their selected prediction hash. Where the full pipeline is available, allocation tends to
-# preserve or modestly improve the baseline-stage Sharpe, while costs and risk overlays go both
-# ways. A `null` entry says the prediction hash traced here was not tested at that stage; it
-# does not say the case study lacks the stage.
+# Read the columns left to right to see how far the selected prediction hash was carried and
+# where the trace stops. A `null` entry says that hash was not tested at that stage; it does
+# not say the case study lacks the stage.
 
 # %% [markdown]
 # ## Selected-Configuration Lineage
@@ -2187,9 +2186,9 @@ if not holdout_df.is_empty():
 # %% [markdown]
 # The table above is the whole holdout result, and it is the place to read which case studies
 # come out positive on Sharpe and which on IC. Those two columns need not agree for a given
-# case study, and in this sample they do not: some case studies pair a negative holdout IC with
-# a positive holdout Sharpe and at least one does the reverse. Ranking accuracy and portfolio
-# construction are different things, and a case study can have one without the other - the
+# case study, which is why both columns are printed rather than one. Ranking accuracy and
+# portfolio construction are different things, and a case study can have one without the other -
+# the
 # construction contributes variance that out-of-sample ranking accuracy says nothing about.
 #
 # **Reading a case study whose edge does not carry forward.** Where a case study's holdout
@@ -2267,17 +2266,13 @@ for stage, count in attrition.items():
     print(f"  {stage:20s}  {bar}  {count}/{total}")
 
 # %% [markdown]
-# The funnel reads top-down with per-stage independent counts: 9 of 9
-# case studies produce positive IC, 8 of 9 produce positive signal-stage
-# Sharpe, 8 of 9 survive their assumed cost regime, 7 of 9 remain
-# risk-tolerable, and 6 of 9 sustain positive Sharpe on holdout. Counting
-# how many case studies each independent gate removes, the largest
-# single-stage attrition is the holdout step (3 of 9 fail to sustain a
-# positive holdout Sharpe), followed by the risk-tolerance gate (2 of 9);
-# the gross-Sharpe and cost-survival gates each remove 1. See NB08 for the
-# cumulative funnel (gates compounded) and the named drop-outs at each cut.
-# Whatever holdout rate the counts above give, it does not account for evidence
-# quality, which the next section addresses.
+# The funnel reads top-down, and each gate is counted independently against `bt_df` and
+# `holdout_df` rather than against the set that cleared the gate above it. Reading down the
+# column gives the per-stage attrition; the difference between two adjacent rows is how many
+# case studies that gate removed on its own terms, not how many survived both. See NB08 for the
+# cumulative funnel with gates compounded and the named drop-outs at each cut. Whatever holdout
+# rate these counts give, it does not account for evidence quality, which the next section
+# addresses.
 
 # %% [markdown]
 # ## Measurement Quality Disclosures
@@ -2434,15 +2429,14 @@ if not variant_df.is_empty():
     )
 
 # %% [markdown]
-# The `pct_positive` column separates the case studies sharply. At one end sit those where
-# nearly every model configuration produces a positive baseline-stage Sharpe; at the other,
-# those where most variants come out negative. The order tracks the IC landscape: an asset class
-# with weak ICs produces few positive strategies whatever model is chosen.
+# The `pct_positive` column reports the share of a case study's signal-stage model variants
+# whose baseline Sharpe is positive. It is a property of the variant space rather than of the
+# selected configuration: a case study can carry a strong selected row and a low positive-Sharpe
+# share, or the reverse, and §20.3 works through what each combination says about the search.
 #
 # One caveat applies to the option case studies, and it is large. The positive-Sharpe rate here
-# is measured **before execution costs**. The hold-to-maturity short-straddle backtest in §20.5,
-# which charges the full option bid-ask and commissions, cuts that rate substantially once
-# single-name option costs are recognized.
+# is measured **before execution costs**. The hold-to-maturity short-straddle backtest in §20.5
+# charges the full option bid-ask and commissions and reports the rate that survives them.
 
 # %% [markdown]
 # ## Synthesis JSON

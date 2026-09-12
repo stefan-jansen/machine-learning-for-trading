@@ -112,8 +112,8 @@ panel = pl.concat(
 # forward on effect size and stability alone.
 #
 # PROCEED is therefore a union of the two routes, not a narrowing of the first.
-# A case study can and does show more PROCEED features than FDR-significant
-# ones, so the three counts below are drawn side by side rather than stacked -
+# A case study can show more PROCEED features than FDR-significant ones, so the
+# three counts below are drawn side by side rather than stacked -
 # stacking them would assert a nesting that does not hold.
 
 # %%
@@ -178,9 +178,10 @@ show_with_alt(
 )
 
 # %% [markdown]
-# The same triage protocol, applied to nine different markets, produces very
-# different survival rates. The summary below is computed from the table above
-# rather than typed, so it cannot drift from the ledgers as they are regenerated.
+# The same triage protocol is applied to nine different markets, and the summary
+# below reports the survival rate each one produced. It is computed from the table
+# above rather than typed, so it cannot drift from the ledgers as they are
+# regenerated.
 
 # %% tags=["results"]
 _f = funnel.sort("pct_fdr_sig", descending=True)
@@ -320,10 +321,10 @@ display(
 # %% [markdown]
 # ## Takeaways
 #
-# - The same triage protocol yields very different survival rates across the
-#   nine markets. The numbers are in the computed summary above; what they show
-#   is that the protocol does not transfer a fixed pass rate from one asset class
-#   to the next, so a rate is only interpretable next to the market it came from.
+# - The same triage protocol is applied unchanged across the nine markets, so the
+#   survival rates in the computed summary above are a property of the markets
+#   rather than of the screen. A rate is only interpretable next to the market it
+#   came from.
 # - PROCEED is a union of two routes, BH significance and effect-size-plus-fold-
 #   stability. Reading it as a stricter version of BH significance inverts the
 #   relationship and inflates how selective the screen appears.

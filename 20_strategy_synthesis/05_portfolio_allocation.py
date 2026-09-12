@@ -278,10 +278,10 @@ show_with_alt(
 )
 
 # %% [markdown]
-# **Interpretation**: The bar chart makes the cross-dataset heterogeneity immediately visible.
-# Case studies with strong signals show positive Sharpe regardless of allocator choice.
-# Case studies with weak signals show negative Sharpe across all allocators — no allocation
-# method can rescue a failing signal.
+# **Reading the chart**: one group of bars per case study, one bar per allocator, all on a
+# shared Sharpe axis. The height differences within a group are what the allocator choice is
+# worth for that case study; the differences between groups are what the underlying signal is
+# worth. Both are on the same axis so the two can be compared directly.
 
 # %% [markdown]
 # ## Equal-Weight Baseline vs Best Allocator
@@ -408,14 +408,12 @@ show_with_alt(
 )
 
 # %% [markdown]
-# **Interpretation**: The heatmap reveals that no single allocator dominates
-# across all case studies. Missing cells (N/A) indicate that not every
-# allocator was tested on every dataset — strategy-specific constraints
-# (e.g., long-only, no shorting) exclude certain methods. Green cells
-# (Sharpe > 0) cluster around a few case studies with strong underlying
-# signals, confirming that the upstream prediction quality matters more
-# than the allocation method. Red or near-zero cells indicate that even the highest-Sharpe
-# allocator cannot rescue a weak signal.
+# **Reading the heatmap**: one row per case study, one column per allocator, coloured by
+# Sharpe. A missing cell (N/A) means that allocator was not tested on that dataset -
+# strategy-specific constraints such as long-only or no-shorting exclude certain methods - and
+# is a different thing from a cell whose Sharpe is near zero. Read across a row for how much
+# the allocator choice moved that case study, and down a column for whether one allocator
+# behaves consistently across markets.
 
 # %% [markdown]
 # ## Signal Strength vs Allocation Impact
@@ -567,9 +565,9 @@ else:
 # %% [markdown]
 # ## When Does Allocation Optimization Help?
 #
-# The previous sections show that allocation uplift varies across datasets.
-# Here we ask the structural question: **what predicts whether optimization
-# helps?** We hypothesize two factors:
+# The previous sections report allocation uplift per dataset. Here we ask the
+# structural question: **what predicts whether optimization helps?** We
+# hypothesize two factors:
 #
 # - **Signal strength** (EW baseline Sharpe): When the signal is strong,
 #   most allocators produce positive returns — optimization adds little.
