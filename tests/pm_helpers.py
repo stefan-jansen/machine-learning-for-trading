@@ -1580,6 +1580,12 @@ def run_notebook(
     env_vars = {
         "MPLBACKEND": "Agg",
         "PLOTLY_RENDERER": "json",
+        # Which notebook is running. Nothing papermill injects reaches the kernel, so a study
+        # opened without an explicit `entry_point` had no way to name the notebook that opened
+        # it and every training run it registered wrote the column NULL. The launcher is the
+        # one party that knows, so it says so; `research/workspace._resolve_entry_point` reads
+        # it and an explicit argument still wins.
+        "ML4T_ENTRY_POINT": nb_name,
         **KERNEL_THREAD_CAPS,
     }
     if output_dir:
