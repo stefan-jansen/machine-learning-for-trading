@@ -1486,12 +1486,24 @@ jobs:
           MATRIX_FILTER: ${{ matrix.filter }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           HF_HOME: /hf-cache
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           FILTER="${TEST_FILTER_INPUT:-$MATRIX_FILTER}"
           mkdir -p "$ML4T_OUTPUT_DIR"
           # actions/cache creates the path on a hit and leaves it absent on a miss,
           # and docker would then create the bind source itself as root-owned.
           mkdir -p "$HOME/.cache/huggingface"
+          # The cache is the braces and this is the belt: a cache miss, an ISO-week key
+          # rollover, or ch10 (which has no cache entry) still downloads, and an
+          # unauthenticated download is rate limited per IP across a shared runner pool.
+          # Passed only when the secret exists, so the container never sees HF_TOKEN=""
+          # and huggingface_hub is not asked to interpret an empty credential.
+          hf_auth=()
+          if [ -n "${HF_TOKEN:-}" ]; then
+            hf_auth=(-e HF_TOKEN)
+          else
+            echo "::notice::HF_TOKEN is not set; HuggingFace downloads in this job are anonymous and rate limited per IP."
+          fi
           docker run --rm \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -v "$ML4T_OUTPUT_DIR:$ML4T_OUTPUT_DIR" \
@@ -1499,7 +1511,7 @@ jobs:
             -w "$GITHUB_WORKSPACE" \
             -e PYTHONPATH -e ML4T_DATA_PATH -e ML4T_OUTPUT_DIR \
             -e MPLBACKEND -e PLOTLY_RENDERER \
-            -e FRED_API_KEY -e HF_HOME \
+            -e FRED_API_KEY -e HF_HOME "${hf_auth[@]}" \
             "${{ steps.image.outputs.ref }}" \
             python -m pytest tests/test_chapter_notebooks.py \
               -v --tb=short \
