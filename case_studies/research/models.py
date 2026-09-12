@@ -279,8 +279,10 @@ class ModelRequest:
     # Provenance only - `registry/specs.py:_V2_PROVENANCE_FIELDS` excludes it from the training
     # identity, so two notebooks submitting the same computation still collide on one hash, which
     # is what identity is for. It answers the separate question of which notebook produced a row,
-    # and `entry_point` cannot: that names the module, several notebooks share one, and naming the
-    # module is correct.
+    # and the `entry_point` *in the provenance blob* cannot: that names the module, several
+    # notebooks share one, and naming the module is correct. Do not confuse it with the
+    # `training_runs.entry_point` column, which is the notebook stem and comes from
+    # `study.entry_point` - the same answer this field carries, which is why it defaults from it.
     notebook: str | None = None
 
     @classmethod
@@ -323,7 +325,7 @@ class ModelRequest:
             cv=cv,
             execution_tier=tier,
             preview_reductions=reductions,
-            notebook=str(request["notebook"]) if request.get("notebook") else None,
+            notebook=str(request["notebook"]) if request.get("notebook") else study.entry_point,
         )
 
     def as_dict(self) -> dict[str, Any]:

@@ -793,6 +793,95 @@ def test_preview_records_the_entry_point_when_generated_dirs_are_not_symlinks(
     assert recorded == ("06_linear",)
 
 
+def _register_one(study, **kwargs):
+    """One preview training registration, so the tests below differ only in what they declare."""
+    return study.results.register_training(
+        {
+            "identity_version": 2,
+            "execution_tier": "preview",
+            "family": "linear",
+            "label": "fwd_ret_21d",
+            "config_name": "ridge",
+            "seed": 42,
+            "preview_reductions": {"folds": [0]},
+        },
+        execution_tier="preview",
+        **kwargs,
+    )
+
+
+def _recorded_entry_point(training) -> str | None:
+    with sqlite3.connect(training.root / "run_log" / "registry.db") as db:
+        row = db.execute(
+            "SELECT entry_point FROM training_runs WHERE training_hash = ?", (training.hash,)
+        ).fetchone()
+    assert row is not None, "the run registered no training row"
+    return row[0]
+
+
+def test_provenance_fills_the_entry_point_column_when_the_study_was_not_told(
+    tmp_path: Path,
+) -> None:
+    """A notebook that declares only `notebook=` still gets its stem into the column.
+
+    `open_study(entry_point=...)` and `build_requests(notebook=...)` are the same fact declared
+    in two places, and declaring one and not the other is the common state: measured 2026-09-12
+    over the 53 notebooks calling `run_model_population`, 13 declare only the provenance half.
+    Those registered a NULL column while carrying the answer in the row they were writing, and a
+    NULL is what ml4t/agent-workspace#901 reports as the column having no meaning at all.
+    """
+    release = _seed_release(tmp_path)
+    study = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=tmp_path / "ws",
+        release_root=release,
+    )
+    assert study.entry_point is None, "fixture must exercise the undeclared branch"
+
+    training = _register_one(study, runtime_provenance={"notebook_path": "06_linear"})
+    assert _recorded_entry_point(training) == "06_linear"
+
+
+def test_an_explicit_entry_point_wins_over_the_provenance_field(tmp_path: Path) -> None:
+    """The fallback must not overwrite a Study that was told which notebook it serves.
+
+    The negative half of the test above: without it, a fallback that took the provenance field
+    unconditionally would pass that test just as well while silently renaming every row a
+    declaring notebook writes.
+    """
+    release = _seed_release(tmp_path)
+    study = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=tmp_path / "ws",
+        release_root=release,
+        entry_point="06_linear",
+    )
+
+    training = _register_one(study, runtime_provenance={"notebook_path": "07_gbm"})
+    assert _recorded_entry_point(training) == "06_linear"
+
+
+def test_neither_half_declared_still_registers_a_row(tmp_path: Path) -> None:
+    """A holdout reconstruction is not a notebook run, and must not acquire a wrong name.
+
+    `_runtime_provenance` omits `notebook_path` entirely when its caller names no notebook, for
+    the stated reason that a wrong notebook name is worse than an absent one. The fallback has to
+    preserve that rather than reaching for some other string.
+    """
+    release = _seed_release(tmp_path)
+    study = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=tmp_path / "ws",
+        release_root=release,
+    )
+
+    training = _register_one(study, runtime_provenance={"entry_point": "case_studies.utils.linear"})
+    assert _recorded_entry_point(training) is None
+
+
 def test_open_study_says_it_read_inputs_in_place(tmp_path: Path, capsys) -> None:
     """`open_study` takes one of two branches and used to say nothing about which.
 

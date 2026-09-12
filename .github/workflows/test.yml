@@ -614,10 +614,17 @@ jobs:
           uv export --frozen --extra live --extra dev --no-emit-project --no-hashes \
             --format requirements-txt \
             | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-constraints.txt
+          #
+          # `ipykernel` is here for a capability rather than an import. This venv had
+          # `jupytext` and `papermill` and no kernelspec at all, so `find_kernel_specs()`
+          # returned an empty dict and any test that executes a notebook failed at the sync
+          # with `KeyError: Please choose a kernel name among dict_keys([])`. A job that
+          # installs a notebook runner and cannot run a notebook can only host tests that
+          # stop short of doing it.
           uv pip install --constraint /tmp/locked-constraints.txt \
             pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow nest-asyncio \
-            ml4t-diagnostic jupytext papermill ml4t-backtest ml4t-data ml4t-engineer databento
+            ml4t-diagnostic jupytext papermill ipykernel ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
