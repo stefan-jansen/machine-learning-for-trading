@@ -34,8 +34,6 @@
 # %%
 """Firm Characteristics - download, explore, and update workflow."""
 
-import json
-
 import polars as pl
 
 # %% [markdown]
@@ -166,22 +164,26 @@ yearly
 # ## 5. Data Profile
 
 # %%
+from ml4t.data.storage.data_profile import load_profile
+
 from utils import ML4T_DATA_PATH
 
-# Check for existing profile
 profile_path = (
-    ML4T_DATA_PATH / "equities" / "firm_characteristics" / "firm_characteristics_profile.json"
+    ML4T_DATA_PATH / "equities" / "firm_characteristics" / "firm_characteristics_all_profile.json"
 )
+profile = load_profile(profile_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== Firm Characteristics Profile ===")
-    print(f"Rows: {profile['rows']:,}")
-    print(f"Columns: {profile['columns']}")
-    print(f"Memory: {profile['memory_mb']:.1f} MB")
+if profile is None:
+    print(f"No profile at {display_path(profile_path)}")
+    print(
+        "The downloader above writes it, next to the data, through\n"
+        "ml4t.data.storage.data_profile. Re-run it to produce one; there is no separate\n"
+        "profile-generating script."
+    )
 else:
-    print(f"Profile not found at {display_path(profile_path)}")
-    print("Generate with: python generate_profiles.py --dataset firm_characteristics")
+    print("=== Firm Characteristics Profile ===")
+    print(f"Written by {profile.source}")
+    print(profile.summary())
 
 # %% [markdown]
 # ## 6. Loader Options

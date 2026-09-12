@@ -34,7 +34,6 @@
 # %%
 """US Equities - download, explore, and update workflow."""
 
-import json
 import os
 from pathlib import Path
 
@@ -246,26 +245,25 @@ top_volume.head(20)
 # ## 5. Data Profile
 
 # %%
+from ml4t.data.storage.data_profile import load_profile
+
 from utils import ML4T_DATA_PATH
+from utils.paths import display_path
 
-# Check for existing profile
 profile_path = ML4T_DATA_PATH / "equities" / "market" / "us_equities" / "us_equities_profile.json"
+profile = load_profile(profile_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== US Equities Profile ===")
-    rows = profile.get("total_rows", profile.get("rows"))
-    cols = profile.get("total_columns", profile.get("columns"))
-    if isinstance(cols, list):
-        cols = len(cols)
-    print(f"Rows: {rows:,}" if rows is not None else "Rows: unknown")
-    print(f"Columns: {cols}")
-    mem = profile.get("memory_mb")
-    if mem is not None:
-        print(f"Memory: {mem:.1f} MB")
+if profile is None:
+    print(f"No profile at {display_path(profile_path)}")
+    print(
+        "Profiles are written next to the data by whatever builds the dataset, through\n"
+        "ml4t.data.storage.data_profile. There is no separate profile-generating script,\n"
+        "and nothing in this notebook writes one."
+    )
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset us_equities")
+    print("=== US Equities Profile ===")
+    print(f"Written by {profile.source}")
+    print(profile.summary())
 
 # %% [markdown]
 # ## 6. Loader Options
