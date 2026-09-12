@@ -9,18 +9,32 @@ follows it. Nothing owned removing one.
 That is not a hypothetical shape. `us_firm_characteristics` carried two holdout
 generations, one of them a validation-fitted model publishing over the window, and the
 stale row was removed by hand on 2026-08-30 after a registry backup. The note written at
-the time says plainly that the next case study to reach the stage would accumulate the same
+the time predicted that the next case study to reach the stage would accumulate the same
 second generation and the same silence.
+
+**That prediction did not come true, and the count is here so nobody goes looking.**
+Measured 2026-09-12 across all nine production registries through
+`registered_holdout_generations`: seven holdout generations, every one `refit`, and zero
+`not_out_of_sample`. The `us_firm_characteristics` row is the only one that ever existed.
+Nothing accumulated behind it because the case studies took the stage over - each owns an
+`NN_holdout_predictions` / `NN_holdout_backtest` pair that registers a refit under its own
+identity - and `20_strategy_synthesis/holdout.py::generate_holdout`, the producer named
+below, was removed with `00_holdout_predictions`.
+
+The test stays as it is. It pins the three-way answer, which is right whatever today's
+count happens to be; a bucket that is empty is not a bucket that cannot fill. Only the
+prediction was stale.
 
 The three answers are governed by different rules and the middle one is the gap:
 
 * a refit of another configuration is a second holdout evaluation, and replacing it is a
   research decision - deleting the rows does not undo having observed them;
 * a run whose CV declares something other than the holdout may not be reported as a holdout
-  result, and cannot be deleted unattended either: `20_strategy_synthesis/holdout.py`'s
-  `generate_holdout` refits on a holdout fold and then registers the predictions under the
-  VALIDATION training identity, so this record covers both a validation-fitted model
-  published over the window and a real refit filed under the wrong identity;
+  result, and cannot be deleted unattended either: the retired
+  `20_strategy_synthesis/holdout.py::generate_holdout` refit on a holdout fold and then
+  registered the predictions under the VALIDATION training identity, so this record covers
+  both a validation-fitted model published over the window and a real refit filed under the
+  wrong identity;
 * a run that records no CV split establishes neither, and deleting on that would destroy a
   result nothing has shown to be wrong.
 
