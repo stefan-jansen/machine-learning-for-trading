@@ -58,7 +58,7 @@ from utils.style import COLORS, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import open_study
+from case_studies.research import open_study, reuse_disclosure
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -280,8 +280,8 @@ elapsed = time.time() - t0
 stage_total = len(load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity"))
 print(f"\nCost-sensitivity stage: {stage_total} backtests registered.")
 print(
-    f"This execution: {n_done - n_reused - n_failed} computed, {n_reused} reused, "
-    f"{n_failed} failed, over {n_done} of {n_total} declared levels "
+    f"This execution: {reuse_disclosure(n_done - n_reused - n_failed, n_reused, n_failed)}, "
+    f"over {n_done} of {n_total} declared levels "
     f"attempted in {elapsed:.0f}s."
 )
 for reason, count in failures.most_common():

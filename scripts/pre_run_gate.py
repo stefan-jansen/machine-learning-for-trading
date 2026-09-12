@@ -536,11 +536,19 @@ def check_supersedes_declarations(report: Report, case_study: str, notebook: str
     """Every `SUPERSEDES_*` literal this run may read must still name a generation that exists.
 
     A literal naming a hash the registry no longer holds is withheld by
-    `population_supersedes`, and `create` then refuses the write. That refusal lands at the
-    freeze, *after* the fits are paid for, which is exactly what this gate exists to prevent.
-    It is also invisible until then: an unchanged re-run matches on members and never reads
-    the declaration, so the literal can sit dead through any number of green runs and fail
-    the first one that moves the set's membership - the refit the notebook exists for.
+    `population_supersedes`, and `create` then refuses the write. So is one naming the
+    generation the tip replaced: the resolver offers that hash, and `create` rejects it
+    because it accepts the tip and nothing else. Either refusal lands at the freeze, *after*
+    the fits are paid for, which is exactly what this gate exists to prevent. Both are
+    invisible until then: an unchanged re-run matches on members and never reads the
+    declaration, so the literal sits through any number of green runs and fails the first one
+    that moves the set's membership - the refit the notebook exists for.
+
+    The repair the checker prints is `"live"` rather than the current head, and the difference
+    is the reason this keeps firing. A head is a value the registry moves on every publish, so
+    pasting it buys until the next run of whatever freezes that lineage;
+    `case_studies.research.population.SUPERSEDES_LIVE` names the lineage instead and is
+    resolved at run time.
 
     `scripts/check_supersedes_literals.py` has been able to answer this since #944, and
     nothing called it before a run. It cannot live in CI: the check needs `run_log/`, which
@@ -592,7 +600,13 @@ def check_supersedes_declarations(report: Report, case_study: str, notebook: str
         )
         return
 
-    stale = [f for f in findings if f.is_stale]
+    # `refused_at_the_freeze`, not `is_stale`. Two statuses refuse, and reading only the dead
+    # one is how 19 of the corpus's declarations were reported green: `behind` names the
+    # generation the tip replaced, which `population_supersedes` offers and `create` then
+    # rejects because it accepts the tip and nothing else. That is the state
+    # `us_equities_panel/06_linear` was in when it lost 78 minutes of cold fit on 2026-09-11,
+    # and this gate would have passed it.
+    stale = [f for f in findings if f.refused_at_the_freeze]
     # Scoped to the notebook being run when one is named. A dead literal in a sibling
     # notebook is somebody else's run to fix and must not block this one.
     if notebook is not None:
@@ -603,7 +617,7 @@ def check_supersedes_declarations(report: Report, case_study: str, notebook: str
         report.add(
             "supersedes literals name live generations",
             True,
-            f"no dead declaration in {scope}",
+            f"no refused declaration in {scope}",
             checked=len(findings),
         )
         return
@@ -616,8 +630,8 @@ def check_supersedes_declarations(report: Report, case_study: str, notebook: str
     report.add(
         "supersedes literals name live generations",
         False,
-        f"{len(stale)} dead declaration(s) in {scope}, each of which refuses the write at "
-        f"the freeze once membership moves: " + "; ".join(lines),
+        f"{len(stale)} declaration(s) in {scope} that the registry refuses, each of which "
+        f"refuses the write at the freeze once membership moves: " + "; ".join(lines),
         stale=[asdict(f) for f in stale],
     )
 

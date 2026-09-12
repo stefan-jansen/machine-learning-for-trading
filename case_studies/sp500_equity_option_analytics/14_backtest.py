@@ -57,6 +57,7 @@ from case_studies.research import (
     population_supersedes,
     predictions_identity,
     published_population_names_at,
+    reuse_disclosure,
     sweep_plan_name,
 )
 from case_studies.utils.backtest_explorer import BacktestExplorer
@@ -88,7 +89,7 @@ from case_studies.utils.sweep_config import (
 )
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title, zero_line
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -540,10 +541,7 @@ for pred_hash, group in planned_by_prediction:
             print(f"  [{processed}/{total_backtests}] {rate:.1f} bt/s | failed: {failed}")
 
 elapsed = time.time() - t0
-print(
-    f"\nSweep complete: {completed} run in {elapsed:.0f}s "
-    f"({failed} failed, {skipped} already complete)"
-)
+print(f"\nSweep complete in {elapsed:.0f}s: {reuse_disclosure(completed, skipped, failed)}")
 
 # A failure here stops the notebook rather than being counted and printed. `require_complete`
 # below cannot be relied on to catch one: a member that failed because its registered artifact
@@ -738,7 +736,11 @@ add_message_title(
     "Family medians sit close together; the maxima do not",
     "Median bars and maximum diamonds; eligible equal-weight baselines",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of each model family's median validation Sharpe, with a marker for that "
+    "family's best single run.",
+)
 
 # %% [markdown]
 # The same evaluation surface shows why prediction and portfolio diagnostics
@@ -773,7 +775,11 @@ add_message_title(
     "IC explains only part of Sharpe dispersion",
     f"Spearman rho = {ic_sharpe_rho:.3f}; {len(all_baselines):,} eligible baselines",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Scatter of validation Sharpe against daily-pooled Spearman IC, one faint point per eligible "
+    "baseline, with the leading configuration drawn larger and labelled.",
+)
 
 # %% [markdown]
 # ### Selection-Adjusted Uncertainty
@@ -856,7 +862,11 @@ add_message_title(
     "Which family leaders clear zero on their own return path",
     "Best eligible equal-weight baseline per model family across five labels",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "One row per family leader, each an annualized validation Sharpe point with its 95% "
+    "block-bootstrap interval drawn as a horizontal whisker.",
+)
 
 # %% [markdown]
 # ### Downstream Preview

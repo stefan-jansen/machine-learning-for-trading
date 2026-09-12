@@ -81,6 +81,7 @@ from case_studies.utils.backtest_presets import (
     build_backtest_spec,
     clone_backtest_spec,
     ensure_backtest_spec,
+    prediction_age_declaration,
     set_backtest_costs_bps,
     strategy_view,
     traded_universe_declaration,
@@ -603,10 +604,28 @@ else:
 # %% [markdown]
 # ### Aligning predictions to target bar frequency
 #
-# The predictions are at 15-minute resolution. When rebalancing at hourly
-# cadence, we take the **last available prediction** at or before each price
-# bar timestamp via an asof join. This is realistic: the portfolio manager
-# uses the most recent signal when the rebalance fires.
+# The predictions are minute-level. When rebalancing at hourly cadence, we take the
+# **last available prediction** at or before each price bar timestamp via an asof join.
+# This is realistic: the portfolio manager uses the most recent signal when the
+# rebalance fires.
+#
+# A backward asof join produces a null only *before* a symbol's series begins, so
+# dropping nulls trims the leading edge and nothing else. Everything after a symbol's
+# series *ends* reuses its last score for as long as the panel runs, and the coarser the
+# cadence the larger a share of the result that is. On this registry's `fwd_dir_15m`
+# predictions, eleven of 113 symbols stop reporting mid-sample - ten of them together at
+# the 2020-12-18 fold boundary and `UAL` after a single session - and the oldest match
+# the join produced was 252 sessions, the whole panel. At 30-minute cadence 19,667 of
+# 303,641 aligned rows carried a prediction more than one session old; at four-hour
+# cadence, 3,593 of 55,355.
+#
+# So the age is bounded, and in sessions rather than minutes: an overnight or weekend
+# carry is legitimate and is 5,600 minutes wide, while a symbol that has left the
+# universe is months of *sessions* stale. Measured on the same predictions, age 0 and
+# age 1 cover every symbol that stays; every row beyond that belongs to one of the
+# twelve that leave or have a hole. `MAX_PREDICTION_AGE_SESSIONS` is the bound, and the
+# rows it removes are counted and printed rather than dropped quietly - an alignment
+# that silently discards a symbol is the same absence this bound exists to end.
 
 # %% [markdown]
 # The cadences swept come from `backtest.sweep.cadence_sweep` in `setup.yaml`,
@@ -643,10 +662,34 @@ COST_LABELS = [f"{v * 100:g}¢" for v in COST_PER_SHARE_GRID]
 cadence_results = []
 
 
-def align_predictions_to_bars(preds: pl.DataFrame, bar_timestamps: pl.Series) -> pl.DataFrame:
-    """Align 15-min predictions to coarser bar timestamps via asof join."""
-    # For each symbol, find the last prediction at or before each bar timestamp
+# One session, so a bar may use the session's own prediction or the one before it -
+# which is what an overnight or weekend gap produces - and nothing older.
+MAX_PREDICTION_AGE_SESSIONS = 1
+
+
+def align_predictions_to_bars(
+    preds: pl.DataFrame,
+    bar_timestamps: pl.Series,
+    *,
+    max_age_sessions: int = MAX_PREDICTION_AGE_SESSIONS,
+    label: str = "",
+) -> pl.DataFrame:
+    """Align minute predictions to coarser bars, refusing a match older than the bound.
+
+    Sessions come from the prediction panel's own dates, so the bound counts trading days
+    rather than calendar time: a Friday prediction matched to a Monday bar is one session
+    old, not three days.
+
+    Returns the aligned frame and, when the bound removed rows, the declaration that has to
+    reach `backtest_hash` with them. Without that second value the fix would be invisible to
+    the registry: `prediction_hash` and the strategy spec are unchanged by a filter on the
+    aligned frame, so a bounded run and an unbounded one hash alike and the later one is
+    served the earlier one's result - the same shape as ml4t/agent-workspace#911.
+    """
     bar_df = pl.DataFrame({"timestamp": bar_timestamps}).unique().sort("timestamp")
+    sessions = preds.select(
+        pl.col("timestamp").dt.date().unique().sort().alias("session")
+    ).with_row_index("session_index")
     symbols = preds["symbol"].unique().sort().to_list()
 
     aligned = []
@@ -654,13 +697,59 @@ def align_predictions_to_bars(preds: pl.DataFrame, bar_timestamps: pl.Series) ->
         sym_preds = preds.filter(pl.col("symbol") == sym).sort("timestamp")
         sym_bars = bar_df.with_columns(pl.lit(sym).alias("symbol"))
         joined = sym_bars.join_asof(
-            sym_preds.drop("symbol"),
+            sym_preds.drop("symbol").with_columns(pl.col("timestamp").alias("prediction_ts")),
             on="timestamp",
             strategy="backward",
         )
         aligned.append(joined.drop_nulls("y_score"))
 
-    return pl.concat(aligned) if aligned else pl.DataFrame()
+    if not aligned:
+        return pl.DataFrame(), None
+
+    matched = pl.concat(aligned)
+    dated = (
+        matched.with_columns(pl.col("timestamp").dt.date().alias("session"))
+        .join(sessions, on="session", how="left")
+        .drop("session")
+        .with_columns(pl.col("prediction_ts").dt.date().alias("session"))
+        .join(sessions, on="session", how="left", suffix="_prediction")
+        .drop("session")
+        .with_columns(
+            (pl.col("session_index") - pl.col("session_index_prediction")).alias("age_sessions")
+        )
+    )
+    fresh = dated.filter(pl.col("age_sessions") <= max_age_sessions)
+    stale = dated.filter(pl.col("age_sessions") > max_age_sessions)
+    # Printed on every cadence, including the ones that drop nothing. A line only on the bad
+    # case is indistinguishable from the function not having run, which is the shape of the
+    # defect this bound closes.
+    summary = (
+        f"  {label or 'alignment'}: match age {dated['age_sessions'].median():.0f} session(s) "
+        f"median, {dated['age_sessions'].max()} max, bound {max_age_sessions}"
+    )
+    declaration = None
+    if stale.height:
+        names = sorted(stale["symbol"].unique().to_list())
+        summary += (
+            f" - dropped {stale.height:,} of {dated.height:,} on "
+            f"{len(names)} of {dated['symbol'].n_unique()} symbols "
+            f"({', '.join(names[:6])}{' ...' if len(names) > 6 else ''})"
+        )
+        # Declared only when it removed something, so a cadence the bound does not touch
+        # produces the spec it produced before this existed and keeps its registered identity.
+        declaration = prediction_age_declaration(
+            max_age_sessions=max_age_sessions,
+            dropped=stale.height,
+            kept=fresh.height,
+            symbols_dropped=len(names),
+        )
+    else:
+        summary += " - nothing dropped"
+    print(summary)
+    aligned = fresh.drop(
+        "session_index", "session_index_prediction", "age_sessions", "prediction_ts"
+    )
+    return aligned, declaration
 
 
 # %% [markdown]
@@ -672,7 +761,7 @@ def align_predictions_to_bars(preds: pl.DataFrame, bar_timestamps: pl.Series) ->
 
 # %%
 def run_cadence_cost_backtest(
-    cadence, cadence_label, cost_ps, cadence_prices, aligned_preds, state
+    cadence, cadence_label, cost_ps, cadence_prices, aligned_preds, state, prediction_age=None
 ):
     """Run one cadence × cost backtest and record results."""
     state["n_done"] += 1
@@ -692,6 +781,9 @@ def run_cadence_cost_backtest(
         # from the panel this spec is being built against, which is the one `run_backtest`
         # is handed below. A full run declares nothing and hashes as it did before.
         traded_universe=(traded_universe_declaration(cadence_prices) if MAX_SYMBOLS else None),
+        # Travels with the spec for the same reason the universe does: it changes what this
+        # run is computed from and `prediction_hash` cannot see it.
+        prediction_age=prediction_age,
         # The universe travels with the spec, not just with the query above. A row registered
         # without it reads as full-universe to every later reader - including section 4's
         # full-versus-screened query and `derived_tables_off_canonical_universe` - so the
@@ -774,9 +866,14 @@ for cadence in CADENCES if best_pred_hash else []:
     )
     bar_ts = cadence_prices["timestamp"].unique().sort()
 
-    aligned_preds = (
-        predictions_15m if freq == "15m" else align_predictions_to_bars(predictions_minute, bar_ts)
-    )
+    if freq == "15m":
+        # The 15-minute cadence is the prediction grid itself, so no as-of match is made and
+        # there is no age to bound.
+        aligned_preds, prediction_age = predictions_15m, None
+    else:
+        aligned_preds, prediction_age = align_predictions_to_bars(
+            predictions_minute, bar_ts, label=cadence_label
+        )
     if aligned_preds.is_empty():
         print(f"  {cadence_label}: no aligned predictions — skipping")
         continue
@@ -786,7 +883,13 @@ for cadence in CADENCES if best_pred_hash else []:
     )
     for cost_ps in COST_PER_SHARE_GRID:
         run_cadence_cost_backtest(
-            cadence, cadence_label, cost_ps, cadence_prices, aligned_preds, sweep_state
+            cadence,
+            cadence_label,
+            cost_ps,
+            cadence_prices,
+            aligned_preds,
+            sweep_state,
+            prediction_age=prediction_age,
         )
 
 # %%
