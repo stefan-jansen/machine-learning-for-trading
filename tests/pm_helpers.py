@@ -1093,9 +1093,19 @@ def check_kernel_routing(overrides: dict) -> KernelRouting:
     )
 
     if not (Path(kernel_python).is_file() and os.access(kernel_python, os.X_OK)):
+        # Which filesystem was looked at decides who is at fault, and the two read alike
+        # otherwise: run this file from the host venv and a correct image is reported as
+        # needing a rebuild. /.dockerenv is written by the runtime, not by our images.
+        where = (
+            f"inside this container. {rebuild}"
+            if Path("/.dockerenv").exists()
+            else "on this host. That path lives inside the "
+            f"{image or 'notebook'} image, where this test is meant to execute, so nothing "
+            "here says the image is stale. Run it through the docker job instead."
+        )
         return KernelRouting(
             f"overrides.yaml routes this notebook to {kernel_python}, "
-            f"which is not an executable file here. {rebuild}"
+            f"which is not an executable file {where}"
         )
 
     launcher_path = REPO_ROOT / launcher if launcher else None
