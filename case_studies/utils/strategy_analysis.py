@@ -402,22 +402,45 @@ def holdout_generations_to_retire(
 # This is a denylist rather than an allowlist on purpose: a field added to the specification
 # later is compared by default, so the check tightens as the spec grows instead of silently
 # ignoring the new field.
-_REFIT_MAY_CHANGE = frozenset(
-    {"cv", "expected_prediction_keys", "input_data_spec", "runtime_identity", "source_identity"}
-)
+# Fields a refit may differ in for reasons that are not the fold set: the CV specification it
+# was asked for, where its inputs came from, and the two identity stamps. The fold-derived
+# fields are NOT listed here - they come from `FOLD_DERIVED_FIELDS`, which is the declaration
+# of what a holdout refit is required to recompute.
+_REFIT_MAY_CHANGE = frozenset({"cv", "input_data_spec", "runtime_identity", "source_identity"})
 
 
 def _refit_comparable(training_spec_json: str | None) -> dict | None:
-    """A training specification reduced to what a refit must preserve."""
+    """A training specification reduced to what a refit must preserve.
+
+    The fold-derived fields are skipped by reading the same tuple the holdout deriver writes
+    them from, rather than by a list kept in step with it by hand. The hand-kept list matched
+    two of the three and compared `macro_context.resolved_fold_digest`, which
+    `_resolved_macro_digest` computes over `case.splits` - so it differs whenever a refit is
+    correct, and the one holdout that reached this check was rejected for changing a field it
+    was required to change (ml4t/agent-workspace#1147).
+
+    Scoped to the named subfield, never to its container: the other five entries under
+    `macro_context` are the macro *configuration* - `series`, `policy`, `alignment`,
+    `availability_lag_days`, `version` - and a run that differs in any of them is not a refit
+    of this specification at all.
+    """
     if not training_spec_json:
         return None
+    # Imported in the function because `case_studies.research` pulls in the workspace on import
+    # and this module is reached from notebooks that open no study.
+    from case_studies.research.holdout import FOLD_DERIVED_FIELDS
+
     computation = dict(json.loads(training_spec_json).get("computation") or {})
     for key in _REFIT_MAY_CHANGE:
         computation.pop(key, None)
-    model = dict(computation.get("model") or {})
-    if model:
-        model.pop("effective_params_by_fold", None)
-        computation["model"] = model
+    for container, field in FOLD_DERIVED_FIELDS:
+        if container == "computation":
+            computation.pop(field, None)
+            continue
+        nested = dict(computation.get(container) or {})
+        if nested:
+            nested.pop(field, None)
+            computation[container] = nested
     return computation
 
 
