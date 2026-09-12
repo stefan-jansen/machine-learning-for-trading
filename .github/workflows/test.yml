@@ -1403,13 +1403,29 @@ jobs:
       # run from the previous week's entry instead of empty. A constant key would
       # never save again after the first run, freezing the cache at whatever the
       # chapters needed that day.
+      #
+      # Named jobs rather than all of them, and the list is a BUDGET decision with a number
+      # behind it. A repository gets 10 GB of Actions cache and this one was already holding
+      # 7.0 GB of buildkit layer blobs, the largest a single 4.4 GB base layer. Caching every
+      # chapter measured 3.83 GB and put the repository at 10.85 GB, over the limit, where
+      # GitHub evicts least-recently-used - which would have been those layers, silently
+      # trading a lockfile-image rebuild for a checkpoint download. The four that download
+      # anything at all are ch05, ch10, ch11-12 and ch13; ch10 alone is 2.66 GB of the 3.83,
+      # and it is the only one of the four never observed failing. Dropping it fits in 1.27 GB.
+      #
+      # Re-measure rather than trusting this list: `gh api .../actions/caches` shows what each
+      # key costs and `.../actions/cache/usage` shows the total. A chapter that starts pulling
+      # a checkpoint shows up as a key with a real size and belongs here; a chapter here that
+      # stops pulling one shows up as a ~200-byte key and does not.
       - name: HuggingFace cache key
         id: hfkey
         if: steps.reach.outputs.have_key
         run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
 
       - name: Cache HuggingFace checkpoints
-        if: steps.reach.outputs.have_key
+        if: >-
+          steps.reach.outputs.have_key
+          && contains(fromJSON('["ch05","ch11-12","ch13"]'), matrix.name)
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
@@ -1500,7 +1516,9 @@ jobs:
       # `always()` because a run that failed still downloaded the checkpoints, and they are the
       # expensive part to fetch again.
       - name: Let the runner read what the container cached
-        if: always() && steps.reach.outputs.have_key && steps.image.outputs.ref != ''
+        if: >-
+          always() && steps.reach.outputs.have_key && steps.image.outputs.ref != ''
+          && contains(fromJSON('["ch05","ch11-12","ch13"]'), matrix.name)
         run: |
           docker run --rm -v "$HOME/.cache/huggingface:/hf-cache" \
             "${{ steps.image.outputs.ref }}" chmod -R a+rX /hf-cache
