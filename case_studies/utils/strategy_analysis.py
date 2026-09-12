@@ -225,7 +225,8 @@ def holdout_refit_status(training_spec_json: str | None) -> HoldoutRefitStatus:
     ``not_out_of_sample``
         The run records a CV split and it is not the holdout. **This is a statement about
         the record, not a finding about the fit.** The retired
-        `20_strategy_synthesis/holdout.py::generate_holdout` genuinely refit on a holdout
+        `20_strategy_synthesis/holdout.py::generate_holdout`, deleted on 2026-09-12,
+        genuinely refit on a holdout
         fold and then registered the predictions under the *validation* training identity,
         whose CV says ``validation`` - and the rows it wrote are still in the registries -
         so a row answering this way is either a validation-fitted model published over the
@@ -343,7 +344,8 @@ class HoldoutGenerationsToRetire:
     validation-fitted model publishing over the holdout window, the defect `29f13165`
     fixed, which is not a holdout evaluation at all. The other is a genuine refit filed
     under the validation training identity, which is what the retired
-    `20_strategy_synthesis/holdout.py::generate_holdout` did - it built a holdout fold,
+    `20_strategy_synthesis/holdout.py::generate_holdout`, deleted on 2026-09-12, did -
+    it built a holdout fold,
     trained on it, then registered the predictions against `candidate["training_hash"]`.
     Removing it removed the producer; the rows it already wrote are why this bucket stays.
 
