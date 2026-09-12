@@ -39,6 +39,5 @@ deep_learning:
 - nlinear
 - lstm_h64
 - tcn
-- patchtst
 causal_dml:
 - dml
