@@ -1969,10 +1969,20 @@ def run_resolved_causal_request(
         return cached
 
     # Before the fit, not after it. The registry can already hold a current identity for
-    # this label that this run does not retire - the ordinary state whenever this module
-    # has been edited, since the spec carries a hash of the whole file - and the write
-    # refuses that. Asking now costs one read and names the hash to declare; asking at
-    # the write costs the fit and every placebo refit first. See #953.
+    # this label that this run does not retire, and the write refuses that. Asking now
+    # costs one read and names the hash to declare; asking at the write costs the fit and
+    # every placebo refit first - an hour on a panel of this size, spent to be told
+    # something the registry could have said before the first fold.
+    #
+    # The reason the state arises has changed, and the old wording here said the wrong
+    # one: it read "whenever this module has been edited, since the spec carries a hash of
+    # the whole file". `_causal_source_identity` no longer hashes the module - it returns
+    # the declared `CAUSAL_RUNNER_VERSION` - so an edit to this file moves no identity at
+    # all. What moves them is that integer being raised by hand, and then every
+    # resolver-based fit in every case study moves at once, which makes the pre-fit check
+    # matter more rather than less. `tests/test_causal_prefit_supersedes_check.py` pins it
+    # against the write-time rule, which it calls rather than restates.
+    # See ml4t/agent-workspace#953.
     check_causal_supersedes(
         study.case_study,
         causal_hash,
