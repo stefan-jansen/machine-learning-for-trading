@@ -78,7 +78,21 @@ def excluded_family_sql(
     return f" AND {family_column} NOT IN ({placeholders})", excluded
 
 
-_DEGENERATE_SUBQUERY = "SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL"
+# A constant fold reaches the registry in one of two shapes, and the test has to carry both.
+# Five of the nine registries store NULL for it; `nasdaq100_microstructure` stores a denormal
+# instead, because its predictions are constant to display precision without being bit-identical,
+# so the daily IC series exists and averages to about 2e-16 rather than collapsing to undefined.
+#
+# `1e-12` is not a tuned number, it is the middle of an empty band. Measured across all nine
+# registries on 2026-09-12: 24 rows fall under 1e-12, all of them nasdaq's four LASSO/ElasticNet
+# configurations on the three continuous labels, minimum 2.0048e-16. The smallest legitimate
+# |ic| anywhere is 3.1941e-07 (`sp500_equity_option_analytics`), then 4.0948e-06, 4.4127e-06,
+# 5.9011e-06 and 6.5706e-06. Nine orders of magnitude separate the two groups, so any threshold
+# between 1e-12 and 1e-9 selects exactly the same rows and no other case study moves.
+_DEGENERATE_IC_EPS = 1e-12
+_DEGENERATE_SUBQUERY = (
+    f"SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL OR abs(ic) < {_DEGENERATE_IC_EPS}"
+)
 
 
 def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash") -> str:
@@ -86,11 +100,17 @@ def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash")
 
     When a regularized linear model (LASSO / ElasticNet at high ``alpha_frac``)
     shrinks every coefficient to zero on a fold, that fold's predictions are
-    constant and its IC is undefined — stored as NULL in ``fold_metrics.ic``.
-    The pooled daily IC is then computed over the surviving folds only, which
-    biases it (typically upward) and is not a valid model result. Such
-    prediction sets must never be selected for backtesting or any follow-on
-    leaderboard.
+    constant and its IC carries no information. The pooled daily IC is then
+    computed over a fold that ranks nothing, which biases it (typically upward)
+    and is not a valid model result. Such prediction sets must never be selected
+    for backtesting or any follow-on leaderboard.
+
+    **The IC is not always NULL, and testing only for NULL is how this stayed
+    invisible.** A fold whose every prediction ties does collapse to an undefined
+    correlation and is stored as NULL; a fold whose predictions are constant to
+    display precision but not bit-identical produces a defined, denormal IC
+    instead. Both are the same defect and the clause excludes both - see
+    ``_DEGENERATE_IC_EPS`` for the measurement behind the threshold.
 
     Returns a fragment beginning with ``" AND "`` suitable for appending to a
     WHERE clause; takes no bound parameters. Pass the column expression naming
