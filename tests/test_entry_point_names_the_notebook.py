@@ -204,7 +204,18 @@ def test_the_runner_puts_the_stem_in_front_of_the_kernel(tmp_path: Path) -> None
     kernel and nothing else, and the whole mechanism rests on the launcher setting it before it
     calls `pm.execute_notebook`. Without this, deleting that line leaves every other test green.
     """
+    from jupyter_client.kernelspec import find_kernel_specs
+
     from tests.pm_helpers import run_notebook
+
+    # Named rather than skipped. Without a kernelspec this fails inside jupytext as
+    # `KeyError: Please choose a kernel name among dict_keys([])`, which says nothing about
+    # what is wrong; and skipping would leave the one test that exercises the runner silently
+    # absent in the only job that runs it. `test-unit` installs `ipykernel` for this.
+    assert find_kernel_specs(), (
+        "no jupyter kernelspec is installed, so no test here can execute a notebook - "
+        "the test-unit venv in .github/workflows/test.yml installs ipykernel for this"
+    )
 
     probe = tmp_path / "42_probe_entry_point.py"
     probe.write_text(
