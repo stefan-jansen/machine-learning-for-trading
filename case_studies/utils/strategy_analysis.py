@@ -223,9 +223,10 @@ def holdout_refit_status(training_spec_json: str | None) -> HoldoutRefitStatus:
         The run's CV declares the holdout fold. This is a holdout evaluation.
     ``not_out_of_sample``
         The run records a CV split and it is not the holdout. **This is a statement about
-        the record, not a finding about the fit.** `20_strategy_synthesis/holdout.py`'s
-        `generate_holdout` genuinely refits on a holdout fold and then registers the
-        predictions under the *validation* training identity, whose CV says ``validation`` -
+        the record, not a finding about the fit.** The retired
+        `20_strategy_synthesis/holdout.py::generate_holdout` genuinely refit on a holdout
+        fold and then registered the predictions under the *validation* training identity,
+        whose CV says ``validation`` - and the rows it wrote are still in the registries -
         so a row answering this way is either a validation-fitted model published over the
         holdout window or a real refit filed under the wrong identity, and the registry
         cannot tell them apart. Either way it may not be reported as a holdout result, and
@@ -340,9 +341,10 @@ class HoldoutGenerationsToRetire:
     Two different things produce this record and it cannot separate them. One is a
     validation-fitted model publishing over the holdout window, the defect `29f13165`
     fixed, which is not a holdout evaluation at all. The other is a genuine refit filed
-    under the validation training identity, which is what
-    `20_strategy_synthesis/holdout.py`'s `generate_holdout` does - it builds a holdout fold,
-    trains on it, and then registers the predictions against `candidate["training_hash"]`.
+    under the validation training identity, which is what the retired
+    `20_strategy_synthesis/holdout.py::generate_holdout` did - it built a holdout fold,
+    trained on it, then registered the predictions against `candidate["training_hash"]`.
+    Removing it removed the producer; the rows it already wrote are why this bucket stays.
 
     So this bucket is refused rather than deleted. A row in it may not be reported as a
     holdout result, because on the first reading nothing out of sample was measured and on
@@ -755,10 +757,12 @@ class NoSelectableCandidates(RuntimeError):
     a holdout already covers the current top-N, and an initialised registry with no
     eligible validation backtest is a legitimate "not yet", not an error. It used to catch
     `ValueError`, which is what the pool it built itself raised; routing it through the
-    canonical selector changed the type under it, and in
-    `20_strategy_synthesis/00_holdout_predictions.py` that call sits outside the
-    generation loop's handler, so one un-run case study would have stopped every case
-    study after it.
+    canonical selector changed the type under it. The caller that made this matter was
+    `20_strategy_synthesis/00_holdout_predictions.py`, which put the call outside its
+    generation loop's handler, so one un-run case study stopped every case study after
+    it. That notebook is retired with the rest of Chapter 20's holdout generation; the
+    distinction stays because a "not yet" reported as a failure is wrong wherever it is
+    read.
     """
 
 

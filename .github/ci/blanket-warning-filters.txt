@@ -25,7 +25,6 @@
 # fx_pairs are stamped and wait for a re-execution, and theirs must not regenerate
 # features/model_based.parquet, whose sha256 keys every model fitted against it.
 
-20_strategy_synthesis/00_holdout_predictions.py
 20_strategy_synthesis/03_signal_quality.py
 20_strategy_synthesis/04_signal_to_strategy.py
 case_studies/cme_futures/01_feasibility_analysis.py

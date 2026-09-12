@@ -23,7 +23,7 @@
 # fail — and why?
 #
 # Every gate outcome and metric here is derived from the data produced by
-# NB00–NB05; the HTM cost-cascade figures (which reproduce
+# NB01–NB05; the HTM cost-cascade figures (which reproduce
 # htm_cost_sensitivity.parquet) and the S&P 500 Options cost handling are the
 # only hardcoded elements.
 #
@@ -34,7 +34,7 @@
 #
 # **Book Reference**: Chapter 20, Sections 20.6–20.7
 #
-# **Prerequisites**: Run [`00_holdout_predictions`](00_holdout_predictions.ipynb) and [`01_aggregate_synthesis`](01_aggregate_synthesis.ipynb).
+# **Prerequisites**: Run [`01_aggregate_synthesis`](01_aggregate_synthesis.ipynb). The holdout rows it reads come from each case study's own holdout notebooks, not from this chapter.
 
 # %%
 """Ch20 NB06 — Final recommendations derived from pipeline data."""
@@ -72,7 +72,8 @@ NASDAQ_ID = "nasdaq100_microstructure"
 # %% [markdown]
 # ## 1. Load Pipeline Data
 #
-# All data comes from NB00 (holdout predictions) and NB01 (aggregate synthesis).
+# All data comes from NB01 (aggregate synthesis), which is also what writes
+# `holdout_results.parquet` read below.
 # We make no assumptions beyond what the data shows.
 
 # %%

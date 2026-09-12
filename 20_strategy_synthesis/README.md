@@ -30,7 +30,6 @@ The chapter passes nine case studies through the same standardized pipeline (dat
 
 | Notebook                                                                    | What It Does                                                                                              |
 |-----------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
-| [`00_holdout_predictions`](00_holdout_predictions.ipynb)                    | Generates rank-1-on-holdout predictions per case study via `holdout.py`; populates the holdout split rows |
 | [`01_aggregate_synthesis`](01_aggregate_synthesis.ipynb)                    | Aggregates per-CS registries into chapter-wide parquets in `output/`                                      |
 | [`02_feature_evaluation`](02_feature_evaluation.ipynb)                      | Builds the cross-CS triage funnel (Table 20.3) and the feature-survival vs strategy-survival figure       |
 | [`03_signal_quality`](03_signal_quality.ipynb)                              | Per-CS family-mean IC table (Table 20.4); IC vs Sharpe scatter (Figure 20.2)                              |
@@ -57,7 +56,7 @@ uv run pytest tests/test_chapter_notebooks.py -v -k "20_strategy_synthesis"
 
 ## Dependencies
 
-Upstream: every case study under `case_studies/` must have a populated `run_log/registry.db` with training, prediction, backtest, and (for §20.8) `causal_runs` rows on the primary label. `00_holdout_predictions` writes the holdout-split rows that downstream notebooks read.
+Upstream: every case study under `case_studies/` must have a populated `run_log/registry.db` with training, prediction, backtest, and (for §20.8) `causal_runs` rows on the primary label. The holdout-split rows that the notebooks below read are written by each case study's own `NN_holdout_predictions` and `NN_holdout_backtest` pair, not by this chapter - Chapter 20 reads results, it does not generate them.
 
 Downstream: none. Ch20 is the synthesis end of the pipeline.
 

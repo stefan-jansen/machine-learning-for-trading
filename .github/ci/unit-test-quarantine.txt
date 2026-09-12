@@ -42,13 +42,17 @@
 # `test_gbm_holdout_rekey` was added on 2026-08-30 with the GBM holdout re-keying
 # hook. It imports `case_studies/utils/gbm.py`, which is the boundary itself.
 #
-# `test_holdout_expected_keys` loads `20_strategy_synthesis/holdout.py`, whose
-# module scope reaches lightgbm and torch through the family training paths it
-# dispatches to. It tests two pure functions and needs none of that, but the
-# module cannot be imported without it. `test_holdout_force_regenerates` loads
-# the same module for the same reason and is behind the same boundary, and so does
-# `test_holdout_selection_is_single_sourced`, which has to call `select_best_models`
-# and the canonical resolver on one registry to show they answer the same.
+# `test_holdout_selection_is_single_sourced` loads
+# `20_strategy_synthesis/holdout.py`, which has to call `select_best_models` and the
+# canonical resolver on one registry to show they answer the same. That module used to
+# reach lightgbm AND torch through the family training paths it dispatched to;
+# retiring the generation half took lightgbm out of its import closure but not torch,
+# which arrives transitively through `case_studies.utils.strategy_analysis`. So the
+# boundary still holds, for one import rather than two. Measured by executing the
+# module and reading `sys.modules`, not by reading the import block, because the one
+# that keeps it here is not written there. `test_holdout_expected_keys` and
+# `test_holdout_force_regenerates` were deselected here for the same reason and are
+# gone: both pinned the generation half only.
 # ---------------------------------------------------------------------------
 # The three files the etfs deep-learning and latent-factor pass added are behind
 # the same boundary. `test_common_sample_daily_ic` tests one pure polars
@@ -72,8 +76,6 @@ tests/test_gbm_classification_target.py
 tests/test_gbm_holdout_rekey.py
 tests/test_gbm_identity.py
 tests/test_gbm_runtime.py
-tests/test_holdout_expected_keys.py
-tests/test_holdout_force_regenerates.py
 tests/test_holdout_selection_is_single_sourced.py
 tests/test_insight_chapter.py
 tests/test_latent_epoch_ic_over_dates.py

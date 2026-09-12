@@ -167,8 +167,9 @@ def test_the_selection_restrictions_are_declared_once() -> None:
     answer here and it only ever asked whether two values agreed today; there is now one
     value, and this asks that the second declaration has not come back.
 
-    Read by parsing rather than by importing, because `holdout.py`'s module scope reaches
-    lightgbm and torch, which this job does not install.
+    Read by parsing rather than by importing, because `holdout.py` reaches torch - now
+    transitively, through `case_studies.utils.strategy_analysis`, rather than through the
+    family training paths it used to dispatch to - and this job does not install it.
     `tests/test_holdout_selection_is_single_sourced.py` asserts the runtime identity in
     the job that does.
     """

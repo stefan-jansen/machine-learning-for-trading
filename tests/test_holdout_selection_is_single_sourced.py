@@ -382,10 +382,13 @@ def test_a_registry_with_nothing_eligible_answers_no_holdout_rather_than_raising
     `ValueError`, which is what the pool this module built for itself raised; routing it
     through the canonical selector changed the exception under it to `RuntimeError`.
 
-    The consequence is not local. In `20_strategy_synthesis/00_holdout_predictions.py` the
-    call sits at `was_cached = has_holdout_predictions(cs_id) and not FORCE`, one line
-    ABOVE the `try` that guards generation, so a single un-run case study would abort the
-    loop and every case study after it in `cs_list` would never run.
+    The consequence was not local. `20_strategy_synthesis/00_holdout_predictions.py` put
+    the call at `was_cached = has_holdout_predictions(cs_id) and not FORCE`, one line
+    ABOVE the `try` that guarded generation, so a single un-run case study aborted the
+    loop and every case study after it in `cs_list` never ran. That driver is retired -
+    Chapter 20 no longer generates holdouts - so the property is pinned here for its own
+    sake: an availability check answers with a bool, and a caller that treats "not run
+    yet" as an error is reading a question as a failure.
     """
     _registry(case_dir / "run_log" / "registry.db", [])
 
@@ -396,9 +399,11 @@ def test_the_refusal_is_still_raised_where_it_has_to_be_reported(case_dir: Path)
     """The other half: the availability check absorbs it, the selection does not.
 
     `NoSelectableCandidates` subclasses `RuntimeError`, so returning False from the check
-    is not a decision to stay quiet - `generate_holdout` asks the same selector again with
-    no guard, and the refusal reaches the driver's own handler, which prints it against
-    the case study it belongs to.
+    is not a decision to stay quiet: the selector still refuses when asked directly, with
+    no guard, and the refusal reaches the caller's own handler naming the case study it
+    belongs to. `generate_holdout` was that caller and is retired; the two halves still
+    have to differ, or a check that absorbs the refusal would be the only thing anyone
+    asks and the refusal would never be reported at all.
     """
     _registry(case_dir / "run_log" / "registry.db", [])
 

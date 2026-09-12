@@ -1113,8 +1113,8 @@ def apply_universe_filter(
     only the filter *name* enters the backtest hash, not the resolved symbols.
 
     Returns predictions unchanged when no filter applies. Built into
-    ``run_backtest`` so any caller — sweep notebooks, ``generate_holdout``,
-    ad-hoc scripts — gets the same filter as the bespoke sp500_options
+    ``run_backtest`` so any caller — sweep notebooks, the case studies' holdout
+    notebooks, ad-hoc scripts — gets the same filter as the bespoke sp500_options
     pipeline, driven purely by the strategy spec.
     """
     if not signal_config:
