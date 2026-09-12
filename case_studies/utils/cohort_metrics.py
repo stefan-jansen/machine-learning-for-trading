@@ -243,8 +243,8 @@ def _list_label_cohorts(
 ) -> list[tuple[str, list[str]]]:
     # Exclude cost_sensitivity: those rows are perturbation analyses on a
     # fixed strategy spec, not alternative strategies. They must not inflate
-    # the selection-bias K — see 20_strategy_synthesis/holdout.py
-    # ``HOLDOUT_SELECTION_STAGES`` for the matching rank-1 rule.
+    # the selection-bias K - see ``strategy_analysis.SELECTION_STAGES`` for the
+    # matching rank-1 rule.
     # Restricted to validation split per ``_list_family_cohorts``.
     extra = f" AND {_UNIVERSE_FILTER_CLAUSE}" if universe_filter else ""
     params = (universe_filter,) if universe_filter else ()
