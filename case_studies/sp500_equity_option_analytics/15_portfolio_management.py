@@ -83,7 +83,7 @@ from case_studies.utils.sweep_config import (
     get_top_n_predictions,
 )
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -492,7 +492,11 @@ add_message_title(
     "Mean and peak Sharpe for each declared allocator",
     "Bars: mean across primary-label combinations; points: strongest single one",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of mean validation Sharpe for each allocator, ordered by that mean, with a "
+    "separate marker for the allocator's best single configuration.",
+)
 
 # %% [markdown]
 # ## 4. Inspect the leading allocation
@@ -575,7 +579,11 @@ add_message_title(
     "How each allocator's Sharpe moves as the basket widens",
     f"Dashed line: equal-weight baseline Sharpe {baseline_sharpe:.3f}",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "One line per allocator of annualized validation Sharpe against the number of stocks selected "
+    "per rebalance, with a dashed horizontal line at the equal-weight baseline.",
+)
 
 # %% [markdown]
 # ## Key takeaways

@@ -103,7 +103,7 @@ from case_studies.utils.uncertainty import (
     periods_per_year_from_setup,
 )
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -666,7 +666,11 @@ add_message_title(
     "Which overlays move Sharpe, and which intervals clear zero",
     "Bars: point difference; whiskers: 95% stationary-block bootstrap",
 )
-fig_delta.show()
+show_with_alt(
+    fig_delta,
+    "Horizontal bars of the paired annualized Sharpe difference between each overlay and no "
+    "overlay, with 95% stationary-block bootstrap whiskers and a dashed line at zero.",
+)
 
 # %%
 fig_tradeoff, ax_tradeoff = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
@@ -702,7 +706,11 @@ add_message_title(
     "Higher is better; farther left means a shallower drawdown",
 )
 
-fig_tradeoff.show()
+show_with_alt(
+    fig_tradeoff,
+    "Scatter of annualized validation Sharpe against maximum drawdown magnitude, with a separate "
+    "colour for each overlay rule.",
+)
 
 # %% [markdown]
 # ## 4. Freeze the field the holdout will choose from

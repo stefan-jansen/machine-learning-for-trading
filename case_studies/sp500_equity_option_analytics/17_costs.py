@@ -79,7 +79,7 @@ from case_studies.utils.sweep_config import (
     get_top_n_predictions,
 )
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -550,7 +550,12 @@ add_message_title(
     "Exploratory flat-dollar convention; band: conditional bootstrap",
 )
 
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels of annualized validation Sharpe against a cost axis, each a line with a shaded "
+    "95% bootstrap band and a dashed line at zero: one-way cost in basis points on the left with "
+    "the configured level marked, a uniform per-share half-spread on the right.",
+)
 
 # %% [markdown]
 # ## Key takeaways
