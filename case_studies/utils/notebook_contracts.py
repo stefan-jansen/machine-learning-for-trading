@@ -89,9 +89,24 @@ def excluded_family_sql(
 # |ic| anywhere is 3.1941e-07 (`sp500_equity_option_analytics`), then 4.0948e-06, 4.4127e-06,
 # 5.9011e-06 and 6.5706e-06. Nine orders of magnitude separate the two groups, so any threshold
 # between 1e-12 and 1e-9 selects exactly the same rows and no other case study moves.
+#
+# `ic_std` is in the test because `ic` alone cannot distinguish the two ways a fold reaches a
+# near-zero average. `fold_metrics.ic` is `ic_result["ic_mean"]` (`registry/metrics.py:121`), the
+# mean of the fold's per-cross-section Spearman ICs, so a fold that ranks perfectly well but
+# whose daily ICs cancel would also average to nearly nothing. That fold is a real result and
+# must not be excluded. The two cases separate on dispersion rather than on the mean: a
+# cancelling series has a large `ic_std`, a constant one has none.
+#
+# Measured across all nine registries on 2026-09-12, 38,518 fold rows. The 24 rows with a
+# denormal `ic` carry `ic_std` of 1.95e-17 to 2.02e-17; the smallest `ic_std` on any other row
+# is 1.69e-03 (`us_equities_panel`), and the largest is 0.269. Fourteen orders of magnitude,
+# and no row anywhere has a non-null `ic` with a null `ic_std`, so the conjunction needs no
+# null branch. The reason to prefer this form is not the width of that gap: it is that
+# cancellation is excluded by what the clause tests rather than by the absence of an example.
 _DEGENERATE_IC_EPS = 1e-12
 _DEGENERATE_SUBQUERY = (
-    f"SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL OR abs(ic) < {_DEGENERATE_IC_EPS}"
+    "SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL "
+    f"OR (abs(ic) < {_DEGENERATE_IC_EPS} AND ic_std < {_DEGENERATE_IC_EPS})"
 )
 
 

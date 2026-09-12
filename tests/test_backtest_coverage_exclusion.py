@@ -56,7 +56,7 @@ def case_dir(tmp_path: Path) -> Path:
         CREATE TABLE training_runs (training_hash TEXT, family TEXT, label TEXT,
                                     config_name TEXT, created_at TEXT);
         CREATE TABLE prediction_sets (prediction_hash TEXT, training_hash TEXT, split TEXT);
-        CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+        CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
         """
     )
     for phash, family, symbols in (

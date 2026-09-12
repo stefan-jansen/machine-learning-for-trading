@@ -68,13 +68,13 @@ def _resolver_db(path: Path, *, backtest_hash: str) -> None:
                 backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT, stage TEXT, spec_json TEXT
             );
             CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
-            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
             CREATE TABLE prediction_metrics (
                 prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_n_days REAL
             );
             INSERT INTO training_runs VALUES ('train_us', 'owner_config', 'gbm', 'fwd_ret_1m', NULL);
             INSERT INTO prediction_sets VALUES ('pred_us', 'train_us', 'validation');
-            INSERT INTO fold_metrics VALUES ('pred_us', 0.02);
+            INSERT INTO fold_metrics (prediction_hash, ic) VALUES ('pred_us', 0.02);
             INSERT INTO prediction_metrics VALUES ('pred_us', 0.02, 250);
             """
         )

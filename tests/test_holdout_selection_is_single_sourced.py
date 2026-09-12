@@ -85,7 +85,7 @@ def _registry(
                 prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_mean_daily REAL,
                 ic_ci_lo REAL, ic_ci_hi REAL, ic_n_days REAL
             );
-            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
             CREATE TABLE backtest_runs (
                 backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT, spec_json TEXT, stage TEXT
             );
@@ -116,7 +116,10 @@ def _registry(
                 "INSERT INTO prediction_metrics VALUES (?, 0.02, 0.02, 0.0, 0.04, 250)",
                 (prediction_hash,),
             )
-            db.execute("INSERT INTO fold_metrics VALUES (?, 0.02)", (prediction_hash,))
+            db.execute(
+                "INSERT INTO fold_metrics (prediction_hash, ic) VALUES (?, 0.02)",
+                (prediction_hash,),
+            )
         for backtest_hash, prediction_hash, stage, sharpe, spec_json in rows:
             db.execute(
                 "INSERT INTO backtest_runs VALUES (?, ?, ?, ?)",
