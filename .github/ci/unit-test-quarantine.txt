@@ -146,17 +146,38 @@ tests/test_model_catalog_columns.py
 #
 # The first three collect nothing but notebook executions, so the whole file
 # goes. `test_model_registry.py` does not: only `test_model_notebook` runs a
-# notebook, and its other ten tests are pure config assertions that finish in
-# 0.07s. Excluding the file threw those away, which is the same
+# notebook, and its siblings are pure config assertions that finish in 0.14s.
+# Excluding the file threw those away, which is the same
 # exclude-more-than-you-meant defect the subtraction below exists to fix.
-# Eleven, not nine: `test_registering_stage_maps_to_its_actual_entry_point` is
-# parametrized over five stages, so counting `def test_` undercounts what the
-# deselect leaves behind. Measured 2026-09-03: 105 collected, 94 deselected.
+# Count the deselect, not `def test_`: parametrization makes the two disagree,
+# and `test_registering_stage_maps_to_its_actual_entry_point` alone contributes
+# five. Measured 2026-09-12: 110 collected, 98 deselected, 12 left running
+# (2026-09-03 it was 105 / 94 / 11, so this number moves and is not a pin).
+#
+# `test_model_notebook` is the one exception to "each line names the job that
+# does run it", because no CI job CAN run it. It skips at
+# `tests/test_model_registry.py:532` when `case_studies/<case study>/features`
+# or `labels` is absent, and both are absent on every runner: `.gitignore:152`
+# and `:154` exclude them, nothing tracks them, and a maintainer worktree
+# reaches them through a symlink into `~/ml4t/artifacts`. Every parametrization
+# would skip, so wiring it into a job buys a green that executed nothing - which
+# is the failure this file's subtraction exists to prevent, arriving by the
+# other door. It is deselected here so the file's twelve siblings still run,
+# not because a job is missing.
+#
+# The residual gap, stated rather than implied: the end-to-end path - a notebook
+# runs, registers, and the `entry_point` it recorded names the notebook that
+# wrote it - executes nowhere in CI. `test_model_notebook` is the only test that
+# walks it, and a maintainer worktree is the only place it can. PR #1006's
+# `tests/test_entry_point_names_the_notebook.py` pins the resolver that chooses
+# the value, which is the half that runs without stage 01-05 inputs; nothing
+# observes what a real registration writes. That is why a stale `dl_tsmixer`
+# literal in this file's own query survived from the initial release commit.
 # ---------------------------------------------------------------------------
 tests/test_case_studies.py                       # cs-<case-study> (test-case-studies)
 tests/test_chapter_notebooks.py                  # chNN (test-chapters)
 tests/test_docker_notebooks.py                   # test-py312, test-neo4j, test-benchmark
-tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other eleven tests run here
+tests/test_model_registry.py::test_model_notebook  # no job can run it (see above); its siblings run here
 
 # ---------------------------------------------------------------------------
 # Needs the reader's Docker image. It walks every declared third-party import
