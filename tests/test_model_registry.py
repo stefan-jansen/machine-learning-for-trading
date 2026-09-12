@@ -690,6 +690,15 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
                 finally:
                     db.close()
                 assert {5, 6}.issubset(checkpoints), checkpoints
+            # `10_dl_tsmixer`, not `dl_tsmixer`. The family name was what the runner wrote
+            # before the migration; the notebook now declares `entry_point="10_dl_tsmixer"` to
+            # `open_study`, which is the stem every registering notebook records per
+            # `test_a_registering_stage_is_recognised_by_its_suffix` above. The literal survived
+            # the mapping's removal unchanged, and nothing caught it because this test runs in no
+            # job: `.github/ci/unit-test-quarantine.txt` deselects `test_model_notebook` and says
+            # so. Measured 2026-09-12 against the etfs production registry - 2 rows at
+            # `10_dl_tsmixer`, 0 at `dl_tsmixer` - so the query returned the empty set and the
+            # `issubset` below could only have failed, on the first machine that ever ran it.
             if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
                 db = sqlite3.connect(str(registry_db))
                 try:
@@ -700,7 +709,7 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
                             SELECT ps.checkpoint_value
                             FROM prediction_sets ps
                             JOIN training_runs tr USING (training_hash)
-                            WHERE tr.entry_point = 'dl_tsmixer'
+                            WHERE tr.entry_point = '10_dl_tsmixer'
                               AND ps.split = 'validation'
                             """
                         )

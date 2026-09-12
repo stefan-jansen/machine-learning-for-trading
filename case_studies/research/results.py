@@ -688,7 +688,21 @@ class ResultsCatalog:
             # A table column, not part of `resolved`, so recording it moves no training hash.
             # `spec_json.provenance.entry_point` is a different field naming the runner module
             # (`case_studies.utils.linear`); this one names the notebook.
-            entry_point=self.study.entry_point,
+            #
+            # Falls back to the request's own `notebook_path` when the Study was not told. Those
+            # are the same fact declared in two places - `open_study(entry_point=...)` sets the
+            # column, `build_requests(notebook=...)` sets the provenance field - and a notebook
+            # that declares one and not the other is the common state rather than the exception:
+            # measured 2026-09-12 over the 53 notebooks calling `run_model_population`, 20 declare
+            # `entry_point`, 13 declare only `notebook`, and 20 declare neither. Without this the
+            # 13 register a NULL column while carrying the answer in the row they are writing.
+            #
+            # The direction is fixed by the decision recorded in `tests/test_model_registry.py`
+            # (2026-08-25): the COLUMN is the half that survives when the migration finishes, and
+            # `json_extract(runtime_json, '$.notebook_path')` is the half that goes. So provenance
+            # fills the column, never the reverse. An explicit `entry_point` still wins, because a
+            # Study told which notebook it serves was told deliberately.
+            entry_point=self.study.entry_point or (runtime_provenance or {}).get("notebook_path"),
             runtime_provenance=runtime_provenance,
             # Defaulted here rather than at every call site: a caller that forgets it should
             # still leave a legible row, and "when the identity was registered" is within
