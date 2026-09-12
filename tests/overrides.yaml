@@ -3998,7 +3998,40 @@ case_studies/us_equities_panel/18_risk_management:
     PREVIEW_MAX_RISK_CONTROLS: 3
     MAX_SYMBOLS: 45
   timeout: 600
-case_studies/us_equities_panel/20_strategy_analysis:
+case_studies/us_equities_panel/20_holdout_predictions:
+  # Canonical, not preview. `reconstruct_locked_model_request` refuses any spec whose
+  # execution_tier is not canonical, and the harness injects EXECUTION_TIER="preview" for any
+  # notebook that declares it - so the default routing would fail this notebook on its first
+  # fit. 21 and 22 follow it, because a holdout resolved in one tier and read in another is two
+  # registries. Kept although all three are skipped, so that whenever the fixture can support
+  # them they run as one tier rather than being wired up again from scratch.
+  research_preview: false
+  # Refits the selected configuration over the holdout fold - one training run, no sweep.
+  timeout: 900
+  skip: true
+  skip_reason: >-
+    Needs a selectable validation carrier, which the reduced CI fixture does not produce: it
+    runs the validation sweep only, so `resolve_solvent_carrier` has no configuration to refit
+    on the holdout fold. Same fixture condition that skips 22_strategy_analysis, reached one
+    stage earlier. Remove this skip when the fixture registry carries a selectable candidate.
+  skip_blocker:
+    no_canonical_selection:
+      of: us_equities_panel
+
+case_studies/us_equities_panel/21_holdout_backtest:
+  research_preview: false
+  # One backtest over the holdout window.
+  timeout: 600
+  skip: true
+  skip_reason: >-
+    Resolves the same validation carrier 20_holdout_predictions does and then looks up the
+    holdout prediction set registered under it, so on this fixture it refuses at the carrier
+    before it ever reaches the missing prediction set. Remove this skip together with 20's.
+  skip_blocker:
+    no_canonical_selection:
+      of: us_equities_panel
+
+case_studies/us_equities_panel/22_strategy_analysis:
   skip: true
   # One obstacle, and it is structural: it holds until someone changes what CI runs against. This
   # notebook resolves the holdout replay of the selected validation strategy, so it needs a

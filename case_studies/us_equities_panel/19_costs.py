@@ -548,7 +548,7 @@ execution_diagnostics
 # ## 6. Naming the curves
 #
 # One set per label, holding both regimes, under a name
-# [`20_strategy_analysis`](20_strategy_analysis.ipynb) opens. These rows describe a strategy that
+# [`22_strategy_analysis`](22_strategy_analysis.ipynb) opens. These rows describe a strategy that
 # was already chosen, so they stay out of the pool anything selects from - a cost row winning a
 # selection would mean the cost assumption picked the strategy.
 #
