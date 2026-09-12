@@ -176,8 +176,13 @@ def model_requests(
 
     ``notebook`` is the stem of the notebook submitting these requests, recorded as
     ``runtime_provenance["notebook_path"]`` so a registered row says which notebook produced it.
-    It is provenance rather than identity, so passing it moves no hash. Default ``None`` records
-    nothing: a wrong notebook name is worse than an absent one.
+    It is provenance rather than identity, so passing it moves no hash.
+
+    Defaulted from ``study.entry_point`` by :meth:`ModelRequest.from_request`, which is the same
+    answer to the same question: that field fills ``training_runs.entry_point`` and this one
+    fills ``notebook_path``, and a notebook that passed both said the same string twice. Passing
+    ``notebook=`` still wins, and a study with no entry point still records nothing - a wrong
+    notebook name is worse than an absent one.
     """
     missing = set(REQUEST_COLUMNS) - set(catalog.columns)
     if missing:

@@ -955,6 +955,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--case-study", default=None, help="check one instead of all")
     parser.add_argument(
+        "--notebook",
+        default=None,
+        help=(
+            "the stem of the notebook being launched. Every finding is still reported; only "
+            "this notebook's decide the exit status. A run reads its own SUPERSEDES_* values "
+            "and no others, so a sibling's refused literal cannot refuse it - and the waiver "
+            "that clears the false refusal also switches off the true one. Requires "
+            "--case-study."
+        ),
+    )
+    parser.add_argument(
         "--artifacts-root",
         type=Path,
         default=_default_artifacts_root(),
@@ -982,9 +993,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.notebook and not args.case_study:
+        parser.error("--notebook scopes within one case study; pass --case-study too")
+
     findings = check_all(
         repo_root=REPO_ROOT, artifacts_root=args.artifacts_root, only=args.case_study
     )
+
+    if args.notebook:
+        # Refuse a stem the case study does not hold rather than scoping to nothing. A typo
+        # would otherwise leave every finding non-fatal and report the green it did not earn,
+        # which is the shape of defect this checker exists to catch.
+        directory = REPO_ROOT / "case_studies" / args.case_study
+        if not (directory / f"{args.notebook}.py").is_file():
+            parser.error(f"no case_studies/{args.case_study}/{args.notebook}.py to scope to")
 
     if args.json:
         print(json.dumps([asdict(f) for f in findings], indent=1))
@@ -1005,9 +1027,28 @@ def main(argv: list[str] | None = None) -> int:
             f"{undeclared_count} live generation(s) declared nowhere"
         )
 
-    stale = [f for f in findings if f.refused_at_the_freeze]
+    refused = [f for f in findings if f.refused_at_the_freeze]
+    if args.notebook:
+        # Reported either way; only the exit status narrows. A sibling's refused literal is
+        # real - it fails the run that freezes ITS members - and the person queueing a chain
+        # is the one for whom fixing it is free, so saying nothing would waste the only cheap
+        # moment. It just does not fail this notebook.
+        stale = [f for f in refused if f.notebook == f"{args.notebook}.py"]
+        siblings = [f for f in refused if f not in stale]
+    else:
+        stale, siblings = refused, []
     unresolved = [f for f in findings if f.status == "unresolved"]
     undeclared = [f for f in findings if f.status == "undeclared"]
+
+    if siblings:
+        print(
+            f"\n{len(siblings)} refused literal(s) elsewhere in {args.case_study}. This run "
+            f"reads only {args.notebook}'s own declarations, so this does not block this run - "
+            "it blocks the run that freezes each of these, after that run's fit:\n",
+            file=sys.stderr,
+        )
+        for finding in siblings:
+            print(f"  {finding.notebook}  {finding.declared}  ({finding.status})", file=sys.stderr)
 
     if undeclared:
         # The expensive one. A stale literal at least tells the reader a lineage exists; an

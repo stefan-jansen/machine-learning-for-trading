@@ -369,7 +369,19 @@ def build_holdout_training_spec(
 # `holdout_start`/`holdout_end`, but `resolve()` passes them to `generate_cv_splits` as boundaries
 # to seal VALIDATION against, so it selects validation folds and cannot emit a holdout fold. That
 # is why the fold is derived here.
-_FOLD_DERIVED_FIELDS = (
+#
+# Public because `utils/strategy_analysis._refit_comparable` reads it. That function decides
+# whether a holdout run is a refit of the validation run, so it must skip exactly the fields
+# named here and no others. Kept as one declaration because it was two: the exemption list was
+# written out by hand and matched two of these three, so `macro_context.resolved_fold_digest`
+# was required to change here and required not to have changed there. cme_futures' holdout
+# `723a305604bb` was rejected by its own lineage check for that reason and no other, with its
+# feature artifacts, feature names and label artifact all identical to the validation run's
+# (ml4t/agent-workspace#1147).
+#
+# Each entry is (container, field). "computation" means the computation mapping itself; any
+# other value names a mapping inside it.
+FOLD_DERIVED_FIELDS = (
     ("computation", "expected_prediction_keys"),
     ("model", "effective_params_by_fold"),
     ("macro_context", "resolved_fold_digest"),

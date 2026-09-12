@@ -485,6 +485,37 @@ CURRENT = "aaaa" * 16
 SUPERSEDED = "bbbb" * 16
 
 
+def _macro_spec(
+    *,
+    split: str = "holdout",
+    series: tuple[str, ...] = ("DGS10", "VIXCLS"),
+    fold_digest: str = "sha256:" + "cccc" * 16,
+) -> str:
+    """A spec carrying a macro context, which only `latent_factors/sdf` does.
+
+    Two of its six fields are what this exercises. `resolved_fold_digest` is computed over the
+    fold set by `_resolved_macro_digest`, so a correct refit always moves it. `series` is the
+    macro configuration and a refit that moved it would be a different specification.
+    """
+    return json.dumps(
+        {
+            "computation": {
+                "cv": {"split": split, "folds": [{"fold": 1}]},
+                "feature_artifacts": {"model_based": {"sha256": CURRENT}},
+                "feature_names": ["ret_5d", "vol_21d"],
+                "macro_context": {
+                    "version": 2,
+                    "series": list(series),
+                    "policy": "as_of",
+                    "alignment": "daily",
+                    "availability_lag_days": 1,
+                    "resolved_fold_digest": fold_digest,
+                },
+            }
+        }
+    )
+
+
 def test_a_refit_differs_from_its_validation_run_only_in_the_fold_geometry() -> None:
     """The positive case, or the check would be satisfied by rejecting everything."""
     from case_studies.utils.strategy_analysis import is_refit_of
@@ -548,3 +579,74 @@ def test_the_pinned_carrier_rejects_a_stale_generation_sharing_its_name(
     # 9.9 is the higher Sharpe. Nothing may reach it, and it must not raise as ambiguity
     # either - it is not a candidate at all.
     assert resolved["backtest_hash"] != "b2"
+
+
+# ---------------------------------------------------------------------------------------
+# The macro context, where two of the three fold-derived fields were exempt and one was not.
+#
+# `_resolved_macro_digest` hashes the macro values each fold saw, walking `case.splits`. A
+# holdout refit fits a different fold set by definition, so the digest differs whenever the
+# refit is correct - and comparing it made `is_refit_of` unsatisfiable for every
+# `latent_factors/sdf` holdout. cme_futures' `723a305604bb` was the first to reach the check
+# and was rejected on that field alone, with its feature artifacts, feature names and label
+# artifact identical to the validation run's (ml4t/agent-workspace#1147).
+#
+# Both directions are asserted here. A one-sided test passes just as well against an exemption
+# written one level too wide, as `macro_context` rather than the subfield, which would stop
+# checking the macro configuration entirely and say nothing about it.
+# ---------------------------------------------------------------------------------------
+
+
+def test_a_refit_may_move_the_resolved_fold_digest() -> None:
+    """The field the holdout deriver is required to recompute."""
+    from case_studies.utils.strategy_analysis import is_refit_of
+
+    assert is_refit_of(
+        _macro_spec(fold_digest="sha256:" + "dddd" * 16),
+        _macro_spec(split="validation"),
+    )
+
+
+def test_a_refit_may_not_move_the_macro_series() -> None:
+    """The negative half, and what keeps the exemption at the subfield.
+
+    Same shape as the test above and one field further out. If the exemption is ever widened
+    to `macro_context`, this is what goes red rather than a holdout fitted against a different
+    macro panel being accepted as the carrier's.
+    """
+    from case_studies.utils.strategy_analysis import is_refit_of
+
+    assert not is_refit_of(
+        _macro_spec(series=("DGS10", "VIXCLS", "T10Y2Y")),
+        _macro_spec(split="validation"),
+    )
+
+
+def test_every_declared_fold_derived_field_is_exempt() -> None:
+    """The declaration and the exemption are one thing, so they cannot drift apart again.
+
+    The defect was two lists: `FOLD_DERIVED_FIELDS` named three fields a holdout refit must
+    recompute, and the comparison skipped two of them. This walks the declaration itself, so a
+    fourth entry added to it is covered on the day it is added, and reverting the comparison to
+    a hand-kept list fails here rather than at whichever holdout reaches the check first.
+    """
+    from case_studies.research.holdout import FOLD_DERIVED_FIELDS
+    from case_studies.utils.strategy_analysis import is_refit_of
+
+    for container, field in FOLD_DERIVED_FIELDS:
+        base = {
+            "cv": {"split": "validation", "folds": [{"fold": 1}]},
+            "feature_names": ["ret_5d"],
+            "model": {"class": "lightgbm.Booster"},
+            "macro_context": {"series": ["DGS10"]},
+        }
+        moved = json.loads(json.dumps(base))
+        if container == "computation":
+            base[field] = "validation-value"
+            moved[field] = "holdout-value"
+        else:
+            base[container][field] = "validation-value"
+            moved[container][field] = "holdout-value"
+        assert is_refit_of(json.dumps({"computation": moved}), json.dumps({"computation": base})), (
+            f"{container}.{field} is declared fold-derived but is still compared"
+        )

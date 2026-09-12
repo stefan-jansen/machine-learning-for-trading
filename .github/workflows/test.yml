@@ -614,10 +614,17 @@ jobs:
           uv export --frozen --extra live --extra dev --no-emit-project --no-hashes \
             --format requirements-txt \
             | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-constraints.txt
+          #
+          # `ipykernel` is here for a capability rather than an import. This venv had
+          # `jupytext` and `papermill` and no kernelspec at all, so `find_kernel_specs()`
+          # returned an empty dict and any test that executes a notebook failed at the sync
+          # with `KeyError: Please choose a kernel name among dict_keys([])`. A job that
+          # installs a notebook runner and cannot run a notebook can only host tests that
+          # stop short of doing it.
           uv pip install --constraint /tmp/locked-constraints.txt \
             pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow nest-asyncio \
-            ml4t-diagnostic jupytext papermill ml4t-backtest ml4t-data ml4t-engineer databento
+            ml4t-diagnostic jupytext papermill ipykernel ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -1378,6 +1385,61 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      # Six chapter jobs download checkpoints from HuggingFace while the notebook
+      # runs: ch04, ch22 and ch23 (all-MiniLM-L6-v2), ch10 (finbert-tone,
+      # ProsusAI/finbert, ModernBERT-base, deberta-v3-small and two datasets),
+      # ch11-12 (finbert-tone) and ch13 (granite-timeseries-ttm-v1, chronos-t5-tiny).
+      # Nothing cached them, so every job of every run fetched them again,
+      # unauthenticated, several jobs at once from the same runner pool. Measured
+      # 2026-09-12: ch11-12 red on #994 with `429 Too Many Requests` loading
+      # yiyanghkust/finbert-tone, and ch13 red on `main` two hours later with
+      # "couldn't connect to https://huggingface.co" on ibm-granite. Neither failure
+      # names the commit under test, and both read as that commit's.
+      #
+      # A cache hit cannot serve the wrong checkpoint. HuggingFace stores each
+      # snapshot under its own revision sha, so a hit either holds the revision the
+      # notebook asks for or falls through to the network; the key decides how much
+      # of the download is skipped, never which bytes load. That is what makes a
+      # coarse key safe here.
+      #
+      # The key buckets by ISO week rather than pinning content, because nothing in
+      # the repo declares which checkpoints a chapter pulls - the model ids are
+      # literals inside the notebooks, and a manifest listing them would be a second
+      # place to keep in step. A weekly bucket picks up a newly added model within a
+      # week at the cost of one download, and `restore-keys` starts that week's first
+      # run from the previous week's entry instead of empty. A constant key would
+      # never save again after the first run, freezing the cache at whatever the
+      # chapters needed that day.
+      #
+      # Named jobs rather than all of them, and the list is a BUDGET decision with a number
+      # behind it. A repository gets 10 GB of Actions cache and this one was already holding
+      # 7.0 GB of buildkit layer blobs, the largest a single 4.4 GB base layer. Caching every
+      # chapter measured 3.83 GB and put the repository at 10.85 GB, over the limit, where
+      # GitHub evicts least-recently-used - which would have been those layers, silently
+      # trading a lockfile-image rebuild for a checkpoint download. The four that download
+      # anything at all are ch05, ch10, ch11-12 and ch13; ch10 alone is 2.66 GB of the 3.83,
+      # and it is the only one of the four never observed failing. Dropping it fits in 1.27 GB.
+      #
+      # Re-measure rather than trusting this list: `gh api .../actions/caches` shows what each
+      # key costs and `.../actions/cache/usage` shows the total. A chapter that starts pulling
+      # a checkpoint shows up as a key with a real size and belongs here; a chapter here that
+      # stops pulling one shows up as a ~200-byte key and does not.
+      - name: HuggingFace cache key
+        id: hfkey
+        if: steps.reach.outputs.have_key
+        run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache HuggingFace checkpoints
+        if: >-
+          steps.reach.outputs.have_key
+          && contains(fromJSON('["ch05","ch11-12","ch13"]'), matrix.name)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ matrix.name }}-${{ steps.hfkey.outputs.week }}
+          restore-keys: |
+            hf-${{ matrix.name }}-
+
       - name: Resolve the image this commit declares
         id: image
         if: steps.reach.outputs.have_key
@@ -1430,20 +1492,55 @@ jobs:
           TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
           MATRIX_FILTER: ${{ matrix.filter }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          HF_HOME: /hf-cache
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           FILTER="${TEST_FILTER_INPUT:-$MATRIX_FILTER}"
           mkdir -p "$ML4T_OUTPUT_DIR"
+          # actions/cache creates the path on a hit and leaves it absent on a miss,
+          # and docker would then create the bind source itself as root-owned.
+          mkdir -p "$HOME/.cache/huggingface"
+          # The cache is the braces and this is the belt: a cache miss, an ISO-week key
+          # rollover, or ch10 (which has no cache entry) still downloads, and an
+          # unauthenticated download is rate limited per IP across a shared runner pool.
+          # Passed only when the secret exists, so the container never sees HF_TOKEN=""
+          # and huggingface_hub is not asked to interpret an empty credential.
+          hf_auth=()
+          if [ -n "${HF_TOKEN:-}" ]; then
+            hf_auth=(-e HF_TOKEN)
+          else
+            echo "::notice::HF_TOKEN is not set; HuggingFace downloads in this job are anonymous and rate limited per IP."
+          fi
           docker run --rm \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -v "$ML4T_OUTPUT_DIR:$ML4T_OUTPUT_DIR" \
+            -v "$HOME/.cache/huggingface:/hf-cache" \
             -w "$GITHUB_WORKSPACE" \
             -e PYTHONPATH -e ML4T_DATA_PATH -e ML4T_OUTPUT_DIR \
             -e MPLBACKEND -e PLOTLY_RENDERER \
-            -e FRED_API_KEY \
+            -e FRED_API_KEY -e HF_HOME "${hf_auth[@]}" \
             "${{ steps.image.outputs.ref }}" \
             python -m pytest tests/test_chapter_notebooks.py \
               -v --tb=short \
               -k "$FILTER"
+
+      # The container is root and the runner is not, so whether the cache can be saved depends
+      # on the mode each writer happens to use. `huggingface_hub` writes 644 and tars fine; the
+      # `evaluate` library writes its downloaded metric scripts 600, and three of those under
+      # `evaluate/downloads/` failed ch10's save with `Cannot open: Permission denied` and tar
+      # exit 2 - reported as a warning, so the job stayed green having cached nothing. One
+      # chmod as root covers every writer instead of one per library. `a+rX` and not `a+rx`:
+      # the capital X sets the execute bit on directories only, leaving file modes alone.
+      #
+      # `always()` because a run that failed still downloaded the checkpoints, and they are the
+      # expensive part to fetch again.
+      - name: Let the runner read what the container cached
+        if: >-
+          always() && steps.reach.outputs.have_key && steps.image.outputs.ref != ''
+          && contains(fromJSON('["ch05","ch11-12","ch13"]'), matrix.name)
+        run: |
+          docker run --rm -v "$HOME/.cache/huggingface:/hf-cache" \
+            "${{ steps.image.outputs.ref }}" chmod -R a+rX /hf-cache
 
   # ---------------------------------------------------------------------------
   # Case study pipeline tests — inside Docker (ml4t/ml4t:latest)

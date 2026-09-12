@@ -1506,7 +1506,20 @@ case_studies/us_equities_panel/12_dl_weekly:
     does have cannot make a run safe, only small. It is the one uep modelling notebook off the
     research boundary.
 
-case_studies/us_equities_panel/20_strategy_analysis:
+case_studies/us_equities_panel/20_holdout_predictions:
+  exempt: true
+  exempt_reason: >-
+    The holdout stage refits from an immutable canonical training spec, and
+    research/models.py::reconstruct_locked_model_request refuses a spec whose execution_tier is
+    not canonical. Structural, and shared by every case study's holdout pair.
+
+case_studies/us_equities_panel/21_holdout_backtest:
+  exempt: true
+  exempt_reason: >-
+    Reads the holdout prediction set 20_holdout_predictions produces, which cannot exist in a
+    preview workspace for the reason recorded on that entry.
+
+case_studies/us_equities_panel/22_strategy_analysis:
   writes: []
   blocked_by: 520
   blocked_reason: >-

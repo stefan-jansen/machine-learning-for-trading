@@ -61,6 +61,37 @@ def _resolve_release_root(named: str | Path | None) -> Path:
     return Path(named).expanduser().resolve()
 
 
+def _resolve_entry_point(named: str | None) -> str | None:
+    """An explicit entry point wins over the one the runner named in `ML4T_ENTRY_POINT`.
+
+    Same precedence as `_resolve_release_root`, and for the same reason: the caller knows best,
+    the environment knows something rather than nothing, and neither is inferred.
+
+    The launcher sets the variable because the kernel cannot find the answer for itself. Under
+    papermill the executing file is a temporary `.ipynb`, `__file__` is absent, and nothing about
+    the notebook reaches the kernel - measured 2026-09-12 by probing a papermill run for
+    `PAPERMILL_*` in `os.environ`, in `globals()` and in `dir()`: all three empty. A frame walk is
+    therefore wrong exactly where the answer is needed, which is why the field is stated rather
+    than inferred. `nb-run.sh` and `tests/pm_helpers.run_notebook` both know the stem when they
+    launch, so they say it.
+
+    The value is normalized to a stem: a directory part and a `.py` or `.ipynb` suffix are
+    dropped, so `case_studies/etfs/08_tabular_dl.py` and `08_tabular_dl` record the same thing.
+    Registries already hold both spellings - `nasdaq100_microstructure` carries a `14_backtest.py`
+    beside its `06_linear` - and a column that sometimes has an extension is a column every query
+    has to strip.
+    """
+    if named is None:
+        named = os.environ.get("ML4T_ENTRY_POINT")
+    if not named:
+        return None
+    stem = Path(named).name
+    for suffix in (".py", ".ipynb"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+    return stem or None
+
+
 def _release_manifest_digest(case_dir: Path) -> str:
     release_manifest = case_dir / "run_log" / ".release" / "SHA256SUMS"
     if release_manifest.exists():
@@ -169,9 +200,11 @@ class Study:
     read_only: bool
     manifest: dict
     # The notebook that opened this study, recorded on every training run it registers so the
-    # registry can answer "which notebook wrote this". Stated by the caller rather than inferred:
-    # under papermill the executing file is a temp .ipynb and `__file__` may be absent entirely,
-    # so a frame walk is wrong exactly where it would be needed.
+    # registry can answer "which notebook wrote this". Stated rather than inferred: under
+    # papermill the executing file is a temp .ipynb and `__file__` may be absent entirely, so a
+    # frame walk is wrong exactly where it would be needed. Who states it is the only thing that
+    # has changed - the notebook if it passes one, otherwise the runner through
+    # `ML4T_ENTRY_POINT`. See `_resolve_entry_point`.
     entry_point: str | None = None
     # The tier this study was opened for, held rather than re-derived. `ML4T_OUTPUT_DIR` is
     # process-global and `activate` never clears it, so every consumer that read the tier from
@@ -207,6 +240,7 @@ class Study:
         and `Result.open` read it and nothing else.
         """
         case_dir = Path(case_dir).expanduser().resolve()
+        entry_point = _resolve_entry_point(entry_point)
         return cls(
             case_study=case_study or case_dir.name,
             root=case_dir,
@@ -234,6 +268,7 @@ class Study:
     ) -> Study:
         execution_tier = ExecutionTier(execution_tier)
         release_root = _resolve_release_root(release_root)
+        entry_point = _resolve_entry_point(entry_point)
         release_case_dir = release_root / "case_studies" / case_study
         if not release_case_dir.is_dir():
             raise FileNotFoundError(f"Unknown released case study: {release_case_dir}")
@@ -325,6 +360,7 @@ class Study:
     ) -> Study:
         """Open the canonical generated-artifact links for maintainer regeneration."""
         release_root = _resolve_release_root(release_root)
+        entry_point = _resolve_entry_point(entry_point)
         _refuse_incidental_regeneration(release_root)
         case_dir = release_root / "case_studies" / case_study
         if not case_dir.is_dir():
@@ -609,6 +645,9 @@ def open_study(
     """
     tier = ExecutionTier(execution_tier)
     release_root = _resolve_release_root(release_root)
+    # Resolved here as well as in the constructors below, because the isolated preview branch
+    # builds a `Study` directly rather than going through one of them.
+    entry_point = _resolve_entry_point(entry_point)
     if tier is ExecutionTier.CANONICAL:
         if workspace is None:
             return Study.regenerate(case_study, release_root=release_root, entry_point=entry_point)
