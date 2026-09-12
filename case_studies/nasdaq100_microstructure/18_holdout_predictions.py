@@ -54,7 +54,7 @@ warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
-from case_studies.research.models import reconstruct_locked_model_request
+from case_studies.research.models import _family_module, reconstruct_locked_model_request
 from case_studies.utils.registry import training_hash_from_spec
 from case_studies.utils.strategy_analysis import (
     holdout_generations_to_retire,
@@ -97,6 +97,36 @@ print(
     f"  validation Sharpe {carrier['val_sharpe']:.3f}, max drawdown {carrier['max_drawdown']:.3f}"
 )
 print(f"  fitted by training run {carrier['training_hash']}")
+
+# Whether this family can be refitted at all, asked before anything reads the window.
+#
+# Every stage below - the holdout CV derivation, the re-keying, the request, the retirement
+# check - assumes the selected configuration is a fit that can be repeated on a later fold.
+# The ensemble introduced in `14_backtest` Section 4 is not: it is the mean of twelve gbm
+# forecasts, so its holdout counterpart is the mean of those twelve models' *holdout*
+# forecasts, which is twelve refits and an average rather than the one refit this notebook
+# performs. `case_studies/utils/ensemble.py` refuses the re-key for that reason, and that
+# refusal would otherwise arrive several steps in, after the window derivation has run.
+#
+# Asked of the adapter rather than of a family name, so a family that gains the hooks stops
+# being refused without anything here changing.
+_carrier_module = _family_module(carrier["family"])
+_missing_hooks = [
+    hook
+    for hook in ("rekey_holdout_spec", "reconstruct_locked_request", "validate_locked_run")
+    if not callable(getattr(_carrier_module, hook, None))
+]
+if _missing_hooks:
+    msg = (
+        f"the selected configuration is {carrier['family']}/{carrier['config_name']}, and that "
+        f"family cannot be refitted on the holdout fold: {_carrier_module.__name__} implements "
+        f"none of {_missing_hooks}. For the mean-forecast ensemble this is not an oversight in "
+        "the adapter - an ensemble has no fit of its own, so its holdout forecast is the mean of "
+        "its members' holdout forecasts and producing it means refitting every member and "
+        "averaging the results under a new ensemble identity. That is a stage this case study "
+        "does not have. Nothing has been written and the window has not been read."
+    )
+    raise NotImplementedError(msg)
 
 # %% [markdown]
 # The checkpoint is part of the configuration. Where a family publishes a prediction set per

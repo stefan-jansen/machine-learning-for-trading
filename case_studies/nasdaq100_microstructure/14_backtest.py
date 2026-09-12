@@ -48,8 +48,10 @@ import time
 import polars as pl
 
 from case_studies.research import (
+    SUPERSEDES_LIVE,
     OfficialPopulation,
     open_study,
+    population_supersedes,
     prediction_rows_at,
     reuse_disclosure,
     superseded_members_at,
@@ -1104,11 +1106,27 @@ else:
         # immutable once written. A population is idempotent under its own hash, so a
         # re-run of an unchanged ensemble re-opens the one it published rather than
         # writing a second generation.
+        #
+        # `supersedes` is the other half, and it is not optional here the way it is for a
+        # notebook whose population changes only when someone edits it. This population's
+        # single member is a hash over the members' forecasts, so any refit upstream - one
+        # gbm configuration re-fitted, a checkpoint schedule changed, a feature artifact
+        # rebuilt - gives the ensemble a new prediction identity. `create` refuses changed
+        # membership under an existing name without being told what it replaces, so the
+        # publish would raise before the backtest below on the first upstream refit, and the
+        # previous generation would stay in force. `SUPERSEDES_LIVE` resolves to whatever
+        # generation is in force, which is right in all three cases the resolver documents:
+        # nothing on a clean clone, the same population on an unchanged re-run, and the tip
+        # on a refit.
+        _population_name = f"{CASE_STUDY_ID}-ensemble-{LABEL}-{SPLIT}-v1"
         _population = OfficialPopulation.create(
             study,
-            name=f"{CASE_STUDY_ID}-ensemble-{LABEL}-{SPLIT}-v1",
+            name=_population_name,
             member_kind="prediction",
             members=(ensemble_prediction_hash,),
+            supersedes=population_supersedes(
+                study, name=_population_name, declared=SUPERSEDES_LIVE
+            ),
         )
         print(
             f"\nEnsemble registered: {ensemble_prediction_hash} "
