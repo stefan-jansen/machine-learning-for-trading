@@ -15,6 +15,7 @@ whether or not the column it exists for is filled.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -202,11 +203,25 @@ def test_the_runner_puts_the_stem_in_front_of_the_kernel(tmp_path: Path) -> None
     set. This runs a real notebook through the real runner and asks the kernel what it received,
     because that is the step the value has to survive: papermill forwards `os.environ` to the
     kernel and nothing else, and the whole mechanism rests on the launcher setting it before it
-    calls `pm.execute_notebook`. Without this, deleting that line leaves every other test green.
-    """
-    from jupyter_client.kernelspec import find_kernel_specs
+    calls `pm.execute_notebook`. Without this, deleting that line in `pm_helpers` leaves every
+    other test green.
 
-    from tests.pm_helpers import run_notebook
+    Driven in a subprocess rather than in-process, and that is not tidiness. `run_notebook` calls
+    `pm.execute_notebook`, which drives a kernel through asyncio, and `tests/test_async_utils.py`
+    applies `nest_asyncio` - which patches the event loop policy for the rest of the process. Any
+    notebook executed in-process after that point raises `AssertionError: Timeout should be used
+    inside a task`, so this passes when the file runs alone and fails in the suite, which is
+    exactly what it did: green locally, red in `test-unit` at 5,377 other tests passing.
+
+    Reproduced in a venv built from the `test-unit` install list, running
+    `test_async_utils.py` first: the in-process form fails and this one passes in the same
+    session. A fresh interpreter has no patched policy to inherit, and the launcher's behaviour
+    is what is under test either way.
+    """
+    import subprocess
+    import sys
+
+    from jupyter_client.kernelspec import find_kernel_specs
 
     # Named rather than skipped. Without a kernelspec this fails inside jupytext as
     # `KeyError: Please choose a kernel name among dict_keys([])`, which says nothing about
@@ -226,12 +241,23 @@ def test_the_runner_puts_the_stem_in_front_of_the_kernel(tmp_path: Path) -> None
         'Path(os.environ["ML4T_PROBE_OUT"]).write_text(str(os.environ.get("ML4T_ENTRY_POINT")))\n'
     )
     seen = tmp_path / "seen.txt"
-    result = run_notebook(
-        py_path=probe,
-        parameters={},
-        timeout=120,
-        output_dir=tmp_path / "out",
-        extra_env={"ML4T_PROBE_OUT": str(seen)},
+    driver = (
+        "from pathlib import Path\n"
+        "from tests.pm_helpers import run_notebook\n"
+        f"result = run_notebook(py_path=Path({str(probe)!r}), parameters={{}}, timeout=120,\n"
+        f"                      output_dir=Path({str(tmp_path / 'out')!r}),\n"
+        f"                      extra_env={{'ML4T_PROBE_OUT': {str(seen)!r}}})\n"
+        "print('STATUS:', result['status'], result.get('error'))\n"
     )
-    assert result["status"] == "ok", result.get("error")
+    repo_root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "-c", driver],
+        cwd=str(repo_root),
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "STATUS: ok" in completed.stdout, completed.stdout + completed.stderr
     assert seen.read_text() == "42_probe_entry_point"
