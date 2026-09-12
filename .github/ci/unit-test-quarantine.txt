@@ -44,10 +44,11 @@
 #
 # `test_holdout_expected_keys`, `test_holdout_force_regenerates` and
 # `test_holdout_selection_is_single_sourced` were all deselected here because
-# `20_strategy_synthesis/holdout.py` imported torch and lightgbm at module scope to win
-# an OpenMP load-order race for the `_train_*` family it dispatched to. Retiring that
-# family removed both imports, so all three left this section: the first two are deleted
-# with the code they pinned, and the third now runs in `test-unit`.
+# `20_strategy_synthesis/holdout.py`, since deleted, imported torch and lightgbm at module
+# scope to win an OpenMP load-order race for the `_train_*` family it dispatched to.
+# Retiring that family removed both imports, so all three left this section: the first two
+# are deleted with the code they pinned, and the third now runs in `test-unit` and reads
+# `case_studies/utils/strategy_analysis.py`, which never imported either package.
 #
 # Measured with the packages genuinely hidden, not with `sys.modules` stubbed. Only two
 # things ask for torch in that test's whole import set, and neither is a dependency:

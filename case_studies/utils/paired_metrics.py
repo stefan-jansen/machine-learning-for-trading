@@ -65,7 +65,7 @@ from case_studies.utils.uncertainty import (
 )
 from utils.paths import get_case_study_dir
 
-# Cross-stage rank-1 pooling stages — mirrors holdout.py::HOLDOUT_SELECTION_STAGES.
+# Cross-stage rank-1 pooling stages - mirrors strategy_analysis.SELECTION_STAGES.
 _PAIRED_STAGES = ("signal", "allocation", "risk_overlay")
 
 
@@ -559,8 +559,9 @@ def _holdout_lineage_for(
         # registry here references a validation identity, so there is nothing to join on.
         #
         # What prevents a retired carrier from reaching a holdout is upstream instead:
-        # `holdout.select_best_models` ranks over published members only, so a retrain created
-        # from here on descends from a live carrier by construction. Holdout rows written
+        # `strategy_analysis.resolve_canonical_rank1_lineage` ranks over published members
+        # only, so a retrain created from here on descends from a live carrier by
+        # construction. Holdout rows written
         # before that are stale artifacts of an earlier selection, and they are regenerated.
         clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
         params.append(json.dumps(sorted(retired_hashes)))
@@ -969,7 +970,7 @@ def populate_paired_metrics(
     case study. The per-CS selection config that Ch20 reads from module globals
     is passed in:
 
-    * ``label_restriction`` — ``holdout.LABEL_RESTRICTIONS.get(cs)`` (e.g.
+    * ``label_restriction`` - ``strategy_analysis.LABEL_RESTRICTIONS.get(cs)`` (e.g.
       sp500_options → ``frozenset({'ret_to_expiry'})``); None for most CSs.
     * ``rung`` — ``{"predicate", "universe_filter", "exit_at_max_days"}`` for
       the rung-pinned CSs (sp500_options, nasdaq100_microstructure); None else.

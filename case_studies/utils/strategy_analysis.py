@@ -50,8 +50,9 @@ from case_studies.utils.uncertainty import STAGE_SEQUENCE
 # forward returns as daily returns, inflating Sharpes (e.g. fwd_ret_10d
 # allocation Sharpe ~6.5) to non-credible levels. ret_to_expiry runs through
 # the HTM daily-MTM cohort path and is the only label with an honest cost
-# model for this CS. This is the only definition: ``20_strategy_synthesis/holdout.py``
-# imports it from here rather than keeping a copy in sync by comment.
+# model for this CS. This is the only definition in the tree, which
+# ``tests/test_carrier_routing_contract.py`` checks by reading every module: the retired
+# ``20_strategy_synthesis/holdout.py`` kept a second copy in sync by comment, and it drifted.
 LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
     "sp500_options": frozenset({"ret_to_expiry"}),
 }
@@ -65,9 +66,9 @@ LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
 # Ch18 htm_cost_cascade comparison, never as the deployed carrier). Without this
 # pin, full-universe allocation backtests registered by the standard sweep
 # (e.g. the 2026-05-31 L1-grid rollout) leak into rank-1 by raw Sharpe and
-# orphan the liquid-lineage holdout. This is the only definition; ``holdout.py``
-# imports it, and ``select_best_models`` applies it by going through
-# :func:`selectable_validation_candidates` rather than by repeating the filter.
+# orphan the liquid-lineage holdout. This is the only definition; the holdout selection
+# applies it by going through :func:`selectable_validation_candidates` rather than by
+# repeating the filter.
 UNIVERSE_RESTRICTIONS: dict[str, str] = {
     "sp500_options": "liquid",
 }
@@ -785,9 +786,10 @@ def selectable_validation_candidates(
 ) -> list[dict[str, Any]]:
     """Every validation backtest this case study may select from, best Sharpe first.
 
-    One implementation, because holdout selection had two. ``holdout.select_best_models``
-    built its own pool out of ``BacktestExplorer.best`` per stage and this function's
-    caller built one in SQL, and the two were held together by a comment. They applied
+    One implementation, because holdout selection had two. The retired
+    ``20_strategy_synthesis/holdout.py::select_best_models`` built its own pool out of
+    ``BacktestExplorer.best`` per stage and this function's caller built one in SQL, and
+    the two were held together by a comment. They applied
     different eligibility filters - membership on the prediction side there, a
     retired-set exclusion on both sides here - and different orderings, so they could
     name different configurations for the single holdout use. Measured on ``fx_pairs``
@@ -1190,8 +1192,8 @@ def resolve_canonical_rank1_lineage(
     # it could resolve a carrier on a label the pool excludes - the carrier is then not in
     # the pool, and the notebook reports it missing. The default is the declared
     # restriction, which is what every canonical run wants. The pool itself is
-    # `selectable_validation_candidates`, which `holdout.select_best_models` also ranks,
-    # so the two cannot name different carriers for the single holdout use.
+    # `selectable_validation_candidates`, which is the only ranking there is, so nothing
+    # can name a different carrier for the single holdout use.
     candidates = selectable_validation_candidates(case_study, admitted=admitted, labels=labels)
     val = candidates[0]
     # The field is already in its final order, common-support re-ranking included, so the

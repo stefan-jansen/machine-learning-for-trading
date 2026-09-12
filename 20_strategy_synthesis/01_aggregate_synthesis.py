@@ -272,7 +272,9 @@ refuse_partial_full_mode(
 # entry here skip the filter altogether.
 
 # %%
-from holdout import LABEL_RESTRICTIONS as _CLUSTER_LABEL_RESTRICTIONS  # noqa: E402
+from case_studies.utils.strategy_analysis import (  # noqa: E402
+    LABEL_RESTRICTIONS as _CLUSTER_LABEL_RESTRICTIONS,
+)
 
 _RUNG3_PREDICATE = (pl.col("universe_filter") == "liquid") & pl.col("exit_at_max_days").is_null()
 
@@ -951,7 +953,7 @@ paired_skips: list[dict] = []
 for cs, explorer in explorers.items():
     label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
     # Cross-stage rank-1 (signal/allocation/risk_overlay), mirroring
-    # holdout.py::HOLDOUT_SELECTION_STAGES. Dedup by prediction_hash so the
+    # strategy_analysis.SELECTION_STAGES. Dedup by prediction_hash so the
     # leader corresponds to a distinct trained model.
     cand = pl.concat(
         [_best_live(explorer, cs, s, 2000) for s in ("signal", "allocation", "risk_overlay")],
@@ -1598,8 +1600,8 @@ extra_paired_rows: list[dict] = []
 _PAIRED_STAGES = ("signal", "allocation", "risk_overlay")
 for cs, explorer in explorers.items():
     label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    # Pool validation backtests across the same stages that holdout.py uses
-    # for cross-stage rank-1 (`HOLDOUT_SELECTION_STAGES`). When the val
+    # Pool validation backtests across the same stages the holdout selection
+    # uses for cross-stage rank-1 (`strategy_analysis.SELECTION_STAGES`). When the val
     # rank-1 is an allocation- or risk_overlay-stage strategy, the holdout
     # retrain uses THAT strategy_spec; pulling only signal-stage candidates
     # here surfaces a leader whose signal.method differs from the holdout's,
@@ -1725,9 +1727,9 @@ for cs, explorer in explorers.items():
         )
 
     # Pair #3: holdout rank-1 ↔ validation backtest of the SAME lineage.
-    # Per-CS holdout regen may fall back from val rank-1 to rank-K when the
-    # rank-1 retrain produces degenerate predictions (see holdout.py
-    # `generate_holdout` fallback loop). When that happens, comparing the
+    # A case study's holdout notebook may fall back from val rank-1 to rank-K
+    # when the rank-1 retrain produces degenerate predictions. When that happens,
+    # comparing the
     # holdout against the val rank-1 of a *different* lineage measures
     # cross-lineage difference, not decay. Always pair against the
     # holdout-lineage's own validation backtest so val_rank1_self holds its

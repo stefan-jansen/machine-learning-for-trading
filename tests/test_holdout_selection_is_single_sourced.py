@@ -15,16 +15,20 @@ answered the first while the resolver answered the second. Two strategy specific
 one model, and `select_holdout_self_backtest` matches the specification exactly, so the
 disagreement decided which strategy spent the holdout.
 
-Both properties are pinned here, on the two registries where they are visible.
+The duplicate is gone. `20_strategy_synthesis/holdout.py` was deleted once Chapter 20
+stopped generating holdouts, and `resolve_canonical_rank1_lineage` is the only path left,
+so what is pinned here is no longer an agreement between two implementations. It is the
+set of rules that decides which configuration spends the holdout: the tie-break, the
+declared label restriction, publication membership, the common-support re-ranking, the
+coverage bar, and the refusal. Each is a property of the surviving path and each of these
+tests fails if that path stops applying it.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import importlib.util
 import json
 import sqlite3
-import sys
 from pathlib import Path
 
 import polars as pl
@@ -32,15 +36,6 @@ import pytest
 
 import case_studies.utils.uncertainty as uncertainty
 from case_studies.utils import strategy_analysis
-
-_SPEC = importlib.util.spec_from_file_location(
-    "strategy_synthesis_holdout_selection",
-    Path(__file__).resolve().parents[1] / "20_strategy_synthesis" / "holdout.py",
-)
-assert _SPEC is not None and _SPEC.loader is not None
-HOLDOUT = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = HOLDOUT
-_SPEC.loader.exec_module(HOLDOUT)
 
 CASE_STUDY = "fixture_case_study"
 
@@ -140,27 +135,20 @@ def _registry(
 @pytest.fixture
 def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     resolve = lambda case_study, **_: tmp_path / case_study  # noqa: E731
+    # `strategy_analysis` imports this inside each function, so patching the source
+    # module reaches it.
     monkeypatch.setattr("utils.paths.get_case_study_dir", resolve)
-    # `holdout.py` binds the name at import, so patching the source module does not reach
-    # it; `strategy_analysis` imports it inside each function and does see the patch.
-    monkeypatch.setattr(HOLDOUT, "get_case_study_dir", resolve)
     return tmp_path / CASE_STUDY
 
 
-def _both_selections(case_study: str) -> tuple[str, str]:
-    """What each entry point names as the configuration to carry into the holdout."""
-    return (
-        HOLDOUT.select_best_models(case_study, top_n=1)[0]["backtest_hash"],
-        strategy_analysis.resolve_canonical_rank1_lineage(case_study)["val_backtest_hash"],
-    )
+def _selected(case_study: str) -> str:
+    """The configuration the holdout selection names, as a validation backtest hash."""
+    return strategy_analysis.resolve_canonical_rank1_lineage(case_study)["val_backtest_hash"]
 
 
-def _both_selection_sharpes(case_study: str) -> tuple[float, float]:
-    """The Sharpe each entry point reports for the configuration it selected."""
-    return (
-        HOLDOUT.select_best_models(case_study, top_n=1)[0]["val_sharpe"],
-        strategy_analysis.resolve_canonical_rank1_lineage(case_study)["val_sharpe"],
-    )
+def _selected_sharpe(case_study: str) -> float:
+    """The Sharpe the selection reports for the configuration it named."""
+    return strategy_analysis.resolve_canonical_rank1_lineage(case_study)["val_sharpe"]
 
 
 def test_an_exact_sharpe_tie_resolves_to_the_specification_the_holdout_replays(
@@ -170,37 +158,40 @@ def test_an_exact_sharpe_tie_resolves_to_the_specification_the_holdout_replays(
 
     Under a tie the signal-only specification wins, because that is the one
     `select_holdout_self_backtest` replays, so the selected lineage stays poolable with
-    its own holdout. Building the pool stage by stage knew nothing about that rule and
-    ordered on the stage it happened to visit first.
+    its own holdout. The deleted implementation built its pool stage by stage, knew
+    nothing about that rule, and ordered on the stage it happened to visit first - which
+    is how `fx_pairs` got two answers for one tie.
     """
+    # `aa_allocation_row` sorts first on the final `backtest_hash ASC` key, so the only
+    # thing that can put the signal-only row in front of it is the tie-break itself.
+    # Naming it `zz_` made the assertion pass whether the rule was applied or not.
     _registry(
         case_dir / "run_log" / "registry.db",
         [
-            ("zz_allocation_row", "pred_b", "allocation", 2.0, _WITH_ALLOCATION),
+            ("aa_allocation_row", "pred_b", "allocation", 2.0, _WITH_ALLOCATION),
             ("mm_signal_row", "pred_a", "signal", 2.0, _SIGNAL_ONLY),
         ],
     )
 
-    from_holdout, from_resolver = _both_selections(CASE_STUDY)
-    assert from_holdout == "mm_signal_row", (
-        f"the holdout entry point selected {from_holdout}; under an exact tie the "
-        "specification the holdout replays is the one that wins"
+    selected = _selected(CASE_STUDY)
+    assert selected == "mm_signal_row", (
+        f"the holdout selection named {selected}; under an exact tie the specification "
+        "the holdout replays is the one that wins"
     )
-    assert from_resolver == "mm_signal_row"
 
 
-def test_a_declared_label_restriction_binds_the_holdout_entry_point(
+def test_a_declared_label_restriction_binds_the_holdout_selection(
     case_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One declaration, both readers.
+    """One declaration, and the selection reads it.
 
     `LABEL_RESTRICTIONS` names the labels eligible to anchor a case study's registered
     strategy - sp500_options' four legacy diagnostic variants went through a path that
     treats a 5d forward return as a daily one, so their Sharpes are not comparable with
-    anything. The declaration is edited here rather than in a second copy, which is the
-    whole point: it used to exist twice and the holdout selector read the copy that was
-    not edited, so a restriction the case study declared did not reach the selection that
-    spends its holdout.
+    anything. The restriction is patched on `strategy_analysis` here, which is where it is
+    declared; when the declaration existed twice, the holdout selector read the copy that
+    was not edited, so a restriction the case study declared did not reach the selection
+    that spends its holdout.
     """
     monkeypatch.setitem(strategy_analysis.LABEL_RESTRICTIONS, CASE_STUDY, frozenset({"fwd_ret_5d"}))
     _registry(
@@ -216,18 +207,17 @@ def test_a_declared_label_restriction_binds_the_holdout_entry_point(
             ("train_pred_other_label",),
         )
 
-    from_holdout, from_resolver = _both_selections(CASE_STUDY)
-    assert from_holdout == "bt_eligible", (
-        f"the holdout entry point selected {from_holdout}, whose label the case study "
-        "declared ineligible to anchor its strategy"
+    selected = _selected(CASE_STUDY)
+    assert selected == "bt_eligible", (
+        f"the holdout selection named {selected}, whose label the case study declared "
+        "ineligible to anchor its strategy"
     )
-    assert from_resolver == "bt_eligible"
 
 
 def test_a_prediction_the_case_study_publishes_nothing_about_is_not_selectable(
     case_dir: Path,
 ) -> None:
-    """Membership, not exclusion, and both entry points must apply it.
+    """Membership, not exclusion.
 
     ``pred_experimental`` outranks everything and no population lists it, so nobody
     retired it: an exclusion set admits it and a membership set does not. That is how an
@@ -243,20 +233,10 @@ def test_a_prediction_the_case_study_publishes_nothing_about_is_not_selectable(
         published=["pred_published"],
     )
 
-    from_holdout, from_resolver = _both_selections(CASE_STUDY)
-    assert from_holdout == "bt_published"
-    assert from_resolver == "bt_published"
-
-
-def test_the_selection_restrictions_have_exactly_one_definition() -> None:
-    """The comments said "keep these in sync". Now there is nothing to keep in sync.
-
-    Identity rather than equality: two dicts that happen to hold the same entries today
-    are the arrangement this replaces, and it is the one that drifted silently.
-    """
-    assert HOLDOUT.LABEL_RESTRICTIONS is strategy_analysis.LABEL_RESTRICTIONS
-    assert HOLDOUT.UNIVERSE_RESTRICTIONS is strategy_analysis.UNIVERSE_RESTRICTIONS
-    assert HOLDOUT.HOLDOUT_SELECTION_STAGES == strategy_analysis.SELECTION_STAGES
+    assert _selected(CASE_STUDY) == "bt_published", (
+        "a prediction the case study publishes nothing about was selectable; the pool is "
+        "the published population, not everything nobody retired"
+    )
 
 
 # The plain allocator is the better strategy over the whole span and the worse one over the
@@ -287,18 +267,17 @@ def _daily_returns(case_dir: Path, backtest_hash: str, values: list[float]) -> N
     ).write_parquet(out / "daily_returns.parquet")
 
 
-def test_the_common_support_re_ranking_orders_the_field_both_entry_points_read(
+def test_the_common_support_re_ranking_orders_the_field_the_selection_reads(
     case_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A conformal candidate re-orders the field, and both callers must read that order.
+    """A conformal candidate re-orders the field, and the selection must read that order.
 
     A conformal allocator holds nothing until it is calibrated and books the warm-up as
     returns of exactly zero, so a whole-span Sharpe compares it against a different sample
     from every other candidate. The resolver answers that by re-ranking the field on the
-    timestamps every candidate prices. That re-ranking used to sit in the resolver alone,
-    so the other entry point read the same candidates in stored-Sharpe order - which is a
-    different answer whenever the two rankings disagree, and this fixture is built so they
-    do: `bt_plain` stores the higher Sharpe and loses over the thirty sessions both price.
+    timestamps every candidate prices. The fixture is built so the two rankings disagree:
+    `bt_plain` stores the higher Sharpe and loses over the thirty sessions both price, so
+    a selection reading stored Sharpe returns a different candidate and this test fails.
 
     It changes the order and not only the winner, which is why it belongs to the field: the
     holdout retrain falls back to rank-2 when rank-1's refit degenerates, and a rank-2
@@ -315,22 +294,19 @@ def test_the_common_support_re_ranking_orders_the_field_both_entry_points_read(
     _daily_returns(case_dir, "bt_plain", _PLAIN_RETURNS)
     _daily_returns(case_dir, "bt_conformal", _CONFORMAL_RETURNS)
 
-    from_holdout, from_resolver = _both_selections(CASE_STUDY)
-    assert from_holdout == "bt_conformal", (
-        f"the holdout entry point selected {from_holdout}, which is the stored-Sharpe "
-        "answer; the field was re-ranked on common support and it read the order from "
+    selected = _selected(CASE_STUDY)
+    assert selected == "bt_conformal", (
+        f"the holdout selection named {selected}, which is the stored-Sharpe answer; the "
+        "field was re-ranked on common support and the selection read the order from "
         "before that"
     )
-    assert from_resolver == "bt_conformal"
 
-    # And they have to report the same number for it. The common-support Sharpe is what
-    # the selection was made on; the stored one describes a different sample and is what
-    # the whole re-ranking exists to stop the field being compared by.
-    holdout_sharpe, resolver_sharpe = _both_selection_sharpes(CASE_STUDY)
-    assert holdout_sharpe == resolver_sharpe
-    assert holdout_sharpe != 1.0, (
-        "the holdout entry point reported the stored Sharpe of the row it selected, not "
-        "the common-support Sharpe the selection was made on"
+    # And the number reported for it has to be the one the selection was made on. The
+    # stored Sharpe describes a different sample and is what the whole re-ranking exists
+    # to stop the field being compared by.
+    assert _selected_sharpe(CASE_STUDY) != 1.0, (
+        "the selection reported the stored Sharpe of the row it named, not the "
+        "common-support Sharpe it was selected on"
     )
 
 
@@ -366,46 +342,25 @@ def test_a_retired_prediction_cannot_raise_the_coverage_bar_over_the_live_ones(
             ("train_pred_retired",),
         )
 
-    from_holdout, from_resolver = _both_selections(CASE_STUDY)
-    assert from_holdout == "bt_live"
-    assert from_resolver == "bt_live"
+    assert _selected(CASE_STUDY) == "bt_live", (
+        "a retired prediction set the coverage maximum for its group and emptied the "
+        "field of live rows; the maximum has to be taken inside the published population"
+    )
 
 
-def test_a_registry_with_nothing_eligible_answers_no_holdout_rather_than_raising(
-    case_dir: Path,
-) -> None:
-    """Asking whether a holdout exists is a question, and "nothing to select" is an answer.
+def test_an_empty_field_is_refused_rather_than_answered(case_dir: Path) -> None:
+    """Nothing eligible is a refusal, not a rank-1.
 
-    `has_holdout_predictions` reports whether a holdout already covers the current top-N.
-    A case study whose validation stages have not run yet has no top-N, and that is a
-    normal state - the driver's next step is to generate one. The check used to catch
-    `ValueError`, which is what the pool this module built for itself raised; routing it
-    through the canonical selector changed the exception under it to `RuntimeError`.
+    A case study whose validation stages have not run yet has no field to rank. The
+    selection raises `NoSelectableCandidates` rather than returning a row, so a caller
+    cannot carry an unselected configuration into the holdout. `NoSelectableCandidates`
+    subclasses `RuntimeError`; a caller that wants to treat "not run yet" as a normal
+    state catches it deliberately, which is what `tests/skip_blockers.py:158` does.
 
-    The consequence was not local. `20_strategy_synthesis/00_holdout_predictions.py` put
-    the call at `was_cached = has_holdout_predictions(cs_id) and not FORCE`, one line
-    ABOVE the `try` that guarded generation, so a single un-run case study aborted the
-    loop and every case study after it in `cs_list` never ran. That driver is retired -
-    Chapter 20 no longer generates holdouts - so the property is pinned here for its own
-    sake: an availability check answers with a bool, and a caller that treats "not run
-    yet" as an error is reading a question as a failure.
-    """
-    _registry(case_dir / "run_log" / "registry.db", [])
-
-    assert HOLDOUT.has_holdout_predictions(CASE_STUDY) is False
-
-
-def test_the_refusal_is_still_raised_where_it_has_to_be_reported(case_dir: Path) -> None:
-    """The other half: the availability check absorbs it, the selection does not.
-
-    `NoSelectableCandidates` subclasses `RuntimeError`, so returning False from the check
-    is not a decision to stay quiet: the selector still refuses when asked directly, with
-    no guard, and the refusal reaches the caller's own handler naming the case study it
-    belongs to. `generate_holdout` was that caller and is retired; the two halves still
-    have to differ, or a check that absorbs the refusal would be the only thing anyone
-    asks and the refusal would never be reported at all.
+    The registry here is initialised and empty, which is a different cause from the ruin
+    refusal `tests/test_common_support_trigger.py` pins.
     """
     _registry(case_dir / "run_log" / "registry.db", [])
 
     with pytest.raises(strategy_analysis.NoSelectableCandidates):
-        HOLDOUT.select_best_models(CASE_STUDY, top_n=1)
+        strategy_analysis.resolve_canonical_rank1_lineage(CASE_STUDY)
