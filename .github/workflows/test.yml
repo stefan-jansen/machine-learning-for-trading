@@ -1489,6 +1489,22 @@ jobs:
               -v --tb=short \
               -k "$FILTER"
 
+      # The container is root and the runner is not, so whether the cache can be saved depends
+      # on the mode each writer happens to use. `huggingface_hub` writes 644 and tars fine; the
+      # `evaluate` library writes its downloaded metric scripts 600, and three of those under
+      # `evaluate/downloads/` failed ch10's save with `Cannot open: Permission denied` and tar
+      # exit 2 - reported as a warning, so the job stayed green having cached nothing. One
+      # chmod as root covers every writer instead of one per library. `a+rX` and not `a+rx`:
+      # the capital X sets the execute bit on directories only, leaving file modes alone.
+      #
+      # `always()` because a run that failed still downloaded the checkpoints, and they are the
+      # expensive part to fetch again.
+      - name: Let the runner read what the container cached
+        if: always() && steps.reach.outputs.have_key && steps.image.outputs.ref != ''
+        run: |
+          docker run --rm -v "$HOME/.cache/huggingface:/hf-cache" \
+            "${{ steps.image.outputs.ref }}" chmod -R a+rX /hf-cache
+
   # ---------------------------------------------------------------------------
   # Case study pipeline tests — inside Docker (ml4t/ml4t:latest)
   # ---------------------------------------------------------------------------
