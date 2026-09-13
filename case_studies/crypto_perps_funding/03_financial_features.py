@@ -63,7 +63,6 @@
 # %%
 """Crypto Perps Funding: Feature Engineering."""
 
-import warnings
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -97,10 +96,11 @@ from case_studies.utils.feature_engineering import (
     trailing_volatility,
     warmup_audit,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_crypto_perps
 from utils.paths import get_case_study_dir
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 CASE_DIR = get_case_study_dir("crypto_perps_funding")
 FEATURES_DIR = CASE_DIR / "features"

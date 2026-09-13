@@ -47,11 +47,7 @@
 # %%
 """US Firm Characteristics: Holdout Predictions."""
 
-import warnings
-
 import polars as pl
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
@@ -63,7 +59,10 @@ from case_studies.utils.strategy_analysis import (
     registered_holdout_generations,
     resolve_solvent_carrier,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from utils.paths import get_case_study_dir
+
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"

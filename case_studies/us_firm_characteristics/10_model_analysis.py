@@ -56,7 +56,6 @@
 """Model Analysis: US Firm Characteristics, comparative evaluation across model families."""
 
 import sqlite3
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -90,11 +89,12 @@ from case_studies.utils.model_viz import (
 from case_studies.utils.notebook_render import (
     conformal_coverage_diagnostic,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY = "us_firm_characteristics"

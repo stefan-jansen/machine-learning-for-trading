@@ -49,7 +49,6 @@
 # %%
 """CME Futures: Feature Engineering."""
 
-import warnings
 from datetime import date
 
 import numpy as np
@@ -88,12 +87,13 @@ from case_studies.utils.feature_engineering import (
     trailing_return,
     warmup_audit,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_cme_futures
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
 from utils.style import COLORS, show_plotly_with_alt, style_subplot_titles
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 CASE_DIR = get_case_study_dir("cme_futures")
 FEATURES_DIR = CASE_DIR / "features"

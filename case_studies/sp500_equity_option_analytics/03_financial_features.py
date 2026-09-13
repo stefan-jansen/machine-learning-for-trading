@@ -62,7 +62,6 @@
 # %%
 """S&P 500 Equity + Option Analytics: Feature Engineering."""
 
-import warnings
 from datetime import date
 
 import numpy as np
@@ -89,10 +88,11 @@ from case_studies.utils.feature_engineering import (
     register_frame,
     warmup_audit,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.paths import display_path, get_case_study_dir
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 CASE_STUDY_ID = "sp500_equity_option_analytics"
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)

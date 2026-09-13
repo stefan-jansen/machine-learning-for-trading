@@ -64,7 +64,6 @@
 
 import json
 import sqlite3
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -74,7 +73,6 @@ import polars as pl
 import torch  # ml4t.diagnostic loads cudart; torch must import first
 import yaml
 
-warnings.filterwarnings("ignore")
 
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
 from ml4t.diagnostic.integration import (
@@ -1237,6 +1235,9 @@ print(attr_df)
 # %%
 # Placebo regression: residual α and HAC t-stat on EW alone.
 import statsmodels.api as sm
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
+
+apply_notebook_warning_policy()
 
 X = sm.add_constant(bench_arr)
 ols = sm.OLS(strat_arr, X).fit(cov_type="HAC", cov_kwds={"maxlags": 5})

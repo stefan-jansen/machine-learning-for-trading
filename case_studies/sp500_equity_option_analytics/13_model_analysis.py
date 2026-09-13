@@ -69,7 +69,6 @@
 """Compare model families for the S&P 500 equity and option case study."""
 
 import sqlite3
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -109,8 +108,6 @@ from case_studies.utils.notebook_contracts import (
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY = "sp500_equity_option_analytics"
@@ -1495,6 +1492,9 @@ import sqlite3
 
 from case_studies.utils.registry.store import IDENTITY_VERSION as CAUSAL_IDENTITY_VERSION
 from case_studies.utils.registry.store import current_causal_identities
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
+
+apply_notebook_warning_policy()
 
 _db_path = CASE_DIR / "run_log" / "registry.db"
 causal_rows = []

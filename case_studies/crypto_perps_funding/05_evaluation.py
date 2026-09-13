@@ -57,7 +57,6 @@
 # %%
 """Evaluate crypto financial and temporal features on canonical validation folds."""
 
-import warnings
 from datetime import timedelta
 
 import matplotlib.pyplot as plt
@@ -74,12 +73,13 @@ from case_studies.utils.feature_engineering import (
     families_from_config,
     quantile_profile,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from utils.cv_splits import load_evaluation_config
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0

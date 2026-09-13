@@ -92,6 +92,7 @@ from case_studies.utils.temporal import (
     walk_forward_feature,
     write_model_based,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_cme_futures
 from utils.artifact_specs import load_setup_config, resolve_label_buffer
 from utils.cv_splits import generate_cv_splits, load_evaluation_config, select_folds
@@ -99,7 +100,7 @@ from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_plotly_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% [markdown]
 # ## Configuration

@@ -60,7 +60,6 @@
 # %%
 """S&P 500 Options: Label Engineering."""
 
-import warnings
 from datetime import date
 
 import matplotlib.pyplot as plt
@@ -75,12 +74,13 @@ from case_studies.sp500_options._underlying_returns import reconcile_underlying_
 from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_sp500_daily_bars, load_sp500_options_straddles
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 CASE_STUDY_ID = "sp500_options"
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)

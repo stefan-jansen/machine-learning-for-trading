@@ -45,7 +45,6 @@
 """ETFs: Feature Engineering."""
 
 import logging
-import warnings
 from datetime import date
 
 import polars as pl
@@ -83,11 +82,12 @@ from case_studies.utils.feature_engineering import (
     trailing_volume_ratio,
     warmup_audit,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_etfs, load_macro
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 logging.disable(logging.INFO)
 
 CASE_DIR = get_case_study_dir("etfs")

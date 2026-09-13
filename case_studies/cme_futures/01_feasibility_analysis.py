@@ -49,7 +49,6 @@
 """CME Futures Case Study - Feasibility Analysis."""
 
 import re
-import warnings
 from datetime import date
 
 import matplotlib.pyplot as plt
@@ -60,13 +59,14 @@ from IPython.display import display
 from pandas.tseries.holiday import GoodFriday
 
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_cme_futures
 from utils.config import REPO_ROOT
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "cme_futures"
