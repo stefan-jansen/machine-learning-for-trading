@@ -263,8 +263,7 @@ if profile is not None:
     print_dataset_profile(profile, "ETF UNIVERSE PROFILE")
 else:
     print(f"No profile at {dataset_profile_path(data_path)}")
-    print("This dataset's downloader does not write one. utils.downloading.save_dataset_profile")
-    print("writes a profile beside any parquet it is handed.")
+    print("Written by: python data/etfs/market/download.py")
 
 # %% [markdown]
 # ### Refreshing the profile

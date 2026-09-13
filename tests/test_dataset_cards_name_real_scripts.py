@@ -52,38 +52,36 @@ def test_every_script_a_card_names_exists(card: Path):
 
 
 # A card's profile section offers the reader one of two things: "Written by: python
-# <script>", or a statement that this dataset's downloader writes no profile. The first
-# is a claim about what that script does, and a script that exists but never calls
-# `save_dataset_profile` leaves the reader exactly where `generate_profiles.py` did -
-# running something that does not produce the file they asked for. Three cards carried
-# that form wrongly (etfs, and both microstructure datasets), and the test above passed
-# on all three because the scripts are real.
+# <script>", or a statement that this dataset's downloader writes no profile. Saying both
+# is what the etfs card did - it told a reader with no profile that the downloader writes
+# none, two cells above a section explaining that re-running that downloader refreshes it.
+# One of the two is always wrong and a reader cannot tell which.
+#
+# This checks the contradiction and not the underlying claim, deliberately. Whether a
+# script writes a profile is not decidable from its own text: data/etfs/market/download.py
+# never names save_dataset_profile and writes one anyway, because ETFDataManager.save
+# calls generate_profile and save_profile in ml4t.data.storage.data_profile. A grep-based
+# check called that card wrong once already. Resolving it properly means following
+# first-party delegation through an installed package, which a static test should not
+# pretend to do; the honest check is the one on the card's own two statements.
 _WRITTEN_BY = re.compile(r"Written by:\s*python3?\s+([\w./-]+\.py)")
-
-
-def _resolve(card: Path, script: str) -> Path | None:
-    for candidate in (REPO_ROOT / script, card.parent / script):
-        if candidate.exists():
-            return candidate
-    return None
+_NO_WRITER = re.compile(r"downloader does not write one", re.IGNORECASE)
 
 
 @pytest.mark.parametrize("card", CARDS, ids=lambda p: str(p.relative_to(REPO_ROOT)))
-def test_a_card_credits_a_profile_only_to_a_script_that_writes_one(card: Path):
-    credited = sorted(set(_WRITTEN_BY.findall(card.read_text())))
-    wrong = []
-    for script in credited:
-        path = _resolve(card, script)
-        if path is None or "save_dataset_profile" not in path.read_text():
-            wrong.append(script)
-    assert not wrong, (
-        f"{card.relative_to(REPO_ROOT)} says the profile is written by "
-        f"{', '.join(wrong)}, which never calls save_dataset_profile. Either credit the "
-        f"script that does, or say the downloader writes no profile."
+def test_a_card_does_not_both_credit_a_writer_and_deny_one(card: Path):
+    text = card.read_text()
+    credited = sorted(set(_WRITTEN_BY.findall(text)))
+    denies = bool(_NO_WRITER.search(text))
+    assert not (credited and denies), (
+        f"{card.relative_to(REPO_ROOT)} tells the reader both that the profile is written "
+        f"by {', '.join(credited)} and that this dataset's downloader writes none. "
+        f"One of the two is wrong."
     )
 
 
-def test_some_card_credits_a_writer_so_the_check_is_not_vacuous():
-    """If no card used the "Written by" form, the test above could never fail."""
-    crediting = [c for c in CARDS if _WRITTEN_BY.search(c.read_text())]
-    assert crediting, "no card uses the 'Written by:' form, so the credit check is vacuous"
+def test_both_forms_are_in_use_so_the_check_is_not_vacuous():
+    """If every card used one form, the contradiction above could never arise."""
+    texts = [c.read_text() for c in CARDS]
+    assert any(_WRITTEN_BY.search(t) for t in texts), "no card credits a writer"
+    assert any(_NO_WRITER.search(t) for t in texts), "no card denies a writer"
