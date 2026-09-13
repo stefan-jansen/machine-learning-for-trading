@@ -506,6 +506,87 @@ def test_every_declared_reduction_key_is_one_some_family_accepts(overrides: dict
     assert unknown == {}
 
 
+# A fixture entry that RAISES a value the preset patch already floored, with the reason it is
+# worth the cost. `tests/preset_patches.py` patches a copy of `case_studies/config/` that
+# `tests/conftest.py:390` builds, and `overrides.yaml` runs against that copy, so a reduction
+# declared here replaces the patched value rather than reinforcing it. Raising one is
+# sometimes right - it is the only way to keep a dimension the notebook is *about* - but it is
+# a cost decision, and the entry that makes it silently reads as a reduction.
+#
+# `tests/smoke.yaml` is not covered and must not be: `scripts/nb-run.sh` executes it and
+# patches nothing, so a value there is measured against the canonical preset.
+RAISES_THE_PATCHED_PRESET = {
+    "case_studies/cme_futures/07_gbm": (
+        "20 iterations every 10 against the patched 2 every 1. Publishing more than one "
+        "checkpoint is the dimension this notebook demonstrates, and the entry prices the "
+        "fit against production's 500 every 50."
+    ),
+    "case_studies/nasdaq100_microstructure/07_gbm": "As cme_futures/07_gbm.",
+    "case_studies/sp500_options/07_gbm": "As cme_futures/07_gbm.",
+    "case_studies/us_firm_characteristics/06_gbm": "As cme_futures/07_gbm.",
+}
+
+
+def _patched_preset_floor() -> dict[str, float]:
+    """The largest value any preset patch gives each numeric key.
+
+    A declared value above it is a raise whichever `config/<model_type>/` directory the entry
+    resolves to, and one at or below the smallest cannot be - so the comparison needs no map
+    from a notebook stem to a model directory, which is the part a stem heuristic gets wrong
+    on the next notebook named differently.
+    """
+    from tests.preset_patches import _TEST_PRESET_PATCHES
+
+    floor: dict[str, float] = {}
+    for patches in _TEST_PRESET_PATCHES.values():
+        for key, value in patches.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                floor[key] = max(floor.get(key, value), value)
+    return floor
+
+
+def _raised_keys(reductions: dict, floor: dict[str, float]) -> list[str]:
+    return sorted(
+        name
+        for name, value in reductions.items()
+        if name in floor
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value > floor[name]
+    )
+
+
+def test_a_reduction_that_raises_the_patched_preset_says_why(overrides: dict) -> None:
+    """A fixture value above the patched preset is a cost decision someone writes down."""
+
+    floor = _patched_preset_floor()
+    undeclared = {
+        key: _raised_keys(reductions, floor)
+        for key, reductions in _declared_reductions(overrides).items()
+        if _raised_keys(reductions, floor) and key not in RAISES_THE_PATCHED_PRESET
+    }
+
+    assert undeclared == {}
+
+
+def test_every_entry_that_claims_a_raise_still_makes_one(overrides: dict) -> None:
+    """The other direction: a reason left behind after the value came down is stale prose.
+
+    Without this the table only ever grows, and an entry reduced back under the patch keeps a
+    row saying it costs more than it does.
+    """
+
+    floor = _patched_preset_floor()
+    declared = _declared_reductions(overrides)
+    stale = [
+        key
+        for key, reason in RAISES_THE_PATCHED_PRESET.items()
+        if not reason.strip() or key not in declared or not _raised_keys(declared[key], floor)
+    ]
+
+    assert stale == []
+
+
 def test_a_causal_reduction_declares_all_four_fields(overrides: dict) -> None:
     """The DML resolver requires its four fields, and a partial mapping is worse than none.
 
