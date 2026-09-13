@@ -315,14 +315,23 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # %% [markdown]
 # ## §1 Handoff from model analysis
 #
-# The strategy phase inherits one configuration, chosen once across the stages
-# that are eligible for the holdout - signal, allocation and risk overlay -
-# on validation results only.
+# The strategy phase inherits one configuration, chosen once on validation results
+# only, across the stages that are eligible for the holdout - signal, allocation
+# and risk overlay.
 #
 # The selection is made by `resolve_solvent_carrier`, the shared resolver, and not by
 # ranking a Sharpe column here. The same resolver answers `18_holdout_predictions` and
 # `19_holdout_backtest`, so this page reports the configuration those notebooks refitted
-# and priced.
+# and priced. It refuses rather than selecting past a problem, on three conditions that
+# are all permanent: a rank-1 with no recorded `max_drawdown`, one whose drawdown reached
+# -100% so its Sharpe is arithmetic on an account that no longer exists, and one fitted
+# under a conformal calibration version `run_backtest` will no longer execute.
+#
+# **On this case study the eligible stages come to one.** `UNIVERSE_RESTRICTIONS` pins
+# rank-1 to the `cost_feasible` universe that `backtest.sweep.universe_filter` declares
+# canonical, and `15_portfolio_management` and `16_risk_management` both register
+# specs carrying no `universe_filter`. So the allocation and risk-overlay stages
+# contribute no eligible rows here and the carrier is a signal-stage configuration.
 #
 # The label is taken from the selection rather than assumed. The pool spans every
 # declared label, so the chosen strategy may rest on a variant label rather than the
@@ -1055,19 +1064,28 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 # ## §5 Friction budget & cost sensitivity
 #
 # Cost sensitivity is where a short-rebalancing strategy is decided, because
-# every cost is charged per trade and this one trades often. Two sweeps run
-# against the selected lineage: a **cost grid** that walks commission and
-# slippage from zero upward, and a **risk-overlay grid** of rules that close a
-# position on a condition other than the signal.
+# every cost is charged per trade and this one trades often. Two grids are read
+# here: a **cost grid** that walks commission and slippage from zero upward, and
+# a **risk-overlay grid** of rules that close a position on a condition other
+# than the signal.
 #
 # They answer different questions. The cost grid asks how much friction the
 # strategy can absorb before its edge runs out, which states the execution
 # quality it requires rather than the profit it made under one assumption. The
 # overlay grid asks whether trading *less* on positions that are going wrong
-# preserves more than the extra trading costs.
+# preserves more than the extra trading costs. The two were swept independently,
+# with overlays applied at zero engine cost, so each result is attributable to
+# the field its sweep varied.
 #
-# The two are swept independently, with overlays applied at zero engine cost, so
-# each result is attributable to the field that sweep varied.
+# **Neither grid is restricted to the selected lineage, and they do not sit on
+# the same universe.** Both read their whole stage across labels, which is what
+# the per-horizon stratification below is for. The cost rows come from
+# `17_costs`, whose pool is pinned to the canonical `cost_feasible` universe; the
+# overlay rows come from `16_risk_management`, which overlays allocation-stage
+# specs that carry no `universe_filter` and are therefore full-universe. So a
+# cost curve and an overlay row in this section are not two readings of one
+# portfolio, and the gradient across thresholds is what §5.2 supports rather than
+# a level comparable with §5.1.
 
 # %% [markdown]
 # ### §5.1 Cost sensitivity stratified by label horizon

@@ -68,7 +68,25 @@ LABEL_RESTRICTIONS: dict[str, frozenset[str]] = {
 # orphan the liquid-lineage holdout. This is the only definition; ``holdout.py``
 # imports it, and ``select_best_models`` applies it by going through
 # :func:`selectable_validation_candidates` rather than by repeating the filter.
+#
+# nasdaq100_microstructure is the same arrangement one universe over. Its
+# ``setup.yaml`` declares ``backtest.sweep.universe_filter: cost_feasible`` and says
+# beside it that "the full-universe variant is NOT a canonical rank-1 / cohort / DSR
+# candidate; it lives only in the 17_costs.py full-vs-screened comparison". Nothing
+# enforced that: the sweep's pass 2 registers full-universe reference arms so
+# ``17_costs`` can price the screen, and this resolver ranked them beside the screened
+# rows by raw Sharpe. The entry is what makes the declaration true rather than stated.
+#
+# Measured 2026-09-13 before adding it: the registry held 96 full-universe signal rows
+# and the rank-1 was the same row either way - `gbm/default_multiclass` on
+# `fwd_dir_15m`, a cost-feasible slot configuration at Sharpe 2.416 - so this changes
+# no published value today. That is the point at which to close a hole, not after a
+# full-universe row has won and moved a chapter.
+#
+# ``test_declared_canonical_universe_is_pinned`` asserts the two stay together: a case
+# study that declares the key and is missing from here has an unenforced declaration.
 UNIVERSE_RESTRICTIONS: dict[str, str] = {
+    "nasdaq100_microstructure": "cost_feasible",
     "sp500_options": "liquid",
 }
 

@@ -307,3 +307,56 @@ def test_pbo_with_two_combinations_is_not_reportable() -> None:
         "status": "insufficient combinations (2 < 10)",
         "n_combinations": 2,
     }
+
+
+def test_declared_canonical_universe_is_pinned() -> None:
+    """A case study that declares a canonical universe must also pin rank-1 to it.
+
+    ``backtest.sweep.universe_filter`` says which universe a case study's sweep treats
+    as canonical, and several readers honour it: ``17_costs`` pools only runs carrying
+    it, ``20_strategy_analysis`` rebuilds derived tables off it. Rank-1 selection is the
+    one that decides what the case study reports, and it reads
+    ``UNIVERSE_RESTRICTIONS`` instead.
+
+    The two are separate by design - a case study may sweep one universe and still rank
+    across everything - but a declaration with no entry here is a rule nobody applies.
+    Both case studies that declare the key also register full-universe rows on purpose
+    (sp500_options for the Ch18 HTM cost cascade, nasdaq100_microstructure for the
+    full-versus-screened comparison), which is exactly the population that leaks into
+    rank-1 by raw Sharpe when the pin is absent.
+
+    Read from each ``setup.yaml`` rather than from a list typed here, so a tenth case
+    study declaring the key fails this rather than joining silently.
+    """
+    import yaml
+
+    from case_studies.utils.strategy_analysis import UNIVERSE_RESTRICTIONS
+
+    case_studies_dir = Path(__file__).parents[1] / "case_studies"
+    declared: dict[str, str] = {}
+    for setup_path in sorted(case_studies_dir.glob("*/config/setup.yaml")):
+        setup = yaml.safe_load(setup_path.read_text()) or {}
+        universe = ((setup.get("backtest") or {}).get("sweep") or {}).get("universe_filter")
+        # "full" and "none" name the unrestricted universe, which is not a restriction.
+        if universe and str(universe).lower() not in ("full", "none"):
+            declared[setup_path.parents[1].name] = str(universe)
+
+    assert declared, "no case study declares backtest.sweep.universe_filter; the fixture moved"
+
+    missing = sorted(name for name in declared if name not in UNIVERSE_RESTRICTIONS)
+    assert not missing, (
+        f"{missing} declare backtest.sweep.universe_filter and have no UNIVERSE_RESTRICTIONS "
+        "entry, so rank-1 selection ranks their full-universe rows beside the screened ones "
+        "by raw Sharpe and the declaration applies to nothing."
+    )
+
+    disagreeing = {
+        name: (value, UNIVERSE_RESTRICTIONS[name])
+        for name, value in declared.items()
+        if UNIVERSE_RESTRICTIONS[name] != value
+    }
+    assert not disagreeing, (
+        f"the declared canonical universe and the rank-1 pin disagree: {disagreeing}. "
+        "The pin decides what the case study reports and the declaration decides what its "
+        "sweep and cost pool read, so two values means two different strategies."
+    )
