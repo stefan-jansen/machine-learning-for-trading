@@ -1070,12 +1070,22 @@ else:
 # in both folds.
 
 # %%
-# Try GBM booster-based importance first, fall back to feature-prediction correlation
+# Booster-based gain first; feature-prediction correlation only if the boosters are
+# unreadable. The two are different quantities and the fallback is not a degraded
+# version of the first: gain is how much a feature reduced the loss inside the fitted
+# GBM trees, while the fallback is the rank correlation between a feature and the
+# LINEAR model's score. They can disagree completely, and one variable holding either
+# is how a figure captioned "feature importance" came to show the other. `IMPORTANCE_
+# SOURCE` is carried into the figure title so the render says which one it drew.
 gbm_importance = load_gbm_feature_importance(CASE_STUDY, label=PRIMARY_LABEL, top_n=TOP_N_FEATURES)
+IMPORTANCE_SOURCE = "gbm_gain" if gbm_importance is not None else None
 
 if gbm_importance is None:
     # Fallback: compute feature-prediction IC (correlation between each feature and y_score)
-    print("No GBM booster files available. Computing feature-prediction correlation as fallback...")
+    print(
+        "No readable GBM boosters. Falling back to feature-prediction correlation, which is a "
+        "different quantity - see the note above and read the figure title."
+    )
 
     features_path = CASE_DIR / "features" / "financial.parquet"
     if features_path.exists() and best_preds.height > 0:
@@ -1133,13 +1143,22 @@ if gbm_importance is None:
                     .to_list()
                 )
                 gbm_importance = gbm_importance.filter(pl.col("feature").is_in(top_features))
+                IMPORTANCE_SOURCE = "linear_correlation"
                 print(
                     f"Computed feature-prediction correlation for {len(top_features)} features across {merged['fold_id'].n_unique()} folds"
                 )
 
+_IMPORTANCE_TITLES = {
+    "gbm_gain": "GBM gain: a small feature set stays important across folds",
+    "linear_correlation": (
+        "FALLBACK - linear model feature correlation, NOT GBM gain: "
+        "which features move with the linear score"
+    ),
+}
 if gbm_importance is not None and gbm_importance.height > 0:
     print(
-        f"Feature importance: {gbm_importance['feature'].n_unique()} features × {gbm_importance['fold_id'].n_unique()} folds"
+        f"Feature importance ({IMPORTANCE_SOURCE}): {gbm_importance['feature'].n_unique()} "
+        f"features × {gbm_importance['fold_id'].n_unique()} folds"
     )
 else:
     print("Feature importance data not available.")
@@ -1148,7 +1167,11 @@ else:
 # ### Figure 7: Feature Importance Stability Heatmap
 
 # %%
-plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
+plot_feature_importance_heatmap(
+    gbm_importance,
+    TOP_N_FEATURES,
+    title=_IMPORTANCE_TITLES.get(IMPORTANCE_SOURCE, "Feature importance across folds"),
+)
 
 # %% [markdown]
 # **What the heatmap is showing, and what it is not.** Gain-based importance says how
