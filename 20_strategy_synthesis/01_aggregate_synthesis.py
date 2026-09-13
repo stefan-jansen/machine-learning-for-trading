@@ -49,6 +49,7 @@ from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import (
     allocation_method_of,
     compute_cost_bps,
+    rank_one,
     training_run_fitted_for_the_holdout,
 )
 from utils.paths import REPO_ROOT, get_case_study_dir, get_chapter_dir
@@ -743,7 +744,10 @@ def build_backtest_rows():
         if _stage_applicable(cs, "risk"):
             risk_df = explorer.risk_impact(prediction_hash=carrier_pred)
             if not risk_df.is_empty():
-                best_risk_row = risk_df.sort("sharpe", descending=True).head(1)
+                # rank_one, not a one-key sort: overlays that never trigger book the
+                # baseline Sharpe exactly, so ties at the top are ordinary here and a
+                # one-key sort would let frame order decide the name reported below.
+                best_risk_row = rank_one(risk_df, by="sharpe", name="risk_name")
                 best_overlay = best_risk_row["risk_name"][0]
                 managed_sharpe = best_risk_row["sharpe"][0]
 

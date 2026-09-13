@@ -54,6 +54,7 @@ from case_studies.utils.analytics import (
     SHORT_NAMES,
     load_chapter_backtests,
 )
+from case_studies.utils.strategy_analysis import rank_one
 from utils.style import show_with_alt
 
 # %% tags=["parameters"]
@@ -157,11 +158,14 @@ for cs_id in ACTIVE_CS_LIST:
         if not _ch16_raw.is_empty()
         else pl.DataFrame()
     )
+    # backtest_hash decides a tie: it is unique per row, so the baseline this loop
+    # picks is a function of the registry rather than of the order the frames were
+    # concatenated in. Allocations whose Sharpe repeats exactly are ordinary.
     if not ch17_cs.is_empty():
-        best = ch17_cs.sort("sharpe", descending=True).head(1)
+        best = rank_one(ch17_cs, by="sharpe", name="backtest_hash")
         _baseline_rows.append(best.with_columns(baseline_source=pl.lit("ch17")))
     elif not ch16_cs.is_empty():
-        best = ch16_cs.sort("sharpe", descending=True).head(1)
+        best = rank_one(ch16_cs, by="sharpe", name="backtest_hash")
         _baseline_rows.append(best.with_columns(baseline_source=pl.lit("ch16")))
 
 if _baseline_rows:
