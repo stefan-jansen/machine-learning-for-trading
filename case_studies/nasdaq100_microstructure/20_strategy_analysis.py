@@ -70,6 +70,8 @@ import polars as pl
 import torch  # ml4t.diagnostic loads cudart; torch must import first
 import yaml
 
+from utils.style import show_with_alt
+
 warnings.filterwarnings("ignore")
 
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
@@ -118,6 +120,18 @@ from case_studies.utils.strategy_analysis import (
 from case_studies.utils.sweep_config import get_universe_filters_for
 from case_studies.utils.uncertainty import ENTIRE_REGISTRY, NO_CARRIER
 from utils.paths import get_output_dir
+
+# Figures go through `show_with_alt`, and none of them calls `tight_layout()`. Both are
+# measured rather than stylistic: `utils/style` and `matplotlibrc` set
+# `figure.constrained_layout.use`, so `tight_layout()` warns and fights the layout engine
+# already running, and `fig.show()` on a non-interactive backend warns that the canvas
+# cannot be shown - two UserWarnings per figure, written into the rendered cell. The six
+# notebooks of this case study already at `done` use this form and neither of the others.
+#
+# The alt strings name structure, axes and reference lines, never which series wins. An
+# ordering is a registry result a rebuild can reverse, and alt text is prose no rebuild
+# revisits, so a ranking written here would go stale silently on the one surface a reader
+# who cannot see the chart depends on.
 
 # %% tags=["parameters"]
 CASE_STUDY = "nasdaq100_microstructure"
@@ -461,8 +475,15 @@ ax.set_xlabel("Validation Sharpe")
 ax.set_title("Family-level Signal Sharpe — IQR + max")
 ax.invert_yaxis()
 ax.legend(loc="lower right", frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal chart of validation Sharpe by model family. One row per family, named on "
+    "the vertical axis which runs top to bottom. A filled circle marks that family's "
+    "median Sharpe with a horizontal bar spanning its interquartile range, and a red "
+    "cross marks its single best configuration. A dashed vertical line sits at zero "
+    "Sharpe. The gap between a family's median and its cross is the spread the best draw "
+    "was taken from.",
+)
 
 # %% [markdown]
 # **How to read the family distribution.** The bars show each family's spread of
@@ -508,7 +529,14 @@ if missing_stages:
 
 # %%
 fig = plot_sharpe_waterfall(lineage, ci_lo=ci_lo, ci_hi=ci_hi)
-fig.show()
+show_with_alt(
+    fig,
+    "Waterfall of Sharpe across the selected configuration's locked lineage: signal, then "
+    "allocation, then cost, then risk overlay, one bar per stage in that order. Each bar "
+    "carries asymmetric error bars for its block-bootstrap 95 percent confidence "
+    "interval, so a stage whose interval spans its neighbour's is one the evidence does "
+    "not separate.",
+)
 
 # %% [markdown]
 # Stage transitions are read from the stored paired comparisons rather than
@@ -548,7 +576,13 @@ if ALLOC_HASH is not None:
 conc_df = explorer.concentration_curve(TOP_PHASH)
 if not conc_df.is_empty():
     fig = plot_concentration_curve(conc_df)
-    fig.show()
+    show_with_alt(
+        fig,
+        "Line chart of Sharpe against portfolio concentration. The horizontal axis is the "
+        "number of positions held, top_k, and the vertical axis is the Sharpe the selected "
+        "prediction achieves at each. The shape rather than any single point is the content: "
+        "it shows whether concentrating the book helped or hurt.",
+    )
     best_per_k = conc_df.sort("sharpe", descending=True).group_by("top_k").first().sort("top_k")
     print("Allocation: best Sharpe by top_k:")
     print(best_per_k.select("top_k", "allocator", "sharpe", "max_drawdown"))
@@ -862,8 +896,15 @@ ax.invert_yaxis()
 ax.set_xlabel("Value")
 ax.set_title("Rank-1 Headline Metrics with 95% CIs")
 ax.legend(loc="lower right", fontsize=8, frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Forest plot of the selected configuration's headline metrics. One row per metric, "
+    "named on the vertical axis, with a point estimate and a horizontal bar for its 95 "
+    "percent confidence interval, read on a shared horizontal value axis. A dashed "
+    "vertical line marks zero, and further vertical reference lines mark the equal-weight "
+    "validation Sharpe and the allocation-stage Sharpe, so each interval can be read "
+    "against both baselines as well as against zero.",
+)
 
 # %% [markdown]
 # The strategy's returns are stored daily while the benchmark is stored at the
@@ -902,8 +943,14 @@ ax.axhline(0, color="#9E9E9E", linewidth=0.6, linestyle="--")
 ax.set_ylabel("Cumulative return")
 ax.set_title("Validation-window cumulative return: selected strategy vs EW universe")
 ax.legend(loc="best", frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two cumulative return paths over the validation window, plotted against time. One "
+    "line is the selected strategy and the other the equal-weight universe, distinguished "
+    "in the legend; the vertical axis is cumulative return and a dashed horizontal line "
+    "marks zero. The comparison is the point: the strategy's path is only informative "
+    "beside the universe it traded in.",
+)
 
 # %% [markdown]
 # **How to read the selection-bias adjustment.** The deflated Sharpe ratio asks
@@ -950,7 +997,13 @@ print(dd)
 
 # %%
 fig = plot_equity_drawdown(strat_returns_path)
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a time axis. The upper panel is the selected strategy's "
+    "cumulative return over the window and the lower panel is its drawdown, the distance "
+    "below the running maximum at each moment. Reading a date down both panels pairs a "
+    "level of return with the loss being carried to hold it.",
+)
 
 # %%
 # Rolling Sharpe + rolling beta
@@ -1163,8 +1216,15 @@ ax.set_xlabel("Per-leg cost (bps)")
 ax.set_ylabel("Sharpe (validation, best config per cost level)")
 ax.set_title("Cost sensitivity by label horizon — best config per (label, cost)")
 ax.legend(loc="best", fontsize=8, frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Line chart of validation Sharpe against per-leg cost in basis points, one line per "
+    "label horizon, each showing the best configuration at every cost level with a shaded "
+    "band around it. A dashed horizontal line marks zero Sharpe. Two shaded vertical "
+    "spans mark realistic spreads, roughly 1 to 3 basis points for large caps and 3 to 8 "
+    "for mid caps, and a vertical line marks the cost this case study charges, so each "
+    "horizon's viability can be read where its line crosses those regions.",
+)
 
 # %% [markdown]
 # Trade counts at zero cost say how exposed each label is to friction before any
@@ -1428,8 +1488,15 @@ ax.invert_yaxis()
 ax.set_xlabel("Validation Sharpe")
 ax.set_title("Risk-overlay sensitivity — best overlay per (label, family) with 95% CIs")
 ax.legend(loc="lower right", fontsize=8, frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal chart of risk-overlay sensitivity. One row per label and family pair on "
+    "the vertical axis, running top to bottom, each showing the best overlay's validation "
+    "Sharpe as a point with a horizontal bar for its 95 percent confidence interval. A "
+    "dashed vertical line marks zero and a further vertical line marks the reference "
+    "Sharpe, so an interval crossing either is one the evidence does not separate from "
+    "it.",
+)
 
 # %%
 # Compare overlay rescue vs no-overlay baseline per label

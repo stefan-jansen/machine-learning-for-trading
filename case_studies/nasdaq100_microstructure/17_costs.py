@@ -99,6 +99,7 @@ from case_studies.utils.sweep_config import (
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE
 from utils.paths import get_case_study_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "nasdaq100_microstructure"
@@ -438,8 +439,19 @@ if not cost_df.is_empty():
     ax.set_ylabel("Net Sharpe Ratio")
     ax.set_title("Sharpe Decay Under Transaction Costs")
     ax.legend()
-    fig.tight_layout()
-    fig.show()
+    # `utils/style` and `matplotlibrc` both set `figure.constrained_layout.use`, so
+    # `tight_layout()` warns and fights the layout engine already running; `fig.show()` warns
+    # that a non-interactive canvas cannot be shown and publishes no alt text. Measured: two
+    # UserWarnings per figure. The six notebooks of this case study already at `done` use
+    # `show_with_alt` and neither of the other two calls.
+    show_with_alt(
+        fig,
+        "Line chart of net Sharpe against transaction cost. The horizontal axis is total "
+        "cost in basis points per leg and the vertical axis is net Sharpe ratio. One line "
+        "with circular markers per allocator, named in the legend, tracing that allocator's "
+        "Sharpe as cost rises. Two horizontal reference lines mark zero Sharpe (dashed) and "
+        "0.5 (dotted), so the cost at which a line crosses each can be read off.",
+    )
 else:
     print("No cost sensitivity data in registry")
 
@@ -1045,7 +1057,15 @@ if not cadence_df.is_empty():
             ax.text(j, i, f"{val:.2f}", ha="center", va="center", color=color, fontsize=11)
 
     fig.colorbar(im, ax=ax, label="Sharpe Ratio")
-    fig.show()
+    show_with_alt(
+        fig,
+        "Heatmap of Sharpe over rebalancing cadence against per-share effective spread. "
+        "Rows are cadences and columns are spreads, each cell holding one Sharpe printed to "
+        "two decimals over a red-yellow-green colour scale clipped at -2 and +2, so red is "
+        "the worst and green the best. A colour bar to the right carries the same scale. The "
+        "cell values are the figure's data: the colour repeats them rather than adding "
+        "anything a reader would otherwise miss.",
+    )
 else:
     print("No cadence sweep results")
 
@@ -1087,8 +1107,15 @@ if not cadence_df.is_empty():
         axes[1].set_xlabel("Sharpe Ratio")
         axes[1].set_title("Gross Sharpe by Cadence")
 
-        fig.tight_layout()
-        fig.show()
+        show_with_alt(
+            fig,
+            "Two horizontal bar charts side by side, sharing one cadence per row. The left "
+            "panel gives the number of trades each cadence closes and the right panel its "
+            "gross Sharpe, both at zero assumed cost, with a dashed vertical line at zero "
+            "Sharpe on the right. Reading a row across both panels is what the pair is for: "
+            "it puts the trading a cadence provokes beside the return it earns before any "
+            "cost is charged.",
+        )
 
 # %% [markdown]
 # ## Key Takeaways

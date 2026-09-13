@@ -410,13 +410,30 @@ print(alloc_comparison)
 # %%
 import matplotlib.pyplot as plt
 
+from utils.style import show_with_alt
+
 if not alloc_comparison.is_empty():
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.barh(alloc_comparison["allocator"].to_list(), alloc_comparison["avg_sharpe"].to_list())
     ax.set_xlabel("Average Sharpe")
     ax.set_title(f"{CASE_STUDY_ID}: Mean Sharpe by Allocator")
-    fig.tight_layout()
-    fig.show()
+    # No `tight_layout()`: `utils/style` and `matplotlibrc` both set
+    # `figure.constrained_layout.use`, so calling it warns and fights the layout engine that
+    # is already running. `show_with_alt` rather than `fig.show()`, which on a non-interactive
+    # backend warns that the canvas cannot be shown and publishes a figure with no alt text.
+    # Both are what the six notebooks of this case study already at `done` do.
+    #
+    # The alt text names the structure and not the ranking. Which allocator leads is a
+    # registry result that a rebuild can reverse, and an alt string is prose that no rebuild
+    # revisits - so a described ordering here would go stale silently, on the one surface a
+    # reader who cannot see the chart depends on.
+    show_with_alt(
+        fig,
+        "Horizontal bar chart of mean Sharpe by allocator. One bar per allocator named on "
+        "the vertical axis; bar length is that allocator's average Sharpe across the "
+        "configurations it was run on, read on the horizontal axis. Bars left of zero are "
+        "allocators whose average is negative.",
+    )
 
 # %% [markdown]
 # ### The strongest allocation combinations
