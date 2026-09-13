@@ -57,8 +57,6 @@
 # %%
 """Compare every declared model family on one registered, complete population."""
 
-import warnings
-
 import numpy as np
 import polars as pl
 import yaml
@@ -99,8 +97,6 @@ from case_studies.utils.notebook_contracts import (
     filter_active_model_rows,
 )
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY = "nasdaq100_microstructure"

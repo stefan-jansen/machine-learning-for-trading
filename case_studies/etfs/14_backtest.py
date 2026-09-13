@@ -57,7 +57,6 @@
 """Backtest the registered ETF prediction population across every declared entry scheme."""
 
 import time
-import warnings
 
 import plotly.graph_objects as go
 import polars as pl
@@ -91,8 +90,6 @@ from case_studies.utils.sweep_config import (
     get_top_n_predictions,
 )
 from utils.style import COLORS, show_plotly_with_alt
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "etfs"

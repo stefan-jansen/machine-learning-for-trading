@@ -49,17 +49,13 @@
 
 import json
 import sqlite3
-import warnings
 
 import matplotlib.pyplot as plt
 import polars as pl
 
-warnings.filterwarnings("ignore")
-
 # %% [markdown]
 # Shared helpers reconstruct the configured funnel and its uncertainty from
 # registry artifacts without launching another training or evaluation run.
-
 # %%
 from case_studies.research import CandidateSet, Study, open_selection_field
 from case_studies.research.holdout import build_holdout_training_spec

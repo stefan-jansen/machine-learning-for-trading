@@ -60,7 +60,6 @@
 
 import json
 import sqlite3
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -69,9 +68,6 @@ import pandas as pd
 import polars as pl
 import torch  # ml4t.diagnostic loads cudart; torch must import first
 import yaml
-
-warnings.filterwarnings("ignore")
-
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
 from ml4t.diagnostic.integration import (
     BacktestReportMetadata,

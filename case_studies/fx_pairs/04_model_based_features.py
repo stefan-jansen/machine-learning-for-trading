@@ -64,7 +64,6 @@ import logging
 import multiprocessing
 import os
 import re
-import warnings
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
@@ -96,7 +95,6 @@ from utils.cv_splits import generate_cv_splits, load_evaluation_config, select_f
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, show_plotly_with_alt
 
-warnings.filterwarnings("ignore")
 logging.getLogger("hmmlearn.base").setLevel(logging.ERROR)
 
 # %% [markdown] tags=[]

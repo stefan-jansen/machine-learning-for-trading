@@ -52,7 +52,6 @@
 import datetime as _dt
 import json
 import sqlite3
-import warnings
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -62,8 +61,6 @@ import polars as pl
 import torch  # ml4t.diagnostic loads cudart; torch must import first
 import yaml
 from matplotlib.colors import LinearSegmentedColormap
-
-warnings.filterwarnings("ignore")
 
 # %%
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
