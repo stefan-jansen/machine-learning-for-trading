@@ -2196,11 +2196,29 @@ case_studies/etfs/11c_conditional_autoencoder:
   # cuda and the library refuses to substitute; the device is inside the training identity,
   # so the CPU fit publishes under its own name. n_epochs stays out - preset_patches.py
   # already reduces these presets and declaring it here would replace that patch.
+  #
+  # `folds` for the reason 11d states below - the etfs fixture seeds eight, and this fixture
+  # spans 2007-2025 where seoa spans 2017-2021, so the same model walks about four times as
+  # many sessions here. 11d took the reduction when it hit the cap; 11c and 11e were left at
+  # all eight because they fit inside 900s, which is a different question from whether the
+  # eighth fold says anything the second does not. Priced from CI rather than from a
+  # workstation: on the `e2e649ed` run of `cs-etfs`, 11c took 501s and 11e 521s of a 3,041s
+  # job, the longest in the matrix and therefore the one that sets how long `main` takes to
+  # report. Fold cost rises with fold_id, so two of eight is below a quarter of that.
+  #
+  # Two rather than one: every other latent member in the fleet runs two (11a, 11b, 11d here,
+  # us_firm_characteristics 08a through 08d), and a single fold cannot show a factor loading
+  # moving between windows, which is what these notebooks are about.
+  #
+  # The 900s cap stays until a run prices the reduced notebook. It is loose for a 130s
+  # notebook, and tightening it against a predicted figure rather than a measured one is the
+  # mistake 11d's own comment records.
   parameters:
     DEVICE: cpu
     LABELS: ['fwd_ret_21d']
     POPULATION_NAME: etfs-cae-preview
     PREVIEW_REDUCTIONS:
+      folds: [0, 1]
       max_symbols: 6
   timeout: 900
 case_studies/etfs/11d_stochastic_discount_factor:
@@ -2254,12 +2272,13 @@ case_studies/etfs/11d_stochastic_discount_factor:
   # line against the loaded measurement rather than against a quiet-machine guess.
   timeout: 3600
 case_studies/etfs/11e_supervised_autoencoder:
-  # Same restriction and the same reason as 11c above.
+  # Same restriction, same fold reduction, and the same reasons as 11c above.
   parameters:
     DEVICE: cpu
     LABELS: ['fwd_ret_21d']
     POPULATION_NAME: etfs-sae-preview
     PREVIEW_REDUCTIONS:
+      folds: [0, 1]
       max_symbols: 6
   timeout: 900
 case_studies/etfs/12_causal_dml:

@@ -610,6 +610,116 @@ def test_a_causal_reduction_declares_all_four_fields(overrides: dict) -> None:
     assert incomplete == {}
 
 
+# The case studies whose model entries do not agree on a fold set, and what disagrees. This is a
+# ratchet rather than a permission: the test asserts the disagreeing set is EXACTLY this, so
+# nothing can join it without a line, and an entry that comes into line retires its own line.
+#
+# It is worth a check because the cost of disagreeing is not visible in any entry. A model
+# analysis notebook averages each member's per-fold IC and ranks the averages, and
+# `case_studies/etfs/13_model_analysis.py` states what that costs when the members were not
+# fitted on the same folds: a model with "an undefined daily IC on those folds, so its average is
+# taken over fewer folds than the others and is not the same quantity". Two members at two folds
+# and a third at eight are compared as though the numbers were alike.
+#
+# `etfs` was on this list. Its `11c_conditional_autoencoder` and `11e_supervised_autoencoder` ran
+# all eight seeded folds while the other nine etfs entries ran two, which cost 501 s and 521 s of
+# a 3,041 s `cs-etfs` job on the `e2e649ed` run - the longest job in the matrix - on top of making
+# their ICs a different quantity from their siblings'.
+FOLD_SETS_DISAGREE = {
+    "nasdaq100_microstructure": (
+        "06_linear and 07_gbm declare [0], the four sequence entries declare [0, 1]. Nothing "
+        "compares them today because both linear entries carry a skip, so the disagreement "
+        "costs nothing until that skip lifts."
+    ),
+    "us_firm_characteristics": (
+        "05_linear and 06_gbm declare [0], 07_tabular_dl and 08a through 08d declare [0, 1], "
+        "and 10_model_analysis ranks all of them together."
+    ),
+}
+
+
+def _declared_fold_sets(overrides: dict, dml_fields: set[str]) -> dict[str, set[str]]:
+    """Per case study, the distinct fold declarations its model entries make.
+
+    A missing declaration is a value rather than an absence: an entry that declares no `folds`
+    runs every fold the fixture seeded, which is what puts it out of step with a sibling that
+    named two. DML entries are excluded because their resolver takes `n_folds`, a count, and
+    refuses `folds` outright - `test_a_causal_reduction_declares_all_four_fields` covers them.
+    """
+    per_case: dict[str, set[str]] = {}
+    for key, reductions in _declared_reductions(overrides).items():
+        parts = key.split("/")
+        if len(parts) != 3 or parts[0] != "case_studies":
+            continue
+        if set(reductions) == dml_fields:
+            continue
+        declared = reductions.get("folds")
+        per_case.setdefault(parts[1], set()).add(
+            "every seeded fold" if declared is None else repr(list(declared))
+        )
+    return per_case
+
+
+def test_one_case_study_fits_its_models_on_one_set_of_folds(overrides: dict) -> None:
+    _, dml_fields = _accepted_reduction_fields()
+    disagreeing = {
+        case: sorted(values)
+        for case, values in _declared_fold_sets(overrides, dml_fields).items()
+        if len(values) > 1
+    }
+
+    assert sorted(disagreeing) == sorted(FOLD_SETS_DISAGREE)
+
+
+def _fold_overrides(**per_entry: dict) -> dict:
+    return {
+        f"case_studies/synthetic/{stem}": {"parameters": {"PREVIEW_REDUCTIONS": reductions}}
+        for stem, reductions in per_entry.items()
+    }
+
+
+def test_an_undeclared_fold_set_disagrees_with_a_declared_one() -> None:
+    """The case the etfs entries were in, which is the one a reader is least likely to see.
+
+    Both entries look reduced - each carries a `max_symbols` - and only the fixture says how
+    many folds the second one runs.
+    """
+    _, dml_fields = _accepted_reduction_fields()
+    overrides = _fold_overrides(
+        a_pca={"folds": [0, 1], "max_symbols": 6},
+        b_cae={"max_symbols": 6},
+    )
+
+    assert _declared_fold_sets(overrides, dml_fields) == {
+        "synthetic": {"[0, 1]", "every seeded fold"}
+    }
+
+
+def test_two_different_declared_fold_sets_disagree() -> None:
+    _, dml_fields = _accepted_reduction_fields()
+    overrides = _fold_overrides(
+        a_linear={"folds": [0], "max_symbols": 6},
+        b_gbm={"folds": [0, 1], "max_symbols": 6},
+    )
+
+    assert _declared_fold_sets(overrides, dml_fields) == {"synthetic": {"[0]", "[0, 1]"}}
+
+
+def test_a_causal_entry_is_not_read_as_a_fold_disagreement() -> None:
+    """`n_folds` is the DML resolver's own spelling, and it refuses `folds`.
+
+    Without the exclusion every case study carrying a causal notebook would read as
+    disagreeing, for a reason that is not about folds at all.
+    """
+    _, dml_fields = _accepted_reduction_fields()
+    overrides = _fold_overrides(
+        a_linear={"folds": [0, 1], "max_symbols": 6},
+        b_causal_dml=dict.fromkeys(dml_fields, 2),
+    )
+
+    assert _declared_fold_sets(overrides, dml_fields) == {"synthetic": {"[0, 1]"}}
+
+
 def test_requested_configurations_survive_the_fixture_trim(overrides: dict) -> None:
     """A `CONFIG_NAMES` entry must name a configuration the fixture's menu still declares.
 
