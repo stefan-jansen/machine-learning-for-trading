@@ -136,6 +136,27 @@ def registry_path(case_study: str) -> Path:
     return _cs_dir(case_study) / case_study / "run_log" / "registry.db"
 
 
+# The columns :func:`load_model_ic` documents, carried by its empty result too. A query that
+# matches no rows is an ordinary state - a fresh preview workspace, a case study whose model
+# stages have not run - and a caller cannot tell it from a broken one by the shape it gets back.
+# What it can do is keep working: `frame["prediction_hash"]` and `frame.filter(...)` behave on a
+# schema-carrying empty frame and raise on a `pl.DataFrame()`, which has no columns at all. The
+# emptiness still reaches the caller; only the shape is fixed.
+MODEL_IC_SCHEMA: dict[str, pl.DataType] = {
+    "family": pl.String,
+    "config_name": pl.String,
+    "label": pl.String,
+    "split": pl.String,
+    "checkpoint_value": pl.Int64,
+    "prediction_hash": pl.String,
+    "ic_mean": pl.Float64,
+    "ic_std": pl.Float64,
+    "ic_n_days": pl.Float64,
+    "case_study": pl.String,
+    "coverage_enforced": pl.Boolean,
+}
+
+
 def _has_column(db_path: Path, table: str, column: str) -> bool:
     """Whether ``table`` in this registry carries ``column``.
 
@@ -343,7 +364,7 @@ def load_model_ic(
             )
 
     if not frames:
-        return pl.DataFrame()
+        return pl.DataFrame(schema=MODEL_IC_SCHEMA)
     return pl.concat(frames, how="diagonal")
 
 
