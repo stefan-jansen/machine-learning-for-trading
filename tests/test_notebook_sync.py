@@ -89,6 +89,31 @@ def test_an_identity_bearing_override_is_production() -> None:
     assert production_parameters({"SUPERSEDES_POPULATION": "342446006141", "FORCE_RETRAIN": True})
 
 
+def test_a_candidate_set_declaration_is_production() -> None:
+    """The same shape as ``SUPERSEDES_POPULATION``, and it has to be launchable.
+
+    The supersedes gate tells a reader to declare an undeclared candidate-set generation
+    before the run that moves its members. Every freezing notebook that has already run is
+    stamped, so declaring it in source returns STALE and owes a full re-render - 44.15 h
+    across the five ``us_equities_panel`` notebooks that freeze the twelve live generations
+    (ml4t/agent-workspace#1175). Passing it at launch is the route that costs nothing, and
+    it only exists if such a run is still production: otherwise it takes the scratch-copy
+    path and the reader-facing notebook keeps showing the run this one replaced.
+
+    The value goes unchecked here because ``candidate_set_supersedes`` withholds anything
+    that does not resolve to the tip and ``CandidateSet.create`` refuses what it did not
+    require, which is the same division of labour as the population declaration above.
+    """
+    assert production_parameters({"SUPERSEDES_SETS": {"us-equities-fwd-ret-1d-pca-v1": "live"}})
+    assert production_parameters(
+        {"SUPERSEDES_SETS": {"a-v1": "live", "a-diagnostics-v1": "live"}, "FORCE_RETRAIN": True}
+    )
+    # It declares; it cannot reduce. Beside anything that removes work the run is not
+    # production, which is what stops this admitting a reduced run through the new name.
+    assert not production_parameters({"SUPERSEDES_SETS": {"a-v1": "live"}, "MAX_SYMBOLS": 8})
+    assert not production_parameters({"SUPERSEDES_SETS": {"a-v1": "live"}, "USE_CACHE": True})
+
+
 def test_waiving_the_value_check_does_not_admit_a_reduced_run() -> None:
     """The waiver is per name, not a general relaxation.
 

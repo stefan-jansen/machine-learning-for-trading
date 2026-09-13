@@ -951,6 +951,33 @@ def _default_artifacts_root() -> Path:
     return Path.home() / "ml4t" / "artifacts" / "case_studies"
 
 
+def undeclared_fix(finding: Finding) -> str:
+    """How to declare an undeclared generation, for a notebook that has already run.
+
+    The launch-time form, not the source edit. Editing the notebook's SUPERSEDES_* mapping
+    declares the same thing, but every freezing notebook that has run is stamped, so the
+    edit returns STALE and owes a full re-render - costed at 44.15 h across the five
+    `us_equities_panel` notebooks that freeze the twelve live generations
+    (ml4t/agent-workspace#1175).
+
+    `:json=` and not `-p`. Papermill's `-p` is scalar-only: `_resolve_type` returns
+    True/False/None/int/float and otherwise the bare string, so `-p SUPERSEDES_SETS
+    '{"x": "live"}'` injects a str and `SUPERSEDES_SETS.get(...)` raises AttributeError at
+    the freeze, after the fit - strictly worse than the re-render it was meant to avoid.
+    `nb-run.sh`'s `KEY:json=VALUE` passes a one-key YAML document (`papermill -y`), which
+    arrives as a mapping. The parameter is on `notebook_provenance.PRODUCTION_SAFE_PARAMETERS`,
+    so a run carrying it still publishes rather than going to a scratch copy.
+    """
+    declaration = json.dumps({finding.label: finding.remedy})
+    return (
+        f"fix: pass {finding.parameter}:json='{declaration}' to nb-run.sh when you launch "
+        f"{finding.notebook.removesuffix('.py')}, adding it to any parameters the launch "
+        "already carries. Editing the notebook's SUPERSEDES_* mapping declares the same "
+        "thing, but the paired .ipynb is stamped, so the edit returns STALE and owes a "
+        "full re-render; only edit the source for a notebook that has not run yet."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--case-study", default=None, help="check one instead of all")
@@ -1065,8 +1092,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"  {finding.case_study}: {finding.label}\n"
                 f"      {finding.detail}\n"
-                f'      fix: declare "{finding.label}": "{finding.remedy}" in the freezing '
-                "notebook's SUPERSEDES_* mapping, in the worktree you are about to launch",
+                f"      {undeclared_fix(finding)}",
                 file=sys.stderr,
             )
 

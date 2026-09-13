@@ -203,6 +203,20 @@ PRODUCTION_SAFE_PARAMETERS: dict[str, object] = {
     # cannot reduce the run, and register_causal_run refuses a hash that is not a
     # current canonical identity for the same label.
     "SUPERSEDES_CAUSAL": VALIDATED_BY_CONSUMER,
+    # The candidate-set generations this run retires, as a mapping of set name to the
+    # generation it supersedes. Same shape as the two above and admitted for the same
+    # reason: it adds declarations rather than removing work, so it cannot reduce the run,
+    # and `candidate_set_supersedes` withholds anything that does not resolve to the tip
+    # while `CandidateSet.create` refuses a hash it did not require and names the one it
+    # did. Its absence was the expensive kind of omission. The supersedes gate tells a
+    # reader to declare an undeclared generation before launching, every freezing notebook
+    # that has already run is stamped, and a source edit therefore returns STALE and owes a
+    # full re-render - costed at 44.15 h across the five `us_equities_panel` notebooks that
+    # freeze the twelve live generations (ml4t/agent-workspace#1175). Without this entry the
+    # launch-time route was not an escape from that: the run would take the scratch-copy
+    # path and the reader-facing notebook would still show the run this one replaced, which
+    # is the failure the `SUPERSEDES_POPULATION` comment in `nb-run.sh` describes.
+    "SUPERSEDES_SETS": VALIDATED_BY_CONSUMER,
     # Replaces a holdout evaluation the window already carries instead of adding a second
     # one. It deletes rows, which is why it is worth saying why it belongs here: it cannot
     # reduce what the run computes - the refit, the registration and every check still
