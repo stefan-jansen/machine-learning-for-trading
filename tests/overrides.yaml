@@ -2204,7 +2204,12 @@ case_studies/etfs/11c_conditional_autoencoder:
   # eighth fold says anything the second does not. Priced from CI rather than from a
   # workstation: on the `e2e649ed` run of `cs-etfs`, 11c took 501s and 11e 521s of a 3,041s
   # job, the longest in the matrix and therefore the one that sets how long `main` takes to
-  # report. Fold cost rises with fold_id, so two of eight is below a quarter of that.
+  # report. Two of eight is 23% of the training rows, not 25%: the fixture's fold manifest
+  # (`intermediates/etfs/folds/41c82095b332d9ce/manifest.json`) records n_train per fold, and
+  # folds 0 and 1 hold 247,370 of 1,060,808. The window expands over the first three folds
+  # and is nearly flat after, so the two cheapest folds are barely cheaper than the average -
+  # which is worth stating, because the opposite is true where the window expands throughout
+  # and a two-fold reduction there buys much more than a quarter.
   #
   # Two rather than one: every other latent member in the fleet runs two (11a, 11b, 11d here,
   # us_firm_characteristics 08a through 08d), and a single fold cannot show a factor loading
