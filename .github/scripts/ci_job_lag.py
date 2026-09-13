@@ -41,11 +41,20 @@ BRANCH = "main"
 UNEXPANDED = ("${{", "matrix.")
 
 # `cancelled` is the absence of a verdict, which is the whole subject here. `skipped`
-# IS a verdict, and only because this reads `main`, where the full matrix runs regardless
-# of paths: a skip there is rare and says something real. On a pull request the same skip
-# means "this diff did not need this job", which is not a statement about the tree at all
-# - so a report that read PR runs under this rule would score the four merges that
-# correctly skipped these six jobs as covered, and the hole would read as zero lag.
+# IS a verdict, and only because this reads `main`.
+#
+# `test.yml:259-262` forces the whole matrix on `main` - `main_push` and `after_docker`
+# both set `all=true`, bypassing the path filter - and its comment says why: "The path
+# filter is a PR economy: it skips jobs a PR's diff cannot have broken. On `main` that
+# economy buys nothing and costs the signal ... Ten notebook jobs were failing on `main`
+# for a long time with nothing to report it." So a skip on `main` is rare and says
+# something real, while the same skip on a pull request means the filter judged the diff
+# incapable of touching that job - an economy, not a statement about the tree.
+#
+# The magnitude: a diff under `case_studies/utils/` matches the `shared` filter and fans
+# the matrix to 37 jobs; one confined to a chapter directory runs 1. A report that scored
+# both as full coverage would read 36 holes as zero, which is the failure that comment
+# was written to record.
 NO_VERDICT = {"cancelled", None, "", "null"}
 
 
@@ -163,6 +172,10 @@ def report(verdicts: dict[str, tuple[str, str, int]], max_lag: int) -> int:
         print("no completed job conclusions found on main in the scanned window")
         return 1
 
+    # The breadth of the corpus this is reporting on. `main` forces the whole matrix, so a
+    # count well below the usual 37 is itself the signal - it is the shape of the defect
+    # `test.yml:253-258` records, where 26 of 28 jobs were skipped behind a green badge.
+    print(f"{len(verdicts)} jobs on main, lag in merges behind the tip\n")
     width = max(len(name) for name in verdicts)
     over = []
     for name in sorted(verdicts):
