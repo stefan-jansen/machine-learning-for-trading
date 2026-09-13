@@ -102,3 +102,45 @@ def test_a_population_with_no_members_is_not_reported(case_dir):
 
 def test_a_case_study_with_no_registry_reports_nothing(tmp_path):
     assert unbacktested_populations(tmp_path) == []
+
+
+# The fixtures that ship in this state today, and what each publishes. Every one of these
+# populations lists prediction identities that no backtest in the same registry references,
+# so `selectable_validation_candidates` removes the whole ranked field and
+# `resolve_canonical_rank1_lineage` refuses - which is why the etfs and cme_futures holdout
+# and strategy-analysis stages carry a `no_canonical_selection` skip
+# (ml4t/agent-workspace#907).
+#
+# The detector above is unit-tested and `generate_intermediates.py` prints for it, but only
+# for a population THIS run added: a committed one is subtracted on every run after the one
+# that created it, so nothing says the shipped fixture is in the state. That is how eight of
+# the nine arrived here, and it is what this ratchet answers. The assertion is exact, so a
+# fixture that gains a coherent population retires its own line and a ninth cannot join
+# silently.
+#
+# These identities cannot be repaired by re-sampling production. They were written by a
+# `--through-stage 8` regeneration running the model stages at fixture scale, so they exist
+# in no production registry - checked 2026-09-13 against etfs, 0 of 12 present. Either the
+# backtest stages run into the fixture, or the populations are not committed.
+FIXTURES_PUBLISHING_UNBACKTESTED_POPULATIONS = {
+    "cme_futures",
+    "crypto_perps_funding",
+    "etfs",
+    "fx_pairs",
+    "nasdaq100_microstructure",
+    "sp500_options",
+    "us_equities_panel",
+    "us_firm_characteristics",
+}
+
+
+def test_the_shipped_fixtures_publish_what_they_are_known_to(intermediates_dir):
+    if intermediates_dir is None:
+        pytest.skip("no test-data intermediates on this checkout")
+    unbacked = {
+        case_dir.name
+        for case_dir in sorted(intermediates_dir.iterdir())
+        if (case_dir / "run_log" / "registry.db").is_file() and unbacktested_populations(case_dir)
+    }
+
+    assert unbacked == FIXTURES_PUBLISHING_UNBACKTESTED_POPULATIONS
