@@ -264,8 +264,7 @@ refuse_partial_full_mode(
 # **An execution-regime restriction**, because sp500_options is evaluated under the
 # O'Donovan-Yu (2025) cost-mitigation cascade, whose three rungs are a naive round trip, full
 # hold-to-maturity, and hold-to-maturity restricted to the liquid bottom-spread quintile. The
-# registered strategy is the third rung; the second is the demoted variant §20.5 and §18.8
-# discuss. The first two rungs both carry the same universe filter, so filtering on that column
+# registered strategy is the third rung; the second is the demoted variant §18.8 discusses. The first two rungs both carry the same universe filter, so filtering on that column
 # alone leaves `ORDER BY sharpe DESC LIMIT 1` free to pick whichever of the two happens to score
 # higher in the current data. Pinning the universe filter *and* the exit rule together is what
 # makes the selected row deterministic and coherent with hold-to-maturity. Case studies with no
@@ -649,8 +648,8 @@ ic_pivot
 # IC column in most datasets, particularly futures and options, while linear models lead for
 # ETFs. A negative mean IC - FX Pairs shows one across every family - marks a case study where
 # prediction is genuinely difficult. S&P 500 Options carries the highest raw ICs in the table,
-# and single-name option execution costs then compress the translated Sharpe; §20.5 works
-# through that compression variant by variant.
+# and single-name option execution costs then compress the translated Sharpe; §20.6 sweeps
+# that compression across the cost grid and §18.8 works through it rung by rung.
 
 # %% [markdown]
 # ## Backtest Comparison
@@ -671,8 +670,11 @@ def build_backtest_rows():
         # etc.) since §20.4's model comparison is about trained models, not
         # passive baselines. Also apply case-study label and universe-filter
         # restrictions so the Ch20 rank-1 is HTM-coherent for sp500_options
-        # and pinned to the Rung-2 full-universe baseline (the mitigated
-        # Rung-3 liquid-subset variant is reported separately in §20.5).
+        # and pinned to the Rung-3 liquid subset, which is what
+        # `strategy_analysis.UNIVERSE_RESTRICTIONS` holds ({"sp500_options":
+        # "liquid"}) and what §20.1's Table 20.2 reports at +0.97. The Rung-2
+        # full universe is retained only for the §18.8 cascade comparison and
+        # never anchors the deployed carrier.
         label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
         signal_candidates = _best_pinned(explorer, cs, "signal", 200)
         if not signal_candidates.is_empty() and "family" in signal_candidates.columns:
@@ -2016,11 +2018,13 @@ def query_holdout_rows():
 
     Applies the same label / universe-filter restrictions as the
     cluster-diagnostics rank-1 selection so the reported holdout follows
-    the canonical signal. For sp500_options this means the headline
-    holdout row is the Rung-2 retrain (full universe, HTM) that matches
-    §20.1's −0.361 number; the Rung-3 retrain (liquid subset, +0.455) is
-    the §20.5 mitigation story and surfaced separately by the cascade
-    section of 20_strategy_analysis rather than as the headline.
+    the canonical signal. For sp500_options that is the Rung-3 retrain -
+    hold to maturity on the liquid bottom-quintile-half-spread subset -
+    because ``strategy_analysis.UNIVERSE_RESTRICTIONS`` pins the case study
+    to ``liquid`` and excludes full-universe rows from rank-1 selection.
+    The Rung-2 full-universe variant is the demoted one, kept for the
+    cost-mitigation cascade §18.8 works through rung by rung, and it is not
+    the headline here.
     """
     holdout_rows = []
     for cs in ALL_CASE_STUDIES:
@@ -2442,7 +2446,7 @@ if not variant_df.is_empty():
 # with weak ICs produces few positive strategies whatever model is chosen.
 #
 # One caveat applies to the option case studies, and it is large. The positive-Sharpe rate here
-# is measured **before execution costs**. The hold-to-maturity short-straddle backtest in §20.5,
+# is measured **before execution costs**. The hold-to-maturity short-straddle backtest in §18.8,
 # which charges the full option bid-ask and commissions, cuts that rate substantially once
 # single-name option costs are recognized.
 
@@ -2658,15 +2662,15 @@ display(
 # - `overview.parquet`: Case study metadata (asset class, frequency, universe
 #   size, cost assumptions, primary label, number of model families).
 # - `ic_comparison.parquet`: Top-ranked per-family IC per case study, for the
-#   model-family comparison in §20.2 / notebook 02.
+#   model-family comparison of Table 20.4 in §20.3, read by notebooks 03 and 04.
 # - `backtest_comparison.parquet`: Per-(case-study, stage) Sharpe / CAGR /
 #   drawdown for the selected configuration at each pipeline stage.
 # - `sharpe_progression.parquet`: Stage-by-stage Sharpe for the selected
-#   configuration per case study — the funnel that §20.4 describes.
+#   configuration per case study.
 # - `lineage.parquet`: The stage-path from signal → allocation → cost →
 #   risk for the selected configuration per case study.
 # - `holdout_results.parquet`: Validation-vs-holdout Sharpe for the selected
-#   configuration, used for the validation→holdout decay analysis in §20.6.
+#   configuration, used for the validation→holdout decay analysis in §20.1.
 # - `rank1_cluster_diagnostics.parquet`: top-ranked and tenth-ranked Sharpe,
 #   the spread between them, the fold standard error and the folds-positive
 #   count for each case study — the measurement that lets readers judge how

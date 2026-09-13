@@ -32,7 +32,7 @@
 # - Identify which rule categories help vs hurt by case study
 # - Understand why tight stops destroy value in most cross-asset strategies
 #
-# **Book Reference**: Chapter 20, Section 20.7 (Risk Overlays and Stability Across Regimes)
+# **Book Reference**: Chapter 20, Section 20.7 (Risk overlays)
 #
 # **Prerequisites**: Run [`01_aggregate_synthesis`](01_aggregate_synthesis.ipynb) first.
 # Each case study's registry must contain Ch19 `risk_overlay`-stage backtests

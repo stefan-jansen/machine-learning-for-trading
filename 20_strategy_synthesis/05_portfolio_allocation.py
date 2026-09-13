@@ -42,7 +42,7 @@
 # %%
 """Ch20 Portfolio Allocation — spine-pinned allocator comparison across 8 case studies.
 
-The Table 20.6 / Figure 20.7 semantics are: hold the highest-validation-Sharpe
+The Table 20.6 / Figure 20.14 semantics are: hold the highest-validation-Sharpe
 signal carrier fixed per case study, then compare allocators at the allocation
 stage only, so the best-minus-worst spread measures what the allocator alone
 contributes (risk overlays are a downstream layer covered in §20.7). This

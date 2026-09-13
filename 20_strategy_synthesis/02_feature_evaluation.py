@@ -19,7 +19,8 @@
 # **Docker image**: `ml4t`
 #
 # Each case study runs an FDR-controlled triage pass on its candidate
-# feature menu (Ch8 §8.5), classifying every feature as PROCEED, REVISE,
+# feature menu (Ch7 §7.3 sets the triage gates, §7.4 the FDR control),
+# classifying every feature as PROCEED, REVISE,
 # or STOP. This notebook reads those nine ledgers side by side and asks
 # whether feature-level survival predicts strategy-level survival once
 # the rest of the pipeline runs.
