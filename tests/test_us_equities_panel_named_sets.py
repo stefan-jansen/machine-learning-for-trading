@@ -165,31 +165,65 @@ def test_every_named_set_is_frozen_by_a_producer(
     )
 
 
+# How many labels each producer fits, which is what decides how many horizons a consumer may
+# name. `06_linear` and `07_gbm` take a `LABELS` parameter and loop, so they fit every declared
+# label. Every other producer reads `PRIMARY_LABEL or setup["labels"]["primary"]` and fits one,
+# and `13a_pca`/`13b_ipca` fit the labels whose `config/training/{label}.yaml` declares
+# `latent_factors`, which is the primary label alone. A name at a horizon its producer never
+# reaches raises in `15` and silently narrows the strategy chain in `16`; a producer fitting a
+# horizon no consumer names throws that fit away.
+ALL_HORIZONS = {"1d", "5d", "21d"}
+PRIMARY_HORIZON = {"1d"}
+EXPECTED_HORIZONS = {
+    "linear": ALL_HORIZONS,
+    "gbm": ALL_HORIZONS,
+    "tabular-dl": PRIMARY_HORIZON,
+    "nlinear": PRIMARY_HORIZON,
+    "lstm": PRIMARY_HORIZON,
+    "tsmixer": PRIMARY_HORIZON,
+    "pca": PRIMARY_HORIZON,
+    "ipca": PRIMARY_HORIZON,
+}
+
+
 def test_producers_cover_every_label_the_consumers_ask_for() -> None:
-    """A family named at three labels must be frozen at three labels.
+    """A family must be named at exactly the horizons its producer fits.
 
     The narrower version of this defect: `06` fits all three declared labels in one
     population, so a consumer naming only the 1-day set drops two thirds of what was
-    fitted, and drops it silently in `16`.
+    fitted, and drops it silently in `16`. The reverse costs more - a consumer naming a
+    horizon nothing freezes makes `CandidateSet.one` raise at the first cell of a stage
+    that has to run before any backtest exists.
     """
-    requested: set[str] = set()
+    # Per list, not over their union. The defect this test was written for is `16` naming no
+    # 5-day GBM set while `15` named one, and a union of the two consumers cannot see it.
     for consumer, parameters in CONSUMERS.items():
         for parameter in parameters:
-            requested.update(_literal_string_list(CASE_DIR / consumer, parameter))
+            requested = set(_literal_string_list(CASE_DIR / consumer, parameter))
 
-    by_family: dict[str, set[str]] = {}
-    for name in requested - PENDING_WEEKLY:
-        match = re.fullmatch(r"us-equities-fwd-ret-(\d+d)-(.+?)(-diagnostics)?-v1", name)
-        assert match, f"unrecognised set name shape: {name}"
-        horizon, family, diagnostics = match.groups()
-        by_family.setdefault(f"{family}{diagnostics or ''}", set()).add(horizon)
+            by_family: dict[str, set[str]] = {}
+            for name in requested - PENDING_WEEKLY:
+                match = re.fullmatch(r"us-equities-fwd-ret-(\d+d)-(.+?)(-diagnostics)?-v1", name)
+                assert match, f"{consumer}: unrecognised set name shape: {name}"
+                horizon, family, diagnostics = match.groups()
+                by_family.setdefault(f"{family}{diagnostics or ''}", set()).add(horizon)
 
-    multi_label = {"linear", "gbm", "linear-diagnostics", "gbm-diagnostics", "pca", "ipca"}
-    for family in sorted(multi_label & set(by_family)):
-        assert by_family[family] == {"1d", "5d", "21d"}, (
-            f"{family} is fitted on all three declared labels but named at "
-            f"{sorted(by_family[family])}"
-        )
+            unknown = sorted(
+                family
+                for family in by_family
+                if family.removesuffix("-diagnostics") not in EXPECTED_HORIZONS
+            )
+            assert not unknown, (
+                f"{consumer}: no declared horizon coverage for {unknown}. Add an "
+                "EXPECTED_HORIZONS entry saying how many labels the producer fits."
+            )
+
+            for family in sorted(by_family):
+                expected = EXPECTED_HORIZONS[family.removesuffix("-diagnostics")]
+                assert by_family[family] == expected, (
+                    f"{consumer} {parameter}: {family} is fitted at {sorted(expected)} "
+                    f"but named at {sorted(by_family[family])}"
+                )
 
 
 def test_diagnostic_sets_are_bounded() -> None:
