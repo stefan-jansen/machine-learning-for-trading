@@ -693,10 +693,21 @@ def selftest() -> int:
 def notebook_sources(roots: list[Path]) -> list[Path]:
     """Every paired notebook source, and nothing else.
 
-    A jupytext header or a `# %%` marker is what makes a `.py` a notebook. Dot-directories
-    are skipped: `.venv` alone is tens of thousands of files and none of them is a notebook,
-    and pointed at a checkout that has one, an earlier checker reported title violations
-    from arviz, torch and econml.
+    A notebook source is a `.py` with a committed `.ipynb` beside it. A named file is taken
+    as given, so a scratch copy can still be checked directly.
+
+    The `# %%` marker alone is not enough, and the difference is not cosmetic. Ten files
+    under `tests/` carry notebook source as string fixtures, three of them alt text written
+    to be wrong so a test can catch it, and a marker filter hands those to this checker as
+    though they were notebooks - a fixture added later would red this gate for describing a
+    figure incorrectly on purpose. Measured over this repository: 495 files match the marker,
+    484 have a paired `.ipynb`, and the 11 that do not are ten tests and `sync_notebooks.py`.
+    Not one notebook is lost, including the three that carry an `.ipynb` and no jupytext
+    header, which is why the pair and not the header is the test.
+
+    Dot-directories are skipped: `.venv` alone is tens of thousands of files and none of
+    them is a notebook, and pointed at a checkout that has one, an earlier checker reported
+    title violations from arviz, torch and econml.
     """
     out: list[Path] = []
     for root in roots:
@@ -706,8 +717,7 @@ def notebook_sources(roots: list[Path]) -> list[Path]:
         for path in sorted(root.rglob("*.py")):
             if any(part.startswith(".") for part in path.parts):
                 continue
-            head = path.read_text(encoding="utf-8", errors="replace")[:2048]
-            if "jupytext:" in head or "# %%" in head:
+            if path.with_suffix(".ipynb").exists():
                 out.append(path)
     return out
 
