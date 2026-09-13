@@ -74,6 +74,7 @@ from case_studies.utils.sweep_config import (
     get_expensive_allocators_skip,
     get_top_k_values_for,
     get_top_n_predictions,
+    get_universe_filters_for,
 )
 from utils.paths import get_case_study_dir
 
@@ -123,21 +124,29 @@ if excluded_families(CASE_STUDY_ID):
 # %% [markdown]
 # ## 1. Load Top Predictions from Signal Stage
 #
-# The sweep below trades the full universe, so it selects on the full universe
-# too, and `SELECTION_UNIVERSE` is what ties the two together. The signal stage
-# holds both: `backtest.sweep.signal_passes` scores every admissible prediction
-# on the cost-feasible universe in pass 1, then re-runs the highest-scoring
-# `mechanism_top_n` of them on the full universe in pass 2. A ranking that does
-# not name a universe takes `MAX(sharpe)` over all of a prediction's backtests,
-# so it would rank most predictions on their cost-feasible number and a few on
-# whichever of the two scored higher - a ranking in which no two rows are
-# necessarily the same measurement.
+# The ranking has to name a universe, because the signal stage holds two.
+# `backtest.sweep.signal_passes` scores every admissible prediction on the
+# cost-feasible universe in pass 1, then re-runs the highest-scoring
+# `mechanism_top_n` of them on the full universe in pass 2. A ranking that names
+# neither takes `MAX(sharpe)` over all of a prediction's backtests, so it would
+# rank most predictions on their cost-feasible number and a handful on whichever
+# of their two scored higher - a ranking in which no two rows are necessarily the
+# same measurement.
 #
-# What the pass-2 rows are is therefore a full-universe ranking of the
-# predictions pass 1 advanced, and not a full-universe ranking of the whole
-# population. The narrowing happened on the cost-feasible universe and this
-# notebook inherits it; what it avoids is ranking one prediction's full-universe
-# result against another's cost-feasible one.
+# It names the cost-feasible universe, which is the one `backtest.sweep.
+# universe_filter` declares canonical and the one `17_costs` and
+# `20_strategy_analysis` pin to. The alternative is the pass-2 rows, and they are
+# the narrower question rather than the safer one: pass 2 covers
+# `mechanism_top_n` predictions, so the ranking would be over eight of them after
+# a pre-filter that ran on the cost-feasible universe anyway. The cost-feasible
+# ranking inherits the same pre-filter and ranks the whole population.
+#
+# **So selection and sweep sit on different universes here, deliberately.** The
+# predictions are the ones that rank highest where this case study trades; the
+# allocator sweep then runs them on the full universe, which is the setting the
+# chapter's question is about. What is avoided is not the crossing - it is
+# ranking one prediction's full-universe result against another's cost-feasible
+# one inside a single ordering.
 #
 # The allocation sweep re-runs these predictions with `equal_weight_top_k`
 # selection rebalancing every bar, deliberately stripping out the slot
@@ -156,12 +165,12 @@ if excluded_families(CASE_STUDY_ID):
 # an allocator makes.
 
 # %%
-# The universe this notebook's own backtests trade. `build_backtest_spec` below is
-# handed no `universe_filter`, so every row it registers carries no key and is a
-# full-universe result; "full" is what `resolve_best_predictions` reads that absent
-# key as. Changing one of these two without the other would select on one universe
-# and sweep on the other.
-SELECTION_UNIVERSE = "full"
+# The universe the ranking is taken on, read from the same declaration `17_costs`
+# and `20_strategy_analysis` pin to rather than typed here, so the three cannot
+# drift apart. It is NOT the universe this notebook's own backtests trade:
+# `build_backtest_spec` below is handed no `universe_filter`, so every row it
+# registers is a full-universe result. The markdown above says why the two differ.
+SELECTION_UNIVERSE = get_universe_filters_for(CASE_STUDY_ID)[0]
 
 top_preds = resolve_best_predictions(
     CASE_STUDY_ID,
@@ -174,17 +183,16 @@ top_preds = resolve_best_predictions(
 )
 if top_preds.is_empty():
     msg = (
-        f"No {SELECTION_UNIVERSE}-universe signal-stage backtests for "
-        f"{CASE_STUDY_ID}/{LABEL}/validation. The signal sweep registers them from "
-        "`signal_passes.reference_schemes` on `signal_passes.reference_universe`, "
-        "and a sweep that ran pass 1 only leaves the stage carrying cost-feasible rows "
-        "alone. Allocating over an empty selection would register nothing and report a "
-        "clean run, so it refuses here instead. Re-run 14_backtest."
+        f"No signal-stage backtests on the {SELECTION_UNIVERSE or 'full'} universe for "
+        f"{CASE_STUDY_ID}/{LABEL}/validation, so there is nothing to allocate over. "
+        "Every cell below is a no-op on an empty selection, which would register nothing "
+        "and report a clean run. `backtest.sweep.signal_passes.baseline_universe` is what "
+        "registers these rows; re-run 14_backtest."
     )
     raise RuntimeError(msg)
 print(
-    f"Top {len(top_preds)} prediction sources by {SELECTION_UNIVERSE}-universe "
-    "equal-weight baseline Sharpe:"
+    f"Top {len(top_preds)} prediction sources by equal-weight baseline Sharpe on the "
+    f"{SELECTION_UNIVERSE or 'full'} universe:"
 )
 print(top_preds.select(["source", "sharpe"]))
 
