@@ -95,6 +95,18 @@ def resolve_members(
     show it - the member list would name the right configuration and hold the
     wrong prediction.
 
+    That filter is necessary and not sufficient. It removes a generation the
+    registry has retired, and two generations of one configuration can both be
+    live: populations are named independently, so a second training run published
+    under a second name retires nothing. The checkpoint number cannot arbitrate
+    between them. It is a training coordinate, not a generation one - a refit that
+    shortened a run leaves the *older* generation carrying the larger value, and
+    two runs of the same schedule carry the same value and tie. So a configuration
+    that resolves to more than one live ``training_hash`` raises here and names
+    them, rather than being decided by an ordering that means nothing. Deciding it
+    silently is the same defect as averaging a retired forecast, with the registry
+    state that produced it left invisible.
+
     Returns columns ``config_name``, ``training_hash``, ``prediction_hash``,
     ``checkpoint_value``, ``num_leaves``, ordered by ``config_name`` so the member
     list is stable across calls and so the registered spec is too.
@@ -152,6 +164,24 @@ def resolve_members(
                 f"{max_num_leaves} leaves, so the ensemble has no members"
             )
             raise ValueError(msg)
+    ambiguous = (
+        frame.group_by("config_name")
+        .agg(pl.col("training_hash").unique().alias("training_hashes"))
+        .filter(pl.col("training_hashes").list.len() > 1)
+        .sort("config_name")
+    )
+    if not ambiguous.is_empty():
+        named = "; ".join(
+            f"{row['config_name']} -> {sorted(row['training_hashes'])}"
+            for row in ambiguous.iter_rows(named=True)
+        )
+        msg = (
+            f"{ambiguous.height} {family} configuration(s) for {label!r} resolve to more "
+            f"than one live training run, so which generation the ensemble averages is "
+            f"undecided: {named}. Retire the generation that is no longer current, or pass "
+            "an `admissible` set that holds one of them"
+        )
+        raise ValueError(msg)
     return (
         frame.sort("config_name", "checkpoint_value")
         .group_by("config_name", maintain_order=True)

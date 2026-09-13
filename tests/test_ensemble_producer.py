@@ -110,6 +110,11 @@ def test_a_retired_generation_does_not_win_on_checkpoint_number(tmp_path):
     the retired generation ran longer - 500 trees against the current 300 - then
     grouping by configuration name and taking the largest checkpoint puts the
     retired forecast in the ensemble, under the right configuration's name.
+
+    Both halves are asserted: offered both generations the function refuses and
+    names them, and offered one it resolves to that one. The refusal is what makes
+    the admissibility filter's absence visible - a caller that forgets it gets an
+    error naming two training hashes, not an ensemble built from the wrong one.
     """
     case_dir = tmp_path / "case"
     (case_dir / "run_log").mkdir(parents=True)
@@ -132,18 +137,66 @@ def test_a_retired_generation_does_not_win_on_checkpoint_number(tmp_path):
     db.commit()
     db.close()
 
-    unfiltered = resolve_members(
-        case_dir,
-        label="fwd_ret_60m",
-        max_num_leaves=31,
-        admissible={"p_retired", "p_current", "p_d"},
-    )
-    assert "p_retired" in unfiltered["prediction_hash"].to_list()
+    with pytest.raises(ValueError, match="more than one live training run") as offered_both:
+        resolve_members(
+            case_dir,
+            label="fwd_ret_60m",
+            max_num_leaves=31,
+            admissible={"p_retired", "p_current", "p_d"},
+        )
+    # The message has to name the configuration and both hashes, because the fix is
+    # to retire one of them and the caller cannot do that from a count.
+    message = str(offered_both.value)
+    assert "leaves_7_mae" in message
+    assert "t_old" in message
+    assert "t_new" in message
+    assert "default_mae" not in message
 
     current_only = resolve_members(
         case_dir, label="fwd_ret_60m", max_num_leaves=31, admissible={"p_current", "p_d"}
     )
     assert current_only["prediction_hash"].to_list() == ["p_d", "p_current"]
+
+
+def test_two_live_generations_at_the_same_checkpoint_are_refused(tmp_path):
+    """The tie the checkpoint number cannot break.
+
+    Two runs of one configuration on the same schedule carry the same checkpoint
+    value, so `group_by(...).last()` over an unstable sort picks either one. The
+    registry state is legitimate - populations are named independently, so a second
+    run published under a second name retires nothing - and the ensemble it implies
+    is not, because the member it averages would differ between two calls that read
+    the same registry.
+    """
+    case_dir = tmp_path / "case"
+    (case_dir / "run_log").mkdir(parents=True)
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    db.execute(
+        "CREATE TABLE training_runs (training_hash TEXT PRIMARY KEY, family TEXT, "
+        "label TEXT, config_name TEXT)"
+    )
+    db.execute(
+        "CREATE TABLE prediction_sets (prediction_hash TEXT PRIMARY KEY, training_hash TEXT, "
+        "checkpoint_value INTEGER, split TEXT)"
+    )
+    db.execute("INSERT INTO training_runs VALUES ('t_a','gbm','fwd_ret_60m','leaves_7_mae')")
+    db.execute("INSERT INTO training_runs VALUES ('t_b','gbm','fwd_ret_60m','leaves_7_mae')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p_a','t_a',500,'validation')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p_b','t_b',500,'validation')")
+    db.execute("INSERT INTO training_runs VALUES ('t_d','gbm','fwd_ret_60m','default_mae')")
+    db.execute("INSERT INTO prediction_sets VALUES ('p_d','t_d',500,'validation')")
+    db.commit()
+    db.close()
+
+    with pytest.raises(ValueError, match="more than one live training run"):
+        resolve_members(
+            case_dir, label="fwd_ret_60m", max_num_leaves=31, admissible={"p_a", "p_b", "p_d"}
+        )
+
+    resolved = resolve_members(
+        case_dir, label="fwd_ret_60m", max_num_leaves=31, admissible={"p_a", "p_d"}
+    )
+    assert resolved["prediction_hash"].to_list() == ["p_d", "p_a"]
 
 
 def test_one_member_is_not_an_ensemble(monkeypatch):
