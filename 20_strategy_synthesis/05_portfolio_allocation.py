@@ -278,10 +278,12 @@ show_with_alt(
 )
 
 # %% [markdown]
-# **Reading the chart**: one group of bars per case study, one bar per allocator, all on a
-# shared Sharpe axis. The height differences within a group are what the allocator choice is
-# worth for that case study; the differences between groups are what the underlying signal is
-# worth. Both are on the same axis so the two can be compared directly.
+# **Reading the chart**: one horizontal bar per case study, whose length is the Sharpe of that
+# case study's best allocator and whose label and colour name which allocator that was. Bars
+# are sorted by Sharpe, with a reference line at zero. Because each bar is already a maximum
+# over allocators, the chart compares case studies and says nothing about how much the
+# allocator choice was worth within one; the heatmap below reports every allocator per case
+# study and is where that comparison is read.
 
 # %% [markdown]
 # ## Equal-Weight Baseline vs Best Allocator
@@ -402,9 +404,9 @@ fig.colorbar(im, ax=ax, label="Sharpe Ratio", shrink=0.8)
 fig.subplots_adjust(left=0.18, right=0.92, top=0.9, bottom=0.2)
 show_with_alt(
     fig,
-    "Grouped bars comparing the Sharpe of each of the most common allocators "
-    "within each case study, so the height differences within a group show how "
-    "much the allocator choice moved the result.",
+    "Heatmap with one row per case study and one column per allocator, each cell "
+    "annotated with that pair's Sharpe and coloured red through green over the "
+    "range minus one to one, with untested pairs marked N/A.",
 )
 
 # %% [markdown]

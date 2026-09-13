@@ -2266,11 +2266,13 @@ for stage, count in attrition.items():
     print(f"  {stage:20s}  {bar}  {count}/{total}")
 
 # %% [markdown]
-# The funnel reads top-down, and each gate is counted independently against `bt_df` and
-# `holdout_df` rather than against the set that cleared the gate above it. Reading down the
-# column gives the per-stage attrition; the difference between two adjacent rows is how many
-# case studies that gate removed on its own terms, not how many survived both. See NB08 for the
-# cumulative funnel with gates compounded and the named drop-outs at each cut. Whatever holdout
+# Each row is an independent count: how many of the nine case studies pass that one gate,
+# tested against `bt_df` and `holdout_df` rather than against the set that cleared the gate
+# above it. A row's own failures are nine minus its count. The difference between two adjacent
+# rows is not how many case studies a gate removed, because two gates can pass the same number
+# while failing different case studies, and a case study can appear in a lower row without
+# appearing in a higher one. See NB08 for the cumulative funnel, where each gate is applied to
+# the survivors of the one above it and the drop-outs are named at each cut. Whatever holdout
 # rate these counts give, it does not account for evidence quality, which the next section
 # addresses.
 
