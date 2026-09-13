@@ -403,7 +403,8 @@ if mbo_profile is not None:
     print_dataset_profile(mbo_profile, "MBO PROFILE")
 else:
     print(f"No profile at {dataset_profile_path(mbo_data_path)}")
-    print("Written by: python data/equities/market/microstructure/mbo_download.py")
+    print("This dataset's downloader does not write one. utils.downloading.save_dataset_profile")
+    print("writes a profile beside any parquet it is handed.")
 
 itch_data_path = microstructure / "nasdaq_itch"
 itch_profile = load_dataset_profile(itch_data_path)
@@ -411,7 +412,8 @@ if itch_profile is not None:
     print_dataset_profile(itch_profile, "ITCH PROFILE")
 else:
     print(f"No profile at {dataset_profile_path(itch_data_path)}")
-    print("Written by: python data/equities/market/microstructure/nasdaq_itch_download.py")
+    print("This dataset's downloader does not write one. utils.downloading.save_dataset_profile")
+    print("writes a profile beside any parquet it is handed.")
 
 # %% [markdown]
 # ## 6. Loader Options

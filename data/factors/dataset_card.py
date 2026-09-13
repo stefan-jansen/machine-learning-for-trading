@@ -32,7 +32,6 @@
 # %%
 """Academic Factor Data - download, explore, and update workflow."""
 
-import json
 from pathlib import Path
 
 import polars as pl
@@ -240,17 +239,17 @@ aqr.tail(10)
 
 # %%
 from utils import ML4T_DATA_PATH
-from utils.downloading import dataset_profile_path
+from utils.downloading import dataset_profile_path, load_dataset_profile, print_dataset_profile
 
-# Check for profiles
 for provider, subdir in [("Fama-French", "fama-french"), ("AQR", "aqr")]:
-    profile_path = dataset_profile_path(ML4T_DATA_PATH / "factors" / subdir)
-    if profile_path.exists():
-        profile = json.loads(profile_path.read_text())
-        print(f"=== {provider} Profile ===")
-        print(f"Files: {len(profile.get('files', []))}")
+    data_path = ML4T_DATA_PATH / "factors" / subdir
+    profile = load_dataset_profile(data_path)
+    if profile is not None:
+        print_dataset_profile(profile, f"{provider.upper()} PROFILE")
     else:
-        print(f"{provider} profile not found at {profile_path}")
+        print(f"No profile at {dataset_profile_path(data_path)}")
+        print("This dataset's downloader does not write one.")
+        print("utils.downloading.save_dataset_profile writes one beside any parquet.")
 
 # %% [markdown]
 # ## 6. Loader Options
