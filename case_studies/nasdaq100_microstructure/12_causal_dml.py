@@ -249,11 +249,14 @@ _settled = pl.DataFrame(
 _settled
 
 # %% [markdown]
-# The embargo and the block are both fifteen periods on a one-minute cadence, which is the
-# label horizon and not a coincidence: both answer the same overlap. `block_size_basis` says
+# The embargo and the block are both sixteen periods on a one-minute cadence, and they agree
+# because they answer the same overlap. Sixteen and not fifteen: the basis is `labels.buffer`,
+# which this case study sets one bar past the fifteen-minute horizon so that a training row
+# cannot see any part of the outcome a held-out row is scored on. `block_size_basis` says
 # which of the two candidates set the block - `label_buffer` here, because the treatment's own
-# construction window is one bar and the label's is fifteen, so the label's is what the
-# placebo has to preserve.
+# construction window is one bar and the label's reach is longer, so the label's is what the
+# placebo has to preserve. The run records all of it: `cv.embargo_periods`,
+# `refutation.block_size` and `refutation.label_buffer_steps` are each 16 in this row's spec.
 
 # %% [markdown]
 # ## 3. Estimating and registering

@@ -1360,8 +1360,11 @@ plot_regime_bars(regime_df)
 # It does not produce a per-asset cross-sectional score, so it is
 # reported as ATE/SE/p_HAC rather than IC.
 #
-# Treatment: `signed_vol_share` (signed volume share at the bar);
-# confounders: `rel_spread_close`, `rv_5m`, `r1m`; embargo = 1 bar.
+# Treatment: `signed_vol_share` (signed volume share at the bar); confounders:
+# `rel_spread_close`, `rv_5m`, `r1m`. The embargo is **16 periods**, which on this
+# one-minute panel is sixteen minutes: it follows `labels.buffer` (`16min`) and not the
+# treatment's own construction window, which is one bar. `causal_runs.embargo` records
+# what the run used, and `12_causal_dml` is where the choice is argued.
 
 # %%
 # `causal_runs` is keyed on `causal_hash`, and that identity covers the fold and placebo
