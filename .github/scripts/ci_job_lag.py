@@ -41,7 +41,11 @@ BRANCH = "main"
 UNEXPANDED = ("${{", "matrix.")
 
 # `cancelled` is the absence of a verdict, which is the whole subject here. `skipped`
-# IS a verdict - a job the path filter correctly did not run has reported on that tree.
+# IS a verdict, and only because this reads `main`, where the full matrix runs regardless
+# of paths: a skip there is rare and says something real. On a pull request the same skip
+# means "this diff did not need this job", which is not a statement about the tree at all
+# - so a report that read PR runs under this rule would score the four merges that
+# correctly skipped these six jobs as covered, and the hole would read as zero lag.
 NO_VERDICT = {"cancelled", None, "", "null"}
 
 
@@ -69,6 +73,12 @@ def newest_verdicts(rows: list[JobRow], main_shas: list[str]) -> dict[str, tuple
             continue
         lag = depth.get(row.sha)
         if lag is None:
+            # Not on `main`. This is the second of two guards against counting a pull
+            # request's run, and the one that matters: a PR runs only what its diff
+            # touches, so its skips answer "this diff did not need this job" and never
+            # "this tree has been tested by it". Those two readings coincide on a PR and
+            # come apart at the merge, which is the gap this report exists to show - four
+            # of the five merges that opened it skipped the six jobs correctly.
             continue
         if row.name not in best or lag < best[row.name][2]:
             best[row.name] = (row.sha, row.conclusion, lag)
@@ -94,6 +104,13 @@ def _gh_lines(path: str, jq: str) -> list[str]:
 
 
 def fetch_rows(runs_to_scan: int) -> tuple[list[JobRow], list[str]]:
+    """`main`'s `Tests` runs and their jobs.
+
+    `branch=main` is the first of the two guards against counting a pull request's run:
+    a PR run carries its own head branch, and the API filter drops it. Verified
+    2026-09-12 - the filtered page is 100 of 100 on `main`, the unfiltered one is mostly
+    feature branches.
+    """
     runs = [
         line.split("\t")
         for line in _gh_lines(

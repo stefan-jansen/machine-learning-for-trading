@@ -124,6 +124,22 @@ def test_a_commit_outside_the_history_window_is_dropped() -> None:
     assert newest_verdicts([_row("zzz", "lint", "success")], HISTORY) == {}
 
 
+def test_a_pull_request_head_says_nothing_about_main() -> None:
+    """The rule that a skip is a verdict holds only because this reads `main`.
+
+    A pull request runs what its diff touches, so its skip means "this diff did not need
+    this job" - not "this tree has been tested". Four of the five merges that opened the
+    gap skipped these jobs correctly, so counting a PR run would score them as covered and
+    the hole would read as zero lag. The API filter is the first guard; this is the second,
+    and it holds whatever the query returns.
+    """
+
+    pr_head = "pr-head-not-on-main"
+    rows = [_row(pr_head, "cs-etfs", "skipped"), _row(FIVE_BACK, "cs-etfs", "success")]
+
+    assert newest_verdicts(rows, HISTORY)["cs-etfs"] == (FIVE_BACK, "success", 5)
+
+
 def test_the_threshold_decides_the_exit_status(capsys: pytest.CaptureFixture[str]) -> None:
     verdicts = {"lint": (TIP, "success", 0), "cs-etfs": (FIVE_BACK, "success", 5)}
 
