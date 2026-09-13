@@ -49,3 +49,44 @@ def test_absent_boosters_return_none(tmp_path: Path) -> None:
     (tmp_path / "run_log" / "training" / "abc123").mkdir(parents=True)
 
     assert _booster_dir(tmp_path, "abc123") is None
+
+
+def test_recurrence_counts_folds_not_rows(capsys, tmp_path, monkeypatch) -> None:
+    """A feature in one fold's top five, under many configs, is not persistent.
+
+    `importance_df` carries one row per (config, fold, feature). Counting those rows
+    let a fold's five highest raw rows be five configs agreeing on one feature, and
+    with two folds the ">= 75% of folds" bar is 1.5 - so two configs inside a single
+    fold cleared a threshold that is supposed to mean "in most folds".
+
+    `one_fold_hog` here is top in fold 0 under all three configs and absent from fold
+    1; `steady` is second in both folds. Only `steady` is persistent.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import polars as pl
+
+    from case_studies.utils.model_viz import plot_feature_importance_heatmap
+
+    rows = []
+    for config in ("a", "b", "c"):
+        rows += [
+            {
+                "config_name": config,
+                "fold_id": 0,
+                "feature": "one_fold_hog",
+                "importance_norm": 1.0,
+            },
+            {"config_name": config, "fold_id": 0, "feature": "steady", "importance_norm": 0.9},
+            {"config_name": config, "fold_id": 0, "feature": "filler0", "importance_norm": 0.1},
+            {"config_name": config, "fold_id": 1, "feature": "steady", "importance_norm": 0.9},
+            {"config_name": config, "fold_id": 1, "feature": "filler1", "importance_norm": 0.1},
+        ]
+
+    plot_feature_importance_heatmap(pl.DataFrame(rows), top_n=5)
+    printed = capsys.readouterr().out
+
+    assert "Persistent features" in printed, printed
+    assert "steady" in printed, printed
+    assert "one_fold_hog" not in printed, printed

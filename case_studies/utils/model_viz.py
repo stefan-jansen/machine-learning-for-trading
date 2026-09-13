@@ -492,19 +492,34 @@ def plot_feature_importance_heatmap(
         f"scale from 0 to 1.",
     )
 
-    # Recurrence summary
+    # Recurrence summary, on the same aggregation the heatmap above is drawn from.
+    #
+    # `importance_df` carries one row per (config, fold, feature), so a fold's five
+    # highest RAW rows can be five configs agreeing on one feature - measured on
+    # `nasdaq100_microstructure`, fold 0's top five were `time_since_open` five times
+    # over. Counting those rows then made a feature that reached the top five in a
+    # single fold clear a threshold meant to say "in most folds": with two folds the
+    # bar is 1.5, and two configs inside one fold pass it.
+    #
+    # So aggregate to one value per (feature, fold) first, take each fold's top five
+    # from that, and count DISTINCT FOLDS rather than rows. On the same registry the
+    # row count reported two persistent features and the fold count reports three -
+    # `rv_30m` is in both folds' top five and the raw count never saw it.
     n_total_folds = importance_df["fold_id"].n_unique()
+    per_fold = importance_df.group_by(["feature", "fold_id"]).agg(
+        pl.col("importance_norm").mean().alias("importance_norm")
+    )
     top5_per_fold = (
-        importance_df.sort(["fold_id", "importance_norm"], descending=[False, True])
+        per_fold.sort(["fold_id", "importance_norm"], descending=[False, True])
         .group_by("fold_id")
         .head(5)
     )
     recurrence = (
         top5_per_fold.group_by("feature")
-        .agg(pl.len().alias("n_top5"))
-        .sort("n_top5", descending=True)
+        .agg(pl.col("fold_id").n_unique().alias("n_folds_top5"))
+        .sort("n_folds_top5", descending=True)
     )
-    persistent = recurrence.filter(pl.col("n_top5") >= n_total_folds * 0.75)
+    persistent = recurrence.filter(pl.col("n_folds_top5") >= n_total_folds * 0.75)
     if persistent.height > 0:
         print(f"\nPersistent features (top-5 in ≥75% of folds): {persistent['feature'].to_list()}")
 
