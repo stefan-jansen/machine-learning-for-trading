@@ -1413,7 +1413,11 @@ for _label, _why in _unresolved.items():
 # Point IC tells us whether the ranking is correct on average; it says
 # nothing about whether the model's *uncertainty* is well calibrated. The
 # width measured here is the one the `conformal_weighted` allocator sizes
-# positions with: calibrated per symbol on every absolute residual known at
+# positions with in the eight case studies that declare it. This one does not:
+# `backtest.sweep.allocators` here is `equal_weight`, `score_weighted` and
+# `inverse_vol`, so the diagnostic below describes the model and nothing
+# downstream consumes it. It is calibrated per symbol on every absolute
+# residual known at
 # `t - h`, where `h` is this label's horizon in data steps, falling back to a
 # quantile pooled over every symbol where one has too few residuals of its
 # own. A decision is covered when its absolute residual falls inside that
@@ -1428,12 +1432,15 @@ for _label, _why in _unresolved.items():
 # means tighter, more useful intervals.
 #
 # Read it as a diagnostic of residual dispersion rather than a guarantee.
-# Split conformal's finite-sample coverage (Vovk et al., 2005; Lei et al.,
-# 2018) requires the calibration and evaluation scores to be exchangeable and
-# return residuals are not, and nothing in the allocation path reads an
-# interval or a coverage level - the width stands in for a volatility
-# estimate. See Ch12 §12.6 / `11_conformal_gbm` for the full conformal toolkit
-# (CQR, ACI).
+# Split conformal's finite-sample coverage guarantee (Vovk et al., 2005; Lei et
+# al., 2018) requires the calibration and evaluation scores to be exchangeable,
+# and return residuals are not: they are serially dependent and their dispersion
+# moves with the regime, so the nominal level is a target the procedure aims at
+# here rather than one it attains. Where the allocator is swept, it reads the
+# width as a volatility estimate and never reads the coverage level, so a
+# miscalibrated interval reaches position sizing as a scale and not as a
+# probability. See Ch12 §12.6 / `12_gradient_boosting/11_conformal_gbm` for the
+# full conformal toolkit (CQR, ACI).
 #
 # Each row is the family's highest-IC configuration for the primary label.
 # That is a model-level ranking and not the funnel's - every selection stage
