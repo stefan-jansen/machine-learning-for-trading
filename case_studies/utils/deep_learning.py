@@ -66,6 +66,7 @@ from case_studies.utils.sequence_dataset import (
     GAP_MASK_FEATURES,
     GAP_POLICY_ID,
     FoldSequenceDataset,
+    collate_sequences,
     collate_with_metadata,
     materialize_store_metadata,
     prepare_fold_sequence_stores,
@@ -1903,7 +1904,7 @@ def _train_one_config(
                     y_batch_dev = y_batch.to(device, non_blocking=True)
                     pred_batch = model(X_batch)
                     pred_parts.append(pred_batch.cpu().numpy())
-                    y_parts.append(y_batch.numpy())
+                    y_parts.append(y_batch.cpu().numpy())
                     date_parts.append(timestamps)
                     entity_parts.append(entities)
                     val_loss += criterion(pred_batch, y_batch_dev).item()
@@ -2505,8 +2506,8 @@ def run_dl_cv(
         )
         print("    creating datasets...")
 
-        train_ds = FoldSequenceDataset(train_store)
-        val_ds = FoldSequenceDataset(val_store, include_metadata=True)
+        train_ds = FoldSequenceDataset(train_store, device=torch_device)
+        val_ds = FoldSequenceDataset(val_store, include_metadata=True, device=torch_device)
 
         # The architecture's input width is a property of what the loader
         # actually produced, not of what the caller declared. The store appends
@@ -2544,19 +2545,26 @@ def run_dl_cv(
             t0 = time.perf_counter()
             print(f"    {config_name}:")
 
+            # num_workers stays 0 and the sampler and seed stay exactly as they were:
+            # both decide which sequences land in which batch, and already-registered
+            # results were produced under them. What changed is how a batch is gathered,
+            # which the dataset's __getitems__ does in one indexing operation.
+            # Pinning is for a host tensor awaiting a copy to the card. When the dataset
+            # gathers on the card there is no such copy and nothing to pin.
             train_loader = DataLoader(
                 train_ds,
                 batch_size=cfg_batch_size,
                 shuffle=True,
                 num_workers=0,
-                pin_memory=torch_device.type == "cuda",
+                pin_memory=torch_device.type == "cuda" and not train_ds.returns_device_tensors,
+                collate_fn=collate_sequences,
             )
             val_loader = DataLoader(
                 val_ds,
                 batch_size=cfg_batch_size,
                 shuffle=False,
                 num_workers=0,
-                pin_memory=torch_device.type == "cuda",
+                pin_memory=torch_device.type == "cuda" and not val_ds.returns_device_tensors,
                 collate_fn=collate_with_metadata,
             )
 
@@ -2705,9 +2713,13 @@ def run_dl_cv(
                 f"({elapsed:.1f}s, {len(checkpoint_ics)} checkpoints)"
             )
 
-        # Free this fold's data before creating next fold's sequences
+        # Free this fold's data before creating next fold's sequences. The datasets may
+        # hold the fold's features on the card, so release those blocks to the rest of the
+        # machine rather than leaving them reserved until the process exits.
         del train_ds, val_ds, train_store, val_store
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     if n_valid_folds == 0:
         raise ValueError("No valid folds created. Check data size vs lookback.")

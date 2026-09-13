@@ -17,7 +17,7 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 45 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
+# 47 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
@@ -90,6 +90,10 @@ tests/test_lightning_announcement_silence.py
 tests/test_family_hook_dispatch.py
 tests/test_model_analysis_selection.py
 tests/test_model_source_identity_versions.py
+# The gather this file tests is the torch one: it builds a FoldSequenceDataset and
+# runs a DataLoader over it, so it imports torch directly rather than reaching it
+# through the module under test.
+tests/test_sequence_batch_gather.py
 # `test_prediction_sequence_cap` tests the same module as `test_sequence_dataset`
 # below. `case_studies/utils/sequence_dataset.py` imports torch at :10 for the
 # Dataset subclass; these cases exercise the index builders, which never touch it.
