@@ -43,8 +43,9 @@ UNEXPANDED = ("${{", "matrix.")
 # `cancelled` is the absence of a verdict, which is the whole subject here. `skipped`
 # IS a verdict, and only because this reads `main`.
 #
-# `test.yml:259-262` forces the whole matrix on `main` - `main_push` and `after_docker`
-# both set `all=true`, bypassing the path filter - and its comment says why: "The path
+# `test.yml`'s `Build dynamic matrices` step forces the whole matrix on `main`: `main_push`
+# and `after_docker` both set `all="true"`, bypassing the path filter. Its comment says why:
+# "The path
 # filter is a PR economy: it skips jobs a PR's diff cannot have broken. On `main` that
 # economy buys nothing and costs the signal ... Ten notebook jobs were failing on `main`
 # for a long time with nothing to report it." So a skip on `main` is rare and says
@@ -173,8 +174,9 @@ def report(verdicts: dict[str, tuple[str, str, int]], max_lag: int) -> int:
         return 1
 
     # The breadth of the corpus this is reporting on. `main` forces the whole matrix, so a
-    # count well below the usual 37 is itself the signal - it is the shape of the defect
-    # `test.yml:253-258` records, where 26 of 28 jobs were skipped behind a green badge.
+    # count well below the usual 37 is itself the signal - the shape the same comment
+    # records, where "~26 of 28 jobs were skipped and the green badge reported on the one
+    # or two that ran".
     print(f"{len(verdicts)} jobs on main, lag in merges behind the tip\n")
     width = max(len(name) for name in verdicts)
     over = []

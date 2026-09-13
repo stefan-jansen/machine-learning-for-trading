@@ -152,3 +152,53 @@ def test_a_window_with_no_verdict_at_all_is_loud() -> None:
     """Silence and health are not the same reading, which is the defect in one line."""
 
     assert ci_job_lag.report({}, max_lag=4) == 1
+
+
+# --- the citations this script's reasoning rests on ---------------------------
+#
+# The skip rule is only correct because `main` runs the whole matrix, and the script says
+# so by citing `test.yml` and quoting it. A quote into a file this heavily edited goes
+# silently false, which is the defect class this whole report exists for - so the anchors
+# are checked rather than trusted. They are names and phrases, not line numbers, because a
+# line number into a moving file has a countdown on it.
+
+TEST_YML = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+SCRIPT = (REPO_ROOT / ".github" / "scripts" / "ci_job_lag.py").read_text(encoding="utf-8")
+
+
+def test_the_step_the_skip_rule_cites_still_exists() -> None:
+    assert "- name: Build dynamic matrices" in TEST_YML
+    assert "Build dynamic matrices" in SCRIPT
+
+
+@pytest.mark.parametrize("name", ["main_push", "after_docker", 'all="true"'])
+def test_the_names_the_skip_rule_cites_still_set_the_matrix(name: str) -> None:
+    """Cited by name so an edit that moves them does not silently invalidate the quote."""
+
+    step = TEST_YML.split("- name: Build dynamic matrices", 1)[1].split("\n      - name:", 1)[0]
+    assert name in step
+    assert name in SCRIPT
+
+
+def _unwrapped(text: str) -> str:
+    """Comment text with its markers and line breaks removed.
+
+    Both files wrap the same sentence at their own widths, so a quotation is contiguous in
+    neither. Comparing the raw text would fail on formatting and pass on a changed claim,
+    which is backwards.
+    """
+    return " ".join(text.replace("#", " ").split())
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "The path filter is a PR economy: it skips jobs a PR's diff cannot have broken.",
+        "~26 of 28 jobs were skipped and the green badge reported on the one or two that ran",
+    ],
+)
+def test_the_phrases_the_report_quotes_are_still_in_the_workflow(phrase: str) -> None:
+    """A quotation that no longer appears in its source is worse than no citation."""
+
+    assert phrase in _unwrapped(TEST_YML)
+    assert phrase in _unwrapped(SCRIPT)
