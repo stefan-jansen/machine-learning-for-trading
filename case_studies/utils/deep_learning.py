@@ -25,7 +25,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import shutil
 import subprocess
 import time
 import uuid
@@ -1537,6 +1536,14 @@ def run_resolved_request(
             model_dir, context, computation, study.case_study
         )
     else:
+        # Per attempt, not deterministic, and that is deliberate. Nothing prevents two runs
+        # of the same training hash from being in flight at once - `nb-run.sh` holds slots,
+        # not per-hash locks - and a shared staging path would interleave two writers'
+        # checkpoints into one tree, which promotes as a corrupt `models/` that validates.
+        # A deterministic name is what a resume wants, but it only becomes safe alongside a
+        # liveness claim that can tell a dead attempt's tree from a live one's, and that
+        # belongs with the code that actually resumes. Until then an attempt's tree is found
+        # by globbing `.models.*.tmp` under the training hash.
         staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
         _configure_sequence_runtime(computation["numerics"])
         fit_wall_t0 = time.perf_counter()
@@ -1568,7 +1575,24 @@ def run_resolved_request(
             )
             os.replace(staging, model_dir)
         except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
+            # The tree stays. It holds every checkpoint the run had written - measured on the
+            # 2026-09-13 crash, 139 checkpoints over 7 of 16 folds, 39 MB, last write 90
+            # seconds before the machine died - and deleting it is the reason an interrupted
+            # sequence run costs its whole fit again rather than the folds it had not reached.
+            #
+            # Keeping it cannot make a partial fit look complete. The warm path gates on
+            # `model_dir.exists()` above, `models/` is created only by the `os.replace` on the
+            # line before this, and that promote raises `OSError: Directory not empty` rather
+            # than clobbering a complete one. A `.models.*.tmp` tree is invisible to every
+            # reader here by construction.
+            #
+            # It also cannot make the uncaught death more recoverable than the caught one,
+            # which is what the old handler did: a `SIGKILL` skips this block and orphans the
+            # tree, so anything papermill turned into a Python exception was destroying state
+            # that a power cut would have kept.
+            #
+            # The cost is disk, and it is small: 11 trees orphaned this way across the whole
+            # artifacts root total 63 MB.
             raise
         fit_wall_s = time.perf_counter() - fit_wall_t0
         fit_cpu_s = cpu_seconds() - fit_cpu_t0
