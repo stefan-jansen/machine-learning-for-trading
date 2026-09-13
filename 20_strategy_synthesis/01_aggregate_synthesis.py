@@ -771,9 +771,14 @@ def build_backtest_rows():
             cross_stage = cross_stage.filter(pl.col("label").is_in(list(label_restriction)))
         cross_stage = _apply_rung_restriction(cross_stage, cs)
         if not cross_stage.is_empty():
-            cross_stage = cross_stage.sort("sharpe", descending=True).unique(
-                subset=["prediction_hash"], keep="first", maintain_order=True
-            )
+            # `prediction_hash` as the second sort key for the same reason as the overlay
+            # ranking above: `keep="first"` and the positional read below both take whatever
+            # the concat happened to order first when two predictions share a Sharpe. It is
+            # also the subset key, so it decides the row completely. No registry holds a tie
+            # at this maximum today, so nothing moves.
+            cross_stage = cross_stage.sort(
+                ["sharpe", "prediction_hash"], descending=[True, False], nulls_last=True
+            ).unique(subset=["prediction_hash"], keep="first", maintain_order=True)
         spine_pred_hash = cross_stage["prediction_hash"][0] if not cross_stage.is_empty() else None
 
         bt_rows.append(
