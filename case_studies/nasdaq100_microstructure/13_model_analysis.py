@@ -1052,6 +1052,14 @@ else:
 # label, two folds and one panel, and the grid crosses leaf count with a loss function,
 # so a leaf-count column pools across losses that may not respond the same way.
 #
+# **The ensemble this case study features does not take the winner of this table.**
+# `ensemble.max_num_leaves` in `config/setup.yaml` is 31, so the featured mean forecast
+# averages the 7-, 15- and 31-leaf members and leaves out the 63-leaf ones entirely. That
+# is not an oversight competing with the table above: the table ranks single
+# configurations on one validation sample, and an average of regularized members is a bet
+# that the family generalizes where the individual maximum does not. Chapter 16 is where
+# the two are compared on the same footing, out of sample.
+#
 # `deep_learning/nlinear` is an architecturally near-linear sequence model rather than a
 # deep recurrent one, and its highest IC is a single-config result with no meaningful
 # epoch-versus-IC progression to compare across architectures.
