@@ -491,6 +491,28 @@ else:
 # interval as well as a point: a reader who needs it tighter needs more grid, not more
 # precision in this arithmetic.
 if not cost_df.is_empty():
+    # `cost_sensitivity` returns cost_bps, sharpe, max_drawdown and allocator, and no
+    # identity, so a curve here is only a curve while one configuration contributes each
+    # (allocator, cost_bps) point. `top_n_predictions.cost_sensitivity` is 1 on this case
+    # study, so that holds; raise it above 1 and two selected configurations sharing an
+    # allocator pool into one line, and an interpolation across them describes neither.
+    # Checked rather than assumed, because the collision is invisible in the plot.
+    _dupes = (
+        cost_df.group_by(["allocator", "cost_bps"])
+        .agg(pl.len().alias("n"))
+        .filter(pl.col("n") > 1)
+        .sort("n", descending=True)
+    )
+    if not _dupes.is_empty():
+        msg = (
+            f"{_dupes.height} (allocator, cost) point(s) carry more than one backtest, so "
+            "these curves pool configurations that share an allocator and no breakeven "
+            f"read off them belongs to a single strategy. Worst: {_dupes.row(0)}. Scope "
+            "the cost sweep to one configuration, or extend `cost_sensitivity` to return "
+            "the identity so the curves can be split by it."
+        )
+        raise RuntimeError(msg)
+
     _breakeven_rows = []
     for _alloc in cost_df["allocator"].unique().sort().to_list():
         _curve = cost_df.filter(pl.col("allocator") == _alloc).sort("cost_bps")
