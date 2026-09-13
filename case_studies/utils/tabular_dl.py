@@ -48,7 +48,7 @@ from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.folds import fold_seed
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
-from case_studies.utils.runtime import cpu_seconds
+from case_studies.utils.runtime import cpu_seconds, source_commit
 
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study
@@ -123,15 +123,7 @@ def _tabm_runtime_identity() -> dict[str, str]:
 
 
 def _tabm_runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
-    try:
-        commit = subprocess.check_output(
-            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        commit = "unknown"
+    commit = source_commit(study.release_root)
     record: dict[str, Any] = {
         "entry_point": "case_studies.utils.tabular_dl",
         "packages": _tabm_runtime_identity(),

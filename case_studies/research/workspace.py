@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from case_studies.utils.runtime import source_commit
 from scripts.create_experiment import create_experiment
 from utils.paths import REPO_ROOT
 
@@ -104,15 +105,13 @@ def _release_manifest_digest(case_dir: Path) -> str:
 
 
 def _source_commit(release_root: Path) -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "-C", str(release_root), "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
+    """The commit a research baseline was cut from, with a worktree marker.
+
+    `case_studies/utils/causal.py:1338` copies this into the `source_commit` field of a
+    causal run's runtime provenance, so it is the same claim the model runners make and
+    carries the same marker.
+    """
+    return source_commit(release_root)
 
 
 def _clear_root_sensitive_caches() -> None:
