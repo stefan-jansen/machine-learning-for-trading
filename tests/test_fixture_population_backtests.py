@@ -122,6 +122,12 @@ def test_a_case_study_with_no_registry_reports_nothing(tmp_path):
 # `--through-stage 8` regeneration running the model stages at fixture scale, so they exist
 # in no production registry - checked 2026-09-13 against etfs, 0 of 12 present. Either the
 # backtest stages run into the fixture, or the populations are not committed.
+#
+# The test below is named in `test-unit-data`'s file list in `.github/workflows/test.yml`,
+# for the reason that job's own comment gives about `tests/test_skip_blockers.py`: it
+# measures a property of the fixture, and `test-unit` checks out no test data, so there it
+# skips and asserts nothing. The rest of this file is synthetic and belongs in the sweep.
+# That job also fails on a skip, which is what stops this one going quiet again.
 FIXTURES_PUBLISHING_UNBACKTESTED_POPULATIONS = {
     "cme_futures",
     "crypto_perps_funding",
