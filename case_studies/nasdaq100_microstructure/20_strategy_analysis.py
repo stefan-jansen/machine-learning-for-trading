@@ -1606,10 +1606,15 @@ print(
 # against that model's own validation backtest.
 
 # %%
+# The markdown above states an invariant - exactly one canonical holdout backtest - and
+# this asks the registry rather than assuming it. `ORDER BY created_at ASC LIMIT 1` takes
+# the OLDEST, so a second holdout registered by a re-run of `19_holdout_backtest` would be
+# silently ignored and this section would close the case study on the superseded one. The
+# registry is append-only, which is what makes the oldest the wrong tie-break here.
 with sqlite3.connect(str(_db)) as _con:
-    _ho_row = _con.execute(
+    _ho_rows = _con.execute(
         """
-        SELECT b.backtest_hash, p.training_hash
+        SELECT b.backtest_hash, p.training_hash, b.created_at
         FROM backtest_runs b
         JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
         WHERE b.stage IN ('signal','allocation','risk_overlay','holdout')
@@ -1618,14 +1623,25 @@ with sqlite3.connect(str(_db)) as _con:
               json_extract(b.spec_json, '$.strategy.allocation.method'), ''
           ) != 'conformal_weighted'
         ORDER BY b.created_at ASC
-        LIMIT 1
         """,
-    ).fetchone()
-if _ho_row is None:
-    raise RuntimeError(
-        f"No canonical holdout backtest registered for {CASE_STUDY}; cannot anchor §6."
+    ).fetchall()
+if not _ho_rows:
+    msg = (
+        f"No canonical holdout backtest registered for {CASE_STUDY}, so §6 has nothing to "
+        "close on. `19_holdout_backtest` is what registers it, and it runs after "
+        "`18_holdout_predictions` has generated the holdout prediction set."
     )
-HO_HASH, _HO_TRAINING = _ho_row
+    raise RuntimeError(msg)
+if len(_ho_rows) > 1:
+    _listed = ", ".join(f"{h} ({ts})" for h, _, ts in _ho_rows)
+    msg = (
+        f"{len(_ho_rows)} canonical holdout backtests registered for {CASE_STUDY}: {_listed}. "
+        "This section reports one and the registry is append-only, so taking the oldest "
+        "would close the case study on a superseded read while the current one sits beside "
+        "it. Retire the ones that are not the deployed configuration, or pin the carrier."
+    )
+    raise RuntimeError(msg)
+HO_HASH, _HO_TRAINING, _ = _ho_rows[0]
 
 # Conformal sibling holdout (if registered) — recorded for transparency.
 # Keyed off the canonical holdout's own lineage, not the validation selection.
@@ -1649,8 +1665,8 @@ with sqlite3.connect(str(_db)) as _con:
 HO_HASH_CONFORMAL = _ho_conformal_row[0] if _ho_conformal_row else None
 HO_SHARPE_CONFORMAL = _ho_conformal_row[1] if _ho_conformal_row else None
 
-print(f"Validation the selected lineage hash:        {TOP_HASH}")
-print(f"Holdout (canonical) hash:      {HO_HASH}")
+print(f"Validation (selected lineage): {TOP_HASH}")
+print(f"Holdout (canonical):           {HO_HASH}")
 if HO_HASH_CONFORMAL:
     print(
         f"Holdout (conformal sibling):   {HO_HASH_CONFORMAL} "
