@@ -460,59 +460,125 @@ else:
 # alone.
 
 # %%
+# Read on the equal-weight arms, not the slot design, and matched pair by pair.
+#
+# Which arms exist on which universe is decided by `config/setup.yaml`, not here:
+# `baseline_schemes` runs ew_top5/10/20 on `baseline_universe: cost_feasible` for every
+# pass-1 prediction, and `reference_schemes` runs the same three on
+# `reference_universe: full` for the pass-2 predictions only. The slot design this
+# section used to query is registered on the screened universe alone, so that query
+# returned one row and the derived line below it was skipped, leaving a one-sided table
+# under prose describing two sides.
+#
+# Matched on `(prediction_hash, top_k)` because the two universes do not cover the same
+# predictions: the screened side carries every pass-1 prediction and the full side only
+# the pass-2 survivors. Averaging each side over its own population would compare 510
+# backtests against 10 and attribute the difference to the screen, when most of it is the
+# difference between the two populations. The inner join keeps only the pairs that exist
+# on both sides, so every number below is a difference at a fixed prediction and a fixed
+# concentration.
 conn = sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db"))
-screen_compare = pl.read_database(
+_arms = pl.read_database(
     """
     SELECT
         COALESCE(json_extract(br.spec_json, '$.strategy.signal.universe_filter'),
-                 'full')                                                 AS universe,
-        COUNT(*)                                                          AS n_configs,
-        ROUND(AVG(bm.sharpe), 3)                                          AS avg_sharpe,
-        ROUND(MIN(bm.sharpe), 3)                                          AS min_sharpe,
-        ROUND(MAX(bm.sharpe), 3)                                          AS max_sharpe,
-        ROUND(AVG(bm.num_trades), 0)                                      AS avg_trades
+                 'full')                                                  AS universe,
+        br.prediction_hash                                                AS prediction_hash,
+        json_extract(br.spec_json, '$.strategy.signal.top_k')             AS top_k,
+        bm.sharpe                                                         AS sharpe,
+        bm.num_trades                                                     AS num_trades
     FROM backtest_runs br
     JOIN backtest_metrics bm ON br.backtest_hash = bm.backtest_hash
     JOIN prediction_sets ps ON br.prediction_hash = ps.prediction_hash
     JOIN training_runs tr ON tr.training_hash = ps.training_hash
     WHERE br.stage = 'signal' AND ps.split = 'validation'
-      AND json_extract(br.spec_json, '$.strategy.signal.method') = 'slot_persistent_signal_exit'
-      AND json_extract(br.spec_json, '$.strategy.signal.max_slots') = 10
-      AND json_extract(br.spec_json, '$.strategy.signal.long_q') = 0.9
+      AND json_extract(br.spec_json, '$.strategy.signal.method') = 'equal_weight_top_k'
       AND tr.family = 'gbm'
-    GROUP BY universe
-    ORDER BY universe DESC
+      AND bm.sharpe IS NOT NULL
     """,
     connection=conn,
-    schema_overrides={"avg_trades": pl.Float64},
+    schema_overrides={"sharpe": pl.Float64, "num_trades": pl.Float64},
 )
 conn.close()
+
+_matched = _arms.filter(pl.col("universe") == "full").join(
+    _arms.filter(pl.col("universe") == "cost_feasible"),
+    on=["prediction_hash", "top_k"],
+    how="inner",
+    suffix="_screened",
+)
+screen_compare = (
+    pl.concat(
+        [
+            _matched.select(
+                pl.lit("full").alias("universe"),
+                pl.col("sharpe"),
+                pl.col("num_trades"),
+            ),
+            _matched.select(
+                pl.lit("cost_feasible").alias("universe"),
+                pl.col("sharpe_screened").alias("sharpe"),
+                pl.col("num_trades_screened").alias("num_trades"),
+            ),
+        ]
+    )
+    .group_by("universe")
+    .agg(
+        n_arms=pl.len(),
+        avg_sharpe=pl.col("sharpe").mean().round(3),
+        min_sharpe=pl.col("sharpe").min().round(3),
+        max_sharpe=pl.col("sharpe").max().round(3),
+        avg_trades=pl.col("num_trades").mean().round(0),
+    )
+    .sort("universe", descending=True)
+)
+print(f"{_matched.height} (prediction, top_k) pairs registered on both universes")
 print(screen_compare)
+
+# %%
+# The section's claim is a difference between two universes, so one universe is not a
+# weaker version of it and the derived line must not be skipped when it finds one. A
+# one-row table under prose describing two sides is the failure this refusal exists to
+# stop, and it is the state the previous query was in.
+_universes = set(screen_compare["universe"].to_list())
+if _universes != {"full", "cost_feasible"}:
+    msg = (
+        "section 4 compares one arm across two universes and the matched set offers "
+        f"{sorted(_universes) or 'none'}. It reads stage='signal', split='validation', gbm, "
+        "signal.method='equal_weight_top_k', and needs the same (prediction, top_k) pair "
+        "registered on both the full universe and cost_feasible. `baseline_schemes` and "
+        "`reference_schemes` in config/setup.yaml decide that; they currently agree on "
+        "ew_top5/10/20, so an empty match means the sweep did not reach pass 2."
+    )
+    raise RuntimeError(msg)
+
+full_row = screen_compare.filter(pl.col("universe") == "full")
+screened_row = screen_compare.filter(pl.col("universe") == "cost_feasible")
+d_sharpe = screened_row["avg_sharpe"][0] - full_row["avg_sharpe"][0]
+# Screened over full, so the direction reads off the number: above 1 the screen traded
+# more. A full-over-screened ratio was the previous form and it reads as a reduction
+# whichever way the trade count moved.
+trade_ratio = screened_row["avg_trades"][0] / max(full_row["avg_trades"][0], 1)
+print(
+    f"Screen moves avg Sharpe by {d_sharpe:+.2f} "
+    f"({full_row['avg_sharpe'][0]:+.2f} to {screened_row['avg_sharpe'][0]:+.2f}) "
+    f"and multiplies trades by {trade_ratio:.2f} "
+    f"({full_row['avg_trades'][0]:.0f} to {screened_row['avg_trades'][0]:.0f})."
+)
 
 # %% [markdown]
 # ### Reading the Screen's Effect
 #
-# Same slot design, same model family, validation window — the only difference
-# is the tradeable universe. On the full 113-name panel the design averages a
-# negative Sharpe and churns several thousand trades; on the cost-feasible
-# universe it averages positive and trades roughly an order of magnitude less.
-# The expensive tail was both the turnover source and the cost sink. Screening
-# for cost feasibility is the upstream move that the per-share cadence sweep
-# (Section 5) then builds on.
-
-# %%
-if not screen_compare.is_empty() and screen_compare.height == 2:
-    full_row = screen_compare.filter(pl.col("universe") == "full")
-    screened_row = screen_compare.filter(pl.col("universe") == "cost_feasible")
-    if not full_row.is_empty() and not screened_row.is_empty():
-        d_sharpe = screened_row["avg_sharpe"][0] - full_row["avg_sharpe"][0]
-        trade_ratio = full_row["avg_trades"][0] / max(screened_row["avg_trades"][0], 1)
-        print(
-            f"Screen lifts avg Sharpe by {d_sharpe:+.2f} "
-            f"({full_row['avg_sharpe'][0]:+.2f} → {screened_row['avg_sharpe'][0]:+.2f}) "
-            f"and cuts turnover {trade_ratio:.1f}x "
-            f"({full_row['avg_trades'][0]:.0f} → {screened_row['avg_trades'][0]:.0f} trades)."
-        )
+# Same arm, same model family, same validation window, and the same predictions on
+# both sides. The only difference between the two rows is the tradeable universe, so
+# the gap between them is what the screen did and not what the model did.
+#
+# Read the Sharpe difference and the trade ratio together. The screen changes which
+# names can be held, so it changes how much trading the ordering provokes as well as
+# what each trade costs, and a Sharpe difference alone cannot separate the two. The
+# printed line above states both, computed from the table rather than described here,
+# because a described ordering goes stale against the next rebuild while a computed
+# one cannot.
 
 # %% [markdown]
 # ## 5. Cadence × Per-Share Cost Analysis
