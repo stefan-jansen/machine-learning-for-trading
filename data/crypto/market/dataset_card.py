@@ -32,7 +32,6 @@
 # %%
 """Crypto Premium Index - download, explore, and update workflow."""
 
-import json
 from pathlib import Path
 
 import polars as pl
@@ -342,29 +341,16 @@ premium_stats
 
 # %%
 from utils import ML4T_DATA_PATH
+from utils.downloading import dataset_profile_path, load_dataset_profile, print_dataset_profile
 
-# Check for existing profiles
-for dataset, filename in [
-    ("OHLCV", "perps_1h_profile.json"),
-    ("Premium", "premium_index_8h_profile.json"),
-]:
-    profile_path = ML4T_DATA_PATH / "crypto" / "market" / filename
-    if profile_path.exists():
-        profile = json.loads(profile_path.read_text())
-        print(f"=== Crypto {dataset} Profile ===")
-        rows = profile.get("total_rows", profile.get("rows"))
-        cols = profile.get("total_columns", profile.get("columns"))
-        if isinstance(cols, list):
-            cols = len(cols)
-        print(f"Rows: {rows:,}" if rows is not None else "Rows: unknown")
-        print(f"Columns: {cols}")
-        mem = profile.get("memory_mb")
-        if mem is not None:
-            print(f"Memory: {mem:.1f} MB")
-        print()
+for dataset, filename in [("OHLCV", "perps_1h.parquet"), ("Premium", "premium_index_8h.parquet")]:
+    data_path = ML4T_DATA_PATH / "crypto" / "market" / filename
+    profile = load_dataset_profile(data_path)
+    if profile is not None:
+        print_dataset_profile(profile, f"CRYPTO {dataset.upper()} PROFILE")
     else:
-        print(f"Profile not found: {profile_path}")
-        print(f"Generate with: python generate_profiles.py --dataset crypto_{dataset.lower()}\n")
+        print(f"No profile at {dataset_profile_path(data_path)}")
+        print("Written by: python data/crypto/market/download.py")
 
 # %% [markdown]
 # ## 6. Loader Options

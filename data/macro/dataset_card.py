@@ -32,7 +32,6 @@
 # %%
 """FRED Macro Indicators - download, explore, and update workflow."""
 
-import json
 import os
 from pathlib import Path
 
@@ -306,19 +305,16 @@ if all(c in df.columns for c in ["dgs10", "dgs2"]):
 
 # %%
 from utils import ML4T_DATA_PATH
+from utils.downloading import dataset_profile_path, load_dataset_profile, print_dataset_profile
 
-# Check for existing profile
-profile_path = ML4T_DATA_PATH / "macro" / "profile.json"
+data_path = ML4T_DATA_PATH / "macro" / "fred_macro.parquet"
+profile = load_dataset_profile(data_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== Macro Profile ===")
-    print(f"Rows: {profile['rows']:,}")
-    print(f"Columns: {profile['columns']}")
-    print(f"Memory: {profile['memory_mb']:.1f} MB")
+if profile is not None:
+    print_dataset_profile(profile, "FRED MACRO PROFILE")
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset macro")
+    print(f"No profile at {dataset_profile_path(data_path)}")
+    print("Written by: python data/macro/download.py")
 
 # %% [markdown]
 # ## 6. Loader Options

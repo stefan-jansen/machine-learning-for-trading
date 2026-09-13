@@ -394,11 +394,11 @@ if "msg_type" in itch.columns:
 
 # %%
 from utils import ML4T_DATA_PATH
+from utils.downloading import dataset_profile_path
 
 # Check for MBO profile
-mbo_profile_path = (
-    ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "market_by_order" / "profile.json"
-)
+mbo_data_path = ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "market_by_order"
+mbo_profile_path = dataset_profile_path(mbo_data_path)
 if mbo_profile_path.exists():
     profile = json.loads(mbo_profile_path.read_text())
     print("=== MBO Profile ===")
@@ -407,9 +407,8 @@ else:
     print("MBO profile not found")
 
 # Check for ITCH profile
-itch_profile_path = (
-    ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "nasdaq_itch" / "profile.json"
-)
+itch_data_path = ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "nasdaq_itch"
+itch_profile_path = dataset_profile_path(itch_data_path)
 if itch_profile_path.exists():
     profile = json.loads(itch_profile_path.read_text())
     print("\n=== ITCH Profile ===")

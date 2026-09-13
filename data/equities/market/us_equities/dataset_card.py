@@ -34,7 +34,6 @@
 # %%
 """US Equities - download, explore, and update workflow."""
 
-import json
 import os
 from pathlib import Path
 
@@ -247,25 +246,17 @@ top_volume.head(20)
 
 # %%
 from utils import ML4T_DATA_PATH
+from utils.downloading import dataset_profile_path, load_dataset_profile, print_dataset_profile
 
-# Check for existing profile
-profile_path = ML4T_DATA_PATH / "equities" / "market" / "us_equities" / "us_equities_profile.json"
+data_path = ML4T_DATA_PATH / "equities" / "market" / "us_equities" / "us_equities.parquet"
+profile = load_dataset_profile(data_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== US Equities Profile ===")
-    rows = profile.get("total_rows", profile.get("rows"))
-    cols = profile.get("total_columns", profile.get("columns"))
-    if isinstance(cols, list):
-        cols = len(cols)
-    print(f"Rows: {rows:,}" if rows is not None else "Rows: unknown")
-    print(f"Columns: {cols}")
-    mem = profile.get("memory_mb")
-    if mem is not None:
-        print(f"Memory: {mem:.1f} MB")
+if profile is not None:
+    print_dataset_profile(profile, "US EQUITIES PROFILE")
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset us_equities")
+    print(f"No profile at {dataset_profile_path(data_path)}")
+    print("This dataset's downloader does not write one. utils.downloading.save_dataset_profile")
+    print("writes a profile beside any parquet it is handed.")
 
 # %% [markdown]
 # ## 6. Loader Options

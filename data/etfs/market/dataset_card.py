@@ -32,7 +32,6 @@
 # %%
 """ETF Universe - download, explore, and update workflow."""
 
-import json
 from pathlib import Path
 
 import polars as pl
@@ -253,33 +252,27 @@ category_summary
 
 # %%
 from utils import ML4T_DATA_PATH
+from utils.downloading import dataset_profile_path, load_dataset_profile, print_dataset_profile
 
-# Check for existing profile
-profile_path = ML4T_DATA_PATH / "etfs" / "market" / "profile.json"
+# The profile is written beside the parquet, under the name save_dataset_profile
+# gives it, so ask for it by data file rather than by a hardcoded filename.
+data_path = ML4T_DATA_PATH / "etfs" / "market" / "etf_universe.parquet"
+profile = load_dataset_profile(data_path)
 
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== ETF Universe Profile ===")
-    print(f"Dataset: {profile['dataset']}")
-    print(f"Rows: {profile['rows']:,}")
-    print(f"Columns: {profile['columns']}")
-    print(f"Memory: {profile['memory_mb']:.1f} MB")
-    print("\nSchema:")
-    for col, dtype in profile["schema"].items():
-        print(f"  {col}: {dtype}")
-    print(f"\nDate range: {profile['column_stats']['timestamp']['min']}")
-    print(f"         to {profile['column_stats']['timestamp']['max']}")
+if profile is not None:
+    print_dataset_profile(profile, "ETF UNIVERSE PROFILE")
 else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset etfs")
+    print(f"No profile at {dataset_profile_path(data_path)}")
+    print("Written by: python data/etfs/market/download.py")
 
 # %% [markdown]
-# ### Generate/Refresh Profile
+# ### Refreshing the profile
 #
-# To regenerate the profile after downloading new data:
+# `ETFDataManager` profiles the panel every time it saves, so re-running the
+# downloader refreshes the profile with it:
 #
 # ```bash
-# python generate_profiles.py --dataset etfs --force
+# python data/etfs/market/download.py
 # ```
 
 # %% [markdown]
@@ -357,7 +350,7 @@ print(f"5 ETFs, 2020-2023: {filtered.shape}")
 # | Provider | Yahoo Finance (free) |
 # | Config | `config.yaml` |
 # | Loader | `load_etfs(symbols, start_date, end_date)` |
-# | Profile | `$ML4T_DATA_PATH/etfs/profile.json` |
+# | Profile | `$ML4T_DATA_PATH/etfs/market/etf_universe_profile.json` |
 #
 # **Note**: This is the **candidate pool**. Chapter 6 filters to ~80 ETFs
 # based on liquidity, history, and correlation clustering.

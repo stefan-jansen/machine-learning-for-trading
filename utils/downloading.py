@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import sys
 from pathlib import Path
@@ -168,6 +169,60 @@ def save_dataset_profile(
     profile_path = get_profile_path(path)
     save_profile(profile, profile_path)
     return profile_path
+
+
+def dataset_profile_path(data_path: str | Path) -> Path:
+    """Where the profile for a data file or directory lives.
+
+    Delegates to the same rule `save_dataset_profile` writes by, so a reader and
+    the downloader that wrote the profile cannot disagree about the filename.
+    """
+    from ml4t.data.storage.data_profile import get_profile_path
+
+    return get_profile_path(Path(data_path))
+
+
+def load_dataset_profile(data_path: str | Path) -> dict[str, Any] | None:
+    """Read the profile saved beside a data file, or None if there is none."""
+    profile_path = dataset_profile_path(data_path)
+    if not profile_path.exists():
+        return None
+    return json.loads(profile_path.read_text())
+
+
+def print_dataset_profile(profile: dict[str, Any], title: str = "DATA PROFILE") -> None:
+    """Print a profile written by `save_dataset_profile`.
+
+    Reads the keys `DatasetProfile.to_dict()` actually emits: `total_rows`,
+    `total_columns`, `columns`, `generated_at`, `source`, `date_range_start`,
+    `date_range_end` and `symbols`.
+    """
+    print_section(title)
+    print(f"  Source:      {profile.get('source') or 'unrecorded'}")
+    print(f"  Generated:   {profile.get('generated_at') or 'unrecorded'}")
+    print(f"  Rows:        {profile['total_rows']:,}")
+    print(f"  Columns:     {profile['total_columns']}")
+
+    start, end = profile.get("date_range_start"), profile.get("date_range_end")
+    if start and end:
+        print(f"  Date range:  {start} to {end}")
+
+    symbols = profile.get("symbols") or []
+    if symbols:
+        shown = ", ".join(symbols[:8])
+        more = f", ... ({len(symbols)} total)" if len(symbols) > 8 else ""
+        print(f"  Symbols:     {shown}{more}")
+
+    columns = profile.get("columns") or []
+    if columns:
+        print("\n  Column                         dtype                  nulls    unique")
+        for col in columns:
+            dtype = str(col.get("dtype", ""))
+            dtype = dtype if len(dtype) <= 21 else dtype[:20] + "\u2026"
+            print(
+                f"  {col['name']:<30} {dtype:<22} "
+                f"{col.get('null_count', 0):>6,} {col.get('unique_count', 0):>9,}"
+            )
 
 
 # ---------------------------------------------------------------------------

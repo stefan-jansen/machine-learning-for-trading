@@ -240,10 +240,11 @@ aqr.tail(10)
 
 # %%
 from utils import ML4T_DATA_PATH
+from utils.downloading import dataset_profile_path
 
 # Check for profiles
 for provider, subdir in [("Fama-French", "fama-french"), ("AQR", "aqr")]:
-    profile_path = ML4T_DATA_PATH / "factors" / subdir / "profile.json"
+    profile_path = dataset_profile_path(ML4T_DATA_PATH / "factors" / subdir)
     if profile_path.exists():
         profile = json.loads(profile_path.read_text())
         print(f"=== {provider} Profile ===")

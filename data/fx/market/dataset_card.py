@@ -32,7 +32,6 @@
 # %%
 """FX Pairs - download, explore, and update workflow."""
 
-import json
 import os
 from pathlib import Path
 
@@ -270,41 +269,27 @@ fx_vol
 
 # %%
 from utils import ML4T_DATA_PATH
+from utils.downloading import dataset_profile_path, load_dataset_profile, print_dataset_profile
 
-# Check for existing profile
-profile_path = ML4T_DATA_PATH / "fx" / "market" / "4h_profile.json"
-
-if profile_path.exists():
-    profile = json.loads(profile_path.read_text())
-    print("=== FX 4h Profile ===")
-    rows = profile.get("total_rows", profile.get("rows"))
-    cols_field = profile.get("columns")
-    n_cols = profile.get(
-        "total_columns",
-        len(cols_field) if isinstance(cols_field, list) else cols_field,
-    )
-    print(f"Rows: {rows:,}" if rows is not None else "Rows: unknown")
-    print(f"Columns: {n_cols}")
-    if isinstance(cols_field, list):
-        print("\nSchema:")
-        for c in cols_field:
-            print(f"  {c['name']}: {c['dtype']}")
-        ts = next((c for c in cols_field if c.get("name") == "timestamp"), None)
-        if ts:
-            print(f"\nDate range: {ts['min']}")
-            print(f"         to {ts['max']}")
-else:
-    print(f"Profile not found at {profile_path}")
-    print("Generate with: python generate_profiles.py --dataset fx_pairs_4h")
+# One profile per frequency, each beside its own parquet.
+for frequency in ["4h", "daily"]:
+    data_path = ML4T_DATA_PATH / "fx" / "market" / f"{frequency}.parquet"
+    profile = load_dataset_profile(data_path)
+    if profile is not None:
+        print_dataset_profile(profile, f"FX {frequency} PROFILE")
+    else:
+        print(f"No profile at {dataset_profile_path(data_path)}")
+        print(f"Written by: python data/fx/market/download.py --frequency {frequency}")
 
 # %% [markdown]
-# ### Generate/Refresh Profile
+# ### Refreshing the profile
 #
-# To regenerate the profile after downloading new data:
+# The downloader profiles what it writes, so a re-download refreshes the profile
+# for that frequency:
 #
 # ```bash
-# python generate_profiles.py --dataset fx_pairs_4h --force
-# python generate_profiles.py --dataset fx_pairs_daily --force
+# python data/fx/market/download.py --frequency 4h
+# python data/fx/market/download.py --frequency daily
 # ```
 
 # %% [markdown]
@@ -379,4 +364,4 @@ print(f"EUR/GBP daily 2020-2023: {filtered.shape}")
 # | Provider | OANDA (free API key) |
 # | Config | `config.yaml` |
 # | Loader | `load_fx_pairs(frequency, pairs, start_date, end_date)` |
-# | Profile | `$ML4T_DATA_PATH/fx/{frequency}_profile.json` |
+# | Profile | `$ML4T_DATA_PATH/fx/market/{frequency}_profile.json` |
