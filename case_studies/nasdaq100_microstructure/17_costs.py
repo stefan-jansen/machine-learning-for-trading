@@ -39,8 +39,10 @@
 #    many times it is acted on.
 #
 # The notebook has three parts:
-# - **Sections 1–3**: Standard bps cost grid on full-universe allocation combos,
-#   tracing the Sharpe-vs-cost decay curve.
+# - **Sections 1-3**: Standard bps cost grid on the leading pre-cost runs, which
+#   on this case study are the screened signal-stage arms (Section 1 says why the
+#   allocation and risk-overlay stages contribute none), tracing the
+#   Sharpe-vs-cost decay curve.
 # - **Section 4**: Full universe vs the cost-feasible screen — the first lever,
 #   read off existing registry rows for the equal-weight top-k arms, which are
 #   the arms both universes carry.
@@ -161,10 +163,9 @@ if excluded_families(CASE_STUDY_ID):
 # %% [markdown]
 # ## 1. Load the leading pre-cost runs
 #
-# We load the least-negative full-universe validation backtests. These are every-bar combos
-# and are already loss-making (Ch17); the cost grid below traces how the Sharpe-vs-cost curve
-# behaves around them before the two recovery levers — the screen and the cadence — are
-# applied.
+# We load the highest-Sharpe validation backtests on the universe this case study treats as
+# canonical, and trace how their Sharpe-vs-cost curve behaves before the two recovery
+# mechanisms - the screen in Section 4 and the cadence in Section 5 - are applied.
 #
 # **The pool is every stage a selected configuration can come from, not just `allocation`.** A risk
 # overlay is a strategy in its own right: `16_risk_management` registers it at
@@ -194,6 +195,15 @@ if excluded_families(CASE_STUDY_ID):
 # This is also why the notebook is numbered after `16_risk_management` rather than before it.
 # Run the other way round, the overlay rows do not exist yet and the pool is `allocation`
 # whatever it declares.
+#
+# **On this case study the two arguments above point in opposite directions, and the pin
+# wins.** `15_portfolio_management` builds its allocation specs with no `universe_filter` and
+# `16_risk_management` clones those specs, so every allocation and risk-overlay row this
+# registry holds is a full-universe row and the pin drops all of them. The pool that reaches
+# the cost grid is the signal stage's screened rows. That is the declared design rather than a
+# gap - 15 exists to show that allocation does not rescue the every-bar full-universe
+# strategy, and a negative result is not a candidate to carry the case study - but it does mean
+# the risk-overlay argument above is about the other eight case studies and not about this one.
 
 # %%
 PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
@@ -265,34 +275,41 @@ def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
 top_combos = resolve_pre_cost_runs(TOP_N_COMBOS)
 
 if top_combos.is_empty():
-    print(
-        f"No results on the {CANONICAL_UNIVERSE or 'full'} universe at any of "
-        f"{', '.join(PRE_COST_STAGES)}. Run 14_backtest through 16_risk_management first."
+    # Refused rather than reported. Every cell below is a no-op on an empty pool, so the
+    # notebook would run to the end, register nothing and exit 0 - a chapter with no cost
+    # curve in it and no error anywhere saying why.
+    msg = (
+        f"No {CANONICAL_UNIVERSE or 'full'}-universe validation backtests at any of "
+        f"{', '.join(PRE_COST_STAGES)} for {CASE_STUDY_ID}/{LABEL}. The stages hold rows or "
+        "`_on_canonical_universe` would have raised first, so what is missing is the "
+        f"universe: nothing registered declares `signal.universe_filter = "
+        f"{CANONICAL_UNIVERSE!r}`. Re-run 14_backtest, whose baseline pass is what registers "
+        "them."
     )
-else:
-    for row in top_combos.iter_rows(named=True):
-        spec = ensure_backtest_spec(
+    raise RuntimeError(msg)
+for row in top_combos.iter_rows(named=True):
+    spec = ensure_backtest_spec(
+        CASE_STUDY_ID,
+        bt_config,
+        json.loads(row["spec_json"]),
+        prices=load_backtest_prices_for(
             CASE_STUDY_ID,
-            bt_config,
-            json.loads(row["spec_json"]),
-            prices=load_backtest_prices_for(
-                CASE_STUDY_ID,
-                LABEL,
-                split="validation",
-                warmup_periods=warmup_periods_for(CASE_STUDY_ID),
-                max_symbols=MAX_SYMBOLS,
-            ),
-            prediction_hash=row["prediction_hash"],
-            initial_cash=bt_config.initial_cash,
-        )
-        alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-        # The stage is printed because it is the thing that changed: a `risk_overlay` configuration
-        # and its `allocation` parent share a prediction hash, so nothing else in this line
-        # distinguishes the overlaid run from the un-overlaid one it was built on.
-        print(
-            f"  Sharpe={row['sharpe']:.3f}  stage={row['pool_stage']}  alloc={alloc}  "
-            f"bt_hash={row['backtest_hash'][:8]}"
-        )
+            LABEL,
+            split="validation",
+            warmup_periods=warmup_periods_for(CASE_STUDY_ID),
+            max_symbols=MAX_SYMBOLS,
+        ),
+        prediction_hash=row["prediction_hash"],
+        initial_cash=bt_config.initial_cash,
+    )
+    alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
+    # The stage is printed because it is the thing that changed: a `risk_overlay` configuration
+    # and its `allocation` parent share a prediction hash, so nothing else in this line
+    # distinguishes the overlaid run from the un-overlaid one it was built on.
+    print(
+        f"  Sharpe={row['sharpe']:.3f}  stage={row['pool_stage']}  alloc={alloc}  "
+        f"bt_hash={row['backtest_hash'][:8]}"
+    )
 
 # %%
 prices = load_backtest_prices_for(
@@ -311,12 +328,12 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 # (commission + slippage combined). The grid spans from near-zero to levels
 # that exceed the signal entirely, tracing the full decay curve.
 #
-# At 15-minute cadence with ~26 bars per trading day, even 1 bps per leg
-# compounds to significant annual drag. The breakeven cost level for this
-# case study is expected to be very low — in the range of 1–3 bps total —
-# making it viable only for market-makers or prop desks with institutional
-# execution quality, or for strategies that extend the hold period to 4–8 bars
-# to amortize the per-trade cost.
+# At 15-minute cadence the strategy is offered 20 decision slots a trading day
+# (Section 5 measures the grid at every cadence), so even 1 bps per leg compounds
+# to a large annual drag. Where the breakeven actually falls is what the curve
+# below reports; the reason to expect it low is arithmetic rather than a result,
+# and the two mechanisms that move it are the ones the rest of this chapter
+# measures - trading fewer names, and trading them less often.
 
 # %%
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
@@ -633,11 +650,17 @@ print(
 # %% [markdown]
 # ## 5. Cadence × Per-Share Cost Analysis
 #
-# The bps sweep above fixes the rebalancing cadence at 15 minutes. But the
-# cost-to-edge ratio depends on *how often* we trade, not just *how much* each
-# trade costs. At 15-minute cadence the strategy rebalances 26 times per day;
-# at hourly cadence only 6–7 times. Holding longer amortizes the fixed per-trade
-# cost over a larger expected return per period.
+# The bps sweep above fixes the rebalancing cadence at 15 minutes. The
+# cost-to-edge ratio depends on how often the strategy trades as well as on what
+# each trade costs, and the cadence axis is the one that moves the first term.
+#
+# `resolve_decision_schedule` puts each cadence on the clock over the window this
+# label is scored on, 10:31 to 15:43. Measured on it: 62 decision slots a day at
+# five minutes, 20 at fifteen, 10 at thirty and 5 at sixty. A 9:30-to-16:00
+# session would give 78, 26, 13 and 7; the scored window is shorter at both ends
+# because a feature lookback opens it and the fifteen-minute forward label closes
+# it. Holding longer amortizes the fixed per-trade cost over a larger expected
+# return per period.
 #
 # This section sweeps **cadence × per-share spread** — the central exhibit
 # for this case study. We use a **per-share cost model** rather than bps,
