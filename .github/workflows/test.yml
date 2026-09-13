@@ -24,14 +24,38 @@
 
 name: Tests
 
-# One run per ref, and a burst collapses to the newest tree. Merging eight pull requests in an
-# evening previously started eight full matrices on `main`, each testing a tree the next merge
-# superseded minutes later, and each mailing a failure notice. Cancelling the superseded ones
-# keeps the invariant the push trigger exists for - what is on `main` has been tested - while
-# testing the tip rather than every intermediate state. Pull-request runs collapse the same way
-# when a branch is pushed to repeatedly.
+# One run per pull request, and one per commit on `main`.
+#
+# A pull request still collapses to its newest push: a branch pushed to repeatedly should
+# test the tip and nothing before it.
+#
+# `main` is keyed by commit, not by ref, and the two cancellations that produces want
+# opposite treatment. Two runs exist for one commit - the `push` run and the run
+# `Docker Publish` triggers on finishing - and they test the same tree, so collapsing
+# them is pure saving; measured on ten consecutive merges on 2026-09-12, the push run was
+# cancelled 11 s to 3 min in, every time, by the run that replaced it. Cancelling ACROSS
+# commits is where the coverage went. Keying by ref did both, and the second one cost
+# more than the first saved: merges landing 10 to 30 minutes apart against jobs needing
+# 20 to 46 minutes meant the six slowest never finished at all. By 01:00 on 2026-09-13
+# `cs-etfs`, `cs-nasdaq100_microstructure`, `cs-sp500_equity_option_analytics`,
+# `cs-sp500_options`, `ch11-12` and `ch16-17` had last reported five merges back, and
+# `main` runs the full matrix precisely so that failures outside a merged diff stay
+# visible - which those six had stopped providing.
+#
+# `github.sha` is the right key on both event types, which is measured rather than read
+# off the docs. On a `workflow_run` event it is the default branch tip at event time, and
+# it is what gets tested: the checkout in run 34725716888 fetched
+# `+02e91fa71948...:refs/remotes/origin/main`, matching that run's `head_sha`. When two
+# merges land inside one Docker Publish, both triggered runs are stamped with the later
+# commit - runs 34717628030 and 34717636693 are both `e0ea7054` - so they still share a
+# group and still collapse, which is the same-tree case this wants collapsed.
+#
+# The cost is a full matrix per merge during a burst, in runner minutes that are free on
+# a public repo and wall-clock that gates nothing: `main`'s run blocks no merge. A late
+# complete answer beats a prompt absent one. `.github/workflows/ci-job-lag.yml` reports
+# when a job stops reporting, whichever way this setting goes.
 concurrency:
-  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 on:
