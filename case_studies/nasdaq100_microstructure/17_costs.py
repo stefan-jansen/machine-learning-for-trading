@@ -410,11 +410,20 @@ if failed_points:
 # This section is **read-only** — queries the registry for cost-sensitivity
 # results and computes breakeven levels.
 #
-# The Sharpe-versus-cost curve for intraday strategies typically falls steeply
-# from the near-zero-cost benchmark. For NASDAQ-100 15-minute, the expected
-# pattern is: positive Sharpe at 0–2 bps, break-even around 3–5 bps, negative
-# at any cost level resembling realistic retail execution. The flat portion of
-# the curve (if it exists) defines the practical cost budget.
+# The number to take from the curve is the **breakeven** - the cost level at which
+# Sharpe crosses zero - because it states the execution quality the strategy requires
+# rather than the profit it made under one assumption. It is computed below from the
+# registered rows and printed; no band is predicted here, since a prediction written
+# beside the calculation is read as its confirmation.
+#
+# Two features of the shape are worth reading beside it. How steeply the curve falls
+# from the zero-cost end says how much of the gross result was ever available: a strategy
+# whose Sharpe halves by 1 bps was never trading on much. And a flat stretch, if there is
+# one, is the range over which execution quality does not change the answer, which is the
+# only part of the axis where a cost assumption can be wrong without mattering.
+#
+# The grid is `backtest.sweep.cost_grid_bps`, 0 to 50 bps per leg, against the 7 bps
+# (5 commission + 2 slippage) the engine charged when these backtests were registered.
 
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
