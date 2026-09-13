@@ -183,7 +183,12 @@ cost_range = setup["costs"].get(
 )
 
 print(f"Case Study: {CASE_STUDY}")
-print(f"  Universe: {n_assets} NASDAQ-100 stocks at 15-minute bar frequency")
+# The panel is one-minute (`config/backtest/base.yaml::calendar.data_frequency`) and
+# the decision grid is fifteen (`decision.cadence_by_label`). Naming the bars as
+# fifteen-minute conflates the two, and the gap between them is this case study's
+# subject: the model is scored on every minute it can score and the strategy acts on
+# one bar in fifteen.
+print(f"  Universe: {n_assets} NASDAQ-100 stocks, decisions every 15 minutes")
 print(f"  Label: {PRIMARY_LABEL} (next 15-min return)")
 print(f"  CV: {n_splits} walk-forward folds, train={train_size}, val={val_size}")
 print(f"  Holdout: {holdout_start} onwards")
@@ -579,16 +584,32 @@ if best_preds.height > 0 and fold_ranges.height > 0:
     plot_cv_timeline(fold_ranges, n_splits, holdout_start)
 
 # %% [markdown]
-# With only 2 walk-forward folds, each covering 6 months of 15-minute
-# bars, the validation evidence is inherently thin. Each fold contains
-# about 3.2 million predictions each, counted from the registry rather than
-# from a bar count: the panel is one-minute, so a fold holds roughly 32,400
-# distinct timestamps and not the 3,276 a fifteen-minute reading would give.
-# Per-fold sample size is therefore large. But the temporal diversity is minimal - both folds
-# fall within the 2020–2021 period, which was dominated by COVID
-# recovery, meme-stock volatility, and an unprecedented retail trading
-# surge. Whether patterns learned here generalize to more normal market
-# conditions is an open question that 2 folds cannot answer.
+# Two walk-forward folds - `evaluation.n_splits` in `config/setup.yaml`, each
+# given `val_size: 6M` - and the evidence they carry is thin along one axis and
+# not the other. Reading either number as the other is the mistake this cell
+# exists to prevent.
+#
+# **Scored rows are plentiful.** A prediction set is scored on the minute panel,
+# so a fold holds on the order of a hundred trading days at a few hundred scored
+# minutes each, across 113 symbols: millions of rows. How far each family got
+# across those days is what the scored-day coverage table above prints, per
+# family, and it is the number that decides whether two families are comparable -
+# not a row count, which a family can inflate by covering fewer days of a wider
+# cross-section.
+#
+# **Decisions are far fewer than scored rows, and fewer than the row count
+# suggests.** `resolve_decision_schedule` thins the panel to the cadence
+# `decision.cadence_by_label` declares for this label - fifteen minutes, resolved
+# on the clock rather than by counting rows - so a day carries about twenty
+# decisions and not a few hundred. A model is scored on every minute it can
+# score; the strategy acts on one bar in fifteen.
+#
+# **Regimes are what two folds cannot buy, and no sample size substitutes.** Both
+# folds fall inside 2020-2021, ending where `evaluation.holdout_start` begins on
+# 2021-07-01: COVID recovery, meme-stock volatility and an unprecedented retail
+# trading surge. The rows inside a fold are not independent draws from the
+# regimes this strategy will meet, so millions of them buy precision within this
+# period and say nothing about the next one.
 
 # %% [markdown]
 # ## 2. What Was Actually Run?

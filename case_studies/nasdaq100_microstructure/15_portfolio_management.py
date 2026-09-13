@@ -322,8 +322,8 @@ _EXPENSIVE = {"mvo_ledoit_wolf", "hrp"}
 if SKIP_EXPENSIVE_ALLOC:
     ALLOC_CONFIGS = [a for a in _ALL_ALLOC_CONFIGS if a["method"] not in _EXPENSIVE]
     print(
-        f"Skipping expensive allocators ({', '.join(_EXPENSIVE)}) — "
-        f"covariance estimation on 1.3M 15-min bars is prohibitive"
+        f"Skipping expensive allocators ({', '.join(_EXPENSIVE)}): covariance "
+        f"estimation over {len(prices):,} price rows ({n_assets} symbols) is prohibitive"
     )
 else:
     ALLOC_CONFIGS = _ALL_ALLOC_CONFIGS
