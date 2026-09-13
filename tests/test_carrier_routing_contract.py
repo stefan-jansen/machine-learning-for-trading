@@ -103,10 +103,7 @@ def test_carrier_pins_are_single_sourced_and_well_formed() -> None:
         )
 
     repo = Path(__file__).parents[1]
-    for relative in (
-        "20_strategy_synthesis/holdout.py",
-        "20_strategy_synthesis/01_aggregate_synthesis.py",
-    ):
+    for relative in ("20_strategy_synthesis/01_aggregate_synthesis.py",):
         tree = ast.parse((repo / relative).read_text())
         assignments = [
             node
@@ -156,51 +153,48 @@ def test_the_carrier_restriction_has_no_second_implementation() -> None:
 
 
 def test_the_selection_restrictions_are_declared_once() -> None:
-    """`holdout.py` must import each selection restriction, not declare its own copy.
+    """One declaration of each selection restriction in the whole tree.
 
-    `case_studies/utils/strategy_analysis.py` and `20_strategy_synthesis/holdout.py`
-    each used to declare `LABEL_RESTRICTIONS` and `UNIVERSE_RESTRICTIONS`, under a
-    "keep these in sync" comment where a mechanism should be. A comment is not a
-    mechanism: the same arrangement one directory over - `_CARRIER_PIN_PREDICATES`
-    hand-copying a carrier choice under a "keep in sync" note - had been out of sync
-    across a whole registry rebuild with nothing failing. A drift check was the earlier
-    answer here and it only ever asked whether two values agreed today; there is now one
-    value, and this asks that the second declaration has not come back.
+    `case_studies/utils/strategy_analysis.py` and the retired
+    `20_strategy_synthesis/holdout.py` each used to declare `LABEL_RESTRICTIONS` and
+    `UNIVERSE_RESTRICTIONS`, under a "keep these in sync" comment where a mechanism should
+    be. A comment is not a mechanism: the same arrangement one directory over -
+    `_CARRIER_PIN_PREDICATES` hand-copying a carrier choice under a "keep in sync" note -
+    had been out of sync across a whole registry rebuild with nothing failing.
 
-    Read by parsing rather than by importing, because `holdout.py`'s module scope reaches
-    lightgbm and torch, which this job does not install.
-    `tests/test_holdout_selection_is_single_sourced.py` asserts the runtime identity in
-    the job that does.
+    That earlier check read the two named files. `holdout.py` is deleted, so the question
+    is asked of every module instead, which is the property that was wanted all along: a
+    second copy anywhere is a restriction a case study declares and the holdout selection
+    does not read, and naming the file it may appear in is guessing where.
+
+    Read by parsing rather than by importing, because the property is a source-level one -
+    whether a module DECLARES the name or imports it - and an imported module cannot tell
+    those apart. Importing `01_aggregate_synthesis.py` would also run a notebook.
     """
-    tree = ast.parse(
-        (Path(__file__).parents[1] / "20_strategy_synthesis" / "holdout.py").read_text()
+    repo = Path(__file__).parents[1]
+    sources = sorted(
+        path
+        for root in ("case_studies", "20_strategy_synthesis", "utils", "tests")
+        for path in (repo / root).rglob("*.py")
     )
-    imported = {
-        alias.asname or alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "case_studies.utils.strategy_analysis"
-        for alias in node.names
-    }
+    assert sources, "found no modules to read; the search roots are wrong"
+
     for name in ("LABEL_RESTRICTIONS", "UNIVERSE_RESTRICTIONS"):
-        declared = [
-            node
-            for node in ast.walk(tree)
+        declaring = [
+            path.relative_to(repo).as_posix()
+            for path in sources
+            for node in ast.walk(ast.parse(path.read_text()))
             if isinstance(node, (ast.Assign, ast.AnnAssign))
             and any(
                 isinstance(target, ast.Name) and target.id == name
                 for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
             )
         ]
-        assert not declared, (
-            f"20_strategy_synthesis/holdout.py declares its own {name} again. One "
-            "declaration, in case_studies/utils/strategy_analysis.py, imported here - a "
-            "second copy is a restriction a case study declares and the holdout selector "
-            "does not read."
-        )
-        assert name in imported, (
-            f"20_strategy_synthesis/holdout.py neither declares nor imports {name}, so "
-            "whatever it applies to holdout selection is not what the case study declared."
+        assert declaring == ["case_studies/utils/strategy_analysis.py"], (
+            f"{name} is declared in {declaring}. One declaration, in "
+            "case_studies/utils/strategy_analysis.py, imported everywhere else - a second "
+            "copy is a restriction a case study declares and the selection that spends its "
+            "holdout does not read."
         )
 
 

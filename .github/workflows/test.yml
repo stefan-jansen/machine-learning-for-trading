@@ -1115,7 +1115,7 @@ jobs:
           print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
           PY
   # ---------------------------------------------------------------------------
-  # The 35 test files that need the modelling environment.
+  # The 47 test files that need the modelling environment.
   #
   # These ran in NO job. .github/ci/unit-test-quarantine.txt excluded them from
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
@@ -1194,7 +1194,7 @@ jobs:
     # outcome this job must never have.
     if: always()
     runs-on: ubuntu-latest
-    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 36.
+    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 47.
     # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
@@ -1300,15 +1300,13 @@ jobs:
             tests/test_sae_batch_size.py \
             tests/test_sdf_checkpoint_numbering.py \
             tests/test_sdf_macro_context.py \
+            tests/test_sequence_batch_gather.py \
             tests/test_sequence_dataset.py \
             tests/test_sequence_identity_roundtrip.py \
             tests/test_sequence_holdout_rekey.py \
             tests/test_smoke_configs.py \
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
-            tests/test_holdout_expected_keys.py \
-            tests/test_holdout_force_regenerates.py \
-            tests/test_holdout_selection_is_single_sourced.py \
             tests/test_tabular_dl_identity.py \
             tests/test_tabular_dl_runtime.py \
             tests/test_latent_convergence_guard.py \

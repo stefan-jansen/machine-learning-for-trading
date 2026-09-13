@@ -116,10 +116,6 @@ PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-1d-tsmixer-v1",
     "us-equities-fwd-ret-1d-pca-v1",
     "us-equities-fwd-ret-1d-ipca-v1",
-    "us-equities-fwd-ret-5d-pca-v1",
-    "us-equities-fwd-ret-5d-ipca-v1",
-    "us-equities-fwd-ret-21d-pca-v1",
-    "us-equities-fwd-ret-21d-ipca-v1",
 ]
 
 # %% tags=["parameters"]
@@ -148,10 +144,6 @@ DIAGNOSTIC_SET_NAMES = [
     "us-equities-fwd-ret-1d-tsmixer-diagnostics-v1",
     "us-equities-fwd-ret-1d-pca-diagnostics-v1",
     "us-equities-fwd-ret-1d-ipca-diagnostics-v1",
-    "us-equities-fwd-ret-5d-pca-diagnostics-v1",
-    "us-equities-fwd-ret-5d-ipca-diagnostics-v1",
-    "us-equities-fwd-ret-21d-pca-diagnostics-v1",
-    "us-equities-fwd-ret-21d-ipca-diagnostics-v1",
 ]
 CAUSAL_LABELS = ["fwd_ret_1d"]
 

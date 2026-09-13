@@ -1,3 +1,18 @@
+# Three fields below are inert on the path this case study runs: `execution.execution_price`,
+# `commission.rate` and `slippage.rate`. Every registered backtest here is `ret_to_expiry`,
+# which `case_studies/utils/backtest_runner.py` routes to `_run_htm_daily_mtm`, and that call
+# is not passed `cost_spec` - the only thing that carries these rates into a run. The
+# `quote_side` fill is read by the event-driven broker, which a `rebalance.mode: vectorized`
+# case study never constructs. They still reach the registered `backtest_config` and so the
+# hashed identity, which is why they stay: removing them would re-key 879 backtests to delete
+# values nothing reads.
+#
+# The costs this case study actually pays come from `_htm_backtest.py`, which reads
+# `config/setup.yaml::costs.components` directly - per-leg entry spread from the real option
+# quotes, `hedge_spread.estimate_bps_of_notional` on every hedge rebalance,
+# `commission.option_per_contract` and `commission.equity_per_share`, plus an exit spread on
+# liquidation. Verified 2026-09-12; `total_slippage` is NULL on all 879 rows because the
+# vectorized path records no cost totals, not because nothing was charged.
 account:
   allow_short_selling: true
 execution:

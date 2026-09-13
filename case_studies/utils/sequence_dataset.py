@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 
 from utils.modeling import RANDOM_SEED
 
@@ -63,12 +63,162 @@ class SequenceStore:
         return int(len(self.entities))
 
 
-class FoldSequenceDataset(Dataset):
-    """Lazy map-style dataset yielding lookback windows on demand."""
+# The share of the card's free memory a fold's feature store may take. Training also
+# needs the model, its gradients and a batch of activations, and the card is shared with
+# whatever else this machine is running, so the store - the one allocation here big
+# enough to decide whether a fold fits - gets a minority of what is free, and the host
+# gather takes the fold when it does not fit.
+DEVICE_STORE_MAX_FREE_FRACTION = 0.4
 
-    def __init__(self, store: SequenceStore, *, include_metadata: bool = False) -> None:
+
+@dataclass(slots=True)
+class GatheredBatch:
+    """A batch ``FoldSequenceDataset.__getitems__`` assembled in one gather.
+
+    torch's map-style fetcher passes whatever ``__getitems__`` returns straight to
+    ``collate_fn``, so the assembled batch travels in this wrapper and the collate
+    functions below hand ``payload`` back untouched. Returning a list of per-sequence
+    samples is the documented shape, and it puts back into the collate step the
+    per-sequence Python work that the batch gather exists to remove.
+    """
+
+    payload: tuple
+
+
+def _device_available_bytes(device: torch.device) -> int:
+    """Bytes this process can still allocate on ``device``.
+
+    ``mem_get_info`` reports what the driver has free, which excludes the blocks torch's
+    caching allocator already holds for this process. Those are reusable, so a fold that
+    has just released its predecessor's store would otherwise read the card as fuller
+    than it is and fall back to the host for the rest of the run.
+    """
+
+    free, _total = torch.cuda.mem_get_info(device)
+    reusable = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    return int(free) + int(reusable)
+
+
+def _resolve_gather_device(store: SequenceStore, device: torch.device | str | None) -> torch.device:
+    """Decide where this fold's flat store lives, by measuring it against the card."""
+
+    if device is None:
+        return torch.device("cpu")
+    device = torch.device(device)
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return torch.device("cpu")
+    if not store.features:
+        return device
+    rows = sum(len(feats) for feats in store.features)
+    sample = store.features[0]
+    # The target column is float32 whatever the features are, because __getitem__ casts it.
+    needed = rows * (int(sample.shape[1]) * sample.dtype.itemsize + 4)
+    if needed > DEVICE_STORE_MAX_FREE_FRACTION * _device_available_bytes(device):
+        return torch.device("cpu")
+    return device
+
+
+def _flatten_store(store: SequenceStore, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Concatenate the per-symbol arrays into one feature and one target tensor.
+
+    On a CUDA device each symbol is copied straight to the card, so the host never holds
+    a second copy of the fold. The host path concatenates, which does hold one: that is
+    what the fallback's vectorized gather costs.
+    """
+
+    if not store.features:
+        return (
+            torch.zeros((0, 0), dtype=torch.float32, device=device),
+            torch.zeros(0, dtype=torch.float32, device=device),
+        )
+
+    if device.type == "cpu":
+        features = torch.from_numpy(np.concatenate(store.features))
+        targets = torch.from_numpy(np.concatenate(store.targets)).to(torch.float32)
+        return features, targets
+
+    total = int(sum(len(feats) for feats in store.features))
+    width = int(store.features[0].shape[1])
+    features = torch.empty(
+        (total, width), dtype=torch.from_numpy(store.features[0][:0]).dtype, device=device
+    )
+    targets = torch.empty(total, dtype=torch.float32, device=device)
+    start = 0
+    for feats, tgts in zip(store.features, store.targets, strict=True):
+        stop = start + len(feats)
+        features[start:stop] = torch.from_numpy(feats)
+        targets[start:stop] = torch.from_numpy(tgts).to(torch.float32)
+        start = stop
+    return features, targets
+
+
+class FoldSequenceDataset(Dataset):
+    """Map-style dataset gathering lookback windows one batch at a time.
+
+    ``__getitems__`` (note the plural) is the method that carries the work. torch's
+    map-style fetcher calls it with the whole index list the sampler chose and hands
+    whatever it returns straight to ``collate_fn``, so one strided gather replaces one
+    Python call per sequence. The sampler still decides which indices land in which
+    batch and in what order, so the batches are the ones ``__getitem__`` would have
+    produced, in the same order and with the same values.
+
+    The fold's features are held as one flat ``(total_rows, n_features)`` tensor with a
+    row offset per symbol, which makes a window a contiguous row range and a batch of
+    windows a single index. ``device`` decides where that tensor lives. On a CUDA device
+    the gather runs on the card and the batch is already there when the model reads it;
+    otherwise it runs on the host, which still removes the per-sequence Python call. The
+    choice is made here, at fold setup, by measuring the store against what the card has
+    free - not by attempting the allocation and catching the failure, which would leave
+    the fold half set up and the card fragmented.
+
+    ``__getitem__`` is unchanged and still reads the store's per-symbol arrays. It is the
+    reference the batch gather is tested against.
+    """
+
+    def __init__(
+        self,
+        store: SequenceStore,
+        *,
+        include_metadata: bool = False,
+        device: torch.device | str | None = None,
+    ) -> None:
         self.store = store
         self.include_metadata = include_metadata
+
+        self._symbol_idx = np.asarray(store.symbol_idx, dtype=np.int64)
+        self._end_idx = np.asarray(store.end_idx, dtype=np.int64)
+        lengths = np.asarray([len(feats) for feats in store.features], dtype=np.int64)
+        self._row_offset = np.concatenate(([0], np.cumsum(lengths)[:-1])).astype(np.int64)
+        # The flat row holding each sequence's target. Its window is the ``lookback``
+        # rows before it, which is the slice [end - lookback, end) that __getitem__ takes.
+        self._target_row = self._row_offset[self._symbol_idx] + self._end_idx
+
+        gather_device = _resolve_gather_device(store, device)
+        self._features, self._targets = _flatten_store(store, gather_device)
+        self._target_row_t = torch.as_tensor(self._target_row, device=gather_device)
+        self._window_offsets = torch.arange(
+            -store.lookback, 0, dtype=torch.long, device=gather_device
+        )
+        # Only the evaluation dataset emits these, and a fold's timestamp column is tens
+        # of megabytes, so the training dataset does not build a flat copy it never reads.
+        self._entities = np.asarray(store.entities, dtype="U64") if include_metadata else None
+        self._timestamps = (
+            np.concatenate(store.timestamps)
+            if include_metadata and store.timestamps
+            else np.zeros(0, dtype="datetime64[ns]")
+        )
+
+    @property
+    def gather_device(self) -> torch.device:
+        """Where a gathered batch is produced, and so where it already lives."""
+
+        return self._features.device
+
+    @property
+    def returns_device_tensors(self) -> bool:
+        """Whether batches arrive off the host. This is what decides ``pin_memory``."""
+
+        return self._features.device.type != "cpu"
 
     def __len__(self) -> int:
         return self.store.n_sequences
@@ -85,10 +235,32 @@ class FoldSequenceDataset(Dataset):
         entity = self.store.entities[symbol_id]
         return window, target, timestamp, entity
 
+    def __getitems__(self, indices) -> GatheredBatch:
+        device = self._features.device
+        rows = self._target_row_t[torch.as_tensor(indices, dtype=torch.long, device=device)]
+        X = self._features[rows.unsqueeze(1) + self._window_offsets]
+        y = self._targets[rows]
+        if not self.include_metadata:
+            return GatheredBatch((X, y))
+        host_idx = np.asarray(indices, dtype=np.int64)
+        timestamps = self._timestamps[self._target_row[host_idx]]
+        entities = self._entities[self._symbol_idx[host_idx]]
+        return GatheredBatch((X, y, timestamps, entities))
+
+
+def collate_sequences(batch):
+    """Collate training batches, handing a pre-gathered batch straight back."""
+
+    if isinstance(batch, GatheredBatch):
+        return batch.payload
+    return default_collate(batch)
+
 
 def collate_with_metadata(batch):
     """Collate evaluation batches while preserving timestamps/entities."""
 
+    if isinstance(batch, GatheredBatch):
+        return batch.payload
     X = torch.stack([item[0] for item in batch])
     y = torch.stack([item[1] for item in batch])
     timestamps = np.asarray([item[2] for item in batch])

@@ -44,8 +44,8 @@ tabular_dl:
 - tabm_s
 - tabm_m
 - tabm_l
-latent_factors:
-- pca
-- ipca
+# latent_factors is declared on the primary label only. The walk-forward PCA and IPCA
+# fits are the most expensive in this case study, and 13a_pca and 13b_ipca read this
+# declaration to decide which labels they fit, so removing it here is what narrows them.
 causal_dml:
 - dml

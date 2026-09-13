@@ -30,7 +30,8 @@
 #   Ch19 overlay backtests, however many that currently is - the count is printed
 #   when the overlays load
 # - Identify which rule categories help vs hurt by case study
-# - Understand why tight stops destroy value in most cross-asset strategies
+# - Understand the mechanism by which a tight stop can cost a cross-asset
+#   strategy more than it saves
 #
 # **Book Reference**: Chapter 20, Section 20.7 (Risk Overlays and Stability Across Regimes)
 #
@@ -426,8 +427,9 @@ show_with_alt(
 # %% [markdown]
 # ## Drawdown Protection
 #
-# Compare max drawdown reduction across case studies. Some overlays
-# reduce drawdown at the cost of Sharpe; others improve both.
+# Compare max drawdown reduction across case studies. An overlay can reduce
+# drawdown at the cost of Sharpe or improve both, and the table below separates
+# the two rather than reporting drawdown alone.
 
 # %%
 dd_improvement = (

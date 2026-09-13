@@ -237,7 +237,8 @@ if retire.not_out_of_sample:
         )
         + ". Each is either a validation-fitted model published over the window, which is "
         "not an out-of-sample result, or a refit registered under its validation training "
-        "identity, which `20_strategy_synthesis/holdout.py::generate_holdout` produces - and "
+        "identity, which the retired `20_strategy_synthesis/holdout.py::generate_holdout` "
+        "wrote until it was deleted on 2026-09-12 - and "
         "the registry cannot tell those apart. This notebook has no way past that: "
         "establish which it is and resolve it through the registry's own lifecycle, which "
         "records that the row was retired."
