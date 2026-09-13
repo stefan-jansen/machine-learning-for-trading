@@ -241,3 +241,128 @@ def test_diagnostic_sets_are_bounded() -> None:
             f"{stem}: {len(declared)} diagnostic configurations. `15` correlates these "
             "pairwise across every declared label; keep the subset small."
         )
+
+
+# Families the strategy chain does not name, and the one reason each is allowed to be missing.
+# They are two constants rather than one because they are drained by different things: a pending
+# entry is removed by the run that produces its sets, and a ruled entry is removed by nothing.
+# Merging them would mean that whoever empties the list after the full backtest pass either
+# re-admits a family a ruling dropped or leaves out one whose producer has since run.
+#
+# The reason lives in the value, not in a comment above the entry, because a comment does not
+# move when the entry does.
+
+# A scope ruling, and nothing else. AGENTS.md is explicit that expense alone does not qualify:
+# a notebook excluded this way keeps correct committed source and cleared outputs and is still
+# runnable by a reader, so the names below are absent from the chain and present in the repo.
+EXCLUDED_BY_RULING = {
+    "tsmixer": (
+        "dropped by Stefan 2026-09-12, agents 30d3766bf: 60-80 h of GPU for a third "
+        "deep-learning architecture on the primary label, where nlinear and lstm cost about "
+        "50 between them and 08_tabular_dl already covers a third branch of the literature. "
+        "11_dl_tsmixer.py stays in the repo and registers nothing."
+    ),
+}
+
+# A producer that has not run yet. `CandidateSet.one` raises on a name nothing froze, so a
+# stage that has to run before the sets exist cannot name them. Every entry here is a
+# narrower strategy chain than the case study intends, so each one is temporary by
+# construction and the run that produces its sets removes it.
+PENDING_PRODUCTION: dict[str, str] = {}
+
+# The third list `15` opens by name. `OFFICIAL_POPULATION_NAMES` holds checkpoint populations
+# rather than candidate sets, so it carries no horizon and is shaped
+# `us-equities-{family}-checkpoints-v1`. It is checked for family coverage for the same reason
+# the other two are: `OfficialPopulation.one` raises on a name nothing published, and before
+# this it was the one consumer list with nothing reading it at all.
+POPULATION_CONSUMERS = {"15_model_analysis.py": ["OFFICIAL_POPULATION_NAMES"]}
+
+SET_NAME = re.compile(r"us-equities-fwd-ret-(\d+d)-(.+?)(-diagnostics)?-v1")
+POPULATION_NAME = re.compile(r"us-equities-(.+?)-checkpoints-v1")
+
+
+def _families_named(consumer: str, parameter: str, pattern: re.Pattern[str]) -> set[str]:
+    """The model families a consumer list names, with any `-diagnostics` suffix removed."""
+    families = set()
+    for name in set(_literal_string_list(CASE_DIR / consumer, parameter)) - PENDING_WEEKLY:
+        match = pattern.fullmatch(name)
+        assert match, f"{consumer} {parameter}: unrecognised name shape: {name}"
+        families.add(match.group(2) if pattern is SET_NAME else match.group(1))
+    return families
+
+
+def _all_consumer_lists() -> list[tuple[str, str, re.Pattern[str]]]:
+    lists = [(nb, param, SET_NAME) for nb, params in CONSUMERS.items() for param in params]
+    lists += [
+        (nb, param, POPULATION_NAME)
+        for nb, params in POPULATION_CONSUMERS.items()
+        for param in params
+    ]
+    return lists
+
+
+def test_the_chain_names_every_family_no_declaration_excuses() -> None:
+    """A family missing from a consumer list has to say why it is missing.
+
+    `test_producers_cover_every_label_the_consumers_ask_for` builds its family table from the
+    names that are PRESENT, so it says nothing about a family that is absent altogether -
+    dropping five families from `16_backtest` passes it green. That is the same blind spot in
+    the other direction from the one this module was written for, and it is the one an interim
+    run would walk into: `16` can be narrowed to the sets that happen to exist, publish a
+    narrower comparison than the case study intends, and never fail anything.
+    """
+    excused = set(EXCLUDED_BY_RULING) | set(PENDING_PRODUCTION)
+    for consumer, parameter, pattern in _all_consumer_lists():
+        missing = sorted(
+            set(EXPECTED_HORIZONS) - excused - _families_named(consumer, parameter, pattern)
+        )
+        assert not missing, (
+            f"{consumer} {parameter} names no set for {missing}. Either the family belongs in "
+            "the list, or say why it is absent: EXCLUDED_BY_RULING for a scope ruling, "
+            "PENDING_PRODUCTION for a producer that has not run yet."
+        )
+
+
+def test_an_excused_family_is_not_also_named() -> None:
+    """Excusing a family and naming it anyway is a declaration nobody reads."""
+    excused = set(EXCLUDED_BY_RULING) | set(PENDING_PRODUCTION)
+    for consumer, parameter, pattern in _all_consumer_lists():
+        named = sorted(excused & _families_named(consumer, parameter, pattern))
+        assert not named, (
+            f"{consumer} {parameter} names {named}, which EXCLUDED_BY_RULING or "
+            "PENDING_PRODUCTION says is absent. Remove the name or remove the entry."
+        )
+
+
+def test_every_producer_this_module_names_still_exists() -> None:
+    """`_frozen_names` reads each producer, so a deleted one fails as a missing file.
+
+    Checking it here turns `FileNotFoundError` inside a fixture into a sentence saying which
+    notebook went and what still refers to it.
+    """
+    missing = sorted(stem for stem in PRODUCERS if not (CASE_DIR / stem).exists())
+    assert not missing, f"PRODUCERS names notebooks that are not in the repo: {missing}"
+
+
+def test_a_ruled_exclusion_still_describes_this_case_study(produced: set[str]) -> None:
+    """A ruling excludes a family from the chain; it does not delete the notebook.
+
+    Nothing else in the repo asserts that. The register row keeps the notebook at `ready`,
+    and `register.sh check` compares a row against main rather than asking whether the file
+    is there, so an exclusion left standing over a deleted producer would read as an
+    ordinary exclusion. That state is what the ruling that created this constant forbids.
+    """
+    for family, reason in EXCLUDED_BY_RULING.items():
+        assert reason.strip(), f"EXCLUDED_BY_RULING[{family!r}] has no reason recorded"
+        assert family in EXPECTED_HORIZONS, (
+            f"EXCLUDED_BY_RULING names {family!r}, which this case study has no producer for. "
+            "An exclusion is a statement about a family that exists."
+        )
+        frozen = {name for name in produced if SET_NAME.fullmatch(name)}
+        families = {SET_NAME.fullmatch(name).group(2) for name in frozen}
+        assert family in families, (
+            f"EXCLUDED_BY_RULING names {family!r} but no notebook in PRODUCERS freezes a "
+            f"{family} set any more. A ruling excludes a family from the strategy chain and "
+            "leaves the notebook in the repo, so the producer going missing is a separate "
+            "change that has to be made deliberately."
+        )

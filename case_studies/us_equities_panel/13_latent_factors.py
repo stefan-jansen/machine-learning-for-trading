@@ -127,6 +127,18 @@ latent_results = (
     )
     .sort("label", "config_name", "checkpoint_kind", "checkpoint_value")
 )
+# This notebook indexes what `13a_pca` and `13b_ipca` register and computes nothing of its
+# own, so it has to run after them. Nothing else enforces that: the filter returns an empty
+# frame rather than raising, the frame is the notebook's only result, and a render whose
+# single result cell is blank is indistinguishable from a clean run. Empty is a different
+# condition from the partial one the prose below anticipates - "if a row is missing above,
+# run the notebook that produces it" expects some rows and got none, which means no
+# latent-factor model has been fitted at all.
+if latent_results.is_empty():
+    raise ValueError(
+        "no latent_factors predictions are registered for this execution tier: run "
+        "13a_pca and 13b_ipca first. This notebook only indexes what they publish."
+    )
 latent_results
 
 # %% [markdown]
