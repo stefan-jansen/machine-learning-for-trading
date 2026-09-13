@@ -983,7 +983,7 @@ add_message_title(
     axes[0],
     "Holder counts and screened sectors for the formation cohort",
     subtitle=(
-        f"{len(data_stocks)} stocks held by {len(data_institutions)} institutions, "
+        "Cohort stocks and the institutions holding them, "
         f"formed at report period {period_calendar['report_date'][0]}"
     ),
 )

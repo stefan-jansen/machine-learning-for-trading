@@ -952,8 +952,7 @@ add_message_title(
     axes[0],
     "Extracted relationship classes and their shared suppliers",
     subtitle=(
-        f"{EXTRACTOR_NAME} extraction from {len(filings_df)} S&P 100 10-K filings, "
-        f"{min(years)}-{max(years)}"
+        f"{EXTRACTOR_NAME} extraction from the S&P 100 10-K filings, {min(years)}-{max(years)}"
     ),
 )
 show_with_alt(fig, RELATIONSHIP_FIGURE_ALT)
