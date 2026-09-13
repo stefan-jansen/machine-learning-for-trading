@@ -912,8 +912,8 @@ def load_gbm_feature_importance(
 ) -> pl.DataFrame | None:
     """Load GBM feature importance from saved booster files.
 
-    Looks for LightGBM booster .txt files in run_log/training/{hash}/boosters/.
-    Extracts gain-based importance per fold.
+    The training stage writes boosters under the run's own models directory,
+    run_log/training/{hash}/models/boosters/. Extracts gain-based importance per fold.
 
     Returns DataFrame with columns: config_name, fold_id, feature, importance.
     Returns None if no booster files found.
@@ -943,11 +943,17 @@ def load_gbm_feature_importance(
 
     results = []
     for t_hash, config_name in rows:
-        booster_dir = case_dir / "run_log" / "training" / t_hash / "boosters"
-        if not booster_dir.exists():
-            # Also check under run_log/models/{hash}/boosters (older layout)
-            booster_dir = case_dir / "run_log" / "models" / t_hash / "boosters"
-        if not booster_dir.exists():
+        # The training stage writes boosters under the run's own models directory
+        # (utils/gbm.py:2334). The two older layouts are kept as fallbacks in the same
+        # order as case_studies/utils/insight_chapter.py; no production run log carried
+        # either one when this was measured across all nine registries on 2026-09-13.
+        candidates = [
+            case_dir / "run_log" / "training" / t_hash / "models" / "boosters",
+            case_dir / "run_log" / "training" / t_hash / "boosters",
+            case_dir / "run_log" / "models" / t_hash / "boosters",
+        ]
+        booster_dir = next((path for path in candidates if path.exists()), None)
+        if booster_dir is None:
             continue
 
         for booster_file in sorted(booster_dir.glob("*.txt")):

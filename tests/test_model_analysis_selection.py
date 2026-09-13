@@ -6,6 +6,7 @@ from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
     load_daily_metrics_series,
     load_fold_metrics_from_registry,
+    load_gbm_feature_importance,
     load_metrics_from_registry,
     load_predictions,
     prediction_correlation_matrix,
@@ -275,3 +276,87 @@ def test_prediction_correlation_averages_daily_cross_sectional_spearman() -> Non
 
 def test_fold_columns_are_sorted_numerically() -> None:
     assert _sorted_fold_columns(["10", "2", "1", "0"]) == ["0", "1", "2", "10"]
+
+
+def _write_booster(booster_dir, fold: int) -> None:
+    import lightgbm as lgb
+
+    booster_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(fold)
+    x = rng.normal(size=(200, 2))
+    y = 3.0 * x[:, 0] + 0.1 * x[:, 1] + rng.normal(scale=0.01, size=200)
+    model = lgb.LGBMRegressor(n_estimators=5, num_leaves=4, min_child_samples=5, verbose=-1)
+    model.fit(x, y, feature_name=["strong", "weak"])
+    model.booster_.save_model(str(booster_dir / f"fold_{fold}.txt"))
+
+
+def _register_gbm(tmp_path, config_name: str) -> str:
+    return register_training_run(
+        "test",
+        {
+            "family": "gbm",
+            "label": "fwd_ret_5d",
+            "config_name": config_name,
+            "params": {},
+            "seed": 42,
+        },
+        case_dir=tmp_path,
+    )
+
+
+def test_gbm_importance_reads_the_boosters_the_training_stage_writes(tmp_path, monkeypatch) -> None:
+    """Boosters live under the run's own `models` directory.
+
+    The loader used to look only beside it and one level up, so every case study
+    fell through to the feature-prediction correlation fallback and published the
+    weaker instrument while the boosters sat on disk.
+    """
+    pytest.importorskip("lightgbm")
+    training_hash = _register_gbm(tmp_path, "probe_config")
+    booster_dir = tmp_path / "run_log" / "training" / training_hash / "models" / "boosters"
+    _write_booster(booster_dir, fold=0)
+    _write_booster(booster_dir, fold=1)
+    monkeypatch.setattr("case_studies.utils.model_analysis.get_case_study_dir", lambda _: tmp_path)
+
+    result = load_gbm_feature_importance("test", label="fwd_ret_5d", top_n=2)
+
+    assert result is not None
+    assert sorted(result["fold_id"].unique().to_list()) == [0, 1]
+    assert result["config_name"].unique().to_list() == ["probe_config"]
+    ordered = (
+        result.group_by("feature")
+        .agg(pl.col("importance_norm").mean())
+        .sort("importance_norm", descending=True)["feature"]
+        .to_list()
+    )
+    assert ordered == ["strong", "weak"]
+
+
+def test_gbm_importance_still_reads_the_older_booster_layouts(tmp_path, monkeypatch) -> None:
+    """Run logs written before boosters moved keep working."""
+    pytest.importorskip("lightgbm")
+    beside = _register_gbm(tmp_path, "beside_config")
+    one_up = _register_gbm(tmp_path, "one_up_config")
+    _write_booster(tmp_path / "run_log" / "training" / beside / "boosters", fold=0)
+    _write_booster(tmp_path / "run_log" / "models" / one_up / "boosters", fold=0)
+    monkeypatch.setattr("case_studies.utils.model_analysis.get_case_study_dir", lambda _: tmp_path)
+
+    result = load_gbm_feature_importance("test", label="fwd_ret_5d", top_n=2)
+
+    assert result is not None
+    assert sorted(result["config_name"].unique().to_list()) == ["beside_config", "one_up_config"]
+
+
+def test_gbm_importance_returns_none_when_no_booster_layout_is_present(
+    tmp_path, monkeypatch
+) -> None:
+    """The registered run exists but its boosters do not, so the caller's fallback runs.
+
+    Without this the two tests above would pass against a loader that ignored the
+    filesystem entirely.
+    """
+    pytest.importorskip("lightgbm")
+    _register_gbm(tmp_path, "no_boosters")
+    monkeypatch.setattr("case_studies.utils.model_analysis.get_case_study_dir", lambda _: tmp_path)
+
+    assert load_gbm_feature_importance("test", label="fwd_ret_5d", top_n=2) is None
