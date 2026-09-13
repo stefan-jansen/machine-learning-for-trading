@@ -68,12 +68,9 @@
 
 import hashlib
 import sqlite3
-import warnings
 from pathlib import Path
 
 import polars as pl
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import CandidateSet, open_selection_field, open_study
 from case_studies.research.holdout import build_holdout_training_spec
