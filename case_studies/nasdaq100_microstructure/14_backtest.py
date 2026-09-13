@@ -352,9 +352,39 @@ _admissible = _catalog.filter(
 _offered = len(pred_index)
 _offered_hashes = set(pred_index["prediction_hash"])
 pred_index = pred_index.join(_admissible, on="prediction_hash", how="inner")
+if pred_index.is_empty():
+    msg = (
+        f"{_offered} prediction sets exist for {CASE_STUDY_ID}/{LABEL}/{SPLIT} but none is "
+        "admissible. Either every row is missing an artifact or a fold metric, or carries an "
+        "identity this schema version no longer recognises; or every row belongs to a "
+        f"generation its own name has moved past ({len(_retired)} identities in this registry "
+        "are retired that way). Backtesting them would produce a full sweep over a population "
+        "that cannot be official. Re-run the model notebooks on the research interface first."
+    )
+    raise RuntimeError(msg)
+if len(pred_index) < _offered:
+    # Two conditions were tested and they call for different work, so they are counted apart: an
+    # incomplete row needs its own fit finished, a superseded one needs nothing - it is a
+    # retired generation and the sweep is right to leave it. Supersession is named first because
+    # it decides the row on its own; completing a retired row would not readmit it.
+    _dropped = _offered_hashes - set(pred_index["prediction_hash"])
+    _dropped_superseded = len(_dropped & _retired)
+    print(
+        f"  Excluded {len(_dropped)} of {_offered} prediction sets: "
+        f"{len(_dropped) - _dropped_superseded} not complete, "
+        f"{_dropped_superseded} superseded by a later generation of their own population",
+        flush=True,
+    )
 
-# Membership, after the exclusion above, because the two are different sets and the
-# weaker one is what this sweep had (ml4t/agent-workspace#1088). "Not retired" admits a
+# Membership, and it runs here rather than beside the exclusion above for two reasons
+# that are easy to get wrong. The admissibility refusal has to stay reachable: a pool
+# emptied by the catalog filter must raise the error naming incompleteness and
+# supersession, not this one, which would report an empty pool as unpublished. And the
+# _dropped accounting above splits its exclusions into two counts by subtracting what
+# survives, so a membership drop landing before it would be counted as not complete.
+#
+# Membership is a different set from the exclusion above, and the weaker one is what
+# this sweep had (ml4t/agent-workspace#1088). "Not retired" admits a
 # prediction no population ever listed - an experiment its case study never published is
 # retired by nobody - while "published" does not. `published_members_at` subtracts the
 # retired set itself, so this is never the looser test; it is the same shape
@@ -399,29 +429,6 @@ if _members is not None:
             "them outside the population mechanism. Re-run it before sweeping."
         )
         raise RuntimeError(msg)
-if pred_index.is_empty():
-    msg = (
-        f"{_offered} prediction sets exist for {CASE_STUDY_ID}/{LABEL}/{SPLIT} but none is "
-        "admissible. Either every row is missing an artifact or a fold metric, or carries an "
-        "identity this schema version no longer recognises; or every row belongs to a "
-        f"generation its own name has moved past ({len(_retired)} identities in this registry "
-        "are retired that way). Backtesting them would produce a full sweep over a population "
-        "that cannot be official. Re-run the model notebooks on the research interface first."
-    )
-    raise RuntimeError(msg)
-if len(pred_index) < _offered:
-    # Two conditions were tested and they call for different work, so they are counted apart: an
-    # incomplete row needs its own fit finished, a superseded one needs nothing - it is a
-    # retired generation and the sweep is right to leave it. Supersession is named first because
-    # it decides the row on its own; completing a retired row would not readmit it.
-    _dropped = _offered_hashes - set(pred_index["prediction_hash"])
-    _dropped_superseded = len(_dropped & _retired)
-    print(
-        f"  Excluded {len(_dropped)} of {_offered} prediction sets: "
-        f"{len(_dropped) - _dropped_superseded} not complete, "
-        f"{_dropped_superseded} superseded by a later generation of their own population",
-        flush=True,
-    )
 
 if TOP_N_PREDICTIONS > 0:
     pred_index = pred_index.head(TOP_N_PREDICTIONS)
