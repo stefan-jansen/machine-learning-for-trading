@@ -1,0 +1,54 @@
+# How far behind `main`'s tip each job's last completed conclusion sits.
+#
+# `Tests` collapses a burst of merges to the newest tree, so a superseded run ends
+# `cancelled` and carries no verdict. When merges land faster than the slowest jobs
+# finish, every run in the list reads `cancelled` and the newest run carrying any
+# conclusion can be many merges old. On 2026-09-12 that state held for eleven hours
+# and the newest conclusion available was a `failure` ten merges back, on one job,
+# already superseded by a pass - so every summary view showed either nothing or a
+# stale red, and neither was the state of `main`.
+#
+# This reports the jobs instead, and deliberately never reports the run-level
+# conclusion. Lag is counted in merges, not hours: a quiet weekend is not a gap and an
+# hour of heavy merging is.
+#
+# Six-hourly because the gap this was written for persisted for eleven hours, so this
+# cadence sees a live one at least once. It reads the Actions API and nothing else.
+name: CI job lag
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      max_lag:
+        description: "Merges behind the tip a job may be before this fails"
+        type: string
+        default: "4"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ci-job-lag
+  cancel-in-progress: true
+
+jobs:
+  lag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The report places a verdict by its position in main's history, so the
+          # window it scans has to be in the clone.
+          fetch-depth: 100
+      - name: Report the lag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/ci_job_lag.py \
+            --max-lag "${{ github.event.inputs.max_lag || '4' }}" \
+            | tee "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
