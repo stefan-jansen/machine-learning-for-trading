@@ -514,6 +514,24 @@ jobs:
           source .venv/bin/activate
           python .github/scripts/check_constant_subscripts.py --selftest
           python .github/scripts/check_constant_subscripts.py
+      # Alt text is what a reader who cannot see the figure is handed instead of it, so
+      # alt text naming a chart the cell never draws tells that reader something false
+      # rather than something less. Nothing else here can see it: a prose rewrite that
+      # swaps "heatmap" for "grouped bars" changes no code, so ruff, the formatter and
+      # the notebook tests all stay green (ml4t/agent-workspace#1164).
+      #
+      # This is the machine-decidable third of that clause, not the whole of it. The
+      # wider prose sweep it comes from reports 1,237 violations over this repository,
+      # 603 of them one rule about comment blocks in code cells, so gating on the sweep
+      # would red every open PR; these three rules report zero. Stdlib-only AST over the
+      # jupytext sources, ~4 s. `--selftest` first: two cases that must fire and eleven
+      # that must not, the eleven being real sentences from this repository that earlier
+      # forms of the rule wrongly reported.
+      - name: A figure's description describes the figure its cell draws
+        run: |
+          source .venv/bin/activate
+          python .github/scripts/check_notebook_prose.py --selftest
+          python .github/scripts/check_notebook_prose.py
       - name: Notebook output hygiene
         run: |
           source .venv/bin/activate
