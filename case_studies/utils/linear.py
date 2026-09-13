@@ -45,7 +45,7 @@ from case_studies.utils.folds import (
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
 from case_studies.utils.registry.registration import _with_prediction_label
 from case_studies.utils.registry.specs import canonical_json
-from case_studies.utils.runtime import cpu_seconds, resource_measurement
+from case_studies.utils.runtime import cpu_seconds, resource_measurement, source_commit
 from utils.modeling import (
     load_modeling_dataset,
     resolve_linear_params,
@@ -163,15 +163,7 @@ def _runtime_identity() -> dict[str, str]:
 
 
 def _runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
-    try:
-        commit = subprocess.check_output(
-            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        commit = "unknown"
+    commit = source_commit(study.release_root)
     record: dict[str, Any] = {
         "entry_point": "case_studies.utils.linear",
         "packages": _runtime_identity(),

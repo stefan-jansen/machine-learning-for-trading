@@ -61,7 +61,7 @@ from case_studies.utils.registry.store import (
     flush_fold_training_log,
     incremental_prediction_shards,
 )
-from case_studies.utils.runtime import cpu_seconds
+from case_studies.utils.runtime import cpu_seconds, source_commit
 from case_studies.utils.sequence_dataset import (
     GAP_MASK_FEATURES,
     GAP_POLICY_ID,
@@ -182,15 +182,7 @@ def _sequence_runtime_identity(config: dict[str, Any]) -> dict[str, str]:
 
 
 def _sequence_runtime_provenance(study: Study, config: dict[str, Any]) -> dict[str, Any]:
-    try:
-        commit = subprocess.check_output(
-            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        commit = "unknown"
+    commit = source_commit(study.release_root)
     return {
         "entry_point": "case_studies.utils.deep_learning",
         "packages": _sequence_runtime_identity(config),

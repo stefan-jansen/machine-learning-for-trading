@@ -39,13 +39,57 @@ __all__ = [
     "resource_measurement",
     "runtime_provenance",
     "source_commit",
+    "worktree_marker",
 ]
 
 
-def source_commit(repository_root: Any) -> str:
-    """Return the commit the run was executed from, or ``unknown``."""
+def worktree_marker(repository_root: Any | None = None) -> str:
+    """Return the suffix that says whether the recorded commit describes the tree.
+
+    A commit names what was committed, not what was executed. A run started from a
+    worktree carrying uncommitted edits attests a source that could not have produced
+    it, and nothing in the row says so. Three states, each distinct:
+
+    * ``""`` - the worktree matched the commit.
+    * ``"+dirty"`` - a tracked file differed, staged or not.
+    * ``"+untracked"`` - every tracked file matched and something untracked was present.
+      It is the weaker failure and still a failure: an untracked module is importable
+      and an untracked artifact is readable.
+    * ``"+unknown"`` - git could not answer, so neither can the row.
+
+    Same three words, in the same order of severity, as ``py_vs_head`` at
+    ``scripts/nb-run.sh:1103`` in ``ml4t/agents``, so a reader comparing a register row
+    with a registry row is comparing like with like.
+
+    Only runs written after this lands carry a marker. An unmarked historical row is
+    not a clean one; the trees it would have been compared against are gone, so no
+    backfill is possible and none is attempted.
+
+    That marker answers a narrower question - whether one notebook's paired .py matches
+    HEAD, in a different repository - and does not reach this column.
+    """
+    command = ["git", "--no-optional-locks"]
+    if repository_root is not None:
+        command += ["-C", str(repository_root)]
+    command += ["status", "--porcelain"]
     try:
-        return subprocess.check_output(
+        status = subprocess.check_output(command, stderr=subprocess.DEVNULL, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return "+unknown"
+    lines = [line for line in status.splitlines() if line.strip()]
+    if any(not line.startswith("??") for line in lines):
+        return "+dirty"
+    return "+untracked" if lines else ""
+
+
+def source_commit(repository_root: Any) -> str:
+    """Return the commit the run was executed from, with a worktree marker appended.
+
+    ``unknown`` when git cannot answer at all. See :func:`worktree_marker` for what the
+    suffix means and why an unmarked row is not evidence of a clean tree.
+    """
+    try:
+        commit = subprocess.check_output(
             ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -53,6 +97,7 @@ def source_commit(repository_root: Any) -> str:
         ).strip()
     except (OSError, subprocess.SubprocessError):
         return "unknown"
+    return commit + worktree_marker(repository_root)
 
 
 def runtime_provenance(
