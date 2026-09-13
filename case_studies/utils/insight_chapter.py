@@ -651,7 +651,7 @@ def plot_cross_cs_forest(
     n = len(d)
     if figsize is None:
         figsize = (7.5, max(2.5, 0.45 * n + 1.2))
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize, layout="tight")
     y = np.arange(n)
     ic = d["ic_mean_daily"].to_numpy()
     lo = d["ic_ci_lo"].to_numpy()
@@ -728,7 +728,7 @@ def plot_per_fold_violin(
 
     if figsize is None:
         figsize = (max(6.5, 1.0 * len(present) + 2), 4.5)
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize, layout="tight")
     data = [fold_df.filter(pl.col("short_name") == cs)["ic"].to_numpy() for cs in present]
     positions = np.arange(len(present))
     ax.boxplot(data, positions=positions, widths=0.55, showfliers=True)
@@ -841,7 +841,7 @@ def plot_rolling_daily_ic(
         if not roll.is_empty():
             series[cs] = roll
 
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize, layout="tight")
     if not series:
         ax.text(0.5, 0.5, "No daily-IC series available", ha="center", va="center")
         ax.set_axis_off()
@@ -922,7 +922,7 @@ def plot_multi_label_horizon(
         ax.set_axis_off()
         return fig, ax
 
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize, layout="tight")
     if palette is None:
         from utils.style import COLORS
 

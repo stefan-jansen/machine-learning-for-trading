@@ -653,7 +653,7 @@ print("Family-level baseline Sharpe summary (ret_to_expiry only):")
 print(family_summary)
 
 # %%
-fig, ax = plt.subplots(figsize=(9, 4))
+fig, ax = plt.subplots(figsize=(9, 4), layout="tight")
 fams = family_summary["family"].to_list()
 y = np.arange(len(fams))
 medians = family_summary["sharpe_median"].to_numpy()
@@ -871,7 +871,7 @@ forest_metrics = [
 # benchmark.
 
 # %%
-fig, ax = plt.subplots(figsize=(8, 4))
+fig, ax = plt.subplots(figsize=(8, 4), layout="tight")
 y = np.arange(len(forest_metrics))
 points = np.array([m[1] for m in forest_metrics])
 los = np.array([m[2] for m in forest_metrics])
@@ -927,7 +927,7 @@ print(
 
 cum_strat = np.cumprod(1 + aligned["strategy"].to_numpy()) - 1
 cum_bench = np.cumprod(1 + aligned["benchmark"].to_numpy()) - 1
-fig, ax = plt.subplots(figsize=(10, 4.2))
+fig, ax = plt.subplots(figsize=(10, 4.2), layout="tight")
 ax.plot(aligned["ts"], cum_strat, color="#1565C0", linewidth=1.2, label="Rank-1 strategy (HTM)")
 ax.plot(aligned["ts"], cum_bench, color="#43A047", linewidth=1.2, label="EW universe")
 ax.axhline(0, color="#9E9E9E", linewidth=0.6, linestyle="--")

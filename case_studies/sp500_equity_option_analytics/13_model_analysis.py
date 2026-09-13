@@ -1320,7 +1320,7 @@ if "pca" in lf_extras:
     var_ratios = [e["explained_variance_ratio"] for e in lf_extras["pca"]]
     mean_var = np.mean(var_ratios, axis=0)
 
-    fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
+    fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"], layout="tight")
     axes[0].bar(range(1, len(mean_var) + 1), mean_var, color=COLORS["blue"])
     axes[0].set_xlabel("Component")
     axes[0].set_ylabel("Variance Explained")
@@ -1381,7 +1381,7 @@ if "ipca" in lf_extras:
         n_top = min(10, n_chars)
         panel_count = min(3, n_factors)
         size_key = {1: "single_tall", 2: "dual_h_tall", 3: "triple_h_tall"}[panel_count]
-        fig, axes = plt.subplots(1, panel_count, figsize=FIGSIZE[size_key])
+        fig, axes = plt.subplots(1, panel_count, figsize=FIGSIZE[size_key], layout="tight")
         if panel_count == 1:
             axes = [axes]
         for k, ax in enumerate(axes):
@@ -1429,7 +1429,7 @@ for model_name in ["cae", "sae"]:
             loss_curves.append((fold["fold_id"], epochs, [losses[str(e)] for e in epochs]))
     if not loss_curves:
         continue
-    fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+    fig, ax = plt.subplots(figsize=FIGSIZE["single"], layout="tight")
     for fold_id, epochs, values in loss_curves:
         ax.plot(epochs, values, alpha=0.6, label=f"Fold {fold_id}")
     ax.set_xlabel("Epoch")

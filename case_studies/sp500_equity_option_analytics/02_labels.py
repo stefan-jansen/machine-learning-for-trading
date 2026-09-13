@@ -542,7 +542,7 @@ annual = {n: annual_profile(n) for n in [*PLAIN_RETURNS, *DIRECTION_SOURCE]}
 # would have to carry the comparison.
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"])
+fig, axes = plt.subplots(1, 2, figsize=FIGSIZE["dual_h_tall"], layout="tight")
 for offset, name in zip((-0.2, 0.2), PLAIN_RETURNS, strict=True):
     table = annual[name]
     axes[0].bar(

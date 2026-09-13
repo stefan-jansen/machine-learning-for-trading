@@ -234,7 +234,7 @@ cross_section = (
 )
 thin = cross_section.filter(pl.col("perpetuals") < MIN_CROSS_SECTION)
 
-fig, ax = plt.subplots(figsize=(10, 4))
+fig, ax = plt.subplots(figsize=(10, 4), layout="tight")
 ax.fill_between(
     cross_section["timestamp"].to_list(),
     cross_section["perpetuals"].to_list(),
@@ -443,7 +443,9 @@ def contiguous_segments(series: pl.DataFrame) -> list[pl.DataFrame]:
     return [part.drop("_segment") for part in marked.partition_by("_segment", maintain_order=True)]
 
 
-fig, axes = plt.subplots(len(series_features), 1, figsize=(10, 7), sharex=True, sharey=True)
+fig, axes = plt.subplots(
+    len(series_features), 1, figsize=(10, 7), sharex=True, sharey=True, layout="tight"
+)
 for ax, feature in zip(axes, series_features, strict=True):
     stats = ic_results[feature]
     half_width = 1.96 * stats["hac_se"]
@@ -491,7 +493,7 @@ show_with_alt(
 # %%
 FOLD_FEATURES_SHOWN = 12
 fold_features = [name for name in eval_summary_ordering if name in fold_stats][:FOLD_FEATURES_SHOWN]
-fig, ax = plt.subplots(figsize=(10, 6))
+fig, ax = plt.subplots(figsize=(10, 6), layout="tight")
 for row, feature in enumerate(reversed(fold_features)):
     per_fold = (
         ic_timeseries[feature].group_by("cv_fold").agg(pl.col("ic").mean()).sort("cv_fold")["ic"]
@@ -583,7 +585,7 @@ print(f"largest average score: {leading['mean_ic']:.3f} on {leading['feature']}"
 
 # %%
 top_ic = eval_summary.head(20).sort("mean_ic")
-fig, ax = plt.subplots(figsize=(10, 7))
+fig, ax = plt.subplots(figsize=(10, 7), layout="tight")
 bar_colors = [COLORS["blue"] if value else COLORS["amber"] for value in top_ic["fdr_sig"]]
 ax.barh(top_ic["feature"].to_list(), top_ic["mean_ic"].to_list(), color=bar_colors)
 ax.axvline(0, color=COLORS["neutral"], linewidth=0.8)
@@ -619,7 +621,7 @@ show_with_alt(
 
 # %%
 limit = 1.1 * max(eval_summary["naive_t"].abs().max(), eval_summary["hac_t"].abs().max())
-fig, ax = plt.subplots(figsize=(7, 7))
+fig, ax = plt.subplots(figsize=(7, 7), layout="tight")
 ax.scatter(
     eval_summary["naive_t"].to_list(),
     eval_summary["hac_t"].to_list(),
@@ -733,7 +735,7 @@ if too_coarse:
     print(f"too few distinct values to split at any settlement: {', '.join(too_coarse)}")
 
 # %%
-fig, axes = plt.subplots(2, 3, figsize=(12, 7), sharex=True)
+fig, axes = plt.subplots(2, 3, figsize=(12, 7), sharex=True, layout="tight")
 for ax, feature in zip(axes.flat, shape_features, strict=False):
     profile = quantile_profiles[feature]
     bins = range(1, len(profile["mean"]) + 1)
@@ -824,7 +826,7 @@ print(f"measured on {len(sample_dates)} sampled settlements")
 pair_plot = high_corr_pairs[:20][::-1]
 pair_labels = [f"{left} / {right}" for left, right, _ in pair_plot]
 pair_values = [value for _, _, value in pair_plot]
-fig, ax = plt.subplots(figsize=(11, 8))
+fig, ax = plt.subplots(figsize=(11, 8), layout="tight")
 ax.barh(
     pair_labels,
     pair_values,

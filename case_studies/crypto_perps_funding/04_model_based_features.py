@@ -419,7 +419,7 @@ FOLDS_BY_DATE = sorted(active_folds, key=lambda item: item["test_start"])
 _bars = labels["timestamp"].unique().sort()
 _burnin_end = _bars[min(MIN_TRAIN_BARS, len(_bars) - 1)]
 
-fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single"], layout="tight")
 _top = len(FOLDS_BY_DATE)
 for start_ts, end_ts, color, name in (
     (_bars[0], _burnin_end, COLORS["recede"], f"burn-in, {MIN_TRAIN_BARS} settlements, no value"),
@@ -534,7 +534,7 @@ coverage = (
     .agg(pl.col("timestamp").min().alias("first"), pl.col("timestamp").max().alias("last"))
     .sort("first", descending=True)
 )
-fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], layout="tight")
 _VALIDATION_BY_DATE = [f for f in FOLDS_BY_DATE if f["fold"] in VALIDATION_FOLD_IDS]
 for fold, color in zip(_VALIDATION_BY_DATE, (COLORS["recede"], COLORS["amber"]), strict=False):
     ax.axvspan(
@@ -1131,7 +1131,7 @@ regime_view = (
 )
 
 # %%
-fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True)
+fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], sharex=True, layout="tight")
 _stamps = regime_view["timestamp"].to_list()
 axes[0].plot(
     _stamps, regime_view["xs_mean_funding_bps"].to_list(), color=COLORS["blue"], linewidth=0.7
@@ -1251,7 +1251,7 @@ display(
 display(duration_stability.select("fit_end", "calm_duration_bars", "stress_duration_bars").tail(8))
 
 # %%
-fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single"], layout="tight")
 _fit_ends = coefficient_stability["fit_end"].to_list()
 ax.fill_between(
     _fit_ends,
@@ -1291,7 +1291,7 @@ show_with_alt(
 )
 
 # %%
-fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single"], layout="tight")
 for column, name, color in (
     ("calm_duration_bars", "calm state", COLORS["blue"]),
     ("stress_duration_bars", "stressed state", COLORS["amber"]),
@@ -1713,7 +1713,7 @@ bar_fill = [COLORS["blue"] if flag else "none" for flag in plot_summary["fdr_sig
 interval = [1.96 * se for se in plot_summary["hac_se"]]
 
 # %%
-fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
+fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"], layout="tight")
 ax.barh(
     rows,
     plot_summary["mean_ic"].to_list(),

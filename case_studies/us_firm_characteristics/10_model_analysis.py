@@ -999,7 +999,7 @@ if "ipca" in lf_extras:
 
     n_top = min(10, n_chars)
     n_panels = min(3, n_factors)
-    fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 5))
+    fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 5), layout="tight")
     axes = np.atleast_1d(axes)
     for k, ax in enumerate(axes):
         col = gamma[:, k]
@@ -1039,7 +1039,7 @@ else:
 for model_name in ["cae", "sae"]:
     if model_name not in lf_extras:
         continue
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(8, 4), layout="tight")
     plotted = 0
     for fold in lf_extras[model_name]:
         # CAE writes two record shapes into one history: per-epoch training points, and
