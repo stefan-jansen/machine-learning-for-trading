@@ -1003,7 +1003,7 @@ show_with_alt(
 # The top panel describes holder overlap inside a fixed ten-institution cohort;
 # it does not measure the price impact of an unwind. The bottom panel describes
 # the name screen, not the market: "Other" is where an issuer whose name nobody
-# wrote into `SECTOR_TERMS` lands, so its height is a property of the term list.
+# wrote into `SECTOR_TERMS` lands, so its length is a property of the term list.
 
 # %% [markdown]
 # ## 6. Top Holdings by Sector
