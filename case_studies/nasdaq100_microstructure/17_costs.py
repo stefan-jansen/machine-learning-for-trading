@@ -42,7 +42,8 @@
 # - **Sections 1–3**: Standard bps cost grid on full-universe allocation combos,
 #   tracing the Sharpe-vs-cost decay curve.
 # - **Section 4**: Full universe vs the cost-feasible screen — the first lever,
-#   read off existing registry rows for the featured slot design.
+#   read off existing registry rows for the equal-weight top-k arms, which are
+#   the arms both universes carry.
 # - **Section 5**: Cadence × per-share cost sweep — the second lever and the
 #   publication finding. Uses a per-share cost model ($/share, not bps), more
 #   realistic for equities, swept across rebalance frequencies.
@@ -452,11 +453,16 @@ else:
 # names, fixed per split so the screen cannot use information from the window it
 # is evaluated on.
 #
-# This section reads the same slot design on both universes directly from the
-# registry, running no new backtests, and compares the outcome alongside the
-# trade count. Reporting both matters: the screen changes which names can be
-# held, so it changes how much trading the ordering provokes as well as what
-# each trade costs, and the two effects are not separable from the outcome
+# This section reads the equal-weight top-k arms on both universes directly from
+# the registry, running no new backtests, and compares the outcome alongside the
+# trade count. Equal weight and not the featured slot design, because the slot
+# design is registered on the screened universe alone and a screen effect needs
+# both sides; which arms exist where is set by `baseline_schemes` and
+# `reference_schemes` in `config/setup.yaml`.
+#
+# Reporting outcome and trade count together matters: the screen changes which
+# names can be held, so it changes how much trading the ordering provokes as well
+# as what each trade costs, and the two effects are not separable from the outcome
 # alone.
 
 # %%
