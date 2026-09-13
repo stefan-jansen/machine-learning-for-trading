@@ -31,11 +31,15 @@
 #
 # Two things make the evidence here thinner than the row count suggests.
 # There are only two walk-forward folds over 2020-2021, so two independent
-# windows stand behind every stability statement. And a rank correlation at this
-# horizon is small by construction: the expected return per bar is a fraction of
-# a basis point, the same order as the bid-ask spread a trade has to cross.
-# Whether a correlation of that size is worth anything is a question about costs
-# and rebalancing frequency, settled in the backtest and cost notebooks.
+# windows stand behind every stability statement. And the rank correlations
+# reported below are small - which is a measurement, not a property of the
+# horizon. A Spearman correlation is scale-free, so a fifteen-minute return
+# being a fraction of a basis point does not bound it: an ordering that ranked
+# those returns perfectly would score 1.0. What the small per-bar return does
+# bound is what a given correlation is worth, because the edge it captures per
+# trade is the same order as the bid-ask spread a trade has to cross. That is a
+# question about costs and rebalancing frequency, settled in the backtest and
+# cost notebooks rather than here.
 #
 # **Learning Objectives**:
 # - Choose one representative prediction set per model family on a condition that
