@@ -172,22 +172,44 @@ if match is None:
             ORDER BY p.created_at
             """
         ).fetchall()
+    same_config = [
+        (cfg, lab, th)
+        for cfg, lab, th in registered
+        if cfg == carrier["config_name"] and lab == LABEL
+    ]
+    named = ", ".join(f"{cfg} on {lab} ({th})" for cfg, lab, th in registered[:4])
     if not registered:
         msg = (
             f"No holdout prediction set for training {holdout_training_hash}, and this registry "
             "holds none at all. Run 18_holdout_predictions first; this notebook does not fit."
         )
+    elif same_config:
+        # The configuration is the one that was fitted, under a training identity that is not
+        # the one this notebook just derived. Selection did not move; the DERIVATION did - the
+        # holdout spec, the label timeline it is built from, or something the identity hashes.
+        # Re-running 18 is the right action here and the wrong one in the branch below, which
+        # is the whole reason these are separated.
+        msg = (
+            f"No holdout prediction set for training {holdout_training_hash}, but "
+            f"{carrier['family']}/{carrier['config_name']} on {LABEL} - the configuration that "
+            f"resolves now - already has one under "
+            f"{', '.join(th for _, _, th in same_config)}. So the selection did not move and "
+            "its derived training identity did: the holdout spec, the label timeline it reads, "
+            "or an input the identity covers has changed since 18 ran. Re-run "
+            "18_holdout_predictions to refit under the current derivation, which is an "
+            "idempotent replay of the same configuration rather than a second observation."
+        )
     else:
-        named = ", ".join(f"{cfg} on {lab} ({th})" for cfg, lab, th in registered[:4])
         msg = (
             f"No holdout prediction set for training {holdout_training_hash}, but this registry "
-            f"holds {len(registered)}: {named}. So 18_holdout_predictions has run and the "
-            f"selected configuration has MOVED since - it now resolves to "
-            f"{carrier['family']}/{carrier['config_name']} on {LABEL}. A backtest row is never "
-            "retired from the carrier pool, so a sweep registering a higher-Sharpe cell between "
-            "the two notebooks is enough to do it. Do NOT re-run 18 to fit the new one: that "
-            "spends a second holdout observation on a second configuration, which is what its "
-            "retirement check refuses. Decide which configuration this case study carries."
+            f"holds {len(registered)} for other configurations: {named}. So "
+            "18_holdout_predictions has run and the selected configuration has MOVED since - it "
+            f"now resolves to {carrier['family']}/{carrier['config_name']} on {LABEL}. A "
+            "backtest row is never retired from the carrier pool, so a sweep registering a "
+            "higher-Sharpe cell between the two notebooks is enough to do it. Do NOT re-run 18 "
+            "to fit the new one: that spends a second holdout observation on a second "
+            "configuration, which is what its retirement check refuses. Decide which "
+            "configuration this case study carries."
         )
     raise RuntimeError(msg)
 HOLDOUT_PREDICTION_HASH = match[0]
