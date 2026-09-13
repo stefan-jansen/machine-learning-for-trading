@@ -1116,6 +1116,7 @@ jobs:
             tests/test_artifact_specs.py \
             tests/test_backtest_presets.py \
             tests/test_etf_baseline_parity.py \
+            tests/test_fixture_population_backtests.py::test_the_shipped_fixtures_publish_what_they_are_known_to \
             tests/test_sp500_options_research.py::test_official_population_is_snapshotted_before_option_execution \
             tests/test_us_firm_research_workflow.py::test_open_study_writes_canonical_results_to_output_dir \
             -m "not production_extract" \
