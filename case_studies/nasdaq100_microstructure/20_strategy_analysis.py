@@ -1978,13 +1978,17 @@ attr_summary = format_attribution_summary(reg, boot)
 # the two says how much of the reading depends on the wider factor set rather
 # than on market exposure.
 #
-# **Read the loadings off the regression printout, not off the waterfall's bar
-# heights.** `plot_attribution_waterfall` splits the factor-explained part of the
-# Sharpe in proportion to the absolute betas, which is not the same split as
-# beta times each factor's own Sharpe: a large loading on a factor that returned
-# nothing over the window gets a tall bar there and contributes nothing in fact.
-# The figure orders and signs the exposures; the numbers to quote are the ones
-# printed above it.
+# **Read every exposure off the regression printout above, including its sign and
+# its rank.** `plot_attribution_waterfall` gives each factor
+# `beta / sum(|beta|) * (strategy_sharpe - residual_sharpe)`, so two things are
+# true of the bars that are not true of the betas. The split is proportional to
+# the absolute loading rather than to beta times that factor's own Sharpe, so a
+# large loading on a factor that returned nothing over the window still draws a
+# tall bar. And when the factor-explained term is negative - which it is whenever
+# the residual Sharpe exceeds the strategy's - the multiplication flips every
+# bar, so the signs and the ordering on the chart are the reverse of the
+# loadings. The figure shows the shape of the decomposition; no number should be
+# quoted from it.
 
 
 # %% [markdown]
