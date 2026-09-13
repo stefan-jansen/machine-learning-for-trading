@@ -1008,8 +1008,11 @@ jobs:
       - name: Record the fixture this job read
         if: steps.reach.outputs.have_key
         run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
           printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
-            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: astral-sh/setup-uv@v6
         if: steps.reach.outputs.have_key
         with:
@@ -1416,8 +1419,11 @@ jobs:
       - name: Record the fixture this job read
         if: steps.reach.outputs.have_key
         run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
           printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
-            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Six chapter jobs download checkpoints from HuggingFace while the notebook
       # runs: ch04, ch22 and ch23 (all-MiniLM-L6-v2), ch10 (finbert-tone,
@@ -1643,8 +1649,11 @@ jobs:
       - name: Record the fixture this job read
         if: steps.reach.outputs.have_key
         run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
           printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
-            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve the image this commit declares
         id: image
@@ -1777,8 +1786,11 @@ jobs:
       - name: Record the fixture this job read
         if: steps.reach.outputs.have_key
         run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
           printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
-            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Run py312 notebooks
         if: steps.reach.outputs.have_key
@@ -1877,8 +1889,11 @@ jobs:
       - name: Record the fixture this job read
         if: steps.reach.outputs.have_key
         run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
           printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
-            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve the image this commit declares
         id: image
@@ -2066,8 +2081,11 @@ jobs:
       - name: Record the fixture this job read
         if: steps.reach.outputs.have_key
         run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
           printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
-            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Run Ch02 database benchmark notebooks
         if: steps.reach.outputs.have_key

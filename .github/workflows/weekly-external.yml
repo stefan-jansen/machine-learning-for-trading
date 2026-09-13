@@ -70,8 +70,11 @@ jobs:
 
       - name: Record the fixture this job read
         run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
           printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
-            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Seed case study intermediates
         run: |
