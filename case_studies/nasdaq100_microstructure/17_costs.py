@@ -476,13 +476,20 @@ else:
 # returned one row and the derived line below it was skipped, leaving a one-sided table
 # under prose describing two sides.
 #
-# Matched on `(prediction_hash, top_k)` because the two universes do not cover the same
-# predictions: the screened side carries every pass-1 prediction and the full side only
-# the pass-2 survivors. Averaging each side over its own population would compare 510
-# backtests against 10 and attribute the difference to the screen, when most of it is the
-# difference between the two populations. The inner join keeps only the pairs that exist
-# on both sides, so every number below is a difference at a fixed prediction and a fixed
-# concentration.
+# Matched arm by arm, because the two universes do not cover the same predictions: the
+# screened side carries every pass-1 prediction and the full side only the pass-2
+# survivors. Averaging each side over its own population would compare 510 backtests
+# against 10 and attribute the difference to the screen, when most of it is the
+# difference between the two populations.
+#
+# The match key is the whole signal specification with `universe_filter` removed, not
+# `(prediction_hash, top_k)`. Those two fields do not identify an arm: pass 2 registers
+# `equal_weight_top_k` on the screened universe at both `long_short: true` and a
+# `long_only` variant, the full-universe reference carries the long-short one only, and
+# a join on prediction and concentration alone therefore pairs one full row with two
+# screened rows. The difference it reports would then mix the universe screen with a
+# change of trading direction. Keyed on the sorted items of the signal dict so the match
+# does not depend on the order SQLite happens to serialize the object in.
 conn = sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db"))
 _arms = pl.read_database(
     """
@@ -490,7 +497,7 @@ _arms = pl.read_database(
         COALESCE(json_extract(br.spec_json, '$.strategy.signal.universe_filter'),
                  'full')                                                  AS universe,
         br.prediction_hash                                                AS prediction_hash,
-        json_extract(br.spec_json, '$.strategy.signal.top_k')             AS top_k,
+        json_extract(br.spec_json, '$.strategy.signal')                   AS signal_json,
         bm.sharpe                                                         AS sharpe,
         bm.num_trades                                                     AS num_trades
     FROM backtest_runs br
@@ -507,12 +514,37 @@ _arms = pl.read_database(
 )
 conn.close()
 
-_matched = _arms.filter(pl.col("universe") == "full").join(
-    _arms.filter(pl.col("universe") == "cost_feasible"),
-    on=["prediction_hash", "top_k"],
-    how="inner",
-    suffix="_screened",
+
+def _arm_key(signal_json: str) -> str:
+    """The arm a backtest ran, with the universe taken out of it."""
+    signal = json.loads(signal_json)
+    signal.pop("universe_filter", None)
+    return json.dumps(signal, sort_keys=True)
+
+
+_arms = _arms.with_columns(
+    pl.col("signal_json").map_elements(_arm_key, return_dtype=pl.String).alias("arm"),
 )
+
+_full = _arms.filter(pl.col("universe") == "full").select(
+    "prediction_hash", "arm", "sharpe", "num_trades"
+)
+_screened = _arms.filter(pl.col("universe") == "cost_feasible").select(
+    "prediction_hash", "arm", "sharpe", "num_trades"
+)
+# One backtest per (prediction, arm, universe) is what the registry's identity
+# guarantees; asserted rather than assumed, because a duplicate would silently weight
+# one prediction twice in the averages below.
+for _side_name, _side in (("full", _full), ("cost_feasible", _screened)):
+    _dupes = _side.group_by("prediction_hash", "arm").len().filter(pl.col("len") > 1)
+    if not _dupes.is_empty():
+        msg = (
+            f"{_dupes.height} (prediction, arm) pairs appear more than once on the "
+            f"{_side_name} universe, so the match would not be one to one"
+        )
+        raise RuntimeError(msg)
+
+_matched = _full.join(_screened, on=["prediction_hash", "arm"], how="inner", suffix="_screened")
 screen_compare = (
     pl.concat(
         [
@@ -538,7 +570,7 @@ screen_compare = (
     )
     .sort("universe", descending=True)
 )
-print(f"{_matched.height} (prediction, top_k) pairs registered on both universes")
+print(f"{_matched.height} (prediction, arm) pairs registered on both universes")
 print(screen_compare)
 
 # %%
@@ -551,7 +583,7 @@ if _universes != {"full", "cost_feasible"}:
     msg = (
         "section 4 compares one arm across two universes and the matched set offers "
         f"{sorted(_universes) or 'none'}. It reads stage='signal', split='validation', gbm, "
-        "signal.method='equal_weight_top_k', and needs the same (prediction, top_k) pair "
+        "signal.method='equal_weight_top_k', and needs the same (prediction, arm) pair "
         "registered on both the full universe and cost_feasible. `baseline_schemes` and "
         "`reference_schemes` in config/setup.yaml decide that; they currently agree on "
         "ew_top5/10/20, so an empty match means the sweep did not reach pass 2."
