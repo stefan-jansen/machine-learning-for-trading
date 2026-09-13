@@ -26,11 +26,11 @@ import warnings
 #   219  arch/univariate/base.py  DataScaleWarning  "y is poorly scaled, ..."
 _THIRD_PARTY_NOISE: tuple[str, ...] = (r"y is poorly scaled",)
 
-# A warning is issued with a `module` that `warnings` derives from the source
-# filename with its `.py` suffix stripped, not from the dotted import path. The
-# pattern therefore has to match a path segment, and `filterwarnings` anchors it
-# at the start, so it needs the leading `.*`.
-_CASE_STUDIES_MODULE = r".*[/\\]case_studies[/\\].*"
+# `filterwarnings` matches `module` against the dotted `__name__` of the module
+# that called `warnings.warn`, and anchors the regex at the start. The trailing
+# group is what keeps the pattern from reaching a sibling package whose name
+# merely begins the same way, such as `case_studies_notes`.
+_CASE_STUDIES_MODULE = r"case_studies(\.|$)"
 
 
 def apply_notebook_warning_policy() -> None:
@@ -47,10 +47,11 @@ def apply_notebook_warning_policy() -> None:
     warnings.filterwarnings("default", module=_CASE_STUDIES_MODULE)
 
 
-def is_case_studies_module(filename: str) -> bool:
-    """Whether `filename` is the source of a `case_studies.*` diagnostic.
+def is_case_studies_module(module_name: str) -> bool:
+    """Whether a warning from `module_name` is one this policy keeps audible.
 
-    Exposed so a test can assert the pattern against a real path rather than
+    `module_name` is a dotted import path, the same value `warnings` matches a
+    filter's `module` against. Exposed so a test can assert the pattern without
     restating it.
     """
-    return re.compile(_CASE_STUDIES_MODULE).match(filename.removesuffix(".py")) is not None
+    return re.compile(_CASE_STUDIES_MODULE).match(module_name) is not None
