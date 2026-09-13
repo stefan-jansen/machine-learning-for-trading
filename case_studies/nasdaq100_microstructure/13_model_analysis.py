@@ -858,15 +858,17 @@ if fold_ic.height > 0:
 plot_fold_boxplot(fold_ic)
 
 # %% [markdown]
-# With only 2 data points per family, the box plots reduce to line
-# segments connecting the two fold ICs. Read against the locked
-# registry, all three trained families (`gbm/leaves_7_mae`,
-# `linear/ridge_a1000000.0`, `deep_learning/nlinear`) are positive in
-# both folds at the primary `fwd_ret_15m` label. Per-fold magnitudes
-# differ across families but the **HAC-based per-day CIs in §3 and
-# §6** are the more reliable evidence - they pool over many days
-# rather than two folds and produce overlapping CIs across all three
-# families.
+# With only 2 data points per family, the box plots reduce to line segments connecting
+# the two fold ICs. Which configuration stands for each family is printed by the
+# representative table in section 1 and is not named here: it is the family's
+# highest-IC config on this label, so it moves when the models are refitted.
+#
+# What to read off the segments is the sign, not the magnitude. A family positive in
+# both folds has at least not contradicted itself; one that crosses zero has, and two
+# folds cannot say which side is the accident. The **HAC-based per-day CIs in §3 and
+# §6** are the stronger evidence either way, because they pool over many days rather
+# than two blocks - and where those CIs overlap across families, the ordering of the
+# segments is not evidence that one family beat another.
 #
 # **The 2-fold limitation is severe.** With 8 folds (as in the ETF
 # case study), we could distinguish "reliable but modest" from "noisy
@@ -918,13 +920,14 @@ plot_bucket_monotonicity(
 )
 
 # %% [markdown]
-# The monotonicity plot confirms genuine ranking ability, but the
-# per-bar economic spreads are sub-bp and below the per-leg cost
-# floor (1--5 bps). The bucket-spread bars in the figure show the
-# highest-IC config from each trained family (`gbm/leaves_7_mae`,
-# `linear/ridge_a1000000.0`, `deep_learning/nlinear`) at the primary
-# label; magnitudes are reported by the helper rather than transcribed
-# here so the prose does not drift from the figure.
+# Read the monotonicity plot for whether the buckets are ordered at all, and the spreads
+# beneath it for whether that ordering is worth trading. The two are separate questions:
+# a signal can rank correctly and still move prices less per bar than a round trip costs,
+# which on this case study is the ordinary case rather than the failure case.
+#
+# The bars show each family's representative at the primary label - the same
+# configurations section 1 printed - and their magnitudes come from the helper rather
+# than from this cell, so the prose cannot drift from the figure.
 #
 # **The edge-to-cost ratios are all below 1.** The per-bar decile spread cannot
 # survive a single round-trip at any reasonable cost assumption: a round trip of
@@ -1006,20 +1009,56 @@ print(f"Families with checkpoint data: {cp_families}")
 # %%
 plot_learning_curves(cp_data, cp_families)
 
+# %%
+# Capacity against accuracy, computed rather than asserted. The GBM grid sweeps
+# `num_leaves` over 7, 15, 31 and 63 crossed with three losses, so the question "does
+# more capacity help on this panel" has an answer in the registry and does not need to
+# be argued from the winner's name. Both columns are reported because they can
+# disagree: the maximum is the best draw from a sample and grows with the number of
+# configs at that leaf count, while the mean describes the setting.
+_gbm = all_metrics.filter(pl.col("family") == "gbm")
+_leaf_summary = (
+    _gbm.with_columns(
+        pl.col("config_name").str.extract(r"leaves_(\d+)", 1).cast(pl.Int64).alias("num_leaves")
+    )
+    .drop_nulls("num_leaves")
+    .group_by("num_leaves")
+    .agg(
+        n_configs=pl.col("config_name").n_unique(),
+        best_ic=pl.col("ic_mean").max(),
+        mean_ic=pl.col("ic_mean").mean(),
+    )
+    .sort("num_leaves")
+)
+if _leaf_summary.height:
+    print("GBM leaf count against IC on the primary label:")
+    print(_leaf_summary)
+else:
+    print("No GBM configs carrying a leaf count in their name; capacity read skipped.")
+
 # %% [markdown]
-# The learning curves trace IC across training checkpoints for the
-# families that emit them. From the locked registry, `gbm` highest IC at
-# `fwd_ret_15m` is `leaves_7_mae` (small-leaf, MAE loss) - the
-# regularization-against-noise pattern is the binding principle,
-# not the capacity-for-interactions story. `deep_learning/nlinear` is an
-# architecturally near-linear sequence model, not a deep recurrent
-# architecture; its highest IC is a single-config result and does not
-# come with a meaningful epoch-vs-IC progression for cross-architecture
-# comparison.
+# The learning curves trace IC across training checkpoints for the families that emit
+# them, and the table above asks the question the curves cannot: whether capacity helps
+# at all on this panel.
 #
-# Both families' curves show monotone-then-plateau behavior rather than
-# overfitting (no declining IC beyond the peak), suggesting the models
-# extract genuine but weak patterns rather than memorizing noise.
+# **Read the mean column and the best column against each other.** They answer different
+# questions. If mean IC rises with leaf count, more capacity helps the setting; if only
+# the maximum rises, the wider leaf counts may simply have had more configurations to
+# draw a maximum from. Where they disagree, the mean is the one to believe, because the
+# maximum of a larger sample is larger whether or not the family has an edge - the same
+# argument §3 makes about family maxima.
+#
+# Do not read either column as the binding principle for boosting in general. It is one
+# label, two folds and one panel, and the grid crosses leaf count with a loss function,
+# so a leaf-count column pools across losses that may not respond the same way.
+#
+# `deep_learning/nlinear` is an architecturally near-linear sequence model rather than a
+# deep recurrent one, and its highest IC is a single-config result with no meaningful
+# epoch-versus-IC progression to compare across architectures.
+#
+# What the curves themselves show - a monotone rise then a plateau, or a peak followed
+# by decline - is the overfitting question, and it is the shape rather than the level
+# that answers it.
 
 # %% [markdown]
 # ### Which Features Drive the Forecasts?
