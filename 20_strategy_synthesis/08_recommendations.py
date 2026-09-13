@@ -274,10 +274,12 @@ show_with_alt(
 
 # %% [markdown]
 # The waterfall counts how many of the nine case studies remain after each
-# cumulative gate and names the ones that drop at each. The gates are ordered so
-# that each asks a different question of the same strategy: whether the signal
-# exists, whether it survives costs, whether it holds out of sample, and whether
-# the evidence is strong enough to act on.
+# cumulative gate and names the ones that drop at each. The five gates ask
+# different questions of the same strategy, in pipeline order: whether the
+# prediction has a positive information coefficient, whether the selected
+# configuration's validation Sharpe is positive, whether it survives its cost
+# regime, whether its holdout Sharpe is positive, and whether the evidence
+# behind that holdout is strong enough to act on.
 
 # %% [markdown]
 # ## 3. Exclusion Taxonomy
@@ -628,12 +630,15 @@ if full_pass.height > 0 and gate_miss.height > 0:
             print(f"  {fam:18s}: {n_pass}/{total} full-pass ({100 * n_pass / total:.0f}%)")
 
 # %% [markdown]
-# The comparison groups the nine case studies by two structural attributes -
-# rebalancing frequency and the cost structure of the instrument traded - and
-# reports how many gates each group passed alongside its selected model family.
-# The grouping is the question being asked: whether pipeline survival tracks a
-# structural property of the market rather than the strength of the signal or
-# the choice of model.
+# The comparison splits the nine case studies into those that clear every gate
+# and those that miss at least one, and reports three readings of that split:
+# mean validation IC on each side, and the pass-against-miss counts broken out
+# by rebalancing frequency and by selected model family. The split is binary, so
+# a case study's position says that it missed somewhere and not how far it got;
+# the waterfall above is where the gate a case study left at is read. The
+# question the three readings ask is whether clearing every gate tracks the
+# strength of the signal, a structural property of the market, or the choice of
+# model.
 #
 # Where a case study's holdout confidence interval spans zero, the exclusion
 # table above prints the interval beside the point estimate. An interval that
