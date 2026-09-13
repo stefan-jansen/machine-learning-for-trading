@@ -53,6 +53,7 @@ from case_studies.research import (
     open_study,
     population_supersedes,
     prediction_rows_at,
+    published_population_names_at,
     reuse_disclosure,
     superseded_members_at,
 )
@@ -73,7 +74,10 @@ from case_studies.utils.ensemble import (
     mean_forecast,
     resolve_members,
 )
-from case_studies.utils.notebook_contracts import excluded_families
+from case_studies.utils.notebook_contracts import (
+    excluded_families,
+    prediction_members_in_force,
+)
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     load_existing_backtest_hashes,
@@ -348,6 +352,53 @@ _admissible = _catalog.filter(
 _offered = len(pred_index)
 _offered_hashes = set(pred_index["prediction_hash"])
 pred_index = pred_index.join(_admissible, on="prediction_hash", how="inner")
+
+# Membership, after the exclusion above, because the two are different sets and the
+# weaker one is what this sweep had (ml4t/agent-workspace#1088). "Not retired" admits a
+# prediction no population ever listed - an experiment its case study never published is
+# retired by nobody - while "published" does not. `published_members_at` subtracts the
+# retired set itself, so this is never the looser test; it is the same shape
+# `sp500_equity_option_analytics/14_backtest:292` already applies, and running the nine
+# on two different rules is the thing worth removing even where the answer agrees.
+#
+# It agrees here: on 2026-09-13 the registry publishes 784 prediction sets and holds 784,
+# so this narrows nothing today. It stops being inert the first time a run registers a set
+# under no population - which is exactly the state that produced the unsound sweep this
+# re-run replaces, reached by a different route.
+#
+# `None` means the registry declares no populations at all - a fixture, or a clean clone -
+# and there is then nothing to filter against. Left unscoped in that case rather than
+# narrowed to nothing, which is what `prediction_members_in_force` returns `None` to say.
+#
+# It is slow, and silently so: it opens every published member's artifact to check symbol
+# coverage, which on this registry is 784 parquet files. Measured 2026-09-13 at over 13
+# minutes of wall clock saturating the box, before the sweep's first backtest and with
+# nothing printed while it runs. That is the cost of the check rather than a hang, and it
+# is said here because the next reader watching a quiet log is the one who needs to know.
+_members, _population_notes = prediction_members_in_force(study, CASE_DIR)
+for _note in _population_notes:
+    print(f"  {_note}", flush=True)
+if _members is not None:
+    print(f"  {len(_members):,} prediction sets in the populations in force", flush=True)
+    _before_membership = set(pred_index["prediction_hash"])
+    pred_index = pred_index.filter(pl.col("prediction_hash").is_in(list(_members)))
+    _unpublished = _before_membership - set(pred_index["prediction_hash"])
+    if _unpublished:
+        print(
+            f"  Excluded {len(_unpublished)} further prediction sets that are complete and "
+            "not retired but that no population in force publishes",
+            flush=True,
+        )
+    if pred_index.is_empty():
+        msg = (
+            f"{len(_before_membership)} prediction sets for {CASE_STUDY_ID}/{LABEL}/{SPLIT} "
+            "are complete and not retired, and no population in force publishes any of "
+            f"them. The registry publishes {len(_members):,} prediction identities under "
+            f"{len(published_population_names_at(CASE_DIR))} population names; this label's "
+            "rows are in none of them, so the model notebook that wrote them registered "
+            "them outside the population mechanism. Re-run it before sweeping."
+        )
+        raise RuntimeError(msg)
 if pred_index.is_empty():
     msg = (
         f"{_offered} prediction sets exist for {CASE_STUDY_ID}/{LABEL}/{SPLIT} but none is "
@@ -564,6 +615,7 @@ def run_arms(rows, arms, pass_name):
                         "cagr": None,
                         "volatility": None,
                         "num_trades": None,
+                        "failure": None,
                     }
                 )
                 continue
@@ -607,14 +659,28 @@ def run_arms(rows, arms, pass_name):
                     max_drawdown=result.metrics["max_drawdown"],
                     cagr=result.metrics.get("cagr", 0.0),
                     volatility=result.metrics.get("volatility", 0.0),
-                    num_trades=result.metrics.get("num_trades", 0),
+                    num_trades=result.metrics["num_trades"],
+                    failure=None,
                 )
                 tally["completed"] += 1
                 if result.backtest_hash:
                     existing_hashes.add(result.backtest_hash)
                     planned.add(result.backtest_hash)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - one cell must not end the sweep
+                # Say what threw and which cell it was. A counter the log never
+                # expands is how 144 of 360 pass-2 cells failed on `fwd_ret_5m`
+                # while the run exited 0 and label coverage reported ok: every
+                # one of them was a constant-forecast prediction meeting a slot
+                # arm that cannot rank it, and nothing on the way out said so.
+                # `record` already carries the family, config and arm, so the
+                # message identifies the cell rather than only the exception.
                 tally["failed"] += 1
+                print(
+                    f"  FAILED [{idx}/{n_cells}] {record['family']}/{record['config_name']} "
+                    f"{record['signal_method']} on {record['universe']} "
+                    f"(pred {pred_hash[:12]}): {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
                 record.update(
                     backtest_hash=None,
                     sharpe=None,
@@ -623,6 +689,7 @@ def run_arms(rows, arms, pass_name):
                     cagr=None,
                     volatility=None,
                     num_trades=None,
+                    failure=f"{type(exc).__name__}: {exc}",
                 )
             out.append(record)
 
@@ -692,6 +759,13 @@ if mechanism_arms and not _cells.is_empty():
         schema_overrides={"sharpe": pl.Float64},
     )
     _conn.close()
+    # `drop_nulls` is the complete test here, and only because the Sharpe crosses SQLite.
+    # A ruined path writes `float("nan")` for every ranking metric
+    # (`backtest_runner.RUIN_UNRANKABLE_METRICS`), and a NaN read back into polars would
+    # survive `drop_nulls` and then sort AHEAD of every finite Sharpe under
+    # `descending=True`, so a bankrupt strategy would take a pass-2 slot. SQLite has no
+    # NaN: it stores one as NULL, which is what makes the null test sufficient. Read the
+    # scores from anywhere but the registry and this line needs `is_finite` as well.
     _scored = _cells.join(_metrics, on="backtest_hash", how="inner").drop_nulls("sharpe")
     if not _scored.is_empty():
         _ranked = (
