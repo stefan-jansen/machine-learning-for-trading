@@ -33,7 +33,6 @@
 # %%
 """Tick Data - download, explore, and update workflow."""
 
-import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -394,27 +393,25 @@ if "msg_type" in itch.columns:
 
 # %%
 from utils import ML4T_DATA_PATH
-from utils.downloading import dataset_profile_path
+from utils.downloading import dataset_profile_path, load_dataset_profile, print_dataset_profile
 
-# Check for MBO profile
-mbo_data_path = ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "market_by_order"
-mbo_profile_path = dataset_profile_path(mbo_data_path)
-if mbo_profile_path.exists():
-    profile = json.loads(mbo_profile_path.read_text())
-    print("=== MBO Profile ===")
-    print(f"  Rows: {profile.get('rows', 'N/A'):,}")
-else:
-    print("MBO profile not found")
+microstructure = ML4T_DATA_PATH / "equities" / "market" / "microstructure"
 
-# Check for ITCH profile
-itch_data_path = ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "nasdaq_itch"
-itch_profile_path = dataset_profile_path(itch_data_path)
-if itch_profile_path.exists():
-    profile = json.loads(itch_profile_path.read_text())
-    print("\n=== ITCH Profile ===")
-    print(f"  Rows: {profile.get('rows', 'N/A'):,}")
+mbo_data_path = microstructure / "market_by_order"
+mbo_profile = load_dataset_profile(mbo_data_path)
+if mbo_profile is not None:
+    print_dataset_profile(mbo_profile, "MBO PROFILE")
 else:
-    print("ITCH profile not found")
+    print(f"No profile at {dataset_profile_path(mbo_data_path)}")
+    print("Written by: python data/equities/market/microstructure/mbo_download.py")
+
+itch_data_path = microstructure / "nasdaq_itch"
+itch_profile = load_dataset_profile(itch_data_path)
+if itch_profile is not None:
+    print_dataset_profile(itch_profile, "ITCH PROFILE")
+else:
+    print(f"No profile at {dataset_profile_path(itch_data_path)}")
+    print("Written by: python data/equities/market/microstructure/nasdaq_itch_download.py")
 
 # %% [markdown]
 # ## 6. Loader Options
