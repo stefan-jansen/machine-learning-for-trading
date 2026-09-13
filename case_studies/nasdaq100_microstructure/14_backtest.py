@@ -391,20 +391,36 @@ if len(pred_index) < _offered:
 # `sp500_equity_option_analytics/14_backtest:292` already applies, and running the nine
 # on two different rules is the thing worth removing even where the answer agrees.
 #
-# It agrees here: on 2026-09-13 the registry publishes 784 prediction sets and holds 784,
-# so this narrows nothing today. It stops being inert the first time a run registers a set
-# under no population - which is exactly the state that produced the unsound sweep this
-# re-run replaces, reached by a different route.
+# The two rules agree on the publication question here - the registry publishes 784
+# prediction sets and holds 784 - but do not read that as the filter being inert. Measured
+# on the 2026-09-13 canonical run, it narrowed the pool in two steps and both bit:
+#
+#     220 of 784 members dropped for covering less of the cross-section than their
+#         feature panels offered them
+#     564 prediction sets in the populations in force
+#     80 further sets excluded on this label as complete, not retired, and published
+#         by no population in force
+#     162 predictions swept
+#
+# The first named drop was a `deep_learning/lstm_h64` set carrying 81.2% of the (entity,
+# session) pairs its input panel offered it. Without this filter the previous sweep's
+# pass-2 eight was four `nlinear` checkpoints at 67.4% coverage and four L1-linear sets
+# that are constants - two distinct forecast values across 8,006,995 rows - so 180 of its
+# 360 mechanism backtests priced a 45-arm entry grid over predictions that rank nothing
+# (ml4t/agent-workspace#1170).
 #
 # `None` means the registry declares no populations at all - a fixture, or a clean clone -
 # and there is then nothing to filter against. Left unscoped in that case rather than
 # narrowed to nothing, which is what `prediction_members_in_force` returns `None` to say.
 #
 # It is slow, and silently so: it opens every published member's artifact to check symbol
-# coverage, which on this registry is 784 parquet files. Measured 2026-09-13 at over 13
-# minutes of wall clock saturating the box, before the sweep's first backtest and with
-# nothing printed while it runs. That is the cost of the check rather than a hang, and it
-# is said here because the next reader watching a quiet log is the one who needs to know.
+# coverage, which on this registry is 784 parquet files totalling 94.3 GB. Measured on the
+# 2026-09-13 canonical run at **8,608 s - 2 h 23 m, 11.0 s per member** - before the
+# sweep's first backtest, with nothing printed while it runs because every print in this
+# cell comes after the call returns. That is the cost of the check rather than a hang, and
+# it is said here because the next reader watching a quiet log is the one who needs to
+# know. Scoping it to the candidates the caller can actually sweep - 162 here, against the
+# 784 it opens - is ml4t/agent-workspace#1170.
 _members, _population_notes = prediction_members_in_force(study, CASE_DIR)
 for _note in _population_notes:
     print(f"  {_note}", flush=True)
