@@ -967,8 +967,10 @@ def get_universe_filters_for(case_study: str) -> list[str | None]:
     ``apply_universe_filter`` returning predictions unchanged). Other values
     are passed through to ``apply_universe_filter`` in ``backtest_runner.py``
     where they drive a spec-declared universe restriction at the
-    rebalance-date grain (currently only ``"liquid"`` is supported, for the
-    sp500_options bottom-quantile half-spread subset).
+    rebalance-date grain. Two names are supported there: ``"liquid"`` (the
+    sp500_options bottom-quantile half-spread subset) and ``"cost_feasible"``
+    (the nasdaq100_microstructure frozen per-split symbol list under
+    ``setup.yaml::universe.cost_feasible``); anything else raises.
 
     Sourced from ``backtest.sweep.universe_filter`` in ``setup.yaml``: a
     single scalar value pinning the canonical sweep to one universe. For
