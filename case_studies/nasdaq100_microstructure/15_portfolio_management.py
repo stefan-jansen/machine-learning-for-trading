@@ -21,7 +21,7 @@
 # This notebook sweeps **top predictions × TOP_K concentration × allocators** on
 # the **full universe** to ask a focused question: can portfolio construction
 # rescue the every-bar strategy that Chapter 16 (Act 1) showed is cost-defeated?
-# Each combination re-sizes the top signal-stage predictions with `equal_weight`,
+# Each combination re-sizes the top baseline-stage predictions with `equal_weight`,
 # `score_weighted`, or `inverse_vol`, rebalancing every 15-minute bar across all
 # 113 names.
 #
@@ -40,7 +40,7 @@
 # re-run independently.
 #
 # **Learning Objectives:**
-# 1. Sweep top signal-stage predictions × concentration levels × allocation methods
+# 1. Sweep top baseline-stage predictions × concentration levels × allocation methods
 # 2. Compare equal-weight, score-weighted, and inverse-vol sizing under intraday costs
 # 3. Show that allocator choice is second-order to trade frequency at 15-minute cadence
 #
@@ -122,9 +122,9 @@ if excluded_families(CASE_STUDY_ID):
     )
 
 # %% [markdown]
-# ## 1. Load Top Predictions from Signal Stage
+# ## 1. Load Top Predictions from the Baseline Stage
 #
-# The ranking has to name a universe, because the signal stage holds two.
+# The ranking has to name a universe, because the baseline stage holds two.
 # `backtest.sweep.signal_passes` scores every admissible prediction on the
 # cost-feasible universe in pass 1, then re-runs the highest-scoring
 # `mechanism_top_n` of them on the full universe in pass 2. A ranking that names
@@ -183,7 +183,7 @@ top_preds = resolve_best_predictions(
 )
 if top_preds.is_empty():
     msg = (
-        f"No signal-stage backtests on the {SELECTION_UNIVERSE or 'full'} universe for "
+        f"No baseline-stage backtests on the {SELECTION_UNIVERSE or 'full'} universe for "
         f"{CASE_STUDY_ID}/{LABEL}/validation, so there is nothing to allocate over. "
         "Every cell below is a no-op on an empty selection, which would register nothing "
         "and report a clean run. `backtest.sweep.signal_passes.baseline_universe` is what "
@@ -238,7 +238,7 @@ TRADED_UNIVERSE = traded_universe_declaration(prices) if MAX_SYMBOLS else None
 #
 # For each (prediction × TOP_K × allocator), call `run_backtest()` with the
 # allocation config added to the strategy spec. The spec hash automatically
-# differentiates these from signal-stage backtests.
+# differentiates these from baseline-stage backtests.
 #
 # **The book is long-short, and that shapes every allocator below.**
 # `get_backtest_config("nasdaq100_microstructure").long_short` is `True`, and the

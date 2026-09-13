@@ -331,7 +331,7 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # rank-1 to the `cost_feasible` universe that `backtest.sweep.universe_filter` declares
 # canonical, and `15_portfolio_management` and `16_risk_management` both register
 # specs carrying no `universe_filter`. So the allocation and risk-overlay stages
-# contribute no eligible rows here and the carrier is a signal-stage configuration.
+# contribute no eligible rows here and the carrier is a baseline-stage configuration.
 #
 # The label is taken from the selection rather than assumed. The pool spans every
 # declared label, so the chosen strategy may rest on a variant label rather than the
@@ -387,7 +387,7 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 # %% [markdown]
 # ## §2 Search context, family comparison, and lineage waterfall
 #
-# The signal stage produced many validation backtests across the model families
+# The baseline stage produced many validation backtests across the model families
 # and label horizons. The selected row is one outcome of that search, and a
 # search over many configurations produces a highest value even when none of the
 # configurations has an edge.
@@ -410,14 +410,14 @@ search_table = pl.DataFrame(
         {"metric": "Top-by-Sharpe percentile", "value": f"{ctx['champion_percentile']:.1f}%"},
     ]
 )
-print("Signal-stage search context:")
+print("Baseline-stage search context:")
 print(search_table)
 
 # %% [markdown]
 # The family comparison reads each backtest's stored interval rather than
 # recomputing one, so the plot can show error bars instead of points alone.
 #
-# It is scoped to the canonical universe, because the signal stage holds two and they are
+# It is scoped to the canonical universe, because the baseline stage holds two and they are
 # not distributed evenly across families. `backtest.sweep.signal_passes` re-runs only
 # `mechanism_top_n` predictions on the full universe, and those are whichever families
 # pass 1 ranked highest, so pooling both would move one family's median by rows the others
@@ -454,7 +454,7 @@ with sqlite3.connect(str(_db)) as _con:
     )
 if _famdf.is_empty():
     msg = (
-        f"No signal-stage validation backtests on the {_UNIVERSE_FILTER or 'full'} universe "
+        f"No baseline-stage validation backtests on the {_UNIVERSE_FILTER or 'full'} universe "
         f"for {CASE_STUDY}, so there is no family distribution to plot. The rest of this "
         "notebook reads the same universe, so this is the first place a registry missing it "
         "shows up."
@@ -473,7 +473,7 @@ family_summary = (
     )
     .sort("sharpe_median", descending=True)
 )
-print("Family-level signal-stage Sharpe summary:")
+print("Family-level baseline Sharpe summary:")
 print(family_summary)
 
 # %%
@@ -637,7 +637,7 @@ else:
 # ## §3 Headline performance with uncertainty
 #
 # The selected specification is the validation-window backtest associated
-# with the highest signal-stage Sharpe. Every metric is reported with
+# with the highest baseline Sharpe. Every metric is reported with
 # its block-bootstrap interval from `backtest_metrics`; the equity overlay
 # shows the cumulative trajectory against the equal-weight NASDAQ-100
 # universe benchmark.
@@ -716,7 +716,7 @@ spec_block = {
     "allocation": lineage.get("allocation", {}).get("allocator"),
     "risk_overlay": lineage.get("risk_overlay", {}).get("risk_name"),
     "rebalance_step_bars": setup["labels"]["rebalance_step"][RANK1_LABEL],
-    "cost_assumption": "engine cost model: 5 bps commission + 2 bps slippage at signal stage; per_share_plus_spread sensitivity in §5",
+    "cost_assumption": "engine cost model: 5 bps commission + 2 bps slippage at the baseline stage; per_share_plus_spread sensitivity in §5",
     "validation_window_periods": int(full["n_periods"]) if full["n_periods"] is not None else None,
     "num_trades": int(full["num_trades"]) if full["num_trades"] is not None else None,
     "avg_turnover": full["avg_turnover"],

@@ -40,7 +40,7 @@
 #
 # The notebook has three parts:
 # - **Sections 1-3**: Standard bps cost grid on the leading pre-cost runs, which
-#   on this case study are the screened signal-stage arms (Section 1 says why the
+#   on this case study are the screened baseline-stage arms (Section 1 says why the
 #   allocation and risk-overlay stages contribute none), tracing the
 #   Sharpe-vs-cost decay curve.
 # - **Section 4**: Full universe vs the cost-feasible screen — the first lever,
@@ -182,7 +182,7 @@ if excluded_families(CASE_STUDY_ID):
 # **The pool is also pinned to the canonical universe.** `setup.yaml` declares
 # `universe_filter: cost_feasible` and says in the same breath that the full-universe variant
 # "is NOT a canonical rank-1 / cohort / DSR candidate". Widening the stages without pinning the
-# universe would admit exactly that variant, because the signal stage holds both screened and
+# universe would admit exactly that variant, because the baseline stage holds both screened and
 # full-universe runs and the full-universe ones are not screened out anywhere else - the cost
 # curve would then price a strategy the case study excludes by declaration. The filter is read
 # out of each run's own `spec_json`, the same place `derived_tables_off_canonical_universe`
@@ -200,7 +200,7 @@ if excluded_families(CASE_STUDY_ID):
 # wins.** `15_portfolio_management` builds its allocation specs with no `universe_filter` and
 # `16_risk_management` clones those specs, so every allocation and risk-overlay row this
 # registry holds is a full-universe row and the pin drops all of them. The pool that reaches
-# the cost grid is the signal stage's screened rows. That is the declared design rather than a
+# the cost grid is the baseline stage's screened rows. That is the declared design rather than a
 # gap - 15 exists to show that allocation does not rescue the every-bar full-universe
 # strategy, and a negative result is not a candidate to carry the case study - but it does mean
 # the risk-overlay argument above is about the other eight case studies and not about this one.
@@ -423,7 +423,7 @@ if failed_points:
 # axis where a cost assumption can be wrong without mattering.
 #
 # The grid is `backtest.sweep.cost_grid_bps`, 0 to 50 bps per leg. What it is measured
-# against is not a bps figure: every signal-stage row in this registry carries
+# against is not a bps figure: every baseline-stage row in this registry carries
 # `commission.model = "per_share"` at $0.0035 a share, and the `rate` fields beside it
 # belong to the percentage model that is not the one in force. `cost_sensitivity` returns
 # only the rows this notebook re-ran under the percentage model, which is what puts them
@@ -757,7 +757,7 @@ print(
 from case_studies.utils.backtest_runner import normalize_prediction_columns
 from case_studies.utils.registry import read_predictions
 
-# Top engine signal-stage prediction by Sharpe
+# Top engine baseline-stage prediction by Sharpe
 db_path = CASE_DIR / "run_log" / "registry.db"
 conn = sqlite3.connect(str(db_path))
 cur = conn.cursor()
@@ -787,7 +787,7 @@ conn.close()
 
 if _row is None:
     print(
-        f"No signal-stage engine backtest on the {CANONICAL_UNIVERSE or 'full'} universe. "
+        f"No baseline-stage engine backtest on the {CANONICAL_UNIVERSE or 'full'} universe. "
         "Skipping cadence sweep."
     )
     best_pred_hash = None
