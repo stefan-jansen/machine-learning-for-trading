@@ -1936,12 +1936,24 @@ rolling = compute_rolling_exposures(
 fig_roll = plot_rolling_exposures(
     rolling, title="NQ100 Strategy: Rolling Factor Exposures (63-day, FF5+MOM)"
 )
-fig_roll.show()
+show_with_alt(
+    fig_roll,
+    "Grid of line panels, one per series: annualized alpha first, then one "
+    "coefficient panel for each factor in the FF5+MOM model. Each panel plots the "
+    "63-day rolling value against date with a dashed line at zero; the y-axis is "
+    "Alpha on the first panel and Beta on the rest. Unused grid slots are hidden.",
+)
 
 # %%
 # Attribution waterfall
 fig_attr = plot_attribution_waterfall(reg, title="NQ100 Strategy: Factor Attribution")
-fig_attr.show()
+show_with_alt(
+    fig_attr,
+    "Bar chart with one bar per factor and a grey Residual bar at the right. The "
+    "y-axis is Sharpe Contribution, bars are blue above zero and red below, each "
+    "carries its value as a label, and a dashed horizontal line marks the strategy's "
+    "own Sharpe with its value in the legend.",
+)
 
 attr_summary = format_attribution_summary(reg, boot)
 
@@ -1965,6 +1977,14 @@ attr_summary = format_attribution_summary(reg, boot)
 # The placebo regression against the benchmark alone is the control. Comparing
 # the two says how much of the reading depends on the wider factor set rather
 # than on market exposure.
+#
+# **Read the loadings off the regression printout, not off the waterfall's bar
+# heights.** `plot_attribution_waterfall` splits the factor-explained part of the
+# Sharpe in proportion to the absolute betas, which is not the same split as
+# beta times each factor's own Sharpe: a large loading on a factor that returned
+# nothing over the window gets a tall bar there and contributes nothing in fact.
+# The figure orders and signs the exposures; the numbers to quote are the ones
+# printed above it.
 
 
 # %% [markdown]
