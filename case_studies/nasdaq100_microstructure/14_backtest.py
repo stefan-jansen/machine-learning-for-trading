@@ -406,8 +406,7 @@ if len(pred_index) < _offered:
 # session) pairs its input panel offered it. Without this filter the previous sweep's
 # pass-2 eight was four `nlinear` checkpoints at 67.4% coverage and four L1-linear sets
 # that are constants - two distinct forecast values across 8,006,995 rows - so 180 of its
-# 360 mechanism backtests priced a 45-arm entry grid over predictions that rank nothing
-# (ml4t/agent-workspace#1170).
+# 360 mechanism backtests priced a 45-arm entry grid over predictions that rank nothing.
 #
 # `None` means the registry declares no populations at all - a fixture, or a clean clone -
 # and there is then nothing to filter against. Left unscoped in that case rather than
@@ -419,8 +418,10 @@ if len(pred_index) < _offered:
 # sweep's first backtest, with nothing printed while it runs because every print in this
 # cell comes after the call returns. That is the cost of the check rather than a hang, and
 # it is said here because the next reader watching a quiet log is the one who needs to
-# know. Scoping it to the candidates the caller can actually sweep - 162 here, against the
-# 784 it opens - is ml4t/agent-workspace#1170.
+# know. It is also label-agnostic: it coverage-checks every published member whatever the
+# caller is sweeping, so two thirds of those reads are for labels this run never touches.
+# Scoping it to the candidates the caller can act on is a change to the shared helper and
+# not to this notebook, which is why it is described here rather than made here.
 _members, _population_notes = prediction_members_in_force(study, CASE_DIR)
 for _note in _population_notes:
     print(f"  {_note}", flush=True)
