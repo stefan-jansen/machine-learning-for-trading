@@ -33,7 +33,7 @@
 # - Understand the mechanism by which a tight stop can cost a cross-asset
 #   strategy more than it saves
 #
-# **Book Reference**: Chapter 20, Section 20.7 (Risk Overlays and Stability Across Regimes)
+# **Book Reference**: Chapter 20, Section 20.7 (Risk overlays)
 #
 # **Prerequisites**: Run [`01_aggregate_synthesis`](01_aggregate_synthesis.ipynb) first.
 # Each case study's registry must contain Ch19 `risk_overlay`-stage backtests
