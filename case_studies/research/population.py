@@ -562,9 +562,14 @@ def split_retired_members(
     import polars as pl
 
     if column not in index.columns:
+        carried = (
+            "no columns at all, so it is an empty result rather than a mis-shaped one"
+            if not index.columns
+            else f"{sorted(index.columns)}"
+        )
         raise ValueError(
             f"candidate index has no {column!r} column, so retirement cannot be decided on it; "
-            f"it carries {sorted(index.columns)}"
+            f"it carries {carried}"
         )
     retired = superseded_members(study, member_kind=member_kind)
     if not retired:
@@ -631,9 +636,14 @@ def split_unpublished_members(
     import polars as pl
 
     if column not in index.columns:
+        carried = (
+            "no columns at all, so it is an empty result rather than a mis-shaped one"
+            if not index.columns
+            else f"{sorted(index.columns)}"
+        )
         raise ValueError(
             f"candidate index has no {column!r} column, so membership cannot be decided on it; "
-            f"it carries {sorted(index.columns)}"
+            f"it carries {carried}"
         )
     published = published_members_at(_membership_root(study), member_kind=member_kind)
     if published is None:
