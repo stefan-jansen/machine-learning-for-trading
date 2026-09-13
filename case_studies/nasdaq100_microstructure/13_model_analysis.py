@@ -1151,24 +1151,28 @@ else:
 plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
 
 # %% [markdown]
-# The feature importance analysis reveals a surprising result: the
-# only persistent features (top-5 in both folds) are **`is_first_30m`**
-# and **`is_last_30m`** - time-of-day indicators, not the order flow
-# or liquidity features we expected.
+# **What the heatmap is showing, and what it is not.** Gain-based importance says how
+# much a feature reduced the loss inside the fitted trees. It is not a causal statement
+# and it is not a ranking of forecasting power: two correlated features split the gain
+# between them, so a feature can matter and still read low because a near-copy of it
+# absorbed the credit. Read it for which features the models leaned on, and read
+# persistence across folds rather than the level in either one.
 #
-# This is actually economically meaningful. The first and last 30
-# minutes of the trading day are well-known to exhibit different
-# microstructure dynamics:
+# **Time of day dominates, and the form it takes is the finding.** The panel offers both
+# a continuous position in the session (`time_since_open`, `time_to_close`) and binary
+# bucket indicators (`is_first_30m`, `is_last_30m`). The models use the continuous pair
+# heavily and the indicators barely at all. A bucket says only whether the bar is inside
+# a named window; a continuous position lets a tree place a split anywhere in the
+# session and keep refining, which is what a boosted ensemble is built to exploit.
 #
-# - **Opening**: overnight information is incorporated, spreads are
-#   wider, volume is concentrated, and mean-reversion patterns are
-#   stronger as the opening auction resolves overnight imbalances
-# - **Closing**: portfolio rebalancing flows, index tracking, and
-#   MOC orders create predictable patterns in the cross-section
+# That the opening and closing minutes have their own microstructure is well established
+# - overnight information being incorporated into wider spreads and concentrated volume
+# at the open, rebalancing and MOC flow at the close. What this figure adds is that the
+# models did not need the buckets to use it.
 #
-# The microstructure features (signed volume share, relative spread,
-# microprice deviation) appear in the top 15 but are not persistent
-# across both folds - their importance shifts with market conditions.
+# The order-flow and liquidity features appear in the heatmap without persisting across
+# both folds, which is the diffuse-signal reading: no single microstructure feature
+# carries the bulk of the gain, and which of them surfaces shifts with the window.
 # This suggests the signal is diffuse: no single microstructure
 # feature carries the bulk of the signal, but the time-of-day context conditions which
 # features matter. The models may be implicitly learning "at the

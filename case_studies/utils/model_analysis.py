@@ -905,6 +905,33 @@ def regime_conditional_ic(
 # ---------------------------------------------------------------------------
 
 
+_BOOSTER_LAYOUTS = (
+    ("training", "models", "boosters"),
+    ("training", "boosters"),
+    ("models", "boosters"),
+)
+
+
+def _booster_dir(case_dir: Path, training_hash: str) -> Path | None:
+    """Where this run's LightGBM boosters are, across the layouts that exist on disk.
+
+    Three, and the first is the one the trainer writes today: ``run_log/training/{hash}/
+    models/boosters/``. The loader checked only the other two and so found nothing on
+    ``nasdaq100_microstructure``, where all 50 gbm runs carry the first - and it returns
+    ``None`` for "no boosters", which the caller reads as "this family emits no
+    importances" rather than as "the path was wrong". The notebook then draws its feature
+    figure from the correlation fallback while its prose describes gain-based importance.
+
+    Ordered most recent first and checked rather than declared, so a case study on an
+    older layout is unaffected: a directory that does not exist cannot match.
+    """
+    for parts in _BOOSTER_LAYOUTS:
+        candidate = case_dir.joinpath("run_log", *parts[:1], training_hash, *parts[1:])
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def load_gbm_feature_importance(
     case_study_id: str,
     label: str | None = None,
@@ -943,11 +970,8 @@ def load_gbm_feature_importance(
 
     results = []
     for t_hash, config_name in rows:
-        booster_dir = case_dir / "run_log" / "training" / t_hash / "boosters"
-        if not booster_dir.exists():
-            # Also check under run_log/models/{hash}/boosters (older layout)
-            booster_dir = case_dir / "run_log" / "models" / t_hash / "boosters"
-        if not booster_dir.exists():
+        booster_dir = _booster_dir(case_dir, t_hash)
+        if booster_dir is None:
             continue
 
         for booster_file in sorted(booster_dir.glob("*.txt")):
