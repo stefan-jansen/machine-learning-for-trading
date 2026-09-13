@@ -919,15 +919,22 @@ plot_bucket_monotonicity(
 # label; magnitudes are reported by the helper rather than transcribed
 # here so the prose does not drift from the figure.
 #
-# **The edge-to-cost ratios are all below 1.** The per-bar decile
-# spread cannot survive a single round-trip at any reasonable cost
-# assumption - round-trip cost of 2--10 bps swamps the per-bar
-# spread. The annualized perspective offers some hope: spreads
-# compound across 26 bars per day and ~252 days per year, and a
-# selective strategy (trading only the most extreme signals in the
-# most favorable regime) might achieve positive net returns. The
-# binding requirement is that you cannot trade every bar - only bars
-# where the signal materially exceeds the spread.
+# **The edge-to-cost ratios are all below 1.** The per-bar decile spread cannot
+# survive a single round-trip at any reasonable cost assumption: a round trip of
+# 2 to 10 bps swamps it.
+#
+# The annualized view is what keeps the question open, because the spread
+# compounds over the decision grid and the cost is charged per trade. A full
+# session carries 20 decision slots, not the 26 a 9:30-to-16:00 grid would give -
+# `resolve_decision_schedule` puts the label's fifteen-minute cadence on the
+# clock, and the scored window runs 10:31 to 15:43 - over about 253 sessions a
+# year. A selective strategy, trading only the most extreme signals and only in
+# the regime that favours them, can compound the spread while paying the cost on
+# a fraction of those slots.
+#
+# The requirement this puts on the strategy is a rule for declining slots. The
+# edge per slot is what it is; what a design can change is how many slots it pays
+# for. Chapter 16's slot mechanism is where this case study makes that concrete.
 
 # %%
 # Pairwise prediction correlations
@@ -1208,12 +1215,23 @@ plot_label_horizon_forest(
 # %% [markdown]
 # ### Regime Conditioning
 #
-# At 15-minute frequency, the natural conditioning variable is
-# intraday volatility: during volatile periods, cross-sectional
-# dispersion increases and microstructure signals become more
-# pronounced. We use rolling cross-sectional return dispersion
-# (computed over 252 bars, approximately one trading day) as the
-# regime indicator.
+# The conditioning variable is cross-sectional dispersion: when the
+# cross-section spreads out, a ranking has more to rank and a microstructure
+# signal has more room to be right or wrong. `regime_conditional_ic` computes it
+# for each decision time as the standard deviation of realized returns across
+# the symbols quoting at that time, then splits the decision times at the median
+# into `high_vol` and `low_vol` and scores the rank IC within each half.
+#
+# Two things follow from it being a median split of per-timestamp dispersion, and
+# both bound what the figure below can say. The halves are equal by construction,
+# so "half the decision times are high-volatility" is arithmetic and not a
+# finding. And the classification is per decision time rather than per day or per
+# episode, so adjacent bars can fall in opposite halves - this separates
+# dispersed cross-sections from tight ones, and does not identify a volatile
+# period that a strategy could recognise while it was in one.
+#
+# The split is taken over the sampled grid loaded above, so it is the median of
+# the timestamps kept rather than of every timestamp scored.
 
 # %%
 # Compute regime-conditional IC
