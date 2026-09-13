@@ -643,13 +643,15 @@ else:
 ic_pivot
 
 # %% [markdown]
-# Each cell is a mean IC over that family's configurations under the case study's primary
-# label. Families are comparable within a row, because the label and the evaluation window are
-# fixed across the row; they are not comparable across rows, since each case study prices a
-# different instrument over a different horizon. A negative mean IC marks a case study where
-# prediction is difficult under that label rather than a defect in the family. §20.2 reads the
-# pattern across rows, and §20.5 works through how an option case study's raw IC translates
-# into Sharpe once single-name execution costs are charged.
+# Each cell is the mean of `ic_mean` over that family's non-holdout prediction sets, taken at
+# the primary label the case study declares in `setup.yaml`, with `causal_dml` excluded because
+# its runs are not fit to predict. Families are comparable within a row, since the label is
+# fixed across the row; they are not comparable across rows, because each case study declares a
+# different primary label, from a fifteen-minute forward return to a twenty-one-day one, and
+# prices a different instrument. A negative mean IC marks a case study where prediction is
+# difficult under that label rather than a defect in the family. §20.3 carries this table as
+# Table 20.4, and §20.6 works through how an option case study's raw IC translates into Sharpe
+# once single-name execution costs are charged.
 
 # %% [markdown]
 # ## Backtest Comparison
@@ -2187,9 +2189,9 @@ if not holdout_df.is_empty():
 # The table above is the whole holdout result, and it is the place to read which case studies
 # come out positive on Sharpe and which on IC. Those two columns need not agree for a given
 # case study, which is why both columns are printed rather than one. Ranking accuracy and
-# portfolio construction are different things, and a case study can have one without the other -
-# the
-# construction contributes variance that out-of-sample ranking accuracy says nothing about.
+# portfolio construction are different things, and a case study can have one without the
+# other: the construction contributes variance that out-of-sample ranking accuracy says
+# nothing about.
 #
 # **Reading a case study whose edge does not carry forward.** Where a case study's holdout
 # Sharpe and holdout IC are both negative while its validation Sharpe was strongly positive, the
@@ -2434,10 +2436,10 @@ if not variant_df.is_empty():
 # The `pct_positive` column reports the share of a case study's signal-stage model variants
 # whose baseline Sharpe is positive. It is a property of the variant space rather than of the
 # selected configuration: a case study can carry a strong selected row and a low positive-Sharpe
-# share, or the reverse, and §20.3 works through what each combination says about the search.
+# share, or the reverse.
 #
 # One caveat applies to the option case studies, and it is large. The positive-Sharpe rate here
-# is measured **before execution costs**. The hold-to-maturity short-straddle backtest in §20.5
+# is measured **before execution costs**. The hold-to-maturity short-straddle backtest in §20.6
 # charges the full option bid-ask and commissions and reports the rate that survives them.
 
 # %% [markdown]
