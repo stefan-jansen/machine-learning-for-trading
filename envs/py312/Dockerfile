@@ -97,6 +97,19 @@ RUN /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
 WORKDIR /app
 ENV PATH="/opt/ml4t/bin:$PATH"
 ENV PYTHONPATH="/app"
+
+# polars allocates through jemalloc, which by default keeps freed pages mapped - one
+# arena per worker thread, muzzy pages never returned. On the AlgoSeek conversion that
+# retention reached 3.3 GB of anonymous memory against ~100 MB of live data (#558), and
+# it applies to every notebook that loads a panel. Inside a container the ceiling is
+# Docker Desktop's allocation rather than the host's RAM, so the pages nobody can reach
+# are what gets a run killed. Returning them immediately costs 0-4% on dataset loads and
+# more on tight parse loops; a reader whose container is the constraint wants the memory.
+# polars appends this to its own defaults and jemalloc takes the last setting for a key,
+# so this is its supported override. Set in the image rather than in Python because the
+# assignment only counts if it precedes `import polars` - here it covers every notebook
+# and script without each one remembering. Override with `docker run -e`.
+ENV _RJEM_MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0
 ENV JUPYTER_ENABLE_LAB=yes
 
 # Token-less, like envs/ml4t/Dockerfile: safe only because compose binds the
