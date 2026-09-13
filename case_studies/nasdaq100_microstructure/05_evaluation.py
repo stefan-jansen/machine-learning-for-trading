@@ -1631,7 +1631,11 @@ if high_corr_pairs:
     )
     show_plotly_with_alt(
         fig,
-        "A histogram of the Spearman rank correlation between feature pairs over the sampled development bars, with the pairs drawn from within a family separated from those spanning two families.",
+        "A horizontal bar chart of the twenty feature pairs whose Spearman rank correlation "
+        "across the sampled development bars is largest in size, one bar per pair, ordered "
+        "with the largest at the top. Each bar is labelled with both feature names and the "
+        "family each belongs to, is annotated with its correlation, and is blue where that "
+        "correlation is positive and copper where it is negative.",
     )
     print(f"Of the {len(ranked)} strongest pairs, {cross_family} span two families")
     print(f"Of the {len(ranked)} strongest pairs, {same_twin} are a level against its own z-score")
