@@ -175,13 +175,16 @@ conversions resume, so an interrupted run continues where it stopped: the option
 conversion at the last day it wrote, the NASDAQ-100 conversion at the last day it
 staged, part-way through a month.
 
-**Give the conversion at least 2 GB of memory.** The NASDAQ-100 archive peaks around
-1.3 GB, one day of bars while parsing and about two thirds of a month while a month is
-assembled. In Docker the limit that applies is Docker Desktop's own allocation
-(Settings -> Resources -> Memory), not the host's RAM, and it defaults low enough on
-some installs to stop the run. A conversion killed for memory prints nothing and exits
-137, because the kill leaves no traceback; if a run stops with no error, check the exit
-status before anything else.
+**Give the conversion at least 2 GB of memory, and the options archive 3 GB.** The
+NASDAQ-100 conversion peaked at 1.4 GB over all 24 months, measured inside a 2 GB container:
+a parsed day is ~50 MB, an assembly batch a few hundred, and the rest is the interpreter and
+its imports. The options archive adds ~0.9 GB before it parses anything, because reading days
+out of the zip has to hold the index of its 1,275,314 members; extracting the archive first
+avoids that as well as being faster. In
+Docker the limit that applies is Docker Desktop's own allocation (Settings -> Resources ->
+Memory), not the host's RAM, and it defaults low enough on some installs to stop the run.
+A conversion killed for memory prints nothing and exits 137, because the kill leaves no
+traceback; if a run stops with no error, check the exit status before anything else.
 
 The TAQ ticks are already parquet in the layout the loader scans, so unpacking
 them is the whole of the work. Name the members — Dropbox writes a stray root
