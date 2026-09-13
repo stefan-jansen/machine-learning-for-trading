@@ -416,6 +416,14 @@ print(search_table)
 # %% [markdown]
 # The family comparison reads each backtest's stored interval rather than
 # recomputing one, so the plot can show error bars instead of points alone.
+#
+# It is scoped to the canonical universe, because the signal stage holds two and they are
+# not distributed evenly across families. `backtest.sweep.signal_passes` re-runs only
+# `mechanism_top_n` predictions on the full universe, and those are whichever families
+# pass 1 ranked highest, so pooling both would move one family's median by rows the others
+# have no counterpart for. Labels are pooled deliberately: the question here is what a
+# family's spread of outcomes looks like, and this case study trains most families on
+# every label.
 
 # %%
 with sqlite3.connect(str(_db)) as _con:
@@ -435,11 +443,23 @@ with sqlite3.connect(str(_db)) as _con:
               AND p.split = 'validation'
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
-            """
+              AND COALESCE(
+                  json_extract(b.spec_json, '$.strategy.signal.universe_filter'), 'full'
+              ) = ?
+            """,
+            (_UNIVERSE_FILTER or "full",),
         ).fetchall(),
         schema=["family", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi"],
         orient="row",
     )
+if _famdf.is_empty():
+    msg = (
+        f"No signal-stage validation backtests on the {_UNIVERSE_FILTER or 'full'} universe "
+        f"for {CASE_STUDY}, so there is no family distribution to plot. The rest of this "
+        "notebook reads the same universe, so this is the first place a registry missing it "
+        "shows up."
+    )
+    raise RuntimeError(msg)
 
 family_summary = (
     _famdf.group_by("family")
@@ -508,7 +528,7 @@ show_with_alt(
 #
 # The cost model charged here is the engine's, applied identically to every
 # configuration, so differences between families are not differences in what they
-# were charged.
+# were charged. Every row is on one universe for the same reason.
 
 # %% [markdown]
 # The lineage gives one backtest per pipeline stage for this prediction. Each
