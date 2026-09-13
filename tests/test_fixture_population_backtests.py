@@ -107,9 +107,9 @@ def test_a_case_study_with_no_registry_reports_nothing(tmp_path):
 # The fixtures that ship in this state today. Every one of these populations lists prediction
 # identities that no backtest in the same registry references, so
 # `selectable_validation_candidates` removes the whole ranked field and
-# `resolve_canonical_rank1_lineage` refuses - which is what the twelve
+# `resolve_canonical_rank1_lineage` refuses - which is what the sixteen
 # `no_canonical_selection` skip declarations in `tests/overrides.yaml` name
-# (ml4t/agent-workspace#907). Four of the twelve are etfs' and cme_futures' holdout stages.
+# (ml4t/agent-workspace#907). Four of the sixteen are etfs' and cme_futures' holdout stages.
 #
 # Not their strategy-analysis stages, which is worth saying because #907's title implies it:
 # `cme_futures/19_strategy_analysis` is not skipped and passes, and `etfs/20_strategy_analysis`
