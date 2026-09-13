@@ -68,11 +68,16 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      - name: Record the fixture this job read
+        run: |
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Seed case study intermediates
         run: |
-          mkdir -p $ML4T_OUTPUT_DIR
+          mkdir -p "$ML4T_OUTPUT_DIR"
           if [ -d test-data/intermediates ]; then
-            cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
+            cp -r test-data/intermediates/* "$ML4T_OUTPUT_DIR"/
           fi
 
       - name: Run weekly chapter notebooks
@@ -235,6 +240,10 @@ jobs:
           if python -c "import pytest_rerunfailures" 2>/dev/null; then
             RERUN_ARGS="--reruns 2 --reruns-delay 30"
           fi
+          # RERUN_ARGS holds two flags and their values and has to split into four
+          # words. Quoting it passes "--reruns 2 --reruns-delay 30" as one argument,
+          # which pytest rejects, so the unquoted expansion is the point.
+          # shellcheck disable=SC2086
           python -m pytest tests/test_external_drift.py -m drift \
             -v --tb=short $RERUN_ARGS \
             --junitxml=junit-drift.xml

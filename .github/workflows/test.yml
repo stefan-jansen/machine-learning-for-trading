@@ -1004,6 +1004,12 @@ jobs:
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
+
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
       - uses: astral-sh/setup-uv@v6
         if: steps.reach.outputs.have_key
         with:
@@ -1407,6 +1413,12 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+
       # Six chapter jobs download checkpoints from HuggingFace while the notebook
       # runs: ch04, ch22 and ch23 (all-MiniLM-L6-v2), ch10 (finbert-tone,
       # ProsusAI/finbert, ModernBERT-base, deberta-v3-small and two datasets),
@@ -1489,10 +1501,10 @@ jobs:
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
         run: |
-          mkdir -p $ML4T_OUTPUT_DIR
+          mkdir -p "$ML4T_OUTPUT_DIR"
           if [ -d test-data/intermediates ]; then
-            cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
-            echo "Seeded $(du -sh $ML4T_OUTPUT_DIR | cut -f1) of intermediates"
+            cp -r test-data/intermediates/* "$ML4T_OUTPUT_DIR"/
+            echo "Seeded $(du -sh "$ML4T_OUTPUT_DIR" | cut -f1) of intermediates"
           fi
           # Ch20 outputs go to repo dir (get_chapter_dir doesn't redirect)
           if [ -d test-data/intermediates/ch20_synthesis/output ]; then
@@ -1628,6 +1640,12 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Resolve the image this commit declares
         id: image
         if: steps.reach.outputs.have_key
@@ -1655,10 +1673,10 @@ jobs:
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
         run: |
-          mkdir -p $ML4T_OUTPUT_DIR
+          mkdir -p "$ML4T_OUTPUT_DIR"
           if [ -d test-data/intermediates ]; then
-            cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
-            echo "Seeded $(du -sh $ML4T_OUTPUT_DIR | cut -f1) of intermediates"
+            cp -r test-data/intermediates/* "$ML4T_OUTPUT_DIR"/
+            echo "Seeded $(du -sh "$ML4T_OUTPUT_DIR" | cut -f1) of intermediates"
           fi
 
       - name: Run pipeline (${{ matrix.case-study }})
@@ -1756,6 +1774,12 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run py312 notebooks
         if: steps.reach.outputs.have_key
         env:
@@ -1849,6 +1873,12 @@ jobs:
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
+
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve the image this commit declares
         id: image
@@ -2032,6 +2062,12 @@ jobs:
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
+
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run Ch02 database benchmark notebooks
         if: steps.reach.outputs.have_key
