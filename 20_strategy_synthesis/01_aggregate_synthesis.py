@@ -261,10 +261,19 @@ refuse_partial_full_mode(
 # option-strategy reference, so restricting the cluster diagnostics to that same label keeps the
 # §20.1 top-cluster numbers aligned with the §20.5 and §20.6 narrative.
 #
+# Those two section numbers are right, and they are recorded here because they will not look it.
+# Eleven references in this chapter pointed at sections that exist and do not carry what was
+# claimed, and a sweep for §20.5 in a chapter-20 notebook now finds this one and sees the same
+# shape. It is not the same: §20.5's Table 20.6 carries an sp500_options allocator row, and which
+# row that is depends on the label pinned here; §20.6 carries the option cost model, which is the
+# hold-to-maturity accounting rather than the basis-point sweep the other four labels get. Both
+# targets hold material this restriction decides. Do not retarget it.
+#
 # **An execution-regime restriction**, because sp500_options is evaluated under the
 # O'Donovan-Yu (2025) cost-mitigation cascade, whose three rungs are a naive round trip, full
 # hold-to-maturity, and hold-to-maturity restricted to the liquid bottom-spread quintile. The
-# registered strategy is the third rung; the second is the demoted variant §18.8 discusses. The first two rungs both carry the same universe filter, so filtering on that column
+# registered strategy is the third rung; the second is the demoted variant §18.8 discusses. The
+# first two rungs both carry the same universe filter, so filtering on that column
 # alone leaves `ORDER BY sharpe DESC LIMIT 1` free to pick whichever of the two happens to score
 # higher in the current data. Pinning the universe filter *and* the exit rule together is what
 # makes the selected row deterministic and coherent with hold-to-maturity. Case studies with no
