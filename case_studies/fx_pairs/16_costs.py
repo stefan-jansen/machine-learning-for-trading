@@ -80,6 +80,7 @@ from case_studies.research import (
     run_backtests,
     superseded_members,
 )
+from case_studies.utils.backtest_presets import EngineBacktestConfig
 from case_studies.utils.strategy_analysis import selectable_validation_candidates
 from case_studies.utils.sweep_config import (
     get_allocators,
@@ -102,14 +103,14 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
-SUPERSEDES_COST_BACKTESTS: str = "35d4105736ac"
+SUPERSEDES_COST_BACKTESTS: str = "live"
 # The same rule the populations follow: a candidate set is immutable under its name, so a rebuilt
 # upstream generation must name the set it replaces. Keyed by the full set name, which is what the
 # refusal prints. `15_risk_management` states the reasoning once.
 SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
-    "fx_pairs:fwd_ret_1d:pre-cost-strategies": "ee2af90bd92d",
-    "fx_pairs:fwd_ret_5d:pre-cost-strategies": "0dd7094fba15",
-    "fx_pairs:fwd_ret_21d:pre-cost-strategies": "33b207f0a1f6",
+    "fx_pairs:fwd_ret_1d:pre-cost-strategies": "live",
+    "fx_pairs:fwd_ret_5d:pre-cost-strategies": "live",
+    "fx_pairs:fwd_ret_21d:pre-cost-strategies": "live",
 }
 
 # %% [markdown]
@@ -469,6 +470,27 @@ def _non_cost_projection(spec: dict[str, Any]) -> dict[str, Any]:
         # a sibling written in one worktree never matches a parent registered in another,
         # and the message says a strategy field moved when none did.
         metadata.pop("preset_path", None)
+    # The parent was serialized by whatever engine version registered it and the sibling by the
+    # installed one, so a field the engine has since added to `BacktestConfig` is present on one
+    # side and absent on the other while both describe the same strategy. `ml4t-backtest` 0.1.3 to
+    # 0.1.6 added `account.lock_notional_update_mode` and `position_sizing.share_rounding`, which
+    # failed every fx_pairs and crypto_perps_funding parent registered before 2026-09-12 with a
+    # message saying a strategy field moved. Round-tripping both sides through the installed schema
+    # states the comparison in one vocabulary, so the check answers what this notebook built rather
+    # than which engine wrote the row it is compared against - and it covers the next added field
+    # without naming it. `ensure_backtest_spec` deliberately does NOT round-trip, because there the
+    # result is hashed and dropped unknown keys would move an identity; here it is compared and
+    # discarded. Metadata is merged back over the serialized view for the same reason it is there:
+    # the dataclass pins a schema and drops keys it does not know.
+    if EngineBacktestConfig is not None and config:
+        original_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        rebuilt = EngineBacktestConfig.from_dict(config).to_dict()
+        rebuilt.pop("commission", None)
+        rebuilt.pop("slippage", None)
+        rebuilt_metadata = dict(rebuilt.get("metadata") or {})
+        rebuilt_metadata.update(original_metadata)
+        rebuilt["metadata"] = rebuilt_metadata
+        projected["backtest_config"] = rebuilt
     return projected
 
 

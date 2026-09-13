@@ -67,7 +67,11 @@ from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
-from case_studies.utils.backtest_presets import cost_view, ensure_backtest_spec
+from case_studies.utils.backtest_presets import (
+    EngineBacktestConfig,
+    cost_view,
+    ensure_backtest_spec,
+)
 from case_studies.utils.backtest_runner import resolved_allow_short_selling
 from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.paired_metrics import populate_paired_metrics
@@ -342,6 +346,29 @@ def _comparison_projection(
         config = projected.get("backtest_config", {})
         config.pop("commission", None)
         config.pop("slippage", None)
+    # The rows being compared were serialized by whatever engine version registered each one, so a
+    # field `BacktestConfig` has since gained is present on one side and absent on the other while
+    # both describe the same strategy. `ml4t-backtest` 0.1.3 to 0.1.6 added
+    # `account.lock_notional_update_mode` and `position_sizing.share_rounding`; every row in this
+    # registry written before 2026-09-12 lacks both, so a cost sibling written after it matched no
+    # selected strategy and this notebook stopped at "no controlled cost siblings match". Round
+    # -tripping both sides through the installed schema states the comparison in one vocabulary, so
+    # it answers whether two runs describe the same strategy rather than which engine wrote them,
+    # and it covers the next added field without naming it. `ensure_backtest_spec` deliberately does
+    # not round-trip, because its result is hashed and a dropped unknown key would move an identity;
+    # here the result is compared and discarded. Metadata is merged back over the serialized view
+    # because the dataclass pins a schema and drops keys it does not know.
+    config = projected.get("backtest_config", {})
+    if EngineBacktestConfig is not None and config:
+        original_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        rebuilt = EngineBacktestConfig.from_dict(config).to_dict()
+        if omit_costs:
+            rebuilt.pop("commission", None)
+            rebuilt.pop("slippage", None)
+        rebuilt_metadata = dict(rebuilt.get("metadata") or {})
+        rebuilt_metadata.update(original_metadata)
+        rebuilt["metadata"] = rebuilt_metadata
+        projected["backtest_config"] = rebuilt
     return {
         "prediction_hash": result.registry_record()["prediction_hash"],
         "spec": projected,
