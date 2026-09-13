@@ -412,18 +412,22 @@ if failed_points:
 #
 # The number to take from the curve is the **breakeven** - the cost level at which
 # Sharpe crosses zero - because it states the execution quality the strategy requires
-# rather than the profit it made under one assumption. It is computed below from the
-# registered rows and printed; no band is predicted here, since a prediction written
-# beside the calculation is read as its confirmation.
+# rather than the profit it made under one assumption. It is interpolated below from the
+# grid points and printed. No band is predicted here: a prediction written beside the
+# calculation is read as its confirmation.
 #
-# Two features of the shape are worth reading beside it. How steeply the curve falls
-# from the zero-cost end says how much of the gross result was ever available: a strategy
-# whose Sharpe halves by 1 bps was never trading on much. And a flat stretch, if there is
-# one, is the range over which execution quality does not change the answer, which is the
-# only part of the axis where a cost assumption can be wrong without mattering.
+# Two features of the shape are worth reading beside it. How steeply the curve falls from
+# the zero-cost end says how much of the gross result was ever available - a strategy whose
+# Sharpe halves by 1 bps was never trading on much. And a flat stretch, if there is one, is
+# the range over which execution quality does not change the answer, the only part of the
+# axis where a cost assumption can be wrong without mattering.
 #
-# The grid is `backtest.sweep.cost_grid_bps`, 0 to 50 bps per leg, against the 7 bps
-# (5 commission + 2 slippage) the engine charged when these backtests were registered.
+# The grid is `backtest.sweep.cost_grid_bps`, 0 to 50 bps per leg. What it is measured
+# against is not a bps figure: every signal-stage row in this registry carries
+# `commission.model = "per_share"` at $0.0035 a share, and the `rate` fields beside it
+# belong to the percentage model that is not the one in force. `cost_sensitivity` returns
+# only the rows this notebook re-ran under the percentage model, which is what puts them
+# on one axis at all.
 
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
@@ -480,6 +484,40 @@ if not cost_df.is_empty():
     )
 else:
     print("No cost sensitivity data in registry")
+
+# %%
+# The breakeven, interpolated between the grid points that straddle zero. The grid is
+# coarse (0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50), so the crossing is reported as an
+# interval as well as a point: a reader who needs it tighter needs more grid, not more
+# precision in this arithmetic.
+if not cost_df.is_empty():
+    _breakeven_rows = []
+    for _alloc in cost_df["allocator"].unique().sort().to_list():
+        _curve = cost_df.filter(pl.col("allocator") == _alloc).sort("cost_bps")
+        _x = _curve["cost_bps"].to_list()
+        _y = _curve["sharpe"].to_list()
+        if not _y or _y[0] <= 0:
+            _breakeven_rows.append(
+                {
+                    "allocator": _alloc,
+                    "breakeven_bps": "at or below the lowest grid point",
+                    "bracket": f"<= {_x[0]:g}" if _x else "n/a",
+                }
+            )
+            continue
+        _cross = next((i for i in range(1, len(_y)) if _y[i] <= 0), None)
+        if _cross is None:
+            _breakeven_rows.append(
+                {"allocator": _alloc, "breakeven_bps": "above the grid", "bracket": f"> {_x[-1]:g}"}
+            )
+            continue
+        _x0, _x1, _y0, _y1 = _x[_cross - 1], _x[_cross], _y[_cross - 1], _y[_cross]
+        _be = _x0 + (_x1 - _x0) * (_y0 / (_y0 - _y1)) if _y0 != _y1 else _x1
+        _breakeven_rows.append(
+            {"allocator": _alloc, "breakeven_bps": f"{_be:.2f}", "bracket": f"{_x0:g}-{_x1:g}"}
+        )
+    print("Breakeven cost per leg (Sharpe crosses zero):")
+    print(pl.DataFrame(_breakeven_rows))
 
 # %% [markdown]
 # ## 4. Full Universe vs the Cost-Feasible Screen
