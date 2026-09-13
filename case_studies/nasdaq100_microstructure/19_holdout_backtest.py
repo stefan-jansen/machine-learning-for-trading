@@ -166,18 +166,30 @@ if match is None:
     with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
         registered = conn.execute(
             """
-            SELECT t.config_name, t.label, p.training_hash
+            SELECT t.config_name, t.label, p.training_hash,
+                   p.checkpoint_kind, p.checkpoint_value
             FROM prediction_sets p JOIN training_runs t ON t.training_hash = p.training_hash
             WHERE p.split = 'holdout'
             ORDER BY p.created_at
             """
         ).fetchall()
+    # Checkpoint is part of the generation, not a detail below it: 18 keys its retirement
+    # check on `(training_hash, (checkpoint_kind, checkpoint_value))`, and the lookup above
+    # matches on all three. So a set for this configuration at a DIFFERENT checkpoint is a
+    # different configuration and belongs in the moved-selection branch, not the replay one.
+    _ckpt = (
+        validation_prediction_record["checkpoint_kind"],
+        validation_prediction_record["checkpoint_value"],
+    )
     same_config = [
         (cfg, lab, th)
-        for cfg, lab, th in registered
-        if cfg == carrier["config_name"] and lab == LABEL
+        for cfg, lab, th, ck_kind, ck_value in registered
+        if cfg == carrier["config_name"] and lab == LABEL and (ck_kind, ck_value) == _ckpt
     ]
-    named = ", ".join(f"{cfg} on {lab} ({th})" for cfg, lab, th in registered[:4])
+    named = ", ".join(
+        f"{cfg} on {lab} at {ck_kind}={ck_value} ({th})"
+        for cfg, lab, th, ck_kind, ck_value in registered[:4]
+    )
     if not registered:
         msg = (
             f"No holdout prediction set for training {holdout_training_hash}, and this registry "
@@ -191,8 +203,8 @@ if match is None:
         # is the whole reason these are separated.
         msg = (
             f"No holdout prediction set for training {holdout_training_hash}, but "
-            f"{carrier['family']}/{carrier['config_name']} on {LABEL} - the configuration that "
-            f"resolves now - already has one under "
+            f"{carrier['family']}/{carrier['config_name']} on {LABEL} at "
+            f"{_ckpt[0]}={_ckpt[1]} - the configuration that resolves now - already has one under "
             f"{', '.join(th for _, _, th in same_config)}. So the selection did not move and "
             "its derived training identity did: the holdout spec, the label timeline it reads, "
             "or an input the identity covers has changed since 18 ran. Re-run "
