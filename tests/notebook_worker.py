@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -85,16 +86,19 @@ def _run_full_notebook(
         f"{repo_root}:{nb_dir}:{existing}" if existing else f"{repo_root}:{nb_dir}"
     )
 
+    # Located with find_spec rather than by importing torch: this process only needs
+    # the paths, and executing the package to read them costs 502 MB resident in every
+    # worker (#558). The resulting string is identical.
     try:
-        import torch
-
-        torch_lib = str(Path(torch.__file__).parent / "lib")
-        nvidia_libs = list((Path(torch.__file__).parent.parent / "nvidia").glob("*/lib"))
-        cuda_paths = [torch_lib] + [str(p) for p in nvidia_libs]
+        torch_spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        torch_spec = None
+    if torch_spec is not None and torch_spec.origin:
+        torch_root = Path(torch_spec.origin).parent
+        nvidia_libs = list((torch_root.parent / "nvidia").glob("*/lib"))
+        cuda_paths = [str(torch_root / "lib")] + [str(p) for p in nvidia_libs]
         existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
         env_vars["LD_LIBRARY_PATH"] = ":".join(cuda_paths + [existing_ld])
-    except ImportError:
-        pass
 
     for key, value in env_vars.items():
         saved_env[key] = os.environ.get(key)
