@@ -988,11 +988,13 @@ show_with_alt(
 # rolling Sharpe and rolling beta say whether either was steady or driven by part of the
 # window.
 #
-# The shape of a drawdown separates two causes that its depth cannot. Costs accrue on
-# every rebalance, so a cost-dominated strategy declines whenever it trades and its
-# drawdown carries no recovery. An episodic loss has a floor: it falls through the episode
-# and stops. Read the lower panel for which of the two this is rather than reading the
-# depth.
+# The lower panel is worth reading for its shape and not only its depth: whether the
+# losses arrived steadily across the window or inside one episode, and whether anything
+# was recovered afterwards. That is a description of when the strategy lost, and it is as
+# far as the panel goes. It does not identify a cause - a strategy whose costs exceed its
+# edge still has winning trades and partial recoveries, and a steady decline can happen
+# with no cost at all - so §5 varies the cost directly rather than inferring it from this
+# curve.
 
 # %%
 strat_arr = aligned["strategy"].to_numpy()
@@ -1090,9 +1092,12 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 # skew is the opposite trade, and it is what a strategy paying a per-trade cost for
 # occasional large wins looks like.
 #
-# *Tail ratio* compares the right tail to the left at the same quantile. Near 1 the tails
-# are balanced and it is saying nothing; away from 1 it says which side is longer, and it
-# should agree with the sign of the skew.
+# *Tail ratio* is the 95th percentile over the absolute 5th, so it compares where the two
+# tails begin and not how much sits beyond those points. Near 1 the two boundaries are the
+# same size. It answers a different question from skewness, which the extremes past those
+# percentiles drive, so the two can point opposite ways on the same series - rare large
+# losses pull the skew negative while leaving the 5th percentile where it was. Disagreement
+# between them is a fact about the distribution rather than a sign that one is wrong.
 #
 # *The rolling window* locates the result in time. A rolling Sharpe that stays on one side
 # of zero describes a steady strategy; one that crosses says the headline averages two
