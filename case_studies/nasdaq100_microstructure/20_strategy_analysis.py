@@ -2097,7 +2097,10 @@ bench_series = aligned["benchmark"].to_numpy()
 meta = BacktestReportMetadata(
     title="NASDAQ-100 Microstructure — Rank-1 Lineage",
     strategy_name=f"{RANK1_FAMILY}/{RANK1_CONFIG} — {PRIMARY_LABEL}",
-    universe="100 NASDAQ-100 constituents at 15-minute cadence",
+    universe=(
+        f"{setup['universe']['n_assets']} declared NASDAQ-100 constituents, "
+        f"{(setup['decision'].get('cadence_by_label') or {}).get(RANK1_LABEL, setup['decision']['bar_frequency'])} cadence"
+    ),
     benchmark_name="NQ100 equal-weight universe (validation window)",
     evaluation_window=f"{aligned['ts'].min()} to {aligned['ts'].max()}",
     calendar=setup["evaluation"]["calendar"],
@@ -2125,12 +2128,21 @@ print(f"HTML size: {len(html):,} bytes")
 
 # %%
 op_profile = compute_operating_profile(lineage, setup)
-# nasdaq100_microstructure setup uses `decision.bar_frequency`
-# (15_minute) as the rebalance cadence; the helper inspects
-# evaluation_protocol.rebalance_frequency, which is absent. Override.
+# `compute_operating_profile` reads `evaluation_protocol.rebalance_frequency`, which this
+# setup does not declare, so the cadence is supplied here.
+#
+# Per label, not `decision.bar_frequency`. That key is the case-study default and the
+# carrier need not be on the primary label - today it is not - while the cadence the run
+# actually decided on is `decision.cadence_by_label[label]`, which is what
+# `resolve_decision_schedule` was handed. The two agree on every 15-minute label and
+# disagree on `fwd_ret_60m`, so reading the default would report a cadence four times
+# faster than the strategy traded.
+CARRIER_CADENCE = (setup["decision"].get("cadence_by_label") or {}).get(
+    RANK1_LABEL, setup["decision"]["bar_frequency"]
+)
 op_profile = op_profile.with_columns(
     pl.when(pl.col("property") == "Trading cadence")
-    .then(pl.lit(setup["decision"]["bar_frequency"]))
+    .then(pl.lit(CARRIER_CADENCE))
     .otherwise(pl.col("value"))
     .alias("value")
 )
