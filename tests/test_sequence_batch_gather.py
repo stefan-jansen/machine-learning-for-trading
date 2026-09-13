@@ -147,10 +147,15 @@ def test_a_gathered_batch_needs_no_copy_to_reach_the_model() -> None:
     assert X.to(torch.device("cuda"), non_blocking=True) is X
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 def test_a_store_too_big_for_the_card_is_gathered_on_the_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The fallback is chosen by measuring, before anything is allocated."""
+    """The fallback is chosen by measuring, before anything is allocated.
+
+    Without a card `_resolve_gather_device` returns the host before it measures
+    anything, so this case passes on a CPU-only runner whatever the measurement does.
+    """
 
     store = _synthetic_store()
     monkeypatch.setattr(
