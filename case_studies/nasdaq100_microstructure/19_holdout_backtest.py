@@ -152,10 +152,44 @@ with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
         ),
     ).fetchone()
 if match is None:
-    raise RuntimeError(
-        f"No holdout prediction set for training {holdout_training_hash}. Run "
-        "18_holdout_predictions first; this notebook does not fit."
-    )
+    # Two causes, and they call for opposite actions, so the message has to tell them apart.
+    # 18 not having run is the obvious one. The other is that the carrier MOVED between 18 and
+    # this notebook: both resolve independently and by design, and this case study declares no
+    # backtest population, so `published_members_at(member_kind="backtest")` is None and no
+    # backtest row is ever retired from the pool. A sweep that registers a higher-Sharpe cell
+    # between the two runs therefore changes what `resolve_solvent_carrier` returns, this
+    # notebook re-derives a different training identity, and the lookup misses.
+    #
+    # Sending that case to "run 18 first" points at the wrong thing. 18 would refuse it - its
+    # `holdout_generations_to_retire` check exists for exactly this - but only after the reader
+    # has spent a cycle being told to do the thing that cannot work.
+    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
+        registered = conn.execute(
+            """
+            SELECT t.config_name, t.label, p.training_hash
+            FROM prediction_sets p JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.split = 'holdout'
+            ORDER BY p.created_at
+            """
+        ).fetchall()
+    if not registered:
+        msg = (
+            f"No holdout prediction set for training {holdout_training_hash}, and this registry "
+            "holds none at all. Run 18_holdout_predictions first; this notebook does not fit."
+        )
+    else:
+        named = ", ".join(f"{cfg} on {lab} ({th})" for cfg, lab, th in registered[:4])
+        msg = (
+            f"No holdout prediction set for training {holdout_training_hash}, but this registry "
+            f"holds {len(registered)}: {named}. So 18_holdout_predictions has run and the "
+            f"selected configuration has MOVED since - it now resolves to "
+            f"{carrier['family']}/{carrier['config_name']} on {LABEL}. A backtest row is never "
+            "retired from the carrier pool, so a sweep registering a higher-Sharpe cell between "
+            "the two notebooks is enough to do it. Do NOT re-run 18 to fit the new one: that "
+            "spends a second holdout observation on a second configuration, which is what its "
+            "retirement check refuses. Decide which configuration this case study carries."
+        )
+    raise RuntimeError(msg)
 HOLDOUT_PREDICTION_HASH = match[0]
 
 print(f"Selected configuration: {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")
