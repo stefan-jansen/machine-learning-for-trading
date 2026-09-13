@@ -591,8 +591,8 @@ ax_dd.fill_between(curve["timestamp"], curve["drawdown"], 0.0, color=COLORS["neg
 ax_dd.set_ylabel("Drawdown")
 add_message_title(
     ax_equity,
-    f"The selected strategy on the 2021 holdout: Sharpe {_holdout['sharpe']:.2f}",
-    f"Peak-to-trough {_holdout['max_drawdown']:.1%} over {curve.height} sessions",
+    "Selected strategy on the 2021 holdout: equity curve and drawdown",
+    "Growth of 1 above, peak-to-trough drawdown below, daily",
 )
 fig.show()
 
