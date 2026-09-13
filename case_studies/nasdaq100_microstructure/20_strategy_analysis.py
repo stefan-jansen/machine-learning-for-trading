@@ -1906,9 +1906,6 @@ print(
 print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])}")
 
 # %% [markdown]
-# **Decay reading (val_rank1_self pair):** holdout Sharpe is more
-# negative than validation Sharpe; the paired diff CI excludes zero on
-# the negative side (live numbers from the cell above). The val→holdout
 # **How to read the two paired rows.** Each reports a difference with an
 # interval, and the interval is what decides the reading.
 #
