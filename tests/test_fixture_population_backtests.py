@@ -104,12 +104,17 @@ def test_a_case_study_with_no_registry_reports_nothing(tmp_path):
     assert unbacktested_populations(tmp_path) == []
 
 
-# The fixtures that ship in this state today, and what each publishes. Every one of these
-# populations lists prediction identities that no backtest in the same registry references,
-# so `selectable_validation_candidates` removes the whole ranked field and
-# `resolve_canonical_rank1_lineage` refuses - which is why the etfs and cme_futures holdout
-# and strategy-analysis stages carry a `no_canonical_selection` skip
-# (ml4t/agent-workspace#907).
+# The fixtures that ship in this state today. Every one of these populations lists prediction
+# identities that no backtest in the same registry references, so
+# `selectable_validation_candidates` removes the whole ranked field and
+# `resolve_canonical_rank1_lineage` refuses - which is what the twelve
+# `no_canonical_selection` skip declarations in `tests/overrides.yaml` name
+# (ml4t/agent-workspace#907). Four of the twelve are etfs' and cme_futures' holdout stages.
+#
+# Not their strategy-analysis stages, which is worth saying because #907's title implies it:
+# `cme_futures/19_strategy_analysis` is not skipped and passes, and `etfs/20_strategy_analysis`
+# is held by a `fixture_shortfall` blocker on the complete-run filter, which publication has
+# nothing to do with.
 #
 # The detector above is unit-tested and `generate_intermediates.py` prints for it, but only
 # for a population THIS run added: a committed one is subtracted on every run after the one
