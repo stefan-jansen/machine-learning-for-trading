@@ -123,11 +123,26 @@ if excluded_families(CASE_STUDY_ID):
 # %% [markdown]
 # ## 1. Load Top Predictions from Signal Stage
 #
-# We select from the full-universe signal-stage Sharpe ranking, which is led by
-# GBM slot configurations. The allocation sweep below re-runs these predictions
-# with `equal_weight_top_k` selection rebalancing every bar — deliberately
-# stripping out the slot mechanism's turnover control so the allocator
-# comparison is run on the naive every-bar baseline.
+# The sweep below trades the full universe, so it selects on the full universe
+# too, and `SELECTION_UNIVERSE` is what ties the two together. The signal stage
+# holds both: `backtest.sweep.signal_passes` scores every admissible prediction
+# on the cost-feasible universe in pass 1, then re-runs the highest-scoring
+# `mechanism_top_n` of them on the full universe in pass 2. A ranking that does
+# not name a universe takes `MAX(sharpe)` over all of a prediction's backtests,
+# so it would rank most predictions on their cost-feasible number and a few on
+# whichever of the two scored higher - a ranking in which no two rows are
+# necessarily the same measurement.
+#
+# What the pass-2 rows are is therefore a full-universe ranking of the
+# predictions pass 1 advanced, and not a full-universe ranking of the whole
+# population. The narrowing happened on the cost-feasible universe and this
+# notebook inherits it; what it avoids is ranking one prediction's full-universe
+# result against another's cost-feasible one.
+#
+# The allocation sweep re-runs these predictions with `equal_weight_top_k`
+# selection rebalancing every bar, deliberately stripping out the slot
+# mechanism's turnover control so the allocator comparison is run on the naive
+# every-bar baseline.
 #
 # That stripping is what makes this notebook answer a question rather than repeat
 # one. The slot mechanism allocates a fixed weight per slot and holds it for a
@@ -141,15 +156,36 @@ if excluded_families(CASE_STUDY_ID):
 # an allocator makes.
 
 # %%
+# The universe this notebook's own backtests trade. `build_backtest_spec` below is
+# handed no `universe_filter`, so every row it registers carries no key and is a
+# full-universe result; "full" is what `resolve_best_predictions` reads that absent
+# key as. Changing one of these two without the other would select on one universe
+# and sweep on the other.
+SELECTION_UNIVERSE = "full"
+
 top_preds = resolve_best_predictions(
     CASE_STUDY_ID,
     LABEL,
     split="validation",
     stage="signal",
+    universe_filter=SELECTION_UNIVERSE,
     top_n=TOP_N_PREDICTIONS,
     checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
 )
-print(f"Top {len(top_preds)} prediction sources by equal-weight baseline Sharpe:")
+if top_preds.is_empty():
+    msg = (
+        f"No {SELECTION_UNIVERSE}-universe signal-stage backtests for "
+        f"{CASE_STUDY_ID}/{LABEL}/validation. The signal sweep registers them from "
+        "`signal_passes.reference_schemes` on `signal_passes.reference_universe`, "
+        "and a sweep that ran pass 1 only leaves the stage carrying cost-feasible rows "
+        "alone. Allocating over an empty selection would register nothing and report a "
+        "clean run, so it refuses here instead. Re-run 14_backtest."
+    )
+    raise RuntimeError(msg)
+print(
+    f"Top {len(top_preds)} prediction sources by {SELECTION_UNIVERSE}-universe "
+    "equal-weight baseline Sharpe:"
+)
 print(top_preds.select(["source", "sharpe"]))
 
 # %%
