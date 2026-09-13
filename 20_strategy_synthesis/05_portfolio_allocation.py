@@ -278,10 +278,12 @@ show_with_alt(
 )
 
 # %% [markdown]
-# **Interpretation**: The bar chart makes the cross-dataset heterogeneity immediately visible.
-# Case studies with strong signals show positive Sharpe regardless of allocator choice.
-# Case studies with weak signals show negative Sharpe across all allocators — no allocation
-# method can rescue a failing signal.
+# **Reading the chart**: one horizontal bar per case study, whose length is the Sharpe of that
+# case study's best allocator and whose label and colour name which allocator that was. Bars
+# are sorted by Sharpe, with a reference line at zero. Because each bar is already a maximum
+# over allocators, the chart compares case studies and says nothing about how much the
+# allocator choice was worth within one; the heatmap below reports every allocator per case
+# study and is where that comparison is read.
 
 # %% [markdown]
 # ## Equal-Weight Baseline vs Best Allocator
@@ -402,20 +404,18 @@ fig.colorbar(im, ax=ax, label="Sharpe Ratio", shrink=0.8)
 fig.subplots_adjust(left=0.18, right=0.92, top=0.9, bottom=0.2)
 show_with_alt(
     fig,
-    "Grouped bars comparing the Sharpe of each of the most common allocators "
-    "within each case study, so the height differences within a group show how "
-    "much the allocator choice moved the result.",
+    "Heatmap with one row per case study and one column per allocator, each cell "
+    "annotated with that pair's Sharpe and coloured red through green over the "
+    "range minus one to one, with untested pairs marked N/A.",
 )
 
 # %% [markdown]
-# **Interpretation**: The heatmap reveals that no single allocator dominates
-# across all case studies. Missing cells (N/A) indicate that not every
-# allocator was tested on every dataset — strategy-specific constraints
-# (e.g., long-only, no shorting) exclude certain methods. Green cells
-# (Sharpe > 0) cluster around a few case studies with strong underlying
-# signals, confirming that the upstream prediction quality matters more
-# than the allocation method. Red or near-zero cells indicate that even the highest-Sharpe
-# allocator cannot rescue a weak signal.
+# **Reading the heatmap**: one row per case study, one column per allocator, coloured by
+# Sharpe. A missing cell (N/A) means that allocator was not tested on that dataset -
+# strategy-specific constraints such as long-only or no-shorting exclude certain methods - and
+# is a different thing from a cell whose Sharpe is near zero. Read across a row for how much
+# the allocator choice moved that case study, and down a column for whether one allocator
+# behaves consistently across markets.
 
 # %% [markdown]
 # ## Signal Strength vs Allocation Impact
@@ -567,9 +567,9 @@ else:
 # %% [markdown]
 # ## When Does Allocation Optimization Help?
 #
-# The previous sections show that allocation uplift varies across datasets.
-# Here we ask the structural question: **what predicts whether optimization
-# helps?** We hypothesize two factors:
+# The previous sections report allocation uplift per dataset. Here we ask the
+# structural question: **what predicts whether optimization helps?** We
+# hypothesize two factors:
 #
 # - **Signal strength** (EW baseline Sharpe): When the signal is strong,
 #   most allocators produce positive returns — optimization adds little.
