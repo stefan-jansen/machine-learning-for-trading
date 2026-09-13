@@ -983,12 +983,16 @@ show_with_alt(
 # %% [markdown]
 # ## §4 Risk and drawdown analysis
 #
-# Risk metrics use the validation-window strategy returns paired against
-# the validation EW benchmark. The drawdown panel surfaces the worst
-# episode and recovery; rolling Sharpe and rolling beta locate when the
-# strategy decoupled from the universe. For an intraday cross-sectional
-# strategy on the NASDAQ-100, a deep persistent drawdown is the
-# signature of cost compounding rather than an episodic regime shift.
+# Risk metrics use the validation-window strategy returns paired against the validation
+# EW benchmark. The drawdown panel surfaces the worst episode and whether it recovered;
+# rolling Sharpe and rolling beta say whether either was steady or driven by part of the
+# window.
+#
+# The shape of a drawdown separates two causes that its depth cannot. Costs accrue on
+# every rebalance, so a cost-dominated strategy declines whenever it trades and its
+# drawdown carries no recovery. An episodic loss has a floor: it falls through the episode
+# and stops. Read the lower panel for which of the two this is rather than reading the
+# depth.
 
 # %%
 strat_arr = aligned["strategy"].to_numpy()
@@ -1017,10 +1021,34 @@ show_with_alt(
 )
 
 # %%
-# Rolling Sharpe + rolling beta
-roll = pa.compute_rolling_metrics(windows=[126], metrics=["sharpe", "beta"])
-print("Rolling-window keys:")
-print({k: type(v).__name__ for k, v in roll.items()} if isinstance(roll, dict) else roll)
+# Rolling Sharpe + rolling beta. `aligned` is daily - the strategy's returns are stored
+# that way and the benchmark is compounded to match - so the window is 126 trading days,
+# about six months of a validation window that runs roughly 253.
+ROLL_WINDOW = 126
+roll = pa.compute_rolling_metrics(windows=[ROLL_WINDOW], metrics=["sharpe", "beta"])
+
+# Summarised rather than printed as an object. This used to print the types of the
+# result's members, which says nothing about the strategy, and the section's own prose
+# promises these two series - a computed result that reaches no reader is the same as one
+# never computed.
+_roll_rows = []
+for _label, _store in (("Rolling Sharpe", roll.sharpe), ("Rolling beta", roll.beta)):
+    _series = _store.get(ROLL_WINDOW)
+    _valid = _series.drop_nulls() if _series is not None else None
+    if _valid is None or _valid.len() == 0:
+        _roll_rows.append({"series": _label, "n": 0, "min": "n/a", "median": "n/a", "max": "n/a"})
+        continue
+    _roll_rows.append(
+        {
+            "series": _label,
+            "n": _valid.len(),
+            "min": f"{_valid.min():+.3f}",
+            "median": f"{_valid.median():+.3f}",
+            "max": f"{_valid.max():+.3f}",
+        }
+    )
+print(f"Rolling metrics over {ROLL_WINDOW} trading days ({aligned.height} days in the window):")
+print(pl.DataFrame(_roll_rows))
 
 # Tail-risk read straight from registry (already computed and stored)
 tail_table = pl.DataFrame(
@@ -1046,19 +1074,31 @@ print(f"Fold Sharpe range: [{fold_df['sharpe'].min():.3f}, {fold_df['sharpe'].ma
 print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 
 # %% [markdown]
-# Per-fold Sharpes are both negative across the two walk-forward
-# blocks (live values printed above), confirming that the selected lineage's
-# loss profile is not a single-fold artifact. The tail-risk read
-# carries a moderately-low tail ratio with elevated kurtosis and
-# positive skew — the realized P&L distribution is dominated by many
-# small adverse-selection losses interrupted by occasional large
-# upside bars, the signature of a strategy whose costs accrue on
-# every rebalance while wins are concentrated. The block-bootstrap
-# max-drawdown CI (live values above) is consistent with resampling
-# that cannot rule out severe capital loss. The drawdown is monotone
-# — there is no recovery, only continued decline — which is what
-# cost-dominant strategies look like when run at a cadence whose
-# friction exceeds the per-bar edge.
+# **How to read the four printouts above.** Each answers a question the others cannot,
+# and none of their values is transcribed here: this notebook re-resolves its carrier from
+# the registry on every run, so a number written into this cell would describe whichever
+# configuration was rank-1 the day it was written.
+#
+# *Per-fold Sharpes* say whether the headline belongs to the strategy or to one block.
+# Two folds agreeing in sign is weak evidence; two disagreeing is strong evidence against.
+# With `evaluation.n_splits: 2` there is no third block to break the tie, so a split
+# verdict is a reason to distrust the headline rather than to average it.
+#
+# *Skewness and kurtosis* say what the distribution behind that Sharpe looks like.
+# Negative skew with high kurtosis is the shape a Sharpe flatters, because Sharpe reads
+# only the first two moments: many small gains against occasional large losses. Positive
+# skew is the opposite trade, and it is what a strategy paying a per-trade cost for
+# occasional large wins looks like.
+#
+# *Tail ratio* compares the right tail to the left at the same quantile. Near 1 the tails
+# are balanced and it is saying nothing; away from 1 it says which side is longer, and it
+# should agree with the sign of the skew.
+#
+# *The rolling window* locates the result in time. A rolling Sharpe that stays on one side
+# of zero describes a steady strategy; one that crosses says the headline averages two
+# regimes, which two folds cannot separate. Rolling beta says the same about the
+# relationship to the universe: a construction meant to be dollar-neutral that carries a
+# drifting beta is taking a directional position it did not intend.
 
 # %% [markdown]
 # ## §5 Friction budget & cost sensitivity
