@@ -32,7 +32,6 @@
 # %%
 """Academic Factor Data - download, explore, and update workflow."""
 
-import json
 from pathlib import Path
 
 import polars as pl
@@ -239,17 +238,25 @@ aqr.tail(10)
 # ## 5. Data Profile
 
 # %%
+from ml4t.data.storage.data_profile import get_profile_path, load_profile
+
 from utils import ML4T_DATA_PATH
 
-# Check for profiles
 for provider, subdir in [("Fama-French", "fama-french"), ("AQR", "aqr")]:
-    profile_path = ML4T_DATA_PATH / "factors" / subdir / "profile.json"
-    if profile_path.exists():
-        profile = json.loads(profile_path.read_text())
-        print(f"=== {provider} Profile ===")
-        print(f"Files: {len(profile.get('files', []))}")
+    profile_path = get_profile_path(ML4T_DATA_PATH / "factors" / subdir)
+    profile = load_profile(profile_path)
+    if profile is None:
+        print(f"No {provider} profile at {profile_path}")
     else:
-        print(f"{provider} profile not found at {profile_path}")
+        print(f"=== {provider} Profile ===")
+        print(f"Written by {profile.source}")
+        print(profile.summary())
+
+print(
+    "\nff_download.py and aqr_download.py unzip the providers' own CSV releases and do\n"
+    "not go through ml4t.data.storage.data_profile, so neither carries a profile today.\n"
+    "Nothing in this notebook writes one either."
+)
 
 # %% [markdown]
 # ## 6. Loader Options

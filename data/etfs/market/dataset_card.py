@@ -347,7 +347,7 @@ print(f"5 ETFs, 2020-2023: {filtered.shape}")
 # | Provider | Yahoo Finance (free) |
 # | Config | `config.yaml` |
 # | Loader | `load_etfs(symbols, start_date, end_date)` |
-# | Profile | `$ML4T_DATA_PATH/etfs/profile.json` |
+# | Profile | `$ML4T_DATA_PATH/etfs/market/etf_universe_profile.json` |
 #
 # **Note**: This is the **candidate pool**. Chapter 6 filters to ~80 ETFs
 # based on liquidity, history, and correlation clustering.

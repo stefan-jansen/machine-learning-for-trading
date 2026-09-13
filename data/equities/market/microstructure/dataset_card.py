@@ -33,7 +33,6 @@
 # %%
 """Tick Data - download, explore, and update workflow."""
 
-import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -393,29 +392,30 @@ if "msg_type" in itch.columns:
 # ## 5. Data Profile
 
 # %%
+from ml4t.data.storage.data_profile import get_profile_path, load_profile
+
 from utils import ML4T_DATA_PATH
 
-# Check for MBO profile
-mbo_profile_path = (
-    ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "market_by_order" / "profile.json"
-)
-if mbo_profile_path.exists():
-    profile = json.loads(mbo_profile_path.read_text())
-    print("=== MBO Profile ===")
-    print(f"  Rows: {profile.get('rows', 'N/A'):,}")
-else:
-    print("MBO profile not found")
+microstructure = ML4T_DATA_PATH / "equities" / "market" / "microstructure"
 
-# Check for ITCH profile
-itch_profile_path = (
-    ML4T_DATA_PATH / "equities" / "market" / "microstructure" / "nasdaq_itch" / "profile.json"
+for name, data_path in [
+    ("MBO", microstructure / "market_by_order"),
+    ("ITCH", microstructure / "nasdaq_itch"),
+]:
+    profile_path = get_profile_path(data_path)
+    profile = load_profile(profile_path)
+    if profile is None:
+        print(f"No {name} profile at {profile_path}")
+    else:
+        print(f"=== {name} Profile ===")
+        print(f"Written by {profile.source}")
+        print(profile.summary())
+
+print(
+    "\nThe two downloaders in this directory write raw vendor captures and do not go\n"
+    "through ml4t.data.storage.data_profile, so neither dataset carries a profile today.\n"
+    "Nothing in this notebook writes one either."
 )
-if itch_profile_path.exists():
-    profile = json.loads(itch_profile_path.read_text())
-    print("\n=== ITCH Profile ===")
-    print(f"  Rows: {profile.get('rows', 'N/A'):,}")
-else:
-    print("ITCH profile not found")
 
 # %% [markdown]
 # ## 6. Loader Options
