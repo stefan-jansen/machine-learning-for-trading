@@ -532,10 +532,11 @@ fig = plot_sharpe_waterfall(lineage, ci_lo=ci_lo, ci_hi=ci_hi)
 show_with_alt(
     fig,
     "Waterfall of Sharpe across the selected configuration's locked lineage: signal, then "
-    "allocation, then cost, then risk overlay, one bar per stage in that order. Each bar "
-    "carries asymmetric error bars for its block-bootstrap 95 percent confidence "
-    "interval, so a stage whose interval spans its neighbour's is one the evidence does "
-    "not separate.",
+    "allocation, then cost, then risk overlay, one bar per stage in that order. Each bar carries "
+    "asymmetric error bars for its block-bootstrap 95 percent confidence interval. Those are "
+    "marginal intervals on each stage and not a test between stages: whether one stage differs "
+    "from the next is the paired difference printed below the figure, which can exclude zero "
+    "while two bars overlap.",
 )
 
 # %% [markdown]
@@ -898,12 +899,13 @@ ax.set_title("Rank-1 Headline Metrics with 95% CIs")
 ax.legend(loc="lower right", fontsize=8, frameon=False)
 show_with_alt(
     fig,
-    "Forest plot of the selected configuration's headline metrics. One row per metric, "
-    "named on the vertical axis, with a point estimate and a horizontal bar for its 95 "
-    "percent confidence interval, read on a shared horizontal value axis. A dashed "
-    "vertical line marks zero, and further vertical reference lines mark the equal-weight "
-    "validation Sharpe and the allocation-stage Sharpe, so each interval can be read "
-    "against both baselines as well as against zero.",
+    "Forest plot of the selected configuration's headline metrics. One row per metric, named on "
+    "the vertical axis, with a point estimate and a horizontal bar for its 95 percent confidence "
+    "interval, read on a shared horizontal value axis. A dashed vertical line marks zero, and "
+    "further vertical reference lines mark the equal-weight validation Sharpe and the "
+    "allocation-stage Sharpe. Those two lines are Sharpe values, so only the Sharpe row is "
+    "comparable with them; the Sortino, Calmar and annualized-return rows share the axis but "
+    "measure different quantities.",
 )
 
 # %% [markdown]
@@ -1218,12 +1220,13 @@ ax.set_title("Cost sensitivity by label horizon — best config per (label, cost
 ax.legend(loc="best", fontsize=8, frameon=False)
 show_with_alt(
     fig,
-    "Line chart of validation Sharpe against per-leg cost in basis points, one line per "
-    "label horizon, each showing the best configuration at every cost level with a shaded "
-    "band around it. A dashed horizontal line marks zero Sharpe. Two shaded vertical "
-    "spans mark realistic spreads, roughly 1 to 3 basis points for large caps and 3 to 8 "
-    "for mid caps, and a vertical line marks the cost this case study charges, so each "
-    "horizon's viability can be read where its line crosses those regions.",
+    "Line chart of validation Sharpe against per-leg cost in basis points, one line per label "
+    "horizon, each showing the best configuration at every cost level with a shaded band around "
+    "it. A dashed horizontal line marks zero Sharpe. Two shaded vertical spans mark realistic "
+    "spreads, roughly 1 to 3 basis points for large caps and 3 to 8 for mid caps, and a dotted "
+    "vertical line marks the protocol's 5 basis point friction floor. That floor is a reference "
+    "and not what this case study charges: config/setup.yaml bills a per-share commission plus "
+    "symbol-specific half-spreads, not a flat rate.",
 )
 
 # %% [markdown]
@@ -1490,12 +1493,12 @@ ax.set_title("Risk-overlay sensitivity — best overlay per (label, family) with
 ax.legend(loc="lower right", fontsize=8, frameon=False)
 show_with_alt(
     fig,
-    "Horizontal chart of risk-overlay sensitivity. One row per label and family pair on "
-    "the vertical axis, running top to bottom, each showing the best overlay's validation "
-    "Sharpe as a point with a horizontal bar for its 95 percent confidence interval. A "
-    "dashed vertical line marks zero and a further vertical line marks the reference "
-    "Sharpe, so an interval crossing either is one the evidence does not separate from "
-    "it.",
+    "Horizontal chart of risk-overlay sensitivity. One row per label and family pair on the "
+    "vertical axis, running top to bottom, each showing the best overlay's validation Sharpe as "
+    "a point with a horizontal bar for its 95 percent confidence interval. A dashed vertical "
+    "line marks zero and a further vertical line marks the reference Sharpe. The intervals are "
+    "marginal, one per row, so they place each overlay against those two fixed values and not "
+    "against each other.",
 )
 
 # %%
