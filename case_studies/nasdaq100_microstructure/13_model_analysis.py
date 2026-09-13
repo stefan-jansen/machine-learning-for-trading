@@ -674,18 +674,25 @@ print(f"  Causal families: {causal_families or 'none'}")
 print(f"\nAll labels trained: {all_labels}")
 
 # %% [markdown]
-# The NASDAQ-100 microstructure case study has five model families on the
-# primary label (`fwd_ret_15m`), spanning four of the five modeling
-# chapters. Latent factor models (Ch14) were not trained - microstructure
-# features at 15-minute frequency do not have the cross-sectional depth
-# or temporal structure that factor models require. This is expected:
-# latent-factor methods are designed for panels with rich cross-sectional
-# variation in fundamentals, not for intraday microstructure snapshots.
+# Three predictive families were trained on the primary label - `linear`, `gbm`
+# and `deep_learning` - alongside the synthetic `ensemble` built from them, and
+# the causal estimate `12_causal_dml` registers separately because it is an
+# effect rather than an ordering. The coverage map above is the authority on
+# which families and labels a given run holds; this paragraph says what the
+# design intended, and the two are worth comparing rather than assuming equal.
 #
-# Four labels were explored: the primary `fwd_ret_15m`, a directional
-# variant (`fwd_dir_15m`), a shorter horizon (`fwd_ret_5m`), and a
-# longer horizon (`fwd_ret_60m`). Only linear and GBM were trained on
-# alternate labels. All cross-family comparisons use the primary label.
+# Two of the expected families are absent by design. Latent factor models (Ch14)
+# were not trained: microstructure features at fifteen-minute frequency do not
+# carry the cross-sectional variation in fundamentals that factor models are
+# built to decompose. `tabular_dl` was not trained either, and the coverage
+# warning names both.
+#
+# Four labels were explored: the primary `fwd_ret_15m`, a directional variant
+# (`fwd_dir_15m`), a shorter horizon (`fwd_ret_5m`) and a longer one
+# (`fwd_ret_60m`). The two return variants carry the same families as the primary
+# label; `fwd_dir_15m` carries only `linear` and `gbm`, which is what a
+# classification variant of the primary label needs to answer the question it is
+# asked. All cross-family comparisons use the primary label.
 
 # %% [markdown]
 # ## 3. Headline Comparative View
@@ -1296,10 +1303,13 @@ plot_regime_bars(regime_df)
 # microstructure features would extract market-wide volatility modes,
 # not tradeable cross-sectional factors.
 #
-# This contrasts with broader panels like US Firm Characteristics
-# (2,483 stocks) and SP500 Equity+Options (638 entities), where
-# latent factors can capture meaningful cross-sectional variation
-# in fundamentals.
+# This contrasts with the broader panels elsewhere in the book. US Firm
+# Characteristics declares `universe.n_assets: 2500` and SP500 Equity+Options
+# declares 633, against the 115 this case study declares and the 113 that carry
+# prices and predictions. Those are declarations from each case study's
+# `config/setup.yaml` and not counts realized by a run, which is the reason to
+# read them as an order of magnitude: a cross-section twenty times wider is what
+# gives a latent factor something to vary across.
 
 # %% [markdown]
 # ### Causal DML (Ch15)
