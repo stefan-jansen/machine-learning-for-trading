@@ -198,10 +198,29 @@ class HoldoutSelfBacktest:
     ``reason`` is a sentence for the rendered page. It names the validation run that was
     searched for, so a reader can see the search was well formed and is not being told
     that something went wrong.
+
+    ``training_hash`` is the identity that produced the holdout being returned, and it is
+    here because a hash alone cannot answer the question that matters. The lookup matches
+    on the declared configuration plus three post-conditions, and none of them reads a
+    clock: a returned hash says "a registered holdout is a valid refit of the configuration
+    you asked about", never "the holdout was taken while that configuration was rank-1".
+    Those separate whenever the field kept growing after the window was spent.
+
+    The gap that makes concrete is the one ml4t/agent-workspace#1171 records: neither this
+    lookup nor `18_holdout_predictions` could express *a holdout exists for this
+    configuration, produced by a generation that is no longer reproducible*. The notebook
+    derives the refit it would perform and compares; with the identity returned here, a
+    caller can make that comparison too instead of taking the hash on trust.
+
+    It is the registered identity and not a verdict on purpose. Deciding whether a
+    generation is superseded needs the ranking, and this lookup is called from inside
+    `resolve_canonical_rank1_lineage` - resolving the ranking here would re-enter it.
     """
 
     backtest_hash: str | None
     reason: str | None = None
+    training_hash: str | None = None
+    """The training identity behind the returned holdout, or None when nothing was found."""
 
     @property
     def found(self) -> bool:
@@ -389,6 +408,104 @@ def holdout_generations_to_retire(
         not_out_of_sample=tuple(not_out_of_sample),
         unattributable=tuple(unattributable),
     )
+
+
+class HoldoutWindowSpent(RuntimeError):
+    """A second evaluation of a window this case study reports as unseen was refused."""
+
+
+def refuse_a_second_look(
+    retire: HoldoutGenerationsToRetire,
+    *,
+    this_configuration: str,
+    this_training_hash: str,
+    checkpoint: tuple[Any, Any],
+    retiring: Sequence[str] = (),
+) -> tuple[dict[str, Any], ...]:
+    """Refuse a second evaluation of a spent holdout window, unless it is named.
+
+    The default is refusal, and the override is per generation rather than per run. A
+    boolean would be set once and left set, and the guard would then be decorative; naming
+    the prediction set means each override is a statement about one window that somebody had
+    to look up. ``retiring`` is a sequence of prediction hashes the operator accepts
+    retiring, and the run proceeds only when it names exactly what is registered.
+
+    Returns the rows being retired, so the caller can put them in the render. A second look
+    that proceeds deliberately has to say so where a reader sees it, not only in the launch
+    line - the registry would otherwise show one evaluation of the window and a reader would
+    have no way to learn there had been two.
+
+    Only ``superseded`` is overridable. The other two buckets are not a decision anybody can
+    make by naming a hash:
+
+    * ``unattributable`` - the training runs record no CV split, so whether they were
+      refitted for the holdout cannot be established either way. Naming one asserts a fact
+      the registry does not hold.
+    * ``not_out_of_sample`` - the row is either a validation-fitted model published over the
+      window or a refit filed under its validation identity, and the registry cannot tell
+      those apart. An override here would not authorize a second look; it would authorize
+      reporting something that may never have been out of sample.
+    """
+    if retire.unattributable:
+        raise HoldoutWindowSpent(
+            "the holdout window carries prediction sets whose training runs record no CV "
+            "split, so whether they were refitted for the holdout cannot be established: "
+            + ", ".join(
+                f"{row['prediction_hash']} (training {row['training_hash']})"
+                for row in retire.unattributable
+            )
+            + ". Establish what produced them before registering another evaluation on the "
+            "same window. This is not what `retiring` is for: naming one of these would "
+            "assert something the registry does not record."
+        )
+    if retire.not_out_of_sample:
+        raise HoldoutWindowSpent(
+            "the holdout window carries prediction sets whose training runs declare a CV "
+            "split other than the holdout: "
+            + ", ".join(
+                f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+                for row in retire.not_out_of_sample
+            )
+            + ". Each is either a validation-fitted model published over the window, which "
+            "is not an out-of-sample result, or a refit registered under its validation "
+            "training identity, and the registry cannot tell those apart. Resolve it "
+            "through the registry's own lifecycle, which records that the row was retired."
+        )
+
+    registered = {row["prediction_hash"] for row in retire.superseded}
+    named = dict.fromkeys(retiring)
+
+    unknown = [hash_ for hash_ in named if hash_ not in registered]
+    if unknown:
+        raise HoldoutWindowSpent(
+            f"the run authorizes retiring {', '.join(unknown)}, which this window does not "
+            "carry. An override that names something absent is either aimed at another case "
+            "study or has outlived the generation it was written for, and either way it "
+            "would sit in the launch line authorizing whatever arrives next. Registered "
+            "here: " + (", ".join(sorted(registered)) or "nothing") + "."
+        )
+
+    unnamed = [row for row in retire.superseded if row["prediction_hash"] not in named]
+    if unnamed:
+        kind, value = checkpoint
+        raise HoldoutWindowSpent(
+            "the holdout window already carries a refit of a different configuration: "
+            + ", ".join(
+                f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+                for row in unnamed
+            )
+            + f". This run would evaluate {this_configuration} (training "
+            f"{this_training_hash}, checkpoint {kind}={value}) on the same window, which "
+            "would be a second configuration measured on a period this case study reports "
+            "as unseen. Deleting the earlier rows does not undo having observed their "
+            "result - the selection that produced this configuration may have been informed "
+            "by the earlier holdout number, and no deletion reaches that. To take the second "
+            "look deliberately, name what is being retired: "
+            "RETIRE_HOLDOUT_GENERATIONS:json="
+            + json.dumps(sorted(row["prediction_hash"] for row in unnamed))
+            + ". The run then records it where a reader sees it."
+        )
+    return retire.superseded
 
 
 # What a holdout refit is allowed to change, and nothing else. Everything outside this set
@@ -631,8 +748,8 @@ def _resolve_holdout_self_backtest(
     # fitted on a superseded feature generation from being reported as the carrier's.
     matched = sorted(
         {
-            bh
-            for bh, spec_json, _, training_spec_json in candidates
+            (bh, holdout_training_hash)
+            for bh, spec_json, holdout_training_hash, training_spec_json in candidates
             if json.loads(spec_json).get("strategy", {}) == val_strategy
             and training_run_fitted_for_the_holdout(training_spec_json)
             and is_refit_of(training_spec_json, val_training_spec_json)
@@ -649,11 +766,13 @@ def _resolve_holdout_self_backtest(
         )
     if len(matched) > 1:
         raise ValueError(
-            f"holdout replay for {val_backtest_hash} is ambiguous: {matched} are all "
+            f"holdout replay for {val_backtest_hash} is ambiguous: "
+            f"{[bh for bh, _ in matched]} are all "
             f"{configuration[0]}/{configuration[1]} on {configuration[2]}, refitted for the "
             f"holdout at {checkpoint}, with one strategy spec"
         )
-    return HoldoutSelfBacktest(matched[0])
+    backtest_hash, holdout_training_hash = matched[0]
+    return HoldoutSelfBacktest(backtest_hash, training_hash=holdout_training_hash)
 
 
 def _refuse_a_selection_disagreement(

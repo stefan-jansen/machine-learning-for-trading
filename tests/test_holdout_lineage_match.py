@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from case_studies.utils.strategy_analysis import select_holdout_self_backtest
+from case_studies.utils.strategy_analysis import (
+    _resolve_holdout_self_backtest,
+    select_holdout_self_backtest,
+)
 
 STRATEGY = {"signal": {"method": "equal_weight_top_k", "top_k": 50}}
 OTHER_STRATEGY = {"signal": {"method": "equal_weight_top_k", "top_k": 10}}
@@ -142,3 +145,36 @@ def test_two_indistinguishable_refits_raise_rather_than_one_being_picked(case_di
     _registry(case_dir / "run_log" / "registry.db", [VALIDATION_ROW, REFITTED_ROW, twin])
     with pytest.raises(ValueError, match="ambiguous"):
         select_holdout_self_backtest("fixture_case_study", "bt_val")
+
+
+def test_the_match_says_which_generation_it_returned(case_dir: Path) -> None:
+    """A hash alone cannot answer whether the holdout belongs to the carrier that is rank-1.
+
+    None of the lookup's conditions reads a clock: a returned hash says "a registered
+    holdout is a valid refit of the configuration you asked about", never "it was taken
+    while that configuration was rank-1". Those separate whenever the field kept growing
+    after the window was spent. Reporting the identity lets a caller derive the refit it
+    would perform and compare, which is what `18_holdout_predictions` already does and what
+    the resolver could not express (ml4t/agent-workspace#1171).
+    """
+    _registry(case_dir / "run_log" / "registry.db", [VALIDATION_ROW, REFITTED_ROW])
+
+    found = _resolve_holdout_self_backtest("fixture_case_study", "bt_val")
+
+    assert found.backtest_hash == "bt_holdout"
+    assert found.training_hash == "train_holdout"
+    assert found.training_hash != VALIDATION_ROW["training_hash"], (
+        "the holdout identity must be the refit's own, not the validation run's - a match on "
+        "the validation identity is the one thing the holdout exists to rule out"
+    )
+
+
+def test_a_miss_reports_no_generation(case_dir: Path) -> None:
+    """`training_hash` is None when nothing matched, so it cannot be read as a found one."""
+    _registry(case_dir / "run_log" / "registry.db", [VALIDATION_ROW, VALIDATION_FITTED_ROW])
+
+    found = _resolve_holdout_self_backtest("fixture_case_study", "bt_val")
+
+    assert found.backtest_hash is None
+    assert found.training_hash is None
+    assert found.reason
