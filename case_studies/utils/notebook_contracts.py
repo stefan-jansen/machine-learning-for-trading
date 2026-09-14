@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import closing
 from pathlib import Path
 
@@ -359,6 +359,7 @@ def prediction_members_in_force(
             f"{len(short):,} member(s) were dropped from the candidate pool for covering less "
             f"than the cross-section their feature panels offered them: {listed}{more}"
         )
+    notes.extend(record_prediction_admissibility(root, admitted=members, short=short))
     if not members:
         raise RuntimeError(
             f"every member of the populations in force at {root} was dropped for incomplete "
@@ -367,6 +368,106 @@ def prediction_members_in_force(
             f"comparison. Reasons:\n" + "\n".join(sorted(short.values()))
         )
     return members, notes
+
+
+def record_prediction_admissibility(
+    root: Path | str, *, admitted: Iterable[str], short: Mapping[str, str]
+) -> list[str]:
+    """Write down what this measurement found, so the resolver reads it instead of guessing.
+
+    The sweep charges every member against the feature panel it was offered. The carrier
+    resolver cannot: `full_coverage_prediction_sql`'s bar counts decision days, and a family
+    that scores every day for half the universe ties the day count while ranking a narrower
+    cross-section. So the resolver was the looser of the two rules and a prediction the sweep
+    refused to backtest could still carry the case study.
+
+    Recomputing the check inside the resolver would pay the sweep's startup cost once per
+    strategy-analysis notebook and leave two implementations agreeing by inspection, which is
+    the arrangement that produced the divergence. This records the answer where both can read
+    it.
+
+    Only measured members are written. A member this sweep did not reach is absent rather than
+    admitted, and :func:`selectable_validation_candidates` drops only what is recorded as NOT
+    admitted - so a registry nothing has swept keeps exactly the pool it has today, and the
+    record can never empty a pool on its own.
+
+    Returns notes, not a refusal. A registry opened read-only is a normal state for a reader's
+    clone, and the sweep's own result does not depend on the record being written.
+    """
+    from datetime import UTC, datetime
+
+    from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
+
+    admitted = sorted(set(admitted))
+    if not admitted and not short:
+        return []
+    db_path = Path(root) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return []
+    recorded_at = datetime.now(UTC).isoformat()
+    commit = _git_commit_or_none()
+    rows = [(member, 1, None, recorded_at, commit) for member in admitted]
+    rows += [(member, 0, reason, recorded_at, commit) for member, reason in sorted(short.items())]
+    try:
+        with closing(sqlite3.connect(str(db_path))) as db:
+            db.executescript(REGISTRY_SCHEMA_SQL)
+            db.executemany(
+                "INSERT INTO prediction_admissibility "
+                "(prediction_hash, admitted, reason, recorded_at, git_commit) "
+                "VALUES (?,?,?,?,?) "
+                "ON CONFLICT(prediction_hash) DO UPDATE SET "
+                "admitted=excluded.admitted, reason=excluded.reason, "
+                "recorded_at=excluded.recorded_at, git_commit=excluded.git_commit",
+                rows,
+            )
+            db.commit()
+    except sqlite3.Error as failure:
+        return [
+            f"the cross-sectional coverage result was not recorded in {db_path}: {failure}. "
+            "The pool this run selects from is unaffected; the carrier resolver will fall back "
+            "to its own weaker bar for these members."
+        ]
+    return []
+
+
+def predictions_the_sweep_refused(case_dir: Path | str) -> dict[str, str]:
+    """Members a sweep measured and dropped, with the reason it gave.
+
+    The complement of what :func:`record_prediction_admissibility` writes. Absence is not
+    admission: a member no sweep has measured has no row here, and a caller must leave it
+    where it is rather than treat the silence as either answer. Returns an empty mapping
+    where the registry, or the table, does not exist - which is a fixture, a reader's clean
+    clone, or a registry last swept before the table did.
+    """
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        if not db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='prediction_admissibility'"
+        ).fetchone():
+            return {}
+        return {
+            row[0]: row[1] or "measured short of the cross-section its feature panels offered"
+            for row in db.execute(
+                "SELECT prediction_hash, reason FROM prediction_admissibility WHERE admitted = 0"
+            )
+        }
+
+
+def _git_commit_or_none() -> str | None:
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
 
 
 def _reduced_tier_members(
