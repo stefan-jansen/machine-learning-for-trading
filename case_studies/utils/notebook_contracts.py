@@ -523,9 +523,12 @@ def undercovered_prediction_members(
     # runs registered after #857 put the sequence window on the calendar read the same
     # 64.9%.
     #
-    # This is the denominator `load_backtest_predictions` already uses for the same
-    # question, and the two must agree or the pool admits members the backtest then
-    # refuses, which surfaces as "no rankable validation backtests" three stages later.
+    # `feature_panel_keys` in `coverage.py` is the one implementation of this denominator.
+    # It used to be two: `load_backtest_predictions` measured coverage the same way at load
+    # time, and this comment said the two must agree. They could not disagree, because that
+    # function had no caller anywhere in the repository - the exclusions it applied read as
+    # enforced and reached nothing. It was deleted; a second denominator is worth having only
+    # if something runs it.
     # The fold axis comes from the run's own spec, not from the configuration.
     # `declared_sessions` reads the fold windows out of `config/setup.yaml`, which lists
     # every configured fold whatever the run was asked to do, so a run that fitted a subset
