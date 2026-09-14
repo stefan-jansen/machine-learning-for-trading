@@ -1805,11 +1805,16 @@ val_ho_pair = load_paired_metrics(
 if val_ho_pair.is_empty():
     print(
         f"[WARN] No val_rank1_self pair registered against holdout {HO_HASH}. "
-        "`populate_paired_metrics` builds its holdout pairs on the lineage it is "
-        "handed, and this notebook hands it NO_CARRIER, so that lineage is the "
-        "rung's raw-Sharpe leader rather than the cross-stage rank-1 that §1 "
-        "reports and that 19_holdout_backtest refit. The two differ here, so no "
-        "pair names this holdout. Continuing with NaN val to holdout decay."
+        "Measured rather than inferred, by calling the producer's own resolution "
+        "with this registry: `_val_rank1_carrier` walks the rung-restricted "
+        "candidates for one with a matching holdout and finds none, so "
+        "`populate_paired_metrics` falls back to the rung leader's prediction "
+        "hash as `prefer_prediction_hash`, and `_holdout_lineage_for` pinned on "
+        "that hash returns None. Pass the carrier's prediction hash instead and "
+        f"the same call resolves {HO_HASH}. The rung leader here is "
+        "ensemble/gbm_mean_leaves31 on fwd_ret_15m; the carrier that 18 and 19 "
+        "refit is gbm/default_multiclass on fwd_dir_15m. Continuing with NaN "
+        "val to holdout decay."
     )
     vh = {
         "sharpe_diff": float("nan"),
@@ -1913,10 +1918,10 @@ ho_vs_ew = load_paired_metrics(
 if ho_vs_ew.is_empty():
     print(
         "[WARN] No equal_weight_holdout_side_artifact pair registered against "
-        f"holdout {HO_HASH}, for the same reason as the decay pair above: the "
-        "producer's holdout lineage is the rung leader, not §1's carrier. The "
-        "holdout itself is not empty, so this is an absent comparison rather "
-        "than an absent result. Continuing with NaN diffs."
+        f"holdout {HO_HASH}. Same resolution as the decay pair above, and it "
+        "fails at the same step. The holdout itself carries 420 trades and 128 "
+        "daily returns, so this is an absent comparison rather than an absent "
+        "result. Continuing with NaN diffs."
     )
     he = {
         "sharpe_diff": float("nan"),
