@@ -54,7 +54,6 @@
 """Crypto Perpetuals Funding Case Study - Feasibility Analysis."""
 
 import re
-import warnings
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -65,12 +64,13 @@ import yaml
 from IPython.display import display
 
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_crypto_perps
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "crypto_perps_funding"

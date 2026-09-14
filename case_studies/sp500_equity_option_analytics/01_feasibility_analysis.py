@@ -59,7 +59,6 @@
 """S&P 500 Equity + Option Analytics - Feasibility Analysis."""
 
 import datetime as dt
-import warnings
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -74,12 +73,13 @@ from case_studies.utils.feasibility import (
     exceedance_curve,
     fold_timeline,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"

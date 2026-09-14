@@ -2131,7 +2131,9 @@ def plot_equity_drawdown(
     plt.Figure
     """
     if ax is None:
-        fig, (ax_eq, ax_dd) = plt.subplots(2, 1, figsize=(12, 7), sharex=True, height_ratios=[2, 1])
+        fig, (ax_eq, ax_dd) = plt.subplots(
+            2, 1, figsize=(12, 7), sharex=True, height_ratios=[2, 1], layout="tight"
+        )
     else:
         ax_eq, ax_dd = ax
         fig = ax_eq.figure

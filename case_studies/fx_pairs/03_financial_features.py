@@ -46,7 +46,6 @@
 # %%
 """FX Pairs: Feature Engineering."""
 
-import warnings
 from datetime import date
 
 import pandas as pd
@@ -82,11 +81,12 @@ from case_studies.utils.feature_engineering import (
     rolling_zscore,
     warmup_audit,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_fx_pairs
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 CASE_DIR = get_case_study_dir("fx_pairs")
 FEATURES_DIR = CASE_DIR / "features"

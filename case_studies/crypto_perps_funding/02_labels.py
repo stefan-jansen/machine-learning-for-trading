@@ -55,7 +55,6 @@
 # %%
 """Crypto Perps Funding: Label Engineering."""
 
-import warnings
 from datetime import UTC, datetime, timedelta
 
 import matplotlib.pyplot as plt
@@ -68,12 +67,13 @@ from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.feature_engineering import rolling_zscore
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_crypto_perps
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 CASE_STUDY_ID = "crypto_perps_funding"
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)

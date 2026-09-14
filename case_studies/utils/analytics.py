@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
+from contextlib import closing
 from pathlib import Path
 
 import polars as pl
@@ -164,8 +165,11 @@ def _has_column(db_path: Path, table: str, column: str) -> bool:
     depends on when it was last written and which task types it holds. Naming an absent column
     in a SELECT is a hard error, not a null.
     """
+    # `closing`, not a bare `with`: sqlite3.Connection's context manager commits or rolls back
+    # the transaction and leaves the connection open, so each call here leaked one and the
+    # interpreter reported "ResourceWarning: unclosed database" into the render.
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
             return any(row[1] == column for row in db.execute(f"PRAGMA table_info({table})"))
     except sqlite3.Error:
         return False
@@ -273,7 +277,7 @@ def load_model_ic(
 
         # Registries predating the daily-uncertainty backfill have no
         # ``ic_mean_daily`` column at all, so probe before referencing it.
-        with sqlite3.connect(str(db_path)) as probe_con:
+        with closing(sqlite3.connect(str(db_path))) as probe_con:
             pm_cols = {row[1] for row in probe_con.execute("PRAGMA table_info(prediction_metrics)")}
         ic_expr = (
             "COALESCE(pm.ic_mean_daily, pm.ic_mean)" if "ic_mean_daily" in pm_cols else "pm.ic_mean"
@@ -288,7 +292,7 @@ def load_model_ic(
         # ran.
         coverage_usable = False
         if "ic_n_days" in pm_cols:
-            with sqlite3.connect(str(db_path)) as probe_con:
+            with closing(sqlite3.connect(str(db_path))) as probe_con:
                 coverage_usable = (
                     probe_con.execute(
                         "SELECT 1 FROM prediction_metrics WHERE ic_n_days IS NOT NULL LIMIT 1"
