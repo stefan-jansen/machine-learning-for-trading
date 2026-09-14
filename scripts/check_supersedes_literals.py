@@ -740,7 +740,7 @@ def _undeclared_heads(case_study: str, registry: Path, notebooks: list[Path]) ->
             if len(attributed) == 1:
                 notebook_name, where = attributed[0], f"{attributed[0]} freezes it"
             else:
-                notebook_name = "-"
+                notebook_name = _UNATTRIBUTED
                 where = (
                     f"frozen by one of {attributed}"
                     if attributed
@@ -979,6 +979,10 @@ def undeclared_fix(finding: Finding) -> str:
     )
 
 
+# What `_undeclared_heads` records when it cannot attribute a generation to a notebook.
+_UNATTRIBUTED = "-"
+
+
 def launch_parameters(notebook_findings: Sequence[Finding]) -> list[str]:
     """Every parameter ONE launch of one notebook needs, spelled as `nb-run.sh` takes them.
 
@@ -1030,6 +1034,12 @@ def _print_launch_lines(findings: Sequence[Finding], stream) -> None:
     """
     owing: dict[tuple[str, str], list[Finding]] = {}
     for finding in findings:
+        if finding.notebook == _UNATTRIBUTED:
+            # `_undeclared_heads` writes this when it cannot say which notebook freezes a
+            # generation. There is no launch to name, and pooling such findings under one
+            # command would put entries from different notebooks in one mapping. Their
+            # per-finding detail still prints; only the command is withheld.
+            continue
         owing.setdefault((finding.case_study, finding.notebook), []).append(finding)
     lines = []
     for (case_study, notebook), group in sorted(owing.items()):
@@ -1169,9 +1179,6 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
-    if undeclared and not [f for f in findings if f.refused_at_the_freeze]:
-        _print_launch_lines(findings, sys.stderr)
-
     for finding in unresolved:
         # Warned, never blocked. Refusing on "I could not resolve this" would be the check
         # asserting knowledge it does not have.
@@ -1181,6 +1188,17 @@ def main(argv: list[str] | None = None) -> int:
             f"      {finding.detail}",
             file=sys.stderr,
         )
+
+    # Printed before the first early return, so every path that refuses a run also says
+    # what to type. `--require-declarations` returns two lines down and used to return
+    # without it, which is the path that most needs it: it is the one that stops a chain.
+    launch_printed = False
+    if undeclared and not args.require_declarations and args.allow_stale_supersedes:
+        _print_launch_lines(findings, sys.stderr)
+        launch_printed = True
+    if undeclared and args.require_declarations:
+        _print_launch_lines(findings, sys.stderr)
+        launch_printed = True
 
     if undeclared and args.require_declarations:
         print(
@@ -1243,7 +1261,8 @@ def main(argv: list[str] | None = None) -> int:
                 "above.",
                 file=sys.stderr,
             )
-        _print_launch_lines(findings, sys.stderr)
+        if not launch_printed:
+            _print_launch_lines(findings, sys.stderr)
         print(
             "\nFix it now - you are about to pay for the run that re-renders the notebook "
             "you have to clear. If you know this run's membership is unchanged, so the "

@@ -174,3 +174,48 @@ class TestOneLaunchCarriesEveryEntry:
             )
             == []
         )
+
+
+class TestEveryRefusalPathSaysWhatToType:
+    """A path that stops a chain and prints no command is the failure this change exists
+    to fix, one level up: the reader is told what is wrong and not what to run."""
+
+    @staticmethod
+    def _stderr(*argv: str) -> str:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer), contextlib.redirect_stdout(io.StringIO()):
+            _checker.main(["--case-study", "us_equities_panel", *argv])
+        return buffer.getvalue()
+
+    def test_the_plain_refusal_prints_the_commands_once(self) -> None:
+        assert self._stderr().count("The launch each of these needs") == 1
+
+    def test_require_declarations_prints_them_before_it_returns(self) -> None:
+        """It returns above the refused-literal block, so it used to print none at all."""
+        output = self._stderr("--require-declarations")
+        assert "nb-run.sh us_equities_panel 07_gbm " in output
+        assert "Refusing because --require-declarations was passed." in output
+
+    def test_allow_stale_still_prints_them(self) -> None:
+        assert "The launch each of these needs" in self._stderr("--allow-stale-supersedes")
+
+    def test_no_command_is_offered_for_an_unattributed_generation(self) -> None:
+        """`_undeclared_heads` writes "-" when it cannot say which notebook freezes one."""
+        finding = _checker.Finding(
+            "us_equities_panel",
+            _checker._UNATTRIBUTED,
+            "",
+            "undeclared",
+            "detail",
+            "SUPERSEDES_SETS",
+            "live",
+            "orphan-set-v1",
+        )
+        import io
+
+        buffer = io.StringIO()
+        _checker._print_launch_lines([finding], buffer)
+        assert buffer.getvalue() == ""
