@@ -9,52 +9,13 @@ import numpy as np
 import polars as pl
 from scipy import stats
 
-#: Latent-factor models whose panel is built by :func:`prepare_panel_data` rather than
-#: :func:`prepare_ragged_panel_data`, and which are therefore subject to the entity
-#: eligibility rule below. PCA factorizes a dense ``T x N`` return matrix, so a column
-#: that is mostly absent carries no usable covariance with the others; the ragged builder
-#: has no such requirement because IPCA, CAE, SAE and SDF all take unbalanced dated
-#: cross-sections by construction.
-#:
-#: Declared here, beside the builder whose behaviour it selects, so the rule has one home.
-PERSISTENT_PANEL_MODELS: frozenset[str] = frozenset({"pca"})
-
-#: Fraction of the training window's dates an entity must appear on to enter a persistent
-#: panel. Not a tuned number and not a quality bar: below one half the entity is absent for
-#: most of the window the factors are estimated over.
-DEFAULT_MIN_COVERAGE = 0.5
-
-
-def eligible_persistent_entities(
-    keys: pl.DataFrame,
-    *,
-    entity_col: str,
-    date_col: str,
-    min_coverage: float = DEFAULT_MIN_COVERAGE,
-) -> pl.DataFrame:
-    """Entities dense enough for a persistent-ID panel, most complete first.
-
-    ``keys`` is the ``(entity, date)`` rows of the window eligibility is judged over - the
-    fold's training window, not the whole dataset, so an entity that lists partway through
-    the study is admitted once the rolling window has moved past its start.
-
-    Returned as a frame of ``(entity_col, len)`` rather than a list of names because
-    :func:`prepare_panel_data` truncates it with ``max_entities`` and needs the ordering to
-    do that; callers wanting only the names read the column.
-
-    This is the single definition of the rule. The coverage guard
-    (``notebook_contracts.undercovered_prediction_members``) reads it too, so a member is
-    charged against the entities its own builder would have admitted rather than against
-    the full panel, and the two cannot drift.
-    """
-    n_dates_total = keys[date_col].n_unique()
-    min_dates = max(int(n_dates_total * min_coverage), 10)
-    return (
-        keys.group_by(entity_col)
-        .len()
-        .filter(pl.col("len") >= min_dates)
-        .sort(["len", entity_col], descending=[True, False])
-    )
+# One definition, in a module the coverage guard can import without torch - see that
+# module's docstring for why it is not in this file.
+from case_studies.utils.persistent_panel import (
+    DEFAULT_MIN_COVERAGE,
+    PERSISTENT_PANEL_MODELS,
+    eligible_persistent_entities,
+)
 
 
 def prepare_ragged_panel_data(
@@ -131,7 +92,7 @@ def prepare_panel_data(
     *,
     eligibility_dataset: pl.DataFrame,
     max_entities: int = 0,
-    min_coverage: float = 0.5,
+    min_coverage: float = DEFAULT_MIN_COVERAGE,
     eval_label_col: str | None = None,
     macro_panel: pl.DataFrame | None = None,
 ) -> dict[str, Any]:

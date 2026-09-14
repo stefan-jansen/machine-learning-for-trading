@@ -470,7 +470,7 @@ def _persistent_panel_entities(
     # Imported here for the same reason the `coverage` import below is: `coverage` imports
     # from this module, so a top-level import of either closes a cycle.
     from case_studies.utils.coverage import _normalize_time
-    from case_studies.utils.latent_factors.panel import (
+    from case_studies.utils.persistent_panel import (
         PERSISTENT_PANEL_MODELS,
         eligible_persistent_entities,
     )

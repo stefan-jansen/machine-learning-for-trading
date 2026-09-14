@@ -23,11 +23,11 @@ import polars as pl
 import pytest
 
 from case_studies.utils.coverage import check_prediction_cross_section
-from case_studies.utils.latent_factors.panel import (
+from case_studies.utils.notebook_contracts import _persistent_panel_entities
+from case_studies.utils.persistent_panel import (
     PERSISTENT_PANEL_MODELS,
     eligible_persistent_entities,
 )
-from case_studies.utils.notebook_contracts import _persistent_panel_entities
 
 LABEL = "fwd_ret_1d"
 FOLDS = [
@@ -211,3 +211,45 @@ def test_a_narrowed_call_neither_reads_nor_writes_the_reachable_memo(case_dir):
     assert len(cov._REACHABLE_CACHE) == before, "a narrowed call must leave no entry"
     assert narrow.accountable_coverage > wide.accountable_coverage
     assert narrow.accountable_coverage == 1.0
+
+
+def test_the_guard_does_not_pull_torch_in():
+    """The coverage guard must stay importable where there is no torch.
+
+    ``case_studies/utils/latent_factors/__init__.py`` imports ``torch`` unconditionally and
+    deliberately, so torch's bundled cudart wins symbol resolution before the ml4t libraries
+    load. Anything imported from under that package therefore requires torch. CI's
+    ``test-unit`` installs the import surface of the tests it runs and nothing else - no
+    torch, on purpose, to stay a fast per-commit gate - so putting this rule beside
+    ``prepare_panel_data`` made both the guard and this file unimportable there, with
+    ``ModuleNotFoundError: No module named 'torch'`` as a collection error rather than a
+    failure.
+
+    Checked as "was torch imported" rather than by blocking it: scipy inspects
+    ``sys.modules['torch']`` and raises ``AttributeError`` on a ``None`` sentinel, so the
+    blunt version of this test fails for a reason that has nothing to do with the property.
+    """
+    import subprocess
+    import sys
+
+    # The guard's import is lazy, so the probe has to *call* it with a pca member: importing
+    # the module alone leaves the import unexecuted and the check passes whatever it points
+    # at. Found by mutating the import back to the torch-bearing package and watching this
+    # test stay green.
+    probe = (
+        "import sys, json, datetime as dt, polars as pl;"
+        "from case_studies.utils.notebook_contracts import _persistent_panel_entities;"
+        "train=[dt.datetime(2019,12,d,16,0) for d in range(2,22)];"
+        "rows=[{'entity':e,'session':t} for t in train for e in ('AAA','BBB')];"
+        "spec=json.dumps({'computation':{'cv':{'folds':["
+        "{'fold':0,'train_start':'2019-12-02T16:00:00','train_end':'2019-12-21T16:00:00'}]}}});"
+        "out=_persistent_panel_entities(spec, pl.DataFrame(rows),"
+        " family='latent_factors', config='pca');"
+        "assert out == {0: ['AAA','BBB']}, out;"
+        "print('torch' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False", (
+        "importing the coverage guard pulled torch in; it must not reach the latent_factors "
+        f"package. stdout={out.stdout!r} stderr={out.stderr[-400:]!r}"
+    )
