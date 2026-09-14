@@ -1122,10 +1122,13 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 # days holds about two non-overlapping windows. Sampling variation alone produces sign
 # changes on a stationary series at this length, so a crossing is not evidence of a
 # regime, and an estimate that stays positive throughout does not establish that
-# performance was stable. Rolling beta is read the same way, with one addition that
-# does not depend on sampling: a construction meant to be dollar-neutral carries a
-# directional exposure at any window where its beta is away from zero, whatever produced
-# it.
+# performance was stable. Rolling beta is read the same way and carries the same
+# qualification: each point is an estimate over 126 overlapping days, and a strategy whose
+# population beta is zero still returns nonzero sample betas. So a construction meant to be
+# dollar-neutral whose rolling beta wanders is a reason to look at how the weights are
+# formed, not a measurement of directional exposure. What would establish the exposure is
+# the construction itself - the weights the allocator produced - rather than a point
+# estimate over one window.
 
 # %% [markdown]
 # ## §5 Friction budget & cost sensitivity
