@@ -37,6 +37,7 @@ from case_studies.utils.notebook_contracts import (
     full_coverage_prediction_sql,
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE
+from case_studies.utils.warning_policy import warn_the_reader
 
 # ---------------------------------------------------------------------------
 # Canonical rank-1 resolution (LABEL_RESTRICTIONS-aware)
@@ -1968,13 +1969,11 @@ def plot_sharpe_waterfall(
                 zorder=4,
             )
         if skipped_ci_stages:
-            import warnings
-
-            warnings.warn(
-                "plot_sharpe_waterfall: dropped CIs not bracketing the "
-                f"point estimate for stages={skipped_ci_stages}; rerun "
-                "uncertainty backfill to refresh.",
-                stacklevel=2,
+            warn_the_reader(
+                f"dropped CIs not bracketing the point estimate for "
+                f"stages={skipped_ci_stages}; rerun uncertainty backfill to refresh.",
+                source="plot_sharpe_waterfall",
+                key=("waterfall_ci", tuple(skipped_ci_stages)),
             )
 
     # value labels - always above the upper edge so they don't overlap a CI bar
@@ -2403,12 +2402,13 @@ def load_strategy_assessment(
                 ).fetchone()[0]
                 con.close()
                 if n == 0:
-                    warnings.warn(
+                    warn_the_reader(
                         f"strategy_assessment.json for '{case_study}' is STALE: "
                         f"champion {champion_source}/{primary_label} is not in the "
                         f"registry. Regenerate by running "
                         f"case_studies/{case_study}/*_strategy_analysis.py.",
-                        stacklevel=2,
+                        source="load_assessment",
+                        key=("stale_assessment", case_study, champion_source, primary_label),
                     )
     return assessment
 

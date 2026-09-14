@@ -48,6 +48,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.signals import build_target_weights_from_config
+from case_studies.utils.warning_policy import warn_the_reader
 
 # ---------------------------------------------------------------------------
 # Periods per year for Sharpe annualization
@@ -1022,11 +1023,12 @@ def substitute_continuous_return_for_classification(
                 f"between the classification and continuous-return label "
                 f"parquets; re-run the upstream label step for {case_study!r}."
             )
-        print(
-            f"  WARN substitute_continuous_return_for_classification: "
-            f"{n_null}/{n_total} ({null_rate:.4%}) predictions for "
-            f"classification label {label!r} have no matching {eval_label!r} "
-            f"value after join on (timestamp, symbol); dropping those rows."
+        warn_the_reader(
+            f"{n_null}/{n_total} ({null_rate:.4%}) predictions for classification label "
+            f"{label!r} have no matching {eval_label!r} value after join on "
+            f"(timestamp, symbol); dropping those rows.",
+            source="substitute_continuous_return_for_classification",
+            key=(case_study, label, eval_label, n_null, n_total),
         )
         joined = joined.filter(pl.col("y_true").is_not_null())
     return joined
@@ -1252,12 +1254,6 @@ def _restore_ruin_nans(metrics: dict) -> dict:
     return metrics
 
 
-# One entry per (case study, label, panel width, prediction width) already reported, so a
-# sweep of twelve backtests over one prediction set prints the diagnostic once rather than
-# twelve times. Process-scoped: a notebook is one process, which is the scope that matters.
-_UNPRICED_UNIVERSE_REPORTED: set[tuple[str, str, int, int]] = set()
-
-
 def apply_traded_universe(
     predictions: pl.DataFrame,
     prices: pl.DataFrame,
@@ -1396,11 +1392,13 @@ def warn_if_the_panel_does_not_bound_the_universe(
         "backtest and the narrower panel reduces nothing (ml4t/agent-workspace#911). "
         "TOP_N_PREDICTIONS is the knob that reduces this stage."
     )
-    warnings.warn(message, stacklevel=2)
-    seen = (case_study, label, priced.height, int(predictions["symbol"].n_unique()))
-    if seen not in _UNPRICED_UNIVERSE_REPORTED:
-        _UNPRICED_UNIVERSE_REPORTED.add(seen)
-        print(f"  WARN warn_if_the_panel_does_not_bound_the_universe: {message}")
+    warn_the_reader(
+        message,
+        source="warn_if_the_panel_does_not_bound_the_universe",
+        # Coarser than the message, which carries counts that move per call: one line per
+        # (case study, label, panel width, prediction width), not one per scheme in a sweep.
+        key=(case_study, label, priced.height, int(predictions["symbol"].n_unique())),
+    )
 
 
 def run_backtest(
