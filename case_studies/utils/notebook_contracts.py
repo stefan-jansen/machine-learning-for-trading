@@ -78,7 +78,16 @@ def excluded_family_sql(
     return f" AND {family_column} NOT IN ({placeholders})", excluded
 
 
-_DEGENERATE_SUBQUERY = "SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL"
+# A correlation over a constant vector is undefined, and two code paths in this repo
+# disagree about how to store that: one writes NULL, the other writes whatever the
+# floating-point reduction returned, which is machine epsilon. Both mean the fold
+# carried no ranking information, so both have to be caught here.
+_DEGENERATE_IC_EPSILON = 1e-12
+
+_DEGENERATE_SUBQUERY = (
+    "SELECT prediction_hash FROM fold_metrics "
+    f"WHERE ic IS NULL OR ABS(ic) < {_DEGENERATE_IC_EPSILON}"
+)
 
 
 def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash") -> str:
@@ -86,11 +95,32 @@ def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash")
 
     When a regularized linear model (LASSO / ElasticNet at high ``alpha_frac``)
     shrinks every coefficient to zero on a fold, that fold's predictions are
-    constant and its IC is undefined — stored as NULL in ``fold_metrics.ic``.
-    The pooled daily IC is then computed over the surviving folds only, which
-    biases it (typically upward) and is not a valid model result. Such
-    prediction sets must never be selected for backtesting or any follow-on
-    leaderboard.
+    constant and its IC is undefined. The pooled daily IC is then computed over
+    the surviving folds only, which biases it (typically upward) and is not a
+    valid model result. Such prediction sets must never be selected for
+    backtesting or any follow-on leaderboard.
+
+    **An undefined IC does not always reach the registry as NULL.** Where the
+    correlation is reduced numerically rather than short-circuited on zero
+    variance, a constant fold stores machine epsilon instead, and a test for
+    NULL alone reads that prediction set as a valid one. Measured 2026-09-14 on
+    ``nasdaq100_microstructure``: twelve prediction sets - LASSO and ElasticNet
+    at alpha 0.01 and 0.1, on ``fwd_ret_5m``, ``fwd_ret_15m`` and ``fwd_ret_60m``
+    - store a fold IC of 2.0e-16 with an IC standard deviation of 2.0e-17, and
+    the registry holds not one NULL fold IC. All twelve passed the NULL test,
+    entered the published ``...-linear-validation-v1`` population and carried 396
+    backtests, where a constant prediction leaves top-k selection with no
+    ranking to apply and the basket falls back to row order. Their best Sharpe
+    was 1.467, and on ``fwd_ret_60m`` only three of 1,015 validation backtests
+    beat it.
+
+    So the test is NULL **or** an IC indistinguishable from zero. The threshold
+    is 1e-12, six orders of magnitude above the epsilon values it catches and
+    five below the smallest real fold IC in the fleet - ``latent_factors/cae`` on
+    ``sp500_equity_option_analytics``, -3.2e-07 over 525 entities, which stays
+    selectable. Widening the rule changes nothing outside nasdaq: measured across
+    all nine registries the same day, it excludes those twelve prediction sets
+    and no others.
 
     Returns a fragment beginning with ``" AND "`` suitable for appending to a
     WHERE clause; takes no bound parameters. Pass the column expression naming
