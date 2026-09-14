@@ -409,45 +409,42 @@ def _validation_fold_ids(path: Path, function: str, validator: str) -> str:
     return next(ast.unparse(kw.value) for kw in call.keywords if kw.arg == "fold_ids")
 
 
-def test_the_tree_validation_expects_the_folds_it_adopted() -> None:
-    """The tree population and the prediction population are different sets on a resume.
+def test_the_native_path_expects_the_folds_it_adopted() -> None:
+    """One set, not two, on the native path - and the reason is the shards.
 
-    `validate_deep_checkpoint_population` reads the whole staging tree and calls
-    anything outside the declared population an undeclared artifact, so validating
-    against the refit folds alone fails on a tree that is correct - after the resume
-    has paid to refit the rest.
+    A native resume reads its checkpoint metrics from `save_dir/_incremental`, and the
+    adopted folds' shards are still there: `clear_fold_predictions` drops one
+    `(config, fold)` glob at that fold's start, so only a refit fold loses its own. So
+    the adopted folds appear in both populations - the per-checkpoint coverage
+    comparison, which would otherwise skip every checkpoint and leave the aggregation
+    with nothing to assemble, and the staging-tree validation, which would otherwise
+    call them undeclared artifacts.
     """
+    body = _function(DEEP_LEARNING, "run_dl_cv")
+    seed = next(
+        node.value
+        for node in ast.walk(body)
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "expected_fold_ids"
+    )
+    assert "adopted" in ast.unparse(seed), (
+        f"expected_fold_ids must start from the adopted folds, got {ast.unparse(seed)}"
+    )
+
     fold_ids = _validation_fold_ids(
         DEEP_LEARNING, "run_dl_cv", "validate_deep_checkpoint_population"
     )
-    assert "adopted" in fold_ids, (
-        f"the tree validation must expect the adopted folds, got fold_ids={fold_ids}"
-    )
+    assert "adopted" in fold_ids
 
 
-def test_the_coverage_comparison_does_not_expect_the_adopted_folds() -> None:
-    """The other half of the same distinction, and it fails in the opposite direction.
+def test_the_darts_path_keeps_the_two_populations_apart() -> None:
+    """The Darts path aggregates from in-memory slices, so the sets genuinely differ.
 
-    A checkpoint is compared against the folds this run produced predictions for. Add
-    the adopted folds there and every checkpoint mismatches, every one is skipped, and
-    the aggregation is left with no metrics at all.
+    `cfg_slices` holds only what this run predicted, so expecting the adopted folds in
+    the coverage comparison skips every checkpoint and `assemble_cv_result` raises. The
+    tree validation still has to expect them, because the tree holds them.
     """
-    body = _function(DEEP_LEARNING, "run_dl_cv")
-    comparison = next(
-        node
-        for node in ast.walk(body)
-        if isinstance(node, ast.Compare)
-        and isinstance(node.left, ast.Name)
-        and node.left.id == "fold_ids"
-    )
-    assert "adopted" not in ast.unparse(comparison), (
-        "the per-checkpoint coverage comparison must not expect folds this run did not "
-        "produce predictions for"
-    )
-
-
-def test_the_darts_backend_is_told_what_was_adopted() -> None:
-    """The Darts path keeps its own copy of both sets, and needs the same split."""
     darts = REPO / "case_studies" / "utils" / "darts_forecasting.py"
     signature = _function(darts, "run_darts_cv").args
     names = {arg.arg for arg in signature.args + signature.kwonlyargs}
@@ -468,6 +465,53 @@ def test_the_darts_backend_is_told_what_was_adopted() -> None:
         )
     )
     assert "already_fitted_folds" not in ast.unparse(expected.value), (
-        "expected_fold_ids drives the per-checkpoint coverage comparison; including the "
-        "adopted folds there skips every checkpoint and leaves no metrics to assemble"
+        "expected_fold_ids drives the per-checkpoint coverage comparison, and the Darts "
+        "path predicts nothing for an adopted fold"
     )
+
+
+class TestPrunedShardsForceARefit:
+    """A fold whose prediction shards have gone cannot be adopted on the native path."""
+
+    @staticmethod
+    def _shards(tmp_path: Path, folds, epochs=(5, 10)) -> Path:
+        from case_studies.utils.registry.store import incremental_shard_path
+
+        incr = tmp_path / "_incremental"
+        incr.mkdir(parents=True, exist_ok=True)
+        for fold in folds:
+            for epoch in epochs:
+                # Named by the producer, so the test cannot drift from the file layout.
+                incremental_shard_path(incr, CONFIG, fold, epoch).write_bytes(b"")
+        return tmp_path
+
+    def test_a_fold_with_shards_stays_adopted(self, tmp_path: Path) -> None:
+        from case_studies.utils.deep_learning import _folds_with_prediction_shards
+
+        self._shards(tmp_path, (0, 1, 2))
+        kept = _folds_with_prediction_shards(tmp_path, [{"config_name": CONFIG}], {0, 1, 2})
+        assert kept == {0, 1, 2}
+
+    def test_a_fold_whose_shards_were_pruned_is_refit(self, tmp_path: Path) -> None:
+        """Adopting it anyway leaves every checkpoint short and nothing to assemble."""
+        from case_studies.utils.deep_learning import _folds_with_prediction_shards
+
+        self._shards(tmp_path, (0, 2))
+        kept = _folds_with_prediction_shards(tmp_path, [{"config_name": CONFIG}], {0, 1, 2})
+        assert kept == {0, 2}
+
+    def test_a_missing_incremental_directory_adopts_nothing(self, tmp_path: Path) -> None:
+        from case_studies.utils.deep_learning import _folds_with_prediction_shards
+
+        assert _folds_with_prediction_shards(tmp_path, [{"config_name": CONFIG}], {0, 1}) == set()
+        assert _folds_with_prediction_shards(None, [{"config_name": CONFIG}], {0, 1}) == set()
+
+
+def test_the_native_resume_checks_its_shards_before_adopting() -> None:
+    """Without this the resume fails at aggregation, after refitting the other folds."""
+    names = {
+        node.func.id
+        for node in ast.walk(_function(DEEP_LEARNING, "run_dl_cv"))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_folds_with_prediction_shards" in names

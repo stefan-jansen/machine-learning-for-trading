@@ -1581,6 +1581,29 @@ def _folds_already_fitted(
     )
 
 
+def _folds_with_prediction_shards(
+    save_dir: Path | None,
+    configs: list[dict[str, Any]],
+    folds: set[int],
+) -> set[int]:
+    """Narrow `folds` to those whose incremental prediction shards are still on disk."""
+    if save_dir is None:
+        return set()
+    incr_dir = Path(save_dir) / "_incremental"
+    if not incr_dir.exists():
+        return set()
+    present: set[int] = set()
+    for cfg in configs:
+        for stem, _checkpoint, _path in incremental_prediction_shards(incr_dir, cfg["config_name"]):
+            _, _, fold = stem.rpartition("_fold")
+            if fold.isdigit():
+                present.add(int(fold))
+    dropped = folds - present
+    if dropped:
+        print(f"  no prediction shards for fold(s) {sorted(dropped)} - refitting them")
+    return folds & present
+
+
 def _clear_partial_folds(staging: Path, config_name: str, folds: Sequence[int]) -> int:
     """Drop the checkpoints of folds about to be refit, and report how many files went.
 
@@ -2521,6 +2544,17 @@ def run_dl_cv(
     # because this ran below it, so a Darts resume refit the folds it had adopted and hit
     # the immutable-checkpoint conflict on the first one.
     adopted = {int(fold) for fold in (already_fitted_folds or [])}
+    if adopted and not uses_darts_backend(configs):
+        # A native resume aggregates from the prediction shards under
+        # `save_dir/_incremental`, which the adopted folds wrote during the run that
+        # died and which nothing since has cleared - `clear_fold_predictions` drops one
+        # `(config, fold)` glob at that fold's start, so only a refit fold loses its own.
+        # A fold whose shards have gone cannot contribute a checkpoint metric, and
+        # adopting it anyway leaves every checkpoint short of the expected population,
+        # skipped, and the aggregation with nothing to assemble. Refit it instead, which
+        # costs one fold rather than the failure of the whole resume after it has paid
+        # for the others.
+        adopted = _folds_with_prediction_shards(save_dir, configs, adopted)
     if selected_folds:
         selected = {int(fold) for fold in selected_folds}
         splits = [split for split in splits if int(split["fold"]) in selected]
@@ -2600,7 +2634,11 @@ def run_dl_cv(
         }
 
     n_valid_folds = 0
-    expected_fold_ids: list[int] = []
+    # The adopted folds belong here. Their shards are read back above and their
+    # checkpoints are in the staging tree, so both the per-checkpoint coverage
+    # comparison and the tree validation have to expect them - the first would skip
+    # every checkpoint without them, the second would call them undeclared artifacts.
+    expected_fold_ids: list[int] = sorted(adopted)
 
     _has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
@@ -2979,11 +3017,6 @@ def run_dl_cv(
                 validate_deep_checkpoint_population,
             )
 
-            # The tree population and the prediction population are not the same set on a
-            # resume. `expected_fold_ids` is the folds this run produced predictions for,
-            # which is what the checkpoint-coverage comparison above needs. The tree also
-            # holds the folds this run adopted, and validating without them calls them
-            # undeclared artifacts on a tree that is correct.
             validate_deep_checkpoint_population(
                 checkpoint_root,
                 config_name=config_name,
