@@ -1,4 +1,10 @@
-"""Where `load_gbm_feature_importance` looks for LightGBM boosters."""
+"""Where the GBM importance loaders look for LightGBM boosters.
+
+Imports `case_studies.utils.booster_paths` rather than the two modules that
+call it. Both of those import lightgbm and torch at module scope for a load-
+order race, and `test-unit` installs neither, so importing either one here
+failed the required job at collection.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from case_studies.utils.model_analysis import _BOOSTER_LAYOUTS, _booster_dir
+from case_studies.utils.booster_paths import BOOSTER_LAYOUTS, booster_dir
 
 
-@pytest.mark.parametrize("parts", _BOOSTER_LAYOUTS)
+@pytest.mark.parametrize("parts", BOOSTER_LAYOUTS)
 def test_every_declared_layout_is_found(tmp_path: Path, parts: tuple[str, ...]) -> None:
     """Each layout in the table resolves, so adding one cannot silently do nothing."""
     t_hash = "abc123"
@@ -17,7 +23,7 @@ def test_every_declared_layout_is_found(tmp_path: Path, parts: tuple[str, ...]) 
     target.mkdir(parents=True)
     (target / "fold_0.txt").write_text("")
 
-    assert _booster_dir(tmp_path, t_hash) == target
+    assert booster_dir(tmp_path, t_hash) == target
 
 
 def test_the_current_trainer_layout_wins_over_an_older_one(tmp_path: Path) -> None:
@@ -34,7 +40,7 @@ def test_the_current_trainer_layout_wins_over_an_older_one(tmp_path: Path) -> No
         d.mkdir(parents=True)
         (d / "fold_0.txt").write_text("")
 
-    assert _booster_dir(tmp_path, t_hash) == current
+    assert booster_dir(tmp_path, t_hash) == current
 
 
 def test_absent_boosters_return_none(tmp_path: Path) -> None:
@@ -48,7 +54,7 @@ def test_absent_boosters_return_none(tmp_path: Path) -> None:
     """
     (tmp_path / "run_log" / "training" / "abc123").mkdir(parents=True)
 
-    assert _booster_dir(tmp_path, "abc123") is None
+    assert booster_dir(tmp_path, "abc123") is None
 
 
 def test_recurrence_counts_folds_not_rows(capsys, tmp_path, monkeypatch) -> None:

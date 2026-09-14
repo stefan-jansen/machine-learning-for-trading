@@ -44,6 +44,7 @@ import polars as pl
 import torch  # noqa: F401
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
+from case_studies.utils.booster_paths import booster_dir
 from case_studies.utils.conformal import (
     sizing_conformal_lag,
     walk_forward_conformal_coverage,
@@ -563,19 +564,12 @@ def load_gbm_feature_importance(
     import lightgbm as lgb
 
     case_dir = get_case_study_dir(case_study)
-    # The training stage writes boosters under the run's own models directory. The two
-    # older layouts are kept because run logs predating that move still carry them.
-    candidates = [
-        case_dir / "run_log" / "training" / training_hash / "models" / "boosters",
-        case_dir / "run_log" / "training" / training_hash / "boosters",
-        case_dir / "run_log" / "models" / training_hash / "boosters",
-    ]
-    booster_dir = next((path for path in candidates if path.exists()), None)
-    if booster_dir is None:
+    run_booster_dir = booster_dir(case_dir, training_hash)
+    if run_booster_dir is None:
         return pl.DataFrame()
 
     rows = []
-    for booster_file in sorted(booster_dir.glob("*.txt")):
+    for booster_file in sorted(run_booster_dir.glob("*.txt")):
         fold_text = booster_file.stem.split("fold")[-1].lstrip("_")
         with contextlib.suppress(ValueError):
             fold_id = int(fold_text)

@@ -44,6 +44,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 
 from utils.paths import get_case_study_dir
 
+from .booster_paths import booster_dir
 from .notebook_contracts import defined_ic, degenerate_prediction_sql
 
 # ---------------------------------------------------------------------------
@@ -905,40 +906,6 @@ def regime_conditional_ic(
 # ---------------------------------------------------------------------------
 
 
-_BOOSTER_LAYOUTS = (
-    ("training", "models", "boosters"),
-    ("training", "boosters"),
-    ("models", "boosters"),
-)
-
-
-def _booster_dir(case_dir: Path, training_hash: str) -> Path | None:
-    """Where this run's LightGBM boosters are, across the layouts that exist on disk.
-
-    Three, and the first is the one the trainer writes today: ``run_log/training/{hash}/
-    models/boosters/``. The loader checked only the other two and so found nothing on
-    ``nasdaq100_microstructure``, where all 50 gbm runs carry the first - and it returns
-    ``None`` for "no boosters", which the caller reads as "this family emits no
-    importances" rather than as "the path was wrong". The notebook then draws its feature
-    figure from the correlation fallback while its prose describes gain-based importance.
-
-    Ordered most recent first and checked rather than declared, so a case study on an
-    older layout is unaffected: a directory that does not exist cannot match. The current
-    layout is the one the training stage writes (``utils/gbm.py:2334``) and the order
-    matches ``case_studies/utils/insight_chapter.py``, which resolves the same three.
-
-    ``main`` fixed this independently and inline while this branch was open; the two
-    agree on all three paths and their order. This keeps the extracted form because
-    ``tests/test_gbm_booster_layout.py`` asserts against the table, and folds in the two
-    source references the inline version carried.
-    """
-    for parts in _BOOSTER_LAYOUTS:
-        candidate = case_dir.joinpath("run_log", *parts[:1], training_hash, *parts[1:])
-        if candidate.is_dir():
-            return candidate
-    return None
-
-
 def load_gbm_feature_importance(
     case_study_id: str,
     label: str | None = None,
@@ -977,11 +944,11 @@ def load_gbm_feature_importance(
 
     results = []
     for t_hash, config_name in rows:
-        booster_dir = _booster_dir(case_dir, t_hash)
-        if booster_dir is None:
+        run_booster_dir = booster_dir(case_dir, t_hash)
+        if run_booster_dir is None:
             continue
 
-        for booster_file in sorted(booster_dir.glob("*.txt")):
+        for booster_file in sorted(run_booster_dir.glob("*.txt")):
             # Extract fold from filename: fold_0.txt or {config}_fold0.txt
             name = booster_file.stem
             fold_str = name.split("fold")[-1].lstrip("_") if "fold" in name else "0"
