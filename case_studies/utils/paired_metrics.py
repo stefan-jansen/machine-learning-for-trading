@@ -971,9 +971,10 @@ def _drop_degenerate_predictions(cs: str, cand):
     """Candidates whose prediction set selection refuses to consider.
 
     A LASSO or ElasticNet fit that shrinks every coefficient to zero on a fold predicts a
-    constant there, and that fold's IC is undefined - stored as NULL in ``fold_metrics.ic``.
-    The pooled IC is then computed over the surviving folds only, so the number is biased and
-    is not a model result. ``degenerate_prediction_sql`` states the rule and
+    constant there, so that fold ranks nothing and the pooled IC computed over it is biased
+    rather than a model result. ``degenerate_prediction_sql`` states the rule - both limbs of
+    it, the NULL IC of an all-tied fold and the denormal one of a fold constant only to display
+    precision - and
     ``selectable_validation_candidates`` applies it, which is why the published carrier cannot
     be one of these.
 
