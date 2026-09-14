@@ -55,7 +55,7 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             );
             CREATE TABLE prediction_sets (
                 prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT,
-                checkpoint_value REAL
+                checkpoint_value REAL, checkpoint_kind TEXT
             );
             CREATE TABLE prediction_metrics (
                 prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_mean_daily REAL,
@@ -70,7 +70,7 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 total_return REAL, volatility REAL, num_trades REAL
             );
             INSERT INTO training_runs VALUES ('train', 'gbm', 'cfg', 'fwd_ret_5d');
-            INSERT INTO prediction_sets VALUES ('pred', 'train', 'validation', 0);
+            INSERT INTO prediction_sets VALUES ('pred', 'train', 'validation', 0, 'iteration');
             INSERT INTO prediction_metrics VALUES ('pred', 0.02, 0.02, 0.0, 0.04, 250);
             INSERT INTO fold_metrics VALUES ('pred', 0.02);
             """

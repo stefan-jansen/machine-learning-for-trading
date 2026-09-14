@@ -34,7 +34,8 @@ def _build_registry(case_dir) -> None:
                 prediction_hash TEXT PRIMARY KEY,
                 training_hash TEXT,
                 split TEXT,
-                checkpoint_value REAL
+                checkpoint_value REAL,
+                checkpoint_kind TEXT
             );
             CREATE TABLE prediction_metrics (
                 prediction_hash TEXT PRIMARY KEY,
@@ -81,7 +82,7 @@ def _build_registry(case_dir) -> None:
                 (training_hash, family, config),
             )
             db.execute(
-                "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0)",
+                "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0, 'iteration')",
                 (prediction_hash, training_hash),
             )
             db.execute(
@@ -190,7 +191,7 @@ def test_prediction_population_is_filtered_before_checkpoint_ranking(tmp_path) -
                 (training_hash,),
             )
             db.execute(
-                "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0)",
+                "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0, 'iteration')",
                 (prediction_hash, training_hash),
             )
             db.execute(
@@ -407,7 +408,9 @@ def test_fold_metric_backfill_is_restricted_to_requested_label(tmp_path, monkeyp
     _build_registry(case_dir)
     with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
         db.execute("INSERT INTO training_runs VALUES ('train_alt', 'gbm', 'alt', 'fwd_ret_10d')")
-        db.execute("INSERT INTO prediction_sets VALUES ('alt', 'train_alt', 'validation', 0)")
+        db.execute(
+            "INSERT INTO prediction_sets VALUES ('alt', 'train_alt', 'validation', 0, 'iteration')"
+        )
         db.execute("INSERT INTO prediction_metrics VALUES ('alt', 0.1, 0.1, 0, 0.2, 4)")
         db.execute("INSERT INTO backtest_runs VALUES ('bt_alt', 'alt', '{}', 'signal')")
         db.execute("INSERT INTO backtest_metrics VALUES ('bt_alt', 1, 0, 0, 0, 0, 1)")
@@ -592,7 +595,7 @@ def test_a_retired_prediction_cannot_set_a_bar_the_named_population_fails(tmp_pa
             "INSERT INTO training_runs VALUES ('train_retired', 'gbm', 'retired', 'fwd_ret_5d')"
         )
         db.execute(
-            "INSERT INTO prediction_sets VALUES ('retired', 'train_retired', 'validation', 0)"
+            "INSERT INTO prediction_sets VALUES ('retired', 'train_retired', 'validation', 0, 'iteration')"
         )
         db.execute("INSERT INTO prediction_metrics VALUES ('retired', 0.1, 0.1, 0.0, 0.2, 99.0)")
         db.execute(
