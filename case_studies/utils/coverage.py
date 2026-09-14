@@ -1059,17 +1059,24 @@ def check_prediction_cross_section(
         #
         # The key holds `id(input_panel)` and the cache entry holds a reference to that
         # frame, so the id cannot be recycled onto a different panel while the entry is
-        # live - an id is unique among live objects and this keeps the object live. The
-        # rest of the key is what determines `want`: two callers on the same panel asking
-        # about different labels, splits or fold sets get different entries.
+        # live - an id is unique among live objects and this keeps the object live.
+        #
+        # The rest of the key has to be everything that determines `want`, and that is more
+        # than the case study and the label: the same pair names different artifacts under
+        # different registries, so the label artifact path is in the key rather than
+        # `case_study` alone. `decision_axis` narrows `want` too and is not hashable, so a
+        # call that passes one takes no entry and leaves none - bypassing the declaration
+        # memo alone would not have helped, because this memo sits after the narrowing and
+        # would have answered from an entry built on the full axis.
         cache_key = (
+            str(_label_artifact(case_study, label, case_dir)),
             case_study,
             label,
             split,
             tuple(sorted(folds)) if folds is not None else None,
             id(input_panel),
         )
-        cached = _REACHABLE_CACHE.get(cache_key)
+        cached = None if decision_axis is not None else _REACHABLE_CACHE.get(cache_key)
         if cached is not None and cached[0] is input_panel:
             reachable = cached[1]
         else:
@@ -1090,7 +1097,8 @@ def check_prediction_cross_section(
                 _normalize_time(offered.get_column("session")).alias("session")
             )
             reachable = want.join(offered, on=["entity", "session"], how="semi")
-            _REACHABLE_CACHE[cache_key] = (input_panel, reachable)
+            if decision_axis is None:
+                _REACHABLE_CACHE[cache_key] = (input_panel, reachable)
         achievable = reachable.height
         delivered_achievable = reachable.join(got, on=["entity", "session"], how="semi").height
 

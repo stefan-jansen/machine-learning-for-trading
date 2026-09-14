@@ -217,3 +217,59 @@ def test_the_memo_is_not_load_bearing_for_correctness(case_dir, monkeypatch):
     assert cached.accountable_coverage == uncached.accountable_coverage
     assert cached.achievable == uncached.achievable
     assert cached.per_fold == uncached.per_fold
+
+
+def test_one_panel_across_two_decision_axes_does_not_reuse_the_first(case_dir):
+    """A narrowed decision axis narrows `want`, so the narrowing built on one is wrong for
+    the other. Bypassing only the declaration memo does not cover this: the reachable memo
+    sits after the narrowing and would answer from the entry the full-axis call left.
+
+    The first call restricts the axis to fold 0's sessions, and the second asks about the
+    full axis with predictions that cover only those sessions. A reused entry reports the
+    unscored half as unreachable, which reads as complete coverage.
+    """
+    first_week = [ts for ts in SESSIONS if ts.day <= 10]
+    panel = _panel()
+    restricted = check_prediction_cross_section(
+        _predictions(),
+        "cs",
+        LABEL,
+        case_dir=case_dir,
+        input_panel=panel,
+        decision_axis=pl.Series("session", first_week),
+    )
+    assert restricted.achievable == len(first_week) * len(UNIVERSE)
+
+    full = check_prediction_cross_section(
+        _predictions(),
+        "cs",
+        LABEL,
+        case_dir=case_dir,
+        input_panel=panel,
+    )
+    assert full.achievable == len(SESSIONS) * len(UNIVERSE), (
+        "the full axis was served the restricted axis's narrowing"
+    )
+
+
+def test_two_registries_sharing_a_case_study_and_label_do_not_share_an_entry(tmp_path):
+    """`case_study` does not identify a registry. A preview writes its own directory and a
+    reader's clone is another, and both answer to the same case study and label while
+    holding different label artifacts. The key carries the artifact path for that reason.
+    """
+    wide_dir = tmp_path / "wide"
+    narrow_dir = tmp_path / "narrow"
+    _write_label(wide_dir, LABEL, universe=UNIVERSE)
+    _write_label(narrow_dir, LABEL, universe=("AAA",))
+    panel = _panel()
+
+    on_wide = check_prediction_cross_section(
+        _predictions(), "cs", LABEL, case_dir=wide_dir, input_panel=panel
+    )
+    on_narrow = check_prediction_cross_section(
+        _predictions(), "cs", LABEL, case_dir=narrow_dir, input_panel=panel
+    )
+    assert on_wide.achievable == len(SESSIONS) * len(UNIVERSE)
+    assert on_narrow.achievable == len(SESSIONS), (
+        "the second registry was served the first registry's declaration"
+    )
