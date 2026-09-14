@@ -807,7 +807,10 @@ sample_dates = (
     .sort()
     .gather_every(max(1, eval_panel["timestamp"].n_unique() // 200))
 )
-correlation_sample = eval_panel.filter(pl.col("timestamp").is_in(sample_dates))
+# `implode` because polars deprecated `is_in` against a Series of the same dtype as
+# ambiguous: it cannot tell "is this value one of those" from an element-wise compare.
+# Imploding says which was meant. Verified to select the same rows.
+correlation_sample = eval_panel.filter(pl.col("timestamp").is_in(sample_dates.implode()))
 high_corr_pairs = []
 for left_idx, left in enumerate(rankable):
     for right in rankable[left_idx + 1 :]:

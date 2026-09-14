@@ -106,7 +106,11 @@ from utils.artifact_specs import (
     resolve_label_buffer,
     resolve_label_horizon,
 )
-from utils.cv_splits import generate_cv_splits, load_evaluation_config
+from utils.cv_splits import (
+    generate_cv_splits,
+    load_evaluation_config,
+    normalize_label_buffer,
+)
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -151,8 +155,13 @@ LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, _SETUP)
 LABEL_HORIZON = resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, _SETUP)
 assert LABEL_BUFFER, f"No label buffer configured for {PRIMARY_LABEL}"
 # The Newey-West lag below is counted in decision timestamps, not in hours, so the
-# configured horizon is converted into settlement bars once, here.
-LABEL_HORIZON_BARS = round(pd.Timedelta(LABEL_BUFFER) / pd.Timedelta(hours=BAR_HOURS))
+# configured horizon is converted into settlement bars once, here. The conversion goes
+# through `normalize_label_buffer` because the configured string is "8H" and pandas
+# deprecated "H", so `pd.Timedelta` on the raw value writes a FutureWarning into the
+# page. The configured string itself is what registered training runs hash, so it stays
+# as declared. The helper is unit-aware rather than a `.lower()`: "21D" stays "21D".
+LABEL_BUFFER_DELTA = pd.Timedelta(normalize_label_buffer(LABEL_BUFFER))
+LABEL_HORIZON_BARS = round(LABEL_BUFFER_DELTA / pd.Timedelta(hours=BAR_HOURS))
 
 set_global_seeds(SEED)
 
@@ -283,8 +292,8 @@ holdout_end = pd.Timestamp(_evaluation["holdout_end"], tz="UTC")
 print(f"Walk-forward folds: {len(VALIDATION_FOLDS)}")
 for f in VALIDATION_FOLDS:
     embargo = f["test_start"] - f["train_end"]
-    label_endpoint = f["test_end"] + pd.Timedelta(LABEL_BUFFER)
-    assert embargo >= pd.Timedelta(LABEL_BUFFER)
+    label_endpoint = f["test_end"] + LABEL_BUFFER_DELTA
+    assert embargo >= LABEL_BUFFER_DELTA
     assert label_endpoint < holdout_start
     print(
         f"  Fold {f['fold']}: fitted on [{f['train_start']} to {f['train_end']}], "
