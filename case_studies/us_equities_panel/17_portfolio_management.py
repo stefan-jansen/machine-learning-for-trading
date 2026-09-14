@@ -109,8 +109,6 @@ from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_lin
 CASE_STUDY_ID = "us_equities_panel"
 BASELINE_SET_NAMES = [
     "us-equities-fwd-ret-1d-baseline-v1",
-    "us-equities-fwd-ret-5d-baseline-v1",
-    "us-equities-fwd-ret-21d-baseline-v1",
 ]
 EXECUTION_TIER = "canonical"
 POPULATION_NAME = ""
