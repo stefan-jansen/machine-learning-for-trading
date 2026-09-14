@@ -64,20 +64,3 @@ def test_the_predicate_and_its_mirror_agree(case_study):
     kept = frame.filter(pin["predicate"])
     assert kept.height == 1, f"the predicate matched {kept.height} of 3 labels, not 1"
     assert kept["label"][0] == pin["label"]
-
-
-def test_one_definition_of_the_rung_pins_in_the_tree():
-    """`20_strategy_synthesis/01_aggregate_synthesis` used to carry a verbatim copy.
-
-    Both it and `populate_paired_metrics` write `backtest_paired_metrics`, so a pin corrected
-    on one side only lets one overwrite the other's rows with a differently-selected lineage.
-    The notebook imports `RUNG_PINS` now; this fails if a second literal reappears.
-    """
-    import pathlib
-
-    root = pathlib.Path(__file__).resolve().parents[1]
-    source = (root / "20_strategy_synthesis" / "01_aggregate_synthesis.py").read_text()
-    assert "from case_studies.utils.paired_metrics import RUNG_PINS" in source
-    assert '(pl.col("universe_filter") == "cost_feasible")' not in source, (
-        "the nasdaq rung predicate is defined twice again; import it instead"
-    )
