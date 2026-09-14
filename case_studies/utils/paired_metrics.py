@@ -96,8 +96,21 @@ def _min_paired_n(ppy: int) -> int:
 # LIMIT 1` free to pick whichever rung is higher in current data. The pin combines the universe
 # with `exit_at_max_days` so the rank-1 row is deterministic and HTM-coherent.
 #
-# nasdaq100_microstructure: the cost-feasible ensemble, chosen before the holdout was opened and
-# matched on those two design attributes, which any registry can satisfy.
+# nasdaq100_microstructure: the cost-feasible ensemble on the primary label, chosen before the
+# holdout was opened and matched on design attributes any registry can satisfy.
+#
+# The label is part of the pin and was not always. `14_backtest` registers one ensemble per
+# label, so universe and family alone matched three rows on 2026-09-14 - `fwd_ret_15m` +0.566,
+# `fwd_ret_5m` +0.215, `fwd_ret_60m` -0.268 - and `ORDER BY sharpe DESC LIMIT 1` chose among
+# them. It happened to choose correctly, because the featured label also held the best Sharpe;
+# a better `fwd_ret_5m` ensemble would have moved the rank-1 rung to a label this case study
+# is not featured on, with nothing announcing it. A pin that omits a dimension selects along
+# it silently.
+#
+# `fwd_ret_15m` is what the book prints for this case study, in Table 11.6
+# (`NASDAQ-100 15m | fwd_ret_15m`), in Chapter 12's case-study table (`15 minutes | forward
+# return`) and in Chapter 13's (`15 minutes | NLinear`). `config/setup.yaml::labels.primary`
+# says the same, and `tests/test_rung_pin_label.py` asserts the two do not drift apart.
 RUNG_PINS: dict[str, dict] = {
     "sp500_options": {
         "predicate": (pl.col("universe_filter") == "liquid") & pl.col("exit_at_max_days").is_null(),
@@ -106,9 +119,12 @@ RUNG_PINS: dict[str, dict] = {
     },
     "nasdaq100_microstructure": {
         "predicate": (pl.col("universe_filter") == "cost_feasible")
-        & (pl.col("family") == "ensemble"),
+        & (pl.col("family") == "ensemble")
+        & (pl.col("label") == "fwd_ret_15m"),
         "universe_filter": "cost_feasible",
         "exit_at_max_days": None,
+        # Mirrors the predicate for the SQL paths that cannot take a polars expression.
+        "label": "fwd_ret_15m",
     },
 }
 

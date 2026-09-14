@@ -281,32 +281,17 @@ refuse_partial_full_mode(
 # entry here skip the filter altogether.
 
 # %%
+# The rung pins are imported, not restated. This file used to carry its own copy of both
+# predicates and of the dict around them, verbatim, and `paired_metrics.populate_paired_metrics`
+# carries the other - both write `backtest_paired_metrics`, so a pin corrected on one side only
+# would let one of them overwrite the other's rows with a differently-selected lineage. The
+# duplication is how that drift happens, and the mirror keys beside each predicate
+# (`universe_filter`, `exit_at_max_days`, `label`) exist for the SQL paths and `progression(...)`
+# calls that cannot take a polars expression.
+from case_studies.utils.paired_metrics import RUNG_PINS as _CLUSTER_RUNG_RESTRICTIONS  # noqa: E402
 from case_studies.utils.strategy_analysis import (  # noqa: E402
     LABEL_RESTRICTIONS as _CLUSTER_LABEL_RESTRICTIONS,
 )
-
-_RUNG3_PREDICATE = (pl.col("universe_filter") == "liquid") & pl.col("exit_at_max_days").is_null()
-
-# NASDAQ-100 pin: cost-feasible ensemble, chosen before the holdout was opened
-# and matched on those two design attributes, which any registry can satisfy.
-_NASDAQ_PREDICATE = (pl.col("universe_filter") == "cost_feasible") & (
-    pl.col("family") == "ensemble"
-)
-
-_CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
-    "sp500_options": {
-        "predicate": _RUNG3_PREDICATE,
-        # Mirrors the polars predicate above for the holdout SQL path and
-        # for `progression(...)` calls that still need the scope pin.
-        "universe_filter": "liquid",
-        "exit_at_max_days": None,
-    },
-    "nasdaq100_microstructure": {
-        "predicate": _NASDAQ_PREDICATE,
-        "universe_filter": "cost_feasible",
-        "exit_at_max_days": None,
-    },
-}
 
 
 def _retired(cs: str) -> frozenset[str]:
