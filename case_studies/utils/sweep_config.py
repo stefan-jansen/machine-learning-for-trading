@@ -25,6 +25,8 @@ from __future__ import annotations
 import polars as pl
 import yaml
 
+from case_studies.utils.warning_policy import warn_the_reader
+
 # ---------------------------------------------------------------------------
 # MAE/MFE-calibrated risk controls (Ch19)
 # ---------------------------------------------------------------------------
@@ -457,12 +459,13 @@ def ranked_cross_section_width(
     if not widths:
         return None
     if len(widths) > 1:
-        warnings.warn(
+        warn_the_reader(
             f"{case_study}/{label}: registered prediction sets disagree on the ranked "
             f"cross-section ({sorted(widths)}), so the entry-scheme feasibility rule falls "
             "back to the caller's price-panel width. Pass ranked_width= with the width of "
             "the population actually being swept.",
-            stacklevel=2,
+            source="ranked_width_from_registry",
+            key=(case_study, label, tuple(sorted(widths))),
         )
         return None
     return widths.pop()

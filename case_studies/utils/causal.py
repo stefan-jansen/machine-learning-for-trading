@@ -65,6 +65,7 @@ if TYPE_CHECKING:
 
 
 from case_studies.utils.preview_fields import DML_PREVIEW_FIELDS as _DML_PREVIEW_FIELDS
+from case_studies.utils.warning_policy import warn_the_reader
 
 
 @dataclass(frozen=True)
@@ -627,13 +628,13 @@ def manual_dml_timeseries(
             # bandwidth cap becomes self-consistent: `max(1, n_periods // 2)` floors
             # the bandwidth at one lag even when the sample holds none.
             covariance_type = "failed"
-            warnings.warn(
-                f"manual_dml_timeseries: Driscoll-Kraay needs at least two decision "
-                f"times; got {n_periods} over {n_valid} rows. Reporting se_hac, "
-                f"t_stat_hac and p_value_hac as NaN; se_iid carries the HC0 standard "
-                f"error under its own name.",
-                RuntimeWarning,
-                stacklevel=2,
+            warn_the_reader(
+                f"Driscoll-Kraay needs at least two decision times; got {n_periods} over "
+                f"{n_valid} rows. Reporting se_hac, t_stat_hac and p_value_hac as NaN; "
+                f"se_iid carries the HC0 standard error under its own name.",
+                source="manual_dml_timeseries",
+                key=("dk_periods", n_periods, n_valid),
+                category=RuntimeWarning,
             )
         else:
             try:
@@ -669,13 +670,13 @@ def manual_dml_timeseries(
                 # what a singular or ill-conditioned fit raises; anything else here is
                 # a defect in this function and propagates.
                 covariance_type = "failed"
-                warnings.warn(
-                    f"manual_dml_timeseries: robust covariance failed "
-                    f"({type(exc).__name__}: {exc}). Reporting se_hac, t_stat_hac and "
-                    f"p_value_hac as NaN; se_iid carries the HC0 standard error under "
-                    f"its own name.",
-                    RuntimeWarning,
-                    stacklevel=2,
+                warn_the_reader(
+                    f"robust covariance failed ({type(exc).__name__}: {exc}). Reporting "
+                    f"se_hac, t_stat_hac and p_value_hac as NaN; se_iid carries the HC0 "
+                    f"standard error under its own name.",
+                    source="manual_dml_timeseries",
+                    key=("dk_failed", type(exc).__name__, str(exc)),
+                    category=RuntimeWarning,
                 )
 
         if covariance_type == "failed":
@@ -834,15 +835,16 @@ def _assert_placebo_permutation_possible(
         share = f"{short_segment_fraction:.2%} of"
         if short_segment_fraction < 0.0001:
             share = f"a {short_segment_fraction:.2e} fraction of"
-        warnings.warn(
+        warn_the_reader(
             f"block permutation with block_size={block_size} cannot move "
             f"{share} the treatment rows: they sit in segments "
             "too short to hold two blocks, so the placebo distribution holds them at "
             "their observed values and the refutation p-value is biased toward 1. Read "
             "placebo_frozen_fraction alongside the p-value, and lower block_size or "
             "widen gap_tolerance if the frozen share is large.",
-            UserWarning,
-            stacklevel=3,
+            source="block_permutation",
+            key=("frozen_blocks", block_size, share),
+            stacklevel=4,
         )
 
 
@@ -1040,20 +1042,17 @@ def run_dml_analysis(
             raise ValueError(f"Outcome '{outcome_col}' has near-zero variance")
 
         if hac_maxlags is None and horizon is None:
-            # `warnings` is imported at module scope. A local `import warnings` here made
-            # the name local to the whole function, so any other warnings.warn in
-            # run_dml_analysis raised UnboundLocalError whenever this branch was not
-            # taken - which is every caller that passes a horizon.
-            warnings.warn(
-                "run_dml_analysis: no horizon or hac_maxlags given; the second-stage "
-                "HAC bandwidth falls back to the horizon-blind cube-root rule, which "
-                "under-lags overlapping labels of horizon >= ~10 and overstates the "
-                "t-statistic. Pass the outcome horizon in observation periods: read the "
-                "horizon with resolve_label_horizon(case_study_id, label, setup) - not the "
-                "CV buffer, which can be longer - and convert it against the panel's own "
-                "cadence. embargo_from_buffer without observed_step applies per-unit "
-                "defaults instead, which read 24H as one period on an eight-hour panel.",
-                stacklevel=2,
+            warn_the_reader(
+                "no horizon or hac_maxlags given; the second-stage HAC bandwidth falls "
+                "back to the horizon-blind cube-root rule, which under-lags overlapping "
+                "labels of horizon >= ~10 and overstates the t-statistic. Pass the outcome "
+                "horizon in observation periods: read the horizon with "
+                "resolve_label_horizon(case_study_id, label, setup) - not the CV buffer, "
+                "which can be longer - and convert it against the panel's own cadence. "
+                "embargo_from_buffer without observed_step applies per-unit defaults "
+                "instead, which read 24H as one period on an eight-hour panel.",
+                source="run_dml_analysis",
+                key=("hac_fallback", treatment_col, outcome_col),
             )
 
         _dml_started_at = datetime.now(UTC).isoformat()
@@ -1167,14 +1166,15 @@ def run_dml_analysis(
             # `run_resolved_causal_request` refuses the run before this matters. Direct
             # callers of `run_dml_analysis` - the chapter-15 notebooks - do not, and they
             # are the ones who would have read the verdict.
-            warnings.warn(
-                f"run_dml_analysis: the observed t-statistic is not finite "
+            warn_the_reader(
+                f"the observed t-statistic is not finite "
                 f"(covariance_type={dml.get('covariance_type')!r}), so the "
                 f"{len(placebo_t_stats)} placebo draws have nothing to be compared "
                 f"against. Reporting no refutation rather than a verdict computed "
                 f"against NaN.",
-                RuntimeWarning,
-                stacklevel=2,
+                source="run_dml_analysis",
+                key=("nonfinite_t", dml.get("covariance_type"), len(placebo_t_stats)),
+                category=RuntimeWarning,
             )
         elif len(placebo_effects) >= MIN_PLACEBO_DRAWS:
             # THE TEST IS ON THE T-STATISTIC, NOT ON THETA, and the difference is not
@@ -1734,13 +1734,13 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
                 "treatment. One bar is a valid answer for a column built from quantities "
                 "carrying the row's own timestamp, and is how it is said."
             )
-        warnings.warn(
+        warn_the_reader(
             f"{study.case_study}: no construction window is declared for treatment "
             f"{treatment!r}, so the placebo block spans only the label buffer "
             f"({buffer_steps} bars). If the treatment is a rolling statistic, set "
             "`causal.treatment_window` in setup.yaml so the block can span it.",
-            UserWarning,
-            stacklevel=2,
+            source="resolve_placebo_block_size",
+            key=("no_treatment_window", study.case_study, treatment),
         )
     block_size = max(buffer_steps, treatment_window_steps or 1)
     block_size_basis = (
