@@ -384,12 +384,14 @@ if not cost_df.is_empty():
         subtitle="Validation months; the strategy is unchanged, only what it pays to trade",
     )
     ax.legend(frameon=False)
-    fig.tight_layout()
+    # No tight_layout(): matplotlibrc sets `figure.constrained_layout.use: True` repo-wide,
+    # and calling tight_layout() over it makes matplotlib switch layout engines and say so in
+    # a stderr block under the figure. See ml4t/agent-workspace#1106.
     show_with_alt(
         fig,
         "Line chart of validation Sharpe against the total commission and slippage "
         "charged per leg, from zero to fifty basis points. The line starts just under "
-        "2.95 and falls almost straight to about 2.65 at the right edge, staying far "
+        "3.66 and falls almost straight to about 3.36 at the right edge, staying far "
         "above the dashed zero reference across the whole grid. A dotted vertical "
         "marker near the left shows the cost level the rest of the case study was "
         "charged at, with most of the swept range lying to its right.",
