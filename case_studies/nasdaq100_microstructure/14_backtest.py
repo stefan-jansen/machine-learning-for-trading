@@ -1139,6 +1139,11 @@ if not trade_df.is_empty():
 # %%
 _ens = load_ensemble_declaration(CASE_STUDY_ID)
 ensemble_prediction_hash = None
+# How many configurations the mean forecast averages. `_members` cannot answer that far
+# down the notebook: the name holds the in-force prediction identities from the membership
+# filter until the branch below rebinds it to `resolve_members`' frame, so a run that skips
+# the ensemble leaves a frozenset where a later `.height` would be read.
+ENSEMBLE_MEMBER_COUNT = None
 if _ens is None:
     print("No ensemble declared for this case study.", flush=True)
 elif EXECUTION_TIER != "canonical":
@@ -1193,6 +1198,7 @@ else:
             flush=True,
         )
     else:
+        ENSEMBLE_MEMBER_COUNT = _members.height
         print(
             f"Ensemble members ({_members.height}, {_ens['member_family']} at "
             f"<= {_ens['max_num_leaves']} leaves, last checkpoint):",
@@ -1331,6 +1337,10 @@ carrier = pl.read_database(
     SELECT
         tr.family,
         tr.config_name,
+        -- Carried so a reader of this frame can ask what produced a row, and so the
+        -- degeneracy filter below has something to filter on: a constant forecast is a
+        -- property of the prediction set, not of the arm it was backtested under.
+        br.prediction_hash,
         json_extract(br.spec_json, '$.strategy.signal.method')    AS method,
         json_extract(br.spec_json, '$.strategy.signal.max_slots')  AS slots,
         json_extract(br.spec_json, '$.strategy.signal.long_q')     AS entry_q,
@@ -1382,8 +1392,19 @@ if not gbm_slots.is_empty():
 else:
     print("  models: 0 (carrier not present in this registry)")
 if not ensemble_slot.is_empty():
+    # Two different counts, and this line used to print the second as the first: "mean
+    # forecast of the 72 gbm" for a 12-member ensemble. `gbm_slots.height` counts single-gbm
+    # BACKTESTS at this arm, and one configuration contributes several prediction sets to
+    # the sweep and exactly one member to the ensemble. A run that read the registry without
+    # building the ensemble knows the Sharpe and not the membership, so it says so.
+    _averaged = (
+        f"{ENSEMBLE_MEMBER_COUNT} gbm configurations"
+        if ENSEMBLE_MEMBER_COUNT is not None
+        else "the registered members (not resolved by this run)"
+    )
     print(
-        f"  ENSEMBLE (mean forecast of the {gbm_slots.height} gbm): "
+        f"  ENSEMBLE (mean forecast of {_averaged}, against {gbm_slots.height} "
+        f"single-model backtests above): "
         f"Sharpe {ensemble_slot['sharpe'][0]:+.3f}  "
         f"trades {ensemble_slot['num_trades'][0]:.0f}"
     )
@@ -1426,27 +1447,63 @@ for r in _eqw_by_k.iter_rows(named=True):
 # ranking within the band is unstable, and worth nothing when one configuration
 # is genuinely better on grounds the validation window can establish.
 #
-# The comparison below sets the ensemble against the single configuration with
-# the highest validation outcome in the screened set. A thin configuration
-# holding few positions is the one most exposed to this instability, because
-# fewer positions mean each one contributes more of the result.
+# The comparison below sets the ensemble against the best single configuration in
+# the screened set, with one exclusion that has to be made first. A prediction set
+# holding one value per fold ranks nothing, so the slot book fills once and never
+# replaces anything: it trades a handful of times, pays almost no cost, and tops a
+# ranking that costs decide. On this registry that is every linear row at this arm,
+# which is why the cell below reports no linear comparison rather than a number.
+#
+# The exclusion is not a judgement about the configurations. What is measured is the
+# forecast, and `lasso_a0.1` on the primary label carries exactly one value per fold
+# across 8,006,995 rows: -0.000003 over fold 0 and +0.000009 over fold 1. The forecast
+# does not vary with the features at all, so the penalty selected none of them. The
+# backtest is then a buy-and-hold on whichever names the first bar happened to rank, and
+# reading its Sharpe as a linear model's validation outcome is the error this prevents.
 
 # %%
-schematic = carrier.filter(
+# A constant forecast cannot be a comparison. The section above offers the best single
+# configuration as what the ensemble is measured against, and on this registry every linear
+# row at this arm comes from a prediction set holding two distinct values across 8,006,995
+# rows. Those rank nothing, so the slot book fills once and never re-ranks: the top 24 rows
+# trade between 0 and 2 times, and a 1-trade buy-and-hold posts +1.062 while the ensemble
+# posts +0.566. Reporting that as "the highest validation outcome among the screened linear
+# configurations" invites the reader to conclude the ensemble loses to a linear model.
+#
+# They dominate the ranking for the same reason they are worthless: this sweep is cost-
+# dominated, so not trading is the cheapest way to the top of it. `degenerate_prediction_
+# hashes` already names them - the sweep has no degeneracy filter of its own, which is why
+# they are here at all - so they are excluded and what remains is reported, including when
+# what remains is nothing.
+_degenerate = degenerate_prediction_hashes(CASE_DIR)
+schematic_all = carrier.filter(
     (pl.col("family") == "linear") & (pl.col("method") == "slot_persistent_signal_exit")
-).sort("sharpe", descending=True)
-if not schematic.is_empty():
+)
+schematic = schematic_all.filter(~pl.col("prediction_hash").is_in(list(_degenerate))).sort(
+    "sharpe", descending=True
+)
+_dropped = schematic_all.height - schematic.height
+if schematic.is_empty():
+    print(
+        f"No non-degenerate linear configuration reached this arm: all {schematic_all.height} "
+        "of its rows come from prediction sets that hold a constant forecast, so there is no "
+        "single-model linear result to compare the ensemble against. The single-model "
+        "comparison this case study does have is the gbm block printed above, where the "
+        "ensemble sits against the range and mean of the individual gbm models."
+    )
+else:
     # The heading names one configuration, so one is printed. This used to loop over the
-    # whole frame - 288 rows on the 2026-09-13 registry - under that heading, which made
-    # the maximum unfindable and left the count it was drawn from unstated. The count is
-    # what the comparison below needs: a maximum over 288 draws is not the same claim as a
-    # maximum over three.
+    # whole frame under that heading, which made the maximum unfindable and left the count
+    # it was drawn from unstated. The count is what the comparison needs: a maximum over 288
+    # draws is not the same claim as a maximum over three.
     _top = schematic.row(0, named=True)
     print(
         f"Highest validation outcome among the {schematic.height} screened linear "
         f"configurations: linear {int(_top['slots'])}-slot, validation Sharpe "
-        f"{_top['sharpe']:+.3f}"
+        f"{_top['sharpe']:+.3f} on {_top['num_trades']:.0f} trades"
     )
+    if _dropped:
+        print(f"  {_dropped} further rows excluded: their prediction sets are constant")
     if schematic.height > 1:
         _rest = schematic["sharpe"].slice(1)
         print(
