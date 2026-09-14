@@ -1892,7 +1892,7 @@ print(
 # `regime_log_duration`, sit inside the thresholds.
 #
 # The stage is accepted.
-
+#
 # ## Key takeaways
 #
 # - **Fit on a schedule, not inside a fold.** A fold model is estimated on the fold's whole
