@@ -88,6 +88,7 @@ from case_studies.utils.factor_attribution import (
     run_factor_regression,
 )
 from case_studies.utils.notebook_contracts import (
+    degenerate_prediction_sql,
     derived_tables_off_canonical_universe,
     excluded_families,
     strategy_input_counts,
@@ -1594,9 +1595,24 @@ show_with_alt(
 )
 
 # %%
-# Compare overlay rescue vs no-overlay baseline per label
+# Compare overlay rescue vs no-overlay baseline per label.
+#
+# `MAX(sharpe)` over a whole stage is the shape that a constant forecast wins. A prediction
+# set holding one value per fold ranks nothing, so the book fills once and never replaces
+# anything: it pays almost no cost, and in a cost-dominated sweep that is the cheapest route
+# to the top. `num_trades > 0` below was already reaching for this and catches only the
+# zero-trade case; the sets that matter here trade once or twice.
+#
+# It is not the notebook's own rule to restate: `degenerate_prediction_sql` is the same
+# clause `resolve_best_backtest_runs` applies, which is why 16 and 17 never had this hole -
+# they select through that function and this cell writes its own SQL.
+#
+# Latent rather than live on the registry this was written against: the per-label maxima are
+# real models trading 900 to 3,165 times, and excluding the constants moved no label's
+# baseline by any amount. The clause is here so it stays that way when the pool changes,
+# because `rescue` below is a difference measured against this number.
 no_overlay_baseline = pl.read_database(
-    """
+    f"""
         SELECT t.label, MAX(bm.sharpe) AS best_signal_sharpe
         FROM backtest_runs b
         JOIN backtest_metrics bm ON bm.backtest_hash  = b.backtest_hash
@@ -1604,6 +1620,7 @@ no_overlay_baseline = pl.read_database(
         JOIN training_runs t     ON p.training_hash   = t.training_hash
         WHERE b.stage = 'signal' AND p.split = 'validation'
           AND bm.sharpe IS NOT NULL AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+          {degenerate_prediction_sql("b.prediction_hash")}
         GROUP BY t.label
         """,
     sqlite3.connect(str(_db)),
