@@ -12,11 +12,13 @@ separately: on 2026-09-04, on 2026-09-11, and again on 2026-09-13, sessions each
 time establishing that a failure was not theirs (ml4t/agent-workspace#1168).
 
 One line per job answers it, and it is worth asserting rather than trusting, because a
-new checkout site added without one puts that job back where all ten were. What this
-does not decide is whether the checkouts should be pinned: a `ref:` trades this blast
-radius for a bump commit roughly every other day at the current rate, and that is a
-choice someone has to make. Recording is right either way, and a pin cannot be argued
-about until a run says which fixture it read.
+new checkout site added without one puts that job back where all ten were.
+
+The pin that question deferred landed afterwards: every site now takes `ref: ci`, a tag
+in the fixture repository advanced deliberately rather than by every push to its default
+branch. Recording and pinning answer different halves - the pin decides which fixture a
+job reads, the recording says which one it got - so both are asserted here, and a site
+that arrives with neither is the state all ten were in.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ REPO_ROOT = Path(__file__).parent.parent
 WORKFLOWS = REPO_ROOT / ".github/workflows"
 FIXTURE_REPO = "ml4t/third-edition-test-data"
 RECORDING_STEP = "Record the fixture this job read"
+FIXTURE_REF = "ci"
 
 
 def _workflow_files() -> list[Path]:
@@ -108,3 +111,31 @@ def test_the_recording_step_runs_under_the_same_condition_as_its_checkout(
     steps = dict(_steps(document))[job_name]
 
     assert steps[index + 1].get("if") == steps[index].get("if")
+
+
+@pytest.mark.parametrize(
+    ("path", "job_name", "index"),
+    _fixture_checkouts(),
+    ids=lambda value: value.name if isinstance(value, Path) else str(value),
+)
+def test_a_fixture_checkout_is_pinned_to_the_ci_tag(path: Path, job_name: str, index: int) -> None:
+    """No site may take the fixture's default branch.
+
+    A checkout with no `ref:` reads `main` at the moment it runs, so one push to the
+    fixture repository changes the inputs of every open pull request at once. The three
+    incidents in the module docstring are that, and an unpinned site added later is the
+    same defect however many pinned ones surround it.
+
+    The assertion is on the exact tag rather than on `ref:` being present, because a site
+    pinned to a different ref reads a different fixture from the other nine and produces
+    a disagreement no single job can report.
+    """
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    steps = dict(_steps(document))[job_name]
+    ref = (steps[index].get("with") or {}).get("ref")
+
+    assert ref == FIXTURE_REF, (
+        f"{path.name} job {job_name!r}: the {FIXTURE_REPO} checkout takes ref {ref!r}, not "
+        f"{FIXTURE_REF!r}. An unpinned site reads whatever the fixture's default branch "
+        "holds at that moment, which is what pinning removed."
+    )

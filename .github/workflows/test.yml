@@ -1019,6 +1019,30 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
+          # `ci` is a tag in the fixture repository, advanced deliberately. It is not that
+          # repository's default branch, which is what all ten sites read until now: one
+          # push there changed the inputs of every open pull request at once, and three
+          # separate sessions each spent time establishing that a red check was not theirs
+          # (2026-09-04, 09-11, 09-13).
+          #
+          # To adopt a new fixture: move the tag, then watch one `main` run.
+          #
+          #     git -C <fixture checkout> tag -f ci <sha> && git push -f origin refs/tags/ci
+          #
+          # Nothing in this repository has to change - that is the point of a tag over a
+          # sha, which would need a bump commit here for every fixture change, and the
+          # fixture took 26 commits in the first thirteen days of September.
+          #
+          # The tag's history is the record of which fixture generation a window of pull
+          # requests read, and each job prints the commit it actually got in the step
+          # below, so a move that breaks something is attributable to the move.
+          #
+          # A fixture change and the code that needs it still land separately, in either
+          # order: move the tag first and the old code must still pass against the new
+          # fixture, land the code first and it must still pass against the old one. That
+          # is unchanged by pinning - what changes is that it happens when someone decides
+          # it does.
+          ref: ci
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
@@ -1431,6 +1455,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
+          ref: ci
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
@@ -1661,6 +1686,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
+          ref: ci
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
@@ -1798,6 +1824,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
+          ref: ci
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
@@ -1901,6 +1928,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
+          ref: ci
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
@@ -2093,6 +2121,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
+          ref: ci
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
