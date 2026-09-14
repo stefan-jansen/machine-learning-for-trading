@@ -6,10 +6,8 @@ artifacts for each case study's ``strategy_analysis.py`` notebook.
 Usage::
 
     from case_studies.utils.strategy_analysis import (
-        plot_ic_vs_sharpe,
         plot_sharpe_waterfall,
         plot_concentration_curve,
-        plot_cost_decay,
         plot_equity_drawdown,
         load_holdout_metrics,
         write_strategy_assessment,
@@ -1767,109 +1765,6 @@ def load_holdout_metrics(case_study: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def plot_ic_vs_sharpe(
-    explorer,
-    *,
-    highlight_sources: list[str] | None = None,
-    ew_sharpe: float | None = None,
-    ax: plt.Axes | None = None,
-) -> plt.Figure:
-    """IC vs equal-weight baseline Sharpe scatter with annotations.
-
-    Parameters
-    ----------
-    explorer : BacktestExplorer
-    highlight_sources : list[str], optional
-        Model sources to highlight (e.g. model_analysis recommendations).
-    ew_sharpe : float, optional
-        Equal-weight benchmark Sharpe (drawn as horizontal line).
-    ax : plt.Axes, optional
-
-    Returns
-    -------
-    plt.Figure
-    """
-    # Load all equal-weight baseline backtests
-    all_bt = explorer.best(stage="signal", top_n=9999)
-    if all_bt.is_empty():
-        fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, "No signal backtests", ha="center", va="center")
-        return fig
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 7))
-    else:
-        fig = ax.figure
-
-    ic = all_bt["ic_mean"].to_numpy()
-    sharpe = all_bt["sharpe"].to_numpy()
-    sources = all_bt["source"].to_list()
-    families = all_bt["family"].to_list()
-
-    # Base scatter (all points, light gray)
-    ax.scatter(ic, sharpe, c="lightgray", s=20, alpha=0.5, zorder=1, label="_all")
-
-    # Highlight recommended models
-    if highlight_sources:
-        mask = np.array([s in highlight_sources for s in sources])
-        if mask.any():
-            # Color by family
-            family_colors = _family_color_map()
-            highlighted_families = [families[i] for i in range(len(families)) if mask[i]]
-            colors = [family_colors.get(f, "#333333") for f in highlighted_families]
-            ax.scatter(
-                ic[mask],
-                sharpe[mask],
-                c=colors,
-                s=60,
-                alpha=0.8,
-                edgecolors="black",
-                linewidths=0.5,
-                zorder=3,
-            )
-            # Add family legend
-            seen = set()
-            for f in highlighted_families:
-                if f not in seen:
-                    ax.scatter([], [], c=family_colors.get(f, "#333333"), s=60, label=f)
-                    seen.add(f)
-
-    # Annotate top 3
-    top_idx = np.argsort(sharpe)[-3:]
-    for idx in top_idx:
-        label = sources[idx].split("/")[-1]
-        ax.annotate(
-            label,
-            (ic[idx], sharpe[idx]),
-            textcoords="offset points",
-            xytext=(8, 4),
-            fontsize=8,
-            alpha=0.8,
-        )
-
-    # EW benchmark line
-    if ew_sharpe is not None:
-        ax.axhline(
-            ew_sharpe,
-            color="red",
-            linestyle="--",
-            alpha=0.5,
-            label=f"EW baseline ({ew_sharpe:.2f})",
-        )
-
-    ax.set_xlabel("Information Coefficient (IC)")
-    ax.set_ylabel("Signal-Stage Sharpe")
-    ax.set_title("Signal Quality vs Strategy Performance")
-    ax.legend(loc="upper left", frameon=False, fontsize=9)
-
-    return fig
-
-
-# ---------------------------------------------------------------------------
-# Figure 2: Sharpe Progression Waterfall (Locked Lineage)
-# ---------------------------------------------------------------------------
-
-
 def plot_sharpe_waterfall(
     lineage: dict[str, dict],
     *,
@@ -2153,105 +2048,6 @@ def plot_concentration_curve(
 
 # ---------------------------------------------------------------------------
 # Figure 4: Cost Decay Curve
-# ---------------------------------------------------------------------------
-
-
-def plot_cost_decay(
-    explorer,
-    *,
-    protocol_cost_bps: float | None = None,
-    ax: plt.Axes | None = None,
-) -> plt.Figure:
-    """Net Sharpe vs total cost with breakeven annotation.
-
-    Parameters
-    ----------
-    explorer : BacktestExplorer
-    protocol_cost_bps : float, optional
-        The assumed cost from setup.yaml.
-    ax : plt.Axes, optional
-
-    Returns
-    -------
-    plt.Figure
-    """
-    costs_df = explorer.cost_sensitivity()
-    if costs_df.is_empty():
-        fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, "No cost sensitivity data", ha="center", va="center")
-        return fig
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 5))
-    else:
-        fig = ax.figure
-
-    # Best Sharpe per cost level
-    best_per_cost = (
-        costs_df.sort("sharpe", descending=True).group_by("cost_bps").first().sort("cost_bps")
-    )
-
-    cost_bps = best_per_cost["cost_bps"].to_numpy()
-    sharpe = best_per_cost["sharpe"].to_numpy()
-
-    ax.plot(cost_bps, sharpe, "o-", color="#2196F3", linewidth=2, markersize=8)
-    ax.fill_between(cost_bps, sharpe, alpha=0.1, color="#2196F3")
-    ax.axhline(0, color="black", linewidth=0.5, linestyle="-")
-
-    # Estimate breakeven via interpolation
-    if sharpe[0] > 0 and sharpe[-1] < 0:
-        from scipy.interpolate import interp1d
-
-        f = interp1d(sharpe, cost_bps)
-        breakeven = float(f(0))
-        ax.axvline(
-            breakeven,
-            color="#F44336",
-            linestyle="--",
-            alpha=0.7,
-            label=f"Breakeven: {breakeven:.0f} bps",
-        )
-    elif sharpe[-1] >= 0:
-        breakeven = float(cost_bps[-1])
-        ax.annotate(
-            f"Still positive at {breakeven:.0f} bps",
-            xy=(breakeven, sharpe[-1]),
-            fontsize=9,
-            color="#4CAF50",
-        )
-    else:
-        breakeven = None
-
-    # Protocol cost annotation
-    if protocol_cost_bps is not None:
-        ax.axvline(
-            protocol_cost_bps,
-            color="#4CAF50",
-            linestyle=":",
-            alpha=0.7,
-            label=f"Protocol: {protocol_cost_bps:.0f} bps",
-        )
-
-        if breakeven is not None and protocol_cost_bps > 0:
-            headroom = breakeven / protocol_cost_bps
-            ax.annotate(
-                f"Headroom: {headroom:.1f}×",
-                xy=(protocol_cost_bps, sharpe[0] * 0.9),
-                fontsize=10,
-                fontweight="bold",
-                color="#4CAF50",
-            )
-
-    ax.set_xlabel("Total Cost (bps per leg)")
-    ax.set_ylabel("Net Sharpe Ratio")
-    ax.set_title("Cost Sensitivity: Strategy Viability Under Friction")
-    ax.legend(loc="upper right", frameon=False)
-
-    return fig
-
-
-# ---------------------------------------------------------------------------
-# Figure 5: 2-Panel Equity / Drawdown
 # ---------------------------------------------------------------------------
 
 

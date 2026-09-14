@@ -85,7 +85,6 @@ from case_studies.utils.model_viz import (
     plot_cv_timeline,
     plot_feature_importance_heatmap,
     plot_fold_boxplot,
-    plot_fold_heatmap,
     plot_label_horizon_forest,
     plot_learning_curves,
     plot_regime_bars,
