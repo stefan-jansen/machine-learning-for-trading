@@ -25,6 +25,7 @@ from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.ipca import run_ipca_fold
 from case_studies.utils.latent_factors.library_bridge import configure_latent_torch_runtime
 from case_studies.utils.latent_factors.panel import (
+    PERSISTENT_PANEL_MODELS,
     prepare_panel_data,
     prepare_ragged_panel_data,
     rank_normalize_cross_section,
@@ -699,8 +700,10 @@ def run_latent_factor_cv(
         }
         log(f"  {model_name} (K={n_factors}):")
 
-    need_pca_inputs = "pca" in active_models
-    need_ragged_inputs = any(model_name != "pca" for model_name in active_models)
+    need_pca_inputs = bool(PERSISTENT_PANEL_MODELS & set(active_models))
+    need_ragged_inputs = any(
+        model_name not in PERSISTENT_PANEL_MODELS for model_name in active_models
+    )
 
     def runner_kwargs(
         model_name: str,
