@@ -78,3 +78,99 @@ def test_papermill_p_would_not_survive_as_a_mapping() -> None:
     delivered = _resolve_type('{"us-equities-fwd-ret-1d-pca-v1": "live"}')
     assert isinstance(delivered, str)
     assert not hasattr(delivered, "get")
+
+
+def _findings(*specs) -> list:
+    """Findings for one notebook, as `check_all` would return them."""
+    return [
+        _checker.Finding(
+            "us_equities_panel",
+            "07_gbm.py",
+            declared,
+            status,
+            "detail",
+            parameter,
+            "live",
+            label,
+        )
+        for parameter, label, declared, status in specs
+    ]
+
+
+class TestOneLaunchCarriesEveryEntry:
+    """A per-finding fix line is wrong for any notebook owing more than one entry.
+
+    Papermill injects a parameter by REPLACING the notebook's binding, so a launch
+    carrying a one-key `SUPERSEDES_SETS` mapping drops every other key the notebook
+    declared and each of those becomes undeclared - refused at the same freeze the fix
+    was meant to clear, after the same fit. Measured on `us_equities_panel` 2026-09-14:
+    `07_gbm` owes six entries and five other notebooks owe two each, so following the
+    one-key lines literally leaves every one of them carrying a single key.
+    """
+
+    def test_the_entries_land_in_one_mapping(self) -> None:
+        parameters = _checker.launch_parameters(
+            _findings(
+                ("SUPERSEDES_SETS", "gbm-1d", "464646b3bd65", "behind"),
+                ("SUPERSEDES_SETS", "gbm-1d-diagnostics", "30766ca63471", "behind"),
+                ("SUPERSEDES_SETS", "gbm-5d", "", "undeclared"),
+            )
+        )
+        assert len(parameters) == 1
+        mapping = json.loads(parameters[0].split(":json=", 1)[1].strip("'"))
+        assert mapping == {
+            "gbm-1d": "live",
+            "gbm-1d-diagnostics": "live",
+            "gbm-5d": "live",
+        }
+
+    def test_a_live_entry_is_carried_too(self) -> None:
+        """Dropping it from the mapping is what makes it undeclared on the next run."""
+        parameters = _checker.launch_parameters(
+            _findings(
+                ("SUPERSEDES_SETS", "gbm-1d", "464646b3bd65", "behind"),
+                ("SUPERSEDES_SETS", "gbm-21d", "8957551a2b6b", "live"),
+            )
+        )
+        mapping = json.loads(parameters[0].split(":json=", 1)[1].strip("'"))
+        assert set(mapping) == {"gbm-1d", "gbm-21d"}
+
+    def test_a_scalar_declaration_takes_the_scalar_form(self) -> None:
+        """`SUPERSEDES_POPULATION` is a bare string; the mapping form injects a dict."""
+        parameters = _checker.launch_parameters(
+            _findings(("SUPERSEDES_POPULATION", None, "1ce92c9f8dc0", "behind"))
+        )
+        assert parameters == ["SUPERSEDES_POPULATION=live"]
+
+    def test_the_two_forms_compose_in_one_launch(self) -> None:
+        """`07_gbm` declares both, which is where getting the form wrong is easy."""
+        parameters = _checker.launch_parameters(
+            _findings(
+                ("SUPERSEDES_POPULATION", None, "1ce92c9f8dc0", "behind"),
+                ("SUPERSEDES_SETS", "gbm-1d", "464646b3bd65", "behind"),
+            )
+        )
+        line = _checker.launch_line("us_equities_panel", "07_gbm.py", parameters)
+        assert line.strip().startswith("nb-run.sh us_equities_panel 07_gbm ")
+        assert "SUPERSEDES_POPULATION=live" in line
+        assert "SUPERSEDES_SETS:json=" in line
+        assert "SUPERSEDES_POPULATION:json=" not in line
+
+    def test_the_causal_declaration_is_left_out(self) -> None:
+        """`causal_supersedes` never offers the sentinel, so naming it would misdirect."""
+        parameters = _checker.launch_parameters(
+            _findings(
+                (_checker._CAUSAL_NAME, "fwd_ret_1m", "96b84e61bab8", "behind"),
+                ("SUPERSEDES_SETS", "gbm-1d", "464646b3bd65", "behind"),
+            )
+        )
+        assert parameters == ['SUPERSEDES_SETS:json=\'{"gbm-1d": "live"}\'']
+
+    def test_an_unresolved_finding_is_left_out(self) -> None:
+        """The checker does not know what that notebook declares, so it cannot say."""
+        assert (
+            _checker.launch_parameters(
+                _findings(("SUPERSEDES_SETS", "gbm-1d", "464646b3bd65", "unresolved"))
+            )
+            == []
+        )

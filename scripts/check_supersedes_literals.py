@@ -96,6 +96,7 @@ import json
 import re
 import sqlite3
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -978,6 +979,78 @@ def undeclared_fix(finding: Finding) -> str:
     )
 
 
+def launch_parameters(notebook_findings: Sequence[Finding]) -> list[str]:
+    """Every parameter ONE launch of one notebook needs, spelled as `nb-run.sh` takes them.
+
+    Per-finding fix lines are wrong for any notebook that owes more than one entry, and
+    most that owe any owe two. Papermill injects a parameter by REPLACING the notebook's
+    binding, so a launch carrying `SUPERSEDES_SETS:json='{"a": "live"}'` drops every other
+    key the notebook declared, and each of those becomes undeclared - refused at the same
+    freeze the fix was meant to clear, after the same fit.
+
+    Measured against `us_equities_panel` on 2026-09-14: `07_gbm` owes six `SUPERSEDES_SETS`
+    entries (two behind, four undeclared) plus the scalar `SUPERSEDES_POPULATION`, and
+    `08_tabular_dl`, `09_dl_nlinear`, `10_dl_lstm`, `13a_pca` and `13b_ipca` owe two each.
+    Following the one-key lines literally leaves every one of them carrying a single key.
+
+    A mapping carries every key the notebook declares, not only the refused ones, for the
+    same reason. `"live"` is the right value for a key that is already current too: it
+    resolves to the tip, which is what that key already names.
+
+    `SUPERSEDES_CAUSAL` is excluded. `causal_supersedes` offers a declaration only when it
+    is a current causal identity, so the sentinel is never one and is always withheld.
+    """
+    by_parameter: dict[str, list[Finding]] = {}
+    for finding in notebook_findings:
+        if finding.parameter == _CAUSAL_NAME or finding.status in {"unresolved", "no-registry"}:
+            continue
+        by_parameter.setdefault(finding.parameter, []).append(finding)
+    parameters = []
+    for parameter, group in sorted(by_parameter.items()):
+        labelled = sorted({f.label for f in group if f.label})
+        if labelled:
+            mapping = json.dumps({label: SUPERSEDES_LIVE for label in labelled})
+            parameters.append(f"{parameter}:json='{mapping}'")
+        else:
+            parameters.append(f"{parameter}={SUPERSEDES_LIVE}")
+    return parameters
+
+
+def launch_line(case_study: str, notebook: str, parameters: Sequence[str]) -> str:
+    return f"  nb-run.sh {case_study} {notebook.removesuffix('.py')} " + " ".join(parameters)
+
+
+def _print_launch_lines(findings: Sequence[Finding], stream) -> None:
+    """One runnable command per notebook that owes anything, after the per-finding detail.
+
+    The per-finding lines say what is wrong with one entry. This says what to type, and it
+    is not the concatenation of those lines: a notebook owing several entries needs them in
+    ONE mapping, because papermill replaces the notebook's binding rather than merging into
+    it. `launch_parameters` explains the measurement.
+    """
+    owing: dict[tuple[str, str], list[Finding]] = {}
+    for finding in findings:
+        owing.setdefault((finding.case_study, finding.notebook), []).append(finding)
+    lines = []
+    for (case_study, notebook), group in sorted(owing.items()):
+        if not any(f.refused_at_the_freeze or f.status == "undeclared" for f in group):
+            continue
+        parameters = launch_parameters(group)
+        if parameters:
+            lines.append(launch_line(case_study, notebook, parameters))
+    if not lines:
+        return
+    print(
+        "\nThe launch each of these needs. Every entry a notebook declares is in its "
+        "mapping, not only the refused ones: papermill REPLACES the binding rather than "
+        "merging into it, so a mapping carrying one key makes every other key undeclared "
+        "and refused at the same freeze.\n",
+        file=stream,
+    )
+    for line in lines:
+        print(line, file=stream)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--case-study", default=None, help="check one instead of all")
@@ -1096,6 +1169,9 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+    if undeclared and not [f for f in findings if f.refused_at_the_freeze]:
+        _print_launch_lines(findings, sys.stderr)
+
     for finding in unresolved:
         # Warned, never blocked. Refusing on "I could not resolve this" would be the check
         # asserting knowledge it does not have.
@@ -1167,6 +1243,7 @@ def main(argv: list[str] | None = None) -> int:
                 "above.",
                 file=sys.stderr,
             )
+        _print_launch_lines(findings, sys.stderr)
         print(
             "\nFix it now - you are about to pay for the run that re-renders the notebook "
             "you have to clear. If you know this run's membership is unchanged, so the "
