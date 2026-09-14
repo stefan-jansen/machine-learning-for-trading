@@ -1460,12 +1460,8 @@ def run_darts_cv(
             # A fold that reached no checkpoint with predictions is not part of the
             # population a checkpoint has to cover, which is why this narrows the list the
             # fold loop appended to rather than using it.
-            # Plus whatever the staging tree already held. The validation below reads the
-            # whole tree, so a resumed run that expects only the folds it refit calls the
-            # adopted ones undeclared artifacts and raises on a tree that is correct.
             expected_fold_ids = sorted(
                 {fold for by_fold in cfg_slices.values() for fold in by_fold}
-                | {int(fold) for fold in (already_fitted_folds or [])}
             )
             for epoch in sorted(cfg_slices):
                 epoch_slices = cfg_slices[epoch]
@@ -1546,10 +1542,17 @@ def run_darts_cv(
         if checkpoint_root is not None:
             from case_studies.utils.deep_model_state import declared_epoch_checkpoints
 
+            # The tree holds the folds this run adopted as well as the ones it fitted, and
+            # `expected_fold_ids` is only the second set - it drives the per-checkpoint
+            # coverage comparison above, where a fold with no predictions from this run
+            # has no business being expected. Unioning the two there would skip every
+            # checkpoint and leave `assemble_cv_result` with no metrics at all.
             validate_darts_checkpoint_population(
                 checkpoint_root,
                 config_name=config_name,
-                fold_ids=expected_fold_ids,
+                fold_ids=sorted(
+                    set(expected_fold_ids) | {int(f) for f in (already_fitted_folds or [])}
+                ),
                 checkpoints=declared_epoch_checkpoints(n_epochs, checkpoint_interval),
                 architecture=str(params["architecture"]),
             )

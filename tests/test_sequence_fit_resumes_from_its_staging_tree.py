@@ -397,33 +397,66 @@ def test_the_fold_filter_runs_before_the_darts_dispatch() -> None:
     )
 
 
-def test_the_tree_validation_expects_the_folds_it_adopted() -> None:
-    """`expected_fold_ids` seeded empty rejects the tree a resume deliberately kept.
+def _validation_fold_ids(path: Path, function: str, validator: str) -> str:
+    """The `fold_ids=` expression the tree validator is called with."""
+    call = next(
+        node
+        for node in ast.walk(_function(path, function))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == validator
+    )
+    return next(ast.unparse(kw.value) for kw in call.keywords if kw.arg == "fold_ids")
 
-    `validate_deep_checkpoint_population` reads the whole tree and calls anything
-    outside the declared population an undeclared artifact. Validating against the
-    refit folds alone therefore fails on a tree that is correct, after the resume has
-    paid to refit the rest.
+
+def test_the_tree_validation_expects_the_folds_it_adopted() -> None:
+    """The tree population and the prediction population are different sets on a resume.
+
+    `validate_deep_checkpoint_population` reads the whole staging tree and calls
+    anything outside the declared population an undeclared artifact, so validating
+    against the refit folds alone fails on a tree that is correct - after the resume
+    has paid to refit the rest.
+    """
+    fold_ids = _validation_fold_ids(
+        DEEP_LEARNING, "run_dl_cv", "validate_deep_checkpoint_population"
+    )
+    assert "adopted" in fold_ids, (
+        f"the tree validation must expect the adopted folds, got fold_ids={fold_ids}"
+    )
+
+
+def test_the_coverage_comparison_does_not_expect_the_adopted_folds() -> None:
+    """The other half of the same distinction, and it fails in the opposite direction.
+
+    A checkpoint is compared against the folds this run produced predictions for. Add
+    the adopted folds there and every checkpoint mismatches, every one is skipped, and
+    the aggregation is left with no metrics at all.
     """
     body = _function(DEEP_LEARNING, "run_dl_cv")
-    seed = next(
-        node.value
+    comparison = next(
+        node
         for node in ast.walk(body)
-        if isinstance(node, ast.AnnAssign)
-        and isinstance(node.target, ast.Name)
-        and node.target.id == "expected_fold_ids"
+        if isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "fold_ids"
     )
-    assert not (isinstance(seed, ast.List) and not seed.elts), (
-        "expected_fold_ids must start from the folds already on disk, not from []"
+    assert "adopted" not in ast.unparse(comparison), (
+        "the per-checkpoint coverage comparison must not expect folds this run did not "
+        "produce predictions for"
     )
 
 
 def test_the_darts_backend_is_told_what_was_adopted() -> None:
-    """The Darts path derives its own expected folds, and needs the same seeding."""
-    darts = Path(REPO / "case_studies" / "utils" / "darts_forecasting.py")
+    """The Darts path keeps its own copy of both sets, and needs the same split."""
+    darts = REPO / "case_studies" / "utils" / "darts_forecasting.py"
     signature = _function(darts, "run_darts_cv").args
     names = {arg.arg for arg in signature.args + signature.kwonlyargs}
     assert "already_fitted_folds" in names
+
+    fold_ids = _validation_fold_ids(darts, "run_darts_cv", "validate_darts_checkpoint_population")
+    assert "already_fitted_folds" in fold_ids, (
+        f"the Darts tree validation must expect the adopted folds, got fold_ids={fold_ids}"
+    )
 
     expected = next(
         node
@@ -434,7 +467,7 @@ def test_the_darts_backend_is_told_what_was_adopted() -> None:
             for target in node.targets
         )
     )
-    assert "already_fitted_folds" in ast.unparse(expected.value), (
-        "run_darts_cv must count the adopted folds as expected, or its tree "
-        "validation rejects them as undeclared artifacts"
+    assert "already_fitted_folds" not in ast.unparse(expected.value), (
+        "expected_fold_ids drives the per-checkpoint coverage comparison; including the "
+        "adopted folds there skips every checkpoint and leaves no metrics to assemble"
     )

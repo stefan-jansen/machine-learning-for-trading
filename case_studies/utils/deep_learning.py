@@ -2600,11 +2600,7 @@ def run_dl_cv(
         }
 
     n_valid_folds = 0
-    # Seeded with what the staging tree already held. `validate_deep_checkpoint_population`
-    # reads the whole tree and calls anything outside the declared population an undeclared
-    # artifact, so validating against the refit folds alone rejects the folds this run
-    # deliberately kept - after it has paid to refit the rest.
-    expected_fold_ids: list[int] = sorted(adopted)
+    expected_fold_ids: list[int] = []
 
     _has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
@@ -2983,10 +2979,15 @@ def run_dl_cv(
                 validate_deep_checkpoint_population,
             )
 
+            # The tree population and the prediction population are not the same set on a
+            # resume. `expected_fold_ids` is the folds this run produced predictions for,
+            # which is what the checkpoint-coverage comparison above needs. The tree also
+            # holds the folds this run adopted, and validating without them calls them
+            # undeclared artifacts on a tree that is correct.
             validate_deep_checkpoint_population(
                 checkpoint_root,
                 config_name=config_name,
-                fold_ids=tuple(sorted(expected_fold_ids)),
+                fold_ids=tuple(sorted(set(expected_fold_ids) | adopted)),
                 checkpoints=declared_epoch_checkpoints(
                     int(cfg.get("n_epochs", 100)),
                     int(cfg.get("checkpoint_interval", 5)),
