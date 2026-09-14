@@ -949,6 +949,12 @@ def selectable_validation_candidates(
       resolves inside the pool it narrowed to;
     * **publication**: an identity is selectable only where the population its producer
       publishes still lists it, asked per member kind and on both sides of the join.
+    * **what the sweep refused**: a prediction set a sweep measured and dropped for covering
+      less than the cross-section its feature panels offered it. Read from the registry
+      rather than recomputed, because the check costs what the sweep's startup costs and
+      because two implementations of one rule is what let this resolver be the looser of the
+      two. Absence is not admission: a member no sweep has measured has no row and is left
+      where it is.
 
     Publication is the membership question, not the exclusion one, and the two are not
     the same set. A prediction that no population ever listed was retired by nobody, so
@@ -972,6 +978,9 @@ def selectable_validation_candidates(
     import sqlite3
 
     from case_studies.research.population import published_members_at
+    from case_studies.utils.notebook_contracts import (
+        predictions_the_sweep_refused,
+    )
     from utils.paths import get_case_study_dir
 
     case_dir = get_case_study_dir(case_study)
@@ -1135,6 +1144,34 @@ def selectable_validation_candidates(
         if published is None:
             continue
         candidates = [row for row in candidates if row[key] in published]
+
+    # What the sweep measured and refused. `full_coverage_prediction_sql` above is the bar this
+    # query can express, and it counts decision days: a family that scores every day for half
+    # the universe ties the day count and ranks beside families that scored all of it. The
+    # sweep charges every member against the feature panel it was offered and drops the ones
+    # that fall short, and until it recorded that answer the two rules disagreed with the
+    # resolver on the looser side - measured on nasdaq100_microstructure 2026-09-13, where
+    # pinning the label made the carrier a 67.4%-coverage prediction set with an IC of
+    # -0.00125 that the sweep had already stopped backtesting.
+    #
+    # Only what a sweep POSITIVELY recorded as short is dropped here. A member nothing has
+    # measured has no row and is left exactly where it is, so a registry swept before the
+    # record existed keeps the pool it has today and this can never empty a pool on its own.
+    refused = predictions_the_sweep_refused(case_dir)
+    if refused:
+        before_refusals = len(candidates)
+        candidates = [row for row in candidates if row["prediction_hash"] not in refused]
+        if before_refusals and not candidates:
+            named = "; ".join(
+                f"{member} {reason.splitlines()[0]}" for member, reason in sorted(refused.items())
+            )
+            raise NoSelectableCandidates(
+                f"Every one of the {before_refusals} live validation backtests for "
+                f"{case_study} stands on a prediction set the sweep measured and dropped for "
+                f"covering less than the cross-section its feature panels offered it: {named}. "
+                "Selecting one of these would carry the case study on a prediction the sweep "
+                "will not backtest. Re-run the fitting stages rather than ranking them."
+            )
 
     if admitted is not None:
         admitted_before = len(candidates)

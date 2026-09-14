@@ -304,6 +304,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cohort_unique
     ON cohort_metrics(cohort_type, COALESCE(stage, ''), label, COALESCE(family, ''));
 CREATE INDEX IF NOT EXISTS idx_cohort_leader ON cohort_metrics(leader_hash);
 
+-- What a sweep found when it measured a member's cross-sectional coverage. The sweep and the
+-- carrier resolver used to answer "which predictions are admissible" separately: the sweep
+-- through `prediction_members_in_force`, which charges every member against the feature panel
+-- it was offered, and the resolver through `full_coverage_prediction_sql`, whose `ic_n_days`
+-- bar counts decision days and cannot see a family that scored every day for half the
+-- universe. The resolver was the looser of the two, so a prediction the sweep refused to
+-- backtest could still carry the case study.
+--
+-- Recording the measurement makes them one object rather than two implementations that agree
+-- by inspection. Only members a sweep actually measured appear here; a member nothing has
+-- measured is absent, which is not the same as admitted and is what the readers treat it as.
+CREATE TABLE IF NOT EXISTS prediction_admissibility (
+    prediction_hash TEXT PRIMARY KEY,
+    admitted        INTEGER NOT NULL,
+    reason          TEXT,
+    recorded_at     TEXT NOT NULL,
+    git_commit      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_admissibility_admitted
+    ON prediction_admissibility(admitted);
+
 CREATE TABLE IF NOT EXISTS candidate_sets (
     set_hash                 TEXT PRIMARY KEY,
     name                     TEXT NOT NULL,
