@@ -152,11 +152,20 @@ CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 # be separate copies and they disagreed: the freeze spanned every declared label and this
 # fallback spanned one, so which configuration a reader selected depended on whether their
 # registry held a `candidate_sets` table.
+# The notes are printed rather than discarded, because the second element is where the filter
+# says what it removed. On this registry it drops 143 of the 947 members in force - every
+# `deep_learning` fit and every `pca` one - for covering less of the cross-section than their
+# feature panels offered. Taking `[0]` alone applies that filter and publishes a holdout
+# selection over the survivors with nothing saying which candidates were never in the running.
+# `14_backtest`, `19_holdout_backtest` and `20_strategy_analysis` all print it.
+MEMBERS_IN_FORCE, _population_notes = prediction_members_in_force(study)
+for _note in _population_notes:
+    print(_note)
 FIELD = open_selection_field(
     study,
     case_study=CASE_STUDY_ID,
     name=CANDIDATE_SET_NAME,
-    prediction_hashes=prediction_members_in_force(study)[0],
+    prediction_hashes=MEMBERS_IN_FORCE,
     resolve_best_backtest_runs=resolve_best_backtest_runs,
 )
 CANDIDATES = FIELD.candidate_set
