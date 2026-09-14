@@ -282,8 +282,9 @@ def test_the_fit_asks_for_the_missing_folds_only() -> None:
         and node.func.id == "run_dl_cv"
     )
     keywords = {kw.arg for kw in call.keywords}
-    assert "selected_folds" in keywords, (
-        "the staged fit must pass selected_folds, or a resumed run refits every fold"
+    assert "already_fitted_folds" in keywords, (
+        "the staged fit must say which folds are already on disk, "
+        "or a resumed run refits every one of them"
     )
     assert "checkpoint_root" in keywords
 
@@ -359,4 +360,81 @@ def test_the_lock_file_outlives_a_failed_promote() -> None:
     assert not unlinks_in_finally, (
         "the lock file must be removed only after the promote succeeded, "
         "not in the finally that also runs on failure"
+    )
+
+
+def _function(path: Path, name: str) -> ast.FunctionDef:
+    return next(
+        node
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+
+def test_the_fold_filter_runs_before_the_darts_dispatch() -> None:
+    """Order decides whether a Darts resume works at all.
+
+    `run_dl_cv` dispatches to `run_darts_cv` and returns, so a fold filter below that
+    dispatch never runs for a Darts config. The adopted folds would be refit, and the
+    first checkpoint written for one raises the immutable-checkpoint conflict.
+    """
+    body = _function(DEEP_LEARNING, "run_dl_cv")
+    dispatch = min(
+        node.lineno
+        for node in ast.walk(body)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_darts_cv"
+    )
+    filtered = min(
+        node.lineno
+        for node in ast.walk(body)
+        if isinstance(node, ast.Name) and node.id == "already_fitted_folds"
+    )
+    assert filtered < dispatch, (
+        "the already-fitted folds must be removed from `splits` before either backend "
+        f"is dispatched (filter at line {filtered}, run_darts_cv at {dispatch})"
+    )
+
+
+def test_the_tree_validation_expects_the_folds_it_adopted() -> None:
+    """`expected_fold_ids` seeded empty rejects the tree a resume deliberately kept.
+
+    `validate_deep_checkpoint_population` reads the whole tree and calls anything
+    outside the declared population an undeclared artifact. Validating against the
+    refit folds alone therefore fails on a tree that is correct, after the resume has
+    paid to refit the rest.
+    """
+    body = _function(DEEP_LEARNING, "run_dl_cv")
+    seed = next(
+        node.value
+        for node in ast.walk(body)
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "expected_fold_ids"
+    )
+    assert not (isinstance(seed, ast.List) and not seed.elts), (
+        "expected_fold_ids must start from the folds already on disk, not from []"
+    )
+
+
+def test_the_darts_backend_is_told_what_was_adopted() -> None:
+    """The Darts path derives its own expected folds, and needs the same seeding."""
+    darts = Path(REPO / "case_studies" / "utils" / "darts_forecasting.py")
+    signature = _function(darts, "run_darts_cv").args
+    names = {arg.arg for arg in signature.args + signature.kwonlyargs}
+    assert "already_fitted_folds" in names
+
+    expected = next(
+        node
+        for node in ast.walk(_function(darts, "run_darts_cv"))
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "expected_fold_ids"
+            for target in node.targets
+        )
+    )
+    assert "already_fitted_folds" in ast.unparse(expected.value), (
+        "run_darts_cv must count the adopted folds as expected, or its tree "
+        "validation rejects them as undeclared artifacts"
     )

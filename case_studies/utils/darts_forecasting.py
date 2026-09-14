@@ -1132,6 +1132,7 @@ def run_darts_cv(
     temporal_feature_names: list[str] | None = None,
     checkpoint_root: Path | None = None,
     strict: bool = False,
+    already_fitted_folds: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Run Darts-backed global forecasting models and emit standard DL artifacts."""
     if case_study is None:
@@ -1459,8 +1460,12 @@ def run_darts_cv(
             # A fold that reached no checkpoint with predictions is not part of the
             # population a checkpoint has to cover, which is why this narrows the list the
             # fold loop appended to rather than using it.
+            # Plus whatever the staging tree already held. The validation below reads the
+            # whole tree, so a resumed run that expects only the folds it refit calls the
+            # adopted ones undeclared artifacts and raises on a tree that is correct.
             expected_fold_ids = sorted(
                 {fold for by_fold in cfg_slices.values() for fold in by_fold}
+                | {int(fold) for fold in (already_fitted_folds or [])}
             )
             for epoch in sorted(cfg_slices):
                 epoch_slices = cfg_slices[epoch]

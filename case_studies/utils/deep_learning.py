@@ -1666,7 +1666,7 @@ def run_resolved_request(
                     train_sequence_stride=context.train_sequence_stride,
                     register=False,
                     case_study=study.case_study,
-                    selected_folds=missing_folds if already_fitted else None,
+                    already_fitted_folds=already_fitted,
                     temporal_by_fold=context.temporal_by_fold,
                     temporal_keys=list(context.temporal_keys),
                     temporal_feature_names=list(context.temporal_feature_names),
@@ -2296,6 +2296,7 @@ def run_dl_cv(
     case_study: str | None = None,
     notebook: str | None = None,
     selected_folds: list[int] | None = None,
+    already_fitted_folds: Sequence[int] | None = None,
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
@@ -2516,6 +2517,22 @@ def run_dl_cv(
                     f"checkpoint(s) for {cfg['config_name']}"
                 )
 
+    # Before either backend is dispatched. `run_darts_cv` used to be handed every split
+    # because this ran below it, so a Darts resume refit the folds it had adopted and hit
+    # the immutable-checkpoint conflict on the first one.
+    adopted = {int(fold) for fold in (already_fitted_folds or [])}
+    if selected_folds:
+        selected = {int(fold) for fold in selected_folds}
+        splits = [split for split in splits if int(split["fold"]) in selected]
+        print(f"Selected folds: {sorted(selected)}")
+        if not splits:
+            raise ValueError(f"No splits matched selected_folds={selected_folds}")
+    if adopted:
+        splits = [split for split in splits if int(split["fold"]) not in adopted]
+        print(f"Already fitted, not refitting: {sorted(adopted)}")
+        if not splits:
+            raise ValueError("every declared fold is already fitted; nothing to run")
+
     if uses_darts_backend(configs):
         fresh_result = run_darts_cv(
             dataset_pd,
@@ -2540,6 +2557,7 @@ def run_dl_cv(
             temporal_feature_names=temporal_feature_names,
             checkpoint_root=checkpoint_root,
             strict=strict,
+            already_fitted_folds=sorted(adopted),
         )
         if cached_result is not None:
             return combine_cv_results(
@@ -2552,12 +2570,6 @@ def run_dl_cv(
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested for deep learning, but CUDA is unavailable")
     torch_device = torch.device(device)
-    if selected_folds:
-        selected = {int(fold) for fold in selected_folds}
-        splits = [split for split in splits if int(split["fold"]) in selected]
-        print(f"Selected folds: {sorted(selected)}")
-        if not splits:
-            raise ValueError(f"No splits matched selected_folds={selected_folds}")
 
     seed_everything(seed)
 
@@ -2588,7 +2600,11 @@ def run_dl_cv(
         }
 
     n_valid_folds = 0
-    expected_fold_ids: list[int] = []
+    # Seeded with what the staging tree already held. `validate_deep_checkpoint_population`
+    # reads the whole tree and calls anything outside the declared population an undeclared
+    # artifact, so validating against the refit folds alone rejects the folds this run
+    # deliberately kept - after it has paid to refit the rest.
+    expected_fold_ids: list[int] = sorted(adopted)
 
     _has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
@@ -2903,7 +2919,7 @@ def run_dl_cv(
         for epoch in sorted(cfg_shards):
             ep_df = _read_prediction_shards(cfg_shards[epoch])
             fold_ids = sorted(ep_df["fold_id"].unique().to_list())
-            if fold_ids != expected_fold_ids:
+            if fold_ids != sorted(expected_fold_ids):
                 del ep_df
                 continue
             metrics = _decision_time_checkpoint_metrics(
@@ -2970,7 +2986,7 @@ def run_dl_cv(
             validate_deep_checkpoint_population(
                 checkpoint_root,
                 config_name=config_name,
-                fold_ids=tuple(expected_fold_ids),
+                fold_ids=tuple(sorted(expected_fold_ids)),
                 checkpoints=declared_epoch_checkpoints(
                     int(cfg.get("n_epochs", 100)),
                     int(cfg.get("checkpoint_interval", 5)),
