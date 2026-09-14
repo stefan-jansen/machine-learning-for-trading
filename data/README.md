@@ -130,7 +130,8 @@ uv run python data/futures/market/download.py
 
 The Chapter 3 MBO slice (NVDA, 10 trading days in November 2024) is best
 obtained as a one-off download from the Databento Download Center —
-total cost is under $10 and the files stay available for 30 days.
+total cost is under $10, covered by the $125 free credit Databento grants
+new accounts, and the files stay available for 30 days.
 
 See `data/equities/market/microstructure/MBO_DOWNLOAD.md` for step-by-step
 instructions. An API-based alternative (`mbo_download.py`) is available
