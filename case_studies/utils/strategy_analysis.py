@@ -391,6 +391,104 @@ def holdout_generations_to_retire(
     )
 
 
+class HoldoutWindowSpent(RuntimeError):
+    """A second evaluation of a window this case study reports as unseen was refused."""
+
+
+def refuse_a_second_look(
+    retire: HoldoutGenerationsToRetire,
+    *,
+    this_configuration: str,
+    this_training_hash: str,
+    checkpoint: tuple[Any, Any],
+    retiring: Sequence[str] = (),
+) -> tuple[dict[str, Any], ...]:
+    """Refuse a second evaluation of a spent holdout window, unless it is named.
+
+    The default is refusal, and the override is per generation rather than per run. A
+    boolean would be set once and left set, and the guard would then be decorative; naming
+    the prediction set means each override is a statement about one window that somebody had
+    to look up. ``retiring`` is a sequence of prediction hashes the operator accepts
+    retiring, and the run proceeds only when it names exactly what is registered.
+
+    Returns the rows being retired, so the caller can put them in the render. A second look
+    that proceeds deliberately has to say so where a reader sees it, not only in the launch
+    line - the registry would otherwise show one evaluation of the window and a reader would
+    have no way to learn there had been two.
+
+    Only ``superseded`` is overridable. The other two buckets are not a decision anybody can
+    make by naming a hash:
+
+    * ``unattributable`` - the training runs record no CV split, so whether they were
+      refitted for the holdout cannot be established either way. Naming one asserts a fact
+      the registry does not hold.
+    * ``not_out_of_sample`` - the row is either a validation-fitted model published over the
+      window or a refit filed under its validation identity, and the registry cannot tell
+      those apart. An override here would not authorize a second look; it would authorize
+      reporting something that may never have been out of sample.
+    """
+    if retire.unattributable:
+        raise HoldoutWindowSpent(
+            "the holdout window carries prediction sets whose training runs record no CV "
+            "split, so whether they were refitted for the holdout cannot be established: "
+            + ", ".join(
+                f"{row['prediction_hash']} (training {row['training_hash']})"
+                for row in retire.unattributable
+            )
+            + ". Establish what produced them before registering another evaluation on the "
+            "same window. This is not what `retiring` is for: naming one of these would "
+            "assert something the registry does not record."
+        )
+    if retire.not_out_of_sample:
+        raise HoldoutWindowSpent(
+            "the holdout window carries prediction sets whose training runs declare a CV "
+            "split other than the holdout: "
+            + ", ".join(
+                f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+                for row in retire.not_out_of_sample
+            )
+            + ". Each is either a validation-fitted model published over the window, which "
+            "is not an out-of-sample result, or a refit registered under its validation "
+            "training identity, and the registry cannot tell those apart. Resolve it "
+            "through the registry's own lifecycle, which records that the row was retired."
+        )
+
+    registered = {row["prediction_hash"] for row in retire.superseded}
+    named = dict.fromkeys(retiring)
+
+    unknown = [hash_ for hash_ in named if hash_ not in registered]
+    if unknown:
+        raise HoldoutWindowSpent(
+            f"the run authorizes retiring {', '.join(unknown)}, which this window does not "
+            "carry. An override that names something absent is either aimed at another case "
+            "study or has outlived the generation it was written for, and either way it "
+            "would sit in the launch line authorizing whatever arrives next. Registered "
+            "here: " + (", ".join(sorted(registered)) or "nothing") + "."
+        )
+
+    unnamed = [row for row in retire.superseded if row["prediction_hash"] not in named]
+    if unnamed:
+        kind, value = checkpoint
+        raise HoldoutWindowSpent(
+            "the holdout window already carries a refit of a different configuration: "
+            + ", ".join(
+                f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
+                for row in unnamed
+            )
+            + f". This run would evaluate {this_configuration} (training "
+            f"{this_training_hash}, checkpoint {kind}={value}) on the same window, which "
+            "would be a second configuration measured on a period this case study reports "
+            "as unseen. Deleting the earlier rows does not undo having observed their "
+            "result - the selection that produced this configuration may have been informed "
+            "by the earlier holdout number, and no deletion reaches that. To take the second "
+            "look deliberately, name what is being retired: "
+            "RETIRE_HOLDOUT_GENERATIONS:json="
+            + json.dumps(sorted(row["prediction_hash"] for row in unnamed))
+            + ". The run then records it where a reader sees it."
+        )
+    return retire.superseded
+
+
 # What a holdout refit is allowed to change, and nothing else. Everything outside this set
 # has to agree with the validation run, because the holdout is defined as *that configuration*
 # refitted on a later window - not as another run that happens to share its name.
