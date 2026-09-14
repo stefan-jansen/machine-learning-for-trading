@@ -1011,7 +1011,9 @@ plot_learning_curves(cp_data, cp_families)
 # more capacity help on this panel" has an answer in the registry and does not need to
 # be argued from the winner's name. Both columns are reported because they can
 # disagree: the maximum is the best draw from a sample and grows with the number of
-# configs at that leaf count, while the mean describes the setting.
+# scored candidates at that leaf count, while the mean describes the setting. Each row
+# of `all_metrics` is one config-checkpoint pair, so `n_scored` - not `n_configs` - is
+# the sample the maximum is drawn from.
 _gbm = all_metrics.filter(pl.col("family") == "gbm")
 _leaf_summary = (
     _gbm.with_columns(
@@ -1021,6 +1023,8 @@ _leaf_summary = (
     .group_by("num_leaves")
     .agg(
         n_configs=pl.col("config_name").n_unique(),
+        n_checkpoints=pl.col("checkpoint_value").n_unique(),
+        n_scored=pl.len(),
         best_ic=pl.col("ic_mean").max(),
         mean_ic=pl.col("ic_mean").mean(),
     )
@@ -1039,14 +1043,20 @@ else:
 #
 # **Read the mean column and the best column against each other.** They answer different
 # questions. If mean IC rises with leaf count, more capacity helps the setting; if only
-# the maximum rises, the wider leaf counts may simply have had more configurations to
+# the maximum rises, the wider leaf counts may simply have had more scored candidates to
 # draw a maximum from. Where they disagree, the mean is the one to believe, because the
 # maximum of a larger sample is larger whether or not the family has an edge - the same
-# argument §3 makes about family maxima.
+# argument §3 makes about family maxima. `n_scored` is the count that governs that
+# comparison; when it is equal across leaf counts, the maxima are drawn from samples of
+# the same size and the column is comparable on that axis.
 #
 # Do not read either column as the binding principle for boosting in general. It is one
-# label, two folds and one panel, and the grid crosses leaf count with a loss function,
-# so a leaf-count column pools across losses that may not respond the same way.
+# label, two folds and one panel, and each row pools twice over: the grid crosses leaf
+# count with a loss function, and every config contributes one row per training
+# checkpoint. A leaf-count cell therefore mixes losses that may not respond the same way
+# with checkpoints taken at different points in the same fit. `n_scored` is therefore
+# `n_configs` multiplied by the checkpoints each config emits, and the search behind the
+# maximum is that many times wider than the configuration count alone suggests.
 #
 # **The ensemble this case study features does not take the winner of this table.**
 # `ensemble.max_num_leaves` in `config/setup.yaml` is 31, so the featured mean forecast

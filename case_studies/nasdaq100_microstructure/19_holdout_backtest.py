@@ -199,17 +199,28 @@ if match is None:
         # The configuration is the one that was fitted, under a training identity that is not
         # the one this notebook just derived. Selection did not move; the DERIVATION did - the
         # holdout spec, the label timeline it is built from, or something the identity hashes.
-        # Re-running 18 is the right action here and the wrong one in the branch below, which
-        # is the whole reason these are separated.
+        # That diagnosis differs from the branch below, which is why they are separated, but
+        # the action does not: 18 refuses in both cases. `holdout_generations_to_retire`
+        # skips only a row whose (training_hash, checkpoint) equals the generation about to
+        # be registered, so a row under the earlier identity is not skipped. It lands in one
+        # of the three retirement buckets by its training spec - `superseded` if it was a
+        # genuine refit, otherwise `not_out_of_sample` or `unattributable` - and each of the
+        # three raises in 18 before anything is fitted. The `superseded` message reads "a
+        # refit of a different configuration", which is 18's identity for a generation and
+        # not the config name.
         msg = (
             f"No holdout prediction set for training {holdout_training_hash}, but "
             f"{carrier['family']}/{carrier['config_name']} on {LABEL} at "
             f"{_ckpt[0]}={_ckpt[1]} - the configuration that resolves now - already has one under "
             f"{', '.join(th for _, _, th in same_config)}. So the selection did not move and "
             "its derived training identity did: the holdout spec, the label timeline it reads, "
-            "or an input the identity covers has changed since 18 ran. Re-run "
-            "18_holdout_predictions to refit under the current derivation, which is an "
-            "idempotent replay of the same configuration rather than a second observation."
+            "or an input the identity covers has changed since 18 ran. Re-running 18 on its "
+            "own will NOT recover this: it matches a registered generation on the exact "
+            "training hash and checkpoint, so the row under the earlier identity reads as a "
+            "superseded refit and 18 refuses before fitting. Either restore the derivation "
+            "the registered row was fitted under, or retire that generation through the "
+            "registry's own lifecycle - which records that the window was looked at twice - "
+            "and then re-run 18."
         )
     else:
         msg = (

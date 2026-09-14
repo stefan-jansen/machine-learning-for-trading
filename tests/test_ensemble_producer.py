@@ -250,3 +250,37 @@ def test_nasdaq_declares_an_ensemble_and_every_other_case_study_does_not():
     assert "lq90" in declared["featured_scheme"]
     assert declared["universe_filter"] == "cost_feasible"
     assert load_ensemble_declaration("sp500_options") is None
+
+
+def test_a_row_the_sweep_excluded_cannot_enter_through_the_ensemble(tmp_path):
+    """The pool decides membership, and the catalog pool is not the sweep's pool.
+
+    `14_backtest.py` used to hand `resolve_members` the catalog filter -
+    `admissible_prediction_hashes`, complete and not retired - computed before
+    `prediction_members_in_force` narrowed the sweep on what the populations publish
+    and on cross-sectional coverage. A complete, unretired, *unpublished* row is
+    admissible under the first rule and refused by the second, so it could be
+    averaged into a carrier the sweep never backtested, and publishing the ensemble
+    would carry it downstream. 784 catalog rows against 162 swept on 2026-09-13.
+
+    `leaves_15_mae` here is that row. The two assertions are each other's control:
+    the same registry, the same call, and only the pool differs.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("gbm", "fwd_ret_60m", "leaves_7_mae", "p_l7", 500),
+            ("gbm", "fwd_ret_60m", "leaves_15_mae", "p_l15_unpublished", 500),
+        ],
+    )
+    swept = {"p_l7"}
+    members = resolve_members(case_dir, label="fwd_ret_60m", max_num_leaves=31, admissible=swept)
+    assert members["config_name"].to_list() == ["leaves_7_mae"]
+    assert "p_l15_unpublished" not in members["prediction_hash"].to_list()
+
+    # The negative control: under the catalog pool the same call admits it, which is
+    # what makes the assertion above a statement about the pool and not about the
+    # fixture holding one eligible row.
+    catalog = {"p_l7", "p_l15_unpublished"}
+    admitted = resolve_members(case_dir, label="fwd_ret_60m", max_num_leaves=31, admissible=catalog)
+    assert "p_l15_unpublished" in admitted["prediction_hash"].to_list()

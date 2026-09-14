@@ -51,12 +51,20 @@ def member_num_leaves(config_name: str) -> int:
 
 
 def admissible_prediction_hashes(case_dir: Path) -> set[str]:
-    """The prediction identities a stage of this case study may consume.
+    """The catalog-level prediction identities a stage of this case study may consume.
 
-    The same rule `14_backtest.py` applies to its sweep: complete, under an
-    identity this schema still recognises, and not listed by a retired generation
-    of its own population. The two stages have to agree, because an ensemble built
-    over rows the sweep refused would be a carrier the case study cannot select.
+    Complete, under an identity this schema still recognises, and not listed by a
+    retired generation of its own population. That is the *first* of the filters
+    `14_backtest.py` applies, and on its own it is wider than the pool the sweep
+    runs: the notebook then narrows on what the registry's populations publish and
+    on cross-sectional coverage, through `prediction_members_in_force`, which needs
+    an open study and so cannot be composed here. On the 2026-09-13 nasdaq run the
+    two differed by 784 rows against 162.
+
+    So this is a floor, not the sweep's rule, and a caller that averages, ranks or
+    publishes over the result is consuming rows the sweep may have refused. The
+    ensemble in `14_backtest.py` passes its own `SWEPT_POOL` for exactly that
+    reason; this default stands for callers with no sweep to agree with.
     """
     from case_studies.research import prediction_rows_at, superseded_members_at
 

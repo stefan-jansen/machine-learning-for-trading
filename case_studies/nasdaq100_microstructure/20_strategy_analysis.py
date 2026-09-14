@@ -1114,11 +1114,18 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 # losses pull the skew negative while leaving the 5th percentile where it was. Disagreement
 # between them is a fact about the distribution rather than a sign that one is wrong.
 #
-# *The rolling window* locates the result in time. A rolling Sharpe that stays on one side
-# of zero describes a steady strategy; one that crosses says the headline averages two
-# regimes, which two folds cannot separate. Rolling beta says the same about the
-# relationship to the universe: a construction meant to be dollar-neutral that carries a
-# drifting beta is taking a directional position it did not intend.
+# *The rolling window* locates the result in time: each point is the Sharpe of the 126
+# trading days ending there, so the summary reports how far the estimate moved over the
+# window rather than a single number for the whole period. Read the spread between the
+# minimum and the maximum, not the sign. Consecutive windows share 125 of their 126 days,
+# so the series is autocorrelated by construction, and a validation window of roughly 253
+# days holds about two non-overlapping windows. Sampling variation alone produces sign
+# changes on a stationary series at this length, so a crossing is not evidence of a
+# regime, and an estimate that stays positive throughout does not establish that
+# performance was stable. Rolling beta is read the same way, with one addition that
+# does not depend on sampling: a construction meant to be dollar-neutral carries a
+# directional exposure at any window where its beta is away from zero, whatever produced
+# it.
 
 # %% [markdown]
 # ## §5 Friction budget & cost sensitivity
