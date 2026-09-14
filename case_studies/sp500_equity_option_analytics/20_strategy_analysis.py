@@ -90,7 +90,7 @@ from case_studies.utils.uncertainty import (
 )
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY = "sp500_equity_option_analytics"
@@ -704,7 +704,11 @@ add_message_title(
     "Validation Sharpe at each stage of the funnel",
     f"Validation 2019-2020; {CONFIGURED_COST_BPS:.1f} bps/side; 95% block-bootstrap intervals",
 )
-fig_stage.show()
+show_with_alt(
+    fig_stage,
+    "Annualized validation Sharpe at each stage of the selection funnel, one marker per stage "
+    "joined in order, each with its 95% block-bootstrap interval, against a dashed line at zero.",
+)
 
 # %% [markdown]
 # ## 2. Cost survival on the strategy the case study selected
@@ -849,7 +853,12 @@ add_message_title(
     "Where the point path and its lower bound stand across the cost grid",
     "Validation 2019-2020; one-way costs; 95% block-bootstrap band",
 )
-fig_cost.show()
+show_with_alt(
+    fig_cost,
+    "Annualized validation Sharpe against one-way cost per traded notional, drawn as a marked "
+    "line with its 95% block-bootstrap band shaded, a dashed line at zero, and a dotted vertical "
+    "line where the lower bound first reaches zero if it does so inside the grid.",
+)
 
 
 # %%
