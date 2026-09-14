@@ -470,6 +470,11 @@ print(
 )
 
 # %%
+# Passed as the cross-section width when the question is what setup.yaml declares rather than
+# what this panel can trade: it is above every concentration any grid here declares, so
+# `get_entry_schemes_for` drops nothing for feasibility and returns the declared names.
+NO_FEASIBILITY_LIMIT = 1_000_000
+
 entry_schemes = get_entry_schemes_for(
     CASE_STUDY_ID, LABEL, n_assets, long_short=bt_config.long_short
 )
@@ -509,19 +514,49 @@ if _passes is None:
     mechanism_arms: list[tuple[dict, str | None]] = []
     mechanism_top_n = 0
 else:
-    _missing = [n for n in _passes["baseline_schemes"] if n not in _by_name]
-    if _missing and not MAX_ENTRY_SCHEMES:
-        # Checked only when the scheme list is the full declared one. A preview run truncates
-        # `entry_schemes` and is expected to lose names; a canonical run that loses one has a
-        # typo in `signal_passes`, and it would otherwise rank nothing, select nothing, and
-        # report a completed sweep.
+    # A name in `baseline_schemes` goes missing for two reasons and only one of them is a
+    # defect. `get_entry_schemes_for` drops a concentration the cross-section cannot realize,
+    # so any run narrower than the declared grid loses names by construction. The CI fixture
+    # trades twelve symbols long-short, and a long-short selection needs 2k distinct names,
+    # so `ew_top5` is realizable there and neither `ew_top10` nor `ew_top20` is - measured by
+    # calling this function at n_assets=12, which reproduces that run's arm list exactly. A
+    # name no declared grid produces at any width is a typo in setup.yaml.
+    #
+    # Asking the same function again with the feasibility rule lifted separates the two without
+    # restating anywhere how a scheme is named. `MAX_ENTRY_SCHEMES` was the previous test and it
+    # answers a different question - it is one of several reductions, and the fixture reaches
+    # here with it unset - so a narrowed panel raised the typo error against a correct config.
+    _declared_names = {
+        s["name"]
+        for s in get_entry_schemes_for(
+            CASE_STUDY_ID,
+            LABEL,
+            NO_FEASIBILITY_LIMIT,
+            long_short=bt_config.long_short,
+            ranked_width=NO_FEASIBILITY_LIMIT,
+        )
+    }
+    _undeclared = [n for n in _passes["baseline_schemes"] if n not in _declared_names]
+    if _undeclared:
         msg = (
-            f"backtest.sweep.signal_passes.baseline_schemes names {_missing}, which "
-            f"get_entry_schemes_for does not produce for {LABEL}. Arms it does produce: "
-            f"{sorted(_by_name)[:8]}"
+            f"backtest.sweep.signal_passes.baseline_schemes names {_undeclared}, which "
+            f"get_entry_schemes_for does not produce for {LABEL} at any cross-section width. "
+            f"Names the declared grids do produce: {sorted(_declared_names)[:8]}"
         )
         raise KeyError(msg)
     _baseline_names = [n for n in _passes["baseline_schemes"] if n in _by_name]
+    if not _baseline_names:
+        # Every declared baseline concentration is above what this run can rank. Pass 1 would
+        # sweep nothing, rank nothing and report a completed run, which is the failure the
+        # check above used to catch by accident.
+        msg = (
+            f"none of backtest.sweep.signal_passes.baseline_schemes "
+            f"{_passes['baseline_schemes']} is feasible for {LABEL} on this run: "
+            f"{n_assets} assets in the price panel, long_short={bt_config.long_short}, and "
+            f"every declared concentration needs more names than that leaves. Declare a "
+            f"smaller concentration, or widen the panel and the fitting stages together."
+        )
+        raise RuntimeError(msg)
     baseline_arms = [(_by_name[n], _passes["baseline_universe"]) for n in _baseline_names]
     mechanism_arms = [
         (s, _passes["baseline_universe"]) for s in entry_schemes if s["name"] not in _baseline_names
