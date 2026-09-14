@@ -133,9 +133,17 @@ if excluded_families(CASE_STUDY_ID):
 # %% [markdown]
 # ## 1. Load the allocation-stage combinations
 #
-# The overlays below are applied to the highest-scoring full-universe
-# slot-mechanism backtests from the allocation stage. Those serve as a fixed
-# base so the overlay is the only thing that varies between rows.
+# The overlays below are applied to the highest-scoring backtests from the
+# allocation stage. Those serve as a fixed base so the overlay is the only thing
+# that varies between rows.
+#
+# What that base is, stated rather than assumed: `15_portfolio_management` is the
+# only producer at this stage, and every row it registers rebalances at every
+# decision time under `equal_weight_top_k` on the full universe. It is NOT the slot
+# mechanism - that notebook strips the slots deliberately, so that the allocator
+# comparison runs on the naive every-bar baseline. So a risk rule is measured here
+# against the highest-turnover configuration the case study builds, which is the
+# one an early exit costs the most and protects the most.
 #
 # What this notebook establishes is the mechanics of position-level overlays -
 # how a stop-loss, a trailing stop and a time-based exit each reshape the

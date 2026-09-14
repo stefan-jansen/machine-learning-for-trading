@@ -39,10 +39,13 @@
 #    many times it is acted on.
 #
 # The notebook has three parts:
-# - **Sections 1–3**: Standard bps cost grid on full-universe allocation combos,
-#   tracing the Sharpe-vs-cost decay curve.
+# - **Sections 1-3**: Standard bps cost grid on the leading pre-cost runs, which
+#   on this case study are the screened baseline-stage arms (Section 1 says why the
+#   allocation and risk-overlay stages contribute none), tracing the
+#   Sharpe-vs-cost decay curve.
 # - **Section 4**: Full universe vs the cost-feasible screen — the first lever,
-#   read off existing registry rows for the featured slot design.
+#   read off existing registry rows for the equal-weight top-k arms, which are
+#   the arms both universes carry.
 # - **Section 5**: Cadence × per-share cost sweep — the second lever and the
 #   publication finding. Uses a per-share cost model ($/share, not bps), more
 #   realistic for equities, swept across rebalance frequencies.
@@ -98,6 +101,7 @@ from case_studies.utils.sweep_config import (
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE
 from utils.paths import get_case_study_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "nasdaq100_microstructure"
@@ -159,10 +163,9 @@ if excluded_families(CASE_STUDY_ID):
 # %% [markdown]
 # ## 1. Load the leading pre-cost runs
 #
-# We load the least-negative full-universe validation backtests. These are every-bar combos
-# and are already loss-making (Ch17); the cost grid below traces how the Sharpe-vs-cost curve
-# behaves around them before the two recovery levers — the screen and the cadence — are
-# applied.
+# We load the highest-Sharpe validation backtests on the universe this case study treats as
+# canonical, and trace how their Sharpe-vs-cost curve behaves before the two recovery
+# mechanisms - the screen in Section 4 and the cadence in Section 5 - are applied.
 #
 # **The pool is every stage a selected configuration can come from, not just `allocation`.** A risk
 # overlay is a strategy in its own right: `16_risk_management` registers it at
@@ -179,7 +182,7 @@ if excluded_families(CASE_STUDY_ID):
 # **The pool is also pinned to the canonical universe.** `setup.yaml` declares
 # `universe_filter: cost_feasible` and says in the same breath that the full-universe variant
 # "is NOT a canonical rank-1 / cohort / DSR candidate". Widening the stages without pinning the
-# universe would admit exactly that variant, because the signal stage holds both screened and
+# universe would admit exactly that variant, because the baseline stage holds both screened and
 # full-universe runs and the full-universe ones are not screened out anywhere else - the cost
 # curve would then price a strategy the case study excludes by declaration. The filter is read
 # out of each run's own `spec_json`, the same place `derived_tables_off_canonical_universe`
@@ -192,6 +195,15 @@ if excluded_families(CASE_STUDY_ID):
 # This is also why the notebook is numbered after `16_risk_management` rather than before it.
 # Run the other way round, the overlay rows do not exist yet and the pool is `allocation`
 # whatever it declares.
+#
+# **On this case study the two arguments above point in opposite directions, and the pin
+# wins.** `15_portfolio_management` builds its allocation specs with no `universe_filter` and
+# `16_risk_management` clones those specs, so every allocation and risk-overlay row this
+# registry holds is a full-universe row and the pin drops all of them. The pool that reaches
+# the cost grid is the baseline stage's screened rows. That is the declared design rather than a
+# gap - 15 exists to show that allocation does not rescue the every-bar full-universe
+# strategy, and a negative result is not a candidate to carry the case study - but it does mean
+# the risk-overlay argument above is about the other eight case studies and not about this one.
 
 # %%
 PRE_COST_STAGES = tuple(stage for stage in STAGE_SEQUENCE if stage != "cost_sensitivity")
@@ -263,34 +275,41 @@ def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
 top_combos = resolve_pre_cost_runs(TOP_N_COMBOS)
 
 if top_combos.is_empty():
-    print(
-        f"No results on the {CANONICAL_UNIVERSE or 'full'} universe at any of "
-        f"{', '.join(PRE_COST_STAGES)}. Run 14_backtest through 16_risk_management first."
+    # Refused rather than reported. Every cell below is a no-op on an empty pool, so the
+    # notebook would run to the end, register nothing and exit 0 - a chapter with no cost
+    # curve in it and no error anywhere saying why.
+    msg = (
+        f"No {CANONICAL_UNIVERSE or 'full'}-universe validation backtests at any of "
+        f"{', '.join(PRE_COST_STAGES)} for {CASE_STUDY_ID}/{LABEL}. The stages hold rows or "
+        "`_on_canonical_universe` would have raised first, so what is missing is the "
+        f"universe: nothing registered declares `signal.universe_filter = "
+        f"{CANONICAL_UNIVERSE!r}`. Re-run 14_backtest, whose baseline pass is what registers "
+        "them."
     )
-else:
-    for row in top_combos.iter_rows(named=True):
-        spec = ensure_backtest_spec(
+    raise RuntimeError(msg)
+for row in top_combos.iter_rows(named=True):
+    spec = ensure_backtest_spec(
+        CASE_STUDY_ID,
+        bt_config,
+        json.loads(row["spec_json"]),
+        prices=load_backtest_prices_for(
             CASE_STUDY_ID,
-            bt_config,
-            json.loads(row["spec_json"]),
-            prices=load_backtest_prices_for(
-                CASE_STUDY_ID,
-                LABEL,
-                split="validation",
-                warmup_periods=warmup_periods_for(CASE_STUDY_ID),
-                max_symbols=MAX_SYMBOLS,
-            ),
-            prediction_hash=row["prediction_hash"],
-            initial_cash=bt_config.initial_cash,
-        )
-        alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-        # The stage is printed because it is the thing that changed: a `risk_overlay` configuration
-        # and its `allocation` parent share a prediction hash, so nothing else in this line
-        # distinguishes the overlaid run from the un-overlaid one it was built on.
-        print(
-            f"  Sharpe={row['sharpe']:.3f}  stage={row['pool_stage']}  alloc={alloc}  "
-            f"bt_hash={row['backtest_hash'][:8]}"
-        )
+            LABEL,
+            split="validation",
+            warmup_periods=warmup_periods_for(CASE_STUDY_ID),
+            max_symbols=MAX_SYMBOLS,
+        ),
+        prediction_hash=row["prediction_hash"],
+        initial_cash=bt_config.initial_cash,
+    )
+    alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
+    # The stage is printed because it is the thing that changed: a `risk_overlay` configuration
+    # and its `allocation` parent share a prediction hash, so nothing else in this line
+    # distinguishes the overlaid run from the un-overlaid one it was built on.
+    print(
+        f"  Sharpe={row['sharpe']:.3f}  stage={row['pool_stage']}  alloc={alloc}  "
+        f"bt_hash={row['backtest_hash'][:8]}"
+    )
 
 # %%
 prices = load_backtest_prices_for(
@@ -309,12 +328,12 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 # (commission + slippage combined). The grid spans from near-zero to levels
 # that exceed the signal entirely, tracing the full decay curve.
 #
-# At 15-minute cadence with ~26 bars per trading day, even 1 bps per leg
-# compounds to significant annual drag. The breakeven cost level for this
-# case study is expected to be very low — in the range of 1–3 bps total —
-# making it viable only for market-makers or prop desks with institutional
-# execution quality, or for strategies that extend the hold period to 4–8 bars
-# to amortize the per-trade cost.
+# At 15-minute cadence the strategy is offered 20 decision slots a trading day
+# (Section 5 measures the grid at every cadence), so even 1 bps per leg compounds
+# to a large annual drag. Where the breakeven actually falls is what the curve
+# below reports; the reason to expect it low is arithmetic rather than a result,
+# and the two mechanisms that move it are the ones the rest of this chapter
+# measures - trading fewer names, and trading them less often.
 
 # %%
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
@@ -391,11 +410,24 @@ if failed_points:
 # This section is **read-only** — queries the registry for cost-sensitivity
 # results and computes breakeven levels.
 #
-# The Sharpe-versus-cost curve for intraday strategies typically falls steeply
-# from the near-zero-cost benchmark. For NASDAQ-100 15-minute, the expected
-# pattern is: positive Sharpe at 0–2 bps, break-even around 3–5 bps, negative
-# at any cost level resembling realistic retail execution. The flat portion of
-# the curve (if it exists) defines the practical cost budget.
+# The number to take from the curve is the **breakeven** - the cost level at which
+# Sharpe crosses zero - because it states the execution quality the strategy requires
+# rather than the profit it made under one assumption. It is interpolated below from the
+# grid points and printed. No band is predicted here: a prediction written beside the
+# calculation is read as its confirmation.
+#
+# Two features of the shape are worth reading beside it. How steeply the curve falls from
+# the zero-cost end says how much of the gross result was ever available - a strategy whose
+# Sharpe halves by 1 bps was never trading on much. And a flat stretch, if there is one, is
+# the range over which execution quality does not change the answer, the only part of the
+# axis where a cost assumption can be wrong without mattering.
+#
+# The grid is `backtest.sweep.cost_grid_bps`, 0 to 50 bps per leg. What it is measured
+# against is not a bps figure: every baseline-stage row in this registry carries
+# `commission.model = "per_share"` at $0.0035 a share, and the `rate` fields beside it
+# belong to the percentage model that is not the one in force. `cost_sensitivity` returns
+# only the rows this notebook re-ran under the percentage model, which is what puts them
+# on one axis at all.
 
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
@@ -437,10 +469,77 @@ if not cost_df.is_empty():
     ax.set_ylabel("Net Sharpe Ratio")
     ax.set_title("Sharpe Decay Under Transaction Costs")
     ax.legend()
-    fig.tight_layout()
-    fig.show()
+    # `utils/style` and `matplotlibrc` both set `figure.constrained_layout.use`, so
+    # `tight_layout()` warns and fights the layout engine already running; `fig.show()` warns
+    # that a non-interactive canvas cannot be shown and publishes no alt text. Measured: two
+    # UserWarnings per figure. The six notebooks of this case study already at `done` use
+    # `show_with_alt` and neither of the other two calls.
+    show_with_alt(
+        fig,
+        "Line chart of net Sharpe against transaction cost. The horizontal axis is total "
+        "cost in basis points per leg and the vertical axis is net Sharpe ratio. One line "
+        "with circular markers per allocator, named in the legend, tracing that allocator's "
+        "Sharpe as cost rises. Two horizontal reference lines mark zero Sharpe (dashed) and "
+        "0.5 (dotted), so the cost at which a line crosses each can be read off.",
+    )
 else:
     print("No cost sensitivity data in registry")
+
+# %%
+# The breakeven, interpolated between the grid points that straddle zero. The grid is
+# coarse (0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50), so the crossing is reported as an
+# interval as well as a point: a reader who needs it tighter needs more grid, not more
+# precision in this arithmetic.
+if not cost_df.is_empty():
+    # `cost_sensitivity` returns cost_bps, sharpe, max_drawdown and allocator, and no
+    # identity, so a curve here is only a curve while one configuration contributes each
+    # (allocator, cost_bps) point. `top_n_predictions.cost_sensitivity` is 1 on this case
+    # study, so that holds; raise it above 1 and two selected configurations sharing an
+    # allocator pool into one line, and an interpolation across them describes neither.
+    # Checked rather than assumed, because the collision is invisible in the plot.
+    _dupes = (
+        cost_df.group_by(["allocator", "cost_bps"])
+        .agg(pl.len().alias("n"))
+        .filter(pl.col("n") > 1)
+        .sort("n", descending=True)
+    )
+    if not _dupes.is_empty():
+        msg = (
+            f"{_dupes.height} (allocator, cost) point(s) carry more than one backtest, so "
+            "these curves pool configurations that share an allocator and no breakeven "
+            f"read off them belongs to a single strategy. Worst: {_dupes.row(0)}. Scope "
+            "the cost sweep to one configuration, or extend `cost_sensitivity` to return "
+            "the identity so the curves can be split by it."
+        )
+        raise RuntimeError(msg)
+
+    _breakeven_rows = []
+    for _alloc in cost_df["allocator"].unique().sort().to_list():
+        _curve = cost_df.filter(pl.col("allocator") == _alloc).sort("cost_bps")
+        _x = _curve["cost_bps"].to_list()
+        _y = _curve["sharpe"].to_list()
+        if not _y or _y[0] <= 0:
+            _breakeven_rows.append(
+                {
+                    "allocator": _alloc,
+                    "breakeven_bps": "at or below the lowest grid point",
+                    "bracket": f"<= {_x[0]:g}" if _x else "n/a",
+                }
+            )
+            continue
+        _cross = next((i for i in range(1, len(_y)) if _y[i] <= 0), None)
+        if _cross is None:
+            _breakeven_rows.append(
+                {"allocator": _alloc, "breakeven_bps": "above the grid", "bracket": f"> {_x[-1]:g}"}
+            )
+            continue
+        _x0, _x1, _y0, _y1 = _x[_cross - 1], _x[_cross], _y[_cross - 1], _y[_cross]
+        _be = _x0 + (_x1 - _x0) * (_y0 / (_y0 - _y1)) if _y0 != _y1 else _x1
+        _breakeven_rows.append(
+            {"allocator": _alloc, "breakeven_bps": f"{_be:.2f}", "bracket": f"{_x0:g}-{_x1:g}"}
+        )
+    print("Breakeven cost per leg (Sharpe crosses zero):")
+    print(pl.DataFrame(_breakeven_rows))
 
 # %% [markdown]
 # ## 4. Full Universe vs the Cost-Feasible Screen
@@ -452,76 +551,201 @@ else:
 # names, fixed per split so the screen cannot use information from the window it
 # is evaluated on.
 #
-# This section reads the same slot design on both universes directly from the
-# registry, running no new backtests, and compares the outcome alongside the
-# trade count. Reporting both matters: the screen changes which names can be
-# held, so it changes how much trading the ordering provokes as well as what
-# each trade costs, and the two effects are not separable from the outcome
+# This section reads the equal-weight top-k arms on both universes directly from
+# the registry, running no new backtests, and compares the outcome alongside the
+# trade count. Equal weight and not the featured slot design, because the slot
+# design is registered on the screened universe alone and a screen effect needs
+# both sides; which arms exist where is set by `baseline_schemes` and
+# `reference_schemes` in `config/setup.yaml`.
+#
+# Reporting outcome and trade count together matters: the screen changes which
+# names can be held, so it changes how much trading the ordering provokes as well
+# as what each trade costs, and the two effects are not separable from the outcome
 # alone.
 
 # %%
+# Read on the equal-weight arms, not the slot design, and matched pair by pair.
+#
+# Which arms exist on which universe is decided by `config/setup.yaml`, not here:
+# `baseline_schemes` runs ew_top5/10/20 on `baseline_universe: cost_feasible` for every
+# pass-1 prediction, and `reference_schemes` runs the same three on
+# `reference_universe: full` for the pass-2 predictions only. The slot design this
+# section used to query is registered on the screened universe alone, so that query
+# returned one row and the derived line below it was skipped, leaving a one-sided table
+# under prose describing two sides.
+#
+# Matched arm by arm, because the two universes do not cover the same predictions: the
+# screened side carries every pass-1 prediction and the full side only the pass-2
+# survivors. Averaging each side over its own population would compare 510 backtests
+# against 10 and attribute the difference to the screen, when most of it is the
+# difference between the two populations.
+#
+# The match key is the whole signal specification with `universe_filter` removed, not
+# `(prediction_hash, top_k)`. Those two fields do not identify an arm: pass 2 registers
+# `equal_weight_top_k` on the screened universe at both `long_short: true` and a
+# `long_only` variant, the full-universe reference carries the long-short one only, and
+# a join on prediction and concentration alone therefore pairs one full row with two
+# screened rows. The difference it reports would then mix the universe screen with a
+# change of trading direction. Keyed on the sorted items of the signal dict so the match
+# does not depend on the order SQLite happens to serialize the object in.
+#
+# Restricted further to arms carrying no allocator, because the signal stage holds two
+# kinds of row and only one of them belongs here. `15_portfolio_management` prices
+# `equal_weight` as one of its three allocators, and an equal-weight allocation of a
+# top-k basket is the same selection as the signal arm, so those cells register at
+# `stage: signal` rather than writing an allocation row. They are not duplicates of the
+# ch16 rows: measured 2026-09-14 across all 18 colliding pairs, the two sides carry
+# identical `num_trades` and different Sharpes - ew_top5 on the full universe is -4.007
+# from ch16 against -4.056 from ch17, ew_top10 -8.821 against -8.893, ew_top20 -12.667
+# against -12.754. Same entries and exits, different position weights. So the allocated
+# row is a real and distinct backtest, and the fix is to leave it to the allocation
+# stage that produced it rather than to merge the pair or pick one.
+#
+# Without the restriction the join below is not one to one and the assertion that
+# follows raises, which is how this was found.
 conn = sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db"))
-screen_compare = pl.read_database(
+_arms = pl.read_database(
     """
     SELECT
         COALESCE(json_extract(br.spec_json, '$.strategy.signal.universe_filter'),
-                 'full')                                                 AS universe,
-        COUNT(*)                                                          AS n_configs,
-        ROUND(AVG(bm.sharpe), 3)                                          AS avg_sharpe,
-        ROUND(MIN(bm.sharpe), 3)                                          AS min_sharpe,
-        ROUND(MAX(bm.sharpe), 3)                                          AS max_sharpe,
-        ROUND(AVG(bm.num_trades), 0)                                      AS avg_trades
+                 'full')                                                  AS universe,
+        br.prediction_hash                                                AS prediction_hash,
+        json_extract(br.spec_json, '$.strategy.signal')                   AS signal_json,
+        bm.sharpe                                                         AS sharpe,
+        bm.num_trades                                                     AS num_trades
     FROM backtest_runs br
     JOIN backtest_metrics bm ON br.backtest_hash = bm.backtest_hash
     JOIN prediction_sets ps ON br.prediction_hash = ps.prediction_hash
     JOIN training_runs tr ON tr.training_hash = ps.training_hash
     WHERE br.stage = 'signal' AND ps.split = 'validation'
-      AND json_extract(br.spec_json, '$.strategy.signal.method') = 'slot_persistent_signal_exit'
-      AND json_extract(br.spec_json, '$.strategy.signal.max_slots') = 10
-      AND json_extract(br.spec_json, '$.strategy.signal.long_q') = 0.9
+      AND json_extract(br.spec_json, '$.strategy.signal.method') = 'equal_weight_top_k'
+      AND json_extract(br.spec_json, '$.strategy.allocation.method') IS NULL
       AND tr.family = 'gbm'
-    GROUP BY universe
-    ORDER BY universe DESC
+      AND bm.sharpe IS NOT NULL
     """,
     connection=conn,
-    schema_overrides={"avg_trades": pl.Float64},
+    schema_overrides={"sharpe": pl.Float64, "num_trades": pl.Float64},
 )
 conn.close()
+
+
+def _arm_key(signal_json: str) -> str:
+    """The arm a backtest ran, with the universe taken out of it."""
+    signal = json.loads(signal_json)
+    signal.pop("universe_filter", None)
+    return json.dumps(signal, sort_keys=True)
+
+
+_arms = _arms.with_columns(
+    pl.col("signal_json").map_elements(_arm_key, return_dtype=pl.String).alias("arm"),
+)
+
+_full = _arms.filter(pl.col("universe") == "full").select(
+    "prediction_hash", "arm", "sharpe", "num_trades"
+)
+_screened = _arms.filter(pl.col("universe") == "cost_feasible").select(
+    "prediction_hash", "arm", "sharpe", "num_trades"
+)
+# One backtest per (prediction, arm, universe) is what the registry's identity
+# guarantees; asserted rather than assumed, because a duplicate would silently weight
+# one prediction twice in the averages below.
+for _side_name, _side in (("full", _full), ("cost_feasible", _screened)):
+    _dupes = _side.group_by("prediction_hash", "arm").len().filter(pl.col("len") > 1)
+    if not _dupes.is_empty():
+        msg = (
+            f"{_dupes.height} (prediction, arm) pairs appear more than once on the "
+            f"{_side_name} universe, so the match would not be one to one"
+        )
+        raise RuntimeError(msg)
+
+_matched = _full.join(_screened, on=["prediction_hash", "arm"], how="inner", suffix="_screened")
+screen_compare = (
+    pl.concat(
+        [
+            _matched.select(
+                pl.lit("full").alias("universe"),
+                pl.col("sharpe"),
+                pl.col("num_trades"),
+            ),
+            _matched.select(
+                pl.lit("cost_feasible").alias("universe"),
+                pl.col("sharpe_screened").alias("sharpe"),
+                pl.col("num_trades_screened").alias("num_trades"),
+            ),
+        ]
+    )
+    .group_by("universe")
+    .agg(
+        n_arms=pl.len(),
+        avg_sharpe=pl.col("sharpe").mean().round(3),
+        min_sharpe=pl.col("sharpe").min().round(3),
+        max_sharpe=pl.col("sharpe").max().round(3),
+        avg_trades=pl.col("num_trades").mean().round(0),
+    )
+    .sort("universe", descending=True)
+)
+print(f"{_matched.height} (prediction, arm) pairs registered on both universes")
 print(screen_compare)
+
+# %%
+# The section's claim is a difference between two universes, so one universe is not a
+# weaker version of it and the derived line must not be skipped when it finds one. A
+# one-row table under prose describing two sides is the failure this refusal exists to
+# stop, and it is the state the previous query was in.
+_universes = set(screen_compare["universe"].to_list())
+if _universes != {"full", "cost_feasible"}:
+    msg = (
+        "section 4 compares one arm across two universes and the matched set offers "
+        f"{sorted(_universes) or 'none'}. It reads stage='signal', split='validation', gbm, "
+        "signal.method='equal_weight_top_k', and needs the same (prediction, arm) pair "
+        "registered on both the full universe and cost_feasible. `baseline_schemes` and "
+        "`reference_schemes` in config/setup.yaml decide that; they currently agree on "
+        "ew_top5/10/20, so an empty match means the sweep did not reach pass 2."
+    )
+    raise RuntimeError(msg)
+
+full_row = screen_compare.filter(pl.col("universe") == "full")
+screened_row = screen_compare.filter(pl.col("universe") == "cost_feasible")
+d_sharpe = screened_row["avg_sharpe"][0] - full_row["avg_sharpe"][0]
+# Screened over full, so the direction reads off the number: above 1 the screen traded
+# more. A full-over-screened ratio was the previous form and it reads as a reduction
+# whichever way the trade count moved.
+trade_ratio = screened_row["avg_trades"][0] / max(full_row["avg_trades"][0], 1)
+print(
+    f"Screen moves avg Sharpe by {d_sharpe:+.2f} "
+    f"({full_row['avg_sharpe'][0]:+.2f} to {screened_row['avg_sharpe'][0]:+.2f}) "
+    f"and multiplies trades by {trade_ratio:.2f} "
+    f"({full_row['avg_trades'][0]:.0f} to {screened_row['avg_trades'][0]:.0f})."
+)
 
 # %% [markdown]
 # ### Reading the Screen's Effect
 #
-# Same slot design, same model family, validation window — the only difference
-# is the tradeable universe. On the full 114-name panel the design averages a
-# negative Sharpe and churns several thousand trades; on the cost-feasible
-# universe it averages positive and trades roughly an order of magnitude less.
-# The expensive tail was both the turnover source and the cost sink. Screening
-# for cost feasibility is the upstream move that the per-share cadence sweep
-# (Section 5) then builds on.
-
-# %%
-if not screen_compare.is_empty() and screen_compare.height == 2:
-    full_row = screen_compare.filter(pl.col("universe") == "full")
-    screened_row = screen_compare.filter(pl.col("universe") == "cost_feasible")
-    if not full_row.is_empty() and not screened_row.is_empty():
-        d_sharpe = screened_row["avg_sharpe"][0] - full_row["avg_sharpe"][0]
-        trade_ratio = full_row["avg_trades"][0] / max(screened_row["avg_trades"][0], 1)
-        print(
-            f"Screen lifts avg Sharpe by {d_sharpe:+.2f} "
-            f"({full_row['avg_sharpe'][0]:+.2f} → {screened_row['avg_sharpe'][0]:+.2f}) "
-            f"and cuts turnover {trade_ratio:.1f}x "
-            f"({full_row['avg_trades'][0]:.0f} → {screened_row['avg_trades'][0]:.0f} trades)."
-        )
+# Same arm, same model family, same validation window, and the same predictions on
+# both sides. The only difference between the two rows is the tradeable universe, so
+# the gap between them is what the screen did and not what the model did.
+#
+# Read the Sharpe difference and the trade ratio together. The screen changes which
+# names can be held, so it changes how much trading the ordering provokes as well as
+# what each trade costs, and a Sharpe difference alone cannot separate the two. The
+# printed line above states both, computed from the table rather than described here,
+# because a described ordering goes stale against the next rebuild while a computed
+# one cannot.
 
 # %% [markdown]
 # ## 5. Cadence × Per-Share Cost Analysis
 #
-# The bps sweep above fixes the rebalancing cadence at 15 minutes. But the
-# cost-to-edge ratio depends on *how often* we trade, not just *how much* each
-# trade costs. At 15-minute cadence the strategy rebalances 26 times per day;
-# at hourly cadence only 6–7 times. Holding longer amortizes the fixed per-trade
-# cost over a larger expected return per period.
+# The bps sweep above fixes the rebalancing cadence at 15 minutes. The
+# cost-to-edge ratio depends on how often the strategy trades as well as on what
+# each trade costs, and the cadence axis is the one that moves the first term.
+#
+# `resolve_decision_schedule` puts each cadence on the clock over the window this
+# label is scored on, 10:31 to 15:43. Measured on it: 62 decision slots a day at
+# five minutes, 20 at fifteen, 10 at thirty and 5 at sixty. A 9:30-to-16:00
+# session would give 78, 26, 13 and 7; the scored window is shorter at both ends
+# because a feature lookback opens it and the fifteen-minute forward label closes
+# it. Holding longer amortizes the fixed per-trade cost over a larger expected
+# return per period.
 #
 # This section sweeps **cadence × per-share spread** — the central exhibit
 # for this case study. We use a **per-share cost model** rather than bps,
@@ -549,7 +773,7 @@ if not screen_compare.is_empty() and screen_compare.height == 2:
 from case_studies.utils.backtest_runner import normalize_prediction_columns
 from case_studies.utils.registry import read_predictions
 
-# Top engine signal-stage prediction by Sharpe
+# Top engine baseline-stage prediction by Sharpe
 db_path = CASE_DIR / "run_log" / "registry.db"
 conn = sqlite3.connect(str(db_path))
 cur = conn.cursor()
@@ -579,7 +803,7 @@ conn.close()
 
 if _row is None:
     print(
-        f"No signal-stage engine backtest on the {CANONICAL_UNIVERSE or 'full'} universe. "
+        f"No baseline-stage engine backtest on the {CANONICAL_UNIVERSE or 'full'} universe. "
         "Skipping cadence sweep."
     )
     best_pred_hash = None
@@ -941,7 +1165,15 @@ if not cadence_df.is_empty():
             ax.text(j, i, f"{val:.2f}", ha="center", va="center", color=color, fontsize=11)
 
     fig.colorbar(im, ax=ax, label="Sharpe Ratio")
-    fig.show()
+    show_with_alt(
+        fig,
+        "Heatmap of Sharpe over rebalancing cadence against per-share effective spread. "
+        "Rows are cadences and columns are spreads, each cell holding one Sharpe printed to "
+        "two decimals over a red-yellow-green colour scale clipped at -2 and +2, so red is "
+        "the worst and green the best. A colour bar to the right carries the same scale. The "
+        "cell values are the figure's data: the colour repeats them rather than adding "
+        "anything a reader would otherwise miss.",
+    )
 else:
     print("No cadence sweep results")
 
@@ -983,8 +1215,15 @@ if not cadence_df.is_empty():
         axes[1].set_xlabel("Sharpe Ratio")
         axes[1].set_title("Gross Sharpe by Cadence")
 
-        fig.tight_layout()
-        fig.show()
+        show_with_alt(
+            fig,
+            "Two horizontal bar charts side by side, sharing one cadence per row. The left "
+            "panel gives the number of trades each cadence closes and the right panel its "
+            "gross Sharpe, both at zero assumed cost, with a dashed vertical line at zero "
+            "Sharpe on the right. Reading a row across both panels is what the pair is for: "
+            "it puts the trading a cadence provokes beside the return it earns before any "
+            "cost is charged.",
+        )
 
 # %% [markdown]
 # ## Key Takeaways

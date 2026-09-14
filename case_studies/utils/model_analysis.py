@@ -44,6 +44,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 
 from utils.paths import get_case_study_dir
 
+from .booster_paths import booster_dir
 from .notebook_contracts import defined_ic, degenerate_prediction_sql
 
 # ---------------------------------------------------------------------------
@@ -943,20 +944,11 @@ def load_gbm_feature_importance(
 
     results = []
     for t_hash, config_name in rows:
-        # The training stage writes boosters under the run's own models directory
-        # (utils/gbm.py:2334). The two older layouts are kept as fallbacks in the same
-        # order as case_studies/utils/insight_chapter.py; no production run log carried
-        # either one when this was measured across all nine registries on 2026-09-13.
-        candidates = [
-            case_dir / "run_log" / "training" / t_hash / "models" / "boosters",
-            case_dir / "run_log" / "training" / t_hash / "boosters",
-            case_dir / "run_log" / "models" / t_hash / "boosters",
-        ]
-        booster_dir = next((path for path in candidates if path.exists()), None)
-        if booster_dir is None:
+        run_booster_dir = booster_dir(case_dir, t_hash)
+        if run_booster_dir is None:
             continue
 
-        for booster_file in sorted(booster_dir.glob("*.txt")):
+        for booster_file in sorted(run_booster_dir.glob("*.txt")):
             # Extract fold from filename: fold_0.txt or {config}_fold0.txt
             name = booster_file.stem
             fold_str = name.split("fold")[-1].lstrip("_") if "fold" in name else "0"

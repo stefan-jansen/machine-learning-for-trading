@@ -152,10 +152,89 @@ with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
         ),
     ).fetchone()
 if match is None:
-    raise RuntimeError(
-        f"No holdout prediction set for training {holdout_training_hash}. Run "
-        "18_holdout_predictions first; this notebook does not fit."
+    # Two causes, and they call for opposite actions, so the message has to tell them apart.
+    # 18 not having run is the obvious one. The other is that the carrier MOVED between 18 and
+    # this notebook: both resolve independently and by design, and this case study declares no
+    # backtest population, so `published_members_at(member_kind="backtest")` is None and no
+    # backtest row is ever retired from the pool. A sweep that registers a higher-Sharpe cell
+    # between the two runs therefore changes what `resolve_solvent_carrier` returns, this
+    # notebook re-derives a different training identity, and the lookup misses.
+    #
+    # Sending that case to "run 18 first" points at the wrong thing. 18 would refuse it - its
+    # `holdout_generations_to_retire` check exists for exactly this - but only after the reader
+    # has spent a cycle being told to do the thing that cannot work.
+    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
+        registered = conn.execute(
+            """
+            SELECT t.config_name, t.label, p.training_hash,
+                   p.checkpoint_kind, p.checkpoint_value
+            FROM prediction_sets p JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE p.split = 'holdout'
+            ORDER BY p.created_at
+            """
+        ).fetchall()
+    # Checkpoint is part of the generation, not a detail below it: 18 keys its retirement
+    # check on `(training_hash, (checkpoint_kind, checkpoint_value))`, and the lookup above
+    # matches on all three. So a set for this configuration at a DIFFERENT checkpoint is a
+    # different configuration and belongs in the moved-selection branch, not the replay one.
+    _ckpt = (
+        validation_prediction_record["checkpoint_kind"],
+        validation_prediction_record["checkpoint_value"],
     )
+    same_config = [
+        (cfg, lab, th)
+        for cfg, lab, th, ck_kind, ck_value in registered
+        if cfg == carrier["config_name"] and lab == LABEL and (ck_kind, ck_value) == _ckpt
+    ]
+    named = ", ".join(
+        f"{cfg} on {lab} at {ck_kind}={ck_value} ({th})"
+        for cfg, lab, th, ck_kind, ck_value in registered[:4]
+    )
+    if not registered:
+        msg = (
+            f"No holdout prediction set for training {holdout_training_hash}, and this registry "
+            "holds none at all. Run 18_holdout_predictions first; this notebook does not fit."
+        )
+    elif same_config:
+        # The configuration is the one that was fitted, under a training identity that is not
+        # the one this notebook just derived. Selection did not move; the DERIVATION did - the
+        # holdout spec, the label timeline it is built from, or something the identity hashes.
+        # That diagnosis differs from the branch below, which is why they are separated, but
+        # the action does not: 18 refuses in both cases. `holdout_generations_to_retire`
+        # skips only a row whose (training_hash, checkpoint) equals the generation about to
+        # be registered, so a row under the earlier identity is not skipped. It lands in one
+        # of the three retirement buckets by its training spec - `superseded` if it was a
+        # genuine refit, otherwise `not_out_of_sample` or `unattributable` - and each of the
+        # three raises in 18 before anything is fitted. The `superseded` message reads "a
+        # refit of a different configuration", which is 18's identity for a generation and
+        # not the config name.
+        msg = (
+            f"No holdout prediction set for training {holdout_training_hash}, but "
+            f"{carrier['family']}/{carrier['config_name']} on {LABEL} at "
+            f"{_ckpt[0]}={_ckpt[1]} - the configuration that resolves now - already has one under "
+            f"{', '.join(th for _, _, th in same_config)}. So the selection did not move and "
+            "its derived training identity did: the holdout spec, the label timeline it reads, "
+            "or an input the identity covers has changed since 18 ran. Re-running 18 on its "
+            "own will NOT recover this: it matches a registered generation on the exact "
+            "training hash and checkpoint, so the row under the earlier identity reads as a "
+            "superseded refit and 18 refuses before fitting. Either restore the derivation "
+            "the registered row was fitted under, or retire that generation through the "
+            "registry's own lifecycle - which records that the window was looked at twice - "
+            "and then re-run 18."
+        )
+    else:
+        msg = (
+            f"No holdout prediction set for training {holdout_training_hash}, but this registry "
+            f"holds {len(registered)} for other configurations: {named}. So "
+            "18_holdout_predictions has run and the selected configuration has MOVED since - it "
+            f"now resolves to {carrier['family']}/{carrier['config_name']} on {LABEL}. A "
+            "backtest row is never retired from the carrier pool, so a sweep registering a "
+            "higher-Sharpe cell between the two notebooks is enough to do it. Do NOT re-run 18 "
+            "to fit the new one: that spends a second holdout observation on a second "
+            "configuration, which is what its retirement check refuses. Decide which "
+            "configuration this case study carries."
+        )
+    raise RuntimeError(msg)
 HOLDOUT_PREDICTION_HASH = match[0]
 
 print(f"Selected configuration: {carrier['val_backtest_hash']}  {carrier['config_name']} ({LABEL})")

@@ -46,11 +46,12 @@
 # %%
 """NASDAQ-100 Microstructure: Holdout Predictions."""
 
+import pandas as pd
 import polars as pl
 
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
-from case_studies.research.models import reconstruct_locked_model_request
+from case_studies.research.models import _family_module, reconstruct_locked_model_request
 from case_studies.utils.registry import training_hash_from_spec
 from case_studies.utils.strategy_analysis import (
     holdout_generations_to_retire,
@@ -93,6 +94,36 @@ print(
     f"  validation Sharpe {carrier['val_sharpe']:.3f}, max drawdown {carrier['max_drawdown']:.3f}"
 )
 print(f"  fitted by training run {carrier['training_hash']}")
+
+# Whether this family can be refitted at all, asked before anything reads the window.
+#
+# Every stage below - the holdout CV derivation, the re-keying, the request, the retirement
+# check - assumes the selected configuration is a fit that can be repeated on a later fold.
+# The ensemble introduced in `14_backtest` Section 4 is not: it is the mean of twelve gbm
+# forecasts, so its holdout counterpart is the mean of those twelve models' *holdout*
+# forecasts, which is twelve refits and an average rather than the one refit this notebook
+# performs. `case_studies/utils/ensemble.py` refuses the re-key for that reason, and that
+# refusal would otherwise arrive several steps in, after the window derivation has run.
+#
+# Asked of the adapter rather than of a family name, so a family that gains the hooks stops
+# being refused without anything here changing.
+_carrier_module = _family_module(carrier["family"])
+_missing_hooks = [
+    hook
+    for hook in ("rekey_holdout_spec", "reconstruct_locked_request", "validate_locked_run")
+    if not callable(getattr(_carrier_module, hook, None))
+]
+if _missing_hooks:
+    msg = (
+        f"the selected configuration is {carrier['family']}/{carrier['config_name']}, and that "
+        f"family cannot be refitted on the holdout fold: {_carrier_module.__name__} implements "
+        f"none of {_missing_hooks}. For the mean-forecast ensemble this is not an oversight in "
+        "the adapter - an ensemble has no fit of its own, so its holdout forecast is the mean of "
+        "its members' holdout forecasts and producing it means refitting every member and "
+        "averaging the results under a new ensemble identity. That is a stage this case study "
+        "does not have. Nothing has been written and the window has not been read."
+    )
+    raise NotImplementedError(msg)
 
 # %% [markdown]
 # The checkpoint is part of the configuration. Where a family publishes a prediction set per
@@ -164,12 +195,56 @@ print(f"  predicts {fold['val_start']} -> {fold['val_end']}")
 print(f"  label buffer: {holdout_spec['computation']['cv']['request']['label_buffer']}")
 
 # The validation folds are what the buffer is measured against, and the last of them ends
-# before the holdout opens. Printing both is what lets a reader check the gap rather than take
-# it on the derivation's word.
+# before the holdout opens. Both are printed so a reader can see the gap, and the gap is also
+# checked, because a reader is not what runs this.
+#
+# The check is not a tautology, which is the reason it is here rather than left to the two
+# declarations agreeing. `fold["val_start"]` comes from `evaluation.holdout_start` in today's
+# `setup.yaml`; `latest_validation_end` comes from the SELECTED CONFIGURATION'S OWN training
+# spec, which was registered whenever that configuration was fitted and is not re-derived. The
+# carrier pool never retires a row - `published_members_at(member_kind="backtest")` is None for
+# this case study, so every backtest ever registered stays selectable - so the resolver can
+# hand this notebook a configuration whose folds were built under an earlier window. If that
+# window reached past today's `holdout_start`, the configuration was already evaluated on part
+# of the period this notebook is about to call out-of-sample, and nothing else would say so:
+# the seal below is measured from the holdout's own start and is satisfied either way.
+#
+# Measured 2026-09-13 on the current registry: latest validation evaluation ends
+# 2021-06-30 15:43:00 and the holdout opens 2021-07-01, so this passes today and the refusal
+# is for the generation that does not.
+#
+# Compared as timestamps rather than as strings. The two are rendered by different code -
+# `_boundary_iso` writes a midnight boundary as a bare date, and a fold's `val_end` carries a
+# time - so `"2021-06-30 15:43:00" < "2021-07-01"` is true by the accident that a space sorts
+# below a digit, and would stop being true the moment either renderer changed. Both are put on
+# the same naive panel clock first, since the derivation localizes the declared window to the
+# panel's own zone and the fold boundaries come off that panel.
 validation_folds = validation_spec["computation"]["cv"]["folds"]
 latest_validation_end = max(str(entry["val_end"]) for entry in validation_folds)
 print(f"Validation folds: {len(validation_folds)}, latest evaluation end {latest_validation_end}")
 print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_start']}")
+
+
+def _on_naive_panel_clock(moment: str) -> "pd.Timestamp":
+    """The moment as the panel keeps it, with any zone dropped rather than converted."""
+    stamp = pd.Timestamp(moment)
+    return stamp.tz_localize(None) if stamp.tzinfo is not None else stamp
+
+
+_validation_closed = _on_naive_panel_clock(latest_validation_end)
+_holdout_opened = _on_naive_panel_clock(str(fold["val_start"]))
+if _validation_closed >= _holdout_opened:
+    msg = (
+        f"the selected configuration {carrier['family']}/{carrier['config_name']} on "
+        f"{carrier['label']} was evaluated to {latest_validation_end}, and the holdout opens "
+        f"{fold['val_start']}. Its validation window reaches into the period this notebook "
+        "would report as out-of-sample, so the holdout number it produced would not be one. "
+        "That configuration's folds predate the current evaluation.holdout_start rather than "
+        "disagreeing with it: a backtest row is never retired, so the resolver can still "
+        "select a generation built under an earlier window. Re-fit it under the current "
+        "window, or restrict selection so it cannot carry. Nothing has been written."
+    )
+    raise RuntimeError(msg)
 
 # %% [markdown]
 # ## 3. Fit, and register the predictions

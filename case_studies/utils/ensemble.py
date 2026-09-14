@@ -1,0 +1,376 @@
+"""Mean-forecast ensembles over a family's registered prediction sets.
+
+A case study whose lesson is that selection within a family is noise needs an
+object that does not select: one ordering built from every member of the family,
+registered as a prediction set of its own so that the backtest stage, the
+cohort work and the holdout all read it the same way they read a model.
+
+``nasdaq100_microstructure`` is the case study with that lesson and the one this
+module exists for. Its featured carrier is the mean forecast of the regularized
+LightGBM configurations, and nothing in the repository produced it: three
+notebooks read ``family == 'ensemble'``, no notebook wrote it, and every
+registry in the fleet held zero rows of it
+(ml4t/agent-workspace#1157).
+
+The member set is resolved from what is registered, never listed by hand, so it
+cannot go stale against the configurations a case study actually fitted.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+import polars as pl
+
+# LightGBM's own default when a preset declares no `num_leaves`. Written down rather
+# than read off the library at run time: the member set is part of what the ensemble
+# is, so a library default change must arrive as a disagreement here and not as a
+# silently different ensemble carrying the same name.
+LIGHTGBM_DEFAULT_NUM_LEAVES = 31
+
+# The canonical prediction schema, which is what `normalize_prediction_columns`
+# renames every family's frame into: gbm writes these names already, the sequence
+# families write `fold`/`prediction`/`actual`, and an ensemble built from one
+# family's names would be unreadable beside the other's.
+KEY_COLUMNS = ("fold_id", "symbol", "timestamp")
+SCORE_COLUMN = "y_score"
+TRUTH_COLUMN = "y_true"
+
+
+def member_num_leaves(config_name: str) -> int:
+    """The `num_leaves` a LightGBM preset trains at, explicit or defaulted."""
+    from case_studies.utils.registry.specs import load_preset
+
+    preset = load_preset("gbm", config_name)
+    params = preset.get("params") or {}
+    declared = params.get("num_leaves")
+    return int(declared) if declared is not None else LIGHTGBM_DEFAULT_NUM_LEAVES
+
+
+def admissible_prediction_hashes(case_dir: Path) -> set[str]:
+    """The catalog-level prediction identities a stage of this case study may consume.
+
+    Complete, under an identity this schema still recognises, and not listed by a
+    retired generation of its own population. That is the *first* of the filters
+    `14_backtest.py` applies, and on its own it is wider than the pool the sweep
+    runs: the notebook then narrows on what the registry's populations publish and
+    on cross-sectional coverage, through `prediction_members_in_force`, which needs
+    an open study and so cannot be composed here. On the 2026-09-13 nasdaq run the
+    two differed by 784 rows against 162.
+
+    So this is a floor, not the sweep's rule, and a caller that averages, ranks or
+    publishes over the result is consuming rows the sweep may have refused. The
+    ensemble in `14_backtest.py` passes its own `SWEPT_POOL` for exactly that
+    reason; this default stands for callers with no sweep to agree with.
+    """
+    from case_studies.research import prediction_rows_at, superseded_members_at
+
+    retired = superseded_members_at(case_dir)
+    catalog = prediction_rows_at(case_dir)
+    return set(
+        catalog.filter(pl.col("complete") & ~pl.col("prediction_hash").is_in(list(retired)))
+        .get_column("prediction_hash")
+        .to_list()
+    )
+
+
+def resolve_members(
+    case_dir: Path,
+    *,
+    label: str,
+    family: str = "gbm",
+    split: str = "validation",
+    max_num_leaves: int | None = None,
+    admissible: set[str] | None = None,
+) -> pl.DataFrame:
+    """The prediction set of each qualifying configuration, one row per configuration.
+
+    Takes each configuration's **last** checkpoint among the admissible rows. Any
+    other choice - the checkpoint with the best validation metric, say - would
+    select on the window the ensemble is then measured on, which is the thing the
+    ensemble exists to avoid doing.
+
+    ``admissible`` restricts the candidates before the last-checkpoint rule is
+    applied, and defaults to :func:`admissible_prediction_hashes`. It is not
+    optional in effect: the registry keeps a retired generation's rows after a
+    refit, and a configuration name identifies a configuration rather than a
+    generation of it. Grouping by name over both generations picks whichever row
+    carries the larger checkpoint, so a refit that shortened a run would put the
+    retired generation's forecast into the ensemble and nothing downstream would
+    show it - the member list would name the right configuration and hold the
+    wrong prediction.
+
+    That filter is necessary and not sufficient. It removes a generation the
+    registry has retired, and two generations of one configuration can both be
+    live: populations are named independently, so a second training run published
+    under a second name retires nothing. The checkpoint number cannot arbitrate
+    between them. It is a training coordinate, not a generation one - a refit that
+    shortened a run leaves the *older* generation carrying the larger value, and
+    two runs of the same schedule carry the same value and tie. So a configuration
+    that resolves to more than one live ``training_hash`` raises here and names
+    them, rather than being decided by an ordering that means nothing. Deciding it
+    silently is the same defect as averaging a retired forecast, with the registry
+    state that produced it left invisible.
+
+    Returns columns ``config_name``, ``training_hash``, ``prediction_hash``,
+    ``checkpoint_value``, ``num_leaves``, ordered by ``config_name`` so the member
+    list is stable across calls and so the registered spec is too.
+    """
+    if admissible is None:
+        admissible = admissible_prediction_hashes(case_dir)
+    db = sqlite3.connect(f"file:{case_dir / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+    try:
+        rows = db.execute(
+            """
+            SELECT t.config_name, t.training_hash, p.prediction_hash, p.checkpoint_value
+            FROM prediction_sets p
+            JOIN training_runs t ON t.training_hash = p.training_hash
+            WHERE t.family = ? AND t.label = ? AND p.split = ?
+            """,
+            (family, label, split),
+        ).fetchall()
+    finally:
+        db.close()
+    if not rows:
+        msg = (
+            f"no {family} prediction sets for {label!r} at split {split!r} in "
+            f"{case_dir}; the ensemble has nothing to average"
+        )
+        raise ValueError(msg)
+    offered = len(rows)
+    rows = [row for row in rows if row[2] in admissible]
+    if not rows:
+        msg = (
+            f"all {offered} {family} prediction sets for {label!r} at split {split!r} are "
+            "incomplete or belong to a retired generation, so none may enter an ensemble"
+        )
+        raise ValueError(msg)
+
+    frame = pl.DataFrame(
+        rows,
+        schema={
+            "config_name": pl.String,
+            "training_hash": pl.String,
+            "prediction_hash": pl.String,
+            "checkpoint_value": pl.Int64,
+        },
+        orient="row",
+    )
+    frame = frame.with_columns(
+        pl.col("config_name")
+        .map_elements(member_num_leaves, return_dtype=pl.Int64)
+        .alias("num_leaves")
+    )
+    if max_num_leaves is not None:
+        frame = frame.filter(pl.col("num_leaves") <= int(max_num_leaves))
+        if frame.is_empty():
+            msg = (
+                f"every {family} configuration for {label!r} trains at more than "
+                f"{max_num_leaves} leaves, so the ensemble has no members"
+            )
+            raise ValueError(msg)
+    ambiguous = (
+        frame.group_by("config_name")
+        .agg(pl.col("training_hash").unique().alias("training_hashes"))
+        .filter(pl.col("training_hashes").list.len() > 1)
+        .sort("config_name")
+    )
+    if not ambiguous.is_empty():
+        named = "; ".join(
+            f"{row['config_name']} -> {sorted(row['training_hashes'])}"
+            for row in ambiguous.iter_rows(named=True)
+        )
+        msg = (
+            f"{ambiguous.height} {family} configuration(s) for {label!r} resolve to more "
+            f"than one live training run, so which generation the ensemble averages is "
+            f"undecided: {named}. Retire the generation that is no longer current, or pass "
+            "an `admissible` set that holds one of them"
+        )
+        raise ValueError(msg)
+    return (
+        frame.sort("config_name", "checkpoint_value")
+        .group_by("config_name", maintain_order=True)
+        .last()
+        .sort("config_name")
+    )
+
+
+def mean_forecast(case_study: str, prediction_hashes: list[str]) -> pl.DataFrame:
+    """Average the members' forecasts per key into one prediction frame.
+
+    Every member must cover exactly the same keys. A member covering a subset
+    would average over fewer forecasts on the rows it misses, so the result would
+    be an ensemble of one width on some rows and another width on others while
+    reporting a single member count. A disagreement raises here rather than being
+    filled, dropped, or left to a join to decide.
+
+    The members are summed one at a time into a running total rather than stacked
+    and grouped. On this case study a member carries five to seven million rows
+    and there are twelve of them, so the stacked frame would be the largest
+    object in the notebook by an order of magnitude for the sake of an addition.
+    Summing positionally is what the key check above licenses: two frames sorted
+    by the same keys and carrying the same keys are row-aligned.
+    """
+    from case_studies.utils.backtest_runner import normalize_prediction_columns
+    from case_studies.utils.registry import read_predictions
+
+    if len(prediction_hashes) < 2:
+        msg = f"a mean forecast needs at least two members, got {len(prediction_hashes)}"
+        raise ValueError(msg)
+
+    total: pl.DataFrame | None = None
+    for p_hash in prediction_hashes:
+        frame = normalize_prediction_columns(read_predictions(case_study, p_hash))
+        missing = [c for c in (*KEY_COLUMNS, SCORE_COLUMN, TRUTH_COLUMN) if c not in frame.columns]
+        if missing:
+            msg = f"prediction set {p_hash} is missing {missing}; columns: {frame.columns}"
+            raise ValueError(msg)
+        frame = frame.select(*KEY_COLUMNS, TRUTH_COLUMN, SCORE_COLUMN).sort(KEY_COLUMNS)
+        if frame.select(KEY_COLUMNS).is_duplicated().any():
+            msg = f"prediction set {p_hash} carries duplicate {list(KEY_COLUMNS)} keys"
+            raise ValueError(msg)
+        if total is None:
+            total = frame
+            continue
+        if frame.height != total.height or not frame.select(KEY_COLUMNS).equals(
+            total.select(KEY_COLUMNS)
+        ):
+            msg = (
+                f"member {p_hash} covers {frame.height} keys against {total.height} for "
+                f"{prediction_hashes[0]}; the members of a mean forecast must cover the "
+                "same rows"
+            )
+            raise ValueError(msg)
+        total = total.with_columns(
+            (pl.col(SCORE_COLUMN) + frame.get_column(SCORE_COLUMN)).alias(SCORE_COLUMN)
+        )
+
+    assert total is not None
+    return total.with_columns(pl.col(SCORE_COLUMN) / len(prediction_hashes))
+
+
+def ensemble_training_spec(
+    member_spec_json: str,
+    *,
+    members: pl.DataFrame,
+    method: str,
+    config_name: str,
+    provenance: dict[str, Any],
+) -> dict:
+    """Build the ensemble's training spec from one member's resolved spec.
+
+    The ensemble is fitted on nothing: it has no model, no epochs and no folds of
+    its own. What it does have is the members' inputs, and those are what its
+    identity has to be keyed on - the same features, the same fold plan, the same
+    label artifact, the same expected keys. Deriving them from a member rather
+    than rebuilding them is what guarantees the two agree, and the member key
+    check in :func:`mean_forecast` is what guarantees every member agrees with
+    that one.
+
+    What replaces the model block is the member list itself, by prediction hash.
+    Two ensembles over different members are then different identities, and
+    re-running a member's fit moves its hash and so moves the ensemble's, which
+    is the behaviour every other family already has.
+    """
+    member = json.loads(member_spec_json)
+    computation = dict(member["computation"])
+    for key in ("model", "checkpoint_schedule", "runtime_identity", "source_identity"):
+        computation.pop(key, None)
+    computation["ensemble"] = {
+        "method": method,
+        "member_family": "gbm",
+        "n_members": int(members.height),
+        "members": [
+            {
+                "config_name": row["config_name"],
+                "prediction_hash": row["prediction_hash"],
+                "checkpoint_value": row["checkpoint_value"],
+                "num_leaves": row["num_leaves"],
+            }
+            for row in members.sort("config_name").iter_rows(named=True)
+        ],
+    }
+    computation["source_identity"] = {"ensemble_builder": 1}
+    return {
+        "identity_version": member["identity_version"],
+        "resolved_spec_schema": member["resolved_spec_schema"],
+        "family": "ensemble",
+        "label": member["label"],
+        "seed": member["seed"],
+        "config_name": config_name,
+        "execution_tier": member["execution_tier"],
+        "computation": computation,
+        "provenance": provenance,
+    }
+
+
+def load_ensemble_declaration(case_study: str) -> dict | None:
+    """Return the top-level ``ensemble`` block from a case study's setup.yaml.
+
+    ``None`` when the case study declares none, which is every case study but
+    ``nasdaq100_microstructure``. Required keys are checked here rather than at
+    each use: a typo in one of them would otherwise resolve to a default and
+    build a different ensemble under the declared name.
+    """
+    from case_studies.utils.sweep_config import _load_setup
+
+    block = (_load_setup(case_study) or {}).get("ensemble")
+    if block is None:
+        return None
+    required = (
+        "member_family",
+        "max_num_leaves",
+        "method",
+        "config_name",
+        "checkpoint",
+        "featured_scheme",
+        "universe_filter",
+    )
+    missing = [k for k in required if block.get(k) is None]
+    if missing:
+        msg = (
+            f"the `ensemble` block in case_studies/{case_study}/config/setup.yaml is "
+            f"missing {missing}; every key is part of what the ensemble is, so none of "
+            "them has a default"
+        )
+        raise KeyError(msg)
+    if str(block["method"]) != "mean_forecast":
+        msg = f"unsupported ensemble method {block['method']!r}; only mean_forecast exists"
+        raise ValueError(msg)
+    if str(block["checkpoint"]) != "last":
+        msg = (
+            f"unsupported ensemble checkpoint rule {block['checkpoint']!r}; only `last` "
+            "exists, because any other rule selects on the validation window"
+        )
+        raise ValueError(msg)
+    return dict(block)
+
+
+def rekey_holdout_spec(study, spec: dict[str, Any], *, validation_spec: dict[str, Any]) -> None:
+    """Refuse, naming what an ensemble holdout would have to be.
+
+    ``build_holdout_training_spec`` dispatches here through the model adapter
+    registry, and this module is registered so the refusal names the family rather
+    than reading as "unsupported model adapter". The refusal is the honest answer
+    today: an ensemble is not fitted, so there is nothing here to re-key onto the
+    holdout fold, and the holdout forecast is the mean of the members' *holdout*
+    forecasts rather than a re-fit of anything this spec describes.
+
+    Producing it needs each member re-keyed and re-fitted through its own family's
+    hook and then averaged, which is twelve training identities and one ensemble
+    identity over a window `18_holdout_predictions` documents as carrying one
+    configuration. That is a stage, not a hook, and it is not written.
+    """
+    members = (validation_spec.get("computation", {}).get("ensemble") or {}).get("members") or []
+    msg = (
+        "an ensemble has no fit to re-key onto the holdout fold. Its holdout forecast is the "
+        f"mean of its {len(members)} members' holdout forecasts, so each member has to be "
+        "re-keyed and re-fitted through its own family's hook and the results averaged under a "
+        "new ensemble identity. No stage does that yet, and this hook cannot: it is handed one "
+        "specification and returns one. If the ensemble has been selected as the carrier, the "
+        "holdout stage is what needs writing, not this function."
+    )
+    raise NotImplementedError(msg)

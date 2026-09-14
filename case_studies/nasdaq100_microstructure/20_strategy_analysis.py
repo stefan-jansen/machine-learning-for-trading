@@ -88,6 +88,7 @@ from case_studies.utils.factor_attribution import (
     run_factor_regression,
 )
 from case_studies.utils.notebook_contracts import (
+    degenerate_prediction_sql,
     derived_tables_off_canonical_universe,
     excluded_families,
     strategy_input_counts,
@@ -114,6 +115,19 @@ from case_studies.utils.strategy_analysis import (
 from case_studies.utils.sweep_config import get_universe_filters_for
 from case_studies.utils.uncertainty import ENTIRE_REGISTRY, NO_CARRIER
 from utils.paths import get_output_dir
+from utils.style import show_with_alt
+
+# Figures go through `show_with_alt`, and none of them calls `tight_layout()`. Both are
+# measured rather than stylistic: `utils/style` and `matplotlibrc` set
+# `figure.constrained_layout.use`, so `tight_layout()` warns and fights the layout engine
+# already running, and `fig.show()` on a non-interactive backend warns that the canvas
+# cannot be shown - two UserWarnings per figure, written into the rendered cell. The six
+# notebooks of this case study already at `done` use this form and neither of the others.
+#
+# The alt strings name structure, axes and reference lines, never which series wins. An
+# ordering is a registry result a rebuild can reverse, and alt text is prose no rebuild
+# revisits, so a ranking written here would go stale silently on the one surface a reader
+# who cannot see the chart depends on.
 
 # %% tags=["parameters"]
 CASE_STUDY = "nasdaq100_microstructure"
@@ -250,21 +264,28 @@ if _n_cohorts == 0 or "cohort_metrics" in _stale:
 else:
     print(f"already populated: cohort_metrics {_n_cohorts} rows")
 
-if _n_pairs == 0 or "backtest_paired_metrics" in _stale:
-    # `NO_CARRIER` is the raw-Sharpe ranking inside the producer rather than a resolved
-    # lineage: this case study pins a rung the canonical resolver does not know about.
-    _pairs = populate_paired_metrics(
-        CASE_STUDY,
-        explorer,
-        rung=_RUNG,
-        replace_all=True,
-        carrier=NO_CARRIER,
-        prediction_hashes=ENTIRE_REGISTRY,
-    )
-    _n_pairs = sum(1 for row in _pairs if "skip" not in row)
-    print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
-else:
-    print(f"already populated: backtest_paired_metrics {_n_pairs} pairs")
+# Rebuilt every run, where cohorts above are rebuilt only when they look wrong. The universe
+# recovery cannot answer this table's question. It reads what the rows point at, and a pair
+# written under an earlier pin points at a backtest that is still inside the current one: when
+# `family == "ensemble"` left this case study's pin on 2026-09-14 the rank-1 rung moved from the
+# ensemble at +0.566 to `deep_learning/nlinear` at +2.300, and the ensemble row it had already
+# written stayed canonical, stayed cost-feasible and stayed `fwd_ret_15m`. Nothing about it
+# reads as stale, because being outside the pin and no longer being what the pin selects are
+# different things, and only the first is recoverable from the row. A row count answers neither.
+# So it is recomputed rather than validated. `replace_all=True` makes the call a complete
+# snapshot, and it costs about a second against this notebook's 25 to 40.
+# `NO_CARRIER` is the raw-Sharpe ranking inside the producer rather than a resolved
+# lineage: this case study pins a rung the canonical resolver does not know about.
+_pairs = populate_paired_metrics(
+    CASE_STUDY,
+    explorer,
+    rung=_RUNG,
+    replace_all=True,
+    carrier=NO_CARRIER,
+    prediction_hashes=ENTIRE_REGISTRY,
+)
+_n_pairs = sum(1 for row in _pairs if "skip" not in row)
+print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
 
 # A rebuild that could not produce a canonical table leaves the previous one in place, which
 # is the right call for the data - a stale table is recoverable and deleted rows are not - but
@@ -297,18 +318,38 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # %% [markdown]
 # ## §1 Handoff from model analysis
 #
-# The strategy phase inherits one configuration, chosen once across the stages
-# that are eligible for the holdout - signal, allocation and risk overlay -
-# on validation results only.
+# The strategy phase inherits one configuration, chosen once on validation results
+# only, across the stages that are eligible for the holdout - signal, allocation
+# and risk overlay.
 #
 # The selection is made by `resolve_solvent_carrier`, the shared resolver, and not by
 # ranking a Sharpe column here. The same resolver answers `18_holdout_predictions` and
 # `19_holdout_backtest`, so this page reports the configuration those notebooks refitted
-# and priced.
+# and priced. It refuses rather than selecting past a problem, on three conditions that
+# are all permanent: a rank-1 with no recorded `max_drawdown`, one whose drawdown reached
+# -100% so its Sharpe is arithmetic on an account that no longer exists, and one fitted
+# under a conformal calibration version `run_backtest` will no longer execute.
+#
+# **On this case study the eligible stages come to one.** `UNIVERSE_RESTRICTIONS` pins
+# rank-1 to the `cost_feasible` universe that `backtest.sweep.universe_filter` declares
+# canonical, and `15_portfolio_management` and `16_risk_management` both register
+# specs carrying no `universe_filter`. So the allocation and risk-overlay stages
+# contribute no eligible rows here and the carrier is a baseline-stage configuration.
 #
 # The label is taken from the selection rather than assumed. The pool spans every
 # declared label, so the chosen strategy may rest on a variant label rather than the
 # primary one, and every loader downstream follows the selection rather than the default.
+#
+# **Here it does.** `config/setup.yaml` declares `fwd_ret_15m` primary, and the
+# selection lands on `fwd_dir_15m`, the direction variant, because that is where the
+# best validation Sharpe is. The consequence is worth stating rather than leaving a
+# reader to infer it from two labels appearing in different tables: the holdout was
+# spent on the variant. The primary label is where the stage sweeps ran, carrying all
+# 60 allocation and all 20 risk-overlay backtests against the variant's none, while
+# the variant carries the single holdout row. So the allocation and overlay evidence
+# in the sections below describes one label and the out-of-sample evidence in §6
+# describes another. Each is read on the configuration that produced it and neither
+# stands in for the other.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY)
@@ -360,7 +401,7 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 # %% [markdown]
 # ## §2 Search context, family comparison, and lineage waterfall
 #
-# The signal stage produced many validation backtests across the model families
+# The baseline stage produced many validation backtests across the model families
 # and label horizons. The selected row is one outcome of that search, and a
 # search over many configurations produces a highest value even when none of the
 # configurations has an edge.
@@ -383,12 +424,20 @@ search_table = pl.DataFrame(
         {"metric": "Top-by-Sharpe percentile", "value": f"{ctx['champion_percentile']:.1f}%"},
     ]
 )
-print("Signal-stage search context:")
+print("Baseline-stage search context:")
 print(search_table)
 
 # %% [markdown]
 # The family comparison reads each backtest's stored interval rather than
 # recomputing one, so the plot can show error bars instead of points alone.
+#
+# It is scoped to the canonical universe, because the baseline stage holds two and they are
+# not distributed evenly across families. `backtest.sweep.signal_passes` re-runs only
+# `mechanism_top_n` predictions on the full universe, and those are whichever families
+# pass 1 ranked highest, so pooling both would move one family's median by rows the others
+# have no counterpart for. Labels are pooled deliberately: the question here is what a
+# family's spread of outcomes looks like, and this case study trains most families on
+# every label.
 
 # %%
 with sqlite3.connect(str(_db)) as _con:
@@ -408,11 +457,23 @@ with sqlite3.connect(str(_db)) as _con:
               AND p.split = 'validation'
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
-            """
+              AND COALESCE(
+                  json_extract(b.spec_json, '$.strategy.signal.universe_filter'), 'full'
+              ) = ?
+            """,
+            (_UNIVERSE_FILTER or "full",),
         ).fetchall(),
         schema=["family", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi"],
         orient="row",
     )
+if _famdf.is_empty():
+    msg = (
+        f"No baseline-stage validation backtests on the {_UNIVERSE_FILTER or 'full'} universe "
+        f"for {CASE_STUDY}, so there is no family distribution to plot. The rest of this "
+        "notebook reads the same universe, so this is the first place a registry missing it "
+        "shows up."
+    )
+    raise RuntimeError(msg)
 
 family_summary = (
     _famdf.group_by("family")
@@ -426,7 +487,7 @@ family_summary = (
     )
     .sort("sharpe_median", descending=True)
 )
-print("Family-level signal-stage Sharpe summary:")
+print("Family-level baseline Sharpe summary:")
 print(family_summary)
 
 # %%
@@ -457,8 +518,15 @@ ax.set_xlabel("Validation Sharpe")
 ax.set_title("Family-level Signal Sharpe — IQR + max")
 ax.invert_yaxis()
 ax.legend(loc="lower right", frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal chart of validation Sharpe by model family. One row per family, named on "
+    "the vertical axis which runs top to bottom. A filled circle marks that family's "
+    "median Sharpe with a horizontal bar spanning its interquartile range, and a red "
+    "cross marks its single best configuration. A dashed vertical line sits at zero "
+    "Sharpe. The gap between a family's median and its cross is the spread the best draw "
+    "was taken from.",
+)
 
 # %% [markdown]
 # **How to read the family distribution.** The bars show each family's spread of
@@ -474,7 +542,7 @@ fig.show()
 #
 # The cost model charged here is the engine's, applied identically to every
 # configuration, so differences between families are not differences in what they
-# were charged.
+# were charged. Every row is on one universe for the same reason.
 
 # %% [markdown]
 # The lineage gives one backtest per pipeline stage for this prediction. Each
@@ -504,7 +572,15 @@ if missing_stages:
 
 # %%
 fig = plot_sharpe_waterfall(lineage, ci_lo=ci_lo, ci_hi=ci_hi)
-fig.show()
+show_with_alt(
+    fig,
+    "Waterfall of Sharpe across the selected configuration's locked lineage: signal, then "
+    "allocation, then cost, then risk overlay, one bar per stage in that order. Each bar carries "
+    "asymmetric error bars for its block-bootstrap 95 percent confidence interval. Those are "
+    "marginal intervals on each stage and not a test between stages: whether one stage differs "
+    "from the next is the paired difference printed below the figure, which can exclude zero "
+    "while two bars overlap.",
+)
 
 # %% [markdown]
 # Stage transitions are read from the stored paired comparisons rather than
@@ -541,15 +617,27 @@ if ALLOC_HASH is not None:
 # resolved positive transition.
 
 # %%
-conc_df = explorer.concentration_curve(TOP_PHASH)
+# top_k is an entry-scheme parameter, so the sweep that varies it registers at
+# stage=signal on this case study: the carrier's rows are 5, 10 and 20 positions
+# there and none at the allocation stage, which `concentration_curve` defaults to.
+# Asking for the default raised rather than returning nothing, which is the point
+# of that refusal: this cell printed "no concentration data" and dropped its
+# figure for as long as the registry held no rows for the carrier at all.
+conc_df = explorer.concentration_curve(TOP_PHASH, stage="signal")
 if not conc_df.is_empty():
     fig = plot_concentration_curve(conc_df)
-    fig.show()
+    show_with_alt(
+        fig,
+        "Line chart of Sharpe against portfolio concentration. The horizontal axis is the "
+        "number of positions held, top_k, and the vertical axis is the Sharpe the selected "
+        "prediction achieves at each. The shape rather than any single point is the content: "
+        "it shows whether concentrating the book helped or hurt.",
+    )
     best_per_k = conc_df.sort("sharpe", descending=True).group_by("top_k").first().sort("top_k")
-    print("Allocation: best Sharpe by top_k:")
+    print("Concentration sweep: best Sharpe by top_k:")
     print(best_per_k.select("top_k", "allocator", "sharpe", "max_drawdown"))
 else:
-    print("No concentration data — allocation stage absent for this prediction.")
+    print("No concentration data: no top_k sweep registered for this prediction.")
 
 # %% [markdown]
 # **How to read the concentration curve.** Position count trades two things off
@@ -569,7 +657,7 @@ else:
 # ## §3 Headline performance with uncertainty
 #
 # The selected specification is the validation-window backtest associated
-# with the highest signal-stage Sharpe. Every metric is reported with
+# with the highest baseline Sharpe. Every metric is reported with
 # its block-bootstrap interval from `backtest_metrics`; the equity overlay
 # shows the cumulative trajectory against the equal-weight NASDAQ-100
 # universe benchmark.
@@ -648,7 +736,7 @@ spec_block = {
     "allocation": lineage.get("allocation", {}).get("allocator"),
     "risk_overlay": lineage.get("risk_overlay", {}).get("risk_name"),
     "rebalance_step_bars": setup["labels"]["rebalance_step"][RANK1_LABEL],
-    "cost_assumption": "engine cost model: 5 bps commission + 2 bps slippage at signal stage; per_share_plus_spread sensitivity in §5",
+    "cost_assumption": "engine cost model: 5 bps commission + 2 bps slippage at the baseline stage; per_share_plus_spread sensitivity in §5",
     "validation_window_periods": int(full["n_periods"]) if full["n_periods"] is not None else None,
     "num_trades": int(full["num_trades"]) if full["num_trades"] is not None else None,
     "avg_turnover": full["avg_turnover"],
@@ -858,8 +946,16 @@ ax.invert_yaxis()
 ax.set_xlabel("Value")
 ax.set_title("Rank-1 Headline Metrics with 95% CIs")
 ax.legend(loc="lower right", fontsize=8, frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Forest plot of the selected configuration's headline metrics. One row per metric, named on "
+    "the vertical axis, with a point estimate and a horizontal bar for its 95 percent confidence "
+    "interval, read on a shared horizontal value axis. A dashed vertical line marks zero, and "
+    "further vertical reference lines mark the equal-weight validation Sharpe and the "
+    "allocation-stage Sharpe. Those two lines are Sharpe values, so only the Sharpe row is "
+    "comparable with them; the Sortino, Calmar and annualized-return rows share the axis but "
+    "measure different quantities.",
+)
 
 # %% [markdown]
 # The strategy's returns are stored daily while the benchmark is stored at the
@@ -898,8 +994,14 @@ ax.axhline(0, color="#9E9E9E", linewidth=0.6, linestyle="--")
 ax.set_ylabel("Cumulative return")
 ax.set_title("Validation-window cumulative return: selected strategy vs EW universe")
 ax.legend(loc="best", frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two cumulative return paths over the validation window, plotted against time. One "
+    "line is the selected strategy and the other the equal-weight universe, distinguished "
+    "in the legend; the vertical axis is cumulative return and a dashed horizontal line "
+    "marks zero. The comparison is the point: the strategy's path is only informative "
+    "beside the universe it traded in.",
+)
 
 # %% [markdown]
 # **How to read the selection-bias adjustment.** The deflated Sharpe ratio asks
@@ -921,12 +1023,18 @@ fig.show()
 # %% [markdown]
 # ## §4 Risk and drawdown analysis
 #
-# Risk metrics use the validation-window strategy returns paired against
-# the validation EW benchmark. The drawdown panel surfaces the worst
-# episode and recovery; rolling Sharpe and rolling beta locate when the
-# strategy decoupled from the universe. For an intraday cross-sectional
-# strategy on the NASDAQ-100, a deep persistent drawdown is the
-# signature of cost compounding rather than an episodic regime shift.
+# Risk metrics use the validation-window strategy returns paired against the validation
+# EW benchmark. The drawdown panel surfaces the worst episode and whether it recovered;
+# rolling Sharpe and rolling beta say whether either was steady or driven by part of the
+# window.
+#
+# The lower panel is worth reading for its shape and not only its depth: whether the
+# losses arrived steadily across the window or inside one episode, and whether anything
+# was recovered afterwards. That is a description of when the strategy lost, and it is as
+# far as the panel goes. It does not identify a cause - a strategy whose costs exceed its
+# edge still has winning trades and partial recoveries, and a steady decline can happen
+# with no cost at all - so §5 varies the cost directly rather than inferring it from this
+# curve.
 
 # %%
 strat_arr = aligned["strategy"].to_numpy()
@@ -946,13 +1054,43 @@ print(dd)
 
 # %%
 fig = plot_equity_drawdown(strat_returns_path)
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a time axis. The upper panel is the selected strategy's "
+    "cumulative return over the window and the lower panel is its drawdown, the distance "
+    "below the running maximum at each moment. Reading a date down both panels pairs a "
+    "level of return with the loss being carried to hold it.",
+)
 
 # %%
-# Rolling Sharpe + rolling beta
-roll = pa.compute_rolling_metrics(windows=[126], metrics=["sharpe", "beta"])
-print("Rolling-window keys:")
-print({k: type(v).__name__ for k, v in roll.items()} if isinstance(roll, dict) else roll)
+# Rolling Sharpe + rolling beta. `aligned` is daily - the strategy's returns are stored
+# that way and the benchmark is compounded to match - so the window is 126 trading days,
+# about six months of a validation window that runs roughly 253.
+ROLL_WINDOW = 126
+roll = pa.compute_rolling_metrics(windows=[ROLL_WINDOW], metrics=["sharpe", "beta"])
+
+# Summarised rather than printed as an object. This used to print the types of the
+# result's members, which says nothing about the strategy, and the section's own prose
+# promises these two series - a computed result that reaches no reader is the same as one
+# never computed.
+_roll_rows = []
+for _label, _store in (("Rolling Sharpe", roll.sharpe), ("Rolling beta", roll.beta)):
+    _series = _store.get(ROLL_WINDOW)
+    _valid = _series.drop_nulls() if _series is not None else None
+    if _valid is None or _valid.len() == 0:
+        _roll_rows.append({"series": _label, "n": 0, "min": "n/a", "median": "n/a", "max": "n/a"})
+        continue
+    _roll_rows.append(
+        {
+            "series": _label,
+            "n": _valid.len(),
+            "min": f"{_valid.min():+.3f}",
+            "median": f"{_valid.median():+.3f}",
+            "max": f"{_valid.max():+.3f}",
+        }
+    )
+print(f"Rolling metrics over {ROLL_WINDOW} trading days ({aligned.height} days in the window):")
+print(pl.DataFrame(_roll_rows))
 
 # Tail-risk read straight from registry (already computed and stored)
 tail_table = pl.DataFrame(
@@ -978,37 +1116,75 @@ print(f"Fold Sharpe range: [{fold_df['sharpe'].min():.3f}, {fold_df['sharpe'].ma
 print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 
 # %% [markdown]
-# Per-fold Sharpes are both negative across the two walk-forward
-# blocks (live values printed above), confirming that the selected lineage's
-# loss profile is not a single-fold artifact. The tail-risk read
-# carries a moderately-low tail ratio with elevated kurtosis and
-# positive skew — the realized P&L distribution is dominated by many
-# small adverse-selection losses interrupted by occasional large
-# upside bars, the signature of a strategy whose costs accrue on
-# every rebalance while wins are concentrated. The block-bootstrap
-# max-drawdown CI (live values above) is consistent with resampling
-# that cannot rule out severe capital loss. The drawdown is monotone
-# — there is no recovery, only continued decline — which is what
-# cost-dominant strategies look like when run at a cadence whose
-# friction exceeds the per-bar edge.
+# **How to read the four printouts above.** Each answers a question the others cannot,
+# and none of their values is transcribed here: this notebook re-resolves its carrier from
+# the registry on every run, so a number written into this cell would describe whichever
+# configuration was rank-1 the day it was written.
+#
+# *Per-fold Sharpes* say whether the headline belongs to the strategy or to one block.
+# Two folds agreeing in sign is weak evidence; two disagreeing is strong evidence against.
+# With `evaluation.n_splits: 2` there is no third block to break the tie, so a split
+# verdict is a reason to distrust the headline rather than to average it.
+#
+# *Skewness and kurtosis* say what the distribution behind that Sharpe looks like.
+# Negative skew with high kurtosis is the shape a Sharpe flatters, because Sharpe reads
+# only the first two moments: many small gains against occasional large losses. Positive
+# skew is the opposite trade, and it is what a strategy paying a per-trade cost for
+# occasional large wins looks like.
+#
+# *Tail ratio* is the 95th percentile over the absolute 5th, so it compares where the two
+# tails begin and not how much sits beyond those points. Near 1 the two boundaries are the
+# same size. It answers a different question from skewness, which the extremes past those
+# percentiles drive, so the two can point opposite ways on the same series - rare large
+# losses pull the skew negative while leaving the 5th percentile where it was. Disagreement
+# between them is a fact about the distribution rather than a sign that one is wrong.
+#
+# *The rolling window* locates the result in time: each point is the Sharpe of the 126
+# trading days ending there, so the summary reports how far the estimate moved over the
+# window rather than a single number for the whole period. Read the spread between the
+# minimum and the maximum, not the sign. Consecutive windows share 125 of their 126 days,
+# so the series is autocorrelated by construction, and a validation window of roughly 253
+# days holds about two non-overlapping windows. Sampling variation alone produces sign
+# changes on a stationary series at this length, so a crossing is not evidence of a
+# regime, and an estimate that stays positive throughout does not establish that
+# performance was stable. Rolling beta is read the same way and carries the same
+# qualification: each point is an estimate over 126 overlapping days, and a book whose
+# population beta is zero still returns nonzero sample betas.
+#
+# Dollar neutrality and benchmark beta are two different properties and only one of them is
+# estimated. Dollar neutrality is a fact about the weights - whether the long and short
+# notionals sum to zero - and is read off the allocation directly. Beta is a fact about how
+# those positions co-move with the benchmark, so a book can be exactly dollar-neutral and
+# still carry beta whenever its longs and shorts differ in benchmark sensitivity. Rolling
+# beta is the estimate of that second quantity, and a wandering series is a reason to
+# measure the exposure with its uncertainty rather than a reading of it.
 
 # %% [markdown]
 # ## §5 Friction budget & cost sensitivity
 #
 # Cost sensitivity is where a short-rebalancing strategy is decided, because
-# every cost is charged per trade and this one trades often. Two sweeps run
-# against the selected lineage: a **cost grid** that walks commission and
-# slippage from zero upward, and a **risk-overlay grid** of rules that close a
-# position on a condition other than the signal.
+# every cost is charged per trade and this one trades often. Two grids are read
+# here: a **cost grid** that walks commission and slippage from zero upward, and
+# a **risk-overlay grid** of rules that close a position on a condition other
+# than the signal.
 #
 # They answer different questions. The cost grid asks how much friction the
 # strategy can absorb before its edge runs out, which states the execution
 # quality it requires rather than the profit it made under one assumption. The
 # overlay grid asks whether trading *less* on positions that are going wrong
-# preserves more than the extra trading costs.
+# preserves more than the extra trading costs. The two were swept independently,
+# with overlays applied at zero engine cost, so each result is attributable to
+# the field its sweep varied.
 #
-# The two are swept independently, with overlays applied at zero engine cost, so
-# each result is attributable to the field that sweep varied.
+# **Neither grid is restricted to the selected lineage, and they do not sit on
+# the same universe.** Both read their whole stage across labels, which is what
+# the per-horizon stratification below is for. The cost rows come from
+# `17_costs`, whose pool is pinned to the canonical `cost_feasible` universe; the
+# overlay rows come from `16_risk_management`, which overlays allocation-stage
+# specs that carry no `universe_filter` and are therefore full-universe. So a
+# cost curve and an overlay row in this section are not two readings of one
+# portfolio, and the gradient across thresholds is what §5.2 supports rather than
+# a level comparable with §5.1.
 
 # %% [markdown]
 # ### §5.1 Cost sensitivity stratified by label horizon
@@ -1159,8 +1335,16 @@ ax.set_xlabel("Per-leg cost (bps)")
 ax.set_ylabel("Sharpe (validation, best config per cost level)")
 ax.set_title("Cost sensitivity by label horizon — best config per (label, cost)")
 ax.legend(loc="best", fontsize=8, frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Line chart of validation Sharpe against per-leg cost in basis points, one line per label "
+    "horizon, each showing the best configuration at every cost level with a shaded band around "
+    "it. A dashed horizontal line marks zero Sharpe. Two shaded vertical spans mark realistic "
+    "spreads, roughly 1 to 3 basis points for large caps and 3 to 8 for mid caps, and a dotted "
+    "vertical line marks the protocol's 5 basis point friction floor. That floor is a reference "
+    "and not what this case study charges: config/setup.yaml bills a per-share commission plus "
+    "symbol-specific half-spreads, not a flat rate.",
+)
 
 # %% [markdown]
 # Trade counts at zero cost say how exposed each label is to friction before any
@@ -1424,13 +1608,35 @@ ax.invert_yaxis()
 ax.set_xlabel("Validation Sharpe")
 ax.set_title("Risk-overlay sensitivity — best overlay per (label, family) with 95% CIs")
 ax.legend(loc="lower right", fontsize=8, frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal chart of risk-overlay sensitivity. One row per label and family pair on the "
+    "vertical axis, running top to bottom, each showing the best overlay's validation Sharpe as "
+    "a point with a horizontal bar for its 95 percent confidence interval. A dashed vertical "
+    "line marks zero and a further vertical line marks the reference Sharpe. The intervals are "
+    "marginal, one per row, so they place each overlay against those two fixed values and not "
+    "against each other.",
+)
 
 # %%
-# Compare overlay rescue vs no-overlay baseline per label
+# Compare overlay rescue vs no-overlay baseline per label.
+#
+# `MAX(sharpe)` over a whole stage is the shape that a constant forecast wins. A prediction
+# set holding one value per fold ranks nothing, so the book fills once and never replaces
+# anything: it pays almost no cost, and in a cost-dominated sweep that is the cheapest route
+# to the top. `num_trades > 0` below was already reaching for this and catches only the
+# zero-trade case; the sets that matter here trade once or twice.
+#
+# It is not the notebook's own rule to restate: `degenerate_prediction_sql` is the same
+# clause `resolve_best_backtest_runs` applies, which is why 16 and 17 never had this hole -
+# they select through that function and this cell writes its own SQL.
+#
+# Latent rather than live on the registry this was written against: the per-label maxima are
+# real models trading 900 to 3,165 times, and excluding the constants moved no label's
+# baseline by any amount. The clause is here so it stays that way when the pool changes,
+# because `rescue` below is a difference measured against this number.
 no_overlay_baseline = pl.read_database(
-    """
+    f"""
         SELECT t.label, MAX(bm.sharpe) AS best_signal_sharpe
         FROM backtest_runs b
         JOIN backtest_metrics bm ON bm.backtest_hash  = b.backtest_hash
@@ -1438,6 +1644,7 @@ no_overlay_baseline = pl.read_database(
         JOIN training_runs t     ON p.training_hash   = t.training_hash
         WHERE b.stage = 'signal' AND p.split = 'validation'
           AND bm.sharpe IS NOT NULL AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+          {degenerate_prediction_sql("b.prediction_hash")}
         GROUP BY t.label
         """,
     sqlite3.connect(str(_db)),
@@ -1514,10 +1721,15 @@ print(
 # against that model's own validation backtest.
 
 # %%
+# The markdown above states an invariant - exactly one canonical holdout backtest - and
+# this asks the registry rather than assuming it. `ORDER BY created_at ASC LIMIT 1` takes
+# the OLDEST, so a second holdout registered by a re-run of `19_holdout_backtest` would be
+# silently ignored and this section would close the case study on the superseded one. The
+# registry is append-only, which is what makes the oldest the wrong tie-break here.
 with sqlite3.connect(str(_db)) as _con:
-    _ho_row = _con.execute(
+    _ho_rows = _con.execute(
         """
-        SELECT b.backtest_hash, p.training_hash
+        SELECT b.backtest_hash, p.training_hash, b.created_at
         FROM backtest_runs b
         JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
         WHERE b.stage IN ('signal','allocation','risk_overlay','holdout')
@@ -1526,14 +1738,25 @@ with sqlite3.connect(str(_db)) as _con:
               json_extract(b.spec_json, '$.strategy.allocation.method'), ''
           ) != 'conformal_weighted'
         ORDER BY b.created_at ASC
-        LIMIT 1
         """,
-    ).fetchone()
-if _ho_row is None:
-    raise RuntimeError(
-        f"No canonical holdout backtest registered for {CASE_STUDY}; cannot anchor §6."
+    ).fetchall()
+if not _ho_rows:
+    msg = (
+        f"No canonical holdout backtest registered for {CASE_STUDY}, so §6 has nothing to "
+        "close on. `19_holdout_backtest` is what registers it, and it runs after "
+        "`18_holdout_predictions` has generated the holdout prediction set."
     )
-HO_HASH, _HO_TRAINING = _ho_row
+    raise RuntimeError(msg)
+if len(_ho_rows) > 1:
+    _listed = ", ".join(f"{h} ({ts})" for h, _, ts in _ho_rows)
+    msg = (
+        f"{len(_ho_rows)} canonical holdout backtests registered for {CASE_STUDY}: {_listed}. "
+        "This section reports one and the registry is append-only, so taking the oldest "
+        "would close the case study on a superseded read while the current one sits beside "
+        "it. Retire the ones that are not the deployed configuration, or pin the carrier."
+    )
+    raise RuntimeError(msg)
+HO_HASH, _HO_TRAINING, _ = _ho_rows[0]
 
 # Conformal sibling holdout (if registered) — recorded for transparency.
 # Keyed off the canonical holdout's own lineage, not the validation selection.
@@ -1557,8 +1780,8 @@ with sqlite3.connect(str(_db)) as _con:
 HO_HASH_CONFORMAL = _ho_conformal_row[0] if _ho_conformal_row else None
 HO_SHARPE_CONFORMAL = _ho_conformal_row[1] if _ho_conformal_row else None
 
-print(f"Validation the selected lineage hash:        {TOP_HASH}")
-print(f"Holdout (canonical) hash:      {HO_HASH}")
+print(f"Validation (selected lineage): {TOP_HASH}")
+print(f"Holdout (canonical):           {HO_HASH}")
 if HO_HASH_CONFORMAL:
     print(
         f"Holdout (conformal sibling):   {HO_HASH_CONFORMAL} "
@@ -1588,9 +1811,18 @@ val_ho_pair = load_paired_metrics(
 )
 if val_ho_pair.is_empty():
     print(
-        "[WARN] Missing val_rank1_self pair for nasdaq100_microstructure — populator "
-        "skipped (holdout has no trades or insufficient overlap with val "
-        "lineage). Continuing with NaN val→holdout decay."
+        f"[WARN] No val_rank1_self pair registered against holdout {HO_HASH}. "
+        "Measured rather than inferred, by calling the producer's own resolution "
+        "with this registry: `_val_rank1_carrier` walks the rung-restricted "
+        "candidates for one with a matching holdout and finds none, so "
+        "`populate_paired_metrics` falls back to the rung leader's prediction "
+        "hash as `prefer_prediction_hash`, and `_holdout_lineage_for` pinned on "
+        "that hash returns None. Pass the carrier's prediction hash instead and "
+        f"the same call resolves {HO_HASH}. What separates them is the label: "
+        "the pin is on fwd_ret_15m, where the leader is deep_learning/nlinear at "
+        "+2.300, and the carrier that 18 and 19 refit is gbm/default_multiclass "
+        "on the fwd_dir_15m variant at +2.416. No fwd_ret_15m candidate has a "
+        "holdout, so the walk exhausts. Continuing with NaN val to holdout decay."
     )
     vh = {
         "sharpe_diff": float("nan"),
@@ -1693,9 +1925,11 @@ ho_vs_ew = load_paired_metrics(
 )
 if ho_vs_ew.is_empty():
     print(
-        "[WARN] Missing equal_weight_holdout_side_artifact pair for "
-        "nasdaq100_microstructure — holdout has no trades or all-zero returns; "
-        "paired bootstrap not computable. Continuing with NaN diffs."
+        "[WARN] No equal_weight_holdout_side_artifact pair registered against "
+        f"holdout {HO_HASH}. Same resolution as the decay pair above, and it "
+        "fails at the same step. The holdout itself carries 420 trades and 128 "
+        "daily returns, so this is an absent comparison rather than an absent "
+        "result. Continuing with NaN diffs."
     )
     he = {
         "sharpe_diff": float("nan"),
@@ -1733,9 +1967,6 @@ print(
 print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])}")
 
 # %% [markdown]
-# **Decay reading (val_rank1_self pair):** holdout Sharpe is more
-# negative than validation Sharpe; the paired diff CI excludes zero on
-# the negative side (live numbers from the cell above). The val→holdout
 # **How to read the two paired rows.** Each reports a difference with an
 # interval, and the interval is what decides the reading.
 #
@@ -1862,12 +2093,24 @@ rolling = compute_rolling_exposures(
 fig_roll = plot_rolling_exposures(
     rolling, title="NQ100 Strategy: Rolling Factor Exposures (63-day, FF5+MOM)"
 )
-fig_roll.show()
+show_with_alt(
+    fig_roll,
+    "Grid of line panels, one per series: annualized alpha first, then one "
+    "coefficient panel for each factor in the FF5+MOM model. Each panel plots the "
+    "63-day rolling value against date with a dashed line at zero; the y-axis is "
+    "Alpha on the first panel and Beta on the rest. Unused grid slots are hidden.",
+)
 
 # %%
 # Attribution waterfall
 fig_attr = plot_attribution_waterfall(reg, title="NQ100 Strategy: Factor Attribution")
-fig_attr.show()
+show_with_alt(
+    fig_attr,
+    "Bar chart with one bar per factor and a grey Residual bar at the right. The "
+    "y-axis is Sharpe Contribution, bars are blue above zero and red below, each "
+    "carries its value as a label, and a dashed horizontal line marks the strategy's "
+    "own Sharpe with its value in the legend.",
+)
 
 attr_summary = format_attribution_summary(reg, boot)
 
@@ -1891,6 +2134,18 @@ attr_summary = format_attribution_summary(reg, boot)
 # The placebo regression against the benchmark alone is the control. Comparing
 # the two says how much of the reading depends on the wider factor set rather
 # than on market exposure.
+#
+# **Read every exposure off the regression printout above, including its sign and
+# its rank.** `plot_attribution_waterfall` gives each factor
+# `beta / sum(|beta|) * (strategy_sharpe - residual_sharpe)`, so two things are
+# true of the bars that are not true of the betas. The split is proportional to
+# the absolute loading rather than to beta times that factor's own Sharpe, so a
+# large loading on a factor that returned nothing over the window still draws a
+# tall bar. And when the factor-explained term is negative - which it is whenever
+# the residual Sharpe exceeds the strategy's - the multiplication flips every
+# bar, so the signs and the ordering on the chart are the reverse of the
+# loadings. The figure shows the shape of the decomposition; no number should be
+# quoted from it.
 
 
 # %% [markdown]
@@ -1920,7 +2175,10 @@ bench_series = aligned["benchmark"].to_numpy()
 meta = BacktestReportMetadata(
     title="NASDAQ-100 Microstructure — Rank-1 Lineage",
     strategy_name=f"{RANK1_FAMILY}/{RANK1_CONFIG} — {PRIMARY_LABEL}",
-    universe="100 NASDAQ-100 constituents at 15-minute cadence",
+    universe=(
+        f"{setup['universe']['n_assets']} declared NASDAQ-100 constituents, "
+        f"{(setup['decision'].get('cadence_by_label') or {}).get(RANK1_LABEL, setup['decision']['bar_frequency'])} cadence"
+    ),
     benchmark_name="NQ100 equal-weight universe (validation window)",
     evaluation_window=f"{aligned['ts'].min()} to {aligned['ts'].max()}",
     calendar=setup["evaluation"]["calendar"],
@@ -1948,12 +2206,21 @@ print(f"HTML size: {len(html):,} bytes")
 
 # %%
 op_profile = compute_operating_profile(lineage, setup)
-# nasdaq100_microstructure setup uses `decision.bar_frequency`
-# (15_minute) as the rebalance cadence; the helper inspects
-# evaluation_protocol.rebalance_frequency, which is absent. Override.
+# `compute_operating_profile` reads `evaluation_protocol.rebalance_frequency`, which this
+# setup does not declare, so the cadence is supplied here.
+#
+# Per label, not `decision.bar_frequency`. That key is the case-study default and the
+# carrier need not be on the primary label - today it is not - while the cadence the run
+# actually decided on is `decision.cadence_by_label[label]`, which is what
+# `resolve_decision_schedule` was handed. The two agree on every 15-minute label and
+# disagree on `fwd_ret_60m`, so reading the default would report a cadence four times
+# faster than the strategy traded.
+CARRIER_CADENCE = (setup["decision"].get("cadence_by_label") or {}).get(
+    RANK1_LABEL, setup["decision"]["bar_frequency"]
+)
 op_profile = op_profile.with_columns(
     pl.when(pl.col("property") == "Trading cadence")
-    .then(pl.lit(setup["decision"]["bar_frequency"]))
+    .then(pl.lit(CARRIER_CADENCE))
     .otherwise(pl.col("value"))
     .alias("value")
 )

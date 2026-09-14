@@ -896,6 +896,34 @@ class CrossSectionReport:
             )
 
 
+# One process asks for the same cross-section once per prediction set it checks, and the
+# answer depends only on the case study, the label, the split and the registry directory -
+# never on the member being checked. `undercovered_prediction_members` walks every member in
+# force, so nasdaq100_microstructure rebuilt an identical 9.6M-row frame 784 times: measured
+# 5.9 s each against a 0.14 s parquet read and 1.3 s of joins, which is 4,600 s of the 8,608 s
+# that function spends before a sweep starts. Keyed on the resolved directory rather than the
+# passed one so `None` and an explicit path share an entry.
+#
+# Only the `decision_axis is None` calls are cached: a Series is not hashable, and a caller
+# narrowing the axis is asking a different question per call. The entry is the frame itself,
+# which is safe because every consumer filters, joins or selects, and each of those returns a
+# new frame. The label artifact is written by an earlier stage and not during a run, so there
+# is no invalidation to do inside one process; `declared_cross_section.cache_clear()` exists
+# for a test that writes one.
+_CROSS_SECTION_CACHE: dict[tuple[str, str, str, str], pl.DataFrame] = {}
+
+
+# The panel-narrowed cross-section, keyed in `check_prediction_cross_section` below. Declared
+# here so one call drops both memos.
+_REACHABLE_CACHE: dict[tuple, tuple[pl.DataFrame, pl.DataFrame]] = {}
+
+
+def _clear_cross_section_cache() -> None:
+    """Drop both memos. For a test that rewrites a label artifact inside one process."""
+    _CROSS_SECTION_CACHE.clear()
+    _REACHABLE_CACHE.clear()
+
+
 def declared_cross_section(
     case_study: str,
     label: str,
@@ -916,6 +944,10 @@ def declared_cross_section(
     ``product`` and its prediction panels by ``symbol``, so comparing by the source
     name would report every row missing.
     """
+    key = (case_study, label, split, str(_label_artifact(case_study, label, case_dir)))
+    if decision_axis is None and key in _CROSS_SECTION_CACHE:
+        return _CROSS_SECTION_CACHE[key]
+
     sessions = declared_sessions(
         case_study, label, split=split, case_dir=case_dir, decision_axis=decision_axis
     )
@@ -950,7 +982,10 @@ def declared_cross_section(
             f"{case_study}/{label}/{split}: no declared fold carries a session, so the "
             "cross-section is empty and coverage cannot be evaluated"
         )
-    return pl.concat(parts).select("fold", "entity", "session")
+    result = pl.concat(parts).select("fold", "entity", "session")
+    if decision_axis is None:
+        _CROSS_SECTION_CACHE[key] = result
+    return result
 
 
 def check_prediction_cross_section(
@@ -1016,23 +1051,54 @@ def check_prediction_cross_section(
 
     achievable = delivered_achievable = None
     if input_panel is not None:
-        # `feature_panel_keys` hands back the canonical two columns already; a caller
-        # passing a raw panel gets them resolved. Without this branch the canonical shape
-        # is the one shape that fails, because "entity" is not among the source names a
-        # panel is allowed to use.
-        if {"entity", "session"} <= set(input_panel.columns):
-            panel_entity, panel_time = "entity", "session"
-        else:
-            panel_entity = _entity_column(input_panel.columns, where="input panel")
-            panel_time = _time_column(input_panel.columns)
-        offered = input_panel.select(
-            pl.col(panel_entity).cast(pl.String).alias("entity"),
-            pl.col(panel_time).alias("session"),
-        ).unique()
-        offered = offered.with_columns(
-            _normalize_time(offered.get_column("session")).alias("session")
+        # `reachable` is `want` narrowed to what the panel offered, so it depends on the
+        # declared cross-section and the panel and on nothing about the member being
+        # checked. A caller walking every member in force recomputes it once per member:
+        # 1.26 s to unique a 16.9M-row panel plus a 1.07 s join, measured on
+        # nasdaq100_microstructure, against 0.14 s to read the member's own predictions.
+        #
+        # The key holds `id(input_panel)` and the cache entry holds a reference to that
+        # frame, so the id cannot be recycled onto a different panel while the entry is
+        # live - an id is unique among live objects and this keeps the object live.
+        #
+        # The rest of the key has to be everything that determines `want`, and that is more
+        # than the case study and the label: the same pair names different artifacts under
+        # different registries, so the label artifact path is in the key rather than
+        # `case_study` alone. `decision_axis` narrows `want` too and is not hashable, so a
+        # call that passes one takes no entry and leaves none - bypassing the declaration
+        # memo alone would not have helped, because this memo sits after the narrowing and
+        # would have answered from an entry built on the full axis.
+        cache_key = (
+            str(_label_artifact(case_study, label, case_dir)),
+            case_study,
+            label,
+            split,
+            tuple(sorted(folds)) if folds is not None else None,
+            id(input_panel),
         )
-        reachable = want.join(offered, on=["entity", "session"], how="semi")
+        cached = None if decision_axis is not None else _REACHABLE_CACHE.get(cache_key)
+        if cached is not None and cached[0] is input_panel:
+            reachable = cached[1]
+        else:
+            # `feature_panel_keys` hands back the canonical two columns already; a caller
+            # passing a raw panel gets them resolved. Without this branch the canonical
+            # shape is the one shape that fails, because "entity" is not among the source
+            # names a panel is allowed to use.
+            if {"entity", "session"} <= set(input_panel.columns):
+                panel_entity, panel_time = "entity", "session"
+            else:
+                panel_entity = _entity_column(input_panel.columns, where="input panel")
+                panel_time = _time_column(input_panel.columns)
+            offered = input_panel.select(
+                pl.col(panel_entity).cast(pl.String).alias("entity"),
+                pl.col(panel_time).alias("session"),
+            ).unique()
+            offered = offered.with_columns(
+                _normalize_time(offered.get_column("session")).alias("session")
+            )
+            reachable = want.join(offered, on=["entity", "session"], how="semi")
+            if decision_axis is None:
+                _REACHABLE_CACHE[cache_key] = (input_panel, reachable)
         achievable = reachable.height
         delivered_achievable = reachable.join(got, on=["entity", "session"], how="semi").height
 

@@ -196,7 +196,7 @@ def _seed_prediction_store(case_dir: Path, rows: list[tuple[str, int | None]]) -
             prediction_hash TEXT PRIMARY KEY, computed_at TEXT, ic_mean REAL
         );
         CREATE TABLE fold_metrics (
-            prediction_hash TEXT NOT NULL, fold INTEGER NOT NULL, ic REAL
+            prediction_hash TEXT NOT NULL, fold INTEGER NOT NULL, ic REAL, ic_std REAL
         );
         """
     )

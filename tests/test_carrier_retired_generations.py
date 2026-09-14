@@ -48,7 +48,7 @@ def _registry(path: Path, rows: list[tuple[str, str, str, float]]) -> None:
             CREATE TABLE backtest_metrics (
                 backtest_hash TEXT PRIMARY KEY, sharpe REAL, max_drawdown REAL
             );
-            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
             CREATE TABLE prediction_metrics (
                 prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_n_days REAL
             );
@@ -71,7 +71,10 @@ def _registry(path: Path, rows: list[tuple[str, str, str, float]]) -> None:
                 "INSERT INTO prediction_sets VALUES (?, ?, 'validation', NULL, NULL)",
                 (prediction_hash, training_hash),
             )
-            db.execute("INSERT INTO fold_metrics VALUES (?, 0.02)", (prediction_hash,))
+            db.execute(
+                "INSERT INTO fold_metrics (prediction_hash, ic) VALUES (?, 0.02)",
+                (prediction_hash,),
+            )
             db.execute("INSERT INTO prediction_metrics VALUES (?, 0.02, 250)", (prediction_hash,))
         for backtest_hash, prediction_hash, stage, sharpe in rows:
             db.execute(

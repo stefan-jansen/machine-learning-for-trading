@@ -44,7 +44,7 @@ def _build_registry(case_dir) -> None:
                 ic_ci_hi REAL,
                 ic_n_days REAL
             );
-            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
             CREATE TABLE backtest_runs (
                 backtest_hash TEXT PRIMARY KEY,
                 prediction_hash TEXT,

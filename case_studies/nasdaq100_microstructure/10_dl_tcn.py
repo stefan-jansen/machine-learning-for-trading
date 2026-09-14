@@ -44,7 +44,7 @@
 # **Book Reference**: Chapter 13
 #
 # **Prerequisites**: [`05_evaluation`](05_evaluation.ipynb)
-
+#
 # **What it writes**: one training run per label and one complete validation prediction set per
 # label and checkpoint, in `run_log/registry.db` and under `run_log/training/` and
 # `run_log/predictions/`, grouped under a population this notebook alone publishes.
@@ -275,10 +275,9 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # checkpoints of one fit rather than across configurations, so it says what more training did to
 # this model rather than what a different model would have done.
 #
-# On a fifteen-minute horizon almost all of the target is noise, so the curve to expect is not a
-# rising one. A curve that climbs and then falls is the model beginning to fit the training
-# window; one that never rises is the architecture finding nothing this target rewards, which is
-# a result rather than a failure.
+# The figure is drawn to show how the coefficient moves across checkpoints rather than what level
+# it reaches, and [`13_model_analysis`](13_model_analysis.ipynb) compares the four architectures
+# on the same rows.
 
 # %% tags=["results"]
 # Scoped to this population's own members. `catalog_rows` is the study's whole prediction

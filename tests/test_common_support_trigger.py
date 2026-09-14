@@ -88,7 +88,7 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 backtest_hash TEXT PRIMARY KEY, prediction_hash TEXT, stage TEXT, spec_json TEXT
             );
             CREATE TABLE backtest_metrics (backtest_hash TEXT PRIMARY KEY, sharpe REAL);
-            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+            CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
             CREATE TABLE prediction_metrics (
                 prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_n_days REAL
             );
@@ -101,7 +101,7 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 '{"computation": {"cv": {"split": "validation"}}}'
             );
             INSERT INTO prediction_sets VALUES ('pred', 'train', 'validation', NULL, NULL);
-            INSERT INTO fold_metrics VALUES ('pred', 0.02);
+            INSERT INTO fold_metrics (prediction_hash, ic) VALUES ('pred', 0.02);
             INSERT INTO prediction_metrics VALUES ('pred', 0.02, 250);
             """
         )

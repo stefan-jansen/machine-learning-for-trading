@@ -30,7 +30,7 @@ def case_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         CREATE TABLE prediction_sets (
             prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT
         );
-        CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+        CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
         CREATE TABLE prediction_metrics (prediction_hash TEXT PRIMARY KEY);
     """)
     db.execute("INSERT INTO training_runs VALUES ('T1', 'gbm', 'fwd_ret_5d', 'leaves_7')")
@@ -106,7 +106,7 @@ def test_a_prediction_without_metrics_does_not_set_the_bar(
         CREATE TABLE prediction_sets (
             prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT
         );
-        CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL);
+        CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
         CREATE TABLE prediction_metrics (prediction_hash TEXT PRIMARY KEY);
     """)
     db.execute("INSERT INTO training_runs VALUES ('T1', 'gbm', 'fwd_ret_5d', 'leaves_7')")

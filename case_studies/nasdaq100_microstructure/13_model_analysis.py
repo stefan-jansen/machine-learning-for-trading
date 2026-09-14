@@ -20,8 +20,9 @@
 # microstructure case study and answers a single question: **which learned
 # signals are real, stable, and worth taking into a backtest?**
 #
-# This is the highest-frequency case study in the book. The universe spans
-# 114 NASDAQ-100 constituents at 15-minute bar frequency, where the
+# This is the highest-frequency case study in the book. The declared universe
+# is 115 NASDAQ-100 constituents and 113 of them carry prices and predictions,
+# at 15-minute decision frequency, where the
 # prediction target (`fwd_ret_15m`) is the next 15-minute return. The
 # fundamental question here is different from daily case studies: at
 # intraday horizons, does microstructure information - order flow
@@ -30,11 +31,15 @@
 #
 # Two things make the evidence here thinner than the row count suggests.
 # There are only two walk-forward folds over 2020-2021, so two independent
-# windows stand behind every stability statement. And a rank correlation at this
-# horizon is small by construction: the expected return per bar is a fraction of
-# a basis point, the same order as the bid-ask spread a trade has to cross.
-# Whether a correlation of that size is worth anything is a question about costs
-# and rebalancing frequency, settled in the backtest and cost notebooks.
+# windows stand behind every stability statement. And the rank correlations
+# reported below are small - which is a measurement, not a property of the
+# horizon. A Spearman correlation is scale-free, so a fifteen-minute return
+# being a fraction of a basis point does not bound it: an ordering that ranked
+# those returns perfectly would score 1.0. What the small per-bar return does
+# bound is what a given correlation is worth, because the edge it captures per
+# trade is the same order as the bid-ask spread a trade has to cross. That is a
+# question about costs and rebalancing frequency, settled in the backtest and
+# cost notebooks rather than here.
 #
 # **Learning Objectives**:
 # - Choose one representative prediction set per model family on a condition that
@@ -174,7 +179,12 @@ cost_range = setup["costs"].get(
 )
 
 print(f"Case Study: {CASE_STUDY}")
-print(f"  Universe: {n_assets} NASDAQ-100 stocks at 15-minute bar frequency")
+# The panel is one-minute (`config/backtest/base.yaml::calendar.data_frequency`) and
+# the decision grid is fifteen (`decision.cadence_by_label`). Naming the bars as
+# fifteen-minute conflates the two, and the gap between them is this case study's
+# subject: the model is scored on every minute it can score and the strategy acts on
+# one bar in fifteen.
+print(f"  Universe: {n_assets} NASDAQ-100 stocks, decisions every 15 minutes")
 print(f"  Label: {PRIMARY_LABEL} (next 15-min return)")
 print(f"  CV: {n_splits} walk-forward folds, train={train_size}, val={val_size}")
 print(f"  Holdout: {holdout_start} onwards")
@@ -570,15 +580,32 @@ if best_preds.height > 0 and fold_ranges.height > 0:
     plot_cv_timeline(fold_ranges, n_splits, holdout_start)
 
 # %% [markdown]
-# With only 2 walk-forward folds, each covering 6 months of 15-minute
-# bars, the validation evidence is inherently thin. Each fold contains
-# roughly $114 \times 26 \times 126 \approx 374{,}000$ predictions
-# (114 stocks × 26 bars/day × ~126 trading days), so per-fold sample
-# size is large. But the temporal diversity is minimal - both folds
-# fall within the 2020–2021 period, which was dominated by COVID
-# recovery, meme-stock volatility, and an unprecedented retail trading
-# surge. Whether patterns learned here generalize to more normal market
-# conditions is an open question that 2 folds cannot answer.
+# Two walk-forward folds - `evaluation.n_splits` in `config/setup.yaml`, each
+# given `val_size: 6M` - and the evidence they carry is thin along one axis and
+# not the other. Reading either number as the other is the mistake this cell
+# exists to prevent.
+#
+# **Scored rows are plentiful.** A prediction set is scored on the minute panel,
+# so a fold holds on the order of a hundred trading days at a few hundred scored
+# minutes each, across 113 symbols: millions of rows. How far each family got
+# across those days is what the scored-day coverage table above prints, per
+# family, and it is the number that decides whether two families are comparable -
+# not a row count, which a family can inflate by covering fewer days of a wider
+# cross-section.
+#
+# **Decisions are far fewer than scored rows, and fewer than the row count
+# suggests.** `resolve_decision_schedule` thins the panel to the cadence
+# `decision.cadence_by_label` declares for this label - fifteen minutes, resolved
+# on the clock rather than by counting rows - so a day carries about twenty
+# decisions and not a few hundred. A model is scored on every minute it can
+# score; the strategy acts on one bar in fifteen.
+#
+# **Regimes are what two folds cannot buy, and no sample size substitutes.** Both
+# folds fall inside 2020-2021, ending where `evaluation.holdout_start` begins on
+# 2021-07-01: COVID recovery, meme-stock volatility and an unprecedented retail
+# trading surge. The rows inside a fold are not independent draws from the
+# regimes this strategy will meet, so millions of them buy precision within this
+# period and say nothing about the next one.
 
 # %% [markdown]
 # ## 2. What Was Actually Run?
@@ -643,18 +670,25 @@ print(f"  Causal families: {causal_families or 'none'}")
 print(f"\nAll labels trained: {all_labels}")
 
 # %% [markdown]
-# The NASDAQ-100 microstructure case study has five model families on the
-# primary label (`fwd_ret_15m`), spanning four of the five modeling
-# chapters. Latent factor models (Ch14) were not trained - microstructure
-# features at 15-minute frequency do not have the cross-sectional depth
-# or temporal structure that factor models require. This is expected:
-# latent-factor methods are designed for panels with rich cross-sectional
-# variation in fundamentals, not for intraday microstructure snapshots.
+# Three predictive families were trained on the primary label - `linear`, `gbm`
+# and `deep_learning` - alongside the synthetic `ensemble` built from them, and
+# the causal estimate `12_causal_dml` registers separately because it is an
+# effect rather than an ordering. The coverage map above is the authority on
+# which families and labels a given run holds; this paragraph says what the
+# design intended, and the two are worth comparing rather than assuming equal.
 #
-# Four labels were explored: the primary `fwd_ret_15m`, a directional
-# variant (`fwd_dir_15m`), a shorter horizon (`fwd_ret_5m`), and a
-# longer horizon (`fwd_ret_60m`). Only linear and GBM were trained on
-# alternate labels. All cross-family comparisons use the primary label.
+# Two of the expected families are absent by design. Latent factor models (Ch14)
+# were not trained: microstructure features at fifteen-minute frequency do not
+# carry the cross-sectional variation in fundamentals that factor models are
+# built to decompose. `tabular_dl` was not trained either, and the coverage
+# warning names both.
+#
+# Four labels were explored: the primary `fwd_ret_15m`, a directional variant
+# (`fwd_dir_15m`), a shorter horizon (`fwd_ret_5m`) and a longer one
+# (`fwd_ret_60m`). The two return variants carry the same families as the primary
+# label; `fwd_dir_15m` carries only `linear` and `gbm`, which is what a
+# classification variant of the primary label needs to answer the question it is
+# asked. All cross-family comparisons use the primary label.
 
 # %% [markdown]
 # ## 3. Headline Comparative View
@@ -820,15 +854,17 @@ if fold_ic.height > 0:
 plot_fold_boxplot(fold_ic)
 
 # %% [markdown]
-# With only 2 data points per family, the box plots reduce to line
-# segments connecting the two fold ICs. Read against the locked
-# registry, all three trained families (`gbm/leaves_7_mae`,
-# `linear/ridge_a1000000.0`, `deep_learning/nlinear`) are positive in
-# both folds at the primary `fwd_ret_15m` label. Per-fold magnitudes
-# differ across families but the **HAC-based per-day CIs in §3 and
-# §6** are the more reliable evidence - they pool over many days
-# rather than two folds and produce overlapping CIs across all three
-# families.
+# With only 2 data points per family, the box plots reduce to line segments connecting
+# the two fold ICs. Which configuration stands for each family is printed by the
+# representative table in section 1 and is not named here: it is the family's
+# highest-IC config on this label, so it moves when the models are refitted.
+#
+# What to read off the segments is the sign, not the magnitude. A family positive in
+# both folds has at least not contradicted itself; one that crosses zero has, and two
+# folds cannot say which side is the accident. The **HAC-based per-day CIs in §3 and
+# §6** are the stronger evidence either way, because they pool over many days rather
+# than two blocks - and where those CIs overlap across families, the ordering of the
+# segments is not evidence that one family beat another.
 #
 # **The 2-fold limitation is severe.** With 8 folds (as in the ETF
 # case study), we could distinguish "reliable but modest" from "noisy
@@ -880,23 +916,31 @@ plot_bucket_monotonicity(
 )
 
 # %% [markdown]
-# The monotonicity plot confirms genuine ranking ability, but the
-# per-bar economic spreads are sub-bp and below the per-leg cost
-# floor (1--5 bps). The bucket-spread bars in the figure show the
-# highest-IC config from each trained family (`gbm/leaves_7_mae`,
-# `linear/ridge_a1000000.0`, `deep_learning/nlinear`) at the primary
-# label; magnitudes are reported by the helper rather than transcribed
-# here so the prose does not drift from the figure.
+# Read the monotonicity plot for whether the buckets are ordered at all, and the spreads
+# beneath it for whether that ordering is worth trading. The two are separate questions:
+# a signal can rank correctly and still move prices less per bar than a round trip costs,
+# which on this case study is the ordinary case rather than the failure case.
 #
-# **The edge-to-cost ratios are all below 1.** The per-bar decile
-# spread cannot survive a single round-trip at any reasonable cost
-# assumption - round-trip cost of 2--10 bps swamps the per-bar
-# spread. The annualized perspective offers some hope: spreads
-# compound across 26 bars per day and ~252 days per year, and a
-# selective strategy (trading only the most extreme signals in the
-# most favorable regime) might achieve positive net returns. The
-# binding requirement is that you cannot trade every bar - only bars
-# where the signal materially exceeds the spread.
+# The bars show each family's representative at the primary label - the same
+# configurations section 1 printed - and their magnitudes come from the helper rather
+# than from this cell, so the prose cannot drift from the figure.
+#
+# **The edge-to-cost ratios are all below 1.** The per-bar decile spread cannot
+# survive a single round-trip at any reasonable cost assumption: a round trip of
+# 2 to 10 bps swamps it.
+#
+# The annualized view is what keeps the question open, because the spread
+# compounds over the decision grid and the cost is charged per trade. A full
+# session carries 20 decision slots, not the 26 a 9:30-to-16:00 grid would give -
+# `resolve_decision_schedule` puts the label's fifteen-minute cadence on the
+# clock, and the scored window runs 10:31 to 15:43 - over about 253 sessions a
+# year. A selective strategy, trading only the most extreme signals and only in
+# the regime that favours them, can compound the spread while paying the cost on
+# a fraction of those slots.
+#
+# The requirement this puts on the strategy is a rule for declining slots. The
+# edge per slot is what it is; what a design can change is how many slots it pays
+# for. Chapter 16's slot mechanism is where this case study makes that concrete.
 
 # %%
 # Pairwise prediction correlations
@@ -961,20 +1005,74 @@ print(f"Families with checkpoint data: {cp_families}")
 # %%
 plot_learning_curves(cp_data, cp_families)
 
+# %%
+# Capacity against accuracy, computed rather than asserted. The GBM grid sweeps
+# `num_leaves` over 7, 15, 31 and 63 crossed with three losses, so the question "does
+# more capacity help on this panel" has an answer in the registry and does not need to
+# be argued from the winner's name. Both columns are reported because they can
+# disagree: the maximum is the best draw from a sample and grows with the number of
+# scored candidates at that leaf count, while the mean describes the setting. Each row
+# of `all_metrics` is one config-checkpoint pair, so `n_scored` - not `n_configs` - is
+# the sample the maximum is drawn from.
+_gbm = all_metrics.filter(pl.col("family") == "gbm")
+_leaf_summary = (
+    _gbm.with_columns(
+        pl.col("config_name").str.extract(r"leaves_(\d+)", 1).cast(pl.Int64).alias("num_leaves")
+    )
+    .drop_nulls("num_leaves")
+    .group_by("num_leaves")
+    .agg(
+        n_configs=pl.col("config_name").n_unique(),
+        n_checkpoints=pl.col("checkpoint_value").n_unique(),
+        n_scored=pl.len(),
+        best_ic=pl.col("ic_mean").max(),
+        mean_ic=pl.col("ic_mean").mean(),
+    )
+    .sort("num_leaves")
+)
+if _leaf_summary.height:
+    print("GBM leaf count against IC on the primary label:")
+    print(_leaf_summary)
+else:
+    print("No GBM configs carrying a leaf count in their name; capacity read skipped.")
+
 # %% [markdown]
-# The learning curves trace IC across training checkpoints for the
-# families that emit them. From the locked registry, `gbm` highest IC at
-# `fwd_ret_15m` is `leaves_7_mae` (small-leaf, MAE loss) - the
-# regularization-against-noise pattern is the binding principle,
-# not the capacity-for-interactions story. `deep_learning/nlinear` is an
-# architecturally near-linear sequence model, not a deep recurrent
-# architecture; its highest IC is a single-config result and does not
-# come with a meaningful epoch-vs-IC progression for cross-architecture
-# comparison.
+# The learning curves trace IC across training checkpoints for the families that emit
+# them, and the table above asks the question the curves cannot: whether capacity helps
+# at all on this panel.
 #
-# Both families' curves show monotone-then-plateau behavior rather than
-# overfitting (no declining IC beyond the peak), suggesting the models
-# extract genuine but weak patterns rather than memorizing noise.
+# **Read the mean column and the best column against each other.** They answer different
+# questions. If mean IC rises with leaf count, more capacity helps the setting; if only
+# the maximum rises, the wider leaf counts may simply have had more scored candidates to
+# draw a maximum from. Where they disagree, the mean is the one to believe, because the
+# maximum of a larger sample is larger whether or not the family has an edge - the same
+# argument §3 makes about family maxima. `n_scored` is the count that governs that
+# comparison; when it is equal across leaf counts, the maxima are drawn from samples of
+# the same size and the column is comparable on that axis.
+#
+# Do not read either column as the binding principle for boosting in general. It is one
+# label, two folds and one panel, and each row pools twice over: the grid crosses leaf
+# count with a loss function, and every config contributes one row per training
+# checkpoint. A leaf-count cell therefore mixes losses that may not respond the same way
+# with checkpoints taken at different points in the same fit. `n_scored` is therefore
+# `n_configs` multiplied by the checkpoints each config emits, and the search behind the
+# maximum is that many times wider than the configuration count alone suggests.
+#
+# **The ensemble this case study features does not take the winner of this table.**
+# `ensemble.max_num_leaves` in `config/setup.yaml` is 31, so the featured mean forecast
+# averages the 7-, 15- and 31-leaf members and leaves out the 63-leaf ones entirely. That
+# is not an oversight competing with the table above: the table ranks single
+# configurations on one validation sample, and an average of regularized members is a bet
+# that the family generalizes where the individual maximum does not. Chapter 16 is where
+# the two are compared on the same footing, out of sample.
+#
+# `deep_learning/nlinear` is an architecturally near-linear sequence model rather than a
+# deep recurrent one, and its highest IC is a single-config result with no meaningful
+# epoch-versus-IC progression to compare across architectures.
+#
+# What the curves themselves show - a monotone rise then a plateau, or a peak followed
+# by decline - is the overfitting question, and it is the shape rather than the level
+# that answers it.
 
 # %% [markdown]
 # ### Which Features Drive the Forecasts?
@@ -986,12 +1084,22 @@ plot_learning_curves(cp_data, cp_families)
 # in both folds.
 
 # %%
-# Try GBM booster-based importance first, fall back to feature-prediction correlation
+# Booster-based gain first; feature-prediction correlation only if the boosters are
+# unreadable. The two are different quantities and the fallback is not a degraded
+# version of the first: gain is how much a feature reduced the loss inside the fitted
+# GBM trees, while the fallback is the rank correlation between a feature and the
+# LINEAR model's score. They can disagree completely, and one variable holding either
+# is how a figure captioned "feature importance" came to show the other. `IMPORTANCE_
+# SOURCE` is carried into the figure title so the render says which one it drew.
 gbm_importance = load_gbm_feature_importance(CASE_STUDY, label=PRIMARY_LABEL, top_n=TOP_N_FEATURES)
+IMPORTANCE_SOURCE = "gbm_gain" if gbm_importance is not None else None
 
 if gbm_importance is None:
     # Fallback: compute feature-prediction IC (correlation between each feature and y_score)
-    print("No GBM booster files available. Computing feature-prediction correlation as fallback...")
+    print(
+        "No readable GBM boosters. Falling back to feature-prediction correlation, which is a "
+        "different quantity - see the note above and read the figure title."
+    )
 
     features_path = CASE_DIR / "features" / "financial.parquet"
     if features_path.exists() and best_preds.height > 0:
@@ -1049,13 +1157,22 @@ if gbm_importance is None:
                     .to_list()
                 )
                 gbm_importance = gbm_importance.filter(pl.col("feature").is_in(top_features))
+                IMPORTANCE_SOURCE = "linear_correlation"
                 print(
                     f"Computed feature-prediction correlation for {len(top_features)} features across {merged['fold_id'].n_unique()} folds"
                 )
 
+_IMPORTANCE_TITLES = {
+    "gbm_gain": "GBM gain: a small feature set stays important across folds",
+    "linear_correlation": (
+        "FALLBACK - linear model feature correlation, NOT GBM gain: "
+        "which features move with the linear score"
+    ),
+}
 if gbm_importance is not None and gbm_importance.height > 0:
     print(
-        f"Feature importance: {gbm_importance['feature'].n_unique()} features × {gbm_importance['fold_id'].n_unique()} folds"
+        f"Feature importance ({IMPORTANCE_SOURCE}): {gbm_importance['feature'].n_unique()} "
+        f"features × {gbm_importance['fold_id'].n_unique()} folds"
     )
 else:
     print("Feature importance data not available.")
@@ -1064,27 +1181,35 @@ else:
 # ### Figure 7: Feature Importance Stability Heatmap
 
 # %%
-plot_feature_importance_heatmap(gbm_importance, TOP_N_FEATURES)
+plot_feature_importance_heatmap(
+    gbm_importance,
+    TOP_N_FEATURES,
+    title=_IMPORTANCE_TITLES.get(IMPORTANCE_SOURCE, "Feature importance across folds"),
+)
 
 # %% [markdown]
-# The feature importance analysis reveals a surprising result: the
-# only persistent features (top-5 in both folds) are **`is_first_30m`**
-# and **`is_last_30m`** - time-of-day indicators, not the order flow
-# or liquidity features we expected.
+# **What the heatmap is showing, and what it is not.** Gain-based importance says how
+# much a feature reduced the loss inside the fitted trees. It is not a causal statement
+# and it is not a ranking of forecasting power: two correlated features split the gain
+# between them, so a feature can matter and still read low because a near-copy of it
+# absorbed the credit. Read it for which features the models leaned on, and read
+# persistence across folds rather than the level in either one.
 #
-# This is actually economically meaningful. The first and last 30
-# minutes of the trading day are well-known to exhibit different
-# microstructure dynamics:
+# **Time of day dominates, and the form it takes is the finding.** The panel offers both
+# a continuous position in the session (`time_since_open`, `time_to_close`) and binary
+# bucket indicators (`is_first_30m`, `is_last_30m`). The models use the continuous pair
+# heavily and the indicators barely at all. A bucket says only whether the bar is inside
+# a named window; a continuous position lets a tree place a split anywhere in the
+# session and keep refining, which is what a boosted ensemble is built to exploit.
 #
-# - **Opening**: overnight information is incorporated, spreads are
-#   wider, volume is concentrated, and mean-reversion patterns are
-#   stronger as the opening auction resolves overnight imbalances
-# - **Closing**: portfolio rebalancing flows, index tracking, and
-#   MOC orders create predictable patterns in the cross-section
+# That the opening and closing minutes have their own microstructure is well established
+# - overnight information being incorporated into wider spreads and concentrated volume
+# at the open, rebalancing and MOC flow at the close. What this figure adds is that the
+# models did not need the buckets to use it.
 #
-# The microstructure features (signed volume share, relative spread,
-# microprice deviation) appear in the top 15 but are not persistent
-# across both folds - their importance shifts with market conditions.
+# The order-flow and liquidity features appear in the heatmap without persisting across
+# both folds, which is the diffuse-signal reading: no single microstructure feature
+# carries the bulk of the gain, and which of them surfaces shifts with the window.
 # This suggests the signal is diffuse: no single microstructure
 # feature carries the bulk of the signal, but the time-of-day context conditions which
 # features matter. The models may be implicitly learning "at the
@@ -1177,12 +1302,23 @@ plot_label_horizon_forest(
 # %% [markdown]
 # ### Regime Conditioning
 #
-# At 15-minute frequency, the natural conditioning variable is
-# intraday volatility: during volatile periods, cross-sectional
-# dispersion increases and microstructure signals become more
-# pronounced. We use rolling cross-sectional return dispersion
-# (computed over 252 bars, approximately one trading day) as the
-# regime indicator.
+# The conditioning variable is cross-sectional dispersion: when the
+# cross-section spreads out, a ranking has more to rank and a microstructure
+# signal has more room to be right or wrong. `regime_conditional_ic` computes it
+# for each decision time as the standard deviation of realized returns across
+# the symbols quoting at that time, then splits the decision times at the median
+# into `high_vol` and `low_vol` and scores the rank IC within each half.
+#
+# Two things follow from it being a median split of per-timestamp dispersion, and
+# both bound what the figure below can say. The halves are equal by construction,
+# so "half the decision times are high-volatility" is arithmetic and not a
+# finding. And the classification is per decision time rather than per day or per
+# episode, so adjacent bars can fall in opposite halves - this separates
+# dispersed cross-sections from tight ones, and does not identify a volatile
+# period that a strategy could recognise while it was in one.
+#
+# The split is taken over the sampled grid loaded above, so it is the median of
+# the timestamps kept rather than of every timestamp scored.
 
 # %%
 # Compute regime-conditional IC
@@ -1241,16 +1377,19 @@ plot_regime_bars(regime_df)
 #
 # Latent factor models were **not trained** for the NASDAQ-100
 # microstructure case study. At 15-minute frequency, the cross-section
-# of 114 stocks lacks the fundamental heterogeneity that factor models
+# of 113 stocks lacks the fundamental heterogeneity that factor models
 # require - these are all large-cap US tech stocks with highly
 # correlated microstructure dynamics. PCA or CAE applied to intraday
 # microstructure features would extract market-wide volatility modes,
 # not tradeable cross-sectional factors.
 #
-# This contrasts with broader panels like US Firm Characteristics
-# (2,483 stocks) and SP500 Equity+Options (638 entities), where
-# latent factors can capture meaningful cross-sectional variation
-# in fundamentals.
+# This contrasts with the broader panels elsewhere in the book. US Firm
+# Characteristics declares `universe.n_assets: 2500` and SP500 Equity+Options
+# declares 633, against the 115 this case study declares and the 113 that carry
+# prices and predictions. Those are declarations from each case study's
+# `config/setup.yaml` and not counts realized by a run, which is the reason to
+# read them as an order of magnitude: a cross-section twenty times wider is what
+# gives a latent factor something to vary across.
 
 # %% [markdown]
 # ### Causal DML (Ch15)
@@ -1262,8 +1401,11 @@ plot_regime_bars(regime_df)
 # It does not produce a per-asset cross-sectional score, so it is
 # reported as ATE/SE/p_HAC rather than IC.
 #
-# Treatment: `signed_vol_share` (signed volume share at the bar);
-# confounders: `rel_spread_close`, `rv_5m`, `r1m`; embargo = 1 bar.
+# Treatment: `signed_vol_share` (signed volume share at the bar); confounders:
+# `rel_spread_close`, `rv_5m`, `r1m`. The embargo is **16 periods**, which on this
+# one-minute panel is sixteen minutes: it follows `labels.buffer` (`16min`) and not the
+# treatment's own construction window, which is one bar. `causal_runs.embargo` records
+# what the run used, and `12_causal_dml` is where the choice is argued.
 
 # %%
 # `causal_runs` is keyed on `causal_hash`, and that identity covers the fold and placebo
@@ -1333,8 +1475,9 @@ for _label, _why in _unresolved.items():
 # label buffer rather than from the treatment's own window, and `signed_vol_share` declares no
 # window, so the block is not derived from the quantity it has to bound. A refutation built that
 # way passes by construction. `us_firm_characteristics` measured what that looks like on its own
-# treatment: p = 1.0000 at z = -13.89, with the placebos fourteen standard deviations above the
-# observed effect - a placebo distribution that cannot contain the truth is not evidence about it.
+# treatment: the placebo distribution sat wholly above the observed effect, many standard
+# deviations away, so the refutation returned a p-value of one - a placebo distribution that
+# cannot contain the truth is not evidence about it.
 # Read the column as unresolved until the treatment declares its window.
 #
 # The effect is measured per unit of the treatment, and treatment units are not
@@ -1353,7 +1496,11 @@ for _label, _why in _unresolved.items():
 # Point IC tells us whether the ranking is correct on average; it says
 # nothing about whether the model's *uncertainty* is well calibrated. The
 # width measured here is the one the `conformal_weighted` allocator sizes
-# positions with: calibrated per symbol on every absolute residual known at
+# positions with in the eight case studies that declare it. This one does not:
+# `backtest.sweep.allocators` here is `equal_weight`, `score_weighted` and
+# `inverse_vol`, so the diagnostic below describes the model and nothing
+# downstream consumes it. It is calibrated per symbol on every absolute
+# residual known at
 # `t - h`, where `h` is this label's horizon in data steps, falling back to a
 # quantile pooled over every symbol where one has too few residuals of its
 # own. A decision is covered when its absolute residual falls inside that
@@ -1368,12 +1515,15 @@ for _label, _why in _unresolved.items():
 # means tighter, more useful intervals.
 #
 # Read it as a diagnostic of residual dispersion rather than a guarantee.
-# Split conformal's finite-sample coverage (Vovk et al., 2005; Lei et al.,
-# 2018) requires the calibration and evaluation scores to be exchangeable and
-# return residuals are not, and nothing in the allocation path reads an
-# interval or a coverage level - the width stands in for a volatility
-# estimate. See Ch12 §12.6 / `11_conformal_gbm` for the full conformal toolkit
-# (CQR, ACI).
+# Split conformal's finite-sample coverage guarantee (Vovk et al., 2005; Lei et
+# al., 2018) requires the calibration and evaluation scores to be exchangeable,
+# and return residuals are not: they are serially dependent and their dispersion
+# moves with the regime, so the nominal level is a target the procedure aims at
+# here rather than one it attains. Where the allocator is swept, it reads the
+# width as a volatility estimate and never reads the coverage level, so a
+# miscalibrated interval reaches position sizing as a scale and not as a
+# probability. See Ch12 §12.6 / `12_gradient_boosting/11_conformal_gbm` for the
+# full conformal toolkit (CQR, ACI).
 #
 # Each row is the family's highest-IC configuration for the primary label.
 # That is a model-level ranking and not the funnel's - every selection stage
@@ -1552,7 +1702,7 @@ print(synthesis)
 #
 # ### What This Analysis Does Not Tell Us
 #
-# - **Execution feasibility**: 15-minute rebalancing across 114
+# - **Execution feasibility**: 15-minute rebalancing across 113
 #   stocks requires institutional-grade execution infrastructure.
 #   The market impact of simultaneously trading the top and bottom
 #   deciles may exceed the predicted edge.
@@ -1561,7 +1711,7 @@ print(synthesis)
 # - **Capacity**: even NASDAQ-100 stocks have limited intraday
 #   liquidity at the bar level. A \$10M strategy may face meaningful
 #   market impact; a \$100M strategy almost certainly would.
-# - **Survivorship bias**: the 114-stock universe was selected based
+# - **Survivorship bias**: the 115-stock universe was selected based
 #   on NASDAQ-100 membership, which is backward-looking.
 # - **2-fold limitation**: the strongest caveat. 2020--2021 was an
 #   extraordinary period (COVID, retail trading boom, meme stocks).

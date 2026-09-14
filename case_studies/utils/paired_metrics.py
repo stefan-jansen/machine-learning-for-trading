@@ -96,8 +96,27 @@ def _min_paired_n(ppy: int) -> int:
 # LIMIT 1` free to pick whichever rung is higher in current data. The pin combines the universe
 # with `exit_at_max_days` so the rank-1 row is deterministic and HTM-coherent.
 #
-# nasdaq100_microstructure: the cost-feasible ensemble, chosen before the holdout was opened and
-# matched on those two design attributes, which any registry can satisfy.
+# nasdaq100_microstructure: the cost-feasible sweep on the primary label, matched on design
+# attributes any registry can satisfy and chosen before the holdout was opened.
+#
+# The pin used to name `family == "ensemble"` as well. The mean-forecast ensemble existed
+# because the per-model baseline on this case study was not worth reporting, and that is no
+# longer the case: measured 2026-09-14 on the cost-feasible pool, `deep_learning/nlinear` on
+# `fwd_ret_15m` reaches +2.300 against the ensemble's +0.566, so pinning to the ensemble
+# anchored every paired comparison to the weakest thing in the pool. The family clause is
+# gone; the ensemble rows stay in the registry and stay selectable, they are simply no
+# longer the only thing the pin can choose.
+#
+# The label is part of the pin and was not always, and it does more work now that family is
+# not. The pool spans four declared labels, so universe alone leaves `ORDER BY sharpe DESC
+# LIMIT 1` free to choose among them - `fwd_dir_15m` reaches +2.416, above the primary
+# label's best - and the rank-1 rung would move onto a label this case study is not featured
+# on with nothing announcing it. A pin that omits a dimension selects along it silently.
+#
+# `fwd_ret_15m` is what the book prints for this case study, in Table 11.6
+# (`NASDAQ-100 15m | fwd_ret_15m`), in Chapter 12's case-study table (`15 minutes | forward
+# return`) and in Chapter 13's (`15 minutes | NLinear`). `config/setup.yaml::labels.primary`
+# says the same, and `tests/test_rung_pin_label.py` asserts the two do not drift apart.
 RUNG_PINS: dict[str, dict] = {
     "sp500_options": {
         "predicate": (pl.col("universe_filter") == "liquid") & pl.col("exit_at_max_days").is_null(),
@@ -106,9 +125,11 @@ RUNG_PINS: dict[str, dict] = {
     },
     "nasdaq100_microstructure": {
         "predicate": (pl.col("universe_filter") == "cost_feasible")
-        & (pl.col("family") == "ensemble"),
+        & (pl.col("label") == "fwd_ret_15m"),
         "universe_filter": "cost_feasible",
         "exit_at_max_days": None,
+        # Mirrors the predicate for the SQL paths that cannot take a polars expression.
+        "label": "fwd_ret_15m",
     },
 }
 
@@ -972,17 +993,25 @@ def populate_paired_metrics(
 
     * ``label_restriction`` - ``strategy_analysis.LABEL_RESTRICTIONS.get(cs)`` (e.g.
       sp500_options → ``frozenset({'ret_to_expiry'})``); None for most CSs.
-    * ``rung`` — ``{"predicate", "universe_filter", "exit_at_max_days"}`` for
-      the rung-pinned CSs (sp500_options, nasdaq100_microstructure); None else.
-      (us_firm_characteristics → ``config_name == 'default_huber'``); None else.
+    * ``rung`` - ``{"predicate", "universe_filter", "exit_at_max_days"}``, plus
+      ``label`` where the pin names one, for the rung-pinned CSs (sp500_options,
+      nasdaq100_microstructure); None else. A line naming
+      ``us_firm_characteristics -> config_name == 'default_huber'`` stood here
+      until 2026-09-14, dangling under this bullet and describing a pin deleted on
+      2026-08-25 for selecting that case study's weakest advanced configuration
+      (`20_strategy_synthesis/01_aggregate_synthesis.py:365`).
     * ``periods_per_year`` — the annualization factor. Defaults to the case
       study's own ``evaluation.periods_per_year`` declaration rather than to a
       cadence, so a caller that omits it gets its own scale instead of someone
       else's.
     * ``carrier`` — a ``resolve_canonical_rank1_lineage`` result, or ``NO_CARRIER``.
       With a lineage, pairs #2-6 use its validation and holdout backtests instead of
-      re-ranking the registry here. Pair #1 is unaffected: it is about the signal
-      leader, not the carrier. ``NO_CARRIER`` keeps the legacy ranking, which is not
+      re-ranking the registry here, and pair #1 is pinned to its validation backtest
+      too - the code below refuses rather than ranking when a carrier is supplied,
+      because a pair #1 registered under a backtest the case study does not report
+      leaves its carrier with no validation-to-benchmark evidence. This bullet said
+      pair #1 was unaffected until 2026-09-14, which had not been true since that
+      refusal landed. ``NO_CARRIER`` keeps the legacy ranking, which is not
       the canonical selection - it orders on raw Sharpe and applies neither the
       common-support re-ranking nor the restrictions the resolver holds - so a caller
       that can resolve the lineage should pass it. The rung-pinned case studies

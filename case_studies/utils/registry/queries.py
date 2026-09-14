@@ -837,6 +837,40 @@ def _canonical_family_coverage_bar(
     return bar
 
 
+_UNIVERSE_JSON_PATH = "$.strategy.signal.universe_filter"
+
+
+def _universe_filter_clause(universe_filter: str | None) -> tuple[str, list[str]]:
+    """Restrict the backtests a ranking reads to one universe, and the parameters to bind.
+
+    ``None`` leaves the ranking unscoped. That is right for a registry holding one
+    universe and wrong for one holding two: ``per_prediction`` takes ``MAX(sharpe)``
+    over every backtest of a prediction, so a mixed registry ranks each prediction on
+    whichever universe scored it higher, and a prediction swept on only one of them is
+    ranked against peers swept on both.
+
+    ``"full"`` is the unrestricted universe and two different specs mean it. The sweep
+    notebooks set ``signal.universe_filter`` only when a filter applies - see the
+    ``if universe is not None`` guard in ``14_backtest`` - and every row registered
+    before the universe axis existed carries no key either, so ``json_extract`` returns
+    SQL NULL for them; the sp500_options cost cascade writes the string ``"full"`` on
+    its rung-1 and rung-2 rows. ``COALESCE`` reads both as the same universe, which is
+    the form ``BacktestExplorer.best`` already uses for this predicate.
+
+    ``"none"`` is accepted as a spelling of ``"full"`` because
+    ``get_universe_filters_for`` normalizes the two together.
+    """
+    if not universe_filter:
+        return "", []
+    name = str(universe_filter).strip()
+    if name.lower() in ("full", "none"):
+        name = "full"
+    return (
+        f"AND COALESCE(json_extract(b.spec_json, '{_UNIVERSE_JSON_PATH}'), 'full') = ?",
+        [name],
+    )
+
+
 def _resolve_best_predictions_canonical(
     case_study: str,
     label: str,
@@ -874,7 +908,6 @@ def _resolve_best_predictions_canonical(
     exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family")
     degenerate_clause = degenerate_prediction_sql("p.prediction_hash")
 
-    universe_clause = ""
     backtest_cte = ""
     backtest_clause = ""
     params: list[str] = []
@@ -883,9 +916,8 @@ def _resolve_best_predictions_canonical(
         backtest_clause = "AND b.backtest_hash IN (SELECT backtest_hash FROM backtest_members)"
         params.append(json.dumps(sorted(backtest_hashes)))
     params += [label] + stage_params + exclude_params + [split]
-    if universe_filter:
-        universe_clause = "AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
-        params.append(universe_filter)
+    universe_clause, universe_params = _universe_filter_clause(universe_filter)
+    params.extend(universe_params)
 
     # Same per_prediction shape as the raw path, minus full_coverage_prediction_sql —
     # that comparison is replaced below by canonical_coverage_days, computed in Python.
@@ -1020,6 +1052,11 @@ def resolve_best_predictions(
         Pipeline stage to filter by: "signal", "allocation", etc.
     chapter_filter : str, optional
         Chapter-based filter (e.g. "ch16"). Converted to stage internally.
+    universe_filter : str, optional
+        Rank each prediction on the backtests declaring this universe only.
+        ``None`` (the default) ranks on all of them, which mixes universes
+        wherever a case study sweeps more than one. ``"full"`` selects the
+        rows that declare no filter; see ``_universe_filter_clause``.
     case_dir : Path, optional
         Override case study directory.
     checkpoints_per_config : int
@@ -1142,10 +1179,8 @@ def resolve_best_predictions(
     if split:
         split_clause = "AND p.split = ?"
         params.append(split)
-    universe_clause = ""
-    if universe_filter:
-        universe_clause = "AND json_extract(b.spec_json, '$.strategy.signal.universe_filter') = ?"
-        params.append(universe_filter)
+    universe_clause, universe_params = _universe_filter_clause(universe_filter)
+    params.extend(universe_params)
     params.append(str(top_n))
     params.append(str(max(1, int(checkpoints_per_config))))
 
