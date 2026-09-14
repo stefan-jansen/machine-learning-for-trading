@@ -1192,11 +1192,17 @@ def main(argv: list[str] | None = None) -> int:
     # Printed before the first early return, so every path that refuses a run also says
     # what to type. `--require-declarations` returns two lines down and used to return
     # without it, which is the path that most needs it: it is the one that stops a chain.
+    # The refused-literal block below prints them last, where they read best, but it is
+    # reached only when there are refused literals and `--allow-stale-supersedes` was not
+    # passed - and `--require-declarations` returns above it. Every other path that owes a
+    # command prints one here instead, including the undeclared-only warning, which refuses
+    # nothing and is exactly when a reader can act on it cheaply.
+    returns_above_the_stale_block = bool(undeclared) and args.require_declarations
+    stale_block_prints_them = (
+        bool(stale) and not args.allow_stale_supersedes and not returns_above_the_stale_block
+    )
     launch_printed = False
-    if undeclared and not args.require_declarations and args.allow_stale_supersedes:
-        _print_launch_lines(findings, sys.stderr)
-        launch_printed = True
-    if undeclared and args.require_declarations:
+    if (undeclared or stale) and not stale_block_prints_them:
         _print_launch_lines(findings, sys.stderr)
         launch_printed = True
 

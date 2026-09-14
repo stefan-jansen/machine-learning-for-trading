@@ -178,32 +178,81 @@ class TestOneLaunchCarriesEveryEntry:
 
 class TestEveryRefusalPathSaysWhatToType:
     """A path that stops a chain and prints no command is the failure this change exists
-    to fix, one level up: the reader is told what is wrong and not what to run."""
+    to fix, one level up: the reader is told what is wrong and not what to run.
 
-    @staticmethod
-    def _stderr(*argv: str) -> str:
+    The findings are supplied rather than read from the live registry. Reading it would
+    make these pass only while `us_equities_panel` happens to owe something, so fixing the
+    declarations would break the test or, worse, leave it passing vacuously.
+    """
+
+    FINDINGS = [
+        _checker.Finding(
+            "us_equities_panel",
+            "07_gbm.py",
+            "464646b3bd65",
+            "behind",
+            "one generation behind",
+            "SUPERSEDES_SETS",
+            "live",
+            "gbm-1d",
+        ),
+        _checker.Finding(
+            "us_equities_panel",
+            "07_gbm.py",
+            "",
+            "undeclared",
+            "no declaration names it",
+            "SUPERSEDES_SETS",
+            "live",
+            "gbm-5d",
+        ),
+    ]
+
+    def _stderr(self, monkeypatch, *argv: str, findings=None) -> str:
         import contextlib
         import io
 
+        monkeypatch.setattr(
+            _checker, "check_all", lambda **_: list(self.FINDINGS if findings is None else findings)
+        )
         buffer = io.StringIO()
         with contextlib.redirect_stderr(buffer), contextlib.redirect_stdout(io.StringIO()):
             _checker.main(["--case-study", "us_equities_panel", *argv])
         return buffer.getvalue()
 
-    def test_the_plain_refusal_prints_the_commands_once(self) -> None:
-        assert self._stderr().count("The launch each of these needs") == 1
+    def test_the_plain_refusal_prints_the_commands_once(self, monkeypatch) -> None:
+        output = self._stderr(monkeypatch)
+        assert output.count("The launch each of these needs") == 1
+        assert "nb-run.sh us_equities_panel 07_gbm " in output
 
-    def test_require_declarations_prints_them_before_it_returns(self) -> None:
+    def test_require_declarations_prints_them_before_it_returns(self, monkeypatch) -> None:
         """It returns above the refused-literal block, so it used to print none at all."""
-        output = self._stderr("--require-declarations")
+        output = self._stderr(monkeypatch, "--require-declarations")
         assert "nb-run.sh us_equities_panel 07_gbm " in output
         assert "Refusing because --require-declarations was passed." in output
 
-    def test_allow_stale_still_prints_them(self) -> None:
-        assert "The launch each of these needs" in self._stderr("--allow-stale-supersedes")
+    def test_allow_stale_still_prints_them(self, monkeypatch) -> None:
+        output = self._stderr(monkeypatch, "--allow-stale-supersedes")
+        assert output.count("The launch each of these needs") == 1
+
+    def test_the_undeclared_only_warning_prints_them(self, monkeypatch) -> None:
+        """It refuses nothing, which is exactly when acting on it is cheap."""
+        undeclared_only = [f for f in self.FINDINGS if f.status == "undeclared"]
+        output = self._stderr(monkeypatch, findings=undeclared_only)
+        assert "nb-run.sh us_equities_panel 07_gbm " in output
+
+    def test_the_command_carries_both_entries(self, monkeypatch) -> None:
+        """One behind and one undeclared entry, one mapping, both keys."""
+        output = self._stderr(monkeypatch)
+        # The per-finding fix line also names nb-run.sh, so match the command itself.
+        line = next(x for x in output.splitlines() if x.strip().startswith("nb-run.sh "))
+        mapping = json.loads(line.split(":json=", 1)[1].strip("'"))
+        assert mapping == {"gbm-1d": "live", "gbm-5d": "live"}
 
     def test_no_command_is_offered_for_an_unattributed_generation(self) -> None:
         """`_undeclared_heads` writes "-" when it cannot say which notebook freezes one."""
+        import io
+
         finding = _checker.Finding(
             "us_equities_panel",
             _checker._UNATTRIBUTED,
@@ -214,8 +263,6 @@ class TestEveryRefusalPathSaysWhatToType:
             "live",
             "orphan-set-v1",
         )
-        import io
-
         buffer = io.StringIO()
         _checker._print_launch_lines([finding], buffer)
         assert buffer.getvalue() == ""
