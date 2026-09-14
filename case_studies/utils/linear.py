@@ -45,6 +45,7 @@ from case_studies.utils.folds import (
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
 from case_studies.utils.registry.registration import _with_prediction_label
 from case_studies.utils.registry.specs import canonical_json
+from case_studies.utils.registry.store import _timestamps_as_utc
 from case_studies.utils.runtime import cpu_seconds, resource_measurement, source_commit
 from utils.modeling import (
     load_modeling_dataset,
@@ -1807,8 +1808,16 @@ def validate_locked_run(
     # linear configuration first carried a holdout, which is what fx_pairs did once its
     # carrier selection was corrected. The stamp is added rather than the column dropped: the
     # published label is part of what the reconstruction has to agree with.
-    reconstructed = _with_prediction_label(
-        pl.concat(shards).sort("symbol", "timestamp", "fold"), str(spec["label"])
+    # The shards are the frame as the fit wrote it; `published` came back through
+    # `PredictionResult.load`, which widens a `Date` decision-time column to
+    # `Datetime(us, 'UTC')` so the families join. `equals` compares dtypes, so the
+    # reconstruction is widened the same way or this check fails on the representation
+    # rather than on the values it exists to compare.
+    reconstructed = _timestamps_as_utc(
+        _with_prediction_label(
+            pl.concat(shards).sort("symbol", "timestamp", "fold"), str(spec["label"])
+        ),
+        widen_dates=True,
     )
     if not reconstructed.equals(published):
         raise ValueError("locked linear fitted state does not reproduce published predictions")

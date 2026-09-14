@@ -719,7 +719,10 @@ def _normalize_prediction_frame(frame: pl.DataFrame) -> pl.DataFrame:
     """
     from case_studies.utils.registry.store import _timestamps_as_utc
 
-    frame = _timestamps_as_utc(frame)
+    # `widen_dates` for the same reason the zone is normalized: the persisted side comes
+    # back through `PredictionResult.load`, which widens a `Date` column, and the
+    # reconstructed side carries whatever the context holds.
+    frame = _timestamps_as_utc(frame, widen_dates=True)
     rename = {
         old: new
         for old, new in {

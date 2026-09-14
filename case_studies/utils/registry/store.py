@@ -1224,7 +1224,7 @@ def _save_json(path: Path, data: dict) -> None:
 _PREDICTION_TIME_COLUMNS = ("timestamp", "date", "datetime", "ts")
 
 
-def _timestamps_as_utc(predictions):
+def _timestamps_as_utc(predictions, *, widen_dates: bool = False):
     """Give a naive decision-time column an explicit UTC zone before it is written.
 
     `gbm`, `linear` and `tabular_dl` write `Datetime(_, 'UTC')`; `deep_learning` reaches
@@ -1242,6 +1242,19 @@ def _timestamps_as_utc(predictions):
     `value_digest` ignores the zone (it is time-unit sensitive and zone-insensitive), so
     an artifact rewritten through here keeps its digest and no immutable-artifact check
     moves. The time unit is deliberately left alone for the same reason.
+
+    `widen_dates` handles a third dtype the zone rule cannot see. A `pl.Date` column has
+    no zone at all, so the naive branch above skips it and a case study ends up holding
+    both dtypes: us_equities_panel has 688 prediction artifacts on `Date` (gbm, linear,
+    tabular_dl) and 42 on `Datetime(us, 'UTC')` (deep_learning, latent_factors), same
+    decision times, every aware value at midnight. `Date` never equals `Datetime`, so a
+    join on (timestamp, symbol) across those two families returns nothing.
+
+    Widening is read-only and the flag defaults off, because unlike the zone relabel it
+    is NOT digest-neutral: `value_digest` distinguishes `Date` from `Datetime` (measured
+    2026-09-14), so widening on the write path would re-key every artifact those three
+    families have already registered and every immutable-artifact check over them would
+    fail. Callers reading an artifact pass True; `register_prediction_set` must not.
     """
     if predictions is None:
         return predictions
@@ -1258,16 +1271,31 @@ def _timestamps_as_utc(predictions):
             and isinstance(predictions.schema[column], pl.Datetime)
             and predictions.schema[column].time_zone is None
         ]
-        if not naive:
+        dates = (
+            [
+                column
+                for column in _PREDICTION_TIME_COLUMNS
+                if column in predictions.columns and predictions.schema[column] == pl.Date
+            ]
+            if widen_dates
+            else []
+        )
+        if not naive and not dates:
             return predictions
         return predictions.with_columns(
-            pl.col(column).dt.replace_time_zone("UTC") for column in naive
+            *(pl.col(column).dt.replace_time_zone("UTC") for column in naive),
+            *(
+                pl.col(column).cast(pl.Datetime("us")).dt.replace_time_zone("UTC")
+                for column in dates
+            ),
         )
 
     # pandas is handled in place rather than converted. Both the legacy registration branch
     # and the pandas side of the versioned one hand the caller's own frame to the writer,
     # and `pl.from_pandas` on an arbitrary frame is a wider change than this needs. A naive
     # pandas column localizes to UTC the same way; an already-aware one is left alone.
+    # `widen_dates` has no pandas counterpart: there is no date dtype to widen, only
+    # datetime64 with or without a zone, which the naive branch below already covers.
     import pandas as pd
 
     if not isinstance(predictions, pd.DataFrame):
