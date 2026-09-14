@@ -588,6 +588,21 @@ if not cost_df.is_empty():
 # screened rows. The difference it reports would then mix the universe screen with a
 # change of trading direction. Keyed on the sorted items of the signal dict so the match
 # does not depend on the order SQLite happens to serialize the object in.
+#
+# Restricted further to arms carrying no allocator, because the signal stage holds two
+# kinds of row and only one of them belongs here. `15_portfolio_management` prices
+# `equal_weight` as one of its three allocators, and an equal-weight allocation of a
+# top-k basket is the same selection as the signal arm, so those cells register at
+# `stage: signal` rather than writing an allocation row. They are not duplicates of the
+# ch16 rows: measured 2026-09-14 across all 18 colliding pairs, the two sides carry
+# identical `num_trades` and different Sharpes - ew_top5 on the full universe is -4.007
+# from ch16 against -4.056 from ch17, ew_top10 -8.821 against -8.893, ew_top20 -12.667
+# against -12.754. Same entries and exits, different position weights. So the allocated
+# row is a real and distinct backtest, and the fix is to leave it to the allocation
+# stage that produced it rather than to merge the pair or pick one.
+#
+# Without the restriction the join below is not one to one and the assertion that
+# follows raises, which is how this was found.
 conn = sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db"))
 _arms = pl.read_database(
     """
@@ -604,6 +619,7 @@ _arms = pl.read_database(
     JOIN training_runs tr ON tr.training_hash = ps.training_hash
     WHERE br.stage = 'signal' AND ps.split = 'validation'
       AND json_extract(br.spec_json, '$.strategy.signal.method') = 'equal_weight_top_k'
+      AND json_extract(br.spec_json, '$.strategy.allocation.method') IS NULL
       AND tr.family = 'gbm'
       AND bm.sharpe IS NOT NULL
     """,
