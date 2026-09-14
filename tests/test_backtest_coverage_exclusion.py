@@ -1,14 +1,19 @@
-"""A prediction set that covers a fraction of the cross-section is not backtested.
+"""A prediction set that covers a fraction of the cross-section is dropped from the pool.
 
-The loader already refuses one class of unrankable result - `degenerate_prediction_sql`
+Selection already refuses one class of unrankable result - `degenerate_prediction_sql`
 drops a set whose fold shrank every coefficient to zero, because a pooled IC over the
-surviving folds is not a model result. A set that scored two thirds of the symbols is
-the same kind of thing and was admitted: it competes for selection against families that
-were scored on the whole universe, and the leaderboard compares two experiments.
+surviving folds is not a model result. A set that scored two thirds of the symbols is the
+same kind of thing: it competes against families scored on the whole universe, and the
+leaderboard then compares two experiments.
 
 The measurement is charged against what the feature panels offered, so a family that
 delivered everything it was handed is never refused for a shortfall it inherited. That
 distinction is what the two fixtures below differ in.
+
+These tests used to run against `load_backtest_predictions`, which applied the same rule at
+load time and had no caller anywhere in the repository, so they proved a property of code
+nothing ran. They now exercise `undercovered_prediction_members`, which
+`prediction_members_in_force` calls to build the candidate pool.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.utils.backtest_loaders import _load_registry_prediction_frames
+from case_studies.utils.notebook_contracts import undercovered_prediction_members
 
 LABEL = "fwd_ret_1d"
 FOLDS = [{"fold": 0, "val_start": dt.date(2020, 1, 6), "val_end": dt.date(2020, 1, 17)}]
@@ -54,7 +59,7 @@ def case_dir(tmp_path: Path) -> Path:
     db.executescript(
         """
         CREATE TABLE training_runs (training_hash TEXT, family TEXT, label TEXT,
-                                    config_name TEXT, created_at TEXT);
+                                    config_name TEXT, created_at TEXT, spec_json TEXT);
         CREATE TABLE prediction_sets (prediction_hash TEXT, training_hash TEXT, split TEXT);
         CREATE TABLE fold_metrics (prediction_hash TEXT, ic REAL, ic_std REAL);
         """
@@ -64,8 +69,8 @@ def case_dir(tmp_path: Path) -> Path:
         ("narrow", "deep_learning", ("AAA", "BBB")),
     ):
         db.execute(
-            "INSERT INTO training_runs VALUES (?,?,?,?,?)",
-            (f"t-{phash}", family, LABEL, "default", "2026-01-01"),
+            "INSERT INTO training_runs VALUES (?,?,?,?,?,?)",
+            (f"t-{phash}", family, LABEL, "default", "2026-01-01", None),
         )
         db.execute(
             "INSERT INTO prediction_sets VALUES (?,?,?)", (phash, f"t-{phash}", "validation")
@@ -95,37 +100,20 @@ def declared(monkeypatch):
     monkeypatch.setattr(cv_window, "_holdout_window", lambda cs: None)
 
 
-def _load(case_dir: Path, minimum: float | None):
-    return _load_registry_prediction_frames(
-        case_study_id="cs",
-        case_dir=case_dir,
-        label=LABEL,
-        model_families=["gbm", "deep_learning"],
-        split="validation",
-        best_only=False,
-        minimum_coverage=minimum,
+def _short(case_dir: Path, minimum: float | None = 0.98) -> dict[str, str]:
+    return undercovered_prediction_members(
+        case_dir, ["whole", "narrow"], case_study="cs", minimum=minimum
     )
 
 
-def test_without_a_threshold_both_sets_are_loaded(wide_panel):
-    """The default is opt-out, not absent: a caller passing None gets the old behaviour."""
-    frames, sources, entries, excluded = _load(wide_panel, None)
-    assert len(frames) == 2
-    assert excluded == []
-
-
-def test_the_narrow_set_is_withheld_and_the_whole_one_is_kept(wide_panel):
-    frames, sources, entries, excluded = _load(wide_panel, 0.98)
-    assert [entry["family"] for entry in entries] == ["gbm"]
-    assert len(frames) == 1
-    assert [row["family"] for row in excluded] == ["deep_learning"]
-    assert excluded[0]["coverage"] == pytest.approx(2 / 3)
+def test_the_narrow_set_is_reported_and_the_whole_one_is_not(wide_panel):
+    assert sorted(_short(wide_panel)) == ["narrow"]
 
 
 def test_the_reason_names_the_entity_that_was_never_scored(wide_panel):
-    _, _, _, excluded = _load(wide_panel, 0.98)
-    assert "CCC" in excluded[0]["reason"]
-    assert "never scored" in excluded[0]["reason"]
+    reason = _short(wide_panel)["narrow"]
+    assert "CCC" in reason
+    assert "never scored" in reason
 
 
 def test_a_shortfall_the_feature_panel_caused_withholds_nothing(case_dir):
@@ -140,9 +128,7 @@ def test_a_shortfall_the_feature_panel_caused_withholds_nothing(case_dir):
         [{"timestamp": ts, "symbol": sym, "x": 1.0} for ts in SESSIONS for sym in ("AAA", "BBB")]
     ).write_parquet(features / "financial.parquet")
 
-    frames, _, entries, excluded = _load(case_dir, 0.98)
-    assert excluded == []
-    assert sorted(entry["family"] for entry in entries) == ["deep_learning", "gbm"]
+    assert _short(case_dir) == {}
 
 
 def test_a_set_whose_coverage_cannot_be_evaluated_is_withheld_not_admitted(wide_panel):
@@ -150,10 +136,9 @@ def test_a_set_whose_coverage_cannot_be_evaluated_is_withheld_not_admitted(wide_
     bad = wide_panel / "run_log" / "predictions" / "narrow" / "predictions.parquet"
     pl.read_parquet(bad).drop("y_score").write_parquet(bad)
 
-    _, _, entries, excluded = _load(wide_panel, 0.98)
-    assert [entry["family"] for entry in entries] == ["gbm"]
-    assert "could not be evaluated" in excluded[0]["reason"]
-    assert excluded[0]["coverage"] is None
+    short = _short(wide_panel)
+    assert sorted(short) == ["narrow"]
+    assert "could not be evaluated" in short["narrow"]
 
 
 def test_a_key_only_the_financial_panel_offers_is_still_achievable(case_dir):
@@ -179,11 +164,9 @@ def test_a_key_only_the_financial_panel_offers_is_still_achievable(case_dir):
         [{"timestamp": ts, "symbol": sym, "z": 1.0} for ts in SESSIONS for sym in ("AAA", "BBB")]
     ).write_parquet(features / "model_based.parquet")
 
-    _, _, entries, excluded = _load(case_dir, 0.98)
-    assert [entry["family"] for entry in entries] == ["gbm"]
-    assert [row["family"] for row in excluded] == ["deep_learning"]
-    assert excluded[0]["coverage"] == pytest.approx(2 / 3)
-    assert "CCC" in excluded[0]["reason"]
+    short = _short(case_dir)
+    assert sorted(short) == ["narrow"]
+    assert "CCC" in short["narrow"]
 
 
 def test_a_model_based_panel_narrower_than_financial_does_not_shrink_the_denominator(case_dir):
