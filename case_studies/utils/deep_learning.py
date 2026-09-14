@@ -1512,6 +1512,121 @@ def _publish_sequence_predictions(
     return tuple(prediction_results)
 
 
+def _claim_staging_tree(train_dir: Path) -> tuple[Path, Any]:
+    """Adopt a dead attempt's staging tree under `train_dir`, or open a fresh one.
+
+    Nothing prevents two runs of one training hash from being in flight at once -
+    `nb-run.sh` holds slots, not per-hash locks - so a tree can only be adopted once
+    the previous writer is known to be gone. The claim is an `flock` on a lock file
+    beside the tree: the kernel drops it when the holder dies, however it died, so a
+    tree whose lock is free has no live writer and one whose lock is held is skipped.
+    A stale claim file is not evidence of a live run and a missing one is not evidence
+    of a dead one; only the lock decides.
+
+    The lock file sits beside the tree rather than inside it, so `os.replace` promotes
+    the tree without carrying a lock file into `models/`.
+
+    Returns the staging directory and the open lock file, which the caller must hold
+    until the tree is promoted or abandoned.
+    """
+    import fcntl
+
+    train_dir.mkdir(parents=True, exist_ok=True)
+    for candidate in sorted(train_dir.glob(".models.*.tmp")):
+        if not candidate.is_dir():
+            continue
+        handle = (train_dir / f"{candidate.name}.lock").open("a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            print(f"  staging tree {candidate.name} is held by a live run - not adopting it")
+            continue
+        return candidate, handle
+    staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
+    staging.mkdir(parents=True)
+    handle = (train_dir / f"{staging.name}.lock").open("a+")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return staging, handle
+
+
+def _folds_already_fitted(
+    staging: Path,
+    context: SequenceResearchContext,
+    computation: dict[str, Any],
+) -> tuple[int, ...]:
+    """Declared folds the staging tree already holds in full, in declared order."""
+    checkpoints = tuple(int(item["value"]) for item in computation["checkpoint_schedule"])
+    fold_ids = tuple(int(split["fold"]) for split in context.splits)
+    config_name = context.config["config_name"]
+    architecture = context.config["params"]["architecture"]
+    if context.config.get("library") == "darts":
+        from case_studies.utils.darts_forecasting import complete_darts_checkpoint_folds
+
+        return complete_darts_checkpoint_folds(
+            staging,
+            config_name=config_name,
+            fold_ids=fold_ids,
+            checkpoints=checkpoints,
+            architecture=architecture,
+        )
+    from case_studies.utils.deep_model_state import complete_deep_checkpoint_folds
+
+    return complete_deep_checkpoint_folds(
+        staging,
+        config_name=config_name,
+        fold_ids=fold_ids,
+        checkpoints=checkpoints,
+        architecture=architecture,
+    )
+
+
+def _folds_with_prediction_shards(
+    save_dir: Path | None,
+    configs: list[dict[str, Any]],
+    folds: set[int],
+) -> set[int]:
+    """Narrow `folds` to those whose incremental prediction shards are still on disk."""
+    if save_dir is None:
+        return set()
+    incr_dir = Path(save_dir) / "_incremental"
+    if not incr_dir.exists():
+        return set()
+    present: set[int] = set()
+    for cfg in configs:
+        for stem, _checkpoint, _path in incremental_prediction_shards(incr_dir, cfg["config_name"]):
+            _, _, fold = stem.rpartition("_fold")
+            if fold.isdigit():
+                present.add(int(fold))
+    dropped = folds - present
+    if dropped:
+        print(f"  no prediction shards for fold(s) {sorted(dropped)} - refitting them")
+    return folds & present
+
+
+def _clear_partial_folds(staging: Path, config_name: str, folds: Sequence[int]) -> int:
+    """Drop the checkpoints of folds about to be refit, and report how many files went.
+
+    Checkpoints are immutable: `write_deep_checkpoint` raises `FileExistsError` rather
+    than overwrite one whose content differs, and a refit's weights differ from the
+    interrupted attempt's because the resumed run reaches that fold from a different
+    RNG state. So the partial fold a run died inside has to go before it can be refit.
+
+    Only folds this run is about to rewrite, and only inside the staging tree it has
+    claimed. A fold that is already complete is never passed here.
+    """
+    import shutil
+
+    removed = 0
+    for fold in folds:
+        fold_dir = Path(staging) / config_name / f"fold_{int(fold):02d}"
+        if not fold_dir.is_dir():
+            continue
+        removed += sum(1 for path in fold_dir.rglob("*") if path.is_file())
+        shutil.rmtree(fold_dir)
+    return removed
+
+
 def run_resolved_request(
     study: Study,
     spec: dict[str, Any],
@@ -1536,44 +1651,59 @@ def run_resolved_request(
             model_dir, context, computation, study.case_study
         )
     else:
-        # Per attempt, not deterministic, and that is deliberate. Nothing prevents two runs
-        # of the same training hash from being in flight at once - `nb-run.sh` holds slots,
-        # not per-hash locks - and a shared staging path would interleave two writers'
-        # checkpoints into one tree, which promotes as a corrupt `models/` that validates.
-        # A deterministic name is what a resume wants, but it only becomes safe alongside a
-        # liveness claim that can tell a dead attempt's tree from a live one's, and that
-        # belongs with the code that actually resumes. Until then an attempt's tree is found
-        # by globbing `.models.*.tmp` under the training hash.
-        staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
+        # A dead attempt's tree if there is one, otherwise a fresh `.models.<uuid>.tmp`.
+        # The name stays per-attempt: two runs of one training hash can be in flight at
+        # once because `nb-run.sh` holds slots rather than per-hash locks, and a shared
+        # path would interleave two writers into one tree that promotes as a corrupt
+        # `models/` and then validates. `_claim_staging_tree` adopts only a tree whose
+        # `flock` is free, which is exactly the trees whose writer is gone.
+        staging, staging_lock = _claim_staging_tree(train_dir)
+        already_fitted = _folds_already_fitted(staging, context, computation)
+        declared_folds = [int(split["fold"]) for split in context.splits]
+        missing_folds = [fold for fold in declared_folds if fold not in already_fitted]
+        if already_fitted:
+            dropped = _clear_partial_folds(staging, context.config["config_name"], missing_folds)
+            print(
+                f"Resuming {staging.name}: {len(already_fitted)} of {len(declared_folds)} "
+                f"folds already fitted, refitting {missing_folds}"
+                + (f" ({dropped} partial checkpoint file(s) dropped)" if dropped else "")
+            )
         _configure_sequence_runtime(computation["numerics"])
         fit_wall_t0 = time.perf_counter()
         fit_cpu_t0 = cpu_seconds()
         try:
-            result = run_dl_cv(
-                context.dataset_pd,
-                list(context.splits),
-                configs=[context.config],
-                n_features=len(context.feature_names),
-                feature_names=list(context.feature_names),
-                label_col=context.label_col,
-                date_col=context.date_col,
-                entity_col=context.entity_col,
-                device=computation["numerics"]["device"],
-                save_dir=train_dir / "diagnostics",
-                max_train_sequences=context.max_train_sequences,
-                max_predict_sequences=context.max_predict_sequences,
-                train_sequence_stride=context.train_sequence_stride,
-                register=False,
-                case_study=study.case_study,
-                temporal_by_fold=context.temporal_by_fold,
-                temporal_keys=list(context.temporal_keys),
-                temporal_feature_names=list(context.temporal_feature_names),
-                checkpoint_root=staging,
-                strict=True,
-                seed=int(spec["seed"]),
-                num_threads=int(computation["numerics"]["num_threads"]),
-            )
+            if missing_folds:
+                result = run_dl_cv(
+                    context.dataset_pd,
+                    list(context.splits),
+                    configs=[context.config],
+                    n_features=len(context.feature_names),
+                    feature_names=list(context.feature_names),
+                    label_col=context.label_col,
+                    date_col=context.date_col,
+                    entity_col=context.entity_col,
+                    device=computation["numerics"]["device"],
+                    save_dir=train_dir / "diagnostics",
+                    max_train_sequences=context.max_train_sequences,
+                    max_predict_sequences=context.max_predict_sequences,
+                    train_sequence_stride=context.train_sequence_stride,
+                    register=False,
+                    case_study=study.case_study,
+                    already_fitted_folds=already_fitted,
+                    temporal_by_fold=context.temporal_by_fold,
+                    temporal_keys=list(context.temporal_keys),
+                    temporal_feature_names=list(context.temporal_feature_names),
+                    checkpoint_root=staging,
+                    strict=True,
+                    seed=int(spec["seed"]),
+                    num_threads=int(computation["numerics"]["num_threads"]),
+                )
             os.replace(staging, model_dir)
+            # Only once the tree is gone from `train_dir` under its staging name. Removing
+            # the lock file while the tree is still adoptable would break the claim: a
+            # later run would create a fresh file at the same path, flock that instead,
+            # and adopt a tree another run is writing.
+            (train_dir / f"{staging.name}.lock").unlink(missing_ok=True)
         except Exception:
             # The tree stays. It holds every checkpoint the run had written - measured on the
             # 2026-09-13 crash, 139 checkpoints over 7 of 16 folds, 39 MB, last write 90
@@ -1594,8 +1724,21 @@ def run_resolved_request(
             # The cost is disk, and it is small: 11 trees orphaned this way across the whole
             # artifacts root total 63 MB.
             raise
+        finally:
+            # Closing drops the `flock`, so a tree this run failed to promote becomes
+            # adoptable by the next one. The lock file itself stays where it is.
+            staging_lock.close()
         fit_wall_s = time.perf_counter() - fit_wall_t0
         fit_cpu_s = cpu_seconds() - fit_cpu_t0
+        if already_fitted or not missing_folds:
+            # This run fitted `missing_folds` and read the rest off disk, so `result` covers
+            # only the folds it fitted. Reconstructing from the promoted tree is the warm
+            # path, which returns the full declared population and validates it on the way -
+            # the same predictions an uninterrupted run would have published, and a resumed
+            # run must not publish anything narrower.
+            result = _reconstruct_sequence_predictions(
+                model_dir, context, computation, study.case_study
+            )
 
     prediction_results = _publish_sequence_predictions(
         study, computation, context, training, result
@@ -2176,6 +2319,7 @@ def run_dl_cv(
     case_study: str | None = None,
     notebook: str | None = None,
     selected_folds: list[int] | None = None,
+    already_fitted_folds: Sequence[int] | None = None,
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
@@ -2396,6 +2540,33 @@ def run_dl_cv(
                     f"checkpoint(s) for {cfg['config_name']}"
                 )
 
+    # Before either backend is dispatched. `run_darts_cv` used to be handed every split
+    # because this ran below it, so a Darts resume refit the folds it had adopted and hit
+    # the immutable-checkpoint conflict on the first one.
+    adopted = {int(fold) for fold in (already_fitted_folds or [])}
+    if adopted and not uses_darts_backend(configs):
+        # A native resume aggregates from the prediction shards under
+        # `save_dir/_incremental`, which the adopted folds wrote during the run that
+        # died and which nothing since has cleared - `clear_fold_predictions` drops one
+        # `(config, fold)` glob at that fold's start, so only a refit fold loses its own.
+        # A fold whose shards have gone cannot contribute a checkpoint metric, and
+        # adopting it anyway leaves every checkpoint short of the expected population,
+        # skipped, and the aggregation with nothing to assemble. Refit it instead, which
+        # costs one fold rather than the failure of the whole resume after it has paid
+        # for the others.
+        adopted = _folds_with_prediction_shards(save_dir, configs, adopted)
+    if selected_folds:
+        selected = {int(fold) for fold in selected_folds}
+        splits = [split for split in splits if int(split["fold"]) in selected]
+        print(f"Selected folds: {sorted(selected)}")
+        if not splits:
+            raise ValueError(f"No splits matched selected_folds={selected_folds}")
+    if adopted:
+        splits = [split for split in splits if int(split["fold"]) not in adopted]
+        print(f"Already fitted, not refitting: {sorted(adopted)}")
+        if not splits:
+            raise ValueError("every declared fold is already fitted; nothing to run")
+
     if uses_darts_backend(configs):
         fresh_result = run_darts_cv(
             dataset_pd,
@@ -2420,6 +2591,7 @@ def run_dl_cv(
             temporal_feature_names=temporal_feature_names,
             checkpoint_root=checkpoint_root,
             strict=strict,
+            already_fitted_folds=sorted(adopted),
         )
         if cached_result is not None:
             return combine_cv_results(
@@ -2432,12 +2604,6 @@ def run_dl_cv(
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested for deep learning, but CUDA is unavailable")
     torch_device = torch.device(device)
-    if selected_folds:
-        selected = {int(fold) for fold in selected_folds}
-        splits = [split for split in splits if int(split["fold"]) in selected]
-        print(f"Selected folds: {sorted(selected)}")
-        if not splits:
-            raise ValueError(f"No splits matched selected_folds={selected_folds}")
 
     seed_everything(seed)
 
@@ -2468,7 +2634,11 @@ def run_dl_cv(
         }
 
     n_valid_folds = 0
-    expected_fold_ids: list[int] = []
+    # The adopted folds belong here. Their shards are read back above and their
+    # checkpoints are in the staging tree, so both the per-checkpoint coverage
+    # comparison and the tree validation have to expect them - the first would skip
+    # every checkpoint without them, the second would call them undeclared artifacts.
+    expected_fold_ids: list[int] = sorted(adopted)
 
     _has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
@@ -2783,7 +2953,7 @@ def run_dl_cv(
         for epoch in sorted(cfg_shards):
             ep_df = _read_prediction_shards(cfg_shards[epoch])
             fold_ids = sorted(ep_df["fold_id"].unique().to_list())
-            if fold_ids != expected_fold_ids:
+            if fold_ids != sorted(expected_fold_ids):
                 del ep_df
                 continue
             metrics = _decision_time_checkpoint_metrics(
@@ -2850,7 +3020,7 @@ def run_dl_cv(
             validate_deep_checkpoint_population(
                 checkpoint_root,
                 config_name=config_name,
-                fold_ids=tuple(expected_fold_ids),
+                fold_ids=tuple(sorted(set(expected_fold_ids) | adopted)),
                 checkpoints=declared_epoch_checkpoints(
                     int(cfg.get("n_epochs", 100)),
                     int(cfg.get("checkpoint_interval", 5)),

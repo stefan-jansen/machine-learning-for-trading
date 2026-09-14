@@ -129,6 +129,43 @@ def load_darts_checkpoint(path: Path, *, device: str = "cpu"):
     return model, record["metadata"]
 
 
+def _darts_checkpoint_defect(path: Path, *, config_name: str, architecture: str) -> str | None:
+    """Why this one Darts checkpoint is not usable fitted state, or None when it is.
+
+    The strict population check and the per-fold report below both decide a single
+    checkpoint here, so a resume can never adopt a fold the promote would reject.
+    """
+    try:
+        _model_path, _weights_path, sidecar_path = _darts_checkpoint_files(path)
+        if not all(item.is_file() for item in _darts_checkpoint_files(path)):
+            raise FileNotFoundError(path)
+        record = json.loads(sidecar_path.read_text())
+        if (
+            record.get("schema_version") != 1
+            or record.get("model_sha256") != _file_sha256(path)
+            or record.get("weights_sha256") != _file_sha256(Path(f"{path}.ckpt"))
+        ):
+            raise ValueError(path)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as error:
+        return f"Darts fitted checkpoint population is incomplete: {path} ({error})"
+    required_metadata = {
+        "config_name": config_name,
+        "fold": int(path.parent.name.removeprefix("fold_")),
+        "checkpoint_kind": "epoch",
+        "checkpoint_value": int(path.stem.removeprefix("epoch_")),
+    }
+    mismatches = {
+        key: (record.get("metadata", {}).get(key), value)
+        for key, value in required_metadata.items()
+        if record.get("metadata", {}).get(key) != value
+    }
+    if record.get("architecture") != architecture:
+        mismatches["architecture"] = (record.get("architecture"), architecture)
+    if mismatches:
+        return f"Darts fitted checkpoint metadata mismatch at {path}: {mismatches}"
+    return None
+
+
 def validate_darts_checkpoint_population(
     root: Path,
     *,
@@ -148,36 +185,9 @@ def validate_darts_checkpoint_population(
     expected_files: set[Path] = set()
     for path in expected:
         expected_files.update(_darts_checkpoint_files(path))
-        try:
-            _model_path, _weights_path, sidecar_path = _darts_checkpoint_files(path)
-            if not all(item.is_file() for item in _darts_checkpoint_files(path)):
-                raise FileNotFoundError(path)
-            record = json.loads(sidecar_path.read_text())
-            if (
-                record.get("schema_version") != 1
-                or record.get("model_sha256") != _file_sha256(path)
-                or record.get("weights_sha256") != _file_sha256(Path(f"{path}.ckpt"))
-            ):
-                raise ValueError(path)
-        except (FileNotFoundError, json.JSONDecodeError, ValueError) as error:
-            raise ValueError(f"Darts fitted checkpoint population is incomplete: {path}") from error
-        fold = int(path.parent.name.removeprefix("fold_"))
-        checkpoint = int(path.stem.removeprefix("epoch_"))
-        required_metadata = {
-            "config_name": config_name,
-            "fold": fold,
-            "checkpoint_kind": "epoch",
-            "checkpoint_value": checkpoint,
-        }
-        mismatches = {
-            key: (record.get("metadata", {}).get(key), value)
-            for key, value in required_metadata.items()
-            if record.get("metadata", {}).get(key) != value
-        }
-        if record.get("architecture") != architecture:
-            mismatches["architecture"] = (record.get("architecture"), architecture)
-        if mismatches:
-            raise ValueError(f"Darts fitted checkpoint metadata mismatch at {path}: {mismatches}")
+        defect = _darts_checkpoint_defect(path, config_name=config_name, architecture=architecture)
+        if defect is not None:
+            raise ValueError(defect)
 
     config_root = Path(root) / config_name
     actual_files = {path for path in config_root.glob("fold_*/epoch_*.pt*") if path.is_file()}
@@ -188,6 +198,33 @@ def validate_darts_checkpoint_population(
             f"{[str(path) for path in sorted(extras)]}"
         )
     return expected
+
+
+def complete_darts_checkpoint_folds(
+    root: Path,
+    *,
+    config_name: str,
+    fold_ids: list[int] | tuple[int, ...],
+    checkpoints: list[int] | tuple[int, ...],
+    architecture: str,
+) -> tuple[int, ...]:
+    """Declared folds under `root` that already hold every declared Darts checkpoint.
+
+    Reports rather than raises, so a partial tree is a fold list instead of an error.
+    A fold counts only when all of its declared checkpoints pass the same check
+    `validate_darts_checkpoint_population` applies, digests included.
+    """
+    wanted = sorted({int(value) for value in checkpoints})
+    complete = []
+    for fold in sorted({int(value) for value in fold_ids}):
+        paths = [darts_checkpoint_path(root, config_name, fold, value) for value in wanted]
+        if paths and all(
+            _darts_checkpoint_defect(path, config_name=config_name, architecture=architecture)
+            is None
+            for path in paths
+        ):
+            complete.append(fold)
+    return tuple(complete)
 
 
 def uses_darts_backend(configs: list[dict[str, Any]]) -> bool:
@@ -1095,6 +1132,7 @@ def run_darts_cv(
     temporal_feature_names: list[str] | None = None,
     checkpoint_root: Path | None = None,
     strict: bool = False,
+    already_fitted_folds: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Run Darts-backed global forecasting models and emit standard DL artifacts."""
     if case_study is None:
@@ -1504,10 +1542,17 @@ def run_darts_cv(
         if checkpoint_root is not None:
             from case_studies.utils.deep_model_state import declared_epoch_checkpoints
 
+            # The tree holds the folds this run adopted as well as the ones it fitted, and
+            # `expected_fold_ids` is only the second set - it drives the per-checkpoint
+            # coverage comparison above, where a fold with no predictions from this run
+            # has no business being expected. Unioning the two there would skip every
+            # checkpoint and leave `assemble_cv_result` with no metrics at all.
             validate_darts_checkpoint_population(
                 checkpoint_root,
                 config_name=config_name,
-                fold_ids=expected_fold_ids,
+                fold_ids=sorted(
+                    set(expected_fold_ids) | {int(f) for f in (already_fitted_folds or [])}
+                ),
                 checkpoints=declared_epoch_checkpoints(n_epochs, checkpoint_interval),
                 architecture=str(params["architecture"]),
             )
