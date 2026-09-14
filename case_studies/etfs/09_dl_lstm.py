@@ -63,7 +63,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = "e43679abc875"
+SUPERSEDES_POPULATION: str = "live"
 DEVICE: str = ""
 
 # %%
@@ -492,10 +492,7 @@ fig_cmp = go.Figure(
     )
 )
 fig_cmp.update_layout(
-    title=(
-        f"Peak-checkpoint daily IC by family, recomputed on the {COMMON_ROWS:,} rows "
-        f"({COMMON_DAYS:,} dates) all three share"
-    ),
+    title=f"Daily IC on {COMMON_ROWS:,} rows ({COMMON_DAYS:,} dates) all three families share",
     height=500,
     width=1000,
     margin=dict(t=70),
