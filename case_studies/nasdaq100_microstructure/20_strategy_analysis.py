@@ -264,21 +264,28 @@ if _n_cohorts == 0 or "cohort_metrics" in _stale:
 else:
     print(f"already populated: cohort_metrics {_n_cohorts} rows")
 
-if _n_pairs == 0 or "backtest_paired_metrics" in _stale:
-    # `NO_CARRIER` is the raw-Sharpe ranking inside the producer rather than a resolved
-    # lineage: this case study pins a rung the canonical resolver does not know about.
-    _pairs = populate_paired_metrics(
-        CASE_STUDY,
-        explorer,
-        rung=_RUNG,
-        replace_all=True,
-        carrier=NO_CARRIER,
-        prediction_hashes=ENTIRE_REGISTRY,
-    )
-    _n_pairs = sum(1 for row in _pairs if "skip" not in row)
-    print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
-else:
-    print(f"already populated: backtest_paired_metrics {_n_pairs} pairs")
+# Rebuilt every run, where cohorts above are rebuilt only when they look wrong. The universe
+# recovery cannot answer this table's question. It reads what the rows point at, and a pair
+# written under an earlier pin points at a backtest that is still inside the current one: when
+# `family == "ensemble"` left this case study's pin on 2026-09-14 the rank-1 rung moved from the
+# ensemble at +0.566 to `deep_learning/nlinear` at +2.300, and the ensemble row it had already
+# written stayed canonical, stayed cost-feasible and stayed `fwd_ret_15m`. Nothing about it
+# reads as stale, because being outside the pin and no longer being what the pin selects are
+# different things, and only the first is recoverable from the row. A row count answers neither.
+# So it is recomputed rather than validated. `replace_all=True` makes the call a complete
+# snapshot, and it costs about a second against this notebook's 25 to 40.
+# `NO_CARRIER` is the raw-Sharpe ranking inside the producer rather than a resolved
+# lineage: this case study pins a rung the canonical resolver does not know about.
+_pairs = populate_paired_metrics(
+    CASE_STUDY,
+    explorer,
+    rung=_RUNG,
+    replace_all=True,
+    carrier=NO_CARRIER,
+    prediction_hashes=ENTIRE_REGISTRY,
+)
+_n_pairs = sum(1 for row in _pairs if "skip" not in row)
+print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
 
 # A rebuild that could not produce a canonical table leaves the previous one in place, which
 # is the right call for the data - a stale table is recoverable and deleted rows are not - but
@@ -1811,10 +1818,11 @@ if val_ho_pair.is_empty():
         "`populate_paired_metrics` falls back to the rung leader's prediction "
         "hash as `prefer_prediction_hash`, and `_holdout_lineage_for` pinned on "
         "that hash returns None. Pass the carrier's prediction hash instead and "
-        f"the same call resolves {HO_HASH}. The rung leader here is "
-        "ensemble/gbm_mean_leaves31 on fwd_ret_15m; the carrier that 18 and 19 "
-        "refit is gbm/default_multiclass on fwd_dir_15m. Continuing with NaN "
-        "val to holdout decay."
+        f"the same call resolves {HO_HASH}. What separates them is the label: "
+        "the pin is on fwd_ret_15m, where the leader is deep_learning/nlinear at "
+        "+2.300, and the carrier that 18 and 19 refit is gbm/default_multiclass "
+        "on the fwd_dir_15m variant at +2.416. No fwd_ret_15m candidate has a "
+        "holdout, so the walk exhausts. Continuing with NaN val to holdout decay."
     )
     vh = {
         "sharpe_diff": float("nan"),

@@ -62,8 +62,9 @@ def test_chapter_20_imports_the_pins_rather_than_restating_them() -> None:
 
 # Every combination the pins can discriminate on. `exit_at_max_days` carries a null and a value
 # because sp500_options pins on its nullity; `universe_filter` carries both pinned values and the
-# "full" that rung-1 and rung-2 share; `family` separates nasdaq's ensemble carrier; `label`
-# separates the one ensemble per label that `14_backtest` registers.
+# "full" that rung-1 and rung-2 share; `label` separates the four labels nasdaq's cost-feasible
+# sweep spans. `family` is carried because no pin should be able to narrow on a column its
+# scalar half cannot express without the superset check below catching it.
 _TRUTH_TABLE = pl.DataFrame(
     [
         {"universe_filter": uf, "family": fam, "exit_at_max_days": exit_days, "label": label}
@@ -111,8 +112,9 @@ def test_the_predicate_agrees_with_its_scalar_mirror(case_study: str) -> None:
     by_predicate = _TRUTH_TABLE.select(pin["predicate"].alias("hit"))["hit"]
     by_mirror = _TRUTH_TABLE.select(mirror.alias("hit"))["hit"]
 
-    # The predicate may narrow further than the mirror can express - nasdaq's `family` has no
-    # scalar key - so the mirror must be a superset and never the other way round.
+    # The predicate may narrow further than the mirror can express, so the mirror must be a
+    # superset and never the other way round. No pin uses that latitude today: nasdaq's
+    # `family` clause was the one that did, and it is gone.
     escaped = _TRUTH_TABLE.filter(by_predicate.fill_null(False) & ~by_mirror.fill_null(False))
     assert escaped.is_empty(), (
         f"{case_study}: the predicate selects rows its scalar half excludes\n{escaped}"
