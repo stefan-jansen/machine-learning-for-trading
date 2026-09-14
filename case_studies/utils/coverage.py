@@ -913,15 +913,21 @@ class CrossSectionReport:
 _CROSS_SECTION_CACHE: dict[tuple[str, str, str, str], pl.DataFrame] = {}
 
 
-# The panel-narrowed cross-section, keyed in `check_prediction_cross_section` below. Declared
-# here so one call drops both memos.
-_REACHABLE_CACHE: dict[tuple, tuple[pl.DataFrame, pl.DataFrame]] = {}
+# The input panel's distinct `(entity, session)` keys, keyed on `id(input_panel)` in
+# `check_prediction_cross_section` below and holding a reference to that frame so the id
+# cannot be recycled while the entry lives. Declared here so one call drops both memos.
+#
+# Deliberately not keyed on the case study, label, split or folds: what it holds is a property
+# of the panel alone. An entry that depended on the declared cross-section would have to name
+# everything that narrows it, and that list can only be as complete as somebody's memory - see
+# the comment at the use site.
+_PANEL_KEYS_CACHE: dict[int, tuple[pl.DataFrame, pl.DataFrame]] = {}
 
 
 def _clear_cross_section_cache() -> None:
     """Drop both memos. For a test that rewrites a label artifact inside one process."""
     _CROSS_SECTION_CACHE.clear()
-    _REACHABLE_CACHE.clear()
+    _PANEL_KEYS_CACHE.clear()
 
 
 def declared_cross_section(
@@ -1085,39 +1091,31 @@ def check_prediction_cross_section(
 
     achievable = delivered_achievable = None
     if input_panel is not None:
-        # `reachable` is `want` narrowed to what the panel offered, so it depends on the
-        # declared cross-section and the panel and on nothing about the member being
-        # checked. A caller walking every member in force recomputes it once per member:
-        # 1.26 s to unique a 16.9M-row panel plus a 1.07 s join, measured on
-        # nasdaq100_microstructure, against 0.14 s to read the member's own predictions.
+        # `offered` is the panel's distinct `(entity, session)` keys. A caller walking every
+        # member in force rebuilds it once per member: 1.26 s to unique a 16.9M-row panel,
+        # measured on nasdaq100_microstructure, against 0.14 s to read the member's own
+        # predictions. So it is memoized, and `reachable` - `want` narrowed to it - is not.
         #
-        # The key holds `id(input_panel)` and the cache entry holds a reference to that
-        # frame, so the id cannot be recycled onto a different panel while the entry is
-        # live - an id is unique among live objects and this keeps the object live.
+        # **The memo holds what cannot depend on a narrowing.** `offered` is a function of
+        # `input_panel` and nothing else. The previous version memoized `reachable`, which is
+        # derived from `want`, against a key that enumerated `want`'s inputs by hand; a
+        # narrowing parameter absent from that list read an entry built on the wider axis and
+        # reported the member against a denominator the call had just removed - right code,
+        # wrong number, nothing raised. `eligible_entities` hit exactly that, and the list
+        # could only ever be as complete as somebody's memory of what `want` depends on. Keyed
+        # on the panel alone, no parameter anyone adds later can make this entry stale.
         #
-        # The rest of the key has to be everything that determines `want`, and that is more
-        # than the case study and the label: the same pair names different artifacts under
-        # different registries, so the label artifact path is in the key rather than
-        # `case_study` alone. `decision_axis` narrows `want` too and is not hashable, so a
-        # call that passes one takes no entry and leaves none - bypassing the declaration
-        # memo alone would not have helped, because this memo sits after the narrowing and
-        # would have answered from an entry built on the full axis.
-        cache_key = (
-            str(_label_artifact(case_study, label, case_dir)),
-            case_study,
-            label,
-            split,
-            tuple(sorted(folds)) if folds is not None else None,
-            id(input_panel),
-        )
-        # `eligible_entities` narrows `want` the way `decision_axis` does and is not in the
-        # key, so a narrowed call must take no entry and leave none - otherwise it reads an
-        # entry built on the full entity axis and reports the member against a denominator
-        # this call just removed. Same bypass, same reason.
-        memoizable = decision_axis is None and eligible_entities is None
-        cached = _REACHABLE_CACHE.get(cache_key) if memoizable else None
+        # The join is paid per member instead: 1.07 s, measured the same way. That is the
+        # price of the property, and it is charged against the members the caller can act on
+        # rather than every published member - see `prediction_members_in_force`'s
+        # `candidates`, which is what makes it affordable.
+        #
+        # The key holds `id(input_panel)` and the entry holds a reference to that frame, so
+        # the id cannot be recycled onto a different panel while the entry is live - an id is
+        # unique among live objects and this keeps the object live.
+        cached = _PANEL_KEYS_CACHE.get(id(input_panel))
         if cached is not None and cached[0] is input_panel:
-            reachable = cached[1]
+            offered = cached[1]
         else:
             # `feature_panel_keys` hands back the canonical two columns already; a caller
             # passing a raw panel gets them resolved. Without this branch the canonical
@@ -1135,9 +1133,8 @@ def check_prediction_cross_section(
             offered = offered.with_columns(
                 _normalize_time(offered.get_column("session")).alias("session")
             )
-            reachable = want.join(offered, on=["entity", "session"], how="semi")
-            if memoizable:
-                _REACHABLE_CACHE[cache_key] = (input_panel, reachable)
+            _PANEL_KEYS_CACHE[id(input_panel)] = (input_panel, offered)
+        reachable = want.join(offered, on=["entity", "session"], how="semi")
         achievable = reachable.height
         delivered_achievable = reachable.join(got, on=["entity", "session"], how="semi").height
 

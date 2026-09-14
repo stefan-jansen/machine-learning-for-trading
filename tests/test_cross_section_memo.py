@@ -167,15 +167,15 @@ def test_a_different_panel_is_not_served_the_first_panels_answer(case_dir):
 def test_an_entry_built_from_another_panel_is_not_used(case_dir):
     """The guard, tested apart from the key that usually makes it unnecessary.
 
-    Two things stop one panel's narrowing being handed to another: `id(input_panel)` in the
-    key, and the `is` check on the stored frame. Either alone is enough, so removing either
+    Two things stop one panel's keys being handed to another: `id(input_panel)` is the key,
+    and there is an `is` check on the stored frame. Either alone is enough, so removing either
     one leaves the two tests above green and the pair is not coverage of either. The `is`
     check is the one that has to hold on its own, because an id is unique only among LIVE
     objects: a panel that is collected frees its id for the next allocation, and the key
     would then match a panel the entry was never built from.
 
     That collision cannot be provoked on demand, so the entry is planted instead - under the
-    key this call computes, holding a different panel and a deliberately wrong answer.
+    key this call computes, holding a different panel and a deliberately wrong key set.
     Serving it would report one symbol reachable where three are.
     """
     wide = _panel()
@@ -185,15 +185,15 @@ def test_an_entry_built_from_another_panel_is_not_used(case_dir):
     )
     assert first.achievable == len(SESSIONS) * len(UNIVERSE)
 
-    (key,) = list(cov._REACHABLE_CACHE)
-    wrong = cov._REACHABLE_CACHE[key][1].filter(pl.col("entity") == "AAA")
-    cov._REACHABLE_CACHE[key] = (narrow, wrong)
+    (key,) = list(cov._PANEL_KEYS_CACHE)
+    wrong = cov._PANEL_KEYS_CACHE[key][1].filter(pl.col("entity") == "AAA")
+    cov._PANEL_KEYS_CACHE[key] = (narrow, wrong)
 
     again = check_prediction_cross_section(
         _predictions(), "cs", LABEL, case_dir=case_dir, input_panel=wide
     )
     assert again.achievable == first.achievable, (
-        "the narrowing was taken from an entry built against a different panel"
+        "the panel keys were taken from an entry built against a different panel"
     )
 
 
@@ -210,7 +210,7 @@ def test_the_memo_is_not_load_bearing_for_correctness(case_dir, monkeypatch):
             return None
 
     monkeypatch.setattr(cov, "_CROSS_SECTION_CACHE", _NeverStores())
-    monkeypatch.setattr(cov, "_REACHABLE_CACHE", _NeverStores())
+    monkeypatch.setattr(cov, "_PANEL_KEYS_CACHE", _NeverStores())
     uncached = check_prediction_cross_section(
         _predictions(symbols=("AAA", "BBB")), "cs", LABEL, case_dir=case_dir, input_panel=panel
     )

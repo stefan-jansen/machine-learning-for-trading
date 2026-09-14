@@ -159,3 +159,95 @@ class TestAMemberThatScoredEveryFoldOnFewerDates:
         _publish(study, "etfs-nlinear-validation-v1", ["aaaa1111"], supersedes=declared.hash)
         members, _ = prediction_members_in_force(study)
         assert members == frozenset({"aaaa1111"})
+
+
+class TestScopingToWhatTheCallerCanAct:
+    """``candidates`` narrows the scope, not the checks.
+
+    Without it this reads every published member of every label. On
+    ``nasdaq100_microstructure/14_backtest`` that was 784 members, 94.3 GB of
+    ``predictions.parquet``, 8,608 s before the first backtest - and the run then swept 162,
+    because the other 537 belong to labels it can never sweep. The caller already knows which
+    is which: it has built and narrowed ``pred_index`` before it asks.
+
+    The refusal is registered here too, because what has to be shown is that it narrows with
+    the scope rather than that it is skipped.
+    """
+
+    _register = TestAPoolWithAnUnfinishedMember._register
+
+    def test_the_pool_is_the_intersection(self, study: Study) -> None:
+        _publish(study, "etfs-linear-validation-v1", ["aaaa1111", "bbbb2222"])
+        _publish(study, "etfs-gbm-validation-v1", ["cccc3333"])
+        members, _ = prediction_members_in_force(study, candidates=["aaaa1111", "cccc3333"])
+        assert members == frozenset({"aaaa1111", "cccc3333"})
+
+    def test_a_candidate_no_population_publishes_is_not_admitted(self, study: Study) -> None:
+        """Scoping cannot add. The caller's list narrows the pool and never widens it."""
+        _publish(study, "etfs-linear-validation-v1", ["aaaa1111"])
+        members, _ = prediction_members_in_force(study, candidates=["aaaa1111", "dddd4444"])
+        assert members == frozenset({"aaaa1111"})
+
+    def test_omitting_it_is_exactly_todays_answer(self, study: Study) -> None:
+        _publish(study, "etfs-linear-validation-v1", ["aaaa1111", "bbbb2222"])
+        _publish(study, "etfs-gbm-validation-v1", ["cccc3333"])
+        wide, wide_notes = prediction_members_in_force(study)
+        same, same_notes = prediction_members_in_force(
+            study, candidates=["aaaa1111", "bbbb2222", "cccc3333"]
+        )
+        assert wide == same
+        assert wide_notes == same_notes
+
+    def test_an_unfinished_member_inside_the_scope_still_refuses(self, study: Study) -> None:
+        """The check is asked of every member the caller could select, exactly as before."""
+        _publish(study, "etfs-linear-validation-v1", ["aaaa1111", "bbbb2222"])
+        self._register(study, "aaaa1111", expected=5, scored=5)
+        self._register(study, "bbbb2222", expected=5, scored=2)
+        with pytest.raises(RuntimeError, match="2 of 5 folds scored"):
+            prediction_members_in_force(study, candidates=["aaaa1111", "bbbb2222"])
+
+    def test_an_unfinished_member_outside_the_scope_does_not(self, study: Study) -> None:
+        """The one behaviour change, stated as a test rather than left to be discovered.
+
+        Today an unfinished member under any label refuses every run. That refusal protects a
+        selection, and a member that cannot be selected cannot corrupt one - so scoped, it is
+        the sweep that actually reads that label which refuses. What is lost is an incidental
+        early warning about the registry, not a guarantee about this run.
+        """
+        _publish(study, "etfs-linear-validation-v1", ["aaaa1111"])
+        _publish(study, "etfs-gbm-validation-v1", ["bbbb2222"])
+        self._register(study, "aaaa1111", expected=5, scored=5)
+        self._register(study, "bbbb2222", expected=5, scored=2)
+
+        with pytest.raises(RuntimeError, match="2 of 5 folds scored"):
+            prediction_members_in_force(study)
+
+        members, _ = prediction_members_in_force(study, candidates=["aaaa1111"])
+        assert members == frozenset({"aaaa1111"})
+
+    def test_a_member_outside_the_scope_is_not_recorded_as_inadmissible(self, study: Study) -> None:
+        """The interaction with `record_prediction_admissibility`, pinned rather than reasoned.
+
+        #1076 writes this measurement into `prediction_admissibility` so the carrier resolver
+        reads the answer instead of asking a weaker question, and its contract is that absence
+        is not a verdict: only measured members are written, and the resolver drops only what
+        is recorded as NOT admitted. Scoping makes more members absent, so this asserts the
+        half that keeps that safe - an out-of-scope member must be absent from the table, not
+        written with `admitted=0`. Writing it as inadmissible would let one label's sweep
+        disqualify another label's carrier.
+        """
+        _publish(study, "etfs-linear-validation-v1", ["aaaa1111"])
+        _publish(study, "etfs-gbm-validation-v1", ["bbbb2222"])
+        self._register(study, "aaaa1111", expected=5, scored=5)
+        self._register(study, "bbbb2222", expected=5, scored=5)
+
+        prediction_members_in_force(study, candidates=["aaaa1111"])
+
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            rows = dict(
+                db.execute("SELECT prediction_hash, admitted FROM prediction_admissibility")
+            )
+        assert rows.get("aaaa1111") == 1, "the member in scope should be recorded as admitted"
+        assert "bbbb2222" not in rows, (
+            "a member this sweep never measured must be absent, not recorded inadmissible"
+        )
