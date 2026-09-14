@@ -179,6 +179,37 @@ def restore_deep_model(
     return model, payload["preprocessing"], payload["metadata"]
 
 
+def _deep_checkpoint_defect(
+    path: Path, *, config_name: str, architecture: str | None
+) -> str | None:
+    """Why this one checkpoint is not usable fitted state, or None when it is.
+
+    Both the strict population check and the per-fold report below decide a single
+    checkpoint here, so a resume can never accept a file the promote would reject.
+    """
+    try:
+        payload = load_deep_checkpoint(path)
+    except (FileNotFoundError, ValueError) as error:
+        return f"fitted checkpoint population is incomplete: {path} ({error})"
+    metadata = payload["metadata"]
+    required_metadata = {
+        "config_name": config_name,
+        "fold": int(path.parent.name.removeprefix("fold_")),
+        "checkpoint_kind": "epoch",
+        "checkpoint_value": int(path.stem.removeprefix("epoch_")),
+    }
+    mismatches = {
+        key: (metadata.get(key), value)
+        for key, value in required_metadata.items()
+        if metadata.get(key) != value
+    }
+    if architecture is not None and payload["architecture"] != architecture:
+        mismatches["architecture"] = (payload["architecture"], architecture)
+    if mismatches:
+        return f"fitted checkpoint metadata mismatch at {path}: {mismatches}"
+    return None
+
+
 def validate_deep_checkpoint_population(
     root: Path,
     *,
@@ -196,28 +227,9 @@ def validate_deep_checkpoint_population(
     if not expected:
         raise ValueError("checkpoint validation requires folds and checkpoint values")
     for path in expected:
-        try:
-            payload = load_deep_checkpoint(path)
-        except (FileNotFoundError, ValueError) as error:
-            raise ValueError(f"fitted checkpoint population is incomplete: {path}") from error
-        metadata = payload["metadata"]
-        fold = int(path.parent.name.removeprefix("fold_"))
-        checkpoint = int(path.stem.removeprefix("epoch_"))
-        required_metadata = {
-            "config_name": config_name,
-            "fold": fold,
-            "checkpoint_kind": "epoch",
-            "checkpoint_value": checkpoint,
-        }
-        mismatches = {
-            key: (metadata.get(key), value)
-            for key, value in required_metadata.items()
-            if metadata.get(key) != value
-        }
-        if architecture is not None and payload["architecture"] != architecture:
-            mismatches["architecture"] = (payload["architecture"], architecture)
-        if mismatches:
-            raise ValueError(f"fitted checkpoint metadata mismatch at {path}: {mismatches}")
+        defect = _deep_checkpoint_defect(path, config_name=config_name, architecture=architecture)
+        if defect is not None:
+            raise ValueError(defect)
     actual = {
         path for path in (Path(root) / config_name).glob("fold_*/epoch_*.pt") if path.is_file()
     }
@@ -228,3 +240,31 @@ def validate_deep_checkpoint_population(
             f"{[str(path) for path in sorted(extras)]}"
         )
     return expected
+
+
+def complete_deep_checkpoint_folds(
+    root: Path,
+    *,
+    config_name: str,
+    fold_ids: list[int] | tuple[int, ...],
+    checkpoints: list[int] | tuple[int, ...],
+    architecture: str | None = None,
+) -> tuple[int, ...]:
+    """Declared folds under `root` that already hold every declared checkpoint.
+
+    This reports; it never raises on a partial tree. A fold counts only when all of
+    its declared checkpoints pass exactly the check `validate_deep_checkpoint_population`
+    applies, so the folds named here are folds the promote will accept. A fold half
+    written when a run died is absent, and refitting it overwrites what is there.
+    """
+    wanted = sorted({int(value) for value in checkpoints})
+    complete = []
+    for fold in sorted({int(value) for value in fold_ids}):
+        paths = [deep_checkpoint_path(root, config_name, fold, value) for value in wanted]
+        if paths and all(
+            _deep_checkpoint_defect(path, config_name=config_name, architecture=architecture)
+            is None
+            for path in paths
+        ):
+            complete.append(fold)
+    return tuple(complete)
