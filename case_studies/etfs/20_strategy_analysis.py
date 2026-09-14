@@ -113,6 +113,7 @@ from case_studies.utils.strategy_analysis import (
 )
 from case_studies.utils.uncertainty import STAGE_SEQUENCE, descends_from
 from utils.paths import get_case_study_dir, get_output_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 # MAX_SYMBOLS is gone. Nothing below read it, and a declared cap the run does not apply is
@@ -614,11 +615,15 @@ ax.axvline(0, color="#9E9E9E", linewidth=0.8, linestyle="--")
 ax.set_yticks(y)
 ax.set_yticklabels(fams)
 ax.set_xlabel("Validation Sharpe")
-ax.set_title("Signal-stage Sharpe by family: interquartile range and maximum")
+ax.set_title("Baseline Sharpe by family: interquartile range and maximum")
 ax.invert_yaxis()
 ax.legend(loc="lower right", frameon=False)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Validation Sharpe by model family, one row per family: a marker at the median with a bar "
+    "spanning the interquartile range, a cross at the family maximum, and a dashed line at zero.",
+)
 
 # %% [markdown]
 # **The median and the maximum answer different questions, which is why both are drawn.** A
@@ -655,7 +660,11 @@ for s, info in lineage.items():
 
 # %%
 fig = plot_sharpe_waterfall(lineage, ci_lo=ci_lo, ci_hi=ci_hi)
-fig.show()
+show_with_alt(
+    fig,
+    "One bar per stage of the locked lineage, from the baseline backtest through allocation, cost "
+    "and risk overlay, each carrying its block-bootstrap interval as an error bar.",
+)
 
 # %%
 # Stage-transition deltas via load_paired_metrics — never recompute paired
@@ -742,7 +751,11 @@ for prev_stage, stage_name in zip(present, present[1:]):
 conc_df = explorer.concentration_curve(TOP_PHASH)
 if not conc_df.is_empty():
     fig = plot_concentration_curve(conc_df)
-    fig.show()
+    show_with_alt(
+        fig,
+        "Validation Sharpe against the number of positions held, one marker per top-k with the "
+        "best allocator at that k annotated beside it and the best k highlighted.",
+    )
     best_per_k = conc_df.sort("sharpe", descending=True).group_by("top_k").first().sort("top_k")
     print("Allocation: best Sharpe by top_k:")
     print(best_per_k.select("top_k", "allocator", "sharpe", "max_drawdown"))
@@ -944,7 +957,12 @@ ax.set_xlabel("Value")
 ax.set_title("The selected configuration Headline Metrics with 95% CIs")
 ax.legend(loc="lower right", fontsize=8, frameon=False)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "One row per headline metric, each a point estimate with a bar spanning its 95% interval, "
+    "against a dashed line at zero and dotted reference lines for the equal-weight and risk- "
+    "overlay comparisons where those are available.",
+)
 
 # %%
 # Equity-curve overlay vs validation EW benchmark
@@ -983,7 +1001,11 @@ ax.set_ylabel("Cumulative return")
 ax.set_title("Validation-window cumulative return: rank-1 strategy vs EW universe")
 ax.legend(loc="best", frameon=False)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Cumulative return over the validation window, one line for the selected strategy and one for "
+    "the equal-weight universe, against a dashed line at zero.",
+)
 
 # %% [markdown]
 # **The lower bound of the Sharpe interval is what the first gate reads**, and it answers a
@@ -1033,7 +1055,11 @@ print(dd)
 
 # %%
 fig = plot_equity_drawdown(strat_returns_path)
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels sharing a date axis: cumulative return of the strategy above, and its peak-to- "
+    "trough drawdown below.",
+)
 
 # %%
 # Rolling Sharpe + rolling beta (window 126 ~ 6 months)
@@ -1197,10 +1223,15 @@ ax.axvspan(0.2, 1.0, color="#43A047", alpha=0.10, label="most-liquid ETF (0.2–
 ax.axvspan(2.0, 5.0, color="#FB8C00", alpha=0.10, label="typical ETF (2 to 5 bps)")
 ax.set_xlabel("Per-leg cost (bps)")
 ax.set_ylabel("Sharpe (validation)")
-ax.set_title("Cost sensitivity - etfs (validation, signal+allocation+cost stage)")
+ax.set_title("Cost sensitivity - etfs (validation, baseline+allocation+cost stages)")
 ax.legend(loc="best", fontsize=8, frameon=False)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Sharpe against per-leg cost in basis points: the median across configurations as a line, the "
+    "best configuration dashed, the best-to-worst envelope shaded, a dashed line at zero, and "
+    "shaded bands for the most-liquid and typical ETF spread ranges.",
+)
 
 # %%
 # Breakeven cost: where the best-config Sharpe lower bound crosses zero.
@@ -1527,7 +1558,11 @@ _rolling = compute_rolling_exposures(
 fig_roll = plot_rolling_exposures(
     _rolling, title="ETFs Strategy: Rolling Factor Exposures (63-day)"
 )
-fig_roll.show()
+show_with_alt(
+    fig_roll,
+    "One panel per common factor plus annualized alpha, each tracing its 63-day rolling estimate "
+    "over time against a dashed line at zero.",
+)
 
 # %% [markdown]
 # **Placebo benchmark (random ETF portfolios):**
@@ -1603,7 +1638,11 @@ if _boot.get("n_boot", 0) > 0:
 
 # %%
 fig_attr = plot_attribution_waterfall(_reg, title="ETFs Strategy: Factor Attribution")
-fig_attr.show()
+show_with_alt(
+    fig_attr,
+    "One bar per common factor plus a residual bar, each sized by that term's contribution to "
+    "Sharpe, with a dashed line at the strategy's total Sharpe.",
+)
 
 # %% [markdown]
 # Layer-1 placebo-regression alpha and Layer-2 FF5+MOM attribution
