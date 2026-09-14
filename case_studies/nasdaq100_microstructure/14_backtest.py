@@ -75,6 +75,7 @@ from case_studies.utils.ensemble import (
     resolve_members,
 )
 from case_studies.utils.notebook_contracts import (
+    degenerate_prediction_hashes,
     excluded_families,
     prediction_members_in_force,
 )
@@ -96,6 +97,7 @@ from case_studies.utils.sweep_config import (
     get_universe_filters_for,
 )
 from utils.paths import get_case_study_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "nasdaq100_microstructure"
@@ -446,6 +448,13 @@ if _members is not None:
             "them outside the population mechanism. Re-run it before sweeping."
         )
         raise RuntimeError(msg)
+
+# The pool the sweep is entitled to draw on, captured HERE: after the membership and
+# coverage filter above, and before the preview truncation below. The ensemble reads it
+# rather than the catalog-level `_admissible`, which is only "complete and not retired"
+# and so predates both. Captured before the truncation because `TOP_N_PREDICTIONS` narrows
+# what a preview run *sweeps*, not what the case study is allowed to average.
+SWEPT_POOL = set(pred_index["prediction_hash"])
 
 if TOP_N_PREDICTIONS > 0:
     pred_index = pred_index.head(TOP_N_PREDICTIONS)
@@ -960,8 +969,18 @@ if not full_signal.is_empty():
     axes[1].set_ylabel("Backtest Sharpe")
     axes[1].set_title("IC → Sharpe: Better Prediction = Better Trading?")
 
-fig.tight_layout()
-fig.show()
+# No `tight_layout()`: `matplotlibrc` sets the layout engine for every figure, so a second
+# layout pass writes a warning into the render rather than improving it.
+show_with_alt(
+    fig,
+    "Two panels side by side from the full-universe baseline sweep. Left: a 30-bin "
+    "histogram of backtest Sharpe ratios, counts on the vertical axis and Sharpe on the "
+    "horizontal, with a dashed red vertical line at zero. Right: a scatter of backtest "
+    "Sharpe on the vertical axis against mean prediction IC on the horizontal, one "
+    "translucent point per backtested configuration. The two panels answer the same "
+    "question from opposite directions: how much of the Sharpe spread the histogram shows "
+    "is accounted for by prediction quality.",
+)
 
 # %% [markdown]
 # ### Sharpe vs Trade Count Diagnostic
@@ -1021,7 +1040,7 @@ if not trade_df.is_empty():
     axes[0].axhline(0, color="red", linestyle="--", linewidth=1)
     axes[0].set_xlabel("Number of Trades")
     axes[0].set_ylabel("Sharpe Ratio")
-    axes[0].set_title("Sharpe vs Trade Count (Signal Stage)")
+    axes[0].set_title("Sharpe vs Trade Count (baseline stage)")
 
     # Highlight: positive Sharpe only
     positive = trade_df.filter(pl.col("sharpe") > 0)
@@ -1042,8 +1061,16 @@ if not trade_df.is_empty():
     axes[1].set_ylabel("Count")
     axes[1].set_title("Distribution of Trade Counts")
 
-    fig.tight_layout()
-    fig.show()
+    # See the note on the figure above: the layout engine is set repository-wide.
+    show_with_alt(
+        fig,
+        "Two panels side by side. Left: a scatter of backtest Sharpe on the vertical axis "
+        "against number of trades on the horizontal, one translucent grey point per "
+        "backtested configuration, with a dashed red horizontal line at zero Sharpe and "
+        "the configurations above zero redrawn in green and counted in the legend. Right: "
+        "a 50-bin histogram of the same trade counts, counts on the vertical axis. Read "
+        "the horizontal position of the green points against the bulk of the histogram.",
+    )
 
     # Summary: positive-Sharpe strategies are low-trade
     if not positive.is_empty():
@@ -1121,16 +1148,26 @@ elif EXECUTION_TIER != "canonical":
     # rows if they are there and otherwise leaves Section 4's ensemble line empty.
     print(f"Ensemble skipped: it is a canonical-tier object and this run is {EXECUTION_TIER}.")
 else:
-    # The same admissibility set the sweep above ran on, passed rather than recomputed so the
-    # two stages provably agree: an ensemble averaging a row the sweep refused would be a
-    # carrier this case study cannot select.
+    # The pool the sweep actually ran on, so the two stages agree by construction rather
+    # than by comment. This used to pass `_admissible`, which is the catalog filter -
+    # complete and not retired - computed before `prediction_members_in_force` narrowed
+    # the pool on publication and cross-sectional coverage. On the 2026-09-13 run that gap
+    # was 784 catalog rows against 162 swept, so an unpublished or undercovered member
+    # could have entered the ensemble while the sweep refused to backtest it, and
+    # publishing the ensemble would have carried it downstream anyway.
+    #
+    # Degenerate sets are excluded on top, because the sweep has no degeneracy filter of
+    # its own and a constant forecast averaged into a mean is not a weaker member - it is
+    # a fixed offset. Four L1-linear sets in this registry hold two distinct forecast
+    # values across 8,006,995 rows.
+    _eligible = SWEPT_POOL - degenerate_prediction_hashes(CASE_DIR)
     _members = resolve_members(
         CASE_DIR,
         label=LABEL,
         family=str(_ens["member_family"]),
         split=SPLIT,
         max_num_leaves=int(_ens["max_num_leaves"]),
-        admissible=set(_admissible["prediction_hash"]),
+        admissible=_eligible,
     )
     _member_spec_json = sqlite3.connect(
         f"file:{CASE_DIR / 'run_log' / 'registry.db'}?mode=ro", uri=True
@@ -1350,9 +1387,29 @@ if not ensemble_slot.is_empty():
         f"Sharpe {ensemble_slot['sharpe'][0]:+.3f}  "
         f"trades {ensemble_slot['num_trades'][0]:.0f}"
     )
+# One line per top_k, not per backtest. `eqw` holds every equal-weight cell on the
+# screened universe - one per (prediction set x top_k), which was 781 models at each of
+# three top_k values on 2026-09-13 - and iterating it printed all 2,343 under a heading
+# promising three lines. The comparison the heading makes is between the slot design and a
+# top_k, so what belongs on a top_k's line is the distribution of that arm across the
+# models that ran it.
 print("\nEqual-weight top-k on the same screened universe (Act-1 echo):")
-for r in eqw.iter_rows(named=True):
-    print(f"  top_{int(r['top_k']):<2}: Sharpe {r['sharpe']:+.3f}  trades {r['num_trades']:.0f}")
+_eqw_by_k = (
+    eqw.group_by("top_k")
+    .agg(
+        n=pl.len(),
+        sharpe_max=pl.col("sharpe").max(),
+        sharpe_median=pl.col("sharpe").median(),
+        trades_median=pl.col("num_trades").median(),
+    )
+    .sort("top_k")
+)
+for r in _eqw_by_k.iter_rows(named=True):
+    print(
+        f"  top_{int(r['top_k']):<2}: {r['n']:>5} models  "
+        f"Sharpe median {r['sharpe_median']:+.3f}  best {r['sharpe_max']:+.3f}  "
+        f"trades (median) {r['trades_median']:.0f}"
+    )
 
 # %% [markdown]
 # ### What an ensemble of forecasts is for
@@ -1379,9 +1436,23 @@ schematic = carrier.filter(
     (pl.col("family") == "linear") & (pl.col("method") == "slot_persistent_signal_exit")
 ).sort("sharpe", descending=True)
 if not schematic.is_empty():
-    print("Highest validation outcome among the screened linear configurations:")
-    for r in schematic.iter_rows(named=True):
-        print(f"  linear {int(r['slots'])}-slot: validation Sharpe {r['sharpe']:+.3f}")
+    # The heading names one configuration, so one is printed. This used to loop over the
+    # whole frame - 288 rows on the 2026-09-13 registry - under that heading, which made
+    # the maximum unfindable and left the count it was drawn from unstated. The count is
+    # what the comparison below needs: a maximum over 288 draws is not the same claim as a
+    # maximum over three.
+    _top = schematic.row(0, named=True)
+    print(
+        f"Highest validation outcome among the {schematic.height} screened linear "
+        f"configurations: linear {int(_top['slots'])}-slot, validation Sharpe "
+        f"{_top['sharpe']:+.3f}"
+    )
+    if schematic.height > 1:
+        _rest = schematic["sharpe"].slice(1)
+        print(
+            f"  the other {_rest.len()} run from {_rest.min():+.3f} to {_rest.max():+.3f}, "
+            f"median {_rest.median():+.3f}"
+        )
 
 # %% [markdown]
 # ### Deflated Sharpe on the Cost-Feasible Carrier
