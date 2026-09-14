@@ -1849,7 +1849,7 @@ class BacktestExplorer:
         return result
 
     # -----------------------------------------------------------------
-    # concentration_curve: Sharpe vs top_k at allocation stage
+    # concentration_curve: Sharpe vs top_k at a named stage
     # -----------------------------------------------------------------
 
     def concentration_curve(
@@ -1857,18 +1857,28 @@ class BacktestExplorer:
     ) -> pl.DataFrame:
         """Sharpe vs top_k for a given prediction, at one or more stages.
 
-        Shows how portfolio concentration affects performance — typically
-        more actionable than allocator comparison alone.
+        Shows how portfolio concentration affects performance, which is usually
+        more actionable than comparing allocators alone.
 
         Parameters
         ----------
         stage : str or tuple of str, default ``"allocation"``
-            Which backtest stages to read. The default is unchanged, but the
-            entry-scheme sweep that varies concentration lives at the **signal**
-            stage, and that is where the first three notebooks of the backtesting
-            sequence read. This method used to hardcode the allocation stage, so
-            asking it about a baseline sweep returned an empty frame with no
-            indication that the rows were one stage away (ml4t/agent-workspace#910).
+            Which backtest stages to read. **Name it at the call site.** The
+            default is wrong for most inputs and cannot be made right by picking
+            the other stage: the entry-scheme sweep lives at the **signal**
+            stage for a baseline sweep and at the **allocation** stage once an
+            allocator menu is crossed with it, and those are different
+            populations. Counted 2026-09-14: 585 of etfs' 606 predictions, 953
+            of 1,007 in sp500_equity_option_analytics, 734 of 744 in
+            nasdaq100_microstructure and 539 of 569 in us_firm_characteristics
+            hold signal rows and nothing at the allocation stage.
+
+            The default is kept rather than removed only because removing it
+            edits a rendered notebook that cannot currently be re-run: see
+            ml4t/agent-workspace#1184. Every call site in the repository names
+            its stage; the default is now reachable only by a new caller who has
+            not read this.
+            (ml4t/agent-workspace#910, ml4t/agent-workspace#1184).
 
         Returns
         -------

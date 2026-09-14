@@ -116,16 +116,16 @@ def test_the_concentration_curve_reads_the_stage_the_sweep_ran_at(explorer) -> N
     assert curve["sharpe"].to_list() == [1.80, 1.68, 1.64]
 
 
-def test_the_default_stage_is_unchanged(explorer) -> None:
-    """The control: a caller reading the allocation stage still reads it."""
-    curve = explorer.concentration_curve("pred_b")
+def test_the_allocation_stage_still_reads_the_allocation_stage(explorer) -> None:
+    """The control: naming the stage the default used to supply reads the same rows."""
+    curve = explorer.concentration_curve("pred_b", stage="allocation")
     assert curve["top_k"].to_list() == [5]
 
 
 def test_asking_the_wrong_stage_says_where_the_rows_are(explorer) -> None:
     """An empty frame cannot say whether the sweep was never run or run elsewhere."""
     with pytest.raises(ValueError) as excinfo:
-        explorer.concentration_curve("pred_a")
+        explorer.concentration_curve("pred_a", stage="allocation")
     message = str(excinfo.value)
     assert "signal: 3" in message
     assert "stage='signal'" in message

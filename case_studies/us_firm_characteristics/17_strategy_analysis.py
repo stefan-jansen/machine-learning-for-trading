@@ -120,7 +120,6 @@ from case_studies.utils.strategy_analysis import (
     fmt_gate,
     gate1_validation_sharpe_geq_zero,
     gate2_holdout_diff_not_excludes_zero_negatively,
-    plot_concentration_curve,
     plot_cost_decay,
     plot_ic_vs_sharpe,
     rank_backtests_on_common_support,

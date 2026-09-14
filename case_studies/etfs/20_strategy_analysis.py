@@ -748,7 +748,12 @@ for prev_stage, stage_name in zip(present, present[1:]):
 # that differs between them, and no paired row is written for it.
 
 # %%
-conc_df = explorer.concentration_curve(TOP_PHASH)
+# The stage is named rather than defaulted. This notebook plots one line per
+# allocator, so it wants the allocation stage, and it happens to be what the old
+# default gave it - but most predictions in this registry hold signal rows and no
+# allocation rows, so a carrier that had not been through the allocator menu used
+# to make this cell raise with the stage nowhere in the call.
+conc_df = explorer.concentration_curve(TOP_PHASH, stage="allocation")
 if not conc_df.is_empty():
     fig = plot_concentration_curve(conc_df)
     show_with_alt(
