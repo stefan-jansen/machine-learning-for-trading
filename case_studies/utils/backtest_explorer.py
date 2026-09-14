@@ -48,6 +48,13 @@ _BEST_SCHEMA: dict[str, pl.DataType] = {
     "source": pl.Utf8,
     "family": pl.Utf8,
     "config_name": pl.Utf8,
+    # A configuration publishes a prediction set per checkpoint, and those
+    # checkpoints rank separately, so without these two a ten-row table can print
+    # one configuration six times at six Sharpes with nothing saying what differs.
+    # Measured on us_firm_characteristics: six of the ten best signal-stage rows
+    # for fwd_ret_1m were gbm/leaves_7_mse at top_k 50, iterations 200 to 450.
+    "checkpoint_kind": pl.Utf8,
+    "checkpoint_value": pl.Int64,
     "label": pl.Utf8,
     "signal_method": pl.Utf8,
     # The entry-scheme sweep varies concentration and nothing else, so without
@@ -373,8 +380,10 @@ class BacktestExplorer:
         -------
         pl.DataFrame
             Columns: backtest_hash, prediction_hash, source, family,
-            config_name, label, signal_method, top_k, sharpe, cagr,
-            max_drawdown, total_return, volatility, ic_mean
+            config_name, checkpoint_kind, checkpoint_value, label,
+            signal_method, top_k, universe_filter, exit_at_max_days, sharpe,
+            cagr, max_drawdown, total_return, volatility, ic_mean,
+            ic_mean_daily, ic_ci_lo, ic_ci_hi, ic_n_days
         """
         filter_sql = ""
         filter_params: list[str] = []
@@ -404,6 +413,8 @@ class BacktestExplorer:
                 b.stage,
                 t.family,
                 t.config_name,
+                p.checkpoint_kind,
+                p.checkpoint_value,
                 t.label,
                 bm.sharpe,
                 bm.cagr,
@@ -488,6 +499,8 @@ class BacktestExplorer:
                 "source",
                 "family",
                 "config_name",
+                "checkpoint_kind",
+                "checkpoint_value",
                 "label",
                 "signal_method",
                 "top_k",

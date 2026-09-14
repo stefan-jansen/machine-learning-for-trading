@@ -38,7 +38,7 @@ def _build_registry(case_dir) -> None:
             );
             CREATE TABLE prediction_sets (
                 prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT,
-                checkpoint_value REAL
+                checkpoint_value REAL, checkpoint_kind TEXT
             );
             CREATE TABLE prediction_metrics (
                 prediction_hash TEXT PRIMARY KEY, ic_mean REAL, ic_mean_daily REAL,
@@ -64,7 +64,7 @@ def _build_registry(case_dir) -> None:
                 (training_hash,),
             )
             db.execute(
-                "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0)",
+                "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0, 'iteration')",
                 (prediction_hash, training_hash),
             )
             db.execute(
