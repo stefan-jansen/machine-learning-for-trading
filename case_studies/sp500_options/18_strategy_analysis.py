@@ -115,6 +115,7 @@ from case_studies.utils.strategy_analysis import (
     write_strategy_assessment,
 )
 from utils.paths import get_case_study_dir, get_output_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
@@ -680,8 +681,14 @@ ax.set_xlabel("Validation Sharpe")
 ax.set_title("Family-level Baseline (equal-weight) Sharpe (ret_to_expiry) - IQR + max")
 ax.invert_yaxis()
 ax.legend(loc="lower right", frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal forest plot with one row per model family. Each row draws the family's median "
+    "validation backtest Sharpe as a filled circle, a horizontal bar spanning its interquartile "
+    "range, and a red cross at its single best configuration. A dashed vertical line marks zero. "
+    "The plot is built to show two things at once: how wide each family's spread of "
+    "configurations is, and how far its best run sits above its own median.",
+)
 
 # %% [markdown]
 # Three families produce zero positive-Sharpe baseline rows on `ret_to_expiry`.
@@ -901,8 +908,15 @@ ax.invert_yaxis()
 ax.set_xlabel("Value")
 ax.set_title("Rank-1 (ret_to_expiry, HTM dispatch) Headline Metrics with 95% CIs")
 ax.legend(loc="lower right", fontsize=8, frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal forest plot of four headline metrics for the rank-1 configuration, one row each: "
+    "Sharpe, Sortino, Calmar and annualized return. Each row draws the point estimate as a circle "
+    "with a bar spanning its 95 percent confidence interval. A dashed vertical line marks zero "
+    "and a dotted green line marks the equal-weight benchmark's validation Sharpe. All four rows "
+    "share one numeric axis labelled Value, so the benchmark line is comparable only to the "
+    "Sharpe row.",
+)
 
 # %%
 # Equity-curve overlay vs validation EW benchmark
@@ -934,8 +948,14 @@ ax.axhline(0, color="#9E9E9E", linewidth=0.6, linestyle="--")
 ax.set_ylabel("Cumulative return")
 ax.set_title("Validation-window cumulative return: rank-1 HTM vs EW universe")
 ax.legend(loc="best", frameon=False)
-fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Line chart of cumulative return across the validation overlay window, with two series: the "
+    "rank-1 hold-to-maturity strategy and the equal-weight universe. Both are compounded from "
+    "per-period returns and start at zero, and a dashed horizontal line marks zero, so the "
+    "vertical gap between the lines at any date is the strategy's cumulative excess over the "
+    "benchmark.",
+)
 
 # %% [markdown]
 # The validation Sharpe straddles zero with a CI that spans roughly ±1
@@ -998,7 +1018,14 @@ print(dd)
 
 # %%
 fig = plot_equity_drawdown(strat_returns_path)
-fig.show()
+show_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis. The upper, taller panel plots the strategy's "
+    "cumulative return over the backtest window. The lower panel plots drawdown, the fractional "
+    "decline from the running peak of that same curve, as a red line over a shaded area, with the "
+    "deepest point annotated. The pairing lets the length and depth of each decline be read "
+    "against the part of the equity curve that produced it.",
+)
 
 # %%
 roll = pa.compute_rolling_metrics(windows=[126], metrics=["sharpe", "beta"])
@@ -1316,7 +1343,14 @@ if _boot.get("n_boot", 0) > 0:
 fig_attr = plot_attribution_waterfall(
     _reg, title="S&P 500 Options HTM: FF5+MOM Attribution (diagnostic)"
 )
-fig_attr.show()
+show_with_alt(
+    fig_attr,
+    "Bar chart with one bar per FF5 factor plus momentum and a final gray Residual bar, against a "
+    "y axis labelled Sharpe Contribution, each bar annotated with its value and a dashed "
+    "horizontal line marking the strategy's total Sharpe. The factor bars are each coefficient's "
+    "absolute value as a share of the total, rescaled to the factor-explained part of Sharpe, so "
+    "they show relative exposure and not an exact return decomposition.",
+)
 
 # %% [markdown]
 # Layer-1 placebo regression vs EW: α (annualized) and HAC t-stat read
