@@ -610,6 +610,7 @@ _arms = pl.read_database(
         COALESCE(json_extract(br.spec_json, '$.strategy.signal.universe_filter'),
                  'full')                                                  AS universe,
         br.prediction_hash                                                AS prediction_hash,
+        tr.family                                                         AS family,
         json_extract(br.spec_json, '$.strategy.signal')                   AS signal_json,
         bm.sharpe                                                         AS sharpe,
         bm.num_trades                                                     AS num_trades
@@ -620,7 +621,6 @@ _arms = pl.read_database(
     WHERE br.stage = 'signal' AND ps.split = 'validation'
       AND json_extract(br.spec_json, '$.strategy.signal.method') = 'equal_weight_top_k'
       AND json_extract(br.spec_json, '$.strategy.allocation.method') IS NULL
-      AND tr.family = 'gbm'
       AND bm.sharpe IS NOT NULL
     """,
     connection=conn,
@@ -639,6 +639,42 @@ def _arm_key(signal_json: str) -> str:
 _arms = _arms.with_columns(
     pl.col("signal_json").map_elements(_arm_key, return_dtype=pl.String).alias("arm"),
 )
+
+
+def _pairs_on_both(frame: pl.DataFrame) -> pl.DataFrame:
+    """The (prediction, arm) pairs this frame carries on the full universe and on the screen."""
+    return (
+        frame.filter(pl.col("universe") == "full")
+        .select("prediction_hash", "arm")
+        .join(
+            frame.filter(pl.col("universe") == "cost_feasible").select("prediction_hash", "arm"),
+            on=["prediction_hash", "arm"],
+            how="inner",
+        )
+    )
+
+
+# The section's claim is about the screen and not about a model family, so the family is a
+# choice about which comparison gets published rather than a condition of the comparison
+# being valid. gbm is asked for first because that is what previous renders carried and a
+# family that changes between renders changes the number under the prose. It used to be a
+# `tr.family = 'gbm'` clause in the query above, which is the same choice written as though
+# it were a requirement: a run that fits no gbm at all - the pull-request fixture runs
+# 06_linear and 07_gbm on the weekly tier and skips them - then matched nothing, and the
+# refusal below reported a sweep that had not reached pass 2 when what had happened is that
+# the one family it would look at was absent. Any family carrying the same (prediction, arm)
+# on both universes answers the same question.
+_candidate_families = ["gbm"] + sorted(set(_arms["family"].unique()) - {"gbm"})
+_family = next(
+    (
+        f
+        for f in _candidate_families
+        if not _pairs_on_both(_arms.filter(pl.col("family") == f)).is_empty()
+    ),
+    "gbm",
+)
+_arms = _arms.filter(pl.col("family") == _family)
+print(f"Section 4 compares the {_family} family across the two universes")
 
 _full = _arms.filter(pl.col("universe") == "full").select(
     "prediction_hash", "arm", "sharpe", "num_trades"
@@ -696,7 +732,8 @@ _universes = set(screen_compare["universe"].to_list())
 if _universes != {"full", "cost_feasible"}:
     msg = (
         "section 4 compares one arm across two universes and the matched set offers "
-        f"{sorted(_universes) or 'none'}. It reads stage='signal', split='validation', gbm, "
+        f"{sorted(_universes) or 'none'}. It reads stage='signal', split='validation', "
+        f"family={_family!r} (chosen from {_candidate_families}), "
         "signal.method='equal_weight_top_k', and needs the same (prediction, arm) pair "
         "registered on both the full universe and cost_feasible. `baseline_schemes` and "
         "`reference_schemes` in config/setup.yaml decide that; they currently agree on "
