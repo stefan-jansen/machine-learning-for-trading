@@ -1160,12 +1160,24 @@ def resolve_canonical_rank1_lineage(
     When a conformal candidate is present at any calibration version, every
     candidate - conformal or not - is re-ranked on exact common timestamp
     support, because a conformal allocator abstains until it is calibrated and
-    books zeros over the abstention. Holdout match is by
-    training_hash on the rank-1's prediction set. Use this in every strategy_analysis notebook
-    rather than hardcoding hashes - hardcoded hashes go stale every time the
-    sweep is rebuilt, and queries that forget LABEL_RESTRICTIONS surface the
-    diagnostic-variant rows (sp500_options' fwd_ret_10d Sharpe ≈ 9.7) as
-    bogus rank-1 candidates.
+    books zeros over the abstention.
+
+    The holdout is NOT matched on the rank-1's training hash, which is what this
+    sentence used to say. `_resolve_holdout_self_backtest` joins on the declared
+    configuration - checkpoint, family, config name, label - because a correctly
+    produced holdout carries a new training identity refitted on the holdout fold,
+    so matching on the validation identity could only ever find a holdout scored
+    from the validation-fitted model. Three post-conditions then bind it: the
+    strategy spec must equal the validation run's, the training run must be fitted
+    for the holdout, and `is_refit_of` must hold against the validation training
+    spec, which is what rejects a holdout fitted on a superseded feature
+    generation. The old sentence made the check read as a name match, which is
+    weaker than what runs and is the reading an auditor would act on.
+
+    Use this in every strategy_analysis notebook rather than hardcoding hashes -
+    hardcoded hashes go stale every time the sweep is rebuilt, and queries that
+    forget LABEL_RESTRICTIONS surface the diagnostic-variant rows (sp500_options'
+    fwd_ret_10d Sharpe ≈ 9.7) as bogus rank-1 candidates.
 
     ``admitted``, when given, is the set of backtest hashes a case study has frozen as
     the field this selection may choose from - a ``CandidateSet``'s members. It is applied
