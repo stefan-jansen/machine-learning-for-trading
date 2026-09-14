@@ -158,6 +158,14 @@ def test_crypto_long_short_grid_keeps_only_disjoint_selections() -> None:
     sides and cannot seat k=10 - the long and short legs would have to share names. The
     point of the test is that the filtering happens at all: a declared k that the panel
     cannot support must be dropped rather than silently producing overlapping legs.
+
+    ``ranked_width`` is passed explicitly, matching ``n_assets``, because the feasibility
+    rule applies to the narrower of the panel and the ranked cross-section and the argument
+    is otherwise resolved from whatever registry the process can see. Left implicit, this
+    reads the maintainer's registry rather than the fixture: on a workstation whose crypto
+    predictions rank 19 names it caps the 20-name case at 19 and the test fails on a number
+    it never declared. The narrower-of-the-two rule is covered against a seeded registry in
+    ``tests/test_entry_scheme_feasibility_cross_section.py``, which is where it belongs.
     """
     declared = load_sweep("crypto_perps_funding")["top_k_grid"]["fwd_ret_8h"]
     assert declared == [3, 5, 10]
@@ -167,6 +175,7 @@ def test_crypto_long_short_grid_keeps_only_disjoint_selections() -> None:
         "fwd_ret_8h",
         n_assets=19,
         long_short=True,
+        ranked_width=19,
     )
     top_k = [scheme["top_k"] for scheme in schemes if scheme["method"] == "equal_weight_top_k"]
     assert top_k == [3, 5]
@@ -174,7 +183,7 @@ def test_crypto_long_short_grid_keeps_only_disjoint_selections() -> None:
 
     # 20 names is the first cross-section that seats the whole declared grid.
     seated = get_entry_schemes_for(
-        "crypto_perps_funding", "fwd_ret_8h", n_assets=20, long_short=True
+        "crypto_perps_funding", "fwd_ret_8h", n_assets=20, long_short=True, ranked_width=20
     )
     assert [s["top_k"] for s in seated if s["method"] == "equal_weight_top_k"] == declared
 
