@@ -83,13 +83,24 @@ from case_studies.utils.backtest_presets import strategy_view
 from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import resolve_best_backtest_runs
 from case_studies.utils.registry.specs import training_hash_from_spec
-from case_studies.utils.strategy_analysis import resolve_solvent_carrier
+from case_studies.utils.strategy_analysis import (
+    holdout_generations_to_retire,
+    refuse_a_second_look,
+    resolve_solvent_carrier,
+)
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 LABEL = ""
+# Prediction sets this run accepts retiring, when the holdout window already carries a refit
+# of a different configuration. Empty is the default and the refusal is the default with it.
+# Per generation rather than a boolean on purpose: a boolean is set once and left set, and the
+# guard is decorative after that. Naming the prediction set makes each override a statement
+# about one window that somebody had to look up, and the run fails if what it names is not
+# what is registered. Section 2.1 prints what was retired when this is non-empty.
+RETIRE_HOLDOUT_GENERATIONS: list[str] = []
 
 # %% [markdown]
 # ### What is asked for, and what it resolves to
@@ -359,6 +370,41 @@ HOLDOUT_SPEC = build_holdout_training_spec(
     study, VALIDATION_SPEC, timeline=OBSERVATIONS, case_study=CASE_STUDY_ID
 )
 HOLDOUT_TRAINING_HASH = training_hash_from_spec(HOLDOUT_SPEC)
+
+# The window is evaluated once. `refuse_a_second_look` divides what is already registered
+# against it into three buckets and refuses on any of them; with the selected configuration
+# unchanged this is an idempotent replay, because the derivation is deterministic and the
+# training identity covers it, so the same identity comes back and nothing is in any bucket.
+#
+# This case study reached 2026-09-14 with no such check and 253 backtest rows registered in
+# the five days after its own holdout was spent. Its rank-1 did not move, so nothing was
+# refused and nothing was wrong - but nothing here would have stopped a second evaluation
+# either, which is the state `fx_pairs` was in a week earlier (ml4t/agent-workspace#1174).
+RETIRED_GENERATIONS = refuse_a_second_look(
+    holdout_generations_to_retire(
+        CASE_DIR,
+        this_generation=(HOLDOUT_TRAINING_HASH, (CHECKPOINT_KIND, CHECKPOINT_VALUE)),
+    ),
+    # `.get`, like the summary at line 227: a spec without the key must reach the guard
+    # and be refused on what the registry holds, not crash before the check runs.
+    this_configuration=str(VALIDATION_SPEC.get("config_name")),
+    this_training_hash=HOLDOUT_TRAINING_HASH,
+    checkpoint=(CHECKPOINT_KIND, CHECKPOINT_VALUE),
+    retiring=RETIRE_HOLDOUT_GENERATIONS,
+)
+if RETIRED_GENERATIONS:
+    # Printed rather than left in the launch line: the registry will show two evaluations of
+    # this window and the notebook has to show the same thing, or a reader learns about only
+    # one of them.
+    print(
+        "This run retired an earlier evaluation of the holdout window, named at launch:\n"
+        + "\n".join(
+            f"  {row['prediction_hash']}  {row['config_name']}  training {row['training_hash']}"
+            for row in RETIRED_GENERATIONS
+        )
+        + "\nThe window has now been measured more than once, and the registry carries both."
+    )
+
 holdout_cv = HOLDOUT_SPEC["computation"]["cv"]
 holdout_fold = holdout_cv["folds"][0]
 cv_request = holdout_cv["request"]
