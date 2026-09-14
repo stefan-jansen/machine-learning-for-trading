@@ -332,6 +332,17 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # The label is taken from the selection rather than assumed. The pool spans every
 # declared label, so the chosen strategy may rest on a variant label rather than the
 # primary one, and every loader downstream follows the selection rather than the default.
+#
+# **Here it does.** `config/setup.yaml` declares `fwd_ret_15m` primary, and the
+# selection lands on `fwd_dir_15m`, the direction variant, because that is where the
+# best validation Sharpe is. The consequence is worth stating rather than leaving a
+# reader to infer it from two labels appearing in different tables: the holdout was
+# spent on the variant. The primary label is where the stage sweeps ran, carrying all
+# 60 allocation and all 20 risk-overlay backtests against the variant's none, while
+# the variant carries the single holdout row. So the allocation and overlay evidence
+# in the sections below describes one label and the out-of-sample evidence in §6
+# describes another. Each is read on the configuration that produced it and neither
+# stands in for the other.
 
 # %%
 carrier = resolve_solvent_carrier(CASE_STUDY)
@@ -599,7 +610,13 @@ if ALLOC_HASH is not None:
 # resolved positive transition.
 
 # %%
-conc_df = explorer.concentration_curve(TOP_PHASH)
+# top_k is an entry-scheme parameter, so the sweep that varies it registers at
+# stage=signal on this case study: the carrier's rows are 5, 10 and 20 positions
+# there and none at the allocation stage, which `concentration_curve` defaults to.
+# Asking for the default raised rather than returning nothing, which is the point
+# of that refusal: this cell printed "no concentration data" and dropped its
+# figure for as long as the registry held no rows for the carrier at all.
+conc_df = explorer.concentration_curve(TOP_PHASH, stage="signal")
 if not conc_df.is_empty():
     fig = plot_concentration_curve(conc_df)
     show_with_alt(
@@ -610,10 +627,10 @@ if not conc_df.is_empty():
         "it shows whether concentrating the book helped or hurt.",
     )
     best_per_k = conc_df.sort("sharpe", descending=True).group_by("top_k").first().sort("top_k")
-    print("Allocation: best Sharpe by top_k:")
+    print("Concentration sweep: best Sharpe by top_k:")
     print(best_per_k.select("top_k", "allocator", "sharpe", "max_drawdown"))
 else:
-    print("No concentration data — allocation stage absent for this prediction.")
+    print("No concentration data: no top_k sweep registered for this prediction.")
 
 # %% [markdown]
 # **How to read the concentration curve.** Position count trades two things off
@@ -1787,9 +1804,12 @@ val_ho_pair = load_paired_metrics(
 )
 if val_ho_pair.is_empty():
     print(
-        "[WARN] Missing val_rank1_self pair for nasdaq100_microstructure — populator "
-        "skipped (holdout has no trades or insufficient overlap with val "
-        "lineage). Continuing with NaN val→holdout decay."
+        f"[WARN] No val_rank1_self pair registered against holdout {HO_HASH}. "
+        "`populate_paired_metrics` builds its holdout pairs on the lineage it is "
+        "handed, and this notebook hands it NO_CARRIER, so that lineage is the "
+        "rung's raw-Sharpe leader rather than the cross-stage rank-1 that §1 "
+        "reports and that 19_holdout_backtest refit. The two differ here, so no "
+        "pair names this holdout. Continuing with NaN val to holdout decay."
     )
     vh = {
         "sharpe_diff": float("nan"),
@@ -1892,9 +1912,11 @@ ho_vs_ew = load_paired_metrics(
 )
 if ho_vs_ew.is_empty():
     print(
-        "[WARN] Missing equal_weight_holdout_side_artifact pair for "
-        "nasdaq100_microstructure — holdout has no trades or all-zero returns; "
-        "paired bootstrap not computable. Continuing with NaN diffs."
+        "[WARN] No equal_weight_holdout_side_artifact pair registered against "
+        f"holdout {HO_HASH}, for the same reason as the decay pair above: the "
+        "producer's holdout lineage is the rung leader, not §1's carrier. The "
+        "holdout itself is not empty, so this is an absent comparison rather "
+        "than an absent result. Continuing with NaN diffs."
     )
     he = {
         "sharpe_diff": float("nan"),
