@@ -107,7 +107,7 @@ from case_studies.utils.notebook_contracts import (
 )
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE
+from utils.style import COLORS, FIGSIZE, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY = "sp500_equity_option_analytics"
@@ -1338,7 +1338,13 @@ if "pca" in lf_extras:
         fontweight="semibold",
     )
     fig.tight_layout(rect=(0, 0, 1, 0.92))
-    fig.show()
+    show_with_alt(
+        fig,
+        "Two panels. Left: a bar per retained principal component, height the share of "
+        "validation variance that component explains, averaged over folds. Right: the same "
+        "shares accumulated left to right as a line with a marker per component, against a "
+        "dashed reference line at one half.",
+    )
 
 # %% [markdown]
 # **Interpretation**: The scree plot shows how variance concentrates
@@ -1397,7 +1403,12 @@ if "ipca" in lf_extras:
             ax.invert_yaxis()
         fig.suptitle("IPCA: Top Characteristics per Factor")
         fig.tight_layout()
-        fig.show()
+        show_with_alt(
+            fig,
+            "One horizontal bar panel per IPCA factor. Each panel lists the characteristics "
+            "with the largest absolute loading on that factor, longest at the top, drawn blue "
+            "where the loading is positive and red where it is negative.",
+        )
 
 # %% [markdown]
 # **Interpretation**: The $\Gamma$ matrix reveals which of the 48
@@ -1437,7 +1448,11 @@ for model_name in ["cae", "sae"]:
     ax.set_title(f"{model_name.upper()} loss converges across available folds", loc="left")
     ax.legend(loc="upper right")
     fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "One line per walk-forward fold, training loss on the vertical axis against epoch on "
+        "the horizontal, with a legend naming the folds.",
+    )
 
 # %% [markdown]
 # **Interpretation**: The loss curves show convergence behavior for the
