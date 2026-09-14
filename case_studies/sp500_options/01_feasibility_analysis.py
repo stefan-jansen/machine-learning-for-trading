@@ -56,8 +56,6 @@
 # %%
 """S&P 500 Options Case Study - Feasibility Analysis."""
 
-import warnings
-
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -69,6 +67,7 @@ from ml4t.diagnostic.splitters.calendar import TradingCalendar
 from case_studies.sp500_options._straddle_moves import straddle_premium_moves
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import (
     load_sp500_daily_bars,
     load_sp500_options_straddles,
@@ -80,7 +79,7 @@ from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_options"

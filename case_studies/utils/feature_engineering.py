@@ -690,7 +690,7 @@ def plot_coverage_through_time(
 ) -> None:
     """F1. Non-null share per family against date, with the warmup boundary drawn."""
     families = [c for c in coverage.columns if c != time]
-    fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+    fig, ax = plt.subplots(figsize=FIGSIZE["single"], layout="tight")
     x = coverage[time].to_list()
     for (color, style), family in zip(_cycle(len(families)), families, strict=False):
         ax.plot(x, coverage[family].to_list(), label=family, color=color, ls=style, linewidth=1.1)
@@ -749,6 +749,7 @@ def plot_feature_distributions(
         ncols,
         figsize=(FIGSIZE["grid_2x3"][0], 1.55 * nrows + 0.85),
         squeeze=False,
+        layout="tight",
     )
     flat = axes.ravel()
     for ax, column in zip(flat, columns, strict=False):
@@ -815,7 +816,7 @@ def plot_cross_sectional_dispersion(
             .agg(pl.col("p10").mean(), pl.col("p50").mean(), pl.col("p90").mean())
             .sort(time)
         )
-    fig, ax = plt.subplots(figsize=FIGSIZE["single"])
+    fig, ax = plt.subplots(figsize=FIGSIZE["single"], layout="tight")
     x = band[time].to_list()
     ax.fill_between(
         x,
@@ -849,7 +850,9 @@ def plot_timing_contract(
     the lag with which that input becomes knowable.
     """
     families = list(families)
-    fig, ax = plt.subplots(figsize=(FIGSIZE["single"][0], max(2.0, 0.32 * len(families) + 1.0)))
+    fig, ax = plt.subplots(
+        figsize=(FIGSIZE["single"][0], max(2.0, 0.32 * len(families) + 1.0)), layout="tight"
+    )
     for i, family in enumerate(reversed(families)):
         start = -(family.lookback + family.lag)
         ax.barh(
@@ -983,7 +986,9 @@ def plot_redundancy_clusters(
     height = 1.0 - cut
     labels = fcluster(tree, t=height, criterion="distance")
 
-    fig, ax = plt.subplots(figsize=(FIGSIZE["single"][0], max(2.4, 0.13 * len(columns) + 1.2)))
+    fig, ax = plt.subplots(
+        figsize=(FIGSIZE["single"][0], max(2.4, 0.13 * len(columns) + 1.2)), layout="tight"
+    )
     # Five hues, not six: the sixth is `slate`, a second navy, and a cluster drawn in it
     # is indistinguishable from one drawn in `blue`. Above the cut the links are the
     # figure's background - they say only "these two clusters eventually join" - so they
@@ -1135,7 +1140,7 @@ def plot_persistence(
     # is a horizontal bar per feature on a 0-1 axis. Equal columns compressed the panel that
     # holds the information and left a band of white between the two.
     fig, (left, right) = plt.subplots(
-        1, 2, figsize=(width, height + 0.5), gridspec_kw={"width_ratios": [2, 1]}
+        1, 2, figsize=(width, height + 0.5), gridspec_kw={"width_ratios": [2, 1]}, layout="tight"
     )
     # An interval around each curve, at each lag. A single width drawn around zero is
     # a white-noise significance band, which is a different statement and not one this

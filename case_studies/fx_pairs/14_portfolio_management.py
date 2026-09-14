@@ -177,6 +177,35 @@ def _resolve_baseline_scope(output_scope: str, input_scope: str | None) -> str:
     return output_scope if input_scope is None else input_scope
 
 
+def _scope_baseline_labels(
+    baseline_labels: list[str], catalog_labels: list[str], population_name: str
+) -> list[str]:
+    """Restrict the baseline's labels to the ones this run's catalog actually holds.
+
+    A scoped run may narrow the catalog to one label - the ordinary shape of a
+    single-label partial re-run - while still reading the canonical baseline
+    population, which carries every label. The equality guard on the canonical path
+    deliberately does not apply to a scoped run, so without this the caller iterates
+    labels the catalog does not hold: it writes a candidate set for each of them, and
+    then the catalog lookup fails naming the baseline rather than the label mismatch
+    that caused it.
+
+    An unscoped run is returned unchanged, because there the equality guard has
+    already established that the two label sets agree and narrowing here would hide a
+    disagreement rather than report it.
+    """
+    if not population_name:
+        return baseline_labels
+    held = set(catalog_labels)
+    scoped = [label for label in baseline_labels if label in held]
+    if not scoped:
+        raise RuntimeError(
+            "the equal-weight baselines carry none of the catalog's labels: "
+            f"baselines {baseline_labels}, catalog {sorted(held)}"
+        )
+    return scoped
+
+
 baseline_population_name = _resolve_baseline_scope(POPULATION_NAME, BASELINE_POPULATION_NAME)
 
 # The tier decides the namespace, so a canonical run may legitimately be narrowed -
@@ -341,6 +370,9 @@ if not POPULATION_NAME and baseline_labels != sorted(catalog.get_column("label")
         "the canonical baseline population does not cover every label in the catalog: "
         f"baselines {baseline_labels}, catalog {sorted(catalog.get_column('label').unique())}"
     )
+baseline_labels = _scope_baseline_labels(
+    baseline_labels, sorted(catalog.get_column("label").unique()), POPULATION_NAME
+)
 
 for label in baseline_labels:
     label_results = [result for result in baseline_results if _result_config(result)[0] == label]
@@ -584,6 +616,10 @@ def _non_allocation_projection(spec: dict[str, Any], *, drop_prices: bool) -> di
     metadata = projected.get("backtest_config", {}).get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("chapter", None)
+        # An absolute filesystem path, and already excluded from the identity hash by
+        # `_HASH_EXCLUDED_METADATA` for that reason. Comparing it here makes the notebook
+        # refuse its own siblings from any checkout but the one that registered the parents.
+        metadata.pop("preset_path", None)
     if drop_prices:
         projected.get("input_identity", {}).pop("prices", None)
     return projected

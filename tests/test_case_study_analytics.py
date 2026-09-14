@@ -44,6 +44,19 @@ from case_studies.utils import analytics
 # -----------------------------------------------------------------------------
 
 
+class _StudyStub:
+    """The attributes `superseded_members` reaches for, and nothing else.
+
+    A real Study needs a released case directory on disk; the lineage query here has
+    nothing to read either way, and reading nothing is the condition under test.
+    """
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.release_case_root = Path(root)
+        self.read_only = True
+
+
 def test_case_study_ids_match_metadata_keys() -> None:
     assert list(analytics.CASE_STUDY_META.keys()) == analytics.CASE_STUDY_IDS
 
@@ -663,3 +676,76 @@ def test_extract_allocator_reads_strategy_allocation_method() -> None:
 def test_extract_allocator_defaults_to_unknown_when_missing() -> None:
     spec_json = json.dumps({"version": 2, "strategy": {}, "backtest_config": {}})
     assert analytics.extract_allocator(spec_json) == "unknown"
+
+
+def test_load_model_ic_carries_its_schema_when_nothing_matches(tmp_path, monkeypatch) -> None:
+    """An empty result keeps the columns the docstring promises.
+
+    `pl.DataFrame()` has no columns at all, so a caller reading one - a filter, a
+    column selection, a guard checking that `prediction_hash` is present - fails on
+    the shape instead of seeing that the result is empty. Measured on
+    `etfs/09_dl_lstm` 2026-09-13, where `split_retired_members` refused with
+    "candidate index has no 'prediction_hash' column ... it carries []" and the
+    message described a schema error that was not there.
+
+    The emptiness still reaches the caller. Only the shape is fixed, so a broken
+    query is as visible as it was before.
+    """
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+    _seed_coverage_registry(tmp_path / "etfs" / "run_log" / "registry.db")
+
+    empty = analytics.load_model_ic(case_studies=["etfs"], split="holdout")
+
+    assert empty.height == 0
+    assert empty.columns == list(analytics.MODEL_IC_SCHEMA)
+    assert empty.schema == pl.Schema(analytics.MODEL_IC_SCHEMA)
+    # The two operations the callers actually perform.
+    assert empty["prediction_hash"].to_list() == []
+    assert empty.filter(pl.col("family") == "linear").height == 0
+
+
+def test_load_model_ic_carries_its_schema_when_no_registry_exists(tmp_path, monkeypatch) -> None:
+    """A case study with no registry at all takes the same path."""
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+
+    empty = analytics.load_model_ic(case_studies=["no_such_case_study"], split="validation")
+
+    assert empty.height == 0
+    assert empty.columns == list(analytics.MODEL_IC_SCHEMA)
+
+
+def test_an_empty_candidate_index_splits_instead_of_refusing(tmp_path, monkeypatch) -> None:
+    """The caller that refused: an empty index now divides into two empty halves.
+
+    `split_retired_members` demands the column, which is right - deciding retirement
+    without it would silently keep every row. What it could not do was tell an empty
+    result from a mis-shaped one, because both arrive with no columns.
+    """
+    from case_studies.research.population import split_retired_members
+
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+    _seed_coverage_registry(tmp_path / "etfs" / "run_log" / "registry.db")
+    index = analytics.load_model_ic(case_studies=["etfs"], split="holdout")
+
+    split = split_retired_members(_StudyStub(tmp_path / "etfs"), index)
+
+    assert split.live.height == 0
+    assert split.retired.height == 0
+    assert "prediction_hash" in split.retired.columns
+
+
+def test_a_mis_shaped_index_still_refuses_and_says_which(tmp_path) -> None:
+    """A frame that carries columns but not the one asked for is still an error.
+
+    The two cases are reported differently, so the message no longer describes an
+    empty result as a schema complaint.
+    """
+    from case_studies.research.population import split_retired_members
+
+    mis_shaped = pl.DataFrame({"family": ["linear"], "ic_mean": [0.1]})
+
+    with pytest.raises(ValueError, match=r"\['family', 'ic_mean'\]"):
+        split_retired_members(_StudyStub(tmp_path), mis_shaped)
+
+    with pytest.raises(ValueError, match="no columns at all"):
+        split_retired_members(_StudyStub(tmp_path), pl.DataFrame())

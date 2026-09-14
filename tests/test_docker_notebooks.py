@@ -1,12 +1,22 @@
 """Test notebooks that require Docker environments (py312, neo4j, benchmark).
 
-Same as test_chapter_notebooks.py but IGNORES skip flags from overrides.yaml.
-These notebooks are skipped in uv-native runs (missing modules like signatory,
-gensim, esig, tfcausalimpact, or Neo4j) but CAN run inside their respective
-Docker images.
+Same as test_chapter_notebooks.py, and it honours the same skip declarations.
 
-The skip flag stays in overrides.yaml so the uv-native runner still skips them.
-This file runs them in Docker where the dependencies are available.
+It used to ignore them. The reason it gave was that a skip meant a missing module
+(signatory, gensim, esig, tfcausalimpact, Neo4j) and the image supplies it, so
+running anyway was how those notebooks got covered at all. That premise has
+expired: a notebook whose dependency lives in an image now carries ``docker_env``
+and ``requires_import`` with no ``skip``, and every remaining ``skip: true`` in
+overrides.yaml declares a ``skip_blocker`` naming a fixture, registry or external
+condition. An image does not grow the fixture a shortfall names, register a
+candidate set, or attach a CUDA device, so ignoring the skip did not run those
+notebooks under a cured condition - it ran them under a condition still true and
+collected the failure the declaration predicted.
+
+Honouring the skip is not a coverage loss, because ``honoured_skip_reason``
+honours it only while its blocker still holds. A fixture that grows the file or an
+image that gains the module retires the skip with no edit here, and
+``tests/test_skip_blockers.py`` fails the build on a declaration that has expired.
 
 Usage:
     # Py312 notebooks (signatory, gensim, esig, tfcausalimpact, torch CUDA bug)
@@ -32,6 +42,7 @@ from tests.pm_helpers import (
     gpu_skip_reason,
     run_notebook,
 )
+from tests.skip_blockers import honoured_skip_reason
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -66,8 +77,11 @@ def test_docker_notebook(notebook_path, populated_data_dir, seeded_output_dir):
     if nb_tier != run_tier:
         pytest.skip(f"Tier {nb_tier} — current run tier is {run_tier}")
 
-    # NOTE: We intentionally do NOT check overrides.get("skip") here.
-    # That's the whole point of this file — Docker provides the missing deps.
+    # Honoured only while the blocker its reason rests on still holds, so this cannot
+    # hide a notebook whose condition has lifted - that one runs here as before. See the
+    # module docstring for why ignoring the skip stopped being the right default.
+    if reason := honoured_skip_reason(overrides):
+        pytest.skip(f"Skipped: {reason}")
 
     # GPU requirement still applies (CI runners have no GPU)
     reason = gpu_skip_reason(overrides)

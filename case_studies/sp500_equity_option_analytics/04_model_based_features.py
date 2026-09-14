@@ -69,10 +69,7 @@
 # %%
 """S&P 500 Equity + Option Analytics: Model-Based Features."""
 
-import warnings
 from datetime import date
-
-warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
@@ -95,12 +92,15 @@ from case_studies.utils.temporal import (
     walk_forward_feature,
     write_model_based,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.artifact_specs import load_setup_config, resolve_label_horizon
 from utils.cv_splits import load_evaluation_config
 from utils.data_quality import top_entities
 from utils.paths import display_path, get_case_study_dir
 from utils.style import ml4t_palette, show_plotly_with_alt
+
+apply_notebook_warning_policy()
 
 # %% [markdown]
 # `MIN_OBS` is the shortest estimation window a fit is attempted on. A GJR-GARCH has four

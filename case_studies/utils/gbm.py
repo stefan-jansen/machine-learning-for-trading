@@ -70,7 +70,7 @@ from case_studies.utils.folds import (
 )
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
 from case_studies.utils.registry.specs import canonical_json
-from case_studies.utils.runtime import cpu_seconds, resource_measurement
+from case_studies.utils.runtime import cpu_seconds, resource_measurement, source_commit
 from utils.modeling import RANDOM_SEED, seed_everything
 
 if TYPE_CHECKING:
@@ -1327,15 +1327,7 @@ def _gbm_runtime_identity() -> dict[str, str]:
 def _gbm_runtime_provenance(
     study: Study, device: str, *, notebook: str | None = None
 ) -> dict[str, Any]:
-    try:
-        commit = subprocess.check_output(
-            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        commit = "unknown"
+    commit = source_commit(study.release_root)
     lock_path = study.release_root / "uv.lock"
     record: dict[str, Any] = {
         "device": device,

@@ -360,7 +360,10 @@ class CausalRequest:
             execution_tier=tier,
             preview_reductions=reductions,
             supersedes=(str(request["supersedes"]) if request.get("supersedes") else None),
-            notebook=(str(request["notebook"]) if request.get("notebook") else None),
+            # Defaulted from the study for the same reason as `model_requests`: `entry_point`
+            # and `notebook_path` answer one question, and a notebook that passed both said the
+            # same string twice.
+            notebook=(str(request["notebook"]) if request.get("notebook") else study.entry_point),
         )
 
     def as_dict(self) -> dict[str, Any]:

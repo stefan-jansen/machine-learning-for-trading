@@ -47,11 +47,8 @@
 """Crypto Perpetuals Funding: Holdout Predictions."""
 
 import sqlite3
-import warnings
 
 import polars as pl
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study
 from case_studies.research.holdout import build_holdout_training_spec
@@ -62,7 +59,10 @@ from case_studies.utils.strategy_analysis import (
     resolve_solvent_carrier,
     training_run_fitted_for_the_holdout,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from utils.paths import get_case_study_dir
+
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "crypto_perps_funding"

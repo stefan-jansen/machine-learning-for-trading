@@ -59,8 +59,6 @@
 # %%
 """US Firm Characteristics Case Study - Feasibility Analysis."""
 
-import warnings
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -69,13 +67,14 @@ from IPython.display import display
 from matplotlib.ticker import PercentFormatter
 
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_firm_characteristics
 from utils.artifact_specs import resolve_label_horizon
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"

@@ -17,8 +17,9 @@
 # # US equities panel: predicting a week ahead instead of five days ahead
 #
 # The three sequence notebooks before this one - [`09_dl_nlinear`](09_dl_nlinear.ipynb),
-# [`10_dl_lstm`](10_dl_lstm.ipynb) and [`11_dl_tsmixer`](11_dl_tsmixer.ipynb) - read a window of
-# daily rows and predict a return five sessions ahead. That is a **multi-step** problem: the
+# [`10_dl_lstm`](10_dl_lstm.ipynb) and [`11_dl_tsmixer`](11_dl_tsmixer.ipynb), the last of which
+# is offered rather than run - read a window of daily rows and predict a return five sessions
+# ahead. That is a **multi-step** problem: the
 # quantity being predicted spans five periods of the grid the model reads. This notebook changes
 # the grid rather than the models, and asks whether that alone is worth anything.
 #

@@ -113,13 +113,8 @@ PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-1d-tabular-dl-v1",
     "us-equities-fwd-ret-1d-nlinear-v1",
     "us-equities-fwd-ret-1d-lstm-v1",
-    "us-equities-fwd-ret-1d-tsmixer-v1",
     "us-equities-fwd-ret-1d-pca-v1",
     "us-equities-fwd-ret-1d-ipca-v1",
-    "us-equities-fwd-ret-5d-pca-v1",
-    "us-equities-fwd-ret-5d-ipca-v1",
-    "us-equities-fwd-ret-21d-pca-v1",
-    "us-equities-fwd-ret-21d-ipca-v1",
 ]
 
 # %% tags=["parameters"]
@@ -129,7 +124,6 @@ OFFICIAL_POPULATION_NAMES = [
     "us-equities-tabular-dl-checkpoints-v1",
     "us-equities-nlinear-checkpoints-v1",
     "us-equities-lstm-checkpoints-v1",
-    "us-equities-tsmixer-checkpoints-v1",
     "us-equities-pca-checkpoints-v1",
     "us-equities-ipca-checkpoints-v1",
 ]
@@ -145,13 +139,8 @@ DIAGNOSTIC_SET_NAMES = [
     "us-equities-fwd-ret-1d-tabular-dl-diagnostics-v1",
     "us-equities-fwd-ret-1d-nlinear-diagnostics-v1",
     "us-equities-fwd-ret-1d-lstm-diagnostics-v1",
-    "us-equities-fwd-ret-1d-tsmixer-diagnostics-v1",
     "us-equities-fwd-ret-1d-pca-diagnostics-v1",
     "us-equities-fwd-ret-1d-ipca-diagnostics-v1",
-    "us-equities-fwd-ret-5d-pca-diagnostics-v1",
-    "us-equities-fwd-ret-5d-ipca-diagnostics-v1",
-    "us-equities-fwd-ret-21d-pca-diagnostics-v1",
-    "us-equities-fwd-ret-21d-ipca-diagnostics-v1",
 ]
 CAUSAL_LABELS = ["fwd_ret_1d"]
 

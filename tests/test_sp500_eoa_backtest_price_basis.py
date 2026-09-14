@@ -251,7 +251,7 @@ def test_two_windows_of_one_series_agree_about_the_dates_they_share():
 def test_two_real_loads_agree_about_the_dates_they_share():
     """The same guard through `load_backtest_prices`, on the windows holdout actually uses.
 
-    `20_strategy_synthesis/holdout.py` concatenates a validation load and a
+    A case study's holdout notebook concatenates a validation load and a
     holdout load, so these are the two frames whose seam has to hold. GE's
     1-for-8 on 2021-08-02 sits inside the holdout window.
     """

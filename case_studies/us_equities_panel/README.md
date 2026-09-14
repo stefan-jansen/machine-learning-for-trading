@@ -39,9 +39,11 @@ The pipeline is unusually long because the universe is unusually large. Sixteen 
 | Model Analysis | [`15_model_analysis`](15_model_analysis.ipynb) | -- | Cross-model IC comparison and fold stability diagnostics | Nothing - it reads the registry |
 | Backtest | [`16_backtest`](16_backtest.ipynb) | Ch16 | Daily long-short top-K strategy simulation | One backtest run per prediction set and entry scheme; `daily_returns.parquet`, `weights.parquet`, `trades.parquet`, `fills.parquet`, `equity.parquet`, `portfolio_state.parquet`, and `spec.json` under `run_log/backtest/{hash}/` |
 | Portfolio | [`17_portfolio_management`](17_portfolio_management.ipynb) | Ch17 | Allocation sweep on the highest-IC GBM signal | One backtest run per allocation method, same artifact layout |
-| Costs | [`18_costs`](18_costs.ipynb) | Ch18 | Cost-grid sweep on the top allocation combinations | One backtest run per cost level, same artifact layout |
-| Risk | [`19_risk_management`](19_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays | One backtest run per overlay variant, same artifact layout |
-| Strategy Analysis | [`20_strategy_analysis`](20_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment: signal, lineage, holdout, attribution | `results/strategy_assessment.json`, `20_strategy_synthesis/output/us_equities_panel/us_equities_panel_tearsheet.html` |
+| Risk | [`18_risk_management`](18_risk_management.ipynb) | Ch19 | Position-level and portfolio-level risk overlays | One backtest run per overlay variant, same artifact layout |
+| Costs | [`19_costs`](19_costs.ipynb) | Ch18 | Cost-grid sweep on the strategies the three earlier stages produced | One backtest run per cost level, same artifact layout |
+| Holdout Predictions | [`20_holdout_predictions`](20_holdout_predictions.ipynb) | Ch20 | Refit of the selected configuration on history ending before the holdout window | One training run and one prediction set at `split='holdout'` |
+| Holdout Backtest | [`21_holdout_backtest`](21_holdout_backtest.ipynb) | Ch20 | The holdout predictions traded under the selected allocator, overlay and cost level | One backtest run at `stage='holdout'`, same artifact layout |
+| Strategy Analysis | [`22_strategy_analysis`](22_strategy_analysis.ipynb) | Ch20 | End-to-end strategy assessment: signal, lineage, holdout, attribution | `results/strategy_assessment.json`, `20_strategy_synthesis/output/us_equities_panel/us_equities_panel_tearsheet.html` |
 
 ## Key Results
 
@@ -76,12 +78,14 @@ uv run python case_studies/us_equities_panel/14_causal_dml.py
 uv run python case_studies/us_equities_panel/15_model_analysis.py
 uv run python case_studies/us_equities_panel/16_backtest.py
 uv run python case_studies/us_equities_panel/17_portfolio_management.py
-uv run python case_studies/us_equities_panel/18_costs.py
-uv run python case_studies/us_equities_panel/19_risk_management.py
-uv run python case_studies/us_equities_panel/20_strategy_analysis.py
+uv run python case_studies/us_equities_panel/18_risk_management.py
+uv run python case_studies/us_equities_panel/19_costs.py
+uv run python case_studies/us_equities_panel/20_holdout_predictions.py
+uv run python case_studies/us_equities_panel/21_holdout_backtest.py
+uv run python case_studies/us_equities_panel/22_strategy_analysis.py
 ```
 
-The strategy-analysis notebook in `20_strategy_analysis.py` writes a full diagnostic tear sheet (`template="full"`) to the case study's gitignored output directory; readers regenerate it locally.
+The strategy-analysis notebook in `22_strategy_analysis.py` writes a full diagnostic tear sheet (`template="full"`) to the case study's gitignored output directory; readers regenerate it locally.
 
 ## Run Log
 

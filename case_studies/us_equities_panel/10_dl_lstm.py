@@ -564,4 +564,6 @@ compatible_sets
 # read many times over, and none of it is a statement about tradability.
 #
 # **Next**: [`11_dl_tsmixer`](11_dl_tsmixer.ipynb) drops recurrence entirely and mixes along the
-# two axes of the window in turn.
+# two axes of the window in turn. It is offered rather than run: fitting a third sequence
+# architecture on this panel was declined at 60-80 hours of GPU, so the notebook carries no
+# outputs and registers nothing. Everything it needs is in place for a reader who wants them.

@@ -34,8 +34,9 @@
 # strategy assessment.
 #
 # **Prerequisites**: [`18_risk_management`](18_risk_management.ipynb) has frozen the per-label
-# validation strategy set this notebook opens, and the holdout notebooks have registered the refit
-# and its backtest.
+# validation strategy set this notebook opens;
+# [`20_holdout_predictions`](20_holdout_predictions.ipynb) has registered the refit and
+# [`21_holdout_backtest`](21_holdout_backtest.ipynb) the backtest of it.
 #
 # **What it writes**: nothing. It reads the registry, applies the selection rule and reports.
 
@@ -177,7 +178,8 @@ for candidate_hash in validation_set.members:
 # Apply the selection rule only after every member has passed the protocol checks. The
 # candidate set says which backtests may be chosen from; `resolve_solvent_carrier` says which
 # one is chosen, and it is handed the set rather than the whole registry. It is the same
-# resolver the holdout notebooks use.
+# resolver [`20_holdout_predictions`](20_holdout_predictions.ipynb) and
+# [`21_holdout_backtest`](21_holdout_backtest.ipynb) use.
 
 # %% tags=["results"]
 carrier = resolve_solvent_carrier(CASE_STUDY_ID, admitted=frozenset(validation_set.members))
@@ -290,7 +292,7 @@ holdout_backtest_hash = select_holdout_self_backtest(CASE_STUDY_ID, selected_val
 if holdout_backtest_hash is None:
     raise ValueError(
         f"no holdout backtest replays the selected validation strategy "
-        f"{selected_validation.hash}; run the holdout notebooks first"
+        f"{selected_validation.hash}; run 20_holdout_predictions and 21_holdout_backtest first"
     )
 holdout_backtest = study.results.open(holdout_backtest_hash)
 holdout_prediction = study.results.open(holdout_backtest.registry_record()["prediction_hash"])

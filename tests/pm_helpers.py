@@ -68,6 +68,7 @@ overrides.yaml schema (per-notebook, all optional):
 
 import ast
 import functools
+import importlib.util
 import json
 import os
 import re
@@ -1100,9 +1101,19 @@ def check_kernel_routing(overrides: dict) -> KernelRouting:
     )
 
     if not (Path(kernel_python).is_file() and os.access(kernel_python, os.X_OK)):
+        # Which filesystem was looked at decides who is at fault, and the two read alike
+        # otherwise: run this file from the host venv and a correct image is reported as
+        # needing a rebuild. /.dockerenv is written by the runtime, not by our images.
+        where = (
+            f"inside this container. {rebuild}"
+            if Path("/.dockerenv").exists()
+            else "on this host. That path lives inside the "
+            f"{image or 'notebook'} image, where this test is meant to execute, so nothing "
+            "here says the image is stale. Run it through the docker job instead."
+        )
         return KernelRouting(
             f"overrides.yaml routes this notebook to {kernel_python}, "
-            f"which is not an executable file here. {rebuild}"
+            f"which is not an executable file {where}"
         )
 
     launcher_path = REPO_ROOT / launcher if launcher else None
@@ -1587,6 +1598,12 @@ def run_notebook(
     env_vars = {
         "MPLBACKEND": "Agg",
         "PLOTLY_RENDERER": "json",
+        # Which notebook is running. Nothing papermill injects reaches the kernel, so a study
+        # opened without an explicit `entry_point` had no way to name the notebook that opened
+        # it and every training run it registered wrote the column NULL. The launcher is the
+        # one party that knows, so it says so; `research/workspace._resolve_entry_point` reads
+        # it and an explicit argument still wins.
+        "ML4T_ENTRY_POINT": nb_name,
         **KERNEL_THREAD_CAPS,
     }
     if output_dir:
@@ -1607,16 +1624,19 @@ def run_notebook(
     # Ensure torch's bundled CUDA libraries are found before system ones.
     # The system libcudart.so.12 may be outdated and missing symbols like
     # cudaGetDriverEntryPointByVersion that torch's bundled version provides.
+    # Located with find_spec rather than by importing torch: this process only needs
+    # the paths, and executing the package to read them costs 502 MB resident in every
+    # worker (#558). The resulting string is identical.
     try:
-        import torch
-
-        torch_lib = str(Path(torch.__file__).parent / "lib")
-        nvidia_libs = list((Path(torch.__file__).parent.parent / "nvidia").glob("*/lib"))
-        cuda_paths = [torch_lib] + [str(p) for p in nvidia_libs]
+        torch_spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        torch_spec = None
+    if torch_spec is not None and torch_spec.origin:
+        torch_root = Path(torch_spec.origin).parent
+        nvidia_libs = list((torch_root.parent / "nvidia").glob("*/lib"))
+        cuda_paths = [str(torch_root / "lib")] + [str(p) for p in nvidia_libs]
         existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
         env_vars["LD_LIBRARY_PATH"] = ":".join(cuda_paths + [existing_ld])
-    except ImportError:
-        pass
 
     # A notebook whose dependencies live in a separate venv runs on its own
     # kernelspec, written to a temp JUPYTER_PATH so nothing global is touched.

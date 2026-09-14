@@ -923,7 +923,14 @@ def _booster_dir(case_dir: Path, training_hash: str) -> Path | None:
     figure from the correlation fallback while its prose describes gain-based importance.
 
     Ordered most recent first and checked rather than declared, so a case study on an
-    older layout is unaffected: a directory that does not exist cannot match.
+    older layout is unaffected: a directory that does not exist cannot match. The current
+    layout is the one the training stage writes (``utils/gbm.py:2334``) and the order
+    matches ``case_studies/utils/insight_chapter.py``, which resolves the same three.
+
+    ``main`` fixed this independently and inline while this branch was open; the two
+    agree on all three paths and their order. This keeps the extracted form because
+    ``tests/test_gbm_booster_layout.py`` asserts against the table, and folds in the two
+    source references the inline version carried.
     """
     for parts in _BOOSTER_LAYOUTS:
         candidate = case_dir.joinpath("run_log", *parts[:1], training_hash, *parts[1:])
@@ -939,8 +946,8 @@ def load_gbm_feature_importance(
 ) -> pl.DataFrame | None:
     """Load GBM feature importance from saved booster files.
 
-    Looks for LightGBM booster .txt files in run_log/training/{hash}/boosters/.
-    Extracts gain-based importance per fold.
+    The training stage writes boosters under the run's own models directory,
+    run_log/training/{hash}/models/boosters/. Extracts gain-based importance per fold.
 
     Returns DataFrame with columns: config_name, fold_id, feature, importance.
     Returns None if no booster files found.

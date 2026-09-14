@@ -506,6 +506,87 @@ def test_every_declared_reduction_key_is_one_some_family_accepts(overrides: dict
     assert unknown == {}
 
 
+# A fixture entry that RAISES a value the preset patch already floored, with the reason it is
+# worth the cost. `tests/preset_patches.py` patches a copy of `case_studies/config/` that
+# `tests/conftest.py:390` builds, and `overrides.yaml` runs against that copy, so a reduction
+# declared here replaces the patched value rather than reinforcing it. Raising one is
+# sometimes right - it is the only way to keep a dimension the notebook is *about* - but it is
+# a cost decision, and the entry that makes it silently reads as a reduction.
+#
+# `tests/smoke.yaml` is not covered and must not be: `scripts/nb-run.sh` executes it and
+# patches nothing, so a value there is measured against the canonical preset.
+RAISES_THE_PATCHED_PRESET = {
+    "case_studies/cme_futures/07_gbm": (
+        "20 iterations every 10 against the patched 2 every 1. Publishing more than one "
+        "checkpoint is the dimension this notebook demonstrates, and the entry prices the "
+        "fit against production's 500 every 50."
+    ),
+    "case_studies/nasdaq100_microstructure/07_gbm": "As cme_futures/07_gbm.",
+    "case_studies/sp500_options/07_gbm": "As cme_futures/07_gbm.",
+    "case_studies/us_firm_characteristics/06_gbm": "As cme_futures/07_gbm.",
+}
+
+
+def _patched_preset_floor() -> dict[str, float]:
+    """The largest value any preset patch gives each numeric key.
+
+    A declared value above it is a raise whichever `config/<model_type>/` directory the entry
+    resolves to, and one at or below the smallest cannot be - so the comparison needs no map
+    from a notebook stem to a model directory, which is the part a stem heuristic gets wrong
+    on the next notebook named differently.
+    """
+    from tests.preset_patches import _TEST_PRESET_PATCHES
+
+    floor: dict[str, float] = {}
+    for patches in _TEST_PRESET_PATCHES.values():
+        for key, value in patches.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                floor[key] = max(floor.get(key, value), value)
+    return floor
+
+
+def _raised_keys(reductions: dict, floor: dict[str, float]) -> list[str]:
+    return sorted(
+        name
+        for name, value in reductions.items()
+        if name in floor
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value > floor[name]
+    )
+
+
+def test_a_reduction_that_raises_the_patched_preset_says_why(overrides: dict) -> None:
+    """A fixture value above the patched preset is a cost decision someone writes down."""
+
+    floor = _patched_preset_floor()
+    undeclared = {
+        key: _raised_keys(reductions, floor)
+        for key, reductions in _declared_reductions(overrides).items()
+        if _raised_keys(reductions, floor) and key not in RAISES_THE_PATCHED_PRESET
+    }
+
+    assert undeclared == {}
+
+
+def test_every_entry_that_claims_a_raise_still_makes_one(overrides: dict) -> None:
+    """The other direction: a reason left behind after the value came down is stale prose.
+
+    Without this the table only ever grows, and an entry reduced back under the patch keeps a
+    row saying it costs more than it does.
+    """
+
+    floor = _patched_preset_floor()
+    declared = _declared_reductions(overrides)
+    stale = [
+        key
+        for key, reason in RAISES_THE_PATCHED_PRESET.items()
+        if not reason.strip() or key not in declared or not _raised_keys(declared[key], floor)
+    ]
+
+    assert stale == []
+
+
 def test_a_causal_reduction_declares_all_four_fields(overrides: dict) -> None:
     """The DML resolver requires its four fields, and a partial mapping is worse than none.
 
@@ -527,6 +608,116 @@ def test_a_causal_reduction_declares_all_four_fields(overrides: dict) -> None:
             incomplete[key] = sorted(reductions)
 
     assert incomplete == {}
+
+
+# The case studies whose model entries do not agree on a fold set, and what disagrees. This is a
+# ratchet rather than a permission: the test asserts the disagreeing set is EXACTLY this, so
+# nothing can join it without a line, and an entry that comes into line retires its own line.
+#
+# It is worth a check because the cost of disagreeing is not visible in any entry. A model
+# analysis notebook averages each member's per-fold IC and ranks the averages, and
+# `case_studies/etfs/13_model_analysis.py` states what that costs when the members were not
+# fitted on the same folds: a model with "an undefined daily IC on those folds, so its average is
+# taken over fewer folds than the others and is not the same quantity". Two members at two folds
+# and a third at eight are compared as though the numbers were alike.
+#
+# `etfs` was on this list. Its `11c_conditional_autoencoder` and `11e_supervised_autoencoder` ran
+# all eight seeded folds while the other nine etfs entries ran two, which cost 501 s and 521 s of
+# a 3,041 s `cs-etfs` job on the `e2e649ed` run - the longest job in the matrix - on top of making
+# their ICs a different quantity from their siblings'.
+FOLD_SETS_DISAGREE = {
+    "nasdaq100_microstructure": (
+        "06_linear and 07_gbm declare [0], the four sequence entries declare [0, 1]. Nothing "
+        "compares them today because both linear entries carry a skip, so the disagreement "
+        "costs nothing until that skip lifts."
+    ),
+    "us_firm_characteristics": (
+        "05_linear and 06_gbm declare [0], 07_tabular_dl and 08a through 08d declare [0, 1], "
+        "and 10_model_analysis ranks all of them together."
+    ),
+}
+
+
+def _declared_fold_sets(overrides: dict, dml_fields: set[str]) -> dict[str, set[str]]:
+    """Per case study, the distinct fold declarations its model entries make.
+
+    A missing declaration is a value rather than an absence: an entry that declares no `folds`
+    runs every fold the fixture seeded, which is what puts it out of step with a sibling that
+    named two. DML entries are excluded because their resolver takes `n_folds`, a count, and
+    refuses `folds` outright - `test_a_causal_reduction_declares_all_four_fields` covers them.
+    """
+    per_case: dict[str, set[str]] = {}
+    for key, reductions in _declared_reductions(overrides).items():
+        parts = key.split("/")
+        if len(parts) != 3 or parts[0] != "case_studies":
+            continue
+        if set(reductions) == dml_fields:
+            continue
+        declared = reductions.get("folds")
+        per_case.setdefault(parts[1], set()).add(
+            "every seeded fold" if declared is None else repr(list(declared))
+        )
+    return per_case
+
+
+def test_one_case_study_fits_its_models_on_one_set_of_folds(overrides: dict) -> None:
+    _, dml_fields = _accepted_reduction_fields()
+    disagreeing = {
+        case: sorted(values)
+        for case, values in _declared_fold_sets(overrides, dml_fields).items()
+        if len(values) > 1
+    }
+
+    assert sorted(disagreeing) == sorted(FOLD_SETS_DISAGREE)
+
+
+def _fold_overrides(**per_entry: dict) -> dict:
+    return {
+        f"case_studies/synthetic/{stem}": {"parameters": {"PREVIEW_REDUCTIONS": reductions}}
+        for stem, reductions in per_entry.items()
+    }
+
+
+def test_an_undeclared_fold_set_disagrees_with_a_declared_one() -> None:
+    """The case the etfs entries were in, which is the one a reader is least likely to see.
+
+    Both entries look reduced - each carries a `max_symbols` - and only the fixture says how
+    many folds the second one runs.
+    """
+    _, dml_fields = _accepted_reduction_fields()
+    overrides = _fold_overrides(
+        a_pca={"folds": [0, 1], "max_symbols": 6},
+        b_cae={"max_symbols": 6},
+    )
+
+    assert _declared_fold_sets(overrides, dml_fields) == {
+        "synthetic": {"[0, 1]", "every seeded fold"}
+    }
+
+
+def test_two_different_declared_fold_sets_disagree() -> None:
+    _, dml_fields = _accepted_reduction_fields()
+    overrides = _fold_overrides(
+        a_linear={"folds": [0], "max_symbols": 6},
+        b_gbm={"folds": [0, 1], "max_symbols": 6},
+    )
+
+    assert _declared_fold_sets(overrides, dml_fields) == {"synthetic": {"[0]", "[0, 1]"}}
+
+
+def test_a_causal_entry_is_not_read_as_a_fold_disagreement() -> None:
+    """`n_folds` is the DML resolver's own spelling, and it refuses `folds`.
+
+    Without the exclusion every case study carrying a causal notebook would read as
+    disagreeing, for a reason that is not about folds at all.
+    """
+    _, dml_fields = _accepted_reduction_fields()
+    overrides = _fold_overrides(
+        a_linear={"folds": [0, 1], "max_symbols": 6},
+        b_causal_dml=dict.fromkeys(dml_fields, 2),
+    )
+
+    assert _declared_fold_sets(overrides, dml_fields) == {"synthetic": {"[0, 1]"}}
 
 
 def test_requested_configurations_survive_the_fixture_trim(overrides: dict) -> None:

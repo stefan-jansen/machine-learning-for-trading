@@ -74,7 +74,7 @@ from case_studies.utils.registry.specs import training_hash_from_spec
 from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from case_studies.utils.uncertainty import load_daily_returns_with_timestamp
 from utils.paths import get_case_study_dir
-from utils.style import COLORS, FIGSIZE, add_message_title
+from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -591,10 +591,14 @@ ax_dd.fill_between(curve["timestamp"], curve["drawdown"], 0.0, color=COLORS["neg
 ax_dd.set_ylabel("Drawdown")
 add_message_title(
     ax_equity,
-    f"The selected strategy on the 2021 holdout: Sharpe {_holdout['sharpe']:.2f}",
-    f"Peak-to-trough {_holdout['max_drawdown']:.1%} over {curve.height} sessions",
+    "Selected strategy on the 2021 holdout: equity curve and drawdown",
+    "Growth of 1 above, peak-to-trough drawdown below, daily",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels sharing a date axis over the holdout year: growth of one unit of capital above, "
+    "and peak-to-trough drawdown filled below.",
+)
 
 # %% [markdown]
 # ## Key takeaways

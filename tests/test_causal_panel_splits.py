@@ -572,3 +572,42 @@ def test_entity_sorted_groups_are_refused_rather_than_split() -> None:
 
     with pytest.raises(ValueError, match="sorted and contiguous"):
         _walk_forward_indices(n_rows=len(entity_major), n_folds=2, embargo=1, groups=entity_major)
+
+
+def test_panel_walk_forward_rejects_fewer_decision_times_than_folds() -> None:
+    """A panel too short for its fold count must raise, not return empty folds.
+
+    `fold_size = len(ordered_groups) // (n_folds + 1)` is 0 whenever the panel holds
+    fewer complete decision times than folds, and every train and test slice is then
+    empty. Downstream that is indistinguishable from small folds: each one is skipped,
+    the estimate is NaN over zero observations, and a full summary prints. Measured on
+    a 10,000-row cap of `us_firm_characteristics/09_causal_dml` - 8,180 rows, 4 decision
+    months, 5 folds, `4 // 6 == 0`.
+
+    The caller's minimum counts rows, and 8,180 clears `(5 + 1) * 50` comfortably, so
+    it cannot be what catches this. The width of a panel is why: a handful of decision
+    times carries thousands of rows.
+    """
+    dates = np.repeat(np.arange(4), 2045)
+
+    with pytest.raises(ValueError, match="complete decision times"):
+        _walk_forward_indices(n_rows=len(dates), n_folds=5, embargo=0, groups=dates)
+
+
+def test_panel_walk_forward_accepts_exactly_enough_decision_times() -> None:
+    """The negative direction: n_folds + 1 decision times is the boundary and passes.
+
+    Without this, the guard above is satisfied by any rule that rejects everything.
+    """
+    dates = np.repeat(np.arange(6), 10)
+
+    folds = _walk_forward_indices(n_rows=len(dates), n_folds=5, embargo=0, groups=dates)
+
+    assert len(folds) == 5
+    assert all(len(test_idx) > 0 for _, test_idx in folds)
+
+
+def test_row_walk_forward_rejects_fewer_rows_than_folds() -> None:
+    """Same degeneracy on the ungrouped path, which has no panel guard in front of it."""
+    with pytest.raises(ValueError, match="at least 6 rows"):
+        _walk_forward_indices(n_rows=4, n_folds=5, embargo=0, groups=None)

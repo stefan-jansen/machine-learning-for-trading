@@ -11,6 +11,7 @@ Usage:
     from utils import ML4T_PATH, ML4T_DATA_PATH, REPO_ROOT
 """
 
+import importlib.util
 import os
 from pathlib import Path
 
@@ -93,11 +94,19 @@ if not ML4T_DATA_PATH.exists():
 # Without this, torch imports fail with "undefined symbol" errors on systems
 # where the system libcudart.so is older than what torch expects.
 # Docker images don't need this (CUDA is installed system-wide).
+#
+# Located through the import system rather than by importing torch. `import utils`
+# runs this module, so every script and notebook in the repository paid 502 MB of
+# resident memory for a path string - a third of what the AlgoSeek conversion peaks
+# at inside a reader's container (#558). find_spec resolves the same directories
+# without executing the package, and the string built below is byte-identical.
 if not os.environ.get("LD_LIBRARY_PATH", "").startswith("/usr/local/cuda"):
     try:
-        import torch as _torch
-
-        _torch_root = Path(_torch.__file__).parent
+        _torch_spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):  # absent, or imported without a spec
+        _torch_spec = None
+    if _torch_spec is not None and _torch_spec.origin:
+        _torch_root = Path(_torch_spec.origin).parent
         _cuda_paths = [str(_torch_root / "lib")]
         _nvidia_dir = _torch_root.parent / "nvidia"
         if _nvidia_dir.exists():
@@ -106,9 +115,8 @@ if not os.environ.get("LD_LIBRARY_PATH", "").startswith("/usr/local/cuda"):
         os.environ["LD_LIBRARY_PATH"] = ":".join(
             _cuda_paths + ([_existing_ld] if _existing_ld else [])
         )
-        del _torch, _torch_root, _cuda_paths, _nvidia_dir, _existing_ld
-    except ImportError:
-        pass
+        del _torch_root, _cuda_paths, _nvidia_dir, _existing_ld
+    del _torch_spec
 
 # ============================================================================
 # API Keys (optional - only needed for data downloads)

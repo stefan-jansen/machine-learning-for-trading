@@ -45,6 +45,7 @@ from case_studies.utils.backtest_runner import (
     normalize_prediction_columns,
 )
 from case_studies.utils.registry import prediction_hash_from_parts
+from case_studies.utils.runtime import source_commit
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
 
@@ -134,9 +135,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
             manifest={
                 "schema_version": 1,
                 "case_study": CASE_STUDY,
-                "baseline_source_commit": subprocess.check_output(
-                    ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
-                ).strip(),
+                "baseline_source_commit": source_commit(REPO_ROOT),
                 "preview_only": True,
             },
         )

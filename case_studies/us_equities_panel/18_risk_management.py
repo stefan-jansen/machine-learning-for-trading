@@ -813,7 +813,7 @@ show_with_alt(
 )
 
 # %% [markdown]
-# `20_strategy_analysis.py` reopens one of these per-label sets -
+# `22_strategy_analysis.py` reopens one of these per-label sets -
 # `us-equities-<label>-validation-strategies-v1` - and applies the one official rule: highest
 # validation backtest Sharpe with the backtest hash as deterministic tie-break, within that label.
 # The holdout follows from that selection with nothing in between: retrain the selected

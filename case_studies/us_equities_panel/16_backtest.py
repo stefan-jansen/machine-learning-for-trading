@@ -113,13 +113,8 @@ PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-1d-tabular-dl-v1",
     "us-equities-fwd-ret-1d-nlinear-v1",
     "us-equities-fwd-ret-1d-lstm-v1",
-    "us-equities-fwd-ret-1d-tsmixer-v1",
     "us-equities-fwd-ret-1d-pca-v1",
     "us-equities-fwd-ret-1d-ipca-v1",
-    "us-equities-fwd-ret-5d-pca-v1",
-    "us-equities-fwd-ret-5d-ipca-v1",
-    "us-equities-fwd-ret-21d-pca-v1",
-    "us-equities-fwd-ret-21d-ipca-v1",
 ]
 EXECUTION_TIER = "canonical"
 POPULATION_NAME = ""

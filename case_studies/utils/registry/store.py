@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..runtime import worktree_marker
 from .specs import (
     IDENTITY_VERSION,
     _validate_spec,
@@ -422,8 +423,15 @@ CREATE TABLE IF NOT EXISTS artifact_supersessions (
 
 
 def _git_hash() -> str | None:
+    """Return the short commit for the ``git_commit`` column, with a worktree marker.
+
+    Resolved against the process working directory, which is the notebook's own
+    directory, so it names the checkout the run executed in. The marker is what
+    separates a row whose source is addressable from one whose is not; see
+    :func:`case_studies.utils.runtime.worktree_marker`.
+    """
     try:
-        return (
+        commit = (
             subprocess.check_output(
                 ["git", "rev-parse", "--short", "HEAD"],
                 stderr=subprocess.DEVNULL,
@@ -434,6 +442,7 @@ def _git_hash() -> str | None:
         )
     except Exception:
         return None
+    return commit + worktree_marker()
 
 
 def _utc_now() -> str:

@@ -159,10 +159,13 @@ def _code_cells() -> list[str]:
 def _preamble_violations(cell: str) -> list[str]:
     """Top-level statements in ``cell`` that do more than bind a name.
 
-    The exempted cell is a setup preamble: imports, the warning filter, and the module
+    The exempted cell is a setup preamble: imports, the warning policy, and the module
     constants the rest of the notebook reads. That is what has no seam to split at. A
     statement that computes something - a function, a class, a loop, a lower-case binding
     holding a result - is a step, and a step belongs in a cell the limit counts.
+
+    The warning policy is exempt as the exact zero-argument call `apply_notebook_warning_policy()`
+    and nothing wider, so any other call at column zero is still a step.
 
     Only column-zero lines are statements; a continuation inside a parenthesised import is
     indented, and a line ending in `(` or `,` is opening or continuing one.
@@ -174,6 +177,8 @@ def _preamble_violations(cell: str) -> list[str]:
         if not line.strip() or line.startswith((" ", "\t", "#", ")", '"""')):
             continue
         if line.startswith(("import ", "from ", "warnings.")):
+            continue
+        if line.strip() == "apply_notebook_warning_policy()":
             continue
         if line.rstrip().endswith(("(", ",")):
             continue
@@ -212,6 +217,17 @@ def test_the_preamble_check_rejects_a_cell_that_computes() -> None:
         )
         == []
     )
+    assert (
+        _preamble_violations(
+            "\nfrom case_studies.utils.warning_policy import apply_notebook_warning_policy"
+            '\napply_notebook_warning_policy()\nCASE_DIR = get_dir("x")\n'
+        )
+        == []
+    )
+    assert _preamble_violations("\napply_notebook_warning_policy(strict=True)\n") == [
+        "apply_notebook_warning_policy(strict=True)"
+    ]
+    assert _preamble_violations("\nload_panel()\n") == ["load_panel()"]
 
 
 def _stateful_panel(segment_lengths: tuple[int, ...] = (300, 300)) -> pl.DataFrame:

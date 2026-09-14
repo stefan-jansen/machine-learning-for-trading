@@ -55,7 +55,7 @@ from itertools import cycle
 
 import polars as pl
 
-from utils.style import COLORS, add_message_title, apply_ml4t_style
+from utils.style import COLORS, add_message_title, apply_ml4t_style, show_with_alt
 
 apply_ml4t_style()
 
@@ -641,7 +641,12 @@ if not all_signal.is_empty():
 # No tight_layout(): matplotlibrc sets `figure.constrained_layout.use: True` repo-wide,
 # and calling tight_layout() over it makes matplotlib switch layout engines and say so in
 # a stderr block under the figure. See ml4t/agent-workspace#1106.
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels over the solvent baseline backtests: on the left a histogram of validation Sharpe "
+    "with a dashed line at zero, on the right one point per prediction set and entry scheme "
+    "placing validation Sharpe against mean prediction IC, coloured by model family.",
+)
 
 # %% [markdown]
 # ### Deflated Sharpe Ratio

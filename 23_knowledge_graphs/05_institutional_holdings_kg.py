@@ -983,7 +983,7 @@ add_message_title(
     axes[0],
     "Holder counts and screened sectors for the formation cohort",
     subtitle=(
-        f"{len(data_stocks)} stocks held by {len(data_institutions)} institutions, "
+        "Cohort stocks and the institutions holding them, "
         f"formed at report period {period_calendar['report_date'][0]}"
     ),
 )
@@ -1003,7 +1003,7 @@ show_with_alt(
 # The top panel describes holder overlap inside a fixed ten-institution cohort;
 # it does not measure the price impact of an unwind. The bottom panel describes
 # the name screen, not the market: "Other" is where an issuer whose name nobody
-# wrote into `SECTOR_TERMS` lands, so its height is a property of the term list.
+# wrote into `SECTOR_TERMS` lands, so its length is a property of the term list.
 
 # %% [markdown]
 # ## 6. Top Holdings by Sector

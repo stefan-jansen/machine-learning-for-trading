@@ -41,6 +41,12 @@ import sys
 import zipfile
 from pathlib import Path
 
+from ml4t.data.storage.data_profile import (
+    generate_profile,
+    get_profile_path,
+    save_profile,
+)
+
 from utils.downloading import resolve_data_dir
 
 # Expected files and their approximate sizes (for verification)
@@ -433,6 +439,15 @@ def convert_to_parquet(data_dir: Path) -> bool:
     pl.concat([pl.scan_parquet(path) for path in split_paths]).sink_parquet(all_path)
     all_count = sum(split_counts.values())
     print(f"    all: {all_count:,} rows ({all_path.stat().st_size / 1e6:.1f} MB)")
+
+    # The profile is written here because this converter is the only thing that produces
+    # what `load_firm_characteristics()` reads. `dataset_card.py` reads it back through
+    # `load_profile`; without this write it reports the dataset as unprofiled, which was
+    # true of every copy of this dataset before now.
+    profile = generate_profile(pl.read_parquet(all_path), source="firm_characteristics/download.py")
+    profile_path = get_profile_path(all_path)
+    save_profile(profile, profile_path)
+    print(f"    profile: {profile_path.name}")
     return True
 
 

@@ -30,9 +30,10 @@
 #   Ch19 overlay backtests, however many that currently is - the count is printed
 #   when the overlays load
 # - Identify which rule categories help vs hurt by case study
-# - Understand why tight stops destroy value in most cross-asset strategies
+# - Understand the mechanism by which a tight stop can cost a cross-asset
+#   strategy more than it saves
 #
-# **Book Reference**: Chapter 20, Section 20.7 (Risk Overlays and Stability Across Regimes)
+# **Book Reference**: Chapter 20, Section 20.7 (Risk overlays)
 #
 # **Prerequisites**: Run [`01_aggregate_synthesis`](01_aggregate_synthesis.ipynb) first.
 # Each case study's registry must contain Ch19 `risk_overlay`-stage backtests
@@ -54,6 +55,7 @@ from case_studies.utils.analytics import (
     SHORT_NAMES,
     load_chapter_backtests,
 )
+from case_studies.utils.strategy_analysis import rank_one
 from utils.style import show_with_alt
 
 # %% tags=["parameters"]
@@ -157,11 +159,14 @@ for cs_id in ACTIVE_CS_LIST:
         if not _ch16_raw.is_empty()
         else pl.DataFrame()
     )
+    # backtest_hash decides a tie: it is unique per row, so the baseline this loop
+    # picks is a function of the registry rather than of the order the frames were
+    # concatenated in. Allocations whose Sharpe repeats exactly are ordinary.
     if not ch17_cs.is_empty():
-        best = ch17_cs.sort("sharpe", descending=True).head(1)
+        best = rank_one(ch17_cs, by="sharpe", name="backtest_hash")
         _baseline_rows.append(best.with_columns(baseline_source=pl.lit("ch17")))
     elif not ch16_cs.is_empty():
-        best = ch16_cs.sort("sharpe", descending=True).head(1)
+        best = rank_one(ch16_cs, by="sharpe", name="backtest_hash")
         _baseline_rows.append(best.with_columns(baseline_source=pl.lit("ch16")))
 
 if _baseline_rows:
@@ -422,8 +427,9 @@ show_with_alt(
 # %% [markdown]
 # ## Drawdown Protection
 #
-# Compare max drawdown reduction across case studies. Some overlays
-# reduce drawdown at the cost of Sharpe; others improve both.
+# Compare max drawdown reduction across case studies. An overlay can reduce
+# drawdown at the cost of Sharpe or improve both, and the table below separates
+# the two rather than reporting drawdown alone.
 
 # %%
 dd_improvement = (

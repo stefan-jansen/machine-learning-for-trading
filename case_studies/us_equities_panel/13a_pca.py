@@ -74,7 +74,7 @@ from case_studies.research import (
     run_model_population,
     supersedes_for_run,
 )
-from utils.modeling import load_configs
+from utils.modeling import ConfigError, load_configs
 from utils.paths import get_case_study_dir
 from utils.style import FIGSIZE, add_message_title, ml4t_palette, show_with_alt, zero_line
 
@@ -96,7 +96,9 @@ PREVIEW_N_FACTORS = 0
 #
 # What each setting a run may pass decides:
 #
-# - **`LABELS`** empty fits the primary label and every declared variant. A subset fits only those.
+# - **`LABELS`** empty fits every label whose menu at `config/training/{label}.yaml` declares a
+#   latent-factor model, which in this case study is the primary label alone. A subset fits only
+#   those.
 # - **The factor count** is how many common movements are extracted. It is read from the preset at
 #   `case_studies/config/pca/pca.yaml` rather than set here, so there is one place to change it
 #   and one place to look. It is declared rather than searched, and that is a design choice with
@@ -114,7 +116,29 @@ PREVIEW_N_FACTORS = 0
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
 setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
-published_labels = [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
+# "Published" here is the labels that declare a latent-factor model, not every label the case
+# study declares. The two differ: `config/training/{label}.yaml` declares `latent_factors` on the
+# primary label alone, so a canonical run fits that label and the population it publishes holds
+# exactly what was declared. Reading the wider label list here would make every canonical run
+# narrow its own scope and forfeit the published population under the guard below.
+
+
+def declares_latent_factors(label: str) -> bool:
+    # load_configs raises rather than returning an empty list when a label's menu omits the family,
+    # so absence is read from the exception.
+    try:
+        return bool(load_configs(CASE_STUDY_ID, label, family="latent_factors"))
+    except ConfigError:
+        return False
+
+
+published_labels = [
+    label
+    for label in [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
+    if declares_latent_factors(label)
+]
+if not published_labels:
+    raise ValueError("no label in this case study declares a latent_factors model")
 selected_labels = list(LABELS) if LABELS else published_labels
 unknown_labels = sorted(set(selected_labels) - set(published_labels))
 if unknown_labels:
@@ -188,8 +212,9 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # anything is loaded.
 #
 # The labels get separate requests rather than one shared fit because a label defines which
-# rows are scorable and over what horizon. Fitting once and scoring three ways would give the
-# three labels a common estimate built partly from rows that only one of them can see.
+# rows are scorable and over what horizon. Fitting once and scoring several ways would give every
+# label a common estimate built partly from rows that only one of them can see. Only `fwd_ret_1d`
+# declares a latent-factor model here, so this run builds one request.
 
 # %%
 requests = tuple(

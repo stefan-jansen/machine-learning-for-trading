@@ -56,7 +56,6 @@
 """CME Futures: Label Engineering."""
 
 import math
-import warnings
 from datetime import date
 
 import matplotlib.pyplot as plt
@@ -69,12 +68,13 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.artifact_quality import quality_report, render_quality_report
 from case_studies.utils.label_diagnostics import effective_sample_size, panel_autocorrelation
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_cme_futures
 from utils.artifact_specs import resolve_label_horizon
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 CASE_STUDY_ID = "cme_futures"
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)

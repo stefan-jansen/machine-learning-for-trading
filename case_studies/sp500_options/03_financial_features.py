@@ -51,7 +51,6 @@
 """S&P 500 Options: Feature Engineering."""
 
 import math
-import warnings
 from collections import Counter
 from datetime import date
 
@@ -83,10 +82,11 @@ from case_studies.utils.feature_engineering import (
     trailing_volatility,
     warmup_audit,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_sp500_daily_bars, load_sp500_options_straddles
 from utils.paths import display_path, get_case_study_dir
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 CASE_DIR = get_case_study_dir("sp500_options")
 FEATURES_DIR = CASE_DIR / "features"

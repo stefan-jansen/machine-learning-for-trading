@@ -49,14 +49,9 @@
 
 import json
 import time
-import warnings
 from collections import Counter
 
 import polars as pl
-
-from utils.style import COLORS, add_message_title, show_with_alt
-
-warnings.filterwarnings("ignore")
 
 from case_studies.research import open_study, reuse_disclosure
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
@@ -76,6 +71,7 @@ from case_studies.utils.registry import (
 from case_studies.utils.strategy_analysis import resolve_solvent_carrier
 from case_studies.utils.sweep_config import get_cost_grid_bps
 from utils.paths import get_case_study_dir
+from utils.style import COLORS, add_message_title, show_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"

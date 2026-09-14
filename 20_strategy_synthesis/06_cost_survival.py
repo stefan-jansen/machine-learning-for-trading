@@ -470,24 +470,21 @@ display(
 # The S&P 500 Options case study was validated using executable-label
 # backtesting, pricing straddle entries and exits at actual bid/ask quotes rather
 # than at an assumed bps cost. That case study has no selected configuration cost sweep, so it
-# does not appear in any table above; the figures below are quoted from its own
-# evaluation and are not computed here.
+# does not appear in any table above.
 #
-# Its own evaluation carries the numbers; the shape of them is what belongs here. The median
-# round-trip spread on those straddles is a large double-digit percentage of the premium, and
-# every executable Sharpe in the sweep is negative. Decomposing one prediction across three
-# labels separates where that goes: priced at the mid and unhedged the Sharpe is strongly
-# positive, delta-hedging at the mid takes most of it, and pricing the same trades at the quotes
-# a desk would actually get turns it negative. Ranking on signal and spread jointly recovers
-# part of the gap and does not close it.
+# It is described here for the structure of its cost problem rather than for its numbers, which
+# its own evaluation and §18.8 carry. A single-name option's dominant execution cost is the
+# bid-ask spread on the premium rather than a commission proportional to notional, so the cost
+# scales with how wide the quote is and not with how much is traded. That is why its evaluation
+# decomposes one prediction across three labels - priced at the mid and unhedged, delta-hedged
+# at the mid, and priced at the quotes a desk would actually get - which separates the signal's
+# contribution from the execution's, and why ranking on signal and spread jointly is a different
+# strategy from ranking on signal alone rather than a refinement of it.
 #
-# The ML signal is real - the IC is positive - but the average spread impact per trade is many
-# times the per-period signal it has to pay for. A generic bps cost sweep
-# misrepresents this case study because the cost is predominantly the
-# bid-ask spread, not commission. The teaching point is that strategy
-# design must jointly optimize for signal quality and execution costs:
-# single-stock option spreads are the binding constraint, not model
-# quality.
+# A generic bps cost sweep misrepresents this case study for the same reason: it models a cost
+# that is proportional to notional. The teaching point is that strategy design has to optimize
+# for signal quality and execution cost together, because for this instrument the spread is what
+# the signal has to pay for.
 
 # %% [markdown]
 # ## Cadence–Frequency–Cost Regime

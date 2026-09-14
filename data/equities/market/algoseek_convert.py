@@ -33,6 +33,8 @@ Run from the repository root, once per archive:
 Extracting first is faster for the options archive, which holds **1,275,314** gzip
 members: reading them out of the zip pays the archive's index on every open, and
 unpacking that many small files is slow on any filesystem and slower on Windows.
+Extracting also saves memory - holding that index costs ~0.9 GB for as long as the
+archive is open, before a single row is parsed.
 
 Output, under ``$ML4T_DATA_PATH``:
 
@@ -51,13 +53,28 @@ interrupted run continues where it stopped. The NASDAQ-100 conversion also stage
 day as it is parsed, so a run interrupted midway through a month resumes at the day it
 stopped on rather than restarting the month. Pass ``--force`` to rebuild.
 
-Peak memory is one day of bars while parsing, and about two thirds of a month while a
-month is assembled - roughly 1.3 GB in total for the NASDAQ-100 archive. Give a
-container at least 2 GB; Docker Desktop's own allocation is the ceiling that applies,
-not the host's RAM.
+The data this holds is small - a parsed day is ~50 MB and an assembly batch a few
+hundred - but polars allocates through jemalloc, which by default keeps freed pages
+mapped in one arena per worker thread. Measured on the NASDAQ-100 archive, that
+retention alone reached 3.3 GB of anonymous memory by the fourth month and stayed
+there, against ~100 MB of live data, which is what killed the conversion inside a
+memory-capped container (#558). The preamble below makes jemalloc return freed pages
+immediately. The full 24-month conversion then completes inside a 2 GB container, peaking
+at 1.4 GB and writing the same 48,880,176 rows byte for byte. It has to run before polars
+is imported: jemalloc reads its configuration once, when the extension module loads.
+
+The cost is parse throughput: ten days measured 29.4 s at the default and 36.1 s with
+this setting, against 2,330 MB and 722 MB of resident memory. ``dirty_decay_ms:1000``
+is free but only reaches 1,610 MB, which is not enough to matter for a reader whose
+container is the constraint.
 """
 
 from __future__ import annotations
+
+import os
+
+# Before `import polars`, and for the reason in the module docstring above.
+os.environ.setdefault("_RJEM_MALLOC_CONF", "dirty_decay_ms:0,muzzy_decay_ms:0")
 
 import argparse
 import gzip

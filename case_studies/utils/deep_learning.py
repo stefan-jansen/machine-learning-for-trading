@@ -25,7 +25,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import shutil
 import subprocess
 import time
 import uuid
@@ -61,11 +60,12 @@ from case_studies.utils.registry.store import (
     flush_fold_training_log,
     incremental_prediction_shards,
 )
-from case_studies.utils.runtime import cpu_seconds
+from case_studies.utils.runtime import cpu_seconds, source_commit
 from case_studies.utils.sequence_dataset import (
     GAP_MASK_FEATURES,
     GAP_POLICY_ID,
     FoldSequenceDataset,
+    collate_sequences,
     collate_with_metadata,
     materialize_store_metadata,
     prepare_fold_sequence_stores,
@@ -181,15 +181,7 @@ def _sequence_runtime_identity(config: dict[str, Any]) -> dict[str, str]:
 
 
 def _sequence_runtime_provenance(study: Study, config: dict[str, Any]) -> dict[str, Any]:
-    try:
-        commit = subprocess.check_output(
-            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        commit = "unknown"
+    commit = source_commit(study.release_root)
     return {
         "entry_point": "case_studies.utils.deep_learning",
         "packages": _sequence_runtime_identity(config),
@@ -1544,6 +1536,14 @@ def run_resolved_request(
             model_dir, context, computation, study.case_study
         )
     else:
+        # Per attempt, not deterministic, and that is deliberate. Nothing prevents two runs
+        # of the same training hash from being in flight at once - `nb-run.sh` holds slots,
+        # not per-hash locks - and a shared staging path would interleave two writers'
+        # checkpoints into one tree, which promotes as a corrupt `models/` that validates.
+        # A deterministic name is what a resume wants, but it only becomes safe alongside a
+        # liveness claim that can tell a dead attempt's tree from a live one's, and that
+        # belongs with the code that actually resumes. Until then an attempt's tree is found
+        # by globbing `.models.*.tmp` under the training hash.
         staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
         _configure_sequence_runtime(computation["numerics"])
         fit_wall_t0 = time.perf_counter()
@@ -1575,7 +1575,24 @@ def run_resolved_request(
             )
             os.replace(staging, model_dir)
         except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
+            # The tree stays. It holds every checkpoint the run had written - measured on the
+            # 2026-09-13 crash, 139 checkpoints over 7 of 16 folds, 39 MB, last write 90
+            # seconds before the machine died - and deleting it is the reason an interrupted
+            # sequence run costs its whole fit again rather than the folds it had not reached.
+            #
+            # Keeping it cannot make a partial fit look complete. The warm path gates on
+            # `model_dir.exists()` above, `models/` is created only by the `os.replace` on the
+            # line before this, and that promote raises `OSError: Directory not empty` rather
+            # than clobbering a complete one. A `.models.*.tmp` tree is invisible to every
+            # reader here by construction.
+            #
+            # It also cannot make the uncaught death more recoverable than the caught one,
+            # which is what the old handler did: a `SIGKILL` skips this block and orphans the
+            # tree, so anything papermill turned into a Python exception was destroying state
+            # that a power cut would have kept.
+            #
+            # The cost is disk, and it is small: 11 trees orphaned this way across the whole
+            # artifacts root total 63 MB.
             raise
         fit_wall_s = time.perf_counter() - fit_wall_t0
         fit_cpu_s = cpu_seconds() - fit_cpu_t0
@@ -1903,7 +1920,7 @@ def _train_one_config(
                     y_batch_dev = y_batch.to(device, non_blocking=True)
                     pred_batch = model(X_batch)
                     pred_parts.append(pred_batch.cpu().numpy())
-                    y_parts.append(y_batch.numpy())
+                    y_parts.append(y_batch.cpu().numpy())
                     date_parts.append(timestamps)
                     entity_parts.append(entities)
                     val_loss += criterion(pred_batch, y_batch_dev).item()
@@ -2505,8 +2522,8 @@ def run_dl_cv(
         )
         print("    creating datasets...")
 
-        train_ds = FoldSequenceDataset(train_store)
-        val_ds = FoldSequenceDataset(val_store, include_metadata=True)
+        train_ds = FoldSequenceDataset(train_store, device=torch_device)
+        val_ds = FoldSequenceDataset(val_store, include_metadata=True, device=torch_device)
 
         # The architecture's input width is a property of what the loader
         # actually produced, not of what the caller declared. The store appends
@@ -2544,19 +2561,26 @@ def run_dl_cv(
             t0 = time.perf_counter()
             print(f"    {config_name}:")
 
+            # num_workers stays 0 and the sampler and seed stay exactly as they were:
+            # both decide which sequences land in which batch, and already-registered
+            # results were produced under them. What changed is how a batch is gathered,
+            # which the dataset's __getitems__ does in one indexing operation.
+            # Pinning is for a host tensor awaiting a copy to the card. When the dataset
+            # gathers on the card there is no such copy and nothing to pin.
             train_loader = DataLoader(
                 train_ds,
                 batch_size=cfg_batch_size,
                 shuffle=True,
                 num_workers=0,
-                pin_memory=torch_device.type == "cuda",
+                pin_memory=torch_device.type == "cuda" and not train_ds.returns_device_tensors,
+                collate_fn=collate_sequences,
             )
             val_loader = DataLoader(
                 val_ds,
                 batch_size=cfg_batch_size,
                 shuffle=False,
                 num_workers=0,
-                pin_memory=torch_device.type == "cuda",
+                pin_memory=torch_device.type == "cuda" and not val_ds.returns_device_tensors,
                 collate_fn=collate_with_metadata,
             )
 
@@ -2705,9 +2729,13 @@ def run_dl_cv(
                 f"({elapsed:.1f}s, {len(checkpoint_ics)} checkpoints)"
             )
 
-        # Free this fold's data before creating next fold's sequences
+        # Free this fold's data before creating next fold's sequences. The datasets may
+        # hold the fold's features on the card, so release those blocks to the rest of the
+        # machine rather than leaving them reserved until the process exits.
         del train_ds, val_ds, train_store, val_store
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     if n_valid_folds == 0:
         raise ValueError("No valid folds created. Check data size vs lookback.")

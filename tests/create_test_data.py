@@ -1944,11 +1944,12 @@ def build_13f_bulk_holdings(source: Path, output: Path) -> list[Path]:
 # so CI trained on 2,582 sentences the annotators disagreed about, each carrying
 # whatever label the corpus assigned.
 #
-# `load_financial_phrasebank(agreement=...)` looks like it would have caught that
-# and does not: it filters on an `agreement` column, and neither production's file
-# nor the fixture's has one, so the argument has never selected anything. What
-# makes production correct is that its file already holds the unanimous subset.
-# Copying it is therefore the fix, and no reduction applies.
+# `load_financial_phrasebank(agreement=...)` looked like it would have caught that
+# and did not: it filtered on an `agreement` column, and no distributed file has
+# one, so the argument selected nothing. It now selects the file for the requested
+# level and refuses a level that was never downloaded. What makes production
+# correct is that its file already holds the unanimous subset, so copying it is the
+# fix here and no reduction applies.
 
 PHRASEBANK_DIR = Path("alternative") / "text" / "financial_phrasebank"
 PHRASEBANK = PHRASEBANK_DIR / "sentences_allagree.parquet"

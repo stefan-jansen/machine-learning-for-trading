@@ -60,7 +60,6 @@
 
 import json
 import sqlite3
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -69,11 +68,6 @@ import pandas as pd
 import polars as pl
 import torch  # ml4t.diagnostic loads cudart; torch must import first
 import yaml
-
-from utils.style import show_with_alt
-
-warnings.filterwarnings("ignore")
-
 from ml4t.diagnostic.evaluation import PortfolioAnalysis
 from ml4t.diagnostic.integration import (
     BacktestReportMetadata,
@@ -120,6 +114,7 @@ from case_studies.utils.strategy_analysis import (
 from case_studies.utils.sweep_config import get_universe_filters_for
 from case_studies.utils.uncertainty import ENTIRE_REGISTRY, NO_CARRIER
 from utils.paths import get_output_dir
+from utils.style import show_with_alt
 
 # Figures go through `show_with_alt`, and none of them calls `tight_layout()`. Both are
 # measured rather than stylistic: `utils/style` and `matplotlibrc` set

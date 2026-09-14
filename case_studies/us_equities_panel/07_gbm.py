@@ -112,8 +112,20 @@ PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 DIAGNOSTIC_CONFIG_NAMES = ["default_mse"]
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
-SUPERSEDES_SETS: dict = {}
+SUPERSEDES_POPULATION: str = "1ce92c9f8dc0"
+
+# A candidate set is sealed once written, so a run whose members differ from the recorded
+# generation has to name the set it replaces, keyed by the full set name because that is what
+# the refusal prints. Both moved when 04_model_based_features was rebuilt at production scale
+# on 2026-09-10: all 15 registered gbm runs pin `model_based` at sha256 86ece972 and the file on
+# disk is 0e74d15f, so every one is unreachable and the catalog refits from cold. `fwd_ret_5d`
+# and `fwd_ret_21d` have no recorded generation and need no entry - `create` refuses a first
+# version that claims to replace one. Resolved through `candidate_set_supersedes` rather than
+# passed straight to `freeze`, so a reader's clean clone publishes generation one.
+SUPERSEDES_SETS: dict = {
+    "us-equities-fwd-ret-1d-gbm-v1": "464646b3bd65",
+    "us-equities-fwd-ret-1d-gbm-diagnostics-v1": "30766ca63471",
+}
 
 # %%
 study = open_study("us_equities_panel", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)

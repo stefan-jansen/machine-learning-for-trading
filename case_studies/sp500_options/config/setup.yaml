@@ -65,6 +65,9 @@ mapping:
   # per concurrent cohort. The specialized path does not target a fixed vega.
   sizing: equal_premium_capital_with_fixed_cohort_fraction
 
+# These components are what charges this case study. `_htm_backtest.py` reads this block
+# directly; the `commission.rate` and `slippage.rate` in `config/backtest/base.yaml` are inert
+# on this case study's path and are documented there.
 costs:
   class: dominant
   components:

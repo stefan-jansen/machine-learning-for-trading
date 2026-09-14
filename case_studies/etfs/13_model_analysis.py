@@ -58,7 +58,6 @@
 # %%
 """Compare every registered ETF model family on one panel, without selecting among them."""
 
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -99,10 +98,11 @@ from case_studies.utils.notebook_render import (
     selection_adjusted_leader_table,
 )
 from case_studies.utils.registry import load_prediction_index
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY = "etfs"

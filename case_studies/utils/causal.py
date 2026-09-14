@@ -387,6 +387,10 @@ def _walk_forward_indices(
     """Build expanding-window folds in rows or complete decision-time groups."""
     if groups is None:
         fold_size = n_rows // (n_folds + 1)
+        if fold_size == 0:
+            raise ValueError(
+                f"{n_folds}-fold walk-forward needs at least {n_folds + 1} rows, got {n_rows}."
+            )
         folds = []
         for fold in range(n_folds):
             train_end = (fold + 1) * fold_size
@@ -405,7 +409,24 @@ def _walk_forward_indices(
     ):
         raise ValueError("groups must be sorted and contiguous")
 
+    # A fold is `len(ordered_groups) // (n_folds + 1)` decision times wide, and integer
+    # division makes that 0 whenever the panel holds fewer complete decision times than
+    # folds. Every train and test slice is then empty, every fold is skipped downstream,
+    # and the estimate comes back NaN over zero observations with nothing raised - the
+    # caller's guard counts ROWS (`(n_folds + 1) * 50 + n_folds * embargo`), which a wide
+    # panel clears on a handful of dates. Measured on a 10,000-row cap of
+    # us_firm_characteristics/09_causal_dml: 8,180 rows, 4 complete decision months,
+    # 5 folds, `4 // 6 == 0`, full summary printed, DML effect nan.
+    #
+    # The count that has to clear the geometry is decision times, so it is checked here,
+    # at the one place the geometry is built, rather than in each caller.
     fold_size = len(ordered_groups) // (n_folds + 1)
+    if fold_size == 0:
+        raise ValueError(
+            f"{n_folds}-fold walk-forward needs at least {n_folds + 1} complete decision "
+            f"times, got {len(ordered_groups)}. On a panel the fold geometry is sized in "
+            f"decision times, not rows, so a row-count minimum does not constrain it."
+        )
     folds = []
     for fold in range(n_folds):
         train_end = (fold + 1) * fold_size
@@ -1948,10 +1969,20 @@ def run_resolved_causal_request(
         return cached
 
     # Before the fit, not after it. The registry can already hold a current identity for
-    # this label that this run does not retire - the ordinary state whenever this module
-    # has been edited, since the spec carries a hash of the whole file - and the write
-    # refuses that. Asking now costs one read and names the hash to declare; asking at
-    # the write costs the fit and every placebo refit first. See #953.
+    # this label that this run does not retire, and the write refuses that. Asking now
+    # costs one read and names the hash to declare; asking at the write costs the fit and
+    # every placebo refit first - an hour on a panel of this size, spent to be told
+    # something the registry could have said before the first fold.
+    #
+    # The reason the state arises has changed, and the old wording here said the wrong
+    # one: it read "whenever this module has been edited, since the spec carries a hash of
+    # the whole file". `_causal_source_identity` no longer hashes the module - it returns
+    # the declared `CAUSAL_RUNNER_VERSION` - so an edit to this file moves no identity at
+    # all. What moves them is that integer being raised by hand, and then every
+    # resolver-based fit in every case study moves at once, which makes the pre-fit check
+    # matter more rather than less. `tests/test_causal_prefit_supersedes_check.py` pins it
+    # against the write-time rule, which it calls rather than restates.
+    # See ml4t/agent-workspace#953.
     check_causal_supersedes(
         study.case_study,
         causal_hash,

@@ -70,7 +70,6 @@
 
 import hashlib
 import logging
-import warnings
 from datetime import date, timedelta
 
 import arviz as az
@@ -93,6 +92,7 @@ from case_studies.utils.temporal import (
     walk_forward_feature,
     write_model_based,
 )
+from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_sp500_daily_bars, load_sp500_options_straddles
 from utils.artifact_specs import resolve_label_buffer_unit
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
@@ -101,7 +101,7 @@ from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, add_message_title, show_with_alt
 
-warnings.filterwarnings("ignore")
+apply_notebook_warning_policy()
 logging.getLogger("pymc").setLevel(logging.ERROR)
 
 # %% [markdown]

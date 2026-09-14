@@ -17,7 +17,7 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 45 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
+# 47 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
@@ -42,13 +42,22 @@
 # `test_gbm_holdout_rekey` was added on 2026-08-30 with the GBM holdout re-keying
 # hook. It imports `case_studies/utils/gbm.py`, which is the boundary itself.
 #
-# `test_holdout_expected_keys` loads `20_strategy_synthesis/holdout.py`, whose
-# module scope reaches lightgbm and torch through the family training paths it
-# dispatches to. It tests two pure functions and needs none of that, but the
-# module cannot be imported without it. `test_holdout_force_regenerates` loads
-# the same module for the same reason and is behind the same boundary, and so does
-# `test_holdout_selection_is_single_sourced`, which has to call `select_best_models`
-# and the canonical resolver on one registry to show they answer the same.
+# `test_holdout_expected_keys`, `test_holdout_force_regenerates` and
+# `test_holdout_selection_is_single_sourced` were all deselected here because
+# `20_strategy_synthesis/holdout.py`, since deleted, imported torch and lightgbm at module
+# scope to win an OpenMP load-order race for the `_train_*` family it dispatched to.
+# Retiring that family removed both imports, so all three left this section: the first two
+# are deleted with the code they pinned, and the third now runs in `test-unit` and reads
+# `case_studies/utils/strategy_analysis.py`, which never imported either package.
+#
+# Measured with the packages genuinely hidden, not with `sys.modules` stubbed. Only two
+# things ask for torch in that test's whole import set, and neither is a dependency:
+# polars probes `find_spec("torch")` in `_lazy_import`, which answers None when it is
+# absent, and `utils/config.py:98` does `import torch as _torch` inside a
+# `try/except ImportError: pass` that prepends the CUDA runtime to LD_LIBRARY_PATH.
+# Reading `sys.modules` says torch is LOADED when it is installed, which is true and is
+# a different question from whether it is required - the distinction that kept this
+# entry alive one revision too long.
 # ---------------------------------------------------------------------------
 # The three files the etfs deep-learning and latent-factor pass added are behind
 # the same boundary. `test_common_sample_daily_ic` tests one pure polars
@@ -72,9 +81,6 @@ tests/test_gbm_classification_target.py
 tests/test_gbm_holdout_rekey.py
 tests/test_gbm_identity.py
 tests/test_gbm_runtime.py
-tests/test_holdout_expected_keys.py
-tests/test_holdout_force_regenerates.py
-tests/test_holdout_selection_is_single_sourced.py
 tests/test_insight_chapter.py
 tests/test_latent_epoch_ic_over_dates.py
 tests/test_latent_factors_identity.py
@@ -84,6 +90,10 @@ tests/test_lightning_announcement_silence.py
 tests/test_family_hook_dispatch.py
 tests/test_model_analysis_selection.py
 tests/test_model_source_identity_versions.py
+# The gather this file tests is the torch one: it builds a FoldSequenceDataset and
+# runs a DataLoader over it, so it imports torch directly rather than reaching it
+# through the module under test.
+tests/test_sequence_batch_gather.py
 # `test_prediction_sequence_cap` tests the same module as `test_sequence_dataset`
 # below. `case_studies/utils/sequence_dataset.py` imports torch at :10 for the
 # Dataset subclass; these cases exercise the index builders, which never touch it.
@@ -146,17 +156,38 @@ tests/test_model_catalog_columns.py
 #
 # The first three collect nothing but notebook executions, so the whole file
 # goes. `test_model_registry.py` does not: only `test_model_notebook` runs a
-# notebook, and its other ten tests are pure config assertions that finish in
-# 0.07s. Excluding the file threw those away, which is the same
+# notebook, and its siblings are pure config assertions that finish in 0.14s.
+# Excluding the file threw those away, which is the same
 # exclude-more-than-you-meant defect the subtraction below exists to fix.
-# Eleven, not nine: `test_registering_stage_maps_to_its_actual_entry_point` is
-# parametrized over five stages, so counting `def test_` undercounts what the
-# deselect leaves behind. Measured 2026-09-03: 105 collected, 94 deselected.
+# Count the deselect, not `def test_`: parametrization makes the two disagree,
+# and `test_registering_stage_maps_to_its_actual_entry_point` alone contributes
+# five. Measured 2026-09-12: 110 collected, 98 deselected, 12 left running
+# (2026-09-03 it was 105 / 94 / 11, so this number moves and is not a pin).
+#
+# `test_model_notebook` is the one exception to "each line names the job that
+# does run it", because no CI job CAN run it. It skips at
+# `tests/test_model_registry.py:532` when `case_studies/<case study>/features`
+# or `labels` is absent, and both are absent on every runner: `.gitignore:152`
+# and `:154` exclude them, nothing tracks them, and a maintainer worktree
+# reaches them through a symlink into `~/ml4t/artifacts`. Every parametrization
+# would skip, so wiring it into a job buys a green that executed nothing - which
+# is the failure this file's subtraction exists to prevent, arriving by the
+# other door. It is deselected here so the file's twelve siblings still run,
+# not because a job is missing.
+#
+# The residual gap, stated rather than implied: the end-to-end path - a notebook
+# runs, registers, and the `entry_point` it recorded names the notebook that
+# wrote it - executes nowhere in CI. `test_model_notebook` is the only test that
+# walks it, and a maintainer worktree is the only place it can. PR #1006's
+# `tests/test_entry_point_names_the_notebook.py` pins the resolver that chooses
+# the value, which is the half that runs without stage 01-05 inputs; nothing
+# observes what a real registration writes. That is why a stale `dl_tsmixer`
+# literal in this file's own query survived from the initial release commit.
 # ---------------------------------------------------------------------------
 tests/test_case_studies.py                       # cs-<case-study> (test-case-studies)
 tests/test_chapter_notebooks.py                  # chNN (test-chapters)
 tests/test_docker_notebooks.py                   # test-py312, test-neo4j, test-benchmark
-tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other eleven tests run here
+tests/test_model_registry.py::test_model_notebook  # no job can run it (see above); its siblings run here
 
 # ---------------------------------------------------------------------------
 # Needs the reader's Docker image. It walks every declared third-party import

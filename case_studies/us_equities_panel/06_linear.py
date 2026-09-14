@@ -117,13 +117,36 @@ SUPERSEDES_POPULATION: str = ""
 # the refusal prints. These two moved when 04_model_based_features was rebuilt at production
 # scale on 2026-09-10: every stage-06 training run registered before that pinned the superseded
 # `model_based` artifact, so the whole catalog refitted and both 2026-08-18 generations went
-# stale. `fwd_ret_5d` and `fwd_ret_21d` have no recorded generation and need no entry.
+# stale.
 # Resolved through `candidate_set_supersedes` rather than passed straight to `freeze`, because a
 # reader's clean clone has no generation to supersede and `create` refuses a first version that
 # claims to replace one.
+#
+# The four `fwd_ret_5d` and `fwd_ret_21d` entries were added 2026-09-11, and the comment they
+# replace - "have no recorded generation and need no entry" - was true when it was written and
+# stopped being true when this notebook ran. The 2026-09-10 run created all six sets; the two
+# `fwd_ret_1d` ones already had a generation to supersede and were the only two that needed
+# declaring to get that run published. The other four are now gen 1 and live, so the NEXT run
+# that moves their members is refused at the freeze, which is after the fit. That refusal cost
+# 78 minutes of cold fitting once already.
+#
+# A literal here names the generation in force, and it is re-typed whenever that generation
+# moves. The two arms of `candidate_set_supersedes` are not two equally good declarations:
+# `create` matches on the member list before it reads the declaration at all, so naming the tip
+# on an unchanged re-run writes nothing, while naming what the tip replaced raises
+# "must explicitly supersedes <tip>" as soon as the members do move - at the freeze, after the
+# fit. The tip is therefore correct on both the re-run and the refit and the predecessor is
+# correct on only one of them, so there is no run on which the predecessor is the better
+# declaration. Reproduced against `CandidateSet.create` and `OfficialPopulation.create` on
+# 2026-09-11; the guard is `same_list` in research/population.py and the `bound is not None`
+# branch in research/comparison.py.
 SUPERSEDES_SETS: dict = {
-    "us-equities-fwd-ret-1d-linear-v1": "454f73021f33",
-    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "29155b2c69f1",
+    "us-equities-fwd-ret-1d-linear-v1": "55d64275dfd6",
+    "us-equities-fwd-ret-1d-linear-diagnostics-v1": "ed1840bfaeb8",
+    "us-equities-fwd-ret-5d-linear-v1": "e7b744f380d5",
+    "us-equities-fwd-ret-5d-linear-diagnostics-v1": "5514968cd0bb",
+    "us-equities-fwd-ret-21d-linear-v1": "6e8179623f0a",
+    "us-equities-fwd-ret-21d-linear-diagnostics-v1": "636c1c2425aa",
 }
 
 # %%

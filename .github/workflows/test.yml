@@ -24,14 +24,38 @@
 
 name: Tests
 
-# One run per ref, and a burst collapses to the newest tree. Merging eight pull requests in an
-# evening previously started eight full matrices on `main`, each testing a tree the next merge
-# superseded minutes later, and each mailing a failure notice. Cancelling the superseded ones
-# keeps the invariant the push trigger exists for - what is on `main` has been tested - while
-# testing the tip rather than every intermediate state. Pull-request runs collapse the same way
-# when a branch is pushed to repeatedly.
+# One run per pull request, and one per commit on `main`.
+#
+# A pull request still collapses to its newest push: a branch pushed to repeatedly should
+# test the tip and nothing before it.
+#
+# `main` is keyed by commit, not by ref, and the two cancellations that produces want
+# opposite treatment. Two runs exist for one commit - the `push` run and the run
+# `Docker Publish` triggers on finishing - and they test the same tree, so collapsing
+# them is pure saving; measured on ten consecutive merges on 2026-09-12, the push run was
+# cancelled 11 s to 3 min in, every time, by the run that replaced it. Cancelling ACROSS
+# commits is where the coverage went. Keying by ref did both, and the second one cost
+# more than the first saved: merges landing 10 to 30 minutes apart against jobs needing
+# 20 to 46 minutes meant the six slowest never finished at all. By 01:00 on 2026-09-13
+# `cs-etfs`, `cs-nasdaq100_microstructure`, `cs-sp500_equity_option_analytics`,
+# `cs-sp500_options`, `ch11-12` and `ch16-17` had last reported five merges back, and
+# `main` runs the full matrix precisely so that failures outside a merged diff stay
+# visible - which those six had stopped providing.
+#
+# `github.sha` is the right key on both event types, which is measured rather than read
+# off the docs. On a `workflow_run` event it is the default branch tip at event time, and
+# it is what gets tested: the checkout in run 34725716888 fetched
+# `+02e91fa71948...:refs/remotes/origin/main`, matching that run's `head_sha`. When two
+# merges land inside one Docker Publish, both triggered runs are stamped with the later
+# commit - runs 34717628030 and 34717636693 are both `e0ea7054` - so they still share a
+# group and still collapse, which is the same-tree case this wants collapsed.
+#
+# The cost is a full matrix per merge during a burst, in runner minutes that are free on
+# a public repo and wall-clock that gates nothing: `main`'s run blocks no merge. A late
+# complete answer beats a prompt absent one. `.github/workflows/ci-job-lag.yml` reports
+# when a job stops reporting, whichever way this setting goes.
 concurrency:
-  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 on:
@@ -490,6 +514,24 @@ jobs:
           source .venv/bin/activate
           python .github/scripts/check_constant_subscripts.py --selftest
           python .github/scripts/check_constant_subscripts.py
+      # Alt text is what a reader who cannot see the figure is handed instead of it, so
+      # alt text naming a chart the cell never draws tells that reader something false
+      # rather than something less. Nothing else here can see it: a prose rewrite that
+      # swaps "heatmap" for "grouped bars" changes no code, so ruff, the formatter and
+      # the notebook tests all stay green (ml4t/agent-workspace#1164).
+      #
+      # This is the machine-decidable third of that clause, not the whole of it. The
+      # wider prose sweep it comes from reports 1,237 violations over this repository,
+      # 603 of them one rule about comment blocks in code cells, so gating on the sweep
+      # would red every open PR; these three rules report zero. Stdlib-only AST over the
+      # jupytext sources, ~4 s. `--selftest` first: two cases that must fire and eleven
+      # that must not, the eleven being real sentences from this repository that earlier
+      # forms of the rule wrongly reported.
+      - name: A figure's description describes the figure its cell draws
+        run: |
+          source .venv/bin/activate
+          python .github/scripts/check_notebook_prose.py --selftest
+          python .github/scripts/check_notebook_prose.py
       - name: Notebook output hygiene
         run: |
           source .venv/bin/activate
@@ -614,10 +656,17 @@ jobs:
           uv export --frozen --extra live --extra dev --no-emit-project --no-hashes \
             --format requirements-txt \
             | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-constraints.txt
+          #
+          # `ipykernel` is here for a capability rather than an import. This venv had
+          # `jupytext` and `papermill` and no kernelspec at all, so `find_kernel_specs()`
+          # returned an empty dict and any test that executes a notebook failed at the sync
+          # with `KeyError: Please choose a kernel name among dict_keys([])`. A job that
+          # installs a notebook runner and cannot run a notebook can only host tests that
+          # stop short of doing it.
           uv pip install --constraint /tmp/locked-constraints.txt \
             pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow nest-asyncio \
-            ml4t-diagnostic jupytext papermill ml4t-backtest ml4t-data ml4t-engineer databento
+            ml4t-diagnostic jupytext papermill ipykernel ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -973,6 +1022,15 @@ jobs:
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
+
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: astral-sh/setup-uv@v6
         if: steps.reach.outputs.have_key
         with:
@@ -1085,6 +1143,7 @@ jobs:
             tests/test_artifact_specs.py \
             tests/test_backtest_presets.py \
             tests/test_etf_baseline_parity.py \
+            tests/test_fixture_population_backtests.py::test_the_shipped_fixtures_publish_what_they_are_known_to \
             tests/test_sp500_options_research.py::test_official_population_is_snapshotted_before_option_execution \
             tests/test_us_firm_research_workflow.py::test_open_study_writes_canonical_results_to_output_dir \
             -m "not production_extract" \
@@ -1108,7 +1167,7 @@ jobs:
           print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
           PY
   # ---------------------------------------------------------------------------
-  # The 35 test files that need the modelling environment.
+  # The 47 test files that need the modelling environment.
   #
   # These ran in NO job. .github/ci/unit-test-quarantine.txt excluded them from
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
@@ -1187,7 +1246,7 @@ jobs:
     # outcome this job must never have.
     if: always()
     runs-on: ubuntu-latest
-    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 36.
+    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 47.
     # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
@@ -1293,15 +1352,13 @@ jobs:
             tests/test_sae_batch_size.py \
             tests/test_sdf_checkpoint_numbering.py \
             tests/test_sdf_macro_context.py \
+            tests/test_sequence_batch_gather.py \
             tests/test_sequence_dataset.py \
             tests/test_sequence_identity_roundtrip.py \
             tests/test_sequence_holdout_rekey.py \
             tests/test_smoke_configs.py \
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
-            tests/test_holdout_expected_keys.py \
-            tests/test_holdout_force_regenerates.py \
-            tests/test_holdout_selection_is_single_sourced.py \
             tests/test_tabular_dl_identity.py \
             tests/test_tabular_dl_runtime.py \
             tests/test_latent_convergence_guard.py \
@@ -1378,6 +1435,70 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Six chapter jobs download checkpoints from HuggingFace while the notebook
+      # runs: ch04, ch22 and ch23 (all-MiniLM-L6-v2), ch10 (finbert-tone,
+      # ProsusAI/finbert, ModernBERT-base, deberta-v3-small and two datasets),
+      # ch11-12 (finbert-tone) and ch13 (granite-timeseries-ttm-v1, chronos-t5-tiny).
+      # Nothing cached them, so every job of every run fetched them again,
+      # unauthenticated, several jobs at once from the same runner pool. Measured
+      # 2026-09-12: ch11-12 red on #994 with `429 Too Many Requests` loading
+      # yiyanghkust/finbert-tone, and ch13 red on `main` two hours later with
+      # "couldn't connect to https://huggingface.co" on ibm-granite. Neither failure
+      # names the commit under test, and both read as that commit's.
+      #
+      # A cache hit cannot serve the wrong checkpoint. HuggingFace stores each
+      # snapshot under its own revision sha, so a hit either holds the revision the
+      # notebook asks for or falls through to the network; the key decides how much
+      # of the download is skipped, never which bytes load. That is what makes a
+      # coarse key safe here.
+      #
+      # The key buckets by ISO week rather than pinning content, because nothing in
+      # the repo declares which checkpoints a chapter pulls - the model ids are
+      # literals inside the notebooks, and a manifest listing them would be a second
+      # place to keep in step. A weekly bucket picks up a newly added model within a
+      # week at the cost of one download, and `restore-keys` starts that week's first
+      # run from the previous week's entry instead of empty. A constant key would
+      # never save again after the first run, freezing the cache at whatever the
+      # chapters needed that day.
+      #
+      # Named jobs rather than all of them, and the list is a BUDGET decision with a number
+      # behind it. A repository gets 10 GB of Actions cache and this one was already holding
+      # 7.0 GB of buildkit layer blobs, the largest a single 4.4 GB base layer. Caching every
+      # chapter measured 3.83 GB and put the repository at 10.85 GB, over the limit, where
+      # GitHub evicts least-recently-used - which would have been those layers, silently
+      # trading a lockfile-image rebuild for a checkpoint download. The four that download
+      # anything at all are ch05, ch10, ch11-12 and ch13; ch10 alone is 2.66 GB of the 3.83,
+      # and it is the only one of the four never observed failing. Dropping it fits in 1.27 GB.
+      #
+      # Re-measure rather than trusting this list: `gh api .../actions/caches` shows what each
+      # key costs and `.../actions/cache/usage` shows the total. A chapter that starts pulling
+      # a checkpoint shows up as a key with a real size and belongs here; a chapter here that
+      # stops pulling one shows up as a ~200-byte key and does not.
+      - name: HuggingFace cache key
+        id: hfkey
+        if: steps.reach.outputs.have_key
+        run: echo "week=$(date -u +%GW%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache HuggingFace checkpoints
+        if: >-
+          steps.reach.outputs.have_key
+          && contains(fromJSON('["ch05","ch11-12","ch13"]'), matrix.name)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ matrix.name }}-${{ steps.hfkey.outputs.week }}
+          restore-keys: |
+            hf-${{ matrix.name }}-
+
       - name: Resolve the image this commit declares
         id: image
         if: steps.reach.outputs.have_key
@@ -1405,10 +1526,10 @@ jobs:
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
         run: |
-          mkdir -p $ML4T_OUTPUT_DIR
+          mkdir -p "$ML4T_OUTPUT_DIR"
           if [ -d test-data/intermediates ]; then
-            cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
-            echo "Seeded $(du -sh $ML4T_OUTPUT_DIR | cut -f1) of intermediates"
+            cp -r test-data/intermediates/* "$ML4T_OUTPUT_DIR"/
+            echo "Seeded $(du -sh "$ML4T_OUTPUT_DIR" | cut -f1) of intermediates"
           fi
           # Ch20 outputs go to repo dir (get_chapter_dir doesn't redirect)
           if [ -d test-data/intermediates/ch20_synthesis/output ]; then
@@ -1430,20 +1551,55 @@ jobs:
           TEST_FILTER_INPUT: ${{ github.event.inputs.test_filter }}
           MATRIX_FILTER: ${{ matrix.filter }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          HF_HOME: /hf-cache
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           FILTER="${TEST_FILTER_INPUT:-$MATRIX_FILTER}"
           mkdir -p "$ML4T_OUTPUT_DIR"
+          # actions/cache creates the path on a hit and leaves it absent on a miss,
+          # and docker would then create the bind source itself as root-owned.
+          mkdir -p "$HOME/.cache/huggingface"
+          # The cache is the braces and this is the belt: a cache miss, an ISO-week key
+          # rollover, or ch10 (which has no cache entry) still downloads, and an
+          # unauthenticated download is rate limited per IP across a shared runner pool.
+          # Passed only when the secret exists, so the container never sees HF_TOKEN=""
+          # and huggingface_hub is not asked to interpret an empty credential.
+          hf_auth=()
+          if [ -n "${HF_TOKEN:-}" ]; then
+            hf_auth=(-e HF_TOKEN)
+          else
+            echo "::notice::HF_TOKEN is not set; HuggingFace downloads in this job are anonymous and rate limited per IP."
+          fi
           docker run --rm \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -v "$ML4T_OUTPUT_DIR:$ML4T_OUTPUT_DIR" \
+            -v "$HOME/.cache/huggingface:/hf-cache" \
             -w "$GITHUB_WORKSPACE" \
             -e PYTHONPATH -e ML4T_DATA_PATH -e ML4T_OUTPUT_DIR \
             -e MPLBACKEND -e PLOTLY_RENDERER \
-            -e FRED_API_KEY \
+            -e FRED_API_KEY -e HF_HOME "${hf_auth[@]}" \
             "${{ steps.image.outputs.ref }}" \
             python -m pytest tests/test_chapter_notebooks.py \
               -v --tb=short \
               -k "$FILTER"
+
+      # The container is root and the runner is not, so whether the cache can be saved depends
+      # on the mode each writer happens to use. `huggingface_hub` writes 644 and tars fine; the
+      # `evaluate` library writes its downloaded metric scripts 600, and three of those under
+      # `evaluate/downloads/` failed ch10's save with `Cannot open: Permission denied` and tar
+      # exit 2 - reported as a warning, so the job stayed green having cached nothing. One
+      # chmod as root covers every writer instead of one per library. `a+rX` and not `a+rx`:
+      # the capital X sets the execute bit on directories only, leaving file modes alone.
+      #
+      # `always()` because a run that failed still downloaded the checkpoints, and they are the
+      # expensive part to fetch again.
+      - name: Let the runner read what the container cached
+        if: >-
+          always() && steps.reach.outputs.have_key && steps.image.outputs.ref != ''
+          && contains(fromJSON('["ch05","ch11-12","ch13"]'), matrix.name)
+        run: |
+          docker run --rm -v "$HOME/.cache/huggingface:/hf-cache" \
+            "${{ steps.image.outputs.ref }}" chmod -R a+rX /hf-cache
 
   # ---------------------------------------------------------------------------
   # Case study pipeline tests — inside Docker (ml4t/ml4t:latest)
@@ -1509,6 +1665,15 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Resolve the image this commit declares
         id: image
         if: steps.reach.outputs.have_key
@@ -1536,10 +1701,10 @@ jobs:
       - name: Seed case study intermediates
         if: steps.reach.outputs.have_key
         run: |
-          mkdir -p $ML4T_OUTPUT_DIR
+          mkdir -p "$ML4T_OUTPUT_DIR"
           if [ -d test-data/intermediates ]; then
-            cp -r test-data/intermediates/* $ML4T_OUTPUT_DIR/
-            echo "Seeded $(du -sh $ML4T_OUTPUT_DIR | cut -f1) of intermediates"
+            cp -r test-data/intermediates/* "$ML4T_OUTPUT_DIR"/
+            echo "Seeded $(du -sh "$ML4T_OUTPUT_DIR" | cut -f1) of intermediates"
           fi
 
       - name: Run pipeline (${{ matrix.case-study }})
@@ -1637,6 +1802,15 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
 
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Run py312 notebooks
         if: steps.reach.outputs.have_key
         env:
@@ -1730,6 +1904,15 @@ jobs:
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
+
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve the image this commit declares
         id: image
@@ -1913,6 +2096,15 @@ jobs:
           path: test-data
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
+
+      - name: Record the fixture this job read
+        if: steps.reach.outputs.have_key
+        run: |
+          # tee, not a plain redirect: the summary is where a reader looks, and the log is
+          # where this is greppable and where a broken command would be visible at all. A
+          # step whose whole output goes somewhere no API exposes cannot be checked.
+          printf '%s\n' "test-data $(git -C test-data rev-parse HEAD)" \
+            "$(git -C test-data log -1 --format='%cs %s')" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Run Ch02 database benchmark notebooks
         if: steps.reach.outputs.have_key
