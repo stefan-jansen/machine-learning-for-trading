@@ -45,8 +45,11 @@
 
 import json
 import sqlite3
+import warnings
 
 import polars as pl
+
+warnings.filterwarnings("ignore")
 
 from case_studies.research import supersedes_for_run
 from case_studies.research.holdout import build_holdout_training_spec
@@ -58,10 +61,7 @@ from case_studies.sp500_options.research_workflow import (
 from case_studies.utils.backtest_presets import strategy_view
 from case_studies.utils.registry import training_hash_from_spec
 from case_studies.utils.strategy_analysis import resolve_solvent_carrier
-from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from utils.paths import get_case_study_dir
-
-apply_notebook_warning_policy()
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_options"

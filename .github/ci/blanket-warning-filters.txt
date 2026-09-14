@@ -54,6 +54,7 @@ case_studies/nasdaq100_microstructure/01_feasibility_analysis.py
 case_studies/nasdaq100_microstructure/02_labels.py
 case_studies/nasdaq100_microstructure/03_financial_features.py
 case_studies/nasdaq100_microstructure/04_model_based_features.py
+case_studies/sp500_options/17_holdout_backtest.py
 case_studies/us_equities_panel/01_feasibility_analysis.py
 case_studies/us_equities_panel/02_labels.py
 case_studies/us_equities_panel/03_financial_features.py
