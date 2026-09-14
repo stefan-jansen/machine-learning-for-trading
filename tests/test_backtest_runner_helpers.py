@@ -334,6 +334,14 @@ def test_substitute_continuous_return_dedupe_assertion(
     # artifact is now resolved so that output isolation reaches it.
     monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
     monkeypatch.setattr(br, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
+    # `CASE_STUDIES_DIR` reaches the `setup.yaml` read and stops there. The label parquet is
+    # generated output, so the function resolves it through `get_case_study_dir`, which reads
+    # `ML4T_OUTPUT_DIR` before it looks at `CASE_STUDIES_DIR` at all - see the comment at
+    # `backtest_runner.py`'s `_case_dir` import. Patching only the module constant therefore
+    # points the two reads at different directories the moment anything sets that variable,
+    # and `tests/conftest.py`'s session output fixture sets it for the rest of the run as soon
+    # as one test requests it. That is why this passed alone and failed in the corpus.
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
 
     with pytest.raises(ValueError, match=r"duplicate \(timestamp, symbol\)"):
         substitute_continuous_return_for_classification(
@@ -380,6 +388,14 @@ def test_substitute_continuous_return_max_null_rate_param(
     # artifact is now resolved so that output isolation reaches it.
     monkeypatch.setattr(_utils, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
     monkeypatch.setattr(br, "CASE_STUDIES_DIR", Path(tmp_path), raising=False)
+    # `CASE_STUDIES_DIR` reaches the `setup.yaml` read and stops there. The label parquet is
+    # generated output, so the function resolves it through `get_case_study_dir`, which reads
+    # `ML4T_OUTPUT_DIR` before it looks at `CASE_STUDIES_DIR` at all - see the comment at
+    # `backtest_runner.py`'s `_case_dir` import. Patching only the module constant therefore
+    # points the two reads at different directories the moment anything sets that variable,
+    # and `tests/conftest.py`'s session output fixture sets it for the rest of the run as soon
+    # as one test requests it. That is why this passed alone and failed in the corpus.
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
 
     # Default cap (10%) raises: 3/4 = 75% null rate.
     with pytest.raises(ValueError, match=r"exceeds max_null_rate"):
