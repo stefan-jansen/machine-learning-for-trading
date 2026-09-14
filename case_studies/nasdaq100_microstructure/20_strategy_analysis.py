@@ -1123,12 +1123,16 @@ print(f"Fold Sharpe std:   {fold_df['sharpe'].std():.3f}")
 # changes on a stationary series at this length, so a crossing is not evidence of a
 # regime, and an estimate that stays positive throughout does not establish that
 # performance was stable. Rolling beta is read the same way and carries the same
-# qualification: each point is an estimate over 126 overlapping days, and a strategy whose
-# population beta is zero still returns nonzero sample betas. So a construction meant to be
-# dollar-neutral whose rolling beta wanders is a reason to look at how the weights are
-# formed, not a measurement of directional exposure. What would establish the exposure is
-# the construction itself - the weights the allocator produced - rather than a point
-# estimate over one window.
+# qualification: each point is an estimate over 126 overlapping days, and a book whose
+# population beta is zero still returns nonzero sample betas.
+#
+# Dollar neutrality and benchmark beta are two different properties and only one of them is
+# estimated. Dollar neutrality is a fact about the weights - whether the long and short
+# notionals sum to zero - and is read off the allocation directly. Beta is a fact about how
+# those positions co-move with the benchmark, so a book can be exactly dollar-neutral and
+# still carry beta whenever its longs and shorts differ in benchmark sensitivity. Rolling
+# beta is the estimate of that second quantity, and a wandering series is a reason to
+# measure the exposure with its uncertainty rather than a reading of it.
 
 # %% [markdown]
 # ## §5 Friction budget & cost sensitivity
