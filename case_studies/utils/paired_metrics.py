@@ -46,6 +46,7 @@ import polars as pl
 from case_studies.utils.analytics import DISPLAY_NAMES
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
+from case_studies.utils.notebook_contracts import degenerate_prediction_hashes
 from case_studies.utils.registry.registration import register_paired_metrics
 from case_studies.utils.strategy_analysis import (
     is_refit_of,
@@ -426,12 +427,7 @@ def _val_rank1_carrier(
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         return None
-    cand = _drop_retired_generations(cs, cand)
-    if "family" in cand.columns:
-        cand = cand.filter(pl.col("family") != "benchmark")
-    if label_restriction and "label" in cand.columns:
-        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
-    cand = _apply_rung_restriction(cand, rung)
+    cand = _eligible_candidates(cs, cand, label_restriction=label_restriction, rung=rung)
     if cand.is_empty():
         return None
     # Do NOT dedup by prediction_hash here — the walk needs every registered
@@ -971,6 +967,60 @@ def _drop_retired_generations(cs: str, cand):
     return cand
 
 
+def _drop_degenerate_predictions(cs: str, cand):
+    """Candidates whose prediction set selection refuses to consider.
+
+    A LASSO or ElasticNet fit that shrinks every coefficient to zero on a fold predicts a
+    constant there, and that fold's IC is undefined - stored as NULL in ``fold_metrics.ic``.
+    The pooled IC is then computed over the surviving folds only, so the number is biased and
+    is not a model result. ``degenerate_prediction_sql`` states the rule and
+    ``selectable_validation_candidates`` applies it, which is why the published carrier cannot
+    be one of these.
+
+    A pair is the other publication path and had no such filter. The sweep backtests the whole
+    declared population rather than a shortlist, so the registry does hold backtests on
+    degenerate sets: measured on us_equities_panel 2026-09-14, 15 of its prediction sets are
+    degenerate, four signal-stage backtests stand on two of them, and both sat at Sharpe 0.6062
+    against a 0.8977 leader - third and fourth in the stage, so ranking alone did not catch it
+    and gives no reason to expect it to as the sweep continues.
+
+    Applied wherever ``_drop_retired_generations`` is, for the same reason: every ranking in
+    this module sorts on ``sharpe`` over whatever the registry holds.
+    """
+    if cand is None or cand.is_empty() or "prediction_hash" not in cand.columns:
+        return cand
+    degenerate = degenerate_prediction_hashes(get_case_study_dir(cs))
+    if not degenerate:
+        return cand
+    return cand.filter(~pl.col("prediction_hash").is_in(list(degenerate)))
+
+
+def _eligible_candidates(
+    cs: str, cand, *, label_restriction: frozenset[str] | None, rung: dict | None
+):
+    """Every filter a ranking in this module owes its candidate pool, in one place.
+
+    The three rankings here - the carrier walk, pair #1, and the no-carrier leader - had this
+    chain written out three times, which is how the degeneracy filter came to be missing from
+    all of them while selection had it: a filter added to one copy is not added to the others,
+    and nothing reads as wrong at any single site.
+
+    Retirement and degeneracy are both facts about whether the row may be published at all.
+    The benchmark exclusion is about what a challenger is. The label and rung restrictions are
+    the case study's own scope. What is NOT here is the carrier pin, which pair #1 deliberately
+    does not apply.
+    """
+    cand = _drop_retired_generations(cs, cand)
+    cand = _drop_degenerate_predictions(cs, cand)
+    if cand is None or cand.is_empty():
+        return cand
+    if "family" in cand.columns:
+        cand = cand.filter(pl.col("family") != "benchmark")
+    if label_restriction and "label" in cand.columns:
+        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
+    return _apply_rung_restriction(cand, rung)
+
+
 def populate_paired_metrics(
     cs: str,
     explorer: BacktestExplorer | None = None,
@@ -1093,15 +1143,10 @@ def populate_paired_metrics(
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         skip_pair1 = True
     if not skip_pair1:
-        cand = _drop_retired_generations(cs, cand)
-        if "family" in cand.columns:
-            cand = cand.filter(pl.col("family") != "benchmark")
-        if label_restriction and "label" in cand.columns:
-            cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
         # NB: pair #1 (Ch20 Loop A) applies ONLY the rung restriction — no
         # carrier pin — unlike pairs #2-6 (Loop B), which apply both. Preserve
         # that asymmetry so carrier-pinned CSs (us_firm_characteristics) match.
-        cand = _apply_rung_restriction(cand, rung)
+        cand = _eligible_candidates(cs, cand, label_restriction=label_restriction, rung=rung)
         if cand.is_empty():
             skip_pair1 = True
     if not skip_pair1:
@@ -1194,12 +1239,7 @@ def populate_paired_metrics(
         return rows
     # Pair #1 filters this out and so must this pool: with no carrier passed the leader is
     # taken from the ranking below, and a superseded row still ranks.
-    cand = _drop_retired_generations(cs, cand)
-    if "family" in cand.columns:
-        cand = cand.filter(pl.col("family") != "benchmark")
-    if label_restriction and "label" in cand.columns:
-        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
-    cand = _apply_rung_restriction(cand, rung)
+    cand = _eligible_candidates(cs, cand, label_restriction=label_restriction, rung=rung)
     if cand.is_empty():
         _report(cs, rows, verbose)
         return rows
