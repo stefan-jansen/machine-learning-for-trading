@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1241,6 +1242,7 @@ def register_prediction_set(
     case_dir: Path | None = None,
     expected_keys=None,
     allow_partial: bool = False,
+    retiring: Sequence[str] = (),
 ) -> str:
     """Register a prediction set. Returns prediction_hash.
 
@@ -1273,6 +1275,11 @@ def register_prediction_set(
         use the binary label. Required when ``task_type="classification"``.
     case_dir : Path, optional
         Override case study directory.
+    retiring : sequence of str, optional
+        For ``split="holdout"`` only: prediction hashes the operator accepts retiring from
+        the window. Empty, the default, means a window already carrying another
+        configuration's evaluation refuses this one. See
+        :func:`case_studies.utils.strategy_analysis.refuse_a_second_look`.
     """
     from .metrics import compute_prediction_fold_metrics
 
@@ -1289,7 +1296,7 @@ def register_prediction_set(
     db = _open_registry(case_dir)
     try:
         parent = db.execute(
-            "SELECT identity_version, execution_tier, spec_json FROM training_runs "
+            "SELECT identity_version, execution_tier, spec_json, config_name FROM training_runs "
             "WHERE training_hash = ?",
             (training_hash,),
         ).fetchone()
@@ -1297,7 +1304,39 @@ def register_prediction_set(
         db.close()
     if parent is None:
         raise ValueError(f"unknown training_hash {training_hash}")
-    identity_version, execution_tier, parent_spec_json = parent
+    identity_version, execution_tier, parent_spec_json, parent_config_name = parent
+
+    # A holdout window carries one evaluation. Here rather than in a notebook, because the
+    # question is about what the registry is being asked to hold and every path that holds
+    # something arrives through this call: five of the nine holdout notebooks wrote this
+    # check out for themselves and four never did, which is not a judgement any of the four
+    # made - `fx_pairs` now carries two generations on one window, registered a week apart,
+    # and the notebook that registered the second had no check to fire. A guard copied into
+    # nine notebooks is a guard that is in five of them.
+    #
+    # Re-registering THIS generation is not a second look and is not refused:
+    # `holdout_generations_to_retire` puts a row equal to `this_generation` in no bucket, so
+    # a holdout notebook re-runs like any other stage. What refuses is a DIFFERENT
+    # configuration, or a different checkpoint of the same run, arriving at a window that has
+    # already been observed - and deleting the earlier row is the documented way past it,
+    # because retiring it through the registry's lifecycle records that a second look
+    # was taken, which is the fact the refusal exists to keep.
+    if split == "holdout":
+        from case_studies.utils.strategy_analysis import (
+            holdout_generations_to_retire,
+            refuse_a_second_look,
+        )
+
+        refuse_a_second_look(
+            holdout_generations_to_retire(
+                case_dir,
+                this_generation=(training_hash, (checkpoint_kind, checkpoint_value)),
+            ),
+            this_configuration=parent_config_name or "this run",
+            this_training_hash=training_hash,
+            checkpoint=(checkpoint_kind, checkpoint_value),
+            retiring=retiring,
+        )
 
     # After the parent lookup, not before it: the dispersion bound is a statement about a
     # converged fit, and only the parent row says whether this run claims to be one. The
