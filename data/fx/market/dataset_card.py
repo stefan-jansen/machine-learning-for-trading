@@ -360,4 +360,4 @@ print(f"EUR/GBP daily 2020-2023: {filtered.shape}")
 # | Provider | OANDA (free API key) |
 # | Config | `config.yaml` |
 # | Loader | `load_fx_pairs(frequency, pairs, start_date, end_date)` |
-# | Profile | `$ML4T_DATA_PATH/fx/{frequency}_profile.json` |
+# | Profile | `$ML4T_DATA_PATH/fx/market/{frequency}_profile.json` |
