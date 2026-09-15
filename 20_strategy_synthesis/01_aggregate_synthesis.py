@@ -977,7 +977,11 @@ for cs, explorer in explorers.items():
     if cand.is_empty():
         paired_skips.append({"case_study": cs, "reason": "no_candidates_after_restriction"})
         continue
-    cand = cand.sort("sharpe", descending=True).unique(
+    # Two sort keys, for the reason `rank_one` exists: `keep="first"` after a one-key sort
+    # hands an exact Sharpe tie to whatever order the concat produced, and the row it keeps
+    # supplies `leader_hash` and `leader_label` - both published below. `rank_one` does not
+    # fit here because this dedups per prediction rather than taking one row.
+    cand = cand.sort(["sharpe", "backtest_hash"], descending=[True, False]).unique(
         subset=["prediction_hash"], keep="first", maintain_order=True
     )
 
@@ -1630,7 +1634,11 @@ for cs, explorer in explorers.items():
     cand = _apply_rung_restriction(cand, cs)
     if cand.is_empty():
         continue
-    cand = cand.sort("sharpe", descending=True).unique(
+    # Two sort keys, for the reason `rank_one` exists: `keep="first"` after a one-key sort
+    # hands an exact Sharpe tie to whatever order the concat produced, and the row it keeps
+    # supplies `leader_hash` and `leader_label` - both published below. `rank_one` does not
+    # fit here because this dedups per prediction rather than taking one row.
+    cand = cand.sort(["sharpe", "backtest_hash"], descending=[True, False]).unique(
         subset=["prediction_hash"], keep="first", maintain_order=True
     )
 
