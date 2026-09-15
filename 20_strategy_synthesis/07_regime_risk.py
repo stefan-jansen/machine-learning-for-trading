@@ -64,8 +64,6 @@ MAX_CASE_STUDIES = 0
 
 # %%
 CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_IDS
-DEFERRED_V31_CASE_STUDIES = {"nasdaq100_microstructure"}
-ACTIVE_CS_LIST = [cs for cs in CS_LIST if cs not in DEFERRED_V31_CASE_STUDIES]
 
 # %% [markdown]
 # ## Risk Configuration Classifier
@@ -124,7 +122,7 @@ def extract_risk_name(spec_json: str) -> str:
 # %%
 ch19_raw = load_chapter_backtests(
     "ch19",
-    case_studies=ACTIVE_CS_LIST,
+    case_studies=CS_LIST,
     metrics=["sharpe", "max_drawdown", "sortino", "total_return", "cagr"],
 )
 
@@ -140,15 +138,11 @@ risk_df = ch19_raw.with_columns(
 
 # %%
 # Baseline comes from Ch17 (allocation stage); per-CS fallback to Ch16 if absent.
-_ch17_raw = load_chapter_backtests(
-    "ch17", case_studies=ACTIVE_CS_LIST, metrics=["sharpe", "max_drawdown"]
-)
-_ch16_raw = load_chapter_backtests(
-    "ch16", case_studies=ACTIVE_CS_LIST, metrics=["sharpe", "max_drawdown"]
-)
+_ch17_raw = load_chapter_backtests("ch17", case_studies=CS_LIST, metrics=["sharpe", "max_drawdown"])
+_ch16_raw = load_chapter_backtests("ch16", case_studies=CS_LIST, metrics=["sharpe", "max_drawdown"])
 
 _baseline_rows = []
-for cs_id in ACTIVE_CS_LIST:
+for cs_id in CS_LIST:
     ch17_cs = (
         _ch17_raw.filter(pl.col("case_study") == cs_id)
         if not _ch17_raw.is_empty()
@@ -200,7 +194,6 @@ overlay_df = overlay_df.with_columns(
 
 n_cs = overlay_df["case_study"].n_unique()
 print(f"Loaded {len(overlay_df)} overlay results across {n_cs} case studies")
-print("Deferred to v3.1: NASDAQ-100 timing-corrected broad carrier risk grid")
 overlay_df.group_by("case_study").agg(
     n_overlays=pl.len(),
     best_sharpe=pl.col("sharpe").max(),
@@ -682,9 +675,9 @@ display(
 #
 # ## Known Limitations
 #
-# - Only case studies with Ch19 overlay backtests appear; NASDAQ-100 is excluded
-#   pending a corrected risk grid and the rest have no overlay sweep. The loaded
-#   count is printed above.
+# - Only case studies with Ch19 overlay backtests appear; a case study that ran no
+#   overlay sweep is absent rather than shown as zero. The loaded count is printed
+#   above.
 # - Every Sharpe here is a validation-fold number, and the overlay was chosen by
 #   looking at it. The improvement of a best-of-sweep configuration is inflated by
 #   the size of the sweep, and no deflation is applied.
