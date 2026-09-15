@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -156,7 +156,6 @@ for i in range(len(case_order)):
 
 plt.colorbar(im, ax=ax, label="Mean IC across the family's predictions", shrink=0.8)
 ax.set_title("Mean IC by case study and model family")
-fig.subplots_adjust(left=0.2, right=0.92, top=0.9, bottom=0.18)
 show_with_alt(
     fig,
     "Heatmap of mean information coefficient with case studies as rows and model "
@@ -218,7 +217,6 @@ for i in range(len(sharpe_rows)):
 
 plt.colorbar(im, ax=ax, label="Median signal-stage Sharpe", shrink=0.8)
 ax.set_title("Median signal-stage Sharpe by case study and model family")
-fig.subplots_adjust(left=0.2, right=0.92, top=0.9, bottom=0.18)
 show_with_alt(
     fig,
     "Heatmap of the median signal-stage Sharpe with case studies as rows and "
@@ -338,7 +336,6 @@ axes[1].set_xlim(0, 100)
 for i, v in enumerate(pos_counts["pct_positive"].to_list()):
     axes[1].text(v + 1, i, f"{v:.0f}%", va="center")
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Left: box plots of mean IC per model family across case studies, with a "
@@ -412,7 +409,6 @@ axes[1].set_xlabel("Transaction Cost (bps per leg)")
 axes[1].set_ylabel("Best IC")
 axes[1].set_title("Signal Quality vs Transaction Costs")
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Two scatter panels, each point a case study labelled by name: best IC "

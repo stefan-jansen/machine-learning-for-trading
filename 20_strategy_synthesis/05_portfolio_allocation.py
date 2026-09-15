@@ -401,7 +401,6 @@ ax.set_yticks(range(len(cs_names)))
 ax.set_yticklabels(cs_names)
 ax.set_title("Allocator Sharpe Ratios Across Case Studies")
 fig.colorbar(im, ax=ax, label="Sharpe Ratio", shrink=0.8)
-fig.subplots_adjust(left=0.18, right=0.92, top=0.9, bottom=0.2)
 show_with_alt(
     fig,
     "Heatmap with one row per case study and one column per allocator, each cell "

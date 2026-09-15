@@ -417,7 +417,6 @@ for i in range(len(hm_matrix.index)):
 
 fig.colorbar(im, ax=ax, label="Best Sharpe Delta", shrink=0.8)
 ax.set_title("Best Risk Overlay Effect by Rule Category × Case Study")
-fig.subplots_adjust(left=0.12, right=0.92, top=0.9, bottom=0.18)
 show_with_alt(
     fig,
     "Heatmap of the best Sharpe change achieved by each overlay category within "
