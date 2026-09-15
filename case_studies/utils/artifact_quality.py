@@ -30,11 +30,13 @@ import polars as pl
 
 __all__ = [
     "coverage_against",
+    "cross_sectional_dispersion",
     "explain_missing",
     "flag_columns",
     "label_universe",
     "profile_columns",
     "quality_report",
+    "render_cross_sectional_dispersion",
     "render_quality_report",
 ]
 
@@ -242,6 +244,89 @@ def quality_report(
             report.update({f"missing_{part}": value for part, value in explanation.items()})
     report["name"] = name
     return report
+
+
+def cross_sectional_dispersion(
+    frame: pl.DataFrame,
+    *,
+    value: str,
+    entity: str = "symbol",
+    session: str = "timestamp",
+    eps: float | None = None,
+) -> dict:
+    """Does this forecast order anything at each decision time?
+
+    ``profile_columns`` cannot answer that. Its ``constant`` flag is
+    ``n_unique() <= 1`` over the whole column, so a forecast that is constant
+    within every timestamp and merely drifts across them profiles as varied. That
+    is the exact shape that ranks nothing: a top-k book built from it fills once and
+    never replaces, trades between zero and two times, pays almost no cost, and can
+    top a cost-dominated leaderboard on the strength of not trading.
+
+    So the dispersion has to be measured **within** ``session``, across ``entity``,
+    and the test is a standard deviation at or below ``eps``. That covers both shapes
+    with one clause: an exactly-constant cross-section has a standard deviation of
+    zero, and a regularized fit that leaves float noise instead of a constant carries
+    1.95e-17 to 2.02e-17 - measured on the 24 denormal rows across all nine
+    registries, against a smallest genuine value of 1.69e-03.
+
+    An ``n_distinct == 1`` clause was written beside it first and removed: mutation
+    showed it dead, because every cross-section it catches the standard deviation
+    already catches. ``n_distinct`` is still reported, because a reader looking at a
+    flagged session wants to know which of the two shapes it is.
+
+    ``eps`` defaults to the same constant the registry's degeneracy rule uses, imported
+    rather than restated so the two cannot drift apart. The import is deferred because
+    this module is loaded by stage-02 notebooks and deliberately depends on nothing but
+    polars at module level.
+
+    Returns ``per_session``, one row per decision time, and ``summary``. **It does not
+    raise**, in keeping with the rest of this module: a prediction set that ranks
+    nothing at 3 of 500 timestamps may be a defect or may be three holidays, and only
+    the notebook author knows which. The gate that refuses lives in
+    ``notebook_contracts.degenerate_prediction_sql``.
+    """
+    if eps is None:
+        from case_studies.utils.notebook_contracts import _DEGENERATE_IC_EPS
+
+        eps = _DEGENERATE_IC_EPS
+
+    missing = [c for c in (value, entity, session) if c not in frame.schema]
+    if missing:
+        raise KeyError(f"frame has no column(s) {missing}; it carries {sorted(frame.schema)}")
+
+    per_session = (
+        frame.select(session, entity, value)
+        .drop_nulls(value)
+        .group_by(session)
+        .agg(
+            n_entities=pl.len(),
+            n_distinct=pl.col(value).n_unique(),
+            std=pl.col(value).std(),
+            spread=pl.col(value).max() - pl.col(value).min(),
+        )
+        .with_columns(
+            # A session carrying one entity is not a failure to rank, it is a session
+            # with nothing to rank. Marking it degenerate would report a universe
+            # shrinking to one name as a model defect.
+            degenerate=(pl.col("n_entities") > 1) & (pl.col("std").fill_null(0.0) <= eps),
+        )
+        .sort(session)
+    )
+
+    rankable = per_session.filter(pl.col("n_entities") > 1)
+    n_degenerate = int(per_session.get_column("degenerate").sum())
+    summary = {
+        "value": value,
+        "n_sessions": per_session.height,
+        "n_rankable_sessions": rankable.height,
+        "n_degenerate": n_degenerate,
+        "share_degenerate": (n_degenerate / rankable.height) if rankable.height else None,
+        "min_std": float(rankable.get_column("std").min()) if rankable.height else None,
+        "median_std": float(rankable.get_column("std").median()) if rankable.height else None,
+        "eps": eps,
+    }
+    return {"per_session": per_session, "summary": summary}
 
 
 #: Table width for every frame these renderers print. Polars defaults to 80 characters,
@@ -579,3 +664,39 @@ def render_column_gaps(gaps: dict[str, pl.DataFrame], *, max_rows: int = 60) -> 
             print(by_column)
     else:
         print("residual to explain: none - every null sits where a declaration puts it")
+
+
+def render_cross_sectional_dispersion(report: dict, *, max_rows: int = 20) -> None:
+    """Print a ``cross_sectional_dispersion`` report: the verdict, then the offenders.
+
+    The share leads because it is the number a reader acts on, and the degenerate
+    sessions follow because a share alone does not say whether they cluster at one end
+    of the sample - three at the start is a warmup, three scattered is something else.
+    """
+    s = report["summary"]
+    per_session = report["per_session"]
+
+    if not s["n_rankable_sessions"]:
+        print(f"{s['value']}: no session carries more than one entity - nothing to rank")
+        return
+
+    share = s["share_degenerate"]
+    print(
+        f"{s['value']}: {s['n_degenerate']:,} of {s['n_rankable_sessions']:,} rankable "
+        f"session(s) rank nothing ({share:.2%}), at eps={s['eps']:g}"
+    )
+    if s["n_sessions"] != s["n_rankable_sessions"]:
+        skipped = s["n_sessions"] - s["n_rankable_sessions"]
+        print(f"  {skipped:,} session(s) carry a single entity and are not counted either way")
+    print(
+        f"  cross-sectional std across rankable sessions: min {s['min_std']:.3e}, "
+        f"median {s['median_std']:.3e}"
+    )
+
+    offenders = per_session.filter(pl.col("degenerate"))
+    if offenders.height:
+        print(f"  the {min(offenders.height, max_rows):,} shown of {offenders.height:,}:")
+        with pl.Config(tbl_rows=max_rows, tbl_width_chars=WIDE, tbl_hide_dataframe_shape=True):
+            print(offenders.head(max_rows))
+    else:
+        print("  every rankable session orders its cross-section")
