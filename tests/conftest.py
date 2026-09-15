@@ -639,6 +639,12 @@ def _restore_output_root():
     reads the committed ``case_studies/`` tree instead of the seeded output dir. This lives here
     rather than in each module because thirteen copies of it drifted apart once already.
     """
+    # `previous` is not None for the test that installs the session value. Session-scoped
+    # fixtures set up before function-scoped ones, so `seeded_output_dir` has already written
+    # the variable by the time this reads it, and the pop branch below is unreachable for that
+    # test. Measured 2026-09-15 with both module shadows removed and this file unchanged: the
+    # value survives its own first teardown and every teardown after it. A trace showing it
+    # popped was taken with a shadow still in the tree, and the pop was the shadow's.
     previous = os.environ.get("ML4T_OUTPUT_DIR")
     yield
     if previous is None:

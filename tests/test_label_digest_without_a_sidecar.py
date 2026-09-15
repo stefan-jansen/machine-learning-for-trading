@@ -9,7 +9,6 @@ digest of a container is not an identity of its contents.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import polars as pl
@@ -56,9 +55,14 @@ def _frame() -> pl.DataFrame:
 
 @pytest.fixture(autouse=True)
 def _no_output_redirect(monkeypatch):
+    """This file writes into its own ``tmp_path``, so the seeded output root must not apply.
+
+    ``monkeypatch.delenv`` removes it for the test and puts back whatever was there
+    afterwards. Popping it in teardown instead would remove it for the rest of the worker,
+    because ``seeded_output_dir`` is session-scoped and writes the variable exactly once.
+    """
     monkeypatch.delenv("ML4T_OUTPUT_DIR", raising=False)
     yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
 
 
 def _digest_for(case_dir: Path, **write_kwargs) -> str:

@@ -14,6 +14,7 @@ would pass whatever the fixture does.
 
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import subprocess
@@ -57,3 +58,108 @@ def test_autouse_teardown_survives_a_data_path_that_does_not_exist() -> None:
     assert "Data directory not found" not in combined, combined
     assert "error" not in result.stdout, combined
     assert result.returncode == 0, combined
+
+
+def _fixture_defs(tree: ast.Module) -> list[ast.FunctionDef]:
+    """Top-level functions decorated with ``pytest.fixture``, however it is spelled."""
+    out: list[ast.FunctionDef] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            target = dec.func if isinstance(dec, ast.Call) else dec
+            name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+            if name == "fixture":
+                out.append(node)
+                break
+    return out
+
+
+def _is_autouse(node: ast.FunctionDef) -> bool:
+    for dec in node.decorator_list:
+        if not isinstance(dec, ast.Call):
+            continue
+        for kw in dec.keywords:
+            if kw.arg == "autouse" and isinstance(kw.value, ast.Constant) and kw.value.value:
+                return True
+    return False
+
+
+def _pops_the_output_root(node: ast.FunctionDef) -> bool:
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "pop"):
+            continue
+        if not (isinstance(func.value, ast.Attribute) and func.value.attr == "environ"):
+            continue
+        if call.args and isinstance(call.args[0], ast.Constant):
+            if call.args[0].value == "ML4T_OUTPUT_DIR":
+                return True
+    return False
+
+
+def _test_modules() -> list[Path]:
+    return sorted(p for p in TESTS_DIR.rglob("test_*.py") if p.name != "conftest.py")
+
+
+def test_no_test_module_redefines_a_conftest_autouse_fixture() -> None:
+    """A same-named fixture in a test module replaces the conftest one for that module.
+
+    pytest resolves a fixture from the most specific definition, so a module that defines
+    ``_restore_output_root`` does not run alongside ``tests/conftest.py``'s fixture of that
+    name - it runs instead of it. Both copies existed here and they did not agree:
+    conftest's puts ``ML4T_OUTPUT_DIR`` back to the value ``seeded_output_dir`` installed,
+    and the module copies deleted it. Measured 2026-09-15 on
+    ``pytest tests/test_cme_futures_research.py tests/test_artifact_specs.py``: two failures
+    reading ``Missing prerequisites for 'us_equities_panel': features/financial.parquet,
+    labels/fwd_ret_1d.parquet`` against files that are on disk, because every later test
+    resolved ``get_case_study_dir`` against the committed ``case_studies/`` tree.
+
+    An override is legitimate in general. An override of an autouse fixture that restores
+    process-global state is not: nothing at the call site says the conftest version stopped
+    running, and the tests that pay for it are in other files.
+
+    The same command passes in one checkout and fails in another, so a green run is not
+    evidence the bug is gone. A `--case-study` worktree symlinks
+    `case_studies/<cs>/{features,labels}` to the canonical store, and `get_case_study_dir`
+    then resolves to real artifacts whatever the variable says; a checkout without those
+    links has no fallback. What distinguishes a fix from a tree that hides it is the variable
+    being restored, not the run being green.
+    """
+    conftest = ast.parse((TESTS_DIR / "conftest.py").read_text())
+    protected = {f.name for f in _fixture_defs(conftest) if _is_autouse(f)}
+    assert protected, "tests/conftest.py defines no autouse fixtures - the check is vacuous"
+
+    offenders = []
+    for path in _test_modules():
+        for fixture in _fixture_defs(ast.parse(path.read_text())):
+            if fixture.name in protected:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{fixture.lineno} {fixture.name}")
+    assert not offenders, (
+        "these fixtures replace an autouse fixture of the same name in tests/conftest.py, "
+        "so conftest's version never runs for that module: " + ", ".join(offenders)
+    )
+
+
+def test_no_test_module_deletes_the_output_root_in_a_fixture() -> None:
+    """Deleting ``ML4T_OUTPUT_DIR`` is not the same as restoring it, and it outlives the file.
+
+    ``seeded_output_dir`` is session-scoped and writes the variable exactly once, so a fixture
+    that pops it in teardown removes it for the rest of the worker rather than for the rest of
+    the module. ``tests/conftest.py`` carries the restoring version; a module-level copy that
+    pops defeats it even when it does not shadow it by name.
+
+    A pop inside a test body is untouched - ``test_research_workspace`` pops the variable to
+    assert what ``Study.at`` does without one, which is the behaviour under test.
+    """
+    offenders = []
+    for path in _test_modules():
+        for fixture in _fixture_defs(ast.parse(path.read_text())):
+            if _pops_the_output_root(fixture):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{fixture.lineno} {fixture.name}")
+    assert not offenders, (
+        "these fixtures delete ML4T_OUTPUT_DIR instead of restoring it, which removes the "
+        "seeded output root for every later test in the worker: " + ", ".join(offenders)
+    )

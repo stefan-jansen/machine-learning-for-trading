@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -18,15 +17,11 @@ from case_studies.utils import causal
 from case_studies.utils.registry.specs import training_hash_from_spec
 from tests.test_research_workspace import _seed_release
 
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
+# `_restore_output_root` is deliberately NOT defined here. An autouse fixture of that name
+# in a test module shadows the one in `tests/conftest.py` for every test in the module, and
+# the copy that used to sit here popped ML4T_OUTPUT_DIR unconditionally. The session-scoped
+# `seeded_output_dir` installs that variable exactly once, so the pop removed it for the rest
+# of the worker. The conftest fixture restores the session value instead.
 
 
 def _causal_fixture(
@@ -273,6 +268,21 @@ def test_manual_dml_timeseries_pins_the_pool_for_every_caller(monkeypatch) -> No
     the OMP_NUM_THREADS setdefault is inert for every one - while
     cme_futures/12_model_analysis.py:1190 and sp500_options/11_model_analysis.py:992 tell the
     reader the nuisance models are pinned.
+
+    Torch's bundled OpenMP runtime is excluded because it does none of this work and reports
+    whatever OMP_NUM_THREADS says. Measured 2026-09-15 under the thread cap AGENTS.md requires
+    of anything run beside a live notebook, the four pools in the process are scipy's two
+    openblas copies at 1, scikit-learn's libgomp at 1, and torch/lib/libgomp.so.1 at 2 - the
+    nuisance models are HistGradientBoostingRegressor, so the pin holds over every pool the fit
+    reaches. Asserting over the whole process instead turned that cap into a failure.
+
+    That pool is also written by tests that have nothing to do with this one.
+    `torch.set_num_threads(1)` pins it for the rest of the process, and three call sites take
+    the number from a runtime spec: `tabular_dl.py:1720`, `deep_learning.py:461`,
+    `latent_factors/library_bridge.py:60`. Measured in one process at OMP_NUM_THREADS=2, the
+    pool reads 2 after `import torch` and 1 after `set_num_threads(1)`. So before the
+    exclusion this test failed cold and passed behind an earlier file, and its green was
+    evidence about what had run first rather than about `manual_dml_timeseries`.
     """
     import threadpoolctl
 
@@ -283,7 +293,7 @@ def test_manual_dml_timeseries_pins_the_pool_for_every_caller(monkeypatch) -> No
         observed.extend(
             info["num_threads"]
             for info in threadpoolctl.threadpool_info()
-            if info["user_api"] in {"openmp", "blas"}
+            if info["user_api"] in {"openmp", "blas"} and "/torch/" not in info.get("filepath", "")
         )
         return original(*args, **kwargs)
 
