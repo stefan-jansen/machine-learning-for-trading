@@ -633,12 +633,14 @@ display(
 #   is printed at the top. A case study can hold cost-sensitivity backtests and still
 #   be absent here, because the sweep has to sit on the deployed carrier's own
 #   training lineage and match its strategy signature. Three are absent for three
-#   different reasons as of 2026-09-15: S&P 500 Options has eight cost rows on its
-#   carrier's lineage and none of them match the carrier's signature; ETFs has cost
-#   rows but none on its carrier's lineage; and NASDAQ-100 is resolved through a
-#   hard-coded training hash that its 2026-09-05 registry rebuild replaced, so the
-#   lookup finds nothing. Only the last of those is a defect in this chapter's
-#   plumbing rather than a property of the sweep.
+#   different reasons as of 2026-09-15. S&P 500 Options has eight cost rows on its
+#   carrier's lineage and none of them match the carrier's signature. ETFs has cost
+#   rows but none on its carrier's lineage. NASDAQ-100 has 35 cost-sensitivity
+#   backtests, but they sit on a gbm run of a variant direction label and on an
+#   nlinear run - not on its deployed carrier, which is a 12-model gbm mean-forecast
+#   ensemble and was never cost-swept. So all three absences are properties of what
+#   was swept rather than of this chapter: a carrier with no cost sweep has no cost
+#   curve to draw.
 # - The sweep applies one proportional per-leg cost to every trade. Real costs
 #   vary with size, with the instrument, and with the state of the book, and the
 #   spread realism section is where that assumption is checked rather than
