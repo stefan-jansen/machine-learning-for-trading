@@ -520,8 +520,18 @@ class PredictionResult(Result):
                 # alike and neither reports incomplete.
                 from case_studies.utils.artifact_digest import published_prediction_digest
 
+                # `pl.read_parquet` and not `self.load`: the recorded digest describes the
+                # frame the writer registered, and `load` widens a `Date` decision-time
+                # column so every family presents one dtype. `value_digest` separates
+                # `Date` from `Datetime`, so verifying through `load` compares the
+                # normalized frame against a digest taken before normalization and reports
+                # every artifact those three families wrote as not matching.
                 if (
-                    _verified_digest(prediction_file, self.load, published_prediction_digest)
+                    _verified_digest(
+                        prediction_file,
+                        partial(pl.read_parquet, prediction_file),
+                        published_prediction_digest,
+                    )
                     != recorded_digest
                 ):
                     return f"{prediction_file} does not match its recorded digest"
@@ -544,10 +554,24 @@ class PredictionResult(Result):
         return None
 
     def load(self):
+        """Read this prediction set's artifact, with one decision-time dtype for every family.
+
+        The parquet is returned as written except for the timestamp column, which arrives on
+        `Date` from gbm, linear and tabular_dl and on `Datetime(us, 'UTC')` from deep_learning
+        and latent_factors - same decision times, every aware value at midnight, and a join on
+        (timestamp, symbol) across the two returns nothing. `_timestamps_as_utc` widens to the
+        aware form here rather than narrowing, because narrowing would silently discard the
+        time of day in an intraday case study. Read-only: widening moves `value_digest`, so the
+        artifact and every registered digest over it stay as they are, and
+        `normalize_prediction_columns` produces the identical engine frame either way (verified
+        on a 7.1M-row gbm artifact, 2026-09-14).
+        """
         import polars as pl
 
+        from case_studies.utils.registry.store import _timestamps_as_utc
+
         path = self.root / "run_log" / "predictions" / self.hash / "predictions.parquet"
-        return pl.read_parquet(path)
+        return _timestamps_as_utc(pl.read_parquet(path), widen_dates=True)
 
     def folds(self):
         """Return the per-fold metrics registered for this prediction set.

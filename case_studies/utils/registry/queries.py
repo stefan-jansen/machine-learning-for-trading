@@ -650,7 +650,9 @@ def read_predictions(
     # A naive decision-time column means the same instants as a UTC-aware one and is
     # localized rather than converted, so the artifacts a case study wrote before
     # `_timestamps_as_utc` reached the writer still join against the ones it wrote after.
-    return _timestamps_as_utc(df)
+    # `widen_dates` covers the same gap for a `pl.Date` column, which carries no zone for
+    # the naive branch to fix; it is read-only because widening moves `value_digest`.
+    return _timestamps_as_utc(df, widen_dates=True)
 
 
 # ---------------------------------------------------------------------------

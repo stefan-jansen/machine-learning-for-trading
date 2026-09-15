@@ -38,10 +38,13 @@
 # [`20_holdout_predictions`](20_holdout_predictions.ipynb) has registered the refit and
 # [`21_holdout_backtest`](21_holdout_backtest.ipynb) the backtest of it.
 #
-# **What it writes**: nothing. It reads the registry, applies the selection rule and reports.
+# **What it writes**: `backtest_paired_metrics`, and nothing else. It refits nothing and
+# registers no backtest - the pairs are bootstrap comparisons between return series that
+# already exist. Everything else here reads the registry, applies the selection rule and
+# reports.
 
 # %%
-"""Read-only assessment of one validation and holdout lineage."""
+"""Assessment of one validation and holdout lineage, and the paired evidence for it."""
 
 import json
 
@@ -49,14 +52,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-from case_studies.research import BacktestResult, CandidateSet, Study
+from case_studies.research import (
+    BacktestResult,
+    CandidateSet,
+    Study,
+    split_unpublished_members,
+)
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
+from case_studies.utils.paired_metrics import populate_paired_metrics
 from case_studies.utils.registry import (
     load_backtest_metrics,
     load_paired_metrics,
+    load_prediction_index,
     training_hash_from_spec,
 )
 from case_studies.utils.registry.specs import project_training_identity
@@ -469,6 +479,40 @@ selected_performance
 # equal-weight return artifact for the selected label and window. Each comparison must resolve
 # once and carry finite interval bounds.
 
+# %% [markdown]
+# The pairs are built here rather than read from whatever a later chapter left behind. They used
+# to be produced by a chapter-20 notebook looping over every case study, which left this table
+# empty for a reader working the case study in order and made this notebook unreadable until a
+# chapter after it had been run. `case_studies/etfs/20_strategy_analysis.py` made the same change
+# for the same reason. Nothing is refitted and no backtest is added: each pair is a block
+# bootstrap over two return series the registry already holds.
+#
+# `replace_all=False` is additive, so pairs this call does not produce stay where they are, and
+# registration is an upsert keyed on the challenger and the benchmark, which means re-running
+# recomputes rather than accumulating. The population is this case study's live validation
+# prediction sets, so a retired generation cannot supply either side of a comparison.
+
+# %% tags=["results"]
+live_predictions = (
+    split_unpublished_members(study, load_prediction_index(CASE_STUDY_ID, split="validation"))
+    .live["prediction_hash"]
+    .to_list()
+)
+if not live_predictions:
+    raise ValueError("no live validation prediction sets, so no pair has a population to draw on")
+paired_rows = populate_paired_metrics(
+    CASE_STUDY_ID,
+    prediction_hashes=live_predictions,
+    carrier=carrier,
+    replace_all=False,
+)
+written = [row for row in paired_rows if "skip" not in row]
+print(f"{len(live_predictions)} live validation prediction sets")
+print(f"backtest_paired_metrics: wrote {len(written)} of {len(paired_rows)} pairs")
+for row in paired_rows:
+    if "skip" in row:
+        print(f"  not built: {row['skip']}")
+
 # %% tags=["results"]
 holdout_pairs = load_paired_metrics(
     CASE_STUDY_ID,
@@ -646,6 +690,118 @@ for row in paired_evidence.iter_rows(named=True):
     )
 
 # %% [markdown]
+# ## What the drawdown figure does and does not say
+#
+# The selected configuration carries a deep registered `max_drawdown`, and most of the candidate
+# population it was drawn from does too. A reader is entitled to take that as meaning the capital
+# was nearly gone, so it is worth settling from the stored equity path rather than from the summary
+# statistic.
+#
+# The cell below takes the validation path apart into the peak it reached and the decline from that
+# peak, reports the deepest single session and the smallest margin cushion the book held, and then
+# counts how the candidates divide between a drawdown that gave back a gain and one that consumed
+# the capital committed. Those two cases carry the same `max_drawdown` and different consequences,
+# and the selection rule reads neither.
+
+# %% tags=["results"]
+validation_returns = return_frames["validation"]["daily_return"].to_numpy()
+validation_wealth = np.cumprod(1.0 + validation_returns)
+peak_index = int(validation_wealth.argmax())
+trough_index = int(
+    (
+        validation_wealth / np.maximum.accumulate(np.concatenate(([1.0], validation_wealth)))[1:]
+    ).argmin()
+)
+validation_dates = return_frames["validation"]["timestamp"].to_list()
+
+state_paths = [
+    path for path in selected_validation.artifacts() if path.name == "portfolio_state.parquet"
+]
+if len(state_paths) != 1:
+    raise ValueError(f"{selected_validation.hash} must have one portfolio state artifact")
+state = pl.read_parquet(state_paths[0]).sort("timestamp")
+
+# The margin requirement is read from the run's own spec rather than restated here, so the
+# comparison below cannot outlive a change to the account configuration it is judging.
+spec_paths = [path for path in selected_validation.artifacts() if path.name == "spec.json"]
+if len(spec_paths) != 1:
+    raise ValueError(f"{selected_validation.hash} must have one spec artifact")
+account = json.loads(spec_paths[0].read_text())["backtest_config"]["account"]
+short_maintenance_margin = float(account["short_maintenance_margin"])
+equity = state["equity"].to_numpy()
+gross = state["gross_exposure"].to_numpy()
+# The book holds nothing on the first session, so gross exposure is zero there and the cushion is
+# undefined rather than infinite. Dividing only where the book exists keeps that session out of the
+# minimum instead of letting a warning stand in for it.
+held = gross > 0.0
+cushion = np.full(gross.shape, np.nan)
+cushion[held] = equity[held] / gross[held]
+
+print(
+    f"peak wealth {validation_wealth[peak_index]:,.0f}x initial on {validation_dates[peak_index]}, "
+    f"trough {validation_wealth[trough_index]:,.0f}x on {validation_dates[trough_index]}, "
+    f"ending at {validation_wealth[-1]:,.0f}x"
+)
+print(
+    f"the decline ran {trough_index - peak_index} sessions; "
+    f"the worst single session was {validation_returns.min():+.2%}"
+)
+print(f"equity never fell below {equity.min():,.0f} against {equity[0]:,.0f} of initial cash")
+print(
+    f"the smallest equity-to-gross cushion was {np.nanmin(cushion):.4f}, "
+    f"against a {short_maintenance_margin:.2f} short maintenance requirement"
+)
+
+# The same split across the population the selection rule ranked over. "Gave back a gain" and
+# "lost the capital" are the two readings of one deep drawdown, and the count says which is
+# typical here - so the paragraph below cannot be read as describing every candidate.
+deep = selection_evidence.filter(pl.col("max_drawdown") <= -0.90)
+recovered = deep.filter(pl.col("total_return") > 0.0).height
+lost = deep.filter(pl.col("total_return") <= -0.90).height
+print(
+    f"\nof {selection_evidence.height} candidates, {deep.height} draw down to -90% or worse; "
+    f"of those, {lost} end having lost more than 90% of the capital committed "
+    f"and {recovered} end above water"
+)
+
+# %% [markdown]
+# For the selected configuration the drawdown is a give-back of a gain: equity ends far above the
+# cash committed and the margin cushion stays clear of the maintenance requirement throughout, so
+# no margin call was owed and the engine withheld none. The counts above show that reading is the
+# minority one. Most candidates at the same drawdown did lose the capital, and the rule picked one
+# that did not, which is what ranking on Sharpe across a long window does when the window contains
+# a windfall.
+#
+# The calendar-year table below locates that windfall, and it is why the holdout result follows.
+
+# %% tags=["results"]
+for period in ("validation", "holdout"):
+    frame = return_frames[period]
+    yearly = (
+        frame.with_columns(pl.col("timestamp").dt.year().alias("year"))
+        .group_by("year")
+        .agg(((1.0 + pl.col("daily_return")).product() - 1.0).alias("annual_return"))
+        .sort("year")
+    )
+    print(f"{period}:")
+    for row in yearly.iter_rows(named=True):
+        print(f"  {row['year']}  {row['annual_return']:+9.2%}")
+
+# %% [markdown]
+# The configuration earns its entire validation record in the 2000-2002 decline and again in 2008,
+# and loses money in every year from 2009 through 2014. A Sharpe ratio computed across the whole
+# window reports one number for two regimes, and the selection rule reads only that number. The
+# holdout window opens in the later regime and loses money in every year it covers, so its result
+# continues the 2009-2014 pattern rather than departing from it. The six consecutive losing years
+# that close the validation window are already visible in the data the selection was made from.
+#
+# One further property is worth stating because the chapter does not otherwise measure it: the book
+# runs at roughly twice equity in gross exposure and turns over about its full notional each day,
+# and the commission and slippage registered for the validation run are large multiples of the
+# capital it ends with. The returns above are therefore a property of the signal under the declared
+# cost model, at the notional the backtest assumed.
+
+# %% [markdown]
 # ## Key takeaways and limitations
 #
 # - The immutable backtest set defines the validation search population, so registry additions made
@@ -658,6 +814,23 @@ for row in paired_evidence.iter_rows(named=True):
 #   two separate point estimates.
 # - Validation and holdout path diagnostics retain their own time windows and are interpreted
 #   alongside, rather than pooled across, the validation/holdout boundary.
+# - The selected configuration was never distinguishable from its equal-weight benchmark on
+#   validation: that Sharpe difference is positive with an interval spanning zero, as the computed
+#   assessment above reports. The selection rule ranks on a point estimate and does not consult the
+#   interval, so a configuration can top the ranking on evidence this weak.
+# - The registered drawdown for this configuration measures a decline from a peak, not a loss of the
+#   committed capital, and the margin cushion never approached the short maintenance requirement.
+#   Across the sweep the same figure usually does mean the capital was lost, so the statistic cannot
+#   be read the same way from one run to the next.
+# - Validation Sharpe is computed across two regimes the configuration behaves oppositely in. The
+#   holdout window lies wholly within the second, so holdout and validation are not measuring the
+#   same thing even before the refit is considered.
+#
+# The holdout model is fitted on every year that precedes the holdout window, while each validation
+# model was fitted on a rolling window of about ten years. The selection was therefore made among
+# models of one shape and tested on a model of another, which is a declared property of the holdout
+# construction rather than a defect, and a reason not to read the whole validation-to-holdout gap as
+# an estimate of selection bias.
 #
 # This assessment covers one selected strategy lineage and its declared equal-weight benchmark. It
 # does not estimate live market impact, borrow availability, or capacity beyond the cost and risk

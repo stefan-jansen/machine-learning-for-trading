@@ -98,6 +98,7 @@ from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
 )
+from case_studies.utils.notebook_contracts import degenerate_prediction_hashes
 from case_studies.utils.sweep_config import (
     get_allocators,
     get_checkpoints_per_config,
@@ -109,8 +110,6 @@ from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_lin
 CASE_STUDY_ID = "us_equities_panel"
 BASELINE_SET_NAMES = [
     "us-equities-fwd-ret-1d-baseline-v1",
-    "us-equities-fwd-ret-5d-baseline-v1",
-    "us-equities-fwd-ret-21d-baseline-v1",
 ]
 EXECUTION_TIER = "canonical"
 POPULATION_NAME = ""
@@ -200,6 +199,34 @@ ineligible = baseline.filter(
 )
 if baseline.is_empty() or not ineligible.is_empty():
     raise ValueError("Allocation requires complete finite equal-weight validation rows")
+
+# %% [markdown]
+# ## 3b. The rows that rank but do not forecast
+#
+# A regularized linear model that shrinks every coefficient to zero on a fold predicts one
+# constant for that fold. The backtest still runs: a constant score ranks nothing, so the
+# top-k rule holds whichever names the tie-break leaves on top and the book turns into a slow
+# buy-and-hold. That book has a *good*-looking Sharpe here, because it trades 5,761 times
+# instead of 121,521 and so pays almost none of the costs that dominate every real member.
+#
+# **This is an exclusion, not a refusal.** The rows above are legitimate members of the
+# baseline population and the sweep that produced them has no degeneracy filter of its own -
+# the same gap `nasdaq100_microstructure/14_backtest` closes at the point of use. What must not
+# happen is that they reach a leaderboard: `selectable_validation_candidates` already refuses
+# them when it resolves the carrier, so without this the allocator comparison and the carrier
+# pool would disagree about which configurations exist.
+
+# %%
+degenerate = degenerate_prediction_hashes(study.root)
+excluded = baseline.filter(pl.col("prediction_hash").is_in(degenerate))
+baseline = baseline.filter(~pl.col("prediction_hash").is_in(degenerate))
+if baseline.is_empty():
+    raise ValueError("Every baseline row is a constant-prediction set")
+print(
+    f"{excluded.height} of {excluded.height + baseline.height} baseline rows excluded as "
+    f"constant-prediction sets, leaving {baseline.height}"
+)
+excluded.select("label", "family", "config_name", "prediction_hash", "sharpe", "max_drawdown")
 
 # %% [markdown]
 # ## 4. The shortlist, and what it costs

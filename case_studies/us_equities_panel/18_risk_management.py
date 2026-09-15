@@ -105,13 +105,9 @@ from utils.style import add_message_title, ml4t_palette, show_with_alt, zero_lin
 CASE_STUDY_ID = "us_equities_panel"
 BASELINE_SET_NAMES = [
     "us-equities-fwd-ret-1d-baseline-v1",
-    "us-equities-fwd-ret-5d-baseline-v1",
-    "us-equities-fwd-ret-21d-baseline-v1",
 ]
 ALLOCATION_SET_NAMES = [
     "us-equities-fwd-ret-1d-allocation-v1",
-    "us-equities-fwd-ret-5d-allocation-v1",
-    "us-equities-fwd-ret-21d-allocation-v1",
 ]
 VALIDATION_SET_NAME_TEMPLATE = "us-equities-{label}-validation-strategies-v1"
 EXECUTION_TIER = "canonical"
@@ -504,7 +500,8 @@ execution_diagnostics
 # this is what refuses to freeze them together.
 
 # %%
-completed_risk = study.backtests.table(include_preview=True).filter(
+post_sweep_catalog = study.backtests.table(include_preview=True)
+completed_risk = post_sweep_catalog.filter(
     pl.col("backtest_hash").is_in(planned_population.get_column("backtest_hash"))
 )
 if (
@@ -515,6 +512,20 @@ if (
     or completed_risk.filter(pl.col("sharpe").is_null() | ~pl.col("sharpe").is_finite()).height
 ):
     raise RuntimeError("The risk catalog is incomplete or mis-staged")
+
+# The rows this sweep just published carry two spec leaves that no signal or allocation row has,
+# `strategy.risk.name` and `strategy.risk.position_rules`, and `study.backtests.table()` derives
+# its columns from the specs present in the registry. So `backtest_catalog`, read before the sweep,
+# is two columns narrower than the read above, and concatenating a frame from each raises
+# ShapeError on any run where the risk stage starts empty - which is every first run. Re-deriving
+# the selection-eligible rows from this read puts both sides of that concatenation on one schema by
+# construction. A `how="diagonal"` concat would also pass, by filling the two columns with nulls,
+# and would keep passing silently the next time the schemas diverge for a reason that matters.
+eligible_post_sweep = post_sweep_catalog.filter(
+    pl.col("backtest_hash").is_in(eligible.get_column("backtest_hash"))
+)
+if eligible_post_sweep.height != eligible.height:
+    raise RuntimeError("The post-sweep catalog lost a declared strategy member")
 
 # %% [markdown]
 # **Did the control fire, and did anything move?** Those are two questions and the catalog answers
@@ -650,7 +661,7 @@ if EXECUTION_TIER == "canonical":
         # label_artifact, and every other protocol field being required-constant is the guard.
         validation_candidates = pl.concat(
             [
-                eligible.filter(pl.col("label") == label),
+                eligible_post_sweep.filter(pl.col("label") == label),
                 completed_risk.filter(pl.col("label") == label),
             ]
         ).sort("backtest_hash")
