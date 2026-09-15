@@ -47,7 +47,6 @@ import matplotlib.pyplot as plt
 import polars as pl
 
 from case_studies.research import (
-    CandidateSet,
     Study,
     open_selection_field,
     open_study,

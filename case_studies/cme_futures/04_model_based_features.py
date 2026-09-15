@@ -78,7 +78,6 @@ import plotly.graph_objects as go
 import polars as pl
 from hmmlearn.hmm import GaussianHMM
 from plotly.subplots import make_subplots
-from sklearn.cluster import KMeans
 from statsmodels.tsa.arima.model import ARIMA
 from threadpoolctl import threadpool_limits
 

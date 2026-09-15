@@ -72,7 +72,7 @@ from pathlib import Path
 
 import polars as pl
 
-from case_studies.research import CandidateSet, open_selection_field, open_study
+from case_studies.research import open_selection_field, open_study
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.research.models import (
     reconstruct_locked_model_request,

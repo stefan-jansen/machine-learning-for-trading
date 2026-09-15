@@ -71,7 +71,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 from hmmlearn.hmm import GaussianHMM
-from IPython.display import display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from ml4t.diagnostic.splitters.calendar import TradingCalendar

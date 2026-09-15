@@ -61,7 +61,6 @@ from case_studies.research import (
     BacktestResult,
     CandidateSet,
     OfficialPopulation,
-    PredictionResult,
     Result,
     candidate_set_supersedes,
     open_study,

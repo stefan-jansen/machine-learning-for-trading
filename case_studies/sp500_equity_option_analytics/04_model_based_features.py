@@ -69,8 +69,6 @@
 # %%
 """S&P 500 Equity + Option Analytics: Model-Based Features."""
 
-from datetime import date
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go

@@ -69,7 +69,6 @@ from case_studies.research import (
     BacktestResult,
     CandidateSet,
     OfficialPopulation,
-    PredictionResult,
     Result,
     candidate_set_supersedes,
     open_study,
@@ -83,9 +82,7 @@ from case_studies.research import (
 from case_studies.utils.backtest_presets import EngineBacktestConfig
 from case_studies.utils.strategy_analysis import selectable_validation_candidates
 from case_studies.utils.sweep_config import (
-    get_allocators,
     get_cost_grid_bps,
-    get_top_k_values_for,
 )
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds

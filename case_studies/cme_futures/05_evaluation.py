@@ -79,7 +79,6 @@ from ml4t.diagnostic.metrics import (
     cross_sectional_ic_series,
 )
 from plotly.subplots import make_subplots
-from scipy.stats import spearmanr
 
 from case_studies.utils.feature_engineering import quantile_profile
 from utils.artifact_specs import load_setup_config, resolve_label_buffer

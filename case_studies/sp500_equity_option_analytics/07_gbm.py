@@ -78,7 +78,6 @@
 # %%
 """Fit the declared option-analytics gradient boosting population on the walk-forward folds."""
 
-import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots

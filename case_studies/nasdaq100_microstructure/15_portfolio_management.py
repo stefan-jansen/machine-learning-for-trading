@@ -53,8 +53,6 @@
 
 import time
 
-import polars as pl
-
 from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,

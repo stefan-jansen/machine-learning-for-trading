@@ -60,7 +60,6 @@
 
 import json
 import sqlite3
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -94,7 +93,6 @@ from case_studies.utils.factor_attribution import (
 from case_studies.utils.notebook_contracts import (
     degenerate_prediction_sql,
     derived_tables_off_canonical_universe,
-    excluded_families,
     strategy_input_counts,
 )
 from case_studies.utils.paired_metrics import populate_paired_metrics, rung_for
