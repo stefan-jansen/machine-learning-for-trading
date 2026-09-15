@@ -1572,7 +1572,14 @@ def _unused_imports_removed(source: str) -> str | None:
             text=True,
             check=False,
         )
-        if result.returncode not in (0, 1):
+        # Exit 1 means "ruff ran and reported something", and it is ALSO what a missing
+        # interpreter module exits with. Conflating them made the tier fail open in the
+        # quiet direction: `test-unit` installs no ruff, `python -m ruff` exited 1 with
+        # "No module named ruff" on stderr, this returned the file unmodified, and every
+        # drift then compared as executable. Nothing said the classifier was inert. Ruff
+        # writes diagnostics to stdout and keeps stderr for its own failures, so a
+        # non-empty stderr is the discriminator.
+        if result.returncode not in (0, 1) or result.stderr.strip():
             return None
         return path.read_text(encoding="utf-8")
 

@@ -29,6 +29,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
+import notebook_provenance  # noqa: E402
 from notebook_provenance import (  # noqa: E402
     _unused_imports_removed,
     drift_is_prose_only,
@@ -215,6 +216,32 @@ CASES = [
 def test_tier_refuses(tmp_path: Path, executed: str, edited: str) -> None:
     ok, _removed = drift_is_unused_import_only(_blob(executed), _py(tmp_path, edited))
     assert not ok
+
+
+def test_a_ruff_that_cannot_run_is_a_refusal_not_a_no_op(monkeypatch, tmp_path: Path) -> None:
+    """A missing ruff exits 1, exactly as a lint finding does. It must not read as "nothing to fix".
+
+    `test-unit` installs no ruff. `python -m ruff` there exits 1 with "No module named ruff"
+    on stderr, and the first version of the normalizer accepted that as a completed run, read
+    the unmodified file back, and reported every drift as executable. The tier was inert and
+    nothing said so - three assertion failures in this file were the only symptom, and in a job
+    that did not run them there would have been none at all. Ruff writes diagnostics to stdout
+    and keeps stderr for its own failures, so stderr is the discriminator.
+    """
+    real_run = notebook_provenance.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if len(cmd) > 2 and cmd[1:3] == ["-m", "ruff"]:
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr=f"{sys.executable}: No module named ruff\n"
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(notebook_provenance.subprocess, "run", fake_run)
+    assert _unused_imports_removed(EXECUTED) is None
+    ok, removed = drift_is_unused_import_only(_blob(EXECUTED), _py(tmp_path, CLEANED))
+    assert not ok
+    assert removed == []
 
 
 def test_tier_refuses_a_stamped_blob_that_is_gone(tmp_path: Path) -> None:
