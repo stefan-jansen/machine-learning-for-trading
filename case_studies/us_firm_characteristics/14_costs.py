@@ -386,7 +386,7 @@ if not cost_df.is_empty():
     ax.legend(frameon=False)
     # No tight_layout(): matplotlibrc sets `figure.constrained_layout.use: True` repo-wide,
     # and calling tight_layout() over it makes matplotlib switch layout engines and say so in
-    # a stderr block under the figure. See ml4t/agent-workspace#1106.
+    # a stderr block under the figure.
     show_with_alt(
         fig,
         "Line chart of validation Sharpe against the total commission and slippage "

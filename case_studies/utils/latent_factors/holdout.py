@@ -47,8 +47,7 @@ def rekey_holdout_spec(
     2017-01-05..2020-12-16 while the stage-04 fold covering it begins 2019-01-02, leaving 495
     of 977 training dates covered - and this refused rather than fit on half-null features.
     :func:`holdout_training_floor` below resolves that by bounding the derived window at the
-    artifact's own start, so the refusal now fires only for a real gap. ml4t/agent-workspace#977
-    has the measurement.
+    artifact's own start, so the refusal now fires only for a real gap.
 
     ``validation_spec`` is unused here. The linear hook needs it to replay a data-derived penalty
     against a recorded fold before trusting the preset; latent-factor models resolve no parameter

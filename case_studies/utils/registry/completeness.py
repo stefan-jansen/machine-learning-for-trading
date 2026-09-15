@@ -223,7 +223,7 @@ def require_comparable_key_digests(digests, *, what: str, expected_keys=None) ->
 
     Two digests taken under different renderings are unequal whatever their key sets, and
     nothing about the inequality says so - which is how a rendering change turns into a
-    silent mis-grouping rather than an error (ml4t/agent-workspace#1065). A consumer that
+    silent mis-grouping rather than an error. A consumer that
     groups predictions by their eligibility digest reports more distinct contracts than
     exist and tells a reader that two checkpoints scored on identical rows are not
     comparable.
@@ -570,7 +570,7 @@ def backtest_run_status(
             # A NULL sharpe means "no metric pass has run here" everywhere except one
             # case: a path the engine stopped at ruin registers every ranking metric as
             # NULL on purpose, so that nothing sorts a bankrupt account against a solvent
-            # one (ml4t/agent-workspace#920). Reading that as incomplete would re-run the
+            # one. Reading that as incomplete would re-run the
             # backtest on every pass and never converge, so `ruin` is what separates
             # them. `ruin` is absent from a registry written before that column existed,
             # in which case a NULL sharpe still means unmeasured.

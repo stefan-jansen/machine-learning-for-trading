@@ -156,7 +156,7 @@ def build_holdout_cv(
     would evaluate an estimator nobody selected. Clamping to the producer's geometry applies the
     same rule correctly rather than contradicting it: take everything available, where available
     is what the features actually span. Families with no fold-scoped features supply no floor and
-    are unaffected. ml4t/agent-workspace#977 has the measurement and the rejected alternative.
+    are unaffected.
 
     Training ends one label buffer before the holdout opens, using the same buffer the
     validation folds were built with. That gap is what stops the last training label's outcome
@@ -230,7 +230,7 @@ def build_holdout_cv(
     # A daily panel is untouched by construction: its last observation of that date IS midnight,
     # so the widening condition is false and the rendering does not move. That matters because
     # this value is inside the hashed fold, so moving it changes the training identity every
-    # holdout refit registers under. ml4t/agent-workspace#986.
+    # holdout refit registers under.
     within_close = [value for value in observations if value.date() <= holdout_close.date()]
     if within_close and within_close[-1] > holdout_close:
         holdout_close = within_close[-1]
@@ -376,7 +376,7 @@ def build_holdout_training_spec(
 # was required to change here and required not to have changed there. cme_futures' holdout
 # `723a305604bb` was rejected by its own lineage check for that reason and no other, with its
 # feature artifacts, feature names and label artifact all identical to the validation run's
-# (ml4t/agent-workspace#1147).
+# .
 #
 # Each entry is (container, field). "computation" means the computation mapping itself; any
 # other value names a mapping inside it.

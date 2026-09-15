@@ -75,7 +75,7 @@ def require_fold_scoped_temporal_holdout_coverage(
     ``declared_folds`` is the artifact's own ``temporal_artifact_splits``. It is required
     rather than optional so a new caller has to decide rather than silently lose the check.
     Where it declares a fold with the requested id - which a producer that appends its holdout
-    rows *and* declares their geometry gives it (ml4t/agent-workspace#994) - the declared
+    rows *and* declares their geometry gives it - the declared
     ``train_end`` must fall before the requested fold's evaluation window opens, or the
     feature estimator saw the sessions the holdout is scored on. Where it does not, coverage
     is all that can be asked and the boundary rests on the producer's own assertion, which is

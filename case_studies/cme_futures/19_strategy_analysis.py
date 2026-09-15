@@ -177,7 +177,7 @@ cohort_counts = compute_and_register(
 )
 # The cohort call above is scoped to the reported pool and this one is not: the pairs are
 # selected from every registered prediction set. Stated rather than defaulted; narrowing
-# it changes published numbers and is ml4t/agent-workspace#1006.
+# it would change published numbers, so it is a separate decision from this line.
 paired_rows = populate_paired_metrics(
     "cme_futures",
     carrier=carrier,

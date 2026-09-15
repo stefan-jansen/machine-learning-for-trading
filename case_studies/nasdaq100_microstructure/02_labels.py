@@ -287,8 +287,7 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 # version of this notebook used the quote midpoint at each end, which measures how far the
 # market moved rather than what a trade would have realised, and paired it with a backtest
 # filling on a fifteen-minute clock - so the interval the label predicted and the interval the
-# strategy held did not overlap at all. That is ml4t/agent-workspace#187, and the reason it
-# survived review is that both intervals were fifteen minutes long and nothing printed
+# strategy held did not overlap at all. The reason it survived review is that both intervals were fifteen minutes long and nothing printed
 # distinguished them.
 #
 # A VWAP is not a price any single order is guaranteed, and it is not free of the spread: it
@@ -316,8 +315,7 @@ print(f"Bar spacing {BAR}, uniform within every session; horizons in bars {HORIZ
 # above measures and Section D asserts. Chapter 16 rebalances this case study on a coarser
 # schedule than the one the labels are built on. Chapter 16 now decides every fifteen minutes
 # and fills on the minute after the decision, which is the same convention as this one; that
-# the two agree is the point of ml4t/agent-workspace#187 and is asserted there rather than
-# assumed here.
+# the two agree is the point, and it is asserted in the tests rather than assumed here.
 #
 # The entry price is the next bar's VWAP, which the uniform grid asserted above makes exactly
 # one bar of wall-clock time later. Two things carry no entry and therefore no label: the last
@@ -340,7 +338,7 @@ for name in RETURN_LABELS:
     # carried existed only because the library divides by the price at t, so materialising the
     # entry one bar forward had already spent a bar of the span - and it made a fourteen-minute
     # label read as fifteen to anyone who saw `HORIZONS - BAR` and rounded it in their head.
-    # That is how ml4t/agent-workspace#187 stayed invisible for months. Under this convention
+    # That is how the mismatch stayed invisible for months. Under this convention
     # the span from entry fill to exit fill *is* the horizon, so it is written as one.
     held = f"{HORIZONS[name] // timedelta(minutes=1)}m"
     priced = fixed_time_horizon_labels(

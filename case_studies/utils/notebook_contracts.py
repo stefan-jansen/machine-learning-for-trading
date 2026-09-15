@@ -729,8 +729,7 @@ def undercovered_prediction_members(
     # every configured fold whatever the run was asked to do, so a run that fitted a subset
     # is charged for the folds it was never asked to produce. Every canonical run today
     # declares the full list and the narrowing is a no-op on them; the shape that makes it
-    # fire is `splits[:MAX_FOLDS]`, which ml4t/agent-workspace#1076 finds in three case
-    # studies. The symbol axis stays on the panel, so a family that lost names inside the
+    # fire is `splits[:MAX_FOLDS]`, which appears in three case studies. The symbol axis stays on the panel, so a family that lost names inside the
     # folds it ran is still charged for them.
     panel = feature_panel_keys(root)
     short: dict[str, str] = {}

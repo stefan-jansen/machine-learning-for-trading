@@ -30,7 +30,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 # result would not be identity-stable across the readers' hardware.
 DML_THREAD_LIMIT = 1
 # 1 -> 2 on 2026-09-10: the block-permutation refutation moved from comparing raw effects
-# to comparing HAC t-statistics (ml4t/agent-workspace#1120). That changes a registered
+# to comparing HAC t-statistics. That changes a registered
 # value, so it has to move the identity - and causal rows have no migration path, so every
 # causal row in every case study refits rather than being re-keyed. That is the intended
 # cost: a stored refutation_p computed on raw effects is anti-conservative, always in the
@@ -860,7 +860,7 @@ def empirical_permutation_p(placebo_effects: np.ndarray, observed_effect: float)
     not cosmetic: a permuted treatment is no longer predictable from the controls, so
     ``var(T_res)`` - the second stage's whole denominator - inflates, and every placebo
     theta is shrunk toward zero by arithmetic. Comparing thetas therefore measures a
-    narrower distribution than the null it stands for. See ml4t/agent-workspace#1120.
+    narrower distribution than the null it stands for.
 
     Parameters
     ----------
@@ -1176,7 +1176,7 @@ def run_dml_analysis(
         elif len(placebo_effects) >= MIN_PLACEBO_DRAWS:
             # THE TEST IS ON THE T-STATISTIC, NOT ON THETA, and the difference is not
             # cosmetic: comparing thetas made this refutation anti-conservative on every
-            # run ever recorded (ml4t/agent-workspace#1120).
+            # run ever recorded.
             #
             # DML's second stage regresses the residualized outcome on the residualized
             # treatment, so var(T_res) is the estimator's whole denominator. Permuting the
@@ -1889,8 +1889,8 @@ def _placebo_draws_json(refutation: dict) -> str | None:
 def _placebo_t_stats_json(refutation: dict) -> str | None:
     """Serialize the placebo t-statistics, or None when there are none.
 
-    These are the draws ``refutation_p`` is computed on since
-    ml4t/agent-workspace#1120. The thetas serialized above are still worth storing - a
+    These are the draws ``refutation_p`` is computed on since the t-statistic
+    correction. The thetas serialized above are still worth storing - a
     reader wants the effect scale - but a figure drawn from them no longer shows the
     distribution the p-value came from, because permuting the treatment inflates
     ``var(T_res)`` and shrinks every placebo theta toward zero by arithmetic. Two
@@ -1979,7 +1979,6 @@ def run_resolved_causal_request(
     # resolver-based fit in every case study moves at once, which makes the pre-fit check
     # matter more rather than less. `tests/test_causal_prefit_supersedes_check.py` pins it
     # against the write-time rule, which it calls rather than restates.
-    # See ml4t/agent-workspace#953.
     check_causal_supersedes(
         study.case_study,
         causal_hash,

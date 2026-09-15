@@ -308,8 +308,8 @@ for f in VALIDATION_FOLDS:
 # is appended rather than inferred downstream because **a holdout fit needs features, and a split
 # definition is not features**: `utils.modeling.append_holdout_fold_if_needed` adds the geometry
 # to a modeling dataset and produces no rows, so a stage that called it against an artifact
-# written without this found nothing in the holdout window at any fold. That is
-# ml4t/agent-workspace#971, and this is crypto's half of it.
+# written without this found nothing in the holdout window at any fold. This is crypto's half
+# of that defect.
 #
 # Its boundaries are not re-derived here. `build_holdout_cv` is what reconstructs a holdout fit
 # downstream, so it is asked for them: a second construction is a second thing to keep in step,

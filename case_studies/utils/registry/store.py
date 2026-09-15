@@ -189,8 +189,8 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     refutation_p     REAL,
     refutation_n_successful INTEGER,
     refutation_placebo_json TEXT,
-    -- The placebo t-statistics behind refutation_p, which since
-    -- ml4t/agent-workspace#1120 is the statistic the test is computed on. The thetas
+    -- The placebo t-statistics behind refutation_p, which is the statistic the
+    -- test is computed on since the correction. The thetas
     -- above stay because they are still what a reader wants to see on the effect scale,
     -- but a figure drawn from them no longer shows the distribution the p-value came
     -- from: permuting the treatment inflates var(T_res) and shrinks every placebo theta
@@ -425,7 +425,7 @@ CREATE TABLE IF NOT EXISTS decision_artifacts (
 -- One declared edge per superseded input artifact: "the file registered runs pin as
 -- `supersedes_sha256` was deliberately replaced by `sha256`". A training run fits on
 -- whatever is on disk, so without a declaration a regenerated artifact silently mixes two
--- vintages into one population (ml4t/agent-workspace#987). `register_training_run` refuses
+-- vintages into one population. `register_training_run` refuses
 -- an undeclared change and `declare_artifact_supersession` is how an author declares one.
 CREATE TABLE IF NOT EXISTS artifact_supersessions (
     artifact_name      TEXT NOT NULL,
@@ -689,11 +689,11 @@ _BACKTEST_UNCERTAINTY_COLUMNS = (
 )
 
 # Written on every run by `compute_portfolio_metrics`: whether the path lost its
-# capital, and the index of the period where it did (ml4t/agent-workspace#920).
+# capital, and the index of the period where it did.
 _BACKTEST_RUIN_COLUMNS = ("ruin", "ruin_period")
 
 # Written on every run by `RiskTriggerLog.as_metrics`: how often each declared risk
-# control acted, NULL where none of that kind was declared (ml4t/agent-workspace#1051).
+# control acted, NULL where none of that kind was declared.
 _BACKTEST_RISK_TRIGGER_COLUMNS = (
     "risk_triggers",
     "risk_triggers_stop_loss",
@@ -946,8 +946,8 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     ):
         db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_placebo_json TEXT")
 
-    # The placebo t-statistics, which since ml4t/agent-workspace#1120 are what
-    # refutation_p is computed on. Additive and outside the causal computation
+    # The placebo t-statistics, which are what refutation_p is computed on
+    # since the correction. Additive and outside the causal computation
     # specification, so it moves no causal hash. A row written before this column existed
     # carries NULL, which is the truthful answer: that run's p-value was computed on raw
     # thetas and the draws behind it are not recoverable on the t scale.

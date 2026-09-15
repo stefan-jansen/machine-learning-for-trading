@@ -1100,8 +1100,7 @@ def rank_by_validation_sharpe(
     refused rather than sorted to an end, which is what a null would otherwise do silently.
 
     Unless it is bankrupt. A null Sharpe used to mean exactly one thing - the run was not
-    measured - and refusing was the whole of the right answer. Since ml4t/agent-workspace#920
-    it means two, because a path whose equity reaches zero stops compounding and registers
+    measured - and refusing was the whole of the right answer. It now means two, because a path whose equity reaches zero stops compounding and registers
     `sharpe`, `sortino`, `calmar`, `omega`, `stability` and `tail_ratio` as null on purpose:
     ranking a bankrupt path is the thing that issue exists to prevent. The `ruin` column is what
     separates the two, so this reads it rather than testing the Sharpe alone:

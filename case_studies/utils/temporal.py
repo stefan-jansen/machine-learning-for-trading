@@ -772,7 +772,7 @@ def _require_declared_fold_geometry(
     recover the boundaries from the values. `temporal_artifact_fold_boundaries` falls back to
     `generate_cv_splits`, which returns the cross-validation folds and nothing else - so a fold
     the producer appended beyond the rolling set is invisible to every consumer, and the window
-    its estimator was fitted over is not recorded anywhere (ml4t/agent-workspace#994).
+    its estimator was fitted over is not recorded anywhere.
 
     That is not hypothetical. `us_equities_panel`'s stage-04 artifact carries folds 0..16 while
     its resolved geometry declares 0..15; fold 16 holds 9,978,112 rows spanning 1990-01-30 to

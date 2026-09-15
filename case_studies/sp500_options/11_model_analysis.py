@@ -126,7 +126,7 @@ coverage = coverage.join(
 # different renderings are unequal whatever their key sets, so a mixed population reports more
 # distinct eligibility contracts than exist and tells a reader that two checkpoints scored on
 # identical rows are not comparable - which the dimension check on each group cannot catch,
-# because the split halves agree on every dimension (ml4t/agent-workspace#1065).
+# because the split halves agree on every dimension.
 require_comparable_key_digests(
     coverage.get_column("expected_key_digest"), what="this notebook's model populations"
 )

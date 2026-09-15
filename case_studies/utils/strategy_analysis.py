@@ -156,7 +156,7 @@ def rank_returns_on_common_support(
         )
         # A path the engine stopped at ruin carries no Sharpe, by design: a ratio
         # of a mean to a dispersion describes a process that continues
-        # (ml4t/agent-workspace#920). The candidate stays on the frame so the
+        # . The candidate stays on the frame so the
         # caller can see it was compared, and sorts below every solvent one.
         #
         # Ruin is read off the *whole* series, not off the common-support slice.
@@ -223,7 +223,7 @@ class HoldoutSelfBacktest:
     you asked about", never "the holdout was taken while that configuration was rank-1".
     Those separate whenever the field kept growing after the window was spent.
 
-    The gap that makes concrete is the one ml4t/agent-workspace#1171 records: neither this
+    The gap that makes concrete: neither this
     lookup nor `18_holdout_predictions` could express *a holdout exists for this
     configuration, produced by a generation that is no longer reproducible*. The notebook
     derives the refit it would perform and compares; with the identity returned here, a
@@ -556,7 +556,7 @@ def _refit_comparable(training_spec_json: str | None) -> dict | None:
     two of the three and compared `macro_context.resolved_fold_digest`, which
     `_resolved_macro_digest` computes over `case.splits` - so it differs whenever a refit is
     correct, and the one holdout that reached this check was rejected for changing a field it
-    was required to change (ml4t/agent-workspace#1147).
+    was required to change.
 
     Scoped to the named subfield, never to its container: the other five entries under
     `macro_context` are the macro *configuration* - `series`, `policy`, `alignment`,
@@ -2466,9 +2466,8 @@ def rank_one(frame: pl.DataFrame, *, by: str, name: str) -> pl.DataFrame:
     """The top row of *frame* by *by*, with *name* deciding a tie.
 
     A one-key ``sort(by, descending=True).head(1)`` hands a tie to whatever order the frame
-    arrived in, so the row it returns is not a function of the data - the defect class
-    ml4t/agent-workspace#333 is about, where a visible precaution (the sort) leaves one
-    dimension of the answer free.
+    arrived in, so the row it returns is not a function of the data - the class of defect
+    where a visible precaution (the sort) leaves one dimension of the answer free.
 
     Exact ties in these quantities are not hypothetical. Measured across the nine live
     registries on 2026-09-11, 14 (case study, stage) pairs hold at least one exactly repeated

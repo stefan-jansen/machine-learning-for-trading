@@ -618,7 +618,7 @@ def compute_backtest_fold_metrics(
     # indistinguishable from a fold in which the strategy simply did not trade:
     # `compute_portfolio_metrics` on it reports `ruin=0`, a Sharpe of 0 and no
     # drawdown, which is a clean row for a period in which the book did not exist
-    # (ml4t/agent-workspace#920). The fold that contains the ruin finds it for
+    # . The fold that contains the ruin finds it for
     # itself; the folds after it are told.
     from case_studies.utils.backtest_runner import first_ruin_index
 

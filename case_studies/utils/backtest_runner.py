@@ -252,7 +252,7 @@ def calendar_periods_per_year(calendar: str) -> int:
 # not a return series. Measured on the `us_firm_characteristics` registry,
 # 2026-09-07: 46 registered runs hold a period return below -100%, and the worst
 # of them reports sharpe 1.547 and a positive cagr against a total return of
-# -202.3 (ml4t/agent-workspace#920).
+# -202.3.
 #
 # The engine models no creditor, so the largest loss it can express is the
 # capital: the period that would take equity through zero is truncated to
@@ -564,7 +564,7 @@ class RiskTriggerLog:
     """How many times each declared risk control acted during one backtest.
 
     A risk overlay that never fired was indistinguishable from one that was never
-    installed, and the two have opposite meanings (ml4t/agent-workspace#1051). The
+    installed, and the two have opposite meanings. The
     registry carried `num_trades` and the performance metrics and nothing else, so
     a reader comparing an overlay against the strategy it was laid on could
     conclude "the control acted" from a difference and nothing at all from a
@@ -760,7 +760,7 @@ def precompute_weights(
     # the same point or the two paths build different portfolios under one identity. Doing
     # it to the finished weights is not the same operation and is worse than not doing it:
     # with `top_k=2` picking A and B, dropping B leaves a book half in cash, where narrowing
-    # first picks A and C at the intended weight each (ml4t/agent-workspace#911).
+    # first picks A and C at the intended weight each.
     predictions = apply_traded_universe(predictions, prices, signal_config, case_study=case_study)
     weights = build_target_weights_from_config(predictions, signal_config)
     alloc_spec = strategy.get("allocation")
@@ -1237,7 +1237,7 @@ def _restore_ruin_nans(metrics: dict) -> dict:
     branch - which reads the metrics back out of the registry rather than
     recomputing them - handed the None straight to those same lines. A cached
     bankrupt run therefore failed where a fresh one printed
-    (ml4t/agent-workspace#1051's neighbour, found by review job #18941).
+    the neighbour of the defect above.
 
     Only where `ruin` says the NULL was written on purpose. Everywhere else a
     NULL means the metric was never computed, and inventing a NaN for it would
@@ -1262,23 +1262,23 @@ def apply_traded_universe(
 ) -> pl.DataFrame:
     """Narrow *predictions* to the universe the spec says this run trades.
 
-    Returns them unchanged when ``signal_config`` declares no ``traded_universe``,
-    which is every full run and every spec written before the key existed.
+     Returns them unchanged when ``signal_config`` declares no ``traded_universe``,
+     which is every full run and every spec written before the key existed.
 
-    A declaration is a claim about the panel, so it is checked against the panel
-    rather than trusted: the digest here and the one the caller hashed both cover
-    the sorted symbol list, so a panel that is not the one the caller declared stops
-    the run instead of registering a result under an identity that describes a
-    different portfolio. That is the whole point of the key - a reduced run must not
-    be able to hash like the full run over the same predictions
-    (ml4t/agent-workspace#911).
+     A declaration is a claim about the panel, so it is checked against the panel
+     rather than trusted: the digest here and the one the caller hashed both cover
+     the sorted symbol list, so a panel that is not the one the caller declared stops
+     the run instead of registering a result under an identity that describes a
+     different portfolio. That is the whole point of the key - a reduced run must not
+     be able to hash like the full run over the same predictions
+    .
 
-    The narrowing itself is what makes ``MAX_SYMBOLS`` reduce on the vectorized path,
-    where ``gross_ret = weight * y_true`` is computed from the predictions and never
-    consults ``prices``. On the engine path it is close to a no-op, because an
-    unpriced name could not fill there anyway; doing it in both places keeps
-    ``n_assets`` - which the notebooks read off the panel to decide which ``top_k``
-    schemes are feasible - describing the cross-section the sweep actually ranks.
+     The narrowing itself is what makes ``MAX_SYMBOLS`` reduce on the vectorized path,
+     where ``gross_ret = weight * y_true`` is computed from the predictions and never
+     consults ``prices``. On the engine path it is close to a no-op, because an
+     unpriced name could not fill there anyway; doing it in both places keeps
+     ``n_assets`` - which the notebooks read off the panel to decide which ``top_k``
+     schemes are feasible - describing the cross-section the sweep actually ranks.
     """
     from case_studies.utils.backtest_presets import traded_universe_declaration
 
@@ -1325,7 +1325,7 @@ def warn_if_the_panel_does_not_bound_the_universe(
     production sweep with the production cost per backtest. Measured on
     us_firm_characteristics/11_backtest, 2026-08-24: 8 predictions x 4 schemes at
     300 symbols and at 3,708 gave bit-identical Sharpe, CAGR and drawdown across
-    all 32 backtests, in 21 s against 19 s (ml4t/agent-workspace#911).
+    all 32 backtests, in 21 s against 19 s.
 
     This warns and does not act, which is a decision the engine cannot make on
     its own. Both ways of acting were tried and both are wrong here:
@@ -1363,7 +1363,7 @@ def warn_if_the_panel_does_not_bound_the_universe(
     and which of the seven this is being read in is not something this function
     can know. (76 of the 195 numbered case-study notebooks install it in total; a
     recursive grep also finds an archived notebook and the line you are reading,
-    which is why that count comes back as 78 - ml4t/agent-workspace#1078.)
+    which is why that count comes back as 78.)
     The ``warnings`` call is what a library caller and the tests read; the print is
     what survives the filter and lands in the rendered cell. It is emitted once per
     (case study, label, panel width, prediction width) because a sweep calls
@@ -1388,7 +1388,7 @@ def warn_if_the_panel_does_not_bound_the_universe(
         f"predictions carry {predictions['symbol'].n_unique()}, {unpriced['symbol'].n_unique()} "
         "of which it cannot price. The vectorized path takes its universe and its P&L from "
         "the predictions, so this run trades every predicted name at the full cost per "
-        "backtest and the narrower panel reduces nothing (ml4t/agent-workspace#911). "
+        "backtest and the narrower panel reduces nothing. "
         "TOP_N_PREDICTIONS is the knob that reduces this stage."
     )
     warn_the_reader(
@@ -1516,7 +1516,7 @@ def run_backtest(
     initial_cash = float(strategy_spec["backtest_config"]["cash"]["initial"])
     # The step decides which slots are traded, so the spec has to record the one this run
     # uses - otherwise two runs at different steps hash alike and the second is skipped
-    # (ml4t/agent-workspace#1005). Stamped here rather than only in build_backtest_spec
+    # . Stamped here rather than only in build_backtest_spec
     # because several notebooks build a spec without passing `label`, and this is the one
     # place that always has both the case study and the label.
     if label:
@@ -1543,7 +1543,7 @@ def run_backtest(
 
     # The universe the spec says this run trades, when it says one. This is what makes a
     # reduced run a different identity from the full run over the same predictions, and
-    # what makes the reduction reduce on the vectorized path (ml4t/agent-workspace#911).
+    # what makes the reduction reduce on the vectorized path.
     # The sp500_options HTM path is excluded for the same reason as the warning below:
     # its `prices` frame and its predictions are not indexed by the same kind of symbol.
     _symbol_indexed_alike = not (case_study == "sp500_options" and label == "ret_to_expiry")
@@ -2688,8 +2688,8 @@ def _apply_vectorized_risk(
     # A position rule declared here installs nothing on this path - the
     # close-to-close series cannot express an intrabar stop - so the run would
     # register under an identity named for a stop that never ran. That is
-    # `rules/notebook-standards.md` C17's shape, and ml4t/agent-workspace#1051 is
-    # about not letting it register silently, so it stops here instead.
+    # `rules/notebook-standards.md` C17's shape, and the point is not to let it
+    # register silently, so it stops here instead.
     position_rules = risk_spec.get("position_rules", [])
     if position_rules:
         declared = ", ".join(str(rc.get("name", rc.get("type"))) for rc in position_rules)
@@ -2949,29 +2949,29 @@ def _refuse_an_allocation_that_produced_no_target(
 ) -> None:
     """Refuse to register a run whose strategy produced no target weight at any rebalance.
 
-    An empty weight frame over a non-empty evaluation window is not a strategy that traded
-    little. It is a strategy the engine was never given anything to trade towards, so it holds
-    a flat account for the whole window and every return-derived metric it records is the
-    metric of that flat account: `total_return` 0, `sharpe` 0.0. Written to the registry those
-    read as a configuration that was tried and lost nothing, and a 0.0 Sharpe then sits above
-    every candidate whose Sharpe is negative. Nothing downstream filters it out of the trial
-    count - `cohort_metrics` lists cohort members straight from `backtest_runs` with no
-    zero-trade clause - so an absence is counted as a trial against every real candidate
-    beside it.
+     An empty weight frame over a non-empty evaluation window is not a strategy that traded
+     little. It is a strategy the engine was never given anything to trade towards, so it holds
+     a flat account for the whole window and every return-derived metric it records is the
+     metric of that flat account: `total_return` 0, `sharpe` 0.0. Written to the registry those
+     read as a configuration that was tried and lost nothing, and a 0.0 Sharpe then sits above
+     every candidate whose Sharpe is negative. Nothing downstream filters it out of the trial
+     count - `cohort_metrics` lists cohort members straight from `backtest_runs` with no
+     zero-trade clause - so an absence is counted as a trial against every real candidate
+     beside it.
 
-    `fx_pairs`' `mvo_ledoit_wolf` at `top_k=2` is the measured case
-    (ml4t/agent-workspace#1004): `compute_mvo_weights` skipped every one of 2,063 rebalances
-    for having a two-name cross-section and returned the empty schema-only frame.
+     `fx_pairs`' `mvo_ledoit_wolf` at `top_k=2` is the measured case
+    : `compute_mvo_weights` skipped every one of 2,063 rebalances
+     for having a two-name cross-section and returned the empty schema-only frame.
 
-    **The test is the weight frame, not the trade count.** A run with `num_trades == 0` and a
-    non-empty weight frame is a different condition with different causes, and at least one of
-    them is legitimate: a CI fixture whose panel is one or four bars long has a target and no
-    later bar to fill it on under `next_bar` execution. Refusing on the trade count alone
-    stopped eleven such fixture backtests across `test_research_contract_execution` and
-    `test_cme_futures_research`, which is the wrong answer - nothing is wrong with them.
+     **The test is the weight frame, not the trade count.** A run with `num_trades == 0` and a
+     non-empty weight frame is a different condition with different causes, and at least one of
+     them is legitimate: a CI fixture whose panel is one or four bars long has a target and no
+     later bar to fill it on under `next_bar` execution. Refusing on the trade count alone
+     stopped eleven such fixture backtests across `test_research_contract_execution` and
+     `test_cme_futures_research`, which is the wrong answer - nothing is wrong with them.
 
-    An empty return series is a different failure with its own diagnosis upstream and is left
-    to it.
+     An empty return series is a different failure with its own diagnosis upstream and is left
+     to it.
     """
     if weights is None or weights.height > 0:
         return

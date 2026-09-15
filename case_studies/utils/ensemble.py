@@ -9,8 +9,7 @@ cohort work and the holdout all read it the same way they read a model.
 module exists for. Its featured carrier is the mean forecast of the regularized
 LightGBM configurations, and nothing in the repository produced it: three
 notebooks read ``family == 'ensemble'``, no notebook wrote it, and every
-registry in the fleet held zero rows of it
-(ml4t/agent-workspace#1157).
+registry in the fleet held zero rows of it.
 
 The member set is resolved from what is registered, never listed by hand, so it
 cannot go stale against the configurations a case study actually fitted.
