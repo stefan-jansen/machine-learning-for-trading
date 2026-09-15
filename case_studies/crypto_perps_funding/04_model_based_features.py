@@ -90,6 +90,11 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 
 from case_studies.research.holdout import build_holdout_cv
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.temporal import (
     filtered_state_probs,
     fit_hmm_restarts,
@@ -1802,6 +1807,91 @@ show_with_alt(
 # stand-alone rank correlation cannot see, and the model notebooks are where it is
 # tested. Every magnitude here is small in absolute terms, which is the expected shape
 # for a volatility-state feature screened as a directional signal on its own.
+
+# %% [markdown]
+# ## What the artifact holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# zeros, the distance from the body of the distribution to its tail, whether anything is constant.
+# A threshold crossed there asks for a sentence of explanation and settles nothing on its own.
+#
+# The second is the one a null count cannot reach, and it matters more here than in stage 03. **A
+# fitted feature is undefined until its model has an estimation window**, so this artifact is
+# *expected* to be shorter than the panel it was estimated on - and an expectation that something
+# is missing is exactly the condition under which nobody notices how much. Coverage is therefore
+# measured against the keys the labels declare, which is the same reference stage 03 answers to,
+# so the two shortfalls can be read side by side and the part this stage adds separated from the
+# part it inherited.
+#
+# What this stage is entitled to lose is the burn-in, and it loses it at the front of each
+# perpetual's history. The budget below is the longest burn-in any model here declares,
+# read from the schedule rather than typed in, because a value emitted before the slowest fit has
+# its window would be a value no model produced. Everything else - a key inside a
+# perpetual's own span, or one after its last fitted value - is inherited from
+# the premium shadow stage 03 answers to or is this stage's to answer for, and the check below says which.
+
+# %%
+BURNIN_BUDGET = MIN_TRAIN_BARS
+print(
+    f"burn-in budget {BURNIN_BUDGET} settlements = the minimum training history a fit is attempted on"
+)
+
+report = quality_report(
+    temporal,
+    name="model-based features",
+    key_columns=["symbol", "timestamp"],
+    expected=label_universe(CASE_DIR, keys=["symbol", "timestamp"]),
+    keys=["symbol", "timestamp"],
+    entity="symbol",
+    session="timestamp",
+    expected_missing={
+        "leading": (BURNIN_BUDGET + 1, "the minimum training history a fit is attempted on")
+    },
+)
+render_quality_report(report)
+
+# %% [markdown]
+# The burn-in declaration covers the front of each perpetual's history and nothing else,
+# so anything outside it is measured against what stage 03 actually offered. A fit needs rows to
+# estimate on, and a key whose window holds fewer than the burn-in requires could not have been
+# produced here whatever this stage did; a key that had them and carries no value is this stage's.
+
+# %%
+ENTITY_COLS = "symbol" if isinstance("symbol", list) else ["symbol"]
+offered = pl.read_parquet(FEATURES_DIR / "financial.parquet", columns=["symbol", "timestamp"])
+sessions = (
+    label_universe(CASE_DIR, keys=["symbol", "timestamp"])
+    .select("timestamp")
+    .unique()
+    .sort("timestamp")
+    .with_row_index("i")
+)
+supply = offered.join(sessions, on="timestamp").select(*ENTITY_COLS, "i")
+# `quality_report` adds the `missing_*` keys only where there were missing keys to
+# classify, so their absence is the "nothing is missing" case and not an error.
+classified = report.get("missing_classified")
+outside = (
+    classified.filter(pl.col("where") != "leading").join(sessions, on="timestamp")
+    if classified is not None
+    else pl.DataFrame()
+)
+if outside.height:
+    depth = (
+        outside.join(supply, on=ENTITY_COLS, suffix="_src")
+        .filter(pl.col("i_src").is_between(pl.col("i") - BURNIN_BUDGET, pl.col("i") - 1))
+        .group_by([*ENTITY_COLS, "i"])
+        .len()
+    )
+    starved = outside.join(
+        depth.filter(pl.col("len") >= BURNIN_BUDGET), on=[*ENTITY_COLS, "i"], how="anti"
+    )
+    print(
+        f"outside the burn-in: {outside.height:,} missing keys, of which {starved.height:,} "
+        f"({starved.height / outside.height:.2%}) have fewer than the {BURNIN_BUDGET} rows a fit "
+        "reads behind them"
+    )
+else:
+    print("outside the burn-in: nothing missing")
 
 # %% [markdown]
 # ## Key takeaways
