@@ -80,15 +80,25 @@ def registered_artifacts(spec_json: str) -> list[tuple[str, str, int | None]]:
     return out
 
 
-def walk(case_study: str, artifacts_root: Path | None) -> tuple[dict[str, Path], list[str]]:
-    """Hash every parquet the case study's artifact directories hold, after resolving them."""
+def walk(
+    case_study: str, artifacts_root: Path | None
+) -> tuple[dict[str, Path], list[str], list[str]]:
+    """Hash every parquet the case study's artifact directories hold, after resolving them.
+
+    The third return is the directories that were not there. An absent one is not a small
+    gap in an otherwise good answer: every hash it would have contributed is absent from
+    ``on_disk``, so every fit that read it is counted as naming a missing artifact. The
+    caller has to know, because the two readings are opposite and the output is identical.
+    """
     case_dir = get_case_study_dir(case_study)
     on_disk: dict[str, Path] = {}
     scope: list[str] = []
+    absent: list[str] = []
     for name in ARTIFACT_DIRS:
         declared = case_dir / name
         if not declared.exists():
             scope.append(f"    {name}/  ABSENT at {declared}")
+            absent.append(f"{case_study}/{name} at {declared}")
             continue
         resolved = declared.resolve()
         scope.append(f"    {name}/  -> {resolved}")
@@ -101,7 +111,7 @@ def walk(case_study: str, artifacts_root: Path | None) -> tuple[dict[str, Path],
             )
         for parquet in sorted(resolved.rglob("*.parquet")):
             on_disk.setdefault(sha256_of(parquet), parquet)
-    return on_disk, scope
+    return on_disk, scope, absent
 
 
 def default_artifacts_root(case_studies: tuple[str, ...]) -> Path | None:
@@ -121,16 +131,28 @@ def default_artifacts_root(case_studies: tuple[str, ...]) -> Path | None:
     return None
 
 
-def audit(case_studies: tuple[str, ...], artifacts_root: Path | None) -> tuple[int, list[str]]:
-    """Returns the missing-fit count and the case studies that could not be audited.
+def audit(
+    case_studies: tuple[str, ...], artifacts_root: Path | None
+) -> tuple[int, list[str], list[str]]:
+    """Returns the missing-fit count, the case studies skipped, and the directories unseen.
 
-    The second half is not a detail. A partial audit that prints "0 fits name an artifact
-    that is not on disk" is indistinguishable from a clean one, and a checkout is missing a
-    registry whenever its gitignored ``run_log`` symlink was never created - which is the
-    normal state of most worktrees, not an exception.
+    The second and third are not details. A partial audit that prints "0 fits name an
+    artifact that is not on disk" is indistinguishable from a clean one, and a checkout is
+    missing a registry whenever its gitignored ``run_log`` symlink was never created -
+    which is the normal state of most worktrees, not an exception.
+
+    The third exists because the second was not enough. An absent *artifact directory*
+    inside an audited case study used to print one ABSENT line in the middle of the scope
+    block and then contribute every one of that case study's fits to a confident total.
+    Measured 2026-09-14 on a checkout whose ``us_equities_panel`` had ``run_log`` but no
+    ``features/``: the audit reported 393 fits naming missing artifacts and exited 1, with
+    no PARTIAL, while ``financial.parquet`` sat on disk at exactly the 4,478,156,899 bytes
+    the MISSING line quoted. A case study that could not be fully seen is now not counted
+    at all, because there is no way to tell its real findings from its blind ones.
     """
     total_missing = 0
     unaudited: list[str] = []
+    unseen: list[str] = []
     for case_study in case_studies:
         db = get_case_study_dir(case_study) / "run_log" / "registry.db"
         print(f"\n{case_study}")
@@ -138,9 +160,16 @@ def audit(case_studies: tuple[str, ...], artifacts_root: Path | None) -> tuple[i
             print(f"    NOT AUDITED: no registry at {db}")
             unaudited.append(case_study)
             continue
-        on_disk, scope = walk(case_study, artifacts_root)
+        on_disk, scope, absent = walk(case_study, artifacts_root)
         for line in scope:
             print(line)
+        if absent:
+            print(
+                f"    NOT AUDITED: {len(absent)} artifact directory(ies) absent, so every "
+                f"fit here would read as missing. Nothing from this case study is counted."
+            )
+            unseen.extend(absent)
+            continue
         print(f"    {len(on_disk)} distinct parquet hashed")
 
         connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -163,7 +192,7 @@ def audit(case_studies: tuple[str, ...], artifacts_root: Path | None) -> tuple[i
             size_text = f"{size:,} bytes" if size else "size not recorded"
             print(f"    MISSING  {role:<14} {sha[:16]}…  {size_text}  named by {count} fits")
             total_missing += count
-    return total_missing, unaudited
+    return total_missing, unaudited, unseen
 
 
 def main() -> int:
@@ -194,14 +223,23 @@ def main() -> int:
             )
 
     print(f"artifacts root: {artifacts_root if artifacts_root else 'UNCHECKED'}")
-    total, unaudited = audit(selected, artifacts_root)
-    print(f"\n{total} fits name an artifact that is not on disk")
-    if unaudited:
-        print(
-            f"PARTIAL: {len(unaudited)} of {len(selected)} case studies were not audited "
-            f"({', '.join(unaudited)}). The count above covers the rest only."
-        )
+    total, unaudited, unseen = audit(selected, artifacts_root)
+    if unaudited or unseen:
+        # Deliberately no total. A number printed here is read as the answer however it is
+        # qualified, and over an incomplete scope it is not one.
+        print("\nPARTIAL: this audit did not see the whole tree, so it reports no count.")
+        if unaudited:
+            print(
+                f"  {len(unaudited)} of {len(selected)} case studies had no registry: "
+                f"{', '.join(unaudited)}"
+            )
+        if unseen:
+            print(f"  {len(unseen)} artifact directory(ies) absent:")
+            for line in unseen:
+                print(f"    {line}")
+        print("  Run from a checkout where every case study links into the artifacts root.")
         return 2
+    print(f"\n{total} fits name an artifact that is not on disk")
     return 1 if total else 0
 
 
