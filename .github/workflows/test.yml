@@ -549,10 +549,32 @@ jobs:
       # a gate that only fires on the path we believe is the only path is how that
       # happened. On a push the base is the previous tip, so the scope is exactly
       # what the push introduced.
+      #
+      # It must also fire on `workflow_run`, and that is not a completeness tidy.
+      # Every commit on `main` gets two Tests runs - this `push` run, and the run
+      # `Docker Publish` triggers on finishing - sharing one concurrency group with
+      # cancel-in-progress. The `push` run is the only one whose event carries a
+      # previous tip, and it is routinely cancelled partway by the run that replaces
+      # it, while the `workflow_run` run skipped this step entirely. Measured
+      # 2026-09-15 over the last ten commits on `main`: nine read
+      # `guards=[success, cancelled]` - the cancelled one is this step's run and the
+      # successful one is the run that skipped it. The tenth, `b6a7627c`, is the only
+      # commit where the step actually ran, and it caught a stale render on that push.
+      # So the gate described above as covering merges had not covered a merge in ten.
+      # On `workflow_run` there is no previous tip to diff, so it checks everything,
+      # which is the same fallback a first push already takes.
       - name: Notebooks this change touched were executed from their current .py
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        if: >-
+          github.event_name == 'pull_request' || github.event_name == 'push'
+          || github.event_name == 'workflow_run'
         run: |
           source .venv/bin/activate
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            # No previous tip on this event, so there is no honest narrower scope.
+            echo "workflow_run: no previous tip - checking every notebook"
+            python .github/scripts/notebook_provenance.py check
+            exit $?
+          fi
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             # What does this branch add on top of the base: merge-base diff.
             python .github/scripts/notebook_provenance.py check \
