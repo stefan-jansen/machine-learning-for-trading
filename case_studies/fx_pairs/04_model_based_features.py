@@ -80,6 +80,11 @@ from statsmodels.tsa.arima.model import ARIMA
 from threadpoolctl import threadpool_limits
 
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.artifact_quality import (
+    label_universe,
+    quality_report,
+    render_quality_report,
+)
 from case_studies.utils.temporal import (
     arima_one_step_forecast,
     filtered_state_probs,
@@ -2246,6 +2251,91 @@ if len(eval_summary):
     )
 else:
     print(f"Chart omitted: no session reaches {MIN_PAIRS_PER_DATE} pairs.")
+
+# %% [markdown] tags=[]
+# ## What the artifact holds, and what it owes
+#
+# Two questions about the file this stage just wrote. The first is what is in each column - nulls,
+# zeros, the distance from the body of the distribution to its tail, whether anything is constant.
+# A threshold crossed there asks for a sentence of explanation and settles nothing on its own.
+#
+# The second is the one a null count cannot reach, and it matters more here than in stage 03. **A
+# fitted feature is undefined until its model has an estimation window**, so this artifact is
+# *expected* to be shorter than the panel it was estimated on - and an expectation that something
+# is missing is exactly the condition under which nobody notices how much. Coverage is therefore
+# measured against the keys the labels declare, which is the same reference stage 03 answers to,
+# so the two shortfalls can be read side by side and the part this stage adds separated from the
+# part it inherited.
+#
+# What this stage is entitled to lose is the burn-in, and it loses it at the front of each
+# pair's history. The budget below is the longest burn-in any model here declares,
+# read from the schedule rather than typed in, because a value emitted before the slowest fit has
+# its window would be a value no model produced. Everything else - a key inside a
+# pair's own span, or one after its last fitted value - is inherited from
+# the carrier window stage 03 answers to or is this stage's to answer for, and the check below says which.
+
+# %% tags=[]
+BURNIN_BUDGET = max(KALMAN_BURNIN, HMM_BURNIN, ARIMA_BURNIN)
+print(
+    f"burn-in budget {BURNIN_BUDGET} sessions = the longest of the state-space, regime and ARIMA burn-ins"
+)
+
+report = quality_report(
+    temporal_df,
+    name="model-based features",
+    key_columns=ARTIFACT_KEY,
+    expected=label_universe(CASE_DIR, keys=ARTIFACT_KEY),
+    keys=ARTIFACT_KEY,
+    entity="symbol",
+    session="timestamp",
+    expected_missing={
+        "leading": (BURNIN_BUDGET + 1, "the longest of the state-space, regime and ARIMA burn-ins")
+    },
+)
+render_quality_report(report)
+
+# %% [markdown] tags=[]
+# The burn-in declaration covers the front of each pair's history and nothing else,
+# so anything outside it is measured against what stage 03 actually offered. A fit needs rows to
+# estimate on, and a key whose window holds fewer than the burn-in requires could not have been
+# produced here whatever this stage did; a key that had them and carries no value is this stage's.
+
+# %% tags=[]
+ENTITY_COLS = "symbol" if isinstance("symbol", list) else ["symbol"]
+offered = pl.read_parquet(FEATURES_DIR / "financial.parquet", columns=ARTIFACT_KEY)
+sessions = (
+    label_universe(CASE_DIR, keys=ARTIFACT_KEY)
+    .select("timestamp")
+    .unique()
+    .sort("timestamp")
+    .with_row_index("i")
+)
+supply = offered.join(sessions, on="timestamp").select(*ENTITY_COLS, "i")
+# `quality_report` adds the `missing_*` keys only where there were missing keys to
+# classify, so their absence is the "nothing is missing" case and not an error.
+classified = report.get("missing_classified")
+outside = (
+    classified.filter(pl.col("where") != "leading").join(sessions, on="timestamp")
+    if classified is not None
+    else pl.DataFrame()
+)
+if outside.height:
+    depth = (
+        outside.join(supply, on=ENTITY_COLS, suffix="_src")
+        .filter(pl.col("i_src").is_between(pl.col("i") - BURNIN_BUDGET, pl.col("i") - 1))
+        .group_by([*ENTITY_COLS, "i"])
+        .len()
+    )
+    starved = outside.join(
+        depth.filter(pl.col("len") >= BURNIN_BUDGET), on=[*ENTITY_COLS, "i"], how="anti"
+    )
+    print(
+        f"outside the burn-in: {outside.height:,} missing keys, of which {starved.height:,} "
+        f"({starved.height / outside.height:.2%}) have fewer than the {BURNIN_BUDGET} rows a fit "
+        "reads behind them"
+    )
+else:
+    print("outside the burn-in: nothing missing")
 
 # %% [markdown] tags=[]
 # ## Key Takeaways
