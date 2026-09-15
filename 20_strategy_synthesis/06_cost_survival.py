@@ -306,7 +306,6 @@ for bar, row in zip(bars, summary.iter_rows(named=True), strict=False):
 # Headroom so the breakeven annotation on the widest bar (FX) is not clipped.
 ax.set_xlim(right=max(summary["drag_pct"]) * 1.28)
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Horizontal bars giving the percentage of gross Sharpe consumed by each case "
@@ -347,7 +346,6 @@ ax.set_title("Breakeven Cost Thresholds — Higher Is More Robust")
 legend_handles = [Patch(facecolor=freq_colors[f], label=f) for f in freq_order if f in freq_colors]
 ax.legend(handles=legend_handles, loc="lower right", title="Cadence")
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Horizontal bars of the breakeven per-leg cost for each case study, ordered "
@@ -401,7 +399,6 @@ for cs_id in best_alloc_map:
     if _c is not None:
         ax.axvline(_c, color="gray", alpha=0.25, linewidth=0.8, linestyle=":")
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Line chart of Sharpe against per-leg cost in basis points, one line per "
@@ -577,7 +574,6 @@ if not summary.is_empty():
         framealpha=0.9,
     )
 
-    fig.tight_layout()
     show_with_alt(
         fig,
         "Log-log scatter of breakeven cost against assumed relative turnover, one "

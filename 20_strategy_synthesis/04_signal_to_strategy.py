@@ -176,7 +176,6 @@ ax.set_xticklabels(["Validation", "Holdout"])
 ax.set_ylabel("Sharpe of the selected configuration")
 ax.set_title("The same configuration, before and after the holdout")
 
-fig.tight_layout()
 show_with_alt(
     fig,
     "Left: holdout IC against holdout Sharpe for each selected configuration, "
@@ -435,7 +434,6 @@ handles = [
 ]
 if handles:
     ax.legend(handles=handles, loc="upper right", fontsize=8, title="Cadence")
-fig.tight_layout()
 show_with_alt(
     fig,
     "Box plots of signal-stage Sharpe, one box per case study with a registered "
@@ -535,7 +533,6 @@ if _unmeasured.height:
         + "\nnot shown, no backtested variants: "
         + ", ".join(_unmeasured["case_study"].to_list())
     )
-fig.tight_layout()
 show_with_alt(
     fig,
     "Horizontal bars giving, for each case study with backtested variants, the "
