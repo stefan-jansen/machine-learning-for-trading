@@ -681,7 +681,8 @@ alert_rows = [
         "metric": "prediction_distribution",
         "baseline": 0.0,
         "current": prediction_psi,
-        "threshold": PSI_WATCH,
+        "watch": PSI_WATCH,
+        "alert": PSI_ALERT,
         "status": "ALERT"
         if prediction_psi >= PSI_ALERT
         else ("WATCH" if prediction_psi >= PSI_WATCH else "OK"),
@@ -690,7 +691,8 @@ alert_rows = [
         "metric": ROLLING_IC,
         "baseline": baseline_ic,
         "current": current_ic,
-        "threshold": baseline_ic - IC_ALERT_DROP,
+        "watch": baseline_ic - IC_WATCH_DROP,
+        "alert": baseline_ic - IC_ALERT_DROP,
         "status": "ALERT"
         if current_ic < baseline_ic - IC_ALERT_DROP
         else ("WATCH" if current_ic < baseline_ic - IC_WATCH_DROP else "OK"),
@@ -699,7 +701,8 @@ alert_rows = [
         "metric": ROLLING_HIT_RATE,
         "baseline": baseline_hit_rate,
         "current": current_hit_rate,
-        "threshold": baseline_hit_rate - IC_ALERT_DROP,
+        "watch": baseline_hit_rate - IC_WATCH_DROP,
+        "alert": baseline_hit_rate - IC_ALERT_DROP,
         "status": "ALERT"
         if current_hit_rate < baseline_hit_rate - IC_ALERT_DROP
         else ("WATCH" if current_hit_rate < baseline_hit_rate - IC_WATCH_DROP else "OK"),
@@ -708,7 +711,8 @@ alert_rows = [
         "metric": ROLLING_MSE,
         "baseline": baseline_mse,
         "current": current_mse,
-        "threshold": baseline_mse * (1 + MSE_ALERT_INCREASE),
+        "watch": baseline_mse * (1 + MSE_WATCH_INCREASE),
+        "alert": baseline_mse * (1 + MSE_ALERT_INCREASE),
         "status": "ALERT"
         if current_mse > baseline_mse * (1 + MSE_ALERT_INCREASE)
         else ("WATCH" if current_mse > baseline_mse * (1 + MSE_WATCH_INCREASE) else "OK"),
@@ -886,8 +890,12 @@ alert_table
 
 # %% [markdown]
 # The alert table turns the diagnostics into an operating state. Each row carries the launch
-# baseline, the current window, and the threshold between them, so a status is traceable to the
-# two numbers that produced it rather than being an opinion.
+# baseline, the current window, and *both* bounds its status is decided against, so a status is
+# traceable to the numbers that produced it rather than being an opinion. Both are shown because
+# the two bounds are not the same kind of number across rows: for the prediction distribution they
+# are fixed population-stability conventions, while for the rolling metrics they are offsets from
+# that metric's own launch baseline. A single threshold column would have to pick one severity per
+# row, and a reader could not tell from the table which one it had picked.
 #
 # What the table is not is a retraining trigger. A degraded status says something changed, and
 # the three candidate explanations - the data broke, the market moved, the model decayed - call
