@@ -43,6 +43,7 @@ import polars as pl
 from IPython.display import Markdown, display
 
 from case_studies.utils.analytics import CASE_STUDY_IDS, SHORT_NAMES, load_triage_ledger
+from case_studies.utils.strategy_analysis import rank_one
 from utils.paths import REPO_ROOT, get_chapter_dir
 from utils.style import COLORS, show_with_alt
 
@@ -297,8 +298,12 @@ show_with_alt(
 # %% tags=["results"]
 _paired = forward.filter(pl.col("holdout_sharpe").is_not_null())
 _absent = forward.filter(pl.col("holdout_sharpe").is_null())["cs_short"].to_list()
+# rank_one, not a one-key sort: the case study this picks is named in the sentence below,
+# so a tie on holdout Sharpe would publish whichever row the join happened to emit first.
 _best = (
-    _paired.sort("holdout_sharpe", descending=True).row(0, named=True) if _paired.height else None
+    rank_one(_paired, by="holdout_sharpe", name="cs_short").row(0, named=True)
+    if _paired.height
+    else None
 )
 display(
     Markdown(
