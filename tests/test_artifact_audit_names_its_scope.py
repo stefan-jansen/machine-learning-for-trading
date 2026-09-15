@@ -90,7 +90,7 @@ class TestScope:
     def test_walk_follows_the_symlink_and_finds_the_artifact(self, tree):
         artifacts, _ = tree
         sha = write_parquet_like(artifacts / "cs" / "features" / "financial.parquet", b"x")
-        on_disk, scope = audit_module.walk("cs", (artifacts).resolve())
+        on_disk, scope, _absent = audit_module.walk("cs", (artifacts).resolve())
         assert sha in on_disk
         assert str((artifacts / "cs" / "features").resolve()) in " ".join(scope)
 
@@ -118,7 +118,7 @@ class TestScope:
             checkout / "cs" / "run_log" / "registry.db",
             [spec_with({"financial": {"sha256": sha, "size": 7}})] * 3,
         )
-        total, unaudited = audit_module.audit(("cs",), artifacts.resolve())
+        total, unaudited, unseen = audit_module.audit(("cs",), artifacts.resolve())
         assert (total, unaudited) == (0, [])
         assert "every named artifact present" in capsys.readouterr().out
 
@@ -129,7 +129,7 @@ class TestScope:
             checkout / "cs" / "run_log" / "registry.db",
             [spec_with({"model_based": {"sha256": "deadbeef" * 8, "size": 11}})] * 31,
         )
-        total, unaudited = audit_module.audit(("cs",), artifacts.resolve())
+        total, unaudited, unseen = audit_module.audit(("cs",), artifacts.resolve())
         assert (total, unaudited) == (31, [])
         assert "named by 31 fits" in capsys.readouterr().out
 
@@ -142,8 +142,8 @@ class TestPartialScopeCannotReadAsClean:
         (checkout / "cs").mkdir(parents=True)
         (checkout / "cs" / "features").symlink_to(artifacts / "cs" / "features")
         monkeypatch.setattr(audit_module, "get_case_study_dir", lambda name: checkout / name)
-        total, unaudited = audit_module.audit(("cs",), artifacts.resolve())
-        assert (total, unaudited) == (0, ["cs"])
+        total, unaudited, unseen = audit_module.audit(("cs",), artifacts.resolve())
+        assert (total, unaudited, unseen) == (0, ["cs"], [])
         assert "NOT AUDITED" in capsys.readouterr().out
 
     def test_main_exits_2_when_the_scope_was_partial(self, tmp_path, monkeypatch, capsys):
@@ -158,3 +158,50 @@ class TestPartialScopeCannotReadAsClean:
         monkeypatch.setattr(sys, "argv", ["artifact_audit.py"])
         assert audit_module.main() == 2
         assert "PARTIAL" in capsys.readouterr().out
+
+
+class TestAnAbsentDirectoryIsNotACleanScope:
+    """The half that was silent, and is the reason a wrong answer looked authoritative.
+
+    An unaudited *case study* printed PARTIAL and named itself. An absent artifact
+    *directory* inside an audited one printed a single ABSENT line in the middle of the
+    scope block, hashed nothing, and then counted every fit in that case study as naming a
+    missing artifact - finishing with a bare total and exit 1. Measured 2026-09-14 on a
+    checkout whose `us_equities_panel` had `run_log` but no `features/`: 393 fits reported
+    missing, while the named `financial.parquet` sat on disk at exactly the
+    4,478,156,899 bytes the MISSING line quoted.
+    """
+
+    @pytest.fixture
+    def blind_tree(self, tmp_path, monkeypatch):
+        artifacts = tmp_path / "artifacts"
+        checkout = tmp_path / "checkout"
+        (artifacts / "cs" / "labels").mkdir(parents=True)
+        (checkout / "cs").mkdir(parents=True)
+        # labels/ is linked; features/ is not there at all, which is the normal state of a
+        # worktree whose gitignored symlinks were never created.
+        (checkout / "cs" / "labels").symlink_to(artifacts / "cs" / "labels")
+        make_registry(
+            checkout / "cs" / "run_log" / "registry.db",
+            [spec_with({"financial": {"sha256": "deadbeef", "size": 4_478_156_899}})] * 393,
+        )
+        monkeypatch.setattr(audit_module, "get_case_study_dir", lambda name: checkout / name)
+        monkeypatch.setattr(audit_module, "CASE_STUDIES", ("cs",))
+        return artifacts, checkout
+
+    def test_the_case_study_is_not_counted_at_all(self, blind_tree, capsys):
+        artifacts, _ = blind_tree
+        total, unaudited, unseen = audit_module.audit(("cs",), artifacts.resolve())
+        assert total == 0, "a case study whose tree was not fully seen must contribute nothing"
+        assert unaudited == []
+        assert len(unseen) == 1 and unseen[0].startswith("cs/features")
+        assert "393" not in capsys.readouterr().out
+
+    def test_main_prints_no_total_and_exits_2(self, blind_tree, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["artifact_audit.py"])
+        assert audit_module.main() == 2
+        out = capsys.readouterr().out
+        assert "PARTIAL" in out
+        assert "cs/features" in out
+        # The whole point: no number that could be read as the answer.
+        assert "fits name an artifact that is not on disk" not in out
