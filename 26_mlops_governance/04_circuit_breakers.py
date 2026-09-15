@@ -954,6 +954,14 @@ event_log_df
 #   its capital and its investors, and nothing here answers it.
 # - One iteration is one trading day, so the daily-loss breaker sees a session's total move
 #   rather than the path within it. A real intraday breaker fires on the path.
+# - For the same reason the four recovery timeouts cannot be told apart here. They are 4 hours,
+#   1 hour, 30 minutes and 5 minutes, and the smallest gap between two iterations is 24 hours,
+#   so every one of them has elapsed by the next step: an OPEN breaker always attempts recovery
+#   on the following day whichever value it was given. The drawdown breaker's 31 trips above are
+#   that cycle, not its policy - SPY stayed beyond the 10% threshold for most of the window, and
+#   a breaker that re-opens the day after every recovery attempt trips about once every two days
+#   across it. The four values are written as a real deployment would set them; distinguishing
+#   them needs a simulation that steps in minutes.
 #
 # **Next**: Continue with [`05_feast_feature_store`](05_feast_feature_store.ipynb)
 # to connect these safety controls to the data-governance layer that keeps
