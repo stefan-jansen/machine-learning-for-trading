@@ -15,7 +15,8 @@ own output. An unreferenced import can change what a code cell computes, by side
 and no amount of reading the source separates that case from a dead one - `import torch`
 for cudart symbol ordering has zero references by construction. The refusals below are the
 narrowing: an import carrying `# noqa: F401`, an import carrying any other comment, an
-import that was added rather than removed, and anything else in a code cell.
+import that was added rather than removed, an import whose removal exposes a trailing
+expression to Jupyter's display, and anything else in a code cell.
 """
 
 from __future__ import annotations
@@ -32,7 +33,10 @@ sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
 import notebook_provenance  # noqa: E402
 from notebook_provenance import (  # noqa: E402
+    _comparable,
+    _ends_in_an_expression,
     _unused_imports_removed,
+    code_cells_only,
     drift_is_prose_only,
     drift_is_unused_import_only,
 )
@@ -276,3 +280,106 @@ def test_tier_refuses_a_stamped_blob_that_is_gone(tmp_path: Path) -> None:
     ok, removed = drift_is_unused_import_only("0" * 40, _py(tmp_path, CLEANED))
     assert not ok
     assert removed == []
+
+
+# --- the display refusal --------------------------------------------------------------
+#
+# A way removing an import changes a notebook's output without changing what it computes,
+# and one the other comparisons are all blind to: both sides normalize to the same source,
+# the code-cell ASTs agree, and preserved output counts are what a notebook that has not
+# been re-run looks like either way.
+
+TRAILING_IMPORT = """# %% [markdown] tags=[]
+# # A heading
+
+# %% tags=[]
+import pandas as pd
+
+frame = pd.DataFrame({"n": [21]})
+frame
+import json
+"""
+
+LEADING_IMPORT = """# %% [markdown] tags=[]
+# # A heading
+
+# %% tags=[]
+import json
+
+import pandas as pd
+
+frame = pd.DataFrame({"n": [21]})
+frame
+"""
+
+NO_IMPORT = """# %% [markdown] tags=[]
+# # A heading
+
+# %% tags=[]
+import pandas as pd
+
+frame = pd.DataFrame({"n": [21]})
+frame
+"""
+
+
+def test_tier_refuses_a_removal_that_exposes_a_trailing_expression(tmp_path: Path) -> None:
+    """`frame` then `import json` displays nothing; drop the import and it renders a table.
+
+    The committed notebook holds the cell's outputs from an execution where the import was
+    final, so accepting this would restamp a source whose next execution produces an output
+    the .ipynb does not have. Every other comparison the tier makes passes on this pair,
+    which is why the refusal has to be its own check rather than a consequence of one.
+    """
+    ok, removed = drift_is_unused_import_only(_blob(TRAILING_IMPORT), _py(tmp_path, NO_IMPORT))
+    assert not ok
+    assert removed == []
+
+
+def test_tier_accepts_a_removal_in_front_of_a_trailing_expression(tmp_path: Path) -> None:
+    """`frame` is the final statement before and after, so the display does not change.
+
+    The negative half of the rule. Without it the guard could refuse every cell that ends
+    in an expression and still pass its positive test, which is conservative rather than
+    decidable.
+    """
+    ok, removed = drift_is_unused_import_only(_blob(LEADING_IMPORT), _py(tmp_path, NO_IMPORT))
+    assert ok
+    assert removed == ["json"]
+
+
+def test_nothing_the_tier_compares_separates_the_two_display_cases() -> None:
+    """The comparison the classifier makes cannot tell the refused pair from the accepted one.
+
+    Pins what the refusal is for. Both stamped sources normalize to code cells with the same
+    AST - a trailing import and a leading one are the same statements in a different order,
+    and both are gone after the fix - so the check that rejects one and accepts the other has
+    to be its own, not a consequence of the AST comparison. If a later change makes that
+    comparison distinguish these, this fails and the display check can be re-examined rather
+    than left in place answering a question something else now answers.
+    """
+    trailing = code_cells_only(_comparable(_unused_imports_removed(TRAILING_IMPORT)))
+    leading = code_cells_only(_comparable(_unused_imports_removed(LEADING_IMPORT)))
+    assert trailing is not None
+    assert trailing == leading
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        pytest.param("frame = 1\nframe", True, id="a trailing expression"),
+        pytest.param("frame = 1\nframe\nimport json", False, id="a trailing import"),
+        pytest.param("frame = 1", False, id="a trailing assignment"),
+        pytest.param("frame = 1\nframe;", True, id="a semicolon does not change the statement"),
+        pytest.param("", False, id="an empty cell"),
+        pytest.param("frame =", None, id="a body that does not parse"),
+    ],
+)
+def test_the_display_predicate(body: str, expected: bool | None) -> None:
+    """What Jupyter renders is the last statement's kind, and nothing else about the cell.
+
+    A semicolon suppresses the display at run time without changing the statement, so it is
+    True here; `_comparable` carries the semicolon flags separately and the prose tier
+    already refuses a change to them.
+    """
+    assert _ends_in_an_expression(body) is expected

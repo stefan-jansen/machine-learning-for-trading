@@ -1539,6 +1539,25 @@ def _import_bindings(body: str) -> dict[str, tuple[int, int]] | None:
     return out
 
 
+def _ends_in_an_expression(body: str) -> bool | None:
+    """Whether the last statement of a cell body is an expression Jupyter would display.
+
+    ``ast_node_interactivity`` is ``last_expr``, so a cell renders the value of its final
+    statement when that statement is an ``ast.Expr`` and renders nothing when it is not.
+    An import is not an expression, so an import in final position renders nothing and
+    suppresses whatever the statement before it would have rendered.
+
+    A cell whose final statement is the literal ``None`` reads as displaying here and
+    Jupyter shows nothing for it. That direction only adds a refusal, so it is left
+    unhandled rather than carried as a branch no test can kill.
+    """
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return None
+    return bool(tree.body) and isinstance(tree.body[-1], ast.Expr)
+
+
 def _unused_imports_removed(source: str) -> str | None:
     """*source* with every import ruff reports as F401 removed, or None if ruff cannot say.
 
@@ -1605,6 +1624,17 @@ def removed_import_bindings(old_src: str, new_src: str) -> list[str] | None:
     annotation this repository uses for an import that is load-bearing while unreferenced,
     and it is handled by construction upstream. A comment that is not spelled ``noqa`` is
     the same author saying the same kind of thing in their own words, so it refuses too.
+
+    The display rule covers a way removing an import changes a cell's output without
+    changing what it computes. A cell ending ``frame`` then ``import json`` displays
+    nothing, because the import is the final statement; drop the import and ``frame`` is
+    final and the next execution renders a table the committed notebook does not have.
+    Every comparison this tier makes is blind to it - both sides normalize to the same
+    source, the code-cell ASTs agree, and the preserved output counts are the counts of a
+    notebook that has not been run since. So it is checked directly, against the two raw
+    sources, and it refuses only when the removal is what moved the expression into final
+    position: an import removed from in front of a trailing expression changes no display
+    and is accepted.
     """
     old_cells = _code_bodies(old_src)
     new_cells = _code_bodies(new_src)
@@ -1615,6 +1645,11 @@ def removed_import_bindings(old_src: str, new_src: str) -> list[str] | None:
         old_binds = _import_bindings(old_body)
         new_binds = _import_bindings(new_body)
         if old_binds is None or new_binds is None:
+            return None
+        # Both bodies are known to parse: `_import_bindings` refused above if either did
+        # not, so neither call returns None here. Written so that an unparseable old body
+        # would refuse rather than read as "displayed nothing", if that ever changes.
+        if _ends_in_an_expression(new_body) and not _ends_in_an_expression(old_body):
             return None
         old_lines = old_body.splitlines()
         for name in sorted(set(old_binds) - set(new_binds)):
@@ -1654,11 +1689,18 @@ def drift_is_unused_import_only(stamped_blob: str, py: Path) -> tuple[bool, list
     imports one as a module to read an attribute off. That is a fact about the current tree
     rather than a guarantee - a numbered name is importable through ``import_module`` even
     though it is not an identifier, and one unpaired file under ``data/`` is imported that
-    way already. Two things
-    narrow it rather than close it. ``# noqa: F401`` and any other comment on the statement
-    refuse, which is the only signal the source carries. And ``sync_imports`` records every
-    removed binding in the stamp, so a pass here is a dated claim a later reader can check
-    rather than a silence.
+    way already. Two things narrow it rather than close it. ``# noqa: F401`` and any other
+    comment on the statement refuse, which is the only signal the source carries. And
+    ``sync_imports`` records every removed binding in the stamp, so a pass here is a dated
+    claim a later reader can check rather than a silence.
+
+    **A third way an unreferenced import can be load-bearing is decidable, and is refused
+    rather than assumed away.** An import that is the last statement of a cell suppresses
+    the display of the expression before it, so removing it makes the next execution render
+    an output the committed notebook does not carry. ``removed_import_bindings`` compares
+    the two raw sources for that and refuses the file. Nothing else here can see it: both
+    sides normalize to the same source, the code-cell ASTs agree, and the output counts
+    being preserved is what a not-yet-re-run notebook looks like either way.
 
     Returns the verdict and the bindings removed, because the caller needs both and
     computing them twice would let the report and the stamp disagree.
