@@ -1,0 +1,54 @@
+# Generated prose that aggregates a series instead of reading a value the notebook bound.
+#
+# `rules/notebook-standards.md` requires that every number a notebook shows equals the number
+# it just computed. A sentence built as `f"{returns.mean():.2%}"` produces a statistic nothing
+# else in the notebook holds, so the figure above it cannot be checked against the sentence
+# below it, and editing the figure's own computation moves one and not the other.
+#
+# These sites are listed rather than fixed because the fix is a code-cell change - bind the
+# value before the `display()` - which makes the notebook stale and costs a full re-execution.
+# Listing them gates the rule against NEW ones at no re-execution cost.
+#
+# HOW TO USE THIS FILE: when you re-execute one of these notebooks for any reason, bind the
+# value first and delete its line here. The list may only ever shrink. The checker fails on a
+# site that is not listed, so a new one cannot arrive quietly, and it fails on a listed site
+# that is no longer there, so a stale line cannot sit here unnoticed.
+#
+# Format: the notebook source, a tab, and the expression as `ast.unparse` writes it. The
+# expression rather than a line number, so a re-executed notebook whose cells moved does not
+# invalidate every line.
+
+01_process_is_edge/macro_regimes.py	int(np.bincount(core_labels).min())
+01_process_is_edge/macro_regimes.py	regime_stats['max_dd_pct'].max()
+11_ml_pipeline/03_logistic_classification.py	max(lower_accuracies)
+11_ml_pipeline/03_logistic_classification.py	min(lower_accuracies)
+11_ml_pipeline/07_case_study_insights.py	fold_summary['n_folds'].max()
+11_ml_pipeline/07_case_study_insights.py	fold_summary['n_folds'].min()
+12_gradient_boosting/01_ensemble_foundations.py	_gbm['test_ic'].max() - _gbm['test_ic'].min()
+12_gradient_boosting/01_ensemble_foundations.py	_gbm['test_ic'].max() - _rf_ic
+16_strategy_simulation/03_single_asset_vectorbt.py	float(lower_column.max())
+16_strategy_simulation/03_single_asset_vectorbt.py	float(lower_column.min())
+18_transaction_costs/01_cost_taxonomy.py	adv_summary['coverage_end'].max()
+18_transaction_costs/01_cost_taxonomy.py	adv_summary['coverage_start'].min()
+18_transaction_costs/06_ml4t_execution_demo.py	etf_stats['daily_volatility'].max()
+18_transaction_costs/06_ml4t_execution_demo.py	etf_stats['daily_volatility'].min()
+18_transaction_costs/12_commission_slippage_comparison.py	dates.max()
+18_transaction_costs/12_commission_slippage_comparison.py	dates.min()
+20_strategy_synthesis/02_feature_evaluation.py	_f['pct_fdr_sig'].min()
+20_strategy_synthesis/05_portfolio_allocation.py	_with_ew['sharpe_diff'].max()
+20_strategy_synthesis/05_portfolio_allocation.py	_with_ew['sharpe_diff'].min()
+20_strategy_synthesis/06_cost_survival.py	summary['drag_pct'].max()
+20_strategy_synthesis/06_cost_survival.py	summary['drag_pct'].min()
+20_strategy_synthesis/07_regime_risk.py	_cat['pct_positive'].max()
+20_strategy_synthesis/07_regime_risk.py	_cat['pct_positive'].min()
+20_strategy_synthesis/07_regime_risk.py	best_per_cs['sharpe_delta'].max()
+20_strategy_synthesis/07_regime_risk.py	best_per_cs['sharpe_delta'].min()
+21_rl_execution_hedging/03_market_making_ppo.py	max((row['avg_trades'] for row in baseline_summary))
+21_rl_execution_hedging/03_market_making_ppo.py	max((row['mean_final_wealth'] for row in baseline_summary))
+21_rl_execution_hedging/03_market_making_ppo.py	max((row['std_final_wealth'] for row in baseline_summary))
+21_rl_execution_hedging/03_market_making_ppo.py	min((row['avg_trades'] for row in baseline_summary))
+21_rl_execution_hedging/03_market_making_ppo.py	min((row['mean_final_wealth'] for row in baseline_summary))
+21_rl_execution_hedging/03_market_making_ppo.py	min((row['std_final_wealth'] for row in baseline_summary))
+21_rl_execution_hedging/06_inverse_reinforcement_learning.py	expert_data['actions'].max()
+21_rl_execution_hedging/06_inverse_reinforcement_learning.py	expert_data['actions'].min()
+22_rag_financial_research/03_hybrid_retrieval.py	max((len(relevant) for _, _, relevant in TEST_QUERIES))

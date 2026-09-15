@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A figure's description must describe the figure the cell draws.
+"""A figure's title, description and prose must all describe the figure the cell draws.
 
 A reader who cannot see a figure is handed its alt text instead. When that text names a
 chart the cell never draws, that reader is not told less than a sighted one, they are
@@ -7,11 +7,18 @@ told something false, and nothing in the repository could see it: ruff, the form
 the notebook tests all read code, and a prose rewrite that swaps "heatmap" for "grouped
 bars" changes no code at all (ml4t/agent-workspace#1164).
 
-Three shapes are reported:
+Four shapes are reported:
 
+- a figure title that interpolates a computed result, or runs past 75 characters (A9)
 - alt text naming a chart type the cell does not draw
 - bars described in groups where one Matplotlib bar call draws one series
 - a horizontal bar's extent called its height
+- generated prose that aggregates a series instead of reading a value the notebook bound (A11)
+
+A11 runs against `.github/ci/figure-prose-recomputed.txt`, which lists the sites that exist
+today. The fix binds a name before the `display()`, which is a code-cell change and costs a
+re-execution, so the sites are listed rather than fixed and the list may only shrink: an
+unlisted site fails, and so does a listed one that is no longer there.
 
 What it does NOT decide is worth stating, because the boundary is deliberate and was
 measured. `nasdaq100_microstructure/05_evaluation` called a twenty-bar `go.Bar` chart "a
@@ -109,6 +116,58 @@ NUMERIC_CALLS = frozenset(
     ]
 )
 NUMERIC_ATTRS = frozenset({"height", "size", "shape", "ndim"})
+
+# A11. Generated prose must read a value the notebook bound, not aggregate a series inside
+# the f-string. `rules/notebook-standards.md` requires that every number shown equals the
+# number just computed; an interpolated aggregation is by construction the number the
+# f-string produced, so containment over it is a check that cannot fail.
+#
+# What separates a defect from a formatting convenience is whether the value exists anywhere
+# else. `f"{sharpe:.2f}"` names a value a figure can plot, a table can print and an assert
+# can pin. `f"{returns.mean():.2f}"` produces a statistic nothing else in the notebook holds,
+# so no figure above it can be checked against the sentence below it, and editing the
+# figure's own computation moves one and not the other. Binding it first is the whole fix.
+#
+# Only aggregations are here. Arithmetic is deliberately absent: `impact * 10000` is the same
+# number the figure shows, in basis points. `len()` is absent for the same reason - counting
+# the list the figure was drawn from cannot disagree with it.
+AGGREGATING = frozenset(
+    {
+        "mean",
+        "std",
+        "var",
+        "sum",
+        "quantile",
+        "median",
+        "corr",
+        "corrcoef",
+        "prod",
+        "cumsum",
+        "cumprod",
+        "skew",
+        "kurt",
+        "mode",
+        "value_counts",
+        "describe",
+        "min",
+        "max",
+    }
+)
+# `min` and `max` are aggregations, and the same two spellings are also two things that are
+# not one. `max(abs(x), 1e-08)` is a divide-by-zero clamp: two positional arguments select
+# between scalars rather than reduce a series, so there is no series a figure above the
+# sentence could disagree with. And a first or last timestamp is the extent of the data
+# rather than a result computed over it - "covers 2019-01-02 through 2024-12-31" is a date
+# span.
+#
+# Neither is decided from the name. A column called `max_dd_date` may hold a float and the
+# source cannot say which, so a substring rule would exempt a statistic on its spelling. The
+# format spec decides it: `%Y-%m-%d` cannot be applied to a float and `.2f` cannot be applied
+# to a datetime. Measured over this repository, the spec test leaves 4 date spans reported
+# out of 34 - they carry no format spec at all - against 32 under a rule that reported every
+# one.
+EXTREMA = frozenset({"min", "max"})
+DATE_FORMAT = re.compile(r"%[aAbBcdHIjmMpSUwWxXyYZ]")
 
 ARITHMETIC = (ast.Div, ast.Mult, ast.Sub, ast.Pow, ast.Mod, ast.FloorDiv)
 
@@ -706,6 +765,107 @@ def _is_numeric_expr(node: ast.AST) -> bool:
     return False
 
 
+def _is_name(node: ast.expr, name: str) -> bool:
+    """`display(...)` and `IPython.display.display(...)` are the same call."""
+    return (isinstance(node, ast.Name) and node.id == name) or (
+        isinstance(node, ast.Attribute) and node.attr == name
+    )
+
+
+def _format_spec_text(node: ast.FormattedValue) -> str:
+    """The literal text of an interpolation's format spec, or "".
+
+    A spec can itself interpolate (`f"{x:.{digits}f}"`); only its literal parts are readable
+    here, which is enough to tell a strftime spec from a numeric one.
+    """
+    if node.format_spec is None:
+        return ""
+    return "".join(
+        part.value
+        for part in node.format_spec.values
+        if isinstance(part, ast.Constant) and isinstance(part.value, str)
+    )
+
+
+def generated_markdown_values(src: str):
+    """Yield (line, expr, format_spec) for each value interpolated into `display(Markdown(...))`.
+
+    The format spec rides along because for `min`/`max` it is the evidence that separates a
+    statistic from a date span, and it is only available here, on the `FormattedValue` - by
+    the time the caller has the expression it is gone.
+    """
+    for offset, body, _tagged in code_cells(src):
+        try:
+            tree = ast.parse(dedent_cell(body))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and _is_name(node.func, "display")):
+                continue
+            for arg in node.args:
+                if not (isinstance(arg, ast.Call) and _is_name(arg.func, "Markdown")):
+                    continue
+                for value in arg.args:
+                    for sub in ast.walk(value):
+                        if isinstance(sub, ast.FormattedValue):
+                            yield offset + node.lineno - 1, sub.value, _format_spec_text(sub)
+
+
+def _reads_a_datetime(expr: ast.AST) -> bool:
+    """Whether `expr` reaches through a pandas or polars datetime accessor.
+
+    `.date()` and `.dt.` are the two spellings in this repository. Both say the value is a
+    timestamp without the checker having to guess from a column name.
+    """
+    return any(
+        isinstance(node, ast.Attribute) and node.attr in ("date", "dt") for node in ast.walk(expr)
+    )
+
+
+def aggregating_calls(expr: ast.AST, format_spec: str = "") -> list[str]:
+    """The distinct aggregations `expr` performs, in source order, or an empty list.
+
+    Distinct rather than one per call, because a ratio of two means is one sentence with one
+    fix and reporting it twice reads as two.
+    """
+    temporal = bool(DATE_FORMAT.search(format_spec)) or _reads_a_datetime(expr)
+    found: list[str] = []
+    for node in ast.walk(expr):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+        if name not in AGGREGATING or name in found:
+            continue
+        if name in EXTREMA and (temporal or len(node.args) >= 2):
+            continue
+        found.append(name)
+    return found
+
+
+def recomputed_sites(path: Path, src: str) -> list[tuple[str, str]]:
+    """A11: every generated sentence that aggregates instead of reading a bound value.
+
+    Returns (key, message). The key is the unparsed expression, not a line number, because
+    the allowlist below has to survive a notebook being re-executed and its cells moving.
+    """
+    out: list[tuple[str, str]] = []
+    for line, expr, format_spec in generated_markdown_values(src):
+        names = aggregating_calls(expr, format_spec)
+        if not names:
+            continue
+        calls = ", ".join(repr(n) for n in names)
+        out.append(
+            (
+                ast.unparse(expr),
+                f"{path}:{line}: generated prose aggregates rather than reads a value: "
+                f"{ast.unparse(expr)!r} calls {calls} inside the f-string, so nothing above "
+                f"it holds the number the reader is shown; bind it first",
+            )
+        )
+    return out
+
+
 def check_source(path: Path, src: str) -> list[str]:
     """The two clauses this repository gates: A9 figure titles, A10 figure descriptions."""
     return check_titles(path, src) + check_layout_claims(path, src)
@@ -813,10 +973,6 @@ def check_layout_claims(path: Path, src: str) -> list[str]:
                         f"height; `barh` bars have a length"
                     )
     return problems
-
-
-def check(path: Path) -> list[str]:
-    return check_source(path, path.read_text(encoding="utf-8", errors="replace"))
 
 
 # The violating halves below are `20_strategy_synthesis/05_portfolio_allocation.py` at
@@ -1034,6 +1190,33 @@ CASES: list[tuple[str, str, int, tuple[str, ...]]] = [
         0,
         (),
     ),
+    (
+        "A11 generated prose that aggregates instead of reading a bound value",
+        "# %%\ndisplay(Markdown(f'The strategy earns {returns.mean() * 252:.2%} a year.'))\n",
+        1,
+        ("aggregates rather than reads a value",),
+    ),
+    (
+        "A11 a value bound before the display is what the rule asks for",
+        "# %%\n"
+        "annual = returns.mean() * 252\n"
+        "ax.axhline(annual)\n"
+        "display(Markdown(f'The strategy earns {annual:.2%} a year.'))\n",
+        0,
+        (),
+    ),
+    (
+        "A11 a two-argument max is a clamp, not a statistic",
+        "# %%\ndisplay(Markdown(f'Scaled by {value / max(denominator, 1e-08):.2f}.'))\n",
+        0,
+        (),
+    ),
+    (
+        "A11 a first and last timestamp is the extent of the data, not a result",
+        "# %%\ndisplay(Markdown(f'Covers {idx.min():%Y-%m-%d} through {idx.max():%Y-%m-%d}.'))\n",
+        0,
+        (),
+    ),
 ]
 
 
@@ -1042,7 +1225,8 @@ def selftest() -> int:
     cannot fail, which is evidence of nothing."""
     failures = 0
     for label, src, expected, must_say in CASES:
-        got = check_source(Path("<selftest>"), src)
+        path = Path("<selftest>")
+        got = check_source(path, src) + [m for _, m in recomputed_sites(path, src)]
         missing = [phrase for phrase in must_say if not any(phrase in g for g in got)]
         if len(got) != expected or missing:
             failures += 1
@@ -1092,6 +1276,31 @@ def notebook_sources(roots: list[Path]) -> list[Path]:
     return out
 
 
+ALLOWLIST = Path(__file__).resolve().parents[2] / ".github/ci/figure-prose-recomputed.txt"
+
+
+def read_allowlist(repo: Path) -> set[tuple[str, str]]:
+    """The sites A11 already knows about, as (notebook source, expression).
+
+    An empty or absent file means every site is a violation, which is the state this rule
+    should end in. It is not the state it starts in: the fix binds a name before the
+    `display()`, which is a code-cell change, so the notebook is stale until it is
+    re-executed. Listing the sites that exist today gates the rule against new ones at no
+    re-execution cost, and each listed line goes when its notebook is next run for any reason.
+    """
+    if not ALLOWLIST.exists():
+        return set()
+    out: set[tuple[str, str]] = set()
+    for line in ALLOWLIST.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        line = line.rstrip()
+        rel, _, key = line.partition("\t")
+        if key:
+            out.add((rel.strip(), key))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1109,24 +1318,46 @@ def main() -> int:
 
     repo = Path(__file__).resolve().parents[2]
     roots = args.paths or [repo]
+    allowed = read_allowlist(repo)
     problems: list[str] = []
+    seen: set[tuple[str, str]] = set()
     for path in notebook_sources(roots):
         try:
-            found = check(path)
+            text = path.read_text(encoding="utf-8", errors="replace")
+            found = check_source(path, text)
         except OSError as exc:  # an unreadable file is not a clean one
             print(f"{path}: cannot read: {exc}", file=sys.stderr)
             return 2
-        for problem in found:
-            try:  # a path under the repo reads better relative; one outside it stays absolute
-                problem = problem.replace(str(path), str(path.resolve().relative_to(repo)), 1)
-            except ValueError:
-                pass
-            problems.append(problem)
+        try:  # a path under the repo reads better relative; one outside it stays absolute
+            rel = str(path.resolve().relative_to(repo))
+        except ValueError:
+            rel = str(path)
+        for key, message in recomputed_sites(path, text):
+            seen.add((rel, key))
+            if (rel, key) not in allowed:
+                found.append(message)
+        problems.extend(problem.replace(str(path), rel, 1) for problem in found)
+
+    # A listed site that is no longer there means the notebook was fixed and the line was not
+    # deleted. Reporting it is what makes the list shrink rather than rot: without it the file
+    # stops describing the corpus and nobody notices, which is the failure
+    # `.github/ci/unit-test-quarantine.txt` records from the other direction.
+    #
+    # Only on a whole-repository run. Pointed at one file, everything else is absent by
+    # construction and every other line would report as stale.
+    if roots == [repo]:
+        for rel, key in sorted(allowed - seen):
+            problems.append(
+                f"{ALLOWLIST.relative_to(repo)}: {rel} no longer aggregates {key!r} in "
+                "generated prose - delete this line"
+            )
 
     for problem in problems:
         print(problem)
     if problems:
-        print(f"\n{len(problems)} figure description(s) that do not describe the figure drawn")
+        print(
+            f"\n{len(problems)} figure(s) whose title, description or prose is not the figure drawn"
+        )
         return 1
     return 0
 
