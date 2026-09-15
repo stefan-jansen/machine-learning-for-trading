@@ -1,0 +1,224 @@
+"""The fourth sync tier: removing an import nothing references is not a re-run.
+
+`source_py_blob` compares whole blobs, so deleting `import numpy` reads as stale and the
+report says re-run. AGENTS.md rule 6 already says it does not owe one - a fix that changes
+no computed value never does - but the obligation and the gate are two different things.
+The gate refuses the commit, rule 5 says never bypass a hook, and without a tier the dead
+import in a 734-output notebook cannot land at all. Measured on etfs/13_model_analysis:
+fix the .py, `jupytext --update` the pair, outputs untouched, and `check` still exits 1
+with STALE.
+
+What this tier is NOT is safe by construction, and that is the difference from the three
+before it. A markdown cell is a comment block in the .py; an alt literal reaches the output
+as metadata the image bytes never see; a sanitized path is compared against the sanitizer's
+own output. An unreferenced import can change what a code cell computes, by side effect,
+and no amount of reading the source separates that case from a dead one - `import torch`
+for cudart symbol ordering has zero references by construction. The refusals below are the
+narrowing: an import carrying `# noqa: F401`, an import carrying any other comment, an
+import that was added rather than removed, and anything else in a code cell.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
+
+from notebook_provenance import (  # noqa: E402
+    _unused_imports_removed,
+    drift_is_prose_only,
+    drift_is_unused_import_only,
+)
+
+EXECUTED = """# %% [markdown] tags=[]
+# # A heading
+#
+# A paragraph of prose.
+
+# %% tags=[]
+import json
+from pathlib import Path
+
+import pandas as pd
+
+THRESHOLD = 21
+
+# %% [markdown] tags=[]
+# Another paragraph.
+
+# %% tags=[]
+frame = pd.DataFrame({"n": [THRESHOLD]})
+show_with_alt(frame, "A one-row table of the threshold.")
+"""
+
+CLEANED = EXECUTED.replace("import json\nfrom pathlib import Path\n\n", "")
+
+
+def _blob(text: str) -> str:
+    """Write *text* into the object store and return its hash, as a stamp would have."""
+    out = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=REPO_ROOT,
+        input=text,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.fixture
+def stamped() -> str:
+    return _blob(EXECUTED)
+
+
+def _py(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "nb.py"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+# --- the normalizer ------------------------------------------------------------------
+
+
+def test_normalizer_ignores_the_repository_config() -> None:
+    """`--isolated` is load-bearing: pyproject.toml switches F401 off repo-wide.
+
+    Reading that config would return the input unchanged, every comparison would trivially
+    hold, and the classifier would accept a genuinely executable drift as an import removal.
+    """
+    assert "F401" in (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    normalized = _unused_imports_removed(EXECUTED)
+    assert "import json" not in normalized
+    assert "from pathlib import Path" not in normalized
+    # pandas is referenced two cells down, so it is not an unused import and must survive.
+    assert "import pandas as pd" in normalized
+
+
+def test_normalizer_keeps_a_suppressed_import() -> None:
+    """A `# noqa: F401` import survives normalization, which is what makes its removal visible."""
+    source = EXECUTED.replace("import json\n", "import torch  # noqa: F401\n")
+    assert "import torch  # noqa: F401" in _unused_imports_removed(source)
+
+
+# --- what the tier must accept -------------------------------------------------------
+
+CLEANED_PLUS_MARKDOWN = CLEANED.replace(
+    "# %% [markdown] tags=[]\n# Another paragraph.",
+    '# %% [markdown] tags=["results"]\n# ### Results\n#\n# The reading goes here.',
+)
+
+
+@pytest.mark.parametrize(
+    "edited,expected",
+    [
+        pytest.param(CLEANED, ["Path", "json"], id="two unreferenced imports removed"),
+        pytest.param(
+            CLEANED_PLUS_MARKDOWN, ["Path", "json"], id="removal plus a retagged markdown cell"
+        ),
+    ],
+)
+def test_tier_accepts(stamped: str, tmp_path: Path, edited: str, expected: list[str]) -> None:
+    ok, removed = drift_is_unused_import_only(stamped, _py(tmp_path, edited))
+    assert ok
+    assert sorted(removed) == expected
+
+
+def test_prose_tier_refuses_an_import_removal(stamped: str, tmp_path: Path) -> None:
+    """The tiers do not overlap. An import removal changes an AST, so sync-prose must refuse."""
+    assert not drift_is_prose_only(stamped, _py(tmp_path, CLEANED))
+
+
+def test_tier_refuses_a_markdown_only_edit(stamped: str, tmp_path: Path) -> None:
+    """Nothing was removed, so this belongs to sync-prose and the report must send it there."""
+    edited = EXECUTED.replace("# Another paragraph.", "# Another paragraph, reworded.")
+    ok, removed = drift_is_unused_import_only(stamped, _py(tmp_path, edited))
+    assert not ok
+    assert removed == []
+
+
+# --- what must still be a re-run ------------------------------------------------------
+#
+# Each case names the source that was EXECUTED as well as the edit, because two of the
+# refusals are about what the stamped source carried. Reusing one stamped fixture for all
+# of them made both annotation cases collapse into the partial-cleanup case, and the
+# comment refusal then passed its test while contributing nothing - a mutation that
+# deleted it changed no result.
+
+ONE_DEAD = EXECUTED.replace("from pathlib import Path\n", "")
+ANNOTATED_NOQA = ONE_DEAD.replace("import json\n", "import torch  # noqa: F401\n")
+ANNOTATED_PROSE = ONE_DEAD.replace("import json\n", "import json  # kept for the next stage\n")
+
+CASES = [
+    pytest.param(
+        EXECUTED,
+        EXECUTED.replace("import json\n", ""),
+        id="one dead import removed and another left behind",
+    ),
+    pytest.param(
+        ANNOTATED_NOQA,
+        ANNOTATED_NOQA.replace("import torch  # noqa: F401\n", ""),
+        id="a noqa-suppressed import removed",
+    ),
+    pytest.param(
+        ANNOTATED_PROSE,
+        ANNOTATED_PROSE.replace("import json  # kept for the next stage\n", ""),
+        id="an import carrying any other comment removed",
+    ),
+    pytest.param(
+        EXECUTED,
+        CLEANED.replace("import pandas as pd\n", "import pandas as pd\nimport numpy\n"),
+        id="an unreferenced import added",
+    ),
+    pytest.param(
+        EXECUTED, CLEANED.replace("import pandas as pd\n\n", ""), id="a referenced import removed"
+    ),
+    pytest.param(
+        EXECUTED, CLEANED.replace("THRESHOLD = 21", "THRESHOLD = 42"), id="a constant changed"
+    ),
+    pytest.param(
+        EXECUTED,
+        CLEANED.replace("THRESHOLD = 21", "THRESHOLD = 21\nOFFSET = 3\nprint(OFFSET)"),
+        id="a statement added",
+    ),
+    pytest.param(
+        EXECUTED,
+        CLEANED.replace(
+            "import pandas as pd\n\nTHRESHOLD", "import pandas as pd\n\n# %% tags=[]\nTHRESHOLD"
+        ),
+        id="a code-cell boundary moved",
+    ),
+    pytest.param(
+        EXECUTED,
+        CLEANED.replace(
+            'show_with_alt(frame, "A one-row table of the threshold.")',
+            'show_with_alt(frame, "A one-row table of the threshold.");',
+        ),
+        id="display suppression changed",
+    ),
+    pytest.param(
+        EXECUTED,
+        CLEANED.replace(
+            "# %% tags=[]\nframe = pd.DataFrame", '# %% tags=["results"]\nframe = pd.DataFrame'
+        ),
+        id="a code cell retagged",
+    ),
+]
+
+
+@pytest.mark.parametrize("executed,edited", CASES)
+def test_tier_refuses(tmp_path: Path, executed: str, edited: str) -> None:
+    ok, _removed = drift_is_unused_import_only(_blob(executed), _py(tmp_path, edited))
+    assert not ok
+
+
+def test_tier_refuses_a_stamped_blob_that_is_gone(tmp_path: Path) -> None:
+    """No stored source means no comparison, and an unreadable comparison never softens a report."""
+    ok, removed = drift_is_unused_import_only("0" * 40, _py(tmp_path, CLEANED))
+    assert not ok
+    assert removed == []
