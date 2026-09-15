@@ -792,16 +792,14 @@ for period in ("validation", "holdout"):
 # and loses money in every year from 2009 through 2014. A Sharpe ratio computed across the whole
 # window reports one number for two regimes, and the selection rule reads only that number. The
 # holdout window opens in the later regime and loses money in every year it covers, so its result
-# continues the 2009-2014 pattern rather than departing from it. Reading the holdout as a surprise
-# would mean ignoring the seven validation years that predicted it.
+# continues the 2009-2014 pattern rather than departing from it. The six consecutive losing years
+# that close the validation window are already visible in the data the selection was made from.
 #
-# This is also the honest answer to what the strategy would carry in practice, which is a question
-# this chapter does not otherwise ask. The book runs at roughly twice equity in gross exposure and
-# turns over about its full notional each day; the registered commission and slippage for the
-# validation run are large multiples of the capital it ends with. Nothing here estimates market
-# impact, borrow availability or the notional at which the measured edge would survive its own
-# trading, so the returns above should be read as a property of the signal under the declared cost
-# model and not as a capacity the strategy has been shown to have.
+# One further property is worth stating because the chapter does not otherwise measure it: the book
+# runs at roughly twice equity in gross exposure and turns over about its full notional each day,
+# and the commission and slippage registered for the validation run are large multiples of the
+# capital it ends with. The returns above are therefore a property of the signal under the declared
+# cost model, at the notional the backtest assumed.
 
 # %% [markdown]
 # ## Key takeaways and limitations
