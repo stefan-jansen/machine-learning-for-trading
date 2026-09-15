@@ -379,7 +379,7 @@ HOLDOUT_TRAINING_HASH = training_hash_from_spec(HOLDOUT_SPEC)
 # This case study reached 2026-09-14 with no such check and 253 backtest rows registered in
 # the five days after its own holdout was spent. Its rank-1 did not move, so nothing was
 # refused and nothing was wrong - but nothing here would have stopped a second evaluation
-# either, which is the state `fx_pairs` was in a week earlier (ml4t/agent-workspace#1174).
+# either, which is the state `fx_pairs` was in a week earlier.
 RETIRED_GENERATIONS = refuse_a_second_look(
     holdout_generations_to_retire(
         CASE_DIR,

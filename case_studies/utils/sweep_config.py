@@ -480,34 +480,34 @@ def get_entry_schemes_for(
 ) -> list[dict]:
     """Synthesize Ch16 entry schemes for ``(case_study, label)`` from setup.yaml.
 
-    Reads ``backtest.sweep.{top_k_grid, percentile_grid, quantile_grid}``
-    keyed by label, produces one scheme dict per (axis × value), filtered for
-    feasibility against ``n_assets``. Output dicts match the shape consumed
-    by ``Ch16 backtest notebooks`` (one scheme per (axis, value)).
+     Reads ``backtest.sweep.{top_k_grid, percentile_grid, quantile_grid}``
+     keyed by label, produces one scheme dict per (axis × value), filtered for
+     feasibility against ``n_assets``. Output dicts match the shape consumed
+     by ``Ch16 backtest notebooks`` (one scheme per (axis, value)).
 
-    Quantile schemes (``quintile_long_short`` / ``decile_long_short``) carry
-    ``long_short=True`` regardless of the ``long_short`` argument — they are
-    inherently long-short by construction. ``long_short`` controls only the
-    sign of top-k / percentile schemes.
+     Quantile schemes (``quintile_long_short`` / ``decile_long_short``) carry
+     ``long_short=True`` regardless of the ``long_short`` argument — they are
+     inherently long-short by construction. ``long_short`` controls only the
+     sign of top-k / percentile schemes.
 
-    When the case study declares a ``backtest.sweep.signal_nasdaq100`` block
-    (the nasdaq100 v4 slot-mechanism sweep), schemes from that block are
-    appended — see ``get_signal_nasdaq100_schemes_for`` for the cross-product.
+     When the case study declares a ``backtest.sweep.signal_nasdaq100`` block
+     (the nasdaq100 v4 slot-mechanism sweep), schemes from that block are
+     appended — see ``get_signal_nasdaq100_schemes_for`` for the cross-product.
 
-    ``n_assets`` is the width of the price panel. What bounds a ranked selection
-    is the prediction cross-section, and the two are not the same number: every
-    caller measures ``n_assets`` off the panel it loaded, while the ranking runs
-    over whatever the fitting stages scored. ``ranked_width`` is that second
-    number, resolved from the registry when the caller does not supply it, and
-    the feasibility rule below applies to the narrower of the two.
+     ``n_assets`` is the width of the price panel. What bounds a ranked selection
+     is the prediction cross-section, and the two are not the same number: every
+     caller measures ``n_assets`` off the panel it loaded, while the ranking runs
+     over whatever the fitting stages scored. ``ranked_width`` is that second
+     number, resolved from the registry when the caller does not supply it, and
+     the feasibility rule below applies to the narrower of the two.
 
-    They agree on `main` today, which is why nothing is currently wrong and why
-    the check could not fire on the condition it exists to catch
-    (ml4t/agent-workspace#1003). Any change that narrows the fitting stages
-    without narrowing the panel - a new preview tier, a per-notebook
-    ``max_symbols``, a family that scores a subset - reproduces
-    ml4t/agent-workspace#989: twelve backtests with a Sharpe, zero trades, and
-    four notebooks failing several stages downstream of the cause.
+     They agree on `main` today, which is why nothing is currently wrong and why
+     the check could not fire on the condition it exists to catch
+    . Any change that narrows the fitting stages
+     without narrowing the panel - a new preview tier, a per-notebook
+     ``max_symbols``, a family that scores a subset - reproduces the same
+     failure: twelve backtests with a Sharpe, zero trades, and
+     four notebooks failing several stages downstream of the cause.
     """
     sweep = load_sweep(case_study)
     schemes: list[dict] = []
@@ -805,41 +805,41 @@ def get_top_k_values_for(
 ) -> list[int]:
     """Return the top-K grid for ``(case_study, label)`` used by Ch17.
 
-    Filters out k >= n_assets (holding everything is the equal-weight
-    benchmark, not a prediction-based portfolio). Raises ``KeyError`` if
-    ``backtest.sweep.top_k_grid[label]`` is not declared, and ``ValueError``
-    when the filter empties the grid.
+     Filters out k >= n_assets (holding everything is the equal-weight
+     benchmark, not a prediction-based portfolio). Raises ``KeyError`` if
+     ``backtest.sweep.top_k_grid[label]`` is not declared, and ``ValueError``
+     when the filter empties the grid.
 
-    A long-short strategy takes ``k`` names on each side, so its ceiling is half
-    the universe, not all of it. ``signals.py`` clamps ``eff_k`` to
-    ``n_assets // 2`` when ``long_short`` is set, and ``top_k`` is identity-bearing
-    through ``plan_backtests(signal=...)`` - so a ``k`` in the half-open interval
-    ``(n_assets // 2, n_assets)`` passes this filter, registers under the declared
-    ``k``, and runs at the clamped one. Two such values register distinct identities
-    over a byte-identical weight series. ``get_entry_schemes_for`` has excluded that
-    interval since it took a ``long_short`` argument; this function is the other half
-    of the same grid and has to agree with it.
+     A long-short strategy takes ``k`` names on each side, so its ceiling is half
+     the universe, not all of it. ``signals.py`` clamps ``eff_k`` to
+     ``n_assets // 2`` when ``long_short`` is set, and ``top_k`` is identity-bearing
+     through ``plan_backtests(signal=...)`` - so a ``k`` in the half-open interval
+     ``(n_assets // 2, n_assets)`` passes this filter, registers under the declared
+     ``k``, and runs at the clamped one. Two such values register distinct identities
+     over a byte-identical weight series. ``get_entry_schemes_for`` has excluded that
+     interval since it took a ``long_short`` argument; this function is the other half
+     of the same grid and has to agree with it.
 
-    ``long_short`` defaults to the case study's declared selection mode - the same
-    ``mapping.position_state_space`` that ``get_backtest_config`` reads, which is what
-    every caller already passes to ``get_entry_schemes_for`` as ``bt_config.long_short``.
-    Not ``account.allow_short_selling``: that is an execution permission, and
-    ``sp500_options`` holds it while selecting long-only. Pass it explicitly to override.
+     ``long_short`` defaults to the case study's declared selection mode - the same
+     ``mapping.position_state_space`` that ``get_backtest_config`` reads, which is what
+     every caller already passes to ``get_entry_schemes_for`` as ``bt_config.long_short``.
+     Not ``account.allow_short_selling``: that is an execution permission, and
+     ``sp500_options`` holds it while selecting long-only. Pass it explicitly to override.
 
-    An empty grid is never a legitimate result: the caller multiplies it into
-    a sweep size, so zero concentrations means zero backtests, and the sweep
-    loop then completes without registering anything while still reporting
-    itself done. The downstream risk-overlay notebook is the only thing that
-    notices, and it blames the operator for not having run this stage. Raise
-    here instead, where the cause - a universe cap smaller than the smallest
-    declared k - is still visible.
+     An empty grid is never a legitimate result: the caller multiplies it into
+     a sweep size, so zero concentrations means zero backtests, and the sweep
+     loop then completes without registering anything while still reporting
+     itself done. The downstream risk-overlay notebook is the only thing that
+     notices, and it blames the operator for not having run this stage. Raise
+     here instead, where the cause - a universe cap smaller than the smallest
+     declared k - is still visible.
 
-    ``ranked_width`` is the prediction cross-section, resolved from the registry
-    when not supplied, and the filter runs against the narrower of it and
-    ``n_assets`` for the reason given under ``get_entry_schemes_for``
-    (ml4t/agent-workspace#1003). The two functions are halves of one grid and
-    have to filter it the same way or a sweep and its plumbing test disagree
-    about which concentrations exist.
+     ``ranked_width`` is the prediction cross-section, resolved from the registry
+     when not supplied, and the filter runs against the narrower of it and
+     ``n_assets`` for the reason given under ``get_entry_schemes_for``
+    . The two functions are halves of one grid and
+     have to filter it the same way or a sweep and its plumbing test disagree
+     about which concentrations exist.
     """
     sweep = load_sweep(case_study)
     grid = (sweep.get("top_k_grid") or {}).get(label)

@@ -409,9 +409,8 @@ display(
 # is anything to find. `04_dml_crypto_regime` prints how much of its treatment's variance
 # its controls leave - under a tenth - and moving its own comparison to
 # t-statistics took its permutation p from the floor to the middle of the null.
-# ml4t/agent-workspace#1120 carries the same correction into `case_studies/utils/causal.py`,
-# the shared runner these registries are written by, and the rows below were refit under the
-# corrected runner. That correction has not landed in this checkout: the runner here still
+# The same correction is carried into `case_studies/utils/causal.py`, the shared runner these
+# registries are written by, and the rows below were refit under the corrected runner. That correction has not landed in this checkout: the runner here still
 # collects each placebo's effect and compares those, so regenerating a registry from this
 # tree reproduces the column as it read before the refit rather than the column below.
 #
@@ -422,8 +421,7 @@ display(
 # rejects the permutation null on eleven of the twelve and the t-statistic comparison on
 # five, and eleven of the twelve observed t-statistics are negative against a true effect
 # of zero. A rejection is what the column below records as `Passes`, so on those panels the
-# column reads `Passes` for an effect that is exactly zero. The measurement is on
-# ml4t/agent-workspace#1120.
+# column reads `Passes` for an effect that is exactly zero.
 #
 # The other label carries no more weight. `Fails` says only that the observed statistic was
 # not distinguishable from the permutation distribution, which is as easily a short sample

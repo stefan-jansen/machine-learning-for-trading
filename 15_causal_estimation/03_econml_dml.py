@@ -566,8 +566,7 @@ if len(placebo_effects) < PERMUTATION_MIN_SUCCESS:
 # permutation null and the test reports that distance. Measured on twelve synthetic panels with
 # a true effect of exactly zero and persistent AR(1) confounders, the studentized comparison
 # still rejects at the conventional five percent level on five of the twelve, against eleven for
-# the raw-effect comparison. The measurement is on ml4t/agent-workspace#1120 and
-# `10_case_study_insights` carries it. Read the count below as a comparison against a shuffle
+# the raw-effect comparison. `10_case_study_insights` carries that measurement. Read the count below as a comparison against a shuffle
 # rather than as a significance level.
 
 # %%

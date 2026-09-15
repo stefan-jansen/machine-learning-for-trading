@@ -78,7 +78,7 @@ def published_prediction_digest(df: pl.DataFrame) -> str:
     """The content digest of a published prediction frame, excluding its label column.
 
     A published frame states which label it was produced under, so a coverage check can tell
-    which declaration applies to it (ml4t/agent-workspace#887). That column is data *about*
+    which declaration applies to it. That column is data *about*
     the frame - it is a constant, and the registry already holds the same value on the
     prediction set's parent training run - so it is excluded from the frame's content
     identity, exactly as it is kept out of `computation`.

@@ -46,7 +46,7 @@ def traded_universe_declaration(prices: pl.DataFrame) -> dict[str, Any]:
     full run over the same predictions hashed alike and the second was served the
     first's result. Measured on us_firm_characteristics/11_backtest, 2026-08-24: 8
     predictions x 4 schemes at 300 symbols and at 3,708 gave bit-identical Sharpe, CAGR
-    and drawdown across all 32 backtests (ml4t/agent-workspace#911).
+    and drawdown across all 32 backtests.
 
     The declaration carries a digest of the sorted symbol list rather than its length,
     because ``{A, B}`` and ``{A, C}`` are two symbols each and two different portfolios.
@@ -381,7 +381,7 @@ def ensure_backtest_spec(
     same reason and with the same rule: build it with ``traded_universe_declaration``
     when the price panel was deliberately reduced, and it lands in ``strategy.signal``,
     which is hashed whole, so the reduction reaches ``backtest_hash`` instead of hashing
-    like the full run over the same predictions (ml4t/agent-workspace#911, #1119). It is
+    like the full run over the same predictions. It is
     written only when a caller declares one, on both the carried-forward and the projected
     path, so every existing call site produces byte-identical specs and no registered
     backtest re-keys. A declaration handed here overwrites one inherited from the spec
@@ -556,7 +556,7 @@ def build_backtest_spec(
     # spec it is handed. So an unlabelled call here does not build a spec on the wrong grid -
     # it builds a spec that hashes to an identity no run ever registers, and a caller that
     # pre-hashes it to decide what to skip finds every registered row missing
-    # (ml4t/agent-workspace#1028). Measured on us_firm_characteristics: 2,276 of 2,276
+    # . Measured on us_firm_characteristics: 2,276 of 2,276
     # registered baseline rows invisible to `11_backtest`'s own skip check.
     if declares_rebalance_step(case_study) and not label:
         raise ValueError(
@@ -573,7 +573,7 @@ def build_backtest_spec(
     # `backtest_hash` without a second place to keep in step with it. Emitted only when the
     # caller declares one - the rule `cadence` and `step` already follow above - so a full
     # run produces byte-identical specs to before this parameter existed and every
-    # registered backtest keeps the identity it was written under (ml4t/agent-workspace#911).
+    # registered backtest keeps the identity it was written under.
     if traded_universe is not None:
         resolved_signal["traded_universe"] = deepcopy(traded_universe)
     # The prediction-age bound, from `prediction_age_declaration`, on the same terms and in
@@ -604,7 +604,7 @@ def build_backtest_spec(
             # that declares nothing produces byte-identical specs to before this parameter existed.
             "cadence": case_config.cadence_for(label),
             # The step composes with the cadence to decide which slots are traded, so it
-            # belongs to the identity beside it (ml4t/agent-workspace#1005). Emitted only
+            # belongs to the identity beside it. Emitted only
             # when the case study declares one, so a case study that declares nothing
             # produces byte-identical specs to before this key existed - the same rule
             # `cadence_for` follows above.

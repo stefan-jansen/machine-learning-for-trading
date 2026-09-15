@@ -59,7 +59,7 @@ _BEST_SCHEMA: dict[str, pl.DataType] = {
     "signal_method": pl.Utf8,
     # The entry-scheme sweep varies concentration and nothing else, so without
     # this the ten-row top table reads as one strategy repeated at different
-    # Sharpes (ml4t/agent-workspace#910).
+    # Sharpes.
     "top_k": pl.Int64,
     "universe_filter": pl.Utf8,
     "exit_at_max_days": pl.Int64,
@@ -93,7 +93,7 @@ def _drop_rows_a_reader_cannot_tell_apart(df: pl.DataFrame) -> pl.DataFrame:
 
     ``best`` ranks over every generation in the registry, so both rows compete and a
     ten-row table can show five configurations. This is the same defect
-    ``signal_method`` alone had (ml4t/agent-workspace#910), one level down: there the
+    ``signal_method`` alone had, one level down: there the
     displayed columns could not separate rows that genuinely differed, here the rows
     do not differ at all.
 
@@ -116,7 +116,7 @@ def _drop_rows_a_reader_cannot_tell_apart(df: pl.DataFrame) -> pl.DataFrame:
 # SchemaError instead of returning an empty result. A notebook whose registry holds no rows
 # for the stage it asks about would then fail on the dtype, several cells after the fact,
 # reporting a schema problem for what is actually an empty sweep
-# (ml4t/agent-workspace#1075).
+# .
 _SPEC_SCHEMA: dict[str, pl.DataType] = {
     "backtest_hash": pl.Utf8,
     "stage": pl.Utf8,
@@ -483,7 +483,7 @@ class BacktestExplorer:
         # Every entry scheme in a baseline sweep is `equal_weight_top_k` and varies
         # only `top_k`, so `signal_method` alone made nine of the ten rows read as
         # the same strategy. `top_k` sits one key across from `method` in the spec
-        # this block already parses (ml4t/agent-workspace#910).
+        # this block already parses.
         top_k = [strategy_view(sp).get("signal", {}).get("top_k") for sp in parsed]
         df = df.with_columns(
             pl.Series("signal_method", methods),
@@ -710,7 +710,7 @@ class BacktestExplorer:
             return pl.DataFrame()
         placeholders = ", ".join("?" for _ in stages)
         # A run the engine stopped at ruin carries a null Sharpe by design
-        # (ml4t/agent-workspace#920). Dropping those in SQL, as this query used to,
+        # . Dropping those in SQL, as this query used to,
         # would take an allocator that went bankrupt in every run off the table
         # entirely and report the survivors as the whole population. The rows are
         # kept and counted under `ruined`; the Sharpe and drawdown statistics are
@@ -1384,8 +1384,8 @@ class BacktestExplorer:
                     "num_trades": trades,
                     # How many times the control acted. 0 is an overlay that was
                     # installed and never fired; NULL is a run the engine did not
-                    # count, which is every row registered before
-                    # ml4t/agent-workspace#1051. Matching Sharpe and trade counts
+                    # count, which is every row registered before the trigger log
+                    # existed. Matching Sharpe and trade counts
                     # never established either one on their own.
                     "risk_triggers": triggers,
                     "prediction_hash": pred_h,
@@ -1874,11 +1874,11 @@ class BacktestExplorer:
             hold signal rows and nothing at the allocation stage.
 
             The default is kept rather than removed only because removing it
-            edits a rendered notebook that cannot currently be re-run: see
-            ml4t/agent-workspace#1184. Every call site in the repository names
+            edits a rendered notebook that cannot currently be re-run.
+            Every call site in the repository names
             its stage; the default is now reachable only by a new caller who has
             not read this.
-            (ml4t/agent-workspace#910, ml4t/agent-workspace#1184).
+            the same defect twice over.
 
         Returns
         -------

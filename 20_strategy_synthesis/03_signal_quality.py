@@ -351,7 +351,7 @@ show_with_alt(
 # %% [markdown]
 # `best_ic` below comes from `ic_comparison.parquet` rather than from the models
 # block of `all_synthesis.json`. That block stores the per-family maximum under a
-# key named `ic_mean` (agent-workspace #863), so reading it here would put a
+# key named `ic_mean`, so reading it here would put a
 # maximum under the same axis label as the mean plotted in the heatmap above. The
 # parquet keeps the two apart: `ic_mean` is the family average, `ic_best` the
 # family maximum.

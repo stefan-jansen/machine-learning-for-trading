@@ -71,7 +71,7 @@ def _comparable_protocol_value(field: str, value):
     Only `feature_artifacts` needs it, and why is in
     :func:`case_studies.research.results.normalized_feature_artifacts`: six producers write a
     mapping and the latent adapter writes a list, so two members fitted on identical files
-    declared themselves incompatible (ml4t/agent-workspace#891). Every other field is compared
+    declared themselves incompatible. Every other field is compared
     exactly, as before.
     """
     if field != "feature_artifacts":
@@ -425,7 +425,7 @@ class CandidateSet:
 
         A null Sharpe used to mean one thing - the run was not measured - and the
         height check below refusing the whole set was the whole of the right answer.
-        The ruin stop (ml4t/agent-workspace#920) gave it a second meaning: a path
+        The ruin stop gave it a second meaning: a path
         whose equity reaches zero registers sharpe, sortino, calmar, omega, stability
         and tail_ratio as null on purpose, because ranking a bankrupt path is what
         that issue exists to prevent. So the refusal began firing on the case it was

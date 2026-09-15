@@ -333,8 +333,8 @@ if (
     # generation, so the pairs described a selected configuration the case study does not report.
     # The cohort call above is scoped to `LIVE_PREDICTIONS` and this one is not: the
     # pairs are selected from every registered prediction set. Stated rather than
-    # defaulted; narrowing it changes published numbers and is
-    # ml4t/agent-workspace#1006. `replace_all=False` keeps the write additive, which
+    # defaulted; narrowing it would change published numbers, so it is a separate
+    # decision. `replace_all=False` keeps the write additive, which
     # is what this notebook has always done.
     _paired_rows = populate_paired_metrics(
         CASE_STUDY,

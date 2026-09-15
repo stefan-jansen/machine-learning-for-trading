@@ -264,3 +264,8 @@ case_studies/ch20_*/
 # in-flight notebook, on 2026-09-13.
 .*.build.*.ipynb
 .*.papermill.*.ipynb
+
+# Agent session state. `.workspace/transitions/` holds per-session handoffs written by the
+# transition plugin: machine paths, private-tracker issue numbers and quoted instructions,
+# none of it reader-facing. Two landed in #580 before this rule existed.
+.workspace/

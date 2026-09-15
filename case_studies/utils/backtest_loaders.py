@@ -916,8 +916,8 @@ def resolve_rebalance_timestamps(
     - ``8_hour_*`` / ``15_minute`` and every other fixed-interval cadence → the slots
       on the clock at that interval, constructed rather than assumed. This line used
       to say "every available timestamp ... already at the correct granularity",
-      which is the precondition nasdaq100_microstructure did not meet and
-      ml4t/agent-workspace#187 was filed about; the branch below has constructed the
+      which is the precondition nasdaq100_microstructure did not meet;
+      the branch below has constructed the
       schedule since public ``83141459`` and the description had not followed it.
 
     Parameters
@@ -1004,7 +1004,7 @@ def resolve_rebalance_timestamps(
         # nothing checked, and nasdaq100_microstructure did not meet it: its prediction panel
         # carries every minute, so a declared fifteen-minute cadence resolved to a decision
         # every minute and the backtest traded fifteen times more often than the config said
-        # (ml4t/agent-workspace#187). Constructing the schedule makes the declaration
+        # . Constructing the schedule makes the declaration
         # decisive and makes a panel at any resolution produce the same schedule - which is
         # what the Ch18 cadence sweep needs, since its arms differ only in this token.
         #
@@ -1086,7 +1086,7 @@ def resolved_rebalance_step(rebalance_spec: dict | None, case_study: str, label:
     execution time lets a run hash one step and trade another - edit the file between the
     hash and the run and nothing says so. The spec is the record of what was run, so it is
     what execution reads; setup.yaml is the fallback for a spec written before the step
-    became part of the identity (ml4t/agent-workspace#1005).
+    became part of the identity.
     """
     if rebalance_spec and "step" in rebalance_spec:
         step = int(rebalance_spec["step"])
@@ -1133,7 +1133,7 @@ def declares_rebalance_step(case_study: str) -> bool:
     The per-label question is :func:`declared_rebalance_step`. This is the per-case-study
     one, and it exists because the step is emitted into the hashed spec only for a caller
     that names its label: where a case study declares steps, an unlabelled call builds a
-    spec whose identity is not the identity the run registers (ml4t/agent-workspace#1028).
+    spec whose identity is not the identity the run registers.
     `build_backtest_spec` refuses such a call, and this is the condition it refuses on.
     """
     from utils import CASE_STUDIES_DIR

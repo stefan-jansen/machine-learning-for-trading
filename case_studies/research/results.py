@@ -355,25 +355,25 @@ class Result:
 def normalized_feature_artifacts(value: Any) -> Any:
     """`computation.feature_artifacts` as the set of inputs it names, whatever its shape.
 
-    Seven producers write this field and six of them write `mds.input_lineage["artifacts"]` -
-    `{role: {"sha256": <hex>, "size": <int>}}` - while the latent adapter writes
-    `case.input_data_spec["files"]`, a list of `{"role": ..., "sha256": "sha256:<hex>"}`
-    (ml4t/agent-workspace#891). The two are the same statement in different words. Measured on
-    `etfs` 2026-09-07, one latent and one linear run at `fwd_ret_21d`: the same three roles -
-    financial, label, model_based - carrying the same three sha256 values, rendered one way
-    with a prefix and no size and the other way with a size and no prefix.
+     Seven producers write this field and six of them write `mds.input_lineage["artifacts"]` -
+     `{role: {"sha256": <hex>, "size": <int>}}` - while the latent adapter writes
+     `case.input_data_spec["files"]`, a list of `{"role": ..., "sha256": "sha256:<hex>"}`
+    . The two are the same statement in different words. Measured on
+     `etfs` 2026-09-07, one latent and one linear run at `fwd_ret_21d`: the same three roles -
+     financial, label, model_based - carrying the same three sha256 values, rendered one way
+     with a prefix and no size and the other way with a size and no prefix.
 
-    So a candidate set spanning both families refused on `feature_artifacts` for two members
-    that were fitted on identical files, and the only way past it was to declare the field
-    comparable - which silences the check for the members it could legitimately compare.
+     So a candidate set spanning both families refused on `feature_artifacts` for two members
+     that were fitted on identical files, and the only way past it was to declare the field
+     comparable - which silences the check for the members it could legitimately compare.
 
-    The comparison asks whether two members were fitted on the same inputs. That is a question
-    about which files, by content, and not about how a producer serialized the answer, so it is
-    asked over `{role: <content hash>}`. `size` is dropped because a file's length is decided
-    by its content and adds nothing a sha256 has not already said.
+     The comparison asks whether two members were fitted on the same inputs. That is a question
+     about which files, by content, and not about how a producer serialized the answer, so it is
+     asked over `{role: <content hash>}`. `size` is dropped because a file's length is decided
+     by its content and adds nothing a sha256 has not already said.
 
-    Anything this does not recognize is returned unchanged, so an unfamiliar shape still
-    compares exactly rather than silently comparing equal to everything.
+     Anything this does not recognize is returned unchanged, so an unfamiliar shape still
+     compares exactly rather than silently comparing equal to everything.
     """
     if isinstance(value, dict) and all(isinstance(item, dict) for item in value.values()):
         return {
@@ -515,7 +515,7 @@ class PredictionResult(Result):
             try:
                 # The same digest `register_prediction_set` recorded: the frame's `label`
                 # column states which declaration a coverage check should apply to it and is
-                # not part of its content identity (ml4t/agent-workspace#887), so a labelled
+                # not part of its content identity, so a labelled
                 # artifact and the unlabelled one written before the column existed digest
                 # alike and neither reports incomplete.
                 from case_studies.utils.artifact_digest import published_prediction_digest
@@ -677,8 +677,8 @@ class ResultsCatalog:
         ``started_at`` closes that. With it, a row whose ``elapsed_s`` is still NULL is
         legible: a wall clock says how long this configuration has been going, and how that
         compares to its siblings. Without it the only recoverable timing is
-        ``created_at - started_at`` after the fact, which is what
-        ml4t/agent-workspace#1026 found the whole corpus reduced to.
+        ``created_at - started_at`` after the fact, which is what the whole
+        corpus was once reduced to.
 
         Like ``entry_point``, it is a **table column and not part of ``spec``**, so recording
         it moves no training hash. Nothing here may touch ``computation``.

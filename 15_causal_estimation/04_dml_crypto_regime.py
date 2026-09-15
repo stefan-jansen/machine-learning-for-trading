@@ -679,7 +679,7 @@ print(f"  Difference: {abs(econml_effect - dml_effect):.6f}")
 # the confounding along with the effect. An estimate that is itself biased then sits far from
 # its own permutation null and the test reports that distance. Measured on twelve synthetic
 # panels with a true effect of exactly zero, the studentized comparison still rejects at the
-# conventional five percent level on five of the twelve (ml4t/agent-workspace#1120). The sweep
+# conventional five percent level on five of the twelve. The sweep
 # below compares block lengths against a shuffle; it does not certify a significance level.
 
 # %%

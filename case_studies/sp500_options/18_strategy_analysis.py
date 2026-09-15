@@ -319,7 +319,7 @@ _paired_rows = populate_paired_metrics(
     # The cohort call above is scoped to `_CANDIDATE_PREDICTIONS` and this one is not:
     # the pairs are selected from every registered prediction set. That disagreement
     # was there before the scope had to be stated; narrowing it changes published
-    # numbers and is ml4t/agent-workspace#1006, not this line.
+    # numbers, so it is a separate decision from this line.
     prediction_hashes=ENTIRE_REGISTRY,
     periods_per_year=PERIODS_PER_YEAR,
     replace_all=True,

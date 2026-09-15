@@ -199,8 +199,8 @@ class CausalResult:
                     # not there. An empty list rather than None when the column exists
                     # but the run predates it, so callers need one check, not two.
                     "placebo_effects": json.loads(row[9]) if row[9] else [],
-                    # The draws refutation_p is actually computed on since
-                    # ml4t/agent-workspace#1120. Empty means the p-value on this row was
+                    # The draws refutation_p is actually computed on since the
+                    # t-statistic correction. Empty means the p-value on this row was
                     # computed the old way, on raw thetas, and is anti-conservative: a
                     # permuted treatment is no longer predictable from the controls, so
                     # its residual keeps its variance, the second stage divides by a

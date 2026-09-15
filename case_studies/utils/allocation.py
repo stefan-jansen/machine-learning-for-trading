@@ -377,12 +377,12 @@ def _equal_weight_rows(
 ) -> list[dict]:
     """Equal weight across the selected cross-section, normalized within each side.
 
-    The fallback every rolling-moment allocator takes when the return window is too short to
-    estimate a covariance from. It is deliberately a weight vector rather than nothing: an
-    allocator that emits no row for a rebalance leaves the engine with no target to trade
-    towards, and a run where that happens at every rebalance registers as a backtest that
-    booked zero orders and scored a Sharpe of 0.0 - an absence recorded as a measurement
-    (ml4t/agent-workspace#1004).
+     The fallback every rolling-moment allocator takes when the return window is too short to
+     estimate a covariance from. It is deliberately a weight vector rather than nothing: an
+     allocator that emits no row for a rebalance leaves the engine with no target to trade
+     towards, and a run where that happens at every rebalance registers as a backtest that
+     booked zero orders and scored a Sharpe of 0.0 - an absence recorded as a measurement
+    .
     """
     if not long_short:
         weight = 1.0 / len(assets)
