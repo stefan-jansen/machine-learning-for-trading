@@ -457,17 +457,23 @@ jobs:
           # notebook_provenance.py --since diffs against the base or the previous
           # tip, and neither is in a shallow clone.
           fetch-depth: 0
-          # On `workflow_run` the default resolves to the branch tip at fetch time,
-          # not to the commit that triggered it: the log of the 08:08Z guards job on
-          # 2026-09-15 reads `git rev-parse refs/remotes/origin/main` then
+          # On `workflow_run` the default resolves to the branch tip at FETCH time: the
+          # log of the 08:08Z guards job on 2026-09-15 reads
+          # `git rev-parse refs/remotes/origin/main` then
           # `git checkout --force -B main refs/remotes/origin/main`. The check-run is
-          # still stamped on the triggering sha, so in a fast merge sequence the result
-          # attaches to commit A having checked commit B - and the direction that hurts
-          # is A dirty, B clean, which publishes a green mark on an unchecked tree.
-          # Pinning makes the sha the result claims be the tree that was read. Empty is
-          # actions/checkout's own default, so the pull_request and push paths are
-          # unchanged.
-          ref: "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}"
+          # stamped on `github.sha`, the default-branch tip at EVENT time, and these two
+          # differ whenever `main` moves while the job waits on the concurrency group -
+          # which is not a corner case here, since that job waited 35 minutes. So the
+          # result gets published against a commit whose tree was never read, and the
+          # direction that hurts is the stamped commit dirty and the fetched one clean.
+          #
+          # Pin to `github.sha` and not to `github.event.workflow_run.head_sha`: the
+          # latter is the upstream Docker Publish commit, which is a third sha again, so
+          # pinning there would fix the checkout and leave the same mismatch pointing the
+          # other way. What has to hold is that the tree read is the tree the result
+          # claims. Empty is actions/checkout's own default, so `pull_request` and `push`
+          # resolve exactly as before.
+          ref: "${{ github.event_name == 'workflow_run' && github.sha || '' }}"
       - uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
