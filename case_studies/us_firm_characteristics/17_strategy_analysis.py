@@ -58,7 +58,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
-import torch  # ml4t.diagnostic loads cudart; torch must import first
+
+# ml4t.diagnostic loads cudart; torch must import first, so its bundled runtime wins symbol
+# resolution. Imported for that side effect alone, which ruff cannot see - without the noqa
+# a dead-import sweep deletes it and the notebook fails on the cudart load.
+import torch  # noqa: F401
 import yaml
 from matplotlib.colors import LinearSegmentedColormap
 
@@ -120,8 +124,6 @@ from case_studies.utils.strategy_analysis import (
     fmt_gate,
     gate1_validation_sharpe_geq_zero,
     gate2_holdout_diff_not_excludes_zero_negatively,
-    plot_cost_decay,
-    plot_ic_vs_sharpe,
     rank_backtests_on_common_support,
     resolve_solvent_carrier,
     select_holdout_self_backtest,
