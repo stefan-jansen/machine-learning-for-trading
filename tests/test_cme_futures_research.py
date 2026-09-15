@@ -41,6 +41,12 @@ from tests.test_research_contract_catalog import _resolved_spec
 from tests.test_research_registry import _training_spec
 from utils.paths import REPO_ROOT
 
+# `_restore_output_root` is deliberately NOT defined here. An autouse fixture of that name
+# in a test module shadows the one in `tests/conftest.py` for every test in the module, and
+# the copy that used to sit here popped ML4T_OUTPUT_DIR unconditionally. The session-scoped
+# `seeded_output_dir` installs that variable exactly once, so the pop removed it for the rest
+# of the worker. The conftest fixture restores the session value instead.
+
 
 def _study(tmp_path: Path) -> Study:
     output_root = tmp_path / "workspace"

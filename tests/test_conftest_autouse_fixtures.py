@@ -120,6 +120,13 @@ def test_no_test_module_redefines_a_conftest_autouse_fixture() -> None:
     An override is legitimate in general. An override of an autouse fixture that restores
     process-global state is not: nothing at the call site says the conftest version stopped
     running, and the tests that pay for it are in other files.
+
+    The same command passes in one checkout and fails in another, so a green run is not
+    evidence the bug is gone. A `--case-study` worktree symlinks
+    `case_studies/<cs>/{features,labels}` to the canonical store, and `get_case_study_dir`
+    then resolves to real artifacts whatever the variable says; a checkout without those
+    links has no fallback. What distinguishes a fix from a tree that hides it is the variable
+    being restored, not the run being green.
     """
     conftest = ast.parse((TESTS_DIR / "conftest.py").read_text())
     protected = {f.name for f in _fixture_defs(conftest) if _is_autouse(f)}

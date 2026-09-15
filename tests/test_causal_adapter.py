@@ -18,6 +18,12 @@ from case_studies.utils import causal
 from case_studies.utils.registry.specs import training_hash_from_spec
 from tests.test_research_workspace import _seed_release
 
+# `_restore_output_root` is deliberately NOT defined here. An autouse fixture of that name
+# in a test module shadows the one in `tests/conftest.py` for every test in the module, and
+# the copy that used to sit here popped ML4T_OUTPUT_DIR unconditionally. The session-scoped
+# `seeded_output_dir` installs that variable exactly once, so the pop removed it for the rest
+# of the worker. The conftest fixture restores the session value instead.
+
 
 def _causal_fixture(
     tmp_path,
