@@ -251,7 +251,10 @@ def predictions_without_coverage(case_dir: Path, hashes: Iterable[str]) -> set[s
 
 
 def prediction_members_in_force(
-    study, case_dir: Path | None = None
+    study,
+    case_dir: Path | None = None,
+    *,
+    candidates: Iterable[str] | None = None,
 ) -> tuple[frozenset[str] | None, list[str]]:
     """Every prediction set the registry's populations currently publish, and the notes to print.
 
@@ -274,6 +277,23 @@ def prediction_members_in_force(
     Refuses if any member is registered but unfinished, by the rule
     :func:`incompletely_registered_predictions` applies - a pool that is selected from cannot
     carry a member scored over fewer folds than it was asked for.
+
+    ``candidates`` is the members the caller can actually act on, and passing it is the
+    difference between checking a sweep's own pool and checking the registry. Without it this
+    reads every published member of every label: on ``nasdaq100_microstructure/14_backtest``
+    that was 784 members, 94.3 GB of ``predictions.parquet`` at 11.0 s each, **8,608 s before
+    the first backtest** - and the run then swept 162 of them, because the other 537 belong to
+    ``fwd_ret_60m``, ``fwd_ret_5m`` and ``fwd_dir_15m``, which that run can never sweep. 68% of
+    the reads were for rows the caller had already excluded, and every ``print`` in the cell is
+    after this returns, so a watcher sees nothing for two and a half hours.
+
+    It narrows the scope, not the checks. Every member the caller could select is still asked
+    every question it was asked before, including the refusal below - what goes away is asking
+    them of members this run cannot reach. One thing does change: an unfinished member under a
+    label this run does not sweep no longer refuses the run. That refusal protects a selection,
+    and a member that cannot be selected cannot corrupt one; it was an incidental early warning
+    about the registry, not a guarantee about the run, and the sweep that does read that label
+    still refuses.
 
     Returns ``None`` and a note where the registry publishes no populations - a fixture or a
     reader's clean clone, where there is no declaration to filter against. ``None`` rather than
@@ -305,6 +325,8 @@ def prediction_members_in_force(
     for name in names:
         published.update(OfficialPopulation.one(study, name=name).members)
     members = frozenset(published - superseded_members_at(root))
+    if candidates is not None:
+        members = members & frozenset(candidates)
 
     # A population is written down before its members are fitted, so being in force is not
     # evidence of having finished. Every caller here ranks what comes back and selects from the

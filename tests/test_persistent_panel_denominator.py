@@ -181,36 +181,49 @@ def test_an_entity_the_builder_admitted_and_the_member_dropped_still_fails(case_
     assert report.never_scored == ("BBB",)
 
 
-def test_a_narrowed_call_neither_reads_nor_writes_the_reachable_memo(case_dir):
+def test_the_memo_cannot_go_stale_against_a_narrowing(case_dir):
     """The failure that made the first version of this fix silently do nothing.
 
-    ``_REACHABLE_CACHE`` is keyed on the label artifact, case study, label, split, folds and
-    ``id(input_panel)`` - not on ``eligible_entities``. A narrowed call that shared the memo
-    would read an entry built on the full entity axis and report the member against exactly
-    the denominator the narrowing had just removed, which is silent: the number is wrong and
-    nothing raises. Measured on ``etfs``/``fwd_ret_5d``, that returned pca at 83.0% with the
-    narrowing in place and correct.
+    That version memoized ``reachable`` - ``want`` narrowed to the panel - against a key that
+    enumerated ``want``'s inputs by hand. ``eligible_entities`` was not among them, so the
+    narrowed call read an entry built on the full entity axis and reported the member against
+    exactly the denominator the narrowing had just removed. Right code, wrong number, nothing
+    raised: measured on ``etfs``/``fwd_ret_5d``, pca came back at 83.0% with the narrowing
+    correctly in place.
+
+    The memo now holds ``offered``, the panel's distinct keys, which is a function of the panel
+    alone and cannot depend on any narrowing - so this is a property of the shape rather than
+    of a list someone maintains, and the order of the two calls cannot matter. Both orders are
+    asserted, because a hand-maintained bypass passes one of them and fails the other.
     """
     import case_studies.utils.coverage as cov
 
     panel = _panel()
     delivered = _predictions(symbols=("AAA", "BBB"))
     admitted = _persistent_panel_entities(SPEC, _panel(), family="latent_factors", config="pca")
+
+    def wide():
+        return check_prediction_cross_section(
+            delivered, "cs", LABEL, case_dir=case_dir, input_panel=panel
+        ).accountable_coverage
+
+    def narrow():
+        return check_prediction_cross_section(
+            delivered,
+            "cs",
+            LABEL,
+            case_dir=case_dir,
+            input_panel=panel,
+            eligible_entities=admitted,
+        ).accountable_coverage
+
     cov._clear_cross_section_cache()
+    wide_first, narrow_second = wide(), narrow()
+    cov._clear_cross_section_cache()
+    narrow_first, wide_second = narrow(), wide()
 
-    # Unnarrowed first, so a shared key would be populated and waiting.
-    wide = check_prediction_cross_section(
-        delivered, "cs", LABEL, case_dir=case_dir, input_panel=panel
-    )
-    assert cov._REACHABLE_CACHE, "the unnarrowed call should memoize"
-    before = len(cov._REACHABLE_CACHE)
-
-    narrow = check_prediction_cross_section(
-        delivered, "cs", LABEL, case_dir=case_dir, input_panel=panel, eligible_entities=admitted
-    )
-    assert len(cov._REACHABLE_CACHE) == before, "a narrowed call must leave no entry"
-    assert narrow.accountable_coverage > wide.accountable_coverage
-    assert narrow.accountable_coverage == 1.0
+    assert narrow_second == narrow_first == 1.0
+    assert wide_second == wide_first == pytest.approx(2 / 3)
 
 
 def test_the_guard_does_not_pull_torch_in():
