@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
@@ -41,16 +40,6 @@ from case_studies.utils.registry.store import _open_registry
 from tests.test_research_contract_catalog import _resolved_spec
 from tests.test_research_registry import _training_spec
 from utils.paths import REPO_ROOT
-
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
 
 
 def _study(tmp_path: Path) -> Study:

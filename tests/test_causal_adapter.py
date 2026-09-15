@@ -19,16 +19,6 @@ from case_studies.utils.registry.specs import training_hash_from_spec
 from tests.test_research_workspace import _seed_release
 
 
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
-
-
 def _causal_fixture(
     tmp_path,
     monkeypatch,
@@ -273,6 +263,13 @@ def test_manual_dml_timeseries_pins_the_pool_for_every_caller(monkeypatch) -> No
     the OMP_NUM_THREADS setdefault is inert for every one - while
     cme_futures/12_model_analysis.py:1190 and sp500_options/11_model_analysis.py:992 tell the
     reader the nuisance models are pinned.
+
+    Torch's bundled OpenMP runtime is excluded because it does none of this work and reports
+    whatever OMP_NUM_THREADS says. Measured 2026-09-15 under the thread cap AGENTS.md requires
+    of anything run beside a live notebook, the four pools in the process are scipy's two
+    openblas copies at 1, scikit-learn's libgomp at 1, and torch/lib/libgomp.so.1 at 2 - the
+    nuisance models are HistGradientBoostingRegressor, so the pin holds over every pool the fit
+    reaches. Asserting over the whole process instead turned that cap into a failure.
     """
     import threadpoolctl
 
@@ -283,7 +280,7 @@ def test_manual_dml_timeseries_pins_the_pool_for_every_caller(monkeypatch) -> No
         observed.extend(
             info["num_threads"]
             for info in threadpoolctl.threadpool_info()
-            if info["user_api"] in {"openmp", "blas"}
+            if info["user_api"] in {"openmp", "blas"} and "/torch/" not in info.get("filepath", "")
         )
         return original(*args, **kwargs)
 
