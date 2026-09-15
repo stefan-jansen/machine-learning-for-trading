@@ -63,6 +63,12 @@ from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.derived_params import quantize_derived
 from case_studies.utils.folds import (
     FOLD_PREPARATION_VERSION,
+    # Unreferenced here and load-bearing. `tests/test_fold_seed_coupling.py` asserts
+    # `gbm.fold_seed is fold_seed` for each of the six modules that seed a fold, so this
+    # import IS this module's declared address for the shared definition. gbm reaches the
+    # derivation through `_subsample_index` rather than calling it at a seeding line, so
+    # nothing in this file references the name and F401 reports it.
+    fold_seed,  # noqa: F401
     prepare_gbm_folds_from_mds,
     training_labels_for_split,
 )
