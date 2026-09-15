@@ -62,8 +62,6 @@ MAX_CASE_STUDIES = 0
 
 # %%
 CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_IDS
-DEFERRED_V31_CASE_STUDIES = {"nasdaq100_microstructure"}
-ACTIVE_CS_LIST = [cs for cs in CS_LIST if cs not in DEFERRED_V31_CASE_STUDIES]
 
 # %% [markdown]
 # ## Load Cost Sweep Results from Registry
@@ -79,8 +77,7 @@ ACTIVE_CS_LIST = [cs for cs in CS_LIST if cs not in DEFERRED_V31_CASE_STUDIES]
 # regeneration is deferred to v3.1 rather than mixed with historical timing.
 
 # %%
-costs_df = load_carrier_cost_curves(ACTIVE_CS_LIST)
-print("Deferred to v3.1: NASDAQ-100 timing-corrected broad carrier cost grid")
+costs_df = load_carrier_cost_curves(CS_LIST)
 
 if costs_df.is_empty():
     msg = "No Ch18 cost-sensitivity backtests found for any deployed carrier"
@@ -632,10 +629,16 @@ display(
 #
 # ## Known Limitations
 #
-# - Only case studies with a selected configuration cost sweep appear. NASDAQ-100 is excluded by
-#   `DEFERRED_V31_CASE_STUDIES` pending a corrected cost grid, and the rest have
-#   no sweep because their registries are being rebuilt. The loaded count is
-#   printed at the top.
+# - Only case studies whose *carrier* has a cost sweep appear, and the loaded count
+#   is printed at the top. A case study can hold cost-sensitivity backtests and still
+#   be absent here, because the sweep has to sit on the deployed carrier's own
+#   training lineage and match its strategy signature. Three are absent for three
+#   different reasons as of 2026-09-15: S&P 500 Options has eight cost rows on its
+#   carrier's lineage and none of them match the carrier's signature; ETFs has cost
+#   rows but none on its carrier's lineage; and NASDAQ-100 is resolved through a
+#   hard-coded training hash that its 2026-09-05 registry rebuild replaced, so the
+#   lookup finds nothing. Only the last of those is a defect in this chapter's
+#   plumbing rather than a property of the sweep.
 # - The sweep applies one proportional per-leg cost to every trade. Real costs
 #   vary with size, with the instrument, and with the state of the book, and the
 #   spread realism section is where that assumption is checked rather than
