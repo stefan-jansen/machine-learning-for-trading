@@ -276,6 +276,14 @@ def test_manual_dml_timeseries_pins_the_pool_for_every_caller(monkeypatch) -> No
     openblas copies at 1, scikit-learn's libgomp at 1, and torch/lib/libgomp.so.1 at 2 - the
     nuisance models are HistGradientBoostingRegressor, so the pin holds over every pool the fit
     reaches. Asserting over the whole process instead turned that cap into a failure.
+
+    That pool is also written by tests that have nothing to do with this one.
+    `torch.set_num_threads(1)` pins it for the rest of the process, and three call sites take
+    the number from a runtime spec: `tabular_dl.py:1720`, `deep_learning.py:461`,
+    `latent_factors/library_bridge.py:60`. Measured in one process at OMP_NUM_THREADS=2, the
+    pool reads 2 after `import torch` and 1 after `set_num_threads(1)`. So before the
+    exclusion this test failed cold and passed behind an earlier file, and its green was
+    evidence about what had run first rather than about `manual_dml_timeseries`.
     """
     import threadpoolctl
 
