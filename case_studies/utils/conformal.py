@@ -49,6 +49,7 @@ import copy
 import math
 import os
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -511,26 +512,41 @@ def walk_forward_widths(
         # `by` groups are given, and an unsorted group silently resolves to the wrong row.
         .sort(id_col, "known_by")
     )
-    resolved = (
-        targets.join_asof(
-            per_entity.sort("step").rename(
-                {"cal_q": "entity_q", "cal_n": "entity_n", "step": "entity_step"}
-            ),
-            left_on="known_by",
-            right_on="entity_step",
-            by=id_col,
-            strategy="backward",
+    # polars emits "Sortedness of columns cannot be checked when 'by' groups provided"
+    # on every `join_asof` that takes `by=`, whatever the caller did. It is a statement
+    # about what polars can verify, not about this frame: both sides are sorted directly
+    # above, on the compound key for the `by=` join and on `step` for the pooled one, and
+    # the comment there says why. Measured: the message is emitted with `by=` and not
+    # without it, and `set_sorted()` on the join keys does not suppress it, so there is no
+    # way to be correct enough to silence it. Scoped here rather than added to the
+    # notebook warning policy, which would hide the same message everywhere including
+    # somewhere it would mean something.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Sortedness of columns cannot be checked",
+            category=UserWarning,
         )
-        .sort("known_by")
-        .join_asof(
-            pooled.sort("step").rename(
-                {"cal_q": "pooled_q", "cal_n": "pooled_n", "step": "pooled_step"}
-            ),
-            left_on="known_by",
-            right_on="pooled_step",
-            strategy="backward",
+        resolved = (
+            targets.join_asof(
+                per_entity.sort("step").rename(
+                    {"cal_q": "entity_q", "cal_n": "entity_n", "step": "entity_step"}
+                ),
+                left_on="known_by",
+                right_on="entity_step",
+                by=id_col,
+                strategy="backward",
+            )
+            .sort("known_by")
+            .join_asof(
+                pooled.sort("step").rename(
+                    {"cal_q": "pooled_q", "cal_n": "pooled_n", "step": "pooled_step"}
+                ),
+                left_on="known_by",
+                right_on="pooled_step",
+                strategy="backward",
+            )
         )
-    )
 
     enough_own = pl.col("entity_n") >= min_calibration_n
     enough_pooled = pl.col("pooled_n") >= min_calibration_n

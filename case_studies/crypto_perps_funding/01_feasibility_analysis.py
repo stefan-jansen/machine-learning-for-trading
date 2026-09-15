@@ -66,7 +66,7 @@ from IPython.display import display
 from case_studies.utils.feasibility import exceedance_curve, fold_timeline, panel_acf
 from case_studies.utils.warning_policy import apply_notebook_warning_policy
 from data import load_crypto_perps
-from utils.cv_splits import generate_cv_splits
+from utils.cv_splits import generate_cv_splits, normalize_label_buffer
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt, zero_line
 
@@ -115,6 +115,12 @@ HOLDOUT_START = str(SETUP["evaluation"]["holdout_start"])
 HOLDOUT_END = str(SETUP["evaluation"]["holdout_end"])
 HOLDOUT_TS = pl.lit(HOLDOUT_START).str.to_datetime().dt.replace_time_zone("UTC")
 PRIMARY_LABEL, LABEL_BUFFER = SETUP["labels"]["primary"], SETUP["labels"]["buffer"]
+# `labels.buffer` is "8H", and pandas deprecated "H" in favour of "h", so building a
+# Timedelta from the configured string writes a FutureWarning under every figure below.
+# The configured string is what 144 registered training runs hash, so it is left exactly
+# as declared and converted here instead. `normalize_label_buffer` is unit-aware rather
+# than a `.lower()`: "21D" stays "21D", "3M" becomes "90D", "30T" becomes "30min".
+LABEL_BUFFER_DELTA = pd.Timedelta(normalize_label_buffer(LABEL_BUFFER))
 DECLARED = set(SETUP["universe"]["symbols"])
 BREADTH_FLOOR = 2 * max(SETUP["backtest"]["sweep"]["top_k_grid"][PRIMARY_LABEL])
 BAR_HOURS = int(SETUP["decision"]["cadence"].split("_")[0])
@@ -577,10 +583,8 @@ splits = generate_cv_splits(
 last_val = max(split["val_end"] for split in splits)
 assert len(splits) == SETUP["evaluation"]["n_splits"], "fold count differs from setup.yaml"
 holdout_opens = pd.Timestamp(HOLDOUT_START, tz="UTC")
-assert last_val + pd.Timedelta(LABEL_BUFFER) < holdout_opens, (
-    "a fold's last label reaches the holdout"
-)
-BUFFER_SLOTS = int(pd.Timedelta(LABEL_BUFFER) / pd.Timedelta(hours=BAR_HOURS))
+assert last_val + LABEL_BUFFER_DELTA < holdout_opens, "a fold's last label reaches the holdout"
+BUFFER_SLOTS = int(LABEL_BUFFER_DELTA / pd.Timedelta(hours=BAR_HOURS))
 purged = {
     int((s["val_start"] - s["train_end"]) / pd.Timedelta(hours=BAR_HOURS)) - 1 for s in splits
 }
