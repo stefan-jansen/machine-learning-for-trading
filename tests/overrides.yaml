@@ -3888,6 +3888,16 @@ case_studies/us_equities_panel/11_dl_tsmixer:
     PREVIEW_MAX_SYMBOLS: 8
   timeout: 600
 case_studies/us_equities_panel/12_dl_weekly:
+  # vram_gb: free VRAM this run needs before nb-run lets it start. MEASURED WITH A DIFFERENT
+  # INSTRUMENT FROM THE FOUR nasdaq100_microstructure ENTRIES ABOVE, and the difference is why
+  # this number looks small beside them. Those sample torch.cuda.max_memory_allocated, which
+  # counts tensors and not the CUDA context, so their declared value is the peak plus that
+  # context plus fragmentation. This one samples the kernel process's own VRAM over the whole
+  # canonical run - 2026-09-14, 12 trainings in 2.14 h, 8 PyTorch and 4 Darts N-BEATS - and a
+  # per-process figure already includes the context. Peak was 544 MiB = 0.53 GiB, first sample
+  # to last. Declaring 1 rounds that up with headroom; declaring 2 to match the entries above
+  # would pad a total that is already complete.
+  vram_gb: 1
   parameters:
     BATCH_SIZE: 32
     LOOKBACK: 5
