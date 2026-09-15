@@ -457,6 +457,17 @@ jobs:
           # notebook_provenance.py --since diffs against the base or the previous
           # tip, and neither is in a shallow clone.
           fetch-depth: 0
+          # On `workflow_run` the default resolves to the branch tip at fetch time,
+          # not to the commit that triggered it: the log of the 08:08Z guards job on
+          # 2026-09-15 reads `git rev-parse refs/remotes/origin/main` then
+          # `git checkout --force -B main refs/remotes/origin/main`. The check-run is
+          # still stamped on the triggering sha, so in a fast merge sequence the result
+          # attaches to commit A having checked commit B - and the direction that hurts
+          # is A dirty, B clean, which publishes a green mark on an unchecked tree.
+          # Pinning makes the sha the result claims be the tree that was read. Empty is
+          # actions/checkout's own default, so the pull_request and push paths are
+          # unchanged.
+          ref: "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}"
       - uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
@@ -564,9 +575,7 @@ jobs:
       # On `workflow_run` there is no previous tip to diff, so it checks everything,
       # which is the same fallback a first push already takes.
       - name: Notebooks this change touched were executed from their current .py
-        if: >-
-          github.event_name == 'pull_request' || github.event_name == 'push'
-          || github.event_name == 'workflow_run'
+        if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_run'
         run: |
           source .venv/bin/activate
           if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
