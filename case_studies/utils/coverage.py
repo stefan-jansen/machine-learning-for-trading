@@ -36,7 +36,7 @@ separate answer.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -999,6 +999,7 @@ def check_prediction_cross_section(
     decision_axis: pl.Series | None = None,
     input_panel: pl.DataFrame | None = None,
     folds: Collection[int] | None = None,
+    eligible_entities: Mapping[int, Collection[str]] | None = None,
     minimum: float | None = None,
 ) -> CrossSectionReport:
     """Measure a prediction set against the ``(entity, session)`` grid the label declares.
@@ -1016,6 +1017,18 @@ def check_prediction_cross_section(
     An entity absent from every fold and one missing its first weeks produce the same
     percentage and are different failures, so ``never_scored`` and ``partially_scored``
     are reported apart.
+
+    ``eligible_entities`` narrows the *symbol* axis, per fold, to the entities the run's
+    own panel builder would have admitted. The fold narrowing above deliberately leaves the
+    symbol axis on the panel, because a family that lost names inside the folds it ran must
+    still be charged for them - that stays true. This is the one case it does not cover: a
+    model whose builder refuses an entity before the fit sees it never lost that name, it
+    was never offered it, and charging it is charging it for a denominator it cannot reach.
+    Only ``latent_factors/pca`` is in that position today
+    (``latent_factors.panel.PERSISTENT_PANEL_MODELS``), and the admitted set comes from
+    ``eligible_persistent_entities``, the same function the builder itself calls, so the
+    two cannot drift apart. Sessions stay fully charged inside the admitted entities, so a
+    member short a session for an entity it does carry still fails.
 
     ``folds`` is the fold axis the run was asked to produce, and it is not derivable from
     the case study: ``declared_sessions`` reads the fold windows from the configuration,
@@ -1045,6 +1058,27 @@ def check_prediction_cross_section(
                 f"{case_study}/{label}/{split}: the run declares fold(s) {kept} and the "
                 "configuration declares none of them, so the cross-section is empty and "
                 "coverage cannot be evaluated"
+            )
+    if eligible_entities is not None:
+        admitted = pl.DataFrame(
+            [
+                {"fold": int(fold), "entity": str(entity)}
+                for fold, entities in eligible_entities.items()
+                for entity in entities
+            ],
+            schema={"fold": pl.Int64, "entity": pl.String},
+        )
+        if admitted.is_empty():
+            raise CoverageError(
+                f"{case_study}/{label}/{split}: the run's panel builder admitted no entity "
+                "in any declared fold, so the cross-section is empty and coverage cannot be "
+                "evaluated"
+            )
+        want = want.join(admitted, on=["fold", "entity"], how="semi")
+        if want.is_empty():
+            raise CoverageError(
+                f"{case_study}/{label}/{split}: no entity the run's panel builder admitted "
+                "appears in the declared cross-section, so coverage cannot be evaluated"
             )
     delivered = want.join(got, on=["entity", "session"], how="semi")
     missing = want.join(got, on=["entity", "session"], how="anti")
@@ -1076,7 +1110,12 @@ def check_prediction_cross_section(
             tuple(sorted(folds)) if folds is not None else None,
             id(input_panel),
         )
-        cached = None if decision_axis is not None else _REACHABLE_CACHE.get(cache_key)
+        # `eligible_entities` narrows `want` the way `decision_axis` does and is not in the
+        # key, so a narrowed call must take no entry and leave none - otherwise it reads an
+        # entry built on the full entity axis and reports the member against a denominator
+        # this call just removed. Same bypass, same reason.
+        memoizable = decision_axis is None and eligible_entities is None
+        cached = _REACHABLE_CACHE.get(cache_key) if memoizable else None
         if cached is not None and cached[0] is input_panel:
             reachable = cached[1]
         else:
@@ -1097,7 +1136,7 @@ def check_prediction_cross_section(
                 _normalize_time(offered.get_column("session")).alias("session")
             )
             reachable = want.join(offered, on=["entity", "session"], how="semi")
-            if decision_axis is None:
+            if memoizable:
                 _REACHABLE_CACHE[cache_key] = (input_panel, reachable)
         achievable = reachable.height
         delivered_achievable = reachable.join(got, on=["entity", "session"], how="semi").height

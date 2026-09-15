@@ -9,6 +9,14 @@ import numpy as np
 import polars as pl
 from scipy import stats
 
+# One definition, in a module the coverage guard can import without torch - see that
+# module's docstring for why it is not in this file.
+from case_studies.utils.persistent_panel import (
+    DEFAULT_MIN_COVERAGE,
+    PERSISTENT_PANEL_MODELS,
+    eligible_persistent_entities,
+)
+
 
 def prepare_ragged_panel_data(
     dataset: pl.DataFrame,
@@ -84,7 +92,7 @@ def prepare_panel_data(
     *,
     eligibility_dataset: pl.DataFrame,
     max_entities: int = 0,
-    min_coverage: float = 0.5,
+    min_coverage: float = DEFAULT_MIN_COVERAGE,
     eval_label_col: str | None = None,
     macro_panel: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
@@ -96,14 +104,11 @@ def prepare_panel_data(
         entity_col=entity_col,
     )
 
-    n_dates_total = eligibility_df[date_col].n_unique()
-    min_dates = max(int(n_dates_total * min_coverage), 10)
-
-    eligible = (
-        eligibility_df.group_by(entity_col)
-        .len()
-        .filter(pl.col("len") >= min_dates)
-        .sort(["len", entity_col], descending=[True, False])
+    eligible = eligible_persistent_entities(
+        eligibility_df,
+        entity_col=entity_col,
+        date_col=date_col,
+        min_coverage=min_coverage,
     )
     if max_entities > 0:
         eligible = eligible.head(max_entities)
@@ -294,8 +299,11 @@ def _limit_entities(
 
 
 __all__ = [
+    "DEFAULT_MIN_COVERAGE",
+    "PERSISTENT_PANEL_MODELS",
     "align_macro_to_dates",
     "compute_managed_portfolios",
+    "eligible_persistent_entities",
     "prepare_panel_data",
     "prepare_ragged_panel_data",
     "rank_normalize_cross_section",

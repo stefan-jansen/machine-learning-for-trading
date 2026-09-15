@@ -33,6 +33,7 @@ from case_studies.utils.latent_factors.pca import run_pca_fold
 from case_studies.utils.latent_factors.sae import run_sae_fold
 from case_studies.utils.latent_factors.sdf import run_sdf_fold
 from case_studies.utils.latent_factors.versions import latent_model_version
+from case_studies.utils.persistent_panel import PERSISTENT_PANEL_MODELS
 from utils.modeling import RANDOM_SEED, seed_everything
 
 _MODEL_RUNNERS = {
@@ -699,8 +700,10 @@ def run_latent_factor_cv(
         }
         log(f"  {model_name} (K={n_factors}):")
 
-    need_pca_inputs = "pca" in active_models
-    need_ragged_inputs = any(model_name != "pca" for model_name in active_models)
+    need_pca_inputs = bool(PERSISTENT_PANEL_MODELS & set(active_models))
+    need_ragged_inputs = any(
+        model_name not in PERSISTENT_PANEL_MODELS for model_name in active_models
+    )
 
     def runner_kwargs(
         model_name: str,

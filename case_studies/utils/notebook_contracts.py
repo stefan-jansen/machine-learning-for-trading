@@ -4,6 +4,7 @@ import json
 import sqlite3
 from collections.abc import Iterable, Mapping
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl
@@ -546,6 +547,77 @@ def _declared_folds(spec_json: str | None) -> tuple[int, ...] | None:
     return tuple(sorted(set(indices))) or None
 
 
+def _persistent_panel_entities(
+    spec_json: str | None,
+    panel: pl.DataFrame,
+    *,
+    family: str,
+    config: str,
+) -> dict[int, list[str]] | None:
+    """The entities each fold's panel builder admitted, or ``None`` when all of them are.
+
+    Only the models in ``latent_factors.PERSISTENT_PANEL_MODELS`` build a dense panel, and
+    only they refuse an entity before the fit sees it. For everything else the answer is
+    "all of them", which is what ``None`` says, and the guard is unchanged.
+
+    The admitted set is recomputed here rather than read from the member, because the member
+    records no such declaration - there is no sidecar beside ``predictions.parquet`` saying
+    what it was handed. Recomputing is sound only because the rule has one definition:
+    ``eligible_persistent_entities`` is the function ``prepare_panel_data`` itself calls, so
+    this cannot answer a question the builder would answer differently. It is also cheap -
+    a group-by over the panel per fold, against the 120 MB parquet read this function is
+    already doing per member - and it runs for no member of any other config.
+    """
+    # Imported here for the same reason the `coverage` import below is: `coverage` imports
+    # from this module, so a top-level import of either closes a cycle.
+    from case_studies.utils.coverage import _normalize_time
+    from case_studies.utils.persistent_panel import (
+        PERSISTENT_PANEL_MODELS,
+        eligible_persistent_entities,
+    )
+
+    if family != "latent_factors" or config not in PERSISTENT_PANEL_MODELS:
+        return None
+    if not spec_json:
+        return None
+    try:
+        folds = json.loads(spec_json).get("computation", {}).get("cv", {}).get("folds")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(folds, list):
+        return None
+
+    session = _normalize_time(panel.get_column("session"))
+    keys = panel.select(pl.col("entity").cast(pl.String)).with_columns(session.alias("session"))
+    admitted: dict[int, list[str]] = {}
+    for entry in folds:
+        if not isinstance(entry, dict) or not isinstance(entry.get("fold"), int):
+            continue
+        start, end = entry.get("train_start"), entry.get("train_end")
+        if not isinstance(start, str) or not isinstance(end, str):
+            # A fold that does not declare its training window cannot be narrowed, and
+            # guessing one would charge the member against a denominator nobody declared.
+            return None
+        window = keys.filter(
+            (pl.col("session") >= _parse_declared(start))
+            & (pl.col("session") <= _parse_declared(end))
+        )
+        if window.is_empty():
+            return None
+        admitted[int(entry["fold"])] = (
+            eligible_persistent_entities(window, entity_col="entity", date_col="session")
+            .get_column("entity")
+            .to_list()
+        )
+    return admitted or None
+
+
+def _parse_declared(stamp: str) -> datetime:
+    """A spec's declared fold boundary as a naive datetime, matching ``_normalize_time``."""
+    parsed = datetime.fromisoformat(stamp)
+    return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+
+
 def undercovered_prediction_members(
     root: Path,
     members: Iterable[str],
@@ -660,6 +732,13 @@ def undercovered_prediction_members(
                 # drops it. The fold axis is a validation question; the holdout has one
                 # window and the configuration is the only thing that declares it.
                 folds=None if split == "holdout" else _declared_folds(spec_json),
+                # The symbol axis, for the one family whose builder narrows it before the
+                # fit. `None` for every other member, which leaves the check as it was.
+                eligible_entities=(
+                    None
+                    if split == "holdout"
+                    else _persistent_panel_entities(spec_json, panel, family=family, config=config)
+                ),
                 source=f"{family}/{config}",
             )
         except CoverageError as exc:
