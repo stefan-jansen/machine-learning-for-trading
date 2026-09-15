@@ -207,16 +207,17 @@ def test_the_runner_puts_the_stem_in_front_of_the_kernel(tmp_path: Path) -> None
     other test green.
 
     Driven in a subprocess rather than in-process, and that is not tidiness. `run_notebook` calls
-    `pm.execute_notebook`, which drives a kernel through asyncio, and `tests/test_async_utils.py`
-    applies `nest_asyncio` - which patches the event loop policy for the rest of the process. Any
-    notebook executed in-process after that point raises `AssertionError: Timeout should be used
-    inside a task`, so this passes when the file runs alone and fails in the suite, which is
-    exactly what it did: green locally, red in `test-unit` at 5,377 other tests passing.
+    `pm.execute_notebook`, which drives a kernel through asyncio, so this test is only as isolated
+    as whatever else in the session has touched the interpreter's asyncio. It was written because
+    `tests/test_async_utils.py` applied `nest_asyncio` in-process and every notebook executed after
+    it raised `RuntimeError: Timeout should be used inside a task`: green locally, red in
+    `test-unit` at 5,377 other tests passing.
 
-    Reproduced in a venv built from the `test-unit` install list, running
-    `test_async_utils.py` first: the in-process form fails and this one passes in the same
-    session. A fresh interpreter has no patched policy to inherit, and the launcher's behaviour
-    is what is under test either way.
+    That leak is fixed at its source - `test_async_utils.py` now drives its one nested-loop case in
+    a subprocess and asserts on the way out that it left `asyncio.run` and `asyncio.Task` alone -
+    so this no longer defends against a live hazard. It stays a subprocess anyway, because a fresh
+    interpreter is the only form in which this test measures the launcher rather than the session
+    it happens to run in, and the next thing to patch asyncio will not announce itself either.
     """
     import subprocess
     import sys
