@@ -21,7 +21,6 @@ import json
 import os
 import platform
 import shutil
-import subprocess
 import time
 import uuid
 import warnings
@@ -59,19 +58,18 @@ from case_studies.research.cv import (
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
-from case_studies.research.results import PredictionResult, Result, TrainingResult
+from case_studies.research.results import TrainingResult
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.derived_params import quantize_derived
 from case_studies.utils.folds import (
     FOLD_PREPARATION_VERSION,
-    fold_seed,
     prepare_gbm_folds_from_mds,
     training_labels_for_split,
 )
-from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+from case_studies.utils.registry import training_hash_from_spec
 from case_studies.utils.registry.specs import canonical_json
 from case_studies.utils.runtime import cpu_seconds, resource_measurement, source_commit
-from utils.modeling import RANDOM_SEED, seed_everything
+from utils.modeling import RANDOM_SEED
 
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study

@@ -7,7 +7,6 @@ import json
 import os
 import platform
 import shutil
-import subprocess
 import time
 import uuid
 from dataclasses import dataclass

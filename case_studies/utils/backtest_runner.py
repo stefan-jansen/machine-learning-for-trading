@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 import warnings
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -36,7 +36,6 @@ import numpy as np
 import polars as pl
 
 from case_studies.utils.backtest_loaders import (
-    BacktestConfig,
     declared_rebalance_step,
     get_backtest_config,
 )

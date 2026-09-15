@@ -21,7 +21,7 @@ import json
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -2229,7 +2229,6 @@ def load_strategy_assessment(
         Assessment dictionary, or empty dict if not found.
     """
     import sqlite3
-    import warnings
 
     from utils.paths import get_case_study_dir
 

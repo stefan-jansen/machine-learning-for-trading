@@ -91,9 +91,6 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.conformal import CALIBRATION_VERSION
 from case_studies.utils.external_benchmarks import (
-    align_to_strategy as align_external_benchmark,
-)
-from case_studies.utils.external_benchmarks import (
     align_to_strategy_monthly as align_external_benchmark_monthly,
 )
 from case_studies.utils.external_benchmarks import (

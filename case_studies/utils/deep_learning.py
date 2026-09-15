@@ -25,10 +25,8 @@ import importlib.metadata
 import json
 import os
 import platform
-import subprocess
 import time
 import uuid
-import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -938,13 +936,9 @@ def reconstruct_locked_request(
     )
     from case_studies.research.models import (
         ResolvedModelRequest,
-        locked_holdout_split,
         validate_locked_expected_keys,
     )
-    from case_studies.utils.artifact_digest import value_digest
     from case_studies.utils.deep_model_state import declared_epoch_checkpoints
-    from case_studies.utils.registry import training_hash_from_spec
-    from utils.modeling import load_modeling_dataset
 
     if checkpoint_kind != "epoch" or checkpoint_value is None:
         raise ValueError("sequence holdout requires one locked epoch checkpoint")
@@ -2376,7 +2370,6 @@ def run_dl_cv(
         all_learning_curves: pl.DataFrame — IC × epoch × config
     """
     from case_studies.utils.darts_forecasting import (
-        darts_training_identity,
         run_darts_cv,
         uses_darts_backend,
     )

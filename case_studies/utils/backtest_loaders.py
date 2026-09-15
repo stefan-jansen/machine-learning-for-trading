@@ -32,7 +32,6 @@ Usage:
 from __future__ import annotations
 
 import re
-import sqlite3
 import warnings
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -44,7 +43,6 @@ import numpy as np
 import polars as pl
 import yaml
 
-from case_studies.utils.signals import build_target_weights
 from case_studies.utils.sp500_price_lineage import adjustment_scale, continuous_adjusted_panel
 from utils.artifact_specs import resolve_market_runtime, resolve_market_semantics
 from utils.data_quality import top_entities

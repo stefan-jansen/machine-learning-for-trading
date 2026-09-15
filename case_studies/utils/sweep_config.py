@@ -422,7 +422,6 @@ def ranked_cross_section_width(
     decision about the rule; this function is about which set the rule reads.
     """
     import sqlite3
-    import warnings
 
     from case_studies.utils.registry.store import _case_dir, _registry_db_path, _run_log_dir
 

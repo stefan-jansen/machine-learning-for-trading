@@ -170,7 +170,6 @@ def build_holdout_cv(
     from case_studies.utils.cv_window import canonical_window
     from utils.artifact_specs import (
         load_setup_config,
-        resolve_label_buffer,
         resolve_label_horizon,
     )
     from utils.cv_splits import earliest_train_start, normalize_label_buffer

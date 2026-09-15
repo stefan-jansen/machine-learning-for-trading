@@ -16,7 +16,6 @@ from ..runtime import worktree_marker
 from .specs import (
     IDENTITY_VERSION,
     _validate_spec,
-    canonical_json,
     training_hash_from_spec,
 )
 
