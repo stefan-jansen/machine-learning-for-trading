@@ -145,6 +145,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -1550,7 +1551,21 @@ def _unused_imports_removed(source: str) -> str | None:
     ``--isolated`` deliberately ignores the repository's ``pyproject.toml``, which is where
     ``F401`` is currently switched off. Reading that config would make this return the
     input unchanged and silently classify every drift as executable.
+
+    **The precondition asks whether ruff is importable, not what the run printed.** Exit 1
+    means "ruff ran and reported something" and is also what ``python -m <missing module>``
+    exits with, so the exit code alone cannot tell them apart: ``test-unit`` installed no
+    ruff, this read the unmodified file back, both sides normalised to themselves, and the
+    tier went inert with nothing saying so. Checking stderr instead was the first fix and it
+    is disarmable, because ruff writes warnings there from runs that ran and succeeded -
+    ``No Python files found under the given path(s)`` at exit 0, and an incompatible-rules
+    warning alongside real diagnostics at exit 1. Neither can fire under the argv below, but
+    both are one flag away, and the failure would be the silent direction again.
+    ``find_spec`` answers the question being asked and no message ruff chooses to print can
+    change its answer.
     """
+    if importlib.util.find_spec("ruff") is None:
+        return None
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "cell_source.py"
         path.write_text(source, encoding="utf-8")
@@ -1572,14 +1587,7 @@ def _unused_imports_removed(source: str) -> str | None:
             text=True,
             check=False,
         )
-        # Exit 1 means "ruff ran and reported something", and it is ALSO what a missing
-        # interpreter module exits with. Conflating them made the tier fail open in the
-        # quiet direction: `test-unit` installs no ruff, `python -m ruff` exited 1 with
-        # "No module named ruff" on stderr, this returned the file unmodified, and every
-        # drift then compared as executable. Nothing said the classifier was inert. Ruff
-        # writes diagnostics to stdout and keeps stderr for its own failures, so a
-        # non-empty stderr is the discriminator.
-        if result.returncode not in (0, 1) or result.stderr.strip():
+        if result.returncode not in (0, 1):
             return None
         return path.read_text(encoding="utf-8")
 

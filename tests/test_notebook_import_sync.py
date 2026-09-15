@@ -20,6 +20,7 @@ import that was added rather than removed, and anything else in a code cell.
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -218,30 +219,56 @@ def test_tier_refuses(tmp_path: Path, executed: str, edited: str) -> None:
     assert not ok
 
 
-def test_a_ruff_that_cannot_run_is_a_refusal_not_a_no_op(monkeypatch, tmp_path: Path) -> None:
+def test_a_ruff_that_cannot_be_imported_is_a_refusal_not_a_no_op(
+    monkeypatch, tmp_path: Path
+) -> None:
     """A missing ruff exits 1, exactly as a lint finding does. It must not read as "nothing to fix".
 
-    `test-unit` installs no ruff. `python -m ruff` there exits 1 with "No module named ruff"
-    on stderr, and the first version of the normalizer accepted that as a completed run, read
-    the unmodified file back, and reported every drift as executable. The tier was inert and
-    nothing said so - three assertion failures in this file were the only symptom, and in a job
-    that did not run them there would have been none at all. Ruff writes diagnostics to stdout
-    and keeps stderr for its own failures, so stderr is the discriminator.
+    `test-unit` installed no ruff. `python -m ruff` there exits 1 with "No module named ruff",
+    and the first normaliser accepted that as a completed run, read the unmodified file back,
+    and reported every drift as executable. The tier was inert and nothing said so - three
+    assertion failures in this file were the only symptom, and in a job that did not run them
+    there would have been none: `sync-imports` would refuse every notebook with a message about
+    code cells having moved, which reads exactly like a correct refusal.
     """
-    real_run = notebook_provenance.subprocess.run
+    real = importlib.util.find_spec
 
-    def fake_run(cmd, *args, **kwargs):
-        if len(cmd) > 2 and cmd[1:3] == ["-m", "ruff"]:
-            return subprocess.CompletedProcess(
-                cmd, 1, stdout="", stderr=f"{sys.executable}: No module named ruff\n"
-            )
-        return real_run(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(notebook_provenance.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        notebook_provenance.importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None if name == "ruff" else real(name, *a, **k),
+    )
     assert _unused_imports_removed(EXECUTED) is None
     ok, removed = drift_is_unused_import_only(_blob(EXECUTED), _py(tmp_path, CLEANED))
     assert not ok
     assert removed == []
+
+
+def test_a_warning_on_stderr_does_not_disarm_the_normalizer(monkeypatch) -> None:
+    """Ruff writes warnings to stderr from runs that ran and succeeded, so emptiness is not the test.
+
+    Measured on ruff 0.15.14: `check --no-cache <empty dir>` exits 0 with "No Python files found
+    under the given path(s)" on stderr, and `check --isolated --select D203,D211,F401` exits 1
+    with twelve lines of real diagnostics on stdout AND an incompatible-rules warning on stderr.
+    Neither can fire under the argv this function uses - one `--select` cannot conflict, the path
+    is an explicit existing file - but both are one flag or one ruff release away, and a
+    normaliser that refused on any stderr would go inert in the silent direction again.
+    """
+    real_run = notebook_provenance.subprocess.run
+
+    def warn_but_work(cmd, *args, **kwargs):
+        result = real_run(cmd, *args, **kwargs)
+        if len(cmd) > 2 and cmd[1:3] == ["-m", "ruff"]:
+            return subprocess.CompletedProcess(
+                cmd, result.returncode, result.stdout, "warning: something ruff felt like saying\n"
+            )
+        return result
+
+    monkeypatch.setattr(notebook_provenance.subprocess, "run", warn_but_work)
+    normalized = _unused_imports_removed(EXECUTED)
+    assert normalized is not None
+    assert "import json" not in normalized
+    assert "import pandas as pd" in normalized
 
 
 def test_tier_refuses_a_stamped_blob_that_is_gone(tmp_path: Path) -> None:
