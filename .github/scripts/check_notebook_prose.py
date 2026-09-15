@@ -54,6 +54,65 @@ from pathlib import Path
 UNRESOLVED = object()
 
 
+# A9. Figure titles. A title renders bold above the axes, so a long one wraps across the plot
+# and a computed one is a result the reader has to re-read the chart to verify. The title says
+# what the figure shows; the numbers stay in the axes, legend and output, and the interpretation
+# goes in the markdown around the figure (ruled 2026-09-09).
+#
+# The rule lives in `.claude/skills/notebook-figures/SKILL.md`, which splits its enforcement:
+# `check_notebook_conformance.py` `fig-titles` runs the value test over title *literals*, and
+# A9 here runs the interpolation test and the 75-character ceiling. A9 used to read only
+# `add_message_title`, so Plotly's `update_layout(title=...)` and Matplotlib's `set_title` -
+# between them nearly every figure in the book - were never looked at. Matching is an AST walk
+# rather than a regex because `update_layout` titles are routinely multi-line implicit
+# concatenations and `title=dict(text=...)` nests.
+TITLE_MAX_CHARS = 75
+# Plotly has no `subtitle=`; the house idiom is `<br><sub>…</sub>` inside the title string, so
+# the ceiling applies to the head, exactly as it applies to `add_message_title`'s first
+# argument and not to its `subtitle=`.
+TITLE_SUBTITLE_SPLIT = re.compile(r"<br\s*/?>", re.IGNORECASE)
+HTML_TAG = re.compile(r"<[^>]+>")
+# A format spec that renders a number: a presentation type, or a grouping separator. A
+# datetime spec is checked first because `%Y-%m-%d` ends in `d` and would otherwise read as
+# the integer type.
+DATETIME_SPEC = re.compile(r"%[a-zA-Z]")
+NUMERIC_SPEC = re.compile(r"[bdeEfFgGnoxX%]$|[,_]")
+# Calls and attributes that return a number whatever they are called on. `min`, `max`,
+# `median` and `quantile` are deliberately absent: they are type-preserving selectors, so
+# `options["timestamp"].max()` is a date, and reading them as numeric flagged five legitimate
+# "as of {sample_date}" titles in `02_financial_data_universe/07_sp500_options_eda`. A
+# genuinely numeric one carries a format spec, which is tested first.
+NUMERIC_CALLS = frozenset(
+    [
+        "len",
+        "sum",
+        "round",
+        "abs",
+        "float",
+        "int",
+        "mean",
+        "std",
+        "var",
+        "corr",
+        "corrcoef",
+        "count",
+        "nunique",
+        "cumsum",
+        "prod",
+        "sqrt",
+        "log",
+        "log10",
+        "exp",
+        "dot",
+        "norm",
+        "rank",
+    ]
+)
+NUMERIC_ATTRS = frozenset({"height", "size", "shape", "ndim"})
+
+ARITHMETIC = (ast.Div, ast.Mult, ast.Sub, ast.Pow, ast.Mod, ast.FloorDiv)
+
+
 def markdown_cells(src: str):
     """Yield (line_offset, text, tagged_results) for each jupytext percent markdown cell."""
     lines = src.splitlines()
@@ -392,7 +451,267 @@ def _alt_strings(tree: ast.AST, literals: dict[str, ast.expr]) -> list[str]:
     return out
 
 
+DECLARED_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+AXIS_SETTERS = frozenset(
+    {"update_xaxes", "update_yaxes", "update_zaxes", "update_annotations", "update_coloraxes"}
+)
+NOT_FIGURES = frozenset({"legend", "add_node", "set", "dict", "SearchResult", "Indicator"})
+# Plotly Express constructors and the repo's own plotting helpers, which take the claim as `title=`.
+FIGURE_CALLS = frozenset({"update_layout", "Layout", "Figure", "figure"})
+
+
+def title_nodes(tree: ast.AST):
+    """Yield `(node, kind)` for each figure title or subtitle, whatever mechanism set it.
+
+    `kind` is `"title"` or `"subtitle"`. Both are claims and neither may interpolate a computed
+    value, but only a title carries the character ceiling - a subtitle is a second line by
+    design. `cme_futures/04` stated a wrong HAC bandwidth in a rendered SUBTITLE, which nothing
+    was reading.
+
+    Mechanisms: `add_message_title(ax, claim, subtitle=…)`, Matplotlib `set_title`/`suptitle`,
+    `title=`/`title_text=` on a figure-level call, and a `"title"` key in a layout dict literal.
+    """
+    seen: set[int] = set()
+
+    def emit(node, kind):
+        if node is not None and id(node) not in seen:
+            seen.add(id(node))
+            return [(node, kind)]
+        return []
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            fn = n.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if name in AXIS_SETTERS or name in NOT_FIGURES:
+                continue
+            if name in ("set_title", "suptitle") and n.args:
+                yield from emit(n.args[0], "title")
+            elif name == "add_message_title" and len(n.args) >= 2:
+                yield from emit(n.args[1], "title")
+            for kw in n.keywords:
+                if (
+                    kw.arg == "title"
+                    or kw.arg == "title_text"
+                    and (name in FIGURE_CALLS or name.startswith("plot_"))
+                ):
+                    yield from emit(kw.value, "title")
+                elif kw.arg == "subtitle":
+                    yield from emit(kw.value, "subtitle")
+        elif isinstance(n, ast.Dict):
+            for key, value in zip(n.keys, n.values):
+                if isinstance(key, ast.Constant) and key.value == "title":
+                    yield from emit(value, "title")
+
+
+def title_text(node: ast.AST) -> tuple[str | None, list[tuple[ast.AST, str]]]:
+    """Return (literal text, [(interpolated expression, format spec)]) for a title node.
+
+    `None` where the title is not a string built in place - a variable, a function call - in
+    which case there is nothing to measure. `title=dict(text=…)` is unwrapped first, and
+    adjacent string literals concatenate, which is how the long Plotly titles are written.
+    """
+    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "dict":
+        for kw in node.keywords:
+            if kw.arg == "text":
+                return title_text(kw.value)
+    if isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and key.value == "text":
+                return title_text(value)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value, []
+    if isinstance(node, ast.JoinedStr):
+        text, fields = "", []
+        for part in node.values:
+            if isinstance(part, ast.Constant):
+                text += str(part.value)
+            elif isinstance(part, ast.FormattedValue):
+                spec = ""
+                if isinstance(part.format_spec, ast.JoinedStr):
+                    spec = "".join(
+                        c.value for c in part.format_spec.values if isinstance(c, ast.Constant)
+                    )
+                fields.append((part.value, spec))
+                text += ast.unparse(part.value)
+        return text, fields
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, left_fields = title_text(node.left)
+        right, right_fields = title_text(node.right)
+        if left is None or right is None:
+            return None, []
+        return left + right, left_fields + right_fields
+    return None, []
+
+
+def declared_names(tree: ast.AST, src: str) -> set[str]:
+    """Names holding declared configuration, which a title may interpolate.
+
+    ALL-CAPS constants and whatever the papermill `parameters` cell binds. `N_SIMS = 1000`
+    makes `f"Bias by scenario ({N_SIMS:,} Monte Carlo draws)"` legitimate, which is why this
+    is tested before the format spec: the rule is about which value is named, not how it is
+    rendered.
+    """
+    declared = {
+        n.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and DECLARED_NAME.match(n.id)
+    }
+    return declared | parameter_cell_names(src)
+
+
+def numeric_names(tree: ast.AST, declared: set[str]) -> set[str]:
+    """Names the notebook binds to a number its own code computed.
+
+    This is what separates `f"{ratio}x as wide"` - banned even with no format spec - from
+    `f"{top_symbol} order flow"`, where the interpolated value is which series is plotted
+    rather than a result. Only unambiguously arithmetic right-hand sides count; a name bound
+    to a subscript or an unknown call is left alone, because that is how a symbol, a date and
+    a bar type are all selected out of the data.
+    """
+
+    def numeric(node) -> bool:
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+        if isinstance(node, ast.BinOp):
+            if isinstance(node.op, ARITHMETIC):
+                return True
+            return isinstance(node.op, ast.Add) and (numeric(node.left) or numeric(node.right))
+        if isinstance(node, ast.UnaryOp):
+            return numeric(node.operand)
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            return name in NUMERIC_CALLS
+        if isinstance(node, ast.Attribute):
+            return node.attr in NUMERIC_ATTRS
+        if isinstance(node, ast.Subscript):
+            return numeric(node.value)
+        return False
+
+    found = set()
+    for node in ast.walk(tree):
+        targets = []
+        if isinstance(node, ast.Assign) and numeric(node.value):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None and numeric(node.value):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                found.add(target.id)
+    return found - declared
+
+
+def parameter_cell_names(src: str) -> set[str]:
+    """Names bound in the papermill `parameters` cell, which are declared configuration."""
+    lines = src.splitlines()
+    names: set[str] = set()
+    for i, line in enumerate(lines):
+        if not (line.startswith("# %%") and "parameters" in line):
+            continue
+        body = []
+        j = i + 1
+        while j < len(lines) and not lines[j].startswith("# %%"):
+            body.append(lines[j])
+            j += 1
+        try:
+            cell = ast.parse("\n".join(body))
+        except SyntaxError:
+            continue
+        names |= {
+            n.id for n in ast.walk(cell) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        }
+    return names
+
+
+def check_titles(path: Path, src: str) -> list[str]:
+    """A9 over every title mechanism: no interpolated result, and 75 characters."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as exc:
+        return [f"{path}: source does not parse, so figure titles were not checked: {exc}"]
+    declared = declared_names(tree, src)
+    computed = numeric_names(tree, declared)
+    problems = []
+    for node, kind in title_nodes(tree):
+        text, fields = title_text(node)
+        if text is None:
+            continue
+        for expr, spec in fields:
+            # N4 permits naming a value the configuration declares. Arithmetic over declared
+            # names only is still a declared quantity - `4 * DECISION_CYCLE` says exactly what
+            # `DECISION_CYCLE` says and moves only when the configuration does - so it takes the
+            # same carve-out. Without this, four of the corpus's stage-03 subtitles report as
+            # computed values and cost a reviewer an adjudication each.
+            if _names_all_declared(expr, declared):
+                continue
+            if DATETIME_SPEC.search(spec):
+                continue
+            if NUMERIC_SPEC.search(spec):
+                why = f"a numeric format spec ({spec!r})"
+            elif isinstance(expr, ast.Name) and expr.id in computed:
+                why = "a name the notebook binds to a computed number"
+            elif not isinstance(
+                expr, (ast.Name, ast.Attribute, ast.Subscript)
+            ) and _is_numeric_expr(expr):
+                why = "an arithmetic expression"
+            else:
+                continue
+            problems.append(
+                f"{path}:{node.lineno}: figure {kind} interpolates a computed value "
+                f"({ast.unparse(expr)!r}, {why}); the {kind} says what the figure shows, "
+                f"the number stays in the chart"
+            )
+        # A subtitle is a second line by design, so the ceiling is the title's alone.
+        if kind != "title":
+            continue
+        head = TITLE_SUBTITLE_SPLIT.split(text)[0]
+        plain = " ".join(HTML_TAG.sub("", head).split())
+        if len(plain) > TITLE_MAX_CHARS:
+            problems.append(
+                f"{path}:{node.lineno}: figure title is {len(plain)} chars "
+                f"(max {TITLE_MAX_CHARS}); it wraps across the plot"
+            )
+    return problems
+
+
+def _names_all_declared(node: ast.AST, declared: set[str]) -> bool:
+    """True where `node` reads only declared configuration, so N4's carve-out applies.
+
+    A bare declared name qualifies, and so does arithmetic built solely from declared names and
+    literals. A call, subscript or attribute does not: `len(cols)` and `summary["n"]` reach past
+    the configuration into whatever the notebook computed.
+    """
+    if isinstance(node, ast.Name):
+        return node.id in declared
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (int, float))
+    if isinstance(node, ast.BinOp):
+        return _names_all_declared(node.left, declared) and _names_all_declared(
+            node.right, declared
+        )
+    if isinstance(node, ast.UnaryOp):
+        return _names_all_declared(node.operand, declared)
+    return False
+
+
+def _is_numeric_expr(node: ast.AST) -> bool:
+    if isinstance(node, ast.BinOp):
+        return isinstance(node.op, ARITHMETIC)
+    if isinstance(node, ast.Call):
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+        return name in NUMERIC_CALLS
+    return False
+
+
 def check_source(path: Path, src: str) -> list[str]:
+    """The two clauses this repository gates: A9 figure titles, A10 figure descriptions."""
+    return check_titles(path, src) + check_layout_claims(path, src)
+
+
+def check_layout_claims(path: Path, src: str) -> list[str]:
     """A description of a figure's layout must match the calls that build it."""
     marks = [
         (offset, body, kind)
@@ -551,7 +870,58 @@ DESCRIPTIVE_PROSE = (
 # Each case is (label, source, findings expected, phrases every finding set must contain).
 # The phrases matter as much as the count: a case expecting two findings is satisfied by two
 # grouping hits unless the height message is named, and the two rules fire on the same cell.
+# A9 selftest material. The four below are drawn from the corrections
+# ml4t/agent-workspace#239 made: an interpolated Sharpe in a title
+# (`sp500_equity_option_analytics/19_holdout_backtest`), a 106-character title that wrapped
+# across the plot (`etfs/09_dl_lstm`), and the two shapes that must stay silent - N4's
+# carve-out for a value the configuration declares, and a date, which reads as an integer
+# format to any rule that does not test the datetime spec first.
+A9_COMPUTED_TITLE = (
+    "# %%\n"
+    "sharpe = returns.mean() / returns.std()\n"
+    "fig.update_layout(title=f'Holdout equity curve, Sharpe {sharpe:.2f}')\n"
+)
+A9_LONG_TITLE = (
+    "# %%\n"
+    "fig.update_layout(title='Peak-checkpoint cross-sectional information coefficient on the "
+    "validation split for every configured model family')\n"
+)
+A9_DECLARED_TITLE = (
+    "# %%\n"
+    "DECISION_CYCLE = 15\n"
+    "fig.update_layout(title=f'Forward returns over {4 * DECISION_CYCLE} minutes')\n"
+)
+A9_DATE_TITLE = (
+    "# %%\n"
+    "sample_date = options['timestamp'].max()\n"
+    "fig.update_layout(title=f'Implied volatility surface as of {sample_date:%Y-%m-%d}')\n"
+)
+
 CASES: list[tuple[str, str, int, tuple[str, ...]]] = [
+    (
+        "a figure title interpolating a Sharpe the same cell computed",
+        A9_COMPUTED_TITLE,
+        1,
+        ("interpolates a computed value", "the number stays in the chart"),
+    ),
+    (
+        "a figure title past the 75-character ceiling",
+        A9_LONG_TITLE,
+        1,
+        ("it wraps across the plot",),
+    ),
+    (
+        "a figure title naming a quantity the configuration declares",
+        A9_DECLARED_TITLE,
+        0,
+        (),
+    ),
+    (
+        "a figure title carrying a date, whose format spec ends in an integer type",
+        A9_DATE_TITLE,
+        0,
+        (),
+    ),
     (
         "alt text naming a chart the cell never draws",
         HEATMAP_CELL.format(alt=GROUPED_BARS_ALT),
