@@ -642,10 +642,26 @@ def _restore_output_root():
     """
     previous = os.environ.get("ML4T_OUTPUT_DIR")
     yield
-    if previous is None:
+    # The session dir wins over `previous` whenever one has been installed, which is the
+    # same rule `restore_output_root` above applies. Restoring `previous` alone undoes the
+    # session fixture: `seeded_output_dir` is session-scoped, so the test that first
+    # requests it both installs the variable and, on the old reading, was the test whose
+    # `previous` was None - so its own teardown popped the variable and nothing put it
+    # back for the rest of the worker. Measured 2026-09-15 by sampling the variable per
+    # phase: set to `/tmp/pytest-of-stefan/pytest-422/ml4t_output0` during the first test
+    # that requested the fixture, None after its teardown, None for every test after it.
+    #
+    # The docstring above already described that outcome as the thing to avoid; the code
+    # produced it whenever the variable had been unset before the run, which is the normal
+    # state of a fresh session. It is invisible in a checkout whose `case_studies/*/`
+    # artifact symlinks exist, because `get_case_study_dir` then resolves to real
+    # artifacts anyway - and a failure in a checkout without them
+    # (ml4t/agent-workspace#1188).
+    target = _SESSION_OUTPUT_DIR if _SESSION_OUTPUT_DIR is not None else previous
+    if target is None:
         os.environ.pop("ML4T_OUTPUT_DIR", None)
     else:
-        os.environ["ML4T_OUTPUT_DIR"] = previous
+        os.environ["ML4T_OUTPUT_DIR"] = target
     # Read out of sys.modules rather than importing. The module holds the only state this
     # resets, so a test that never imported it left nothing to reset - and importing it here
     # would make every test in the run pay for the import. `case_studies.research` pulls in

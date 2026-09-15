@@ -18,15 +18,12 @@ from case_studies.utils import causal
 from case_studies.utils.registry.specs import training_hash_from_spec
 from tests.test_research_workspace import _seed_release
 
-
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
+# `_restore_output_root` is deliberately NOT defined here. An autouse fixture of that name
+# in a test module shadows the one in `tests/conftest.py` for every test in the module, and
+# the copy that used to sit here popped ML4T_OUTPUT_DIR unconditionally. The session-scoped
+# `seeded_output_dir` installs that variable exactly once, so the first test to request it
+# had its own teardown remove it for the rest of the worker
+# (ml4t/agent-workspace#1188). The conftest fixture restores the session value instead.
 
 
 def _causal_fixture(

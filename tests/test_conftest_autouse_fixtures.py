@@ -57,3 +57,52 @@ def test_autouse_teardown_survives_a_data_path_that_does_not_exist() -> None:
     assert "Data directory not found" not in combined, combined
     assert "error" not in result.stdout, combined
     assert result.returncode == 0, combined
+
+
+def test_no_test_module_shadows_the_conftest_output_root_restorers() -> None:
+    """An autouse fixture named like a conftest one replaces it for that whole module.
+
+    `seeded_output_dir` is session-scoped: it installs ML4T_OUTPUT_DIR exactly once, in
+    whichever test first requests it. `tests/conftest.py` restores that value after every
+    test precisely so the install survives. A module that defines its own autouse
+    `_restore_output_root` shadows the conftest one by name, and the two copies that used
+    to exist popped the variable unconditionally - so the very test that installed it
+    removed it for the rest of the worker, and every later test resolving through
+    `get_case_study_dir` read the committed `case_studies/` tree instead.
+
+    Measured 2026-09-15 by sampling the variable per phase across two tests: set during
+    the first, None after its teardown, None for every test after it
+    (ml4t/agent-workspace#1188). It is invisible in a checkout whose `case_studies/*/`
+    artifact symlinks exist, because resolution then finds real artifacts anyway, which is
+    why it presented as `FileNotFoundError` on one worktree and passed on another.
+
+    A name check rather than a behaviour check, because the failure is that the conftest
+    fixture never runs: there is no behaviour to observe in the module that shadowed it.
+    """
+    import ast
+
+    conftest = ast.parse((TESTS_DIR / "conftest.py").read_text())
+    reserved = {
+        node.name
+        for node in conftest.body
+        if isinstance(node, ast.FunctionDef) and "output_root" in node.name
+    }
+    assert reserved, "conftest defines no output-root restorer; this test is pinned to nothing"
+
+    offenders: list[str] = []
+    for path in sorted(TESTS_DIR.glob("test_*.py")):
+        tree = ast.parse(path.read_text())
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef) or node.name not in reserved:
+                continue
+            autouse = any(
+                isinstance(dec, ast.Call) and any(kw.arg == "autouse" for kw in dec.keywords)
+                for dec in node.decorator_list
+            )
+            if autouse:
+                offenders.append(f"{path.name}:{node.lineno} {node.name}")
+
+    assert not offenders, (
+        "these modules shadow a conftest autouse fixture that restores ML4T_OUTPUT_DIR, "
+        "so the conftest version does not run for any test in them: " + ", ".join(offenders)
+    )
