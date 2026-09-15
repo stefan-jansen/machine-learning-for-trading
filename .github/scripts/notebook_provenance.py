@@ -1637,7 +1637,24 @@ def drift_is_unused_import_only(stamped_blob: str, py: Path) -> tuple[bool, list
     Nothing in the source distinguishes the two cases: an import that is load-bearing by
     side effect has zero references by construction, so it reads exactly like a dead one.
     ``case_studies/utils/latent_factors/__init__.py`` imports ``torch`` for cudart symbol
-    ordering and is referenced nowhere, and that is the shape this cannot see. Two things
+    ordering and is referenced nowhere, and that is the shape this cannot see.
+
+    **There is a second shape, and it cost a CI failure before it was written down: a
+    re-export.** ``case_studies/utils/gbm.py`` imports ``fold_seed`` and never calls it,
+    because ``tests/test_fold_seed_coupling.py`` asserts ``gbm.fold_seed is fold_seed`` -
+    the consumer reads the name through the module object, so the defining file never
+    mentions it again and it is indistinguishable from dead. It also defeats the obvious
+    review check, "no file still references a name it lost", because the reference is in a
+    different file and is spelled ``<module>.<name>``. Sweep for that spelling when
+    clearing imports by hand.
+
+    This command is narrower than that sweep and today the shape cannot reach it: it only
+    ever edits a ``.py`` that has an ``.ipynb`` beside it, and measured 2026-09-15 none of
+    the 484 paired files is a target of any ``import_module`` call in the repo, so nothing
+    imports one as a module to read an attribute off. That is a fact about the current tree
+    rather than a guarantee - a numbered name is importable through ``import_module`` even
+    though it is not an identifier, and one unpaired file under ``data/`` is imported that
+    way already. Two things
     narrow it rather than close it. ``# noqa: F401`` and any other comment on the statement
     refuse, which is the only signal the source carries. And ``sync_imports`` records every
     removed binding in the stamp, so a pass here is a dated claim a later reader can check
