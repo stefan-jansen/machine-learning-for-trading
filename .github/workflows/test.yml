@@ -544,7 +544,7 @@ jobs:
       # jupytext sources, ~4 s. `--selftest` first: two cases that must fire and eleven
       # that must not, the eleven being real sentences from this repository that earlier
       # forms of the rule wrongly reported.
-      - name: A figure's title and its description both describe the figure its cell draws
+      - name: A figure's title, description and prose all describe the figure its cell draws
         run: |
           source .venv/bin/activate
           python .github/scripts/check_notebook_prose.py --selftest
