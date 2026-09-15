@@ -18,14 +18,12 @@ The current image is taken from the ``ML4T_IMAGE`` environment variable
 
 from __future__ import annotations
 
-import importlib
 import os
 
 import pytest
 
 from envs.scan_imports import (
     IMAGE_OVERRIDES,
-    REPO_ROOT,
     VALID_IMAGES,
     classify,
     scan_repo,

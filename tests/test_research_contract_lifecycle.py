@@ -9,14 +9,12 @@ import polars as pl
 import pytest
 
 from case_studies.research import (
-    CandidateSet,
     DecisionArtifact,
     StateTransitionPolicy,
     Study,
 )
 from case_studies.research.strategy import apply_state_transition_policy
 from tests.test_research_contract_catalog import _publish, _resolved_spec
-from tests.test_research_flow import _patch_holdout_prices, _prices
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
 

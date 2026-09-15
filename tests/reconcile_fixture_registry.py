@@ -40,11 +40,6 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-try:
-    from tests.fixture_registry import PINNED_ARTIFACT_DIRS
-except ModuleNotFoundError:  # standalone, as generate_intermediates.py also runs
-    from fixture_registry import PINNED_ARTIFACT_DIRS
-
 DEFAULT_INTERMEDIATES = Path.home() / "ml4t" / "test-data" / "intermediates"
 
 #: The column each role takes in a shipped artifact. Both conventions are in the tree:

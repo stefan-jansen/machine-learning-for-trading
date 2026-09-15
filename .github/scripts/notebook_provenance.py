@@ -150,7 +150,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import NamedTuple

@@ -21,7 +21,6 @@ Three properties are pinned here, because the resume is only safe if all three h
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 
 import pytest

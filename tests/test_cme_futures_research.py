@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
-import json
 import os
 import re
 import sqlite3
@@ -845,7 +843,6 @@ def test_final_selection_pool_spans_both_return_horizons(
 def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from case_studies.research import CandidateSet
 
     study = _study(tmp_path)
     by_label = _labelled_execution(study, monkeypatch)
