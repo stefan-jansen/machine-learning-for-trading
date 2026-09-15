@@ -45,10 +45,7 @@
 # ## 1. Setup and Imports
 
 # %%
-import sys
 import warnings
-from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -67,7 +64,6 @@ warnings.filterwarnings("ignore")
 
 # ML4T configuration
 from data import load_crypto_perps
-from utils import DATA_DIR
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

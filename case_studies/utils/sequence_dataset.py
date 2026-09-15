@@ -10,8 +10,6 @@ import polars as pl
 import torch
 from torch.utils.data import Dataset, default_collate
 
-from utils.modeling import RANDOM_SEED
-
 _SEQUENCE_PERIOD_COL = "__sequence_period__"
 _SEQUENCE_PERIOD_CACHE_ATTR = "ml4t_sequence_period_cache"
 

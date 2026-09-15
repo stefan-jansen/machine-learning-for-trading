@@ -24,7 +24,7 @@ reproducing the fixture, writing nothing. It exits non-zero when one disagrees.
 """
 
 import argparse
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np

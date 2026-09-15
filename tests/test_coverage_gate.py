@@ -20,7 +20,6 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-import case_studies.utils.coverage as coverage
 from case_studies.utils.coverage import (
     CoverageError,
     check_backtest_input_coverage,

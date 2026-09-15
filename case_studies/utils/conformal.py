@@ -56,7 +56,6 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from utils.modeling import conformal_quantile
 from utils.paths import get_case_study_dir
 
 ID_COLS: tuple[str, ...] = ("symbol", "product")

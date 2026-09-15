@@ -16,7 +16,7 @@ from ..notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
-from .specs import IDENTITY_VERSION, canonical_json
+from .specs import IDENTITY_VERSION
 from .store import (
     _backtest_dir,
     _case_dir,

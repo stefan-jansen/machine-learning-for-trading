@@ -79,7 +79,6 @@ from case_studies.utils.model_analysis import (
     load_all_metrics,
     load_fold_metrics_from_registry,
     load_gbm_feature_importance,
-    load_predictions,
     prediction_bucket_monotonicity,
     prediction_correlation_matrix,
     regime_conditional_ic,

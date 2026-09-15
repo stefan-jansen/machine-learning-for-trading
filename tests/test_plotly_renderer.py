@@ -19,7 +19,6 @@ from importlib.metadata import PackageNotFoundError
 
 import pytest
 
-import utils
 from utils import _default_plotly_renderer
 
 WITH_PNG = "plotly_mimetype+png"

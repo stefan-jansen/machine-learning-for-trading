@@ -78,7 +78,6 @@ from IPython.display import display
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, compute_ic_uncertainty
 from plotly.subplots import make_subplots
-from scipy.stats import spearmanr
 
 from case_studies.utils.feature_engineering import (
     assign_families,

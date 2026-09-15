@@ -320,7 +320,6 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = [
     "E501",  # Line length handled by formatter
     "E402",  # Module level import not at top - OK for notebooks
-    "F401",  # Imported but unused - OK for conditional imports in notebooks
     "F811",  # Redefinition of unused variable - OK in notebook cells
     "B006",  # Mutable argument defaults - common pattern in notebooks
     "B007",  # Loop variable not used - intentional in some cases
@@ -335,6 +334,19 @@ ignore = [
     "SIM113", # Use enumerate - readability preference
     "SIM118", # Use `key in dict` - both forms acceptable
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# F401 is ON. It was ignored repo-wide, commented "OK for conditional imports in
+# notebooks", and that reasoning did not hold: the genuinely conditional imports already
+# carry `# noqa: F401`, so the global ignore only hid the dead ones - 134 under
+# `case_studies/` alone on 2026-09-15, including figure helpers imported and never called.
+#
+# These two paths are the ones not cleaned yet, 112 findings between them. They are listed
+# rather than left under a global ignore so the debt has a name and shrinks: delete an entry
+# when its tree is clear. A dead import in a notebook that carries a render does NOT cost a
+# re-run - see `sync-imports` in .github/scripts/notebook_provenance.py.
+"[0-9][0-9]_*/**" = ["F401"]
+"data/**" = ["F401"]
 
 [tool.jupytext]
 formats = "ipynb,py:percent"

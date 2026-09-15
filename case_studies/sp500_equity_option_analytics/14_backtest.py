@@ -42,7 +42,6 @@
 # %%
 """Ch16 backtest and signal evaluation for S&P 500 equity and option features."""
 
-import sqlite3
 import time
 
 import matplotlib.pyplot as plt

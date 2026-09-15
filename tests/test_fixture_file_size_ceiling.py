@@ -17,8 +17,6 @@ The ceiling is GitHub's limit less a margin, not the limit itself. A check that 
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 #: GitHub rejects a push carrying a file at or above this size, on every repository,

@@ -58,10 +58,7 @@
 # %%
 """Compare every registered ETF model family on one panel, without selecting among them."""
 
-from pathlib import Path
-
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 import yaml

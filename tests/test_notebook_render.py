@@ -2,7 +2,6 @@
 
 import sqlite3
 
-import numpy as np
 import polars as pl
 import pytest
 

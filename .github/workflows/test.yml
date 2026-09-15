@@ -663,9 +663,16 @@ jobs:
           # with `KeyError: Please choose a kernel name among dict_keys([])`. A job that
           # installs a notebook runner and cannot run a notebook can only host tests that
           # stop short of doing it.
+          #
+          # `ruff` is here for the same reason. `notebook_provenance.py`'s unused-import
+          # tier shells out to `python -m ruff` to normalise both sides of a comparison,
+          # so without it `tests/test_notebook_import_sync.py` cannot exercise the tier at
+          # all - and a missing ruff exits 1, exactly as a lint finding does, so the first
+          # version of that job reported three assertion failures rather than a missing
+          # dependency. It is a single small wheel and it is not a lint step here.
           uv pip install --constraint /tmp/locked-constraints.txt \
             pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow nest-asyncio \
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow nest-asyncio ruff \
             ml4t-diagnostic jupytext papermill ipykernel ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:

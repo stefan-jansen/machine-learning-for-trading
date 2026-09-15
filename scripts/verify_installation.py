@@ -404,7 +404,7 @@ def check_repo_imports():
 
     # utils
     try:
-        import utils  # noqa: F811
+        import utils  # noqa: F401,F811 - the import IS the check
 
         results.append((cat, "utils", "PASS", "importable"))
     except Exception as exc:
@@ -431,7 +431,7 @@ def check_repo_imports():
 
     # data package
     try:
-        import data  # noqa: F811
+        import data  # noqa: F401,F811 - the import IS the check
 
         results.append((cat, "data", "PASS", "importable"))
     except Exception as exc:
@@ -443,7 +443,7 @@ def check_repo_imports():
 
     # case_studies package
     try:
-        import case_studies  # noqa: F811
+        import case_studies  # noqa: F401,F811 - the import IS the check
 
         results.append((cat, "case_studies", "PASS", "importable"))
     except Exception as exc:

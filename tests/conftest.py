@@ -16,7 +16,6 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.preset_patches import _patch_presets_for_testing, _trim_label_configs
 

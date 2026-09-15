@@ -64,7 +64,6 @@ from case_studies.utils.backtest_loaders import (
 )
 from case_studies.utils.backtest_presets import (
     ensure_backtest_spec,
-    serializable_backtest_spec,
     strategy_view,
 )
 from case_studies.utils.backtest_runner import resolved_allow_short_selling, run_backtest

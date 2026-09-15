@@ -64,7 +64,6 @@
 
 import json
 import sqlite3
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -97,7 +96,6 @@ from case_studies.utils.paired_metrics import populate_paired_metrics, rung_for
 from case_studies.utils.uncertainty import ENTIRE_REGISTRY, cohort_member_digest
 from case_studies.utils.factor_attribution import (
     compute_bootstrap_ci,
-    format_attribution_summary,
     load_factor_data,
     plot_attribution_waterfall,
     run_factor_regression,

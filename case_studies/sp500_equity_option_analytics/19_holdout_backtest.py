@@ -50,7 +50,7 @@ import sqlite3
 import matplotlib.pyplot as plt
 import polars as pl
 
-from case_studies.research import CandidateSet, Study, open_selection_field
+from case_studies.research import Study, open_selection_field
 from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,

@@ -66,7 +66,6 @@
 # %%
 """Run the equal-weight baseline for every declared crypto perpetuals prediction set."""
 
-import json
 from datetime import UTC, timedelta
 
 import plotly.graph_objects as go

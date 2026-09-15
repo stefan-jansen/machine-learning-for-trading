@@ -69,7 +69,6 @@ from case_studies.research.holdout import build_holdout_training_spec
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
     ensure_backtest_spec,
-    serializable_backtest_spec,
     strategy_view,
 )
 from case_studies.utils.backtest_runner import resolved_allow_short_selling, run_backtest

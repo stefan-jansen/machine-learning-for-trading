@@ -21,10 +21,8 @@ import importlib.metadata
 import json
 import os
 import platform
-import subprocess
 import time
 import uuid
-import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime

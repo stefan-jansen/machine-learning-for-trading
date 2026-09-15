@@ -30,7 +30,6 @@ from matplotlib.figure import Figure
 
 from case_studies.utils.analytics import (
     PRIMARY_LABELS,
-    SHORT_NAMES,
     _query,
     registry_path,
 )

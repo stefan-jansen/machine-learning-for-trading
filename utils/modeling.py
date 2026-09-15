@@ -47,7 +47,7 @@ from utils.artifact_specs import (
     resolve_market_semantics,
     resolve_storage_path,
 )
-from utils.cv_splits import earliest_train_start, generate_cv_splits, make_wf_config
+from utils.cv_splits import generate_cv_splits, make_wf_config
 
 RANDOM_SEED = 42
 MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing windows.

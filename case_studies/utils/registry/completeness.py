@@ -51,11 +51,10 @@ silently reuse a partial state because the result would be misleading
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from .specs import backtest_hash_from_parts, canonical_json, training_hash_from_spec
+from .specs import backtest_hash_from_parts, training_hash_from_spec
 from .store import (
     _backtest_dir,
     _case_dir,

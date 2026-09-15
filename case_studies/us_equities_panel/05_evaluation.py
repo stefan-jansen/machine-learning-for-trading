@@ -79,7 +79,6 @@ from ml4t.diagnostic.metrics import (
 )
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
-from scipy.stats import spearmanr
 
 from case_studies.utils.cv_window import modeling_fold_boundaries
 from case_studies.utils.feature_engineering import quantile_profile

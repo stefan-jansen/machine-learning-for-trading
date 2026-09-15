@@ -50,7 +50,6 @@ import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
-from pathlib import Path
 from typing import Any, Final, Literal, cast
 
 import numpy as np

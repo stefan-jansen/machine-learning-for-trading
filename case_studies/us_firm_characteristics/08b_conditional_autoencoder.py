@@ -64,7 +64,6 @@
 import plotly.graph_objects as go
 import polars as pl
 import yaml
-from plotly.subplots import make_subplots
 
 from case_studies.research import (
     declared_labels,

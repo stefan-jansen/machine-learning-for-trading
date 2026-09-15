@@ -8,7 +8,6 @@ Usage:
     uv run python tests/add_missing_parameters_cells.py [--dry-run]
 """
 
-import re
 import sys
 from pathlib import Path
 

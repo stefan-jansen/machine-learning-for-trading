@@ -30,7 +30,7 @@ WARMUP_PERIODS = 126
 @pytest.fixture
 def panels():
     pl = pytest.importorskip("polars")
-    from case_studies.utils.backtest_loaders import load_backtest_prices, load_backtest_prices_for
+    from case_studies.utils.backtest_loaders import load_backtest_prices_for
 
     try:
         windowed = load_backtest_prices_for(
