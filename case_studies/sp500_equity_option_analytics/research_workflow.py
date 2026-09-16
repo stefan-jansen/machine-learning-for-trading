@@ -48,10 +48,17 @@ def published_labels() -> tuple[str, ...]:
 
 
 def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
-    """Open canonical regeneration or an isolated preview workspace."""
+    """Open canonical regeneration, canonical execution into a workspace, or a reader preview.
+
+    The canonical branch read ``workspace`` nowhere, so a canonical run that passed one read from
+    it and wrote to the released case directory, silently. See the same correction in
+    ``sp500_options``, where a rehearsal run registered 60 rows in the published store.
+    """
     tier = ExecutionTier(execution_tier)
     if tier is ExecutionTier.CANONICAL:
-        return Study.regenerate(CASE_STUDY)
+        if workspace is None:
+            return Study.regenerate(CASE_STUDY)
+        return Study.open(CASE_STUDY, workspace=Path(workspace).expanduser().resolve())
     if workspace is None:
         raise ValueError("preview execution requires an explicit workspace")
     return Study.open(

@@ -194,7 +194,14 @@ if top_combos.is_empty():
 for row in top_combos.iter_rows(named=True):
     spec = json.loads(row["spec_json"])
     alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-    print(f"  Sharpe={row['sharpe']:.3f}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
+    # A ruined account has no Sharpe. The engine writes NULL for every ratio metric once equity
+    # reaches zero, and 29 of this case study's registered allocation runs are in that state -
+    # all of them at `top_k=5`, where the long-short mapping holds ten names. At the declared
+    # `top_n` the parent is always the best-ranked run, which by construction is not one of them,
+    # so the format string below never met a None until the pool was widened.
+    sharpe = row["sharpe"]
+    shown = f"{sharpe:.3f}" if sharpe is not None else "ruined"
+    print(f"  Sharpe={shown}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
 
 # %%
 prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)

@@ -108,9 +108,22 @@ def declared_dl_device(requested: str | None = None) -> str:
 
 
 def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
-    """Open canonical regeneration or an isolated reader preview."""
+    """Open canonical regeneration, canonical execution into a workspace, or a reader preview.
+
+    ``workspace`` used to be read on the preview branch only, so a canonical run that passed one
+    was answered with ``Study.regenerate`` and wrote to the released case directory. It did not
+    raise and it did not warn: the caller read from the workspace it asked for and registered its
+    backtests somewhere else. On 2026-09-15 a rehearsal run against a private registry left 60
+    allocation rows and 60 artifact directories in the published ``sp500_options`` store that way.
+
+    Canonical *with* a workspace is the same full-fidelity computation writing to that root
+    instead, which is also the only form a checkout without the generated-artifact symlinks can
+    run - CI seeds its fixture into a workspace and has nothing to regenerate over.
+    """
     if execution_tier == "canonical":
-        return Study.regenerate(CASE_STUDY)
+        if workspace is None:
+            return Study.regenerate(CASE_STUDY)
+        return Study.open(CASE_STUDY, workspace=Path(workspace).expanduser().resolve())
     if execution_tier != "preview":
         raise ValueError("execution_tier must be canonical or preview")
     if workspace is None:
