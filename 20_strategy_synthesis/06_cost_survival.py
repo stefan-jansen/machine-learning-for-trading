@@ -72,12 +72,16 @@ CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_
 # the signal, allocation, and risk-overlay stages --
 # so the breakeven measured here is the cost survival of the strategy the
 # chapter actually deploys, not of whichever allocator happened to be best
-# at zero cost. NASDAQ-100 is excluded from the v3.0 cross-case cost surface:
-# its bounded active scope has no corrected cost grid for its selection, so that broad
-# regeneration is deferred to v3.1 rather than mixed with historical timing.
+# at zero cost.
+#
+# A case study can hold cost-sensitivity backtests and still draw no curve here, because
+# the sweep has to sit on the carrier's own training lineage *and* run the carrier's own
+# strategy. The loader reports which check dropped each one, printed below the load, so an
+# absence from the charts can be read rather than guessed at.
 
 # %%
-costs_df = load_carrier_cost_curves(CS_LIST)
+loaded = load_carrier_cost_curves(CS_LIST)
+costs_df = loaded.curves
 
 if costs_df.is_empty():
     msg = "No Ch18 cost-sensitivity backtests found for any deployed carrier"
@@ -85,6 +89,8 @@ if costs_df.is_empty():
 
 n_cs = costs_df["case_study"].n_unique()
 print(f"Loaded {len(costs_df)} carrier cost-sweep entries across {n_cs} case studies")
+for _row in loaded.exclusions.iter_rows(named=True):
+    print(f"  no curve for {_row['display_name']}: {_row['reason']} - {_row['detail']}")
 costs_df.head(5)
 
 # %% [markdown]
@@ -598,8 +604,8 @@ display(
             for r in _reg.iter_rows(named=True)
         )
         + ".\n\nThe cadences present here span a narrow part of the range the "
-        "chart is drawn for. The high-frequency corner is empty: NASDAQ-100 is "
-        "excluded pending a corrected carrier cost grid, and the other "
+        "chart is drawn for. The high-frequency corner is empty: NASDAQ-100's "
+        "cost sweep ran a different strategy from its carrier, and the other "
         "sub-daily case studies have no cost sweep. Nothing here tests whether "
         "turnover or signal strength sets the breakeven, because the case "
         "studies that would separate them are the ones missing."
@@ -629,18 +635,19 @@ display(
 #
 # ## Known Limitations
 #
-# - Only case studies whose *carrier* has a cost sweep appear, and the loaded count
-#   is printed at the top. A case study can hold cost-sensitivity backtests and still
-#   be absent here, because the sweep has to sit on the deployed carrier's own
-#   training lineage and match its strategy signature. Three are absent for three
-#   different reasons as of 2026-09-15. S&P 500 Options has eight cost rows on its
-#   carrier's lineage and none of them match the carrier's signature. ETFs has cost
-#   rows but none on its carrier's lineage. NASDAQ-100 has 35 cost-sensitivity
-#   backtests, but they sit on a gbm run of a variant direction label and on an
-#   nlinear run - not on its deployed carrier, which is a 12-model gbm mean-forecast
-#   ensemble and was never cost-swept. So all three absences are properties of what
-#   was swept rather than of this chapter: a carrier with no cost sweep has no cost
-#   curve to draw.
+# - Only case studies whose *carrier* has a cost sweep appear. The loaded count and
+#   one line per absent case study are printed at the top, so which check dropped a
+#   case study is read off the run rather than reconstructed by hand. A case study can
+#   hold cost-sensitivity backtests and still be absent, because the sweep has to sit
+#   on the deployed carrier's own training lineage and run the carrier's own strategy.
+#   Three are absent and each fails a different check. ETFs' carrier lineage carries no
+#   cost sweep at all. S&P 500 Options has eight cost rows on its carrier's lineage,
+#   all of them an `equal_weight_top_k` + `score_weighted` series rather than the
+#   carrier. NASDAQ-100 has 24 on its carrier's lineage, all of them `equal_weight_top_k`
+#   - the instrument its pass-1 ranking uses - while its carrier is a
+#   `slot_persistent_signal_exit` strategy. All three absences are properties of what
+#   was swept rather than of this chapter: a carrier with no cost sweep of its own has
+#   no cost curve to draw.
 # - The sweep applies one proportional per-leg cost to every trade. Real costs
 #   vary with size, with the instrument, and with the state of the book, and the
 #   spread realism section is where that assumption is checked rather than
