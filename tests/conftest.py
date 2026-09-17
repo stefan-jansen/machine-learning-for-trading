@@ -39,6 +39,30 @@ CASE_STUDY_IDS = [
 # session deliberately installed, rather than reverting it.
 _SESSION_OUTPUT_DIR: str | None = None
 
+# The ``ML4T_OUTPUT_DIR`` this session started with, captured while this module is being
+# imported - which the rootdir conftest is, before any test module is collected and long
+# before any test body or fixture can write the variable.
+#
+# ``seeded_output_dir`` is session-scoped and used to read the *live* environment, so the
+# directory the whole session seeds and publishes was decided by whichever test happened to
+# trigger the fixture first. Every higher-scoped fixture for that test has already set up by
+# then, and ``restore_output_root`` cannot see any of them: it is function-scoped, so the
+# ``before`` it captures is taken after they ran and it faithfully restores their leak. A
+# module- or session-scoped fixture in any file that writes ``ML4T_OUTPUT_DIR`` therefore
+# handed the whole session its own ``tmp_path``, and every later consumer looked for artifacts
+# in a temp tree belonging to a finished test - "present on disk but reported missing", on a
+# test that passes when its file runs alone.
+#
+# The legitimate caller this still serves is CI, which exports ``ML4T_OUTPUT_DIR`` before
+# pytest starts (``.github/workflows/test.yml`` sets it at the workflow level). That value is
+# present at import and is what gets captured, so nothing about the CI path changes.
+_STARTING_OUTPUT_DIR: str | None = os.environ.get("ML4T_OUTPUT_DIR")
+
+
+def starting_output_dir() -> str | None:
+    """The ``ML4T_OUTPUT_DIR`` the session started with, or ``None`` where it started unset."""
+    return _STARTING_OUTPUT_DIR
+
 
 @pytest.fixture(autouse=True)
 def restore_output_root():
@@ -342,8 +366,13 @@ def seeded_output_dir(tmp_path_factory):
 
     With pytest-xdist, each worker gets its own subdirectory to avoid races
     on shutil.rmtree/copytree when multiple workers seed simultaneously.
+
+    The base comes from :data:`_STARTING_OUTPUT_DIR` rather than from the live environment.
+    This fixture is session-scoped and runs at whatever point the first test needing it runs,
+    so reading the environment here adopted whatever an earlier test or a higher-scoped
+    fixture had left in it - see the note beside that constant.
     """
-    base_dir = os.environ.get("ML4T_OUTPUT_DIR")
+    base_dir = _STARTING_OUTPUT_DIR
     if base_dir:
         # With xdist, append worker id to avoid races
         worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")

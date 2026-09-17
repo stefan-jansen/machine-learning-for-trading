@@ -163,3 +163,89 @@ def test_no_test_module_deletes_the_output_root_in_a_fixture() -> None:
         "these fixtures delete ML4T_OUTPUT_DIR instead of restoring it, which removes the "
         "seeded output root for every later test in the worker: " + ", ".join(offenders)
     )
+
+
+def test_the_session_output_dir_is_not_adopted_from_a_leaking_fixture() -> None:
+    """The session seeds the directory it started with, not one a later fixture installed.
+
+    ``seeded_output_dir`` is session-scoped and used to read ``ML4T_OUTPUT_DIR`` live, at
+    whatever point the first test needing it ran. Every higher-scoped fixture for that test
+    has already set up by then, and the autouse restore cannot see any of them: it is
+    function-scoped, so the value it captures as "before" is taken after they ran, and it
+    faithfully puts their leak back. A module-scoped fixture in any file that writes the
+    variable therefore chose the output directory for the whole worker, and every later
+    consumer resolved artifacts inside a temp tree belonging to a finished test - which is
+    what ``test_us_equities_pilot_helpers_preserve_current_outputs`` reads as artifacts
+    missing that are present on disk, while passing when its own file runs alone.
+
+    The probe suite runs in file order, with the leaking module sorting first, and asserts
+    the seeded directory is outside the leaked tree. Reverting the fixture to
+    ``os.environ.get`` fails it.
+
+    It has to live under ``tests/`` because that is the only place ``tests/conftest.py``
+    applies, and it runs in a subprocess because the session fixture under test is created
+    once per session and this session has already created it.
+    """
+    suite = Path(tempfile.mkdtemp(prefix="output_dir_probe_", dir=TESTS_DIR))
+    leaked = suite / "leaked-output-dir"
+    try:
+        (suite / "test_a_leaks.py").write_text(
+            "import os\n"
+            "import pytest\n"
+            "\n"
+            "LEAKED = os.environ['PROBE_LEAKED_DIR']\n"
+            "\n"
+            "\n"
+            "@pytest.fixture(scope='module', autouse=True)\n"
+            "def _leak():\n"
+            "    # A module-scoped fixture sets up before every function-scoped one for the\n"
+            "    # first test in this file, so conftest's restore captures the leak as the\n"
+            "    # value to restore to.\n"
+            "    os.environ['ML4T_OUTPUT_DIR'] = LEAKED\n"
+            "    yield\n"
+            "\n"
+            "\n"
+            "def test_leaks():\n"
+            "    assert os.environ['ML4T_OUTPUT_DIR'] == LEAKED\n"
+        )
+        (suite / "test_b_seeds.py").write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "\n"
+            "LEAKED = Path(os.environ['PROBE_LEAKED_DIR'])\n"
+            "\n"
+            "\n"
+            "def test_the_seeded_dir_is_not_the_leaked_one(seeded_output_dir):\n"
+            "    seeded = Path(seeded_output_dir)\n"
+            "    assert LEAKED not in (seeded, *seeded.parents), (\n"
+            "        f'seeded {seeded} inside the leaked tree {LEAKED}'\n"
+            "    )\n"
+        )
+        env = dict(os.environ)
+        env["PROBE_LEAKED_DIR"] = str(leaked)
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        # The starting value is what the fixture must honour, so the probe starts it unset and
+        # lets the fixture mint its own directory. A run that adopts the leak lands inside it.
+        env.pop("ML4T_OUTPUT_DIR", None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                str(suite),
+                "-p",
+                "no:cacheprovider",
+                "-p",
+                "no:randomly",
+                "-q",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        shutil.rmtree(suite, ignore_errors=True)
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
