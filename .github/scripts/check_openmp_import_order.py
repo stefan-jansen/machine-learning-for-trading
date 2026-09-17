@@ -76,8 +76,8 @@ SKIP_PARTS = {".venv", ".git", ".ipynb_checkpoints", "_reference", "node_modules
 #
 # An earlier revision of this list held eleven entries on one shared excuse: that
 # editing a notebook's `.py` obliges a re-execution (notebook_provenance.py
-# enforces that), and re-execution restates whatever the `~/ml4t/code` artifacts
-# now produce. That is true, and it is not a reason to leave a crash in place.
+# enforces that), and re-execution restates whatever the canonical artifacts under
+# `~/ml4t/artifacts` now produce. That is true, and it is not a reason to leave a crash in place.
 # Six of the eleven were fixed and re-executed instead. What the re-run moved was
 # prose that had hard-coded a third decimal place, and where a notebook's own
 # commentary quoted values it no longer printed, the commentary was rewritten to

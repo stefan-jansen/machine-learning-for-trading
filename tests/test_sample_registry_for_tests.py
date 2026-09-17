@@ -27,7 +27,7 @@ def test_the_intended_output_root_is_accepted() -> None:
 
 def test_a_case_studies_tree_is_rejected() -> None:
     """Named-directory rule, not path equality: in a worktree CODE_CS_DIR is the
-    worktree's own tree while the canonical registries live in ~/ml4t/code."""
+    worktree's own tree while the canonical registries live in ~/ml4t/artifacts."""
     assert rejected_output_root(CODE_CS_DIR) is not None
     assert rejected_output_root(Path.home() / "ml4t" / "code" / "case_studies") is not None
     assert rejected_output_root(CODE_CS_DIR / "etfs") is not None

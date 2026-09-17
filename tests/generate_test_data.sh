@@ -23,18 +23,23 @@
 # (which does not exist either). The generator now lives in the public repo and
 # there is no separate review repo to deploy to.
 #
+# The production data root was ~/ml4t/code/data until that repo was deleted on
+# 2026-09-02. It is ~/Dropbox/ml4t/data now: read-only input, reproducible from the
+# vendor files, and not the ~47 MB data/ scaffolding in this repo, which carries the
+# loaders and no full dataset.
+#
 # Usage:
 #   bash tests/generate_test_data.sh [TEST_DATA_DIR]
 #
 # Env:
-#   ML4T_SOURCE_DATA   production data root to subsample (default ~/ml4t/code/data)
+#   ML4T_SOURCE_DATA   production data root to subsample (default ~/Dropbox/ml4t/data)
 #   STEPS              comma-separated subset of 1,2,3 (default all)
 #   CASE_STUDIES       space-separated list for step 2 (default: all nine)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_DATA_DIR="${1:-$HOME/ml4t/test-data}"
-SOURCE_DATA="${ML4T_SOURCE_DATA:-$HOME/ml4t/code/data}"
+SOURCE_DATA="${ML4T_SOURCE_DATA:-$HOME/Dropbox/ml4t/data}"
 STEPS="${STEPS:-1,2,3}"
 
 # Only step 1 reads production data; steps 2 and 3 run off the fixture set and
