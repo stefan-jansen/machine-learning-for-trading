@@ -159,11 +159,21 @@ def _complete_plan(study: Study, *, name: str, alpha: float) -> str:
     `require_complete` passes, so a plan that cannot pass it never reaches the behaviour under
     test.
     """
+    prediction_hash, backtest_hash = _registered_member(study, alpha=alpha)
+    plan = OfficialPopulation.create(
+        study, name=name, member_kind="backtest", members=[backtest_hash]
+    )
+    attest_sweep(study, plan, open_sweep_attempt(study, plan))
+    return prediction_hash
+
+
+def _registered_member(study: Study, *, alpha: float, label: str = "fwd_ret_5d") -> tuple[str, str]:
+    """One complete prediction and the backtest that rides it, with no plan around them."""
     training = study.results.register_training(
         {
             "identity_version": 2,
             "family": "linear",
-            "label": "fwd_ret_5d",
+            "label": label,
             "label_artifact": "label-a",
             "feature_artifacts": {"financial": "features-a"},
             "feature_names": ["momentum"],
@@ -199,11 +209,7 @@ def _complete_plan(study: Study, *, name: str, alpha: float) -> str:
         metrics={"sharpe": alpha, "sharpe_se_lo": 0.0},
         case_dir=study.root,
     )
-    plan = OfficialPopulation.create(
-        study, name=name, member_kind="backtest", members=[backtest_hash]
-    )
-    attest_sweep(study, plan, open_sweep_attempt(study, plan))
-    return prediction.hash
+    return prediction.hash, backtest_hash
 
 
 def _rename_population(study: Study, old: str, new: str) -> None:
@@ -225,31 +231,113 @@ def _rename_population(study: Study, old: str, new: str) -> None:
         db.commit()
 
 
-def test_a_sweep_planned_against_other_predictions_is_reported(study: Study) -> None:
+def test_a_downstream_stage_is_not_charged_against_the_whole_pool(study: Study) -> None:
+    """Allocation and risk price what their upstream advanced, not what the pool holds.
+
+    The baseline prices every prediction in force. The stages after it price the leading
+    configurations the stage before them advanced - ten of sixty on
+    ``sp500_equity_option_analytics``'s direction labels - so charging them against the pool
+    reports fifty uncovered members on a chain that is doing exactly what it declares. What
+    ties those stages to the current pool is their attestation, whose name folds in the
+    upstream plan identities, so a baseline that re-sweeps leaves them unattested.
+    """
+    advanced, advanced_backtest = _registered_member(study, alpha=1.0)
+    not_advanced, not_advanced_backtest = _registered_member(study, alpha=2.0)
+    assert not_advanced != advanced
+    # The baseline prices both, which is what it is charged with.
+    baseline = OfficialPopulation.create(
+        study,
+        name=f"etfs-baseline-fwd_ret_5d-{predictions_identity({advanced, not_advanced})}",
+        member_kind="backtest",
+        members=sorted({advanced_backtest, not_advanced_backtest}),
+    )
+    attest_sweep(study, baseline, open_sweep_attempt(study, baseline))
+    allocation = OfficialPopulation.create(
+        study,
+        name=f"etfs-allocation-fwd_ret_5d-{predictions_identity({advanced, not_advanced})}",
+        member_kind="backtest",
+        members=[advanced_backtest],
+    )
+    upstream = (baseline.hash,)
+    attest_sweep(study, allocation, open_sweep_attempt(study, allocation, upstream), upstream)
+
+    assert (
+        unfinished_sweep_plans(
+            study,
+            case_study="etfs",
+            labels=["fwd_ret_5d"],
+            stages=["allocation"],
+            prediction_hashes={advanced, not_advanced},
+        )
+        == []
+    )
+
+
+def test_a_sweep_that_never_priced_a_prediction_in_force_is_reported(study: Study) -> None:
     """The premature freeze a refit makes possible, and the one completeness cannot see.
 
-    A plan supersedes only when its own sweep re-runs, so under a fixed name the previous
-    generation would still be the plan in force after a refit - and still complete, because its
-    members are still registered. Waving it through seals a field holding current baselines and
-    none of this label's current allocation rows.
+    A plan supersedes only when its own sweep re-runs, so the previous generation is still the
+    plan on record after a refit - and still complete, because its members are still
+    registered. Waving it through seals a field holding current baselines and none of this
+    label's current allocation rows.
 
-    The plan below is complete. It is simply not the plan for the predictions in force, and the
-    name says so, so it is reported the same way a plan that was never written is.
+    What says so is the plan's contents, not its name. Its members ride the prediction the
+    sweep actually priced, and the prediction now in force is not that one, so the grid has
+    never been run against what is being ranked. The report names the member it misses.
     """
-    prediction_hash = _complete_plan(
-        study, name=f"etfs-allocation-fwd_ret_5d-{predictions_identity({'p-old'})}", alpha=1.0
+    priced, backtest = _registered_member(study, alpha=1.0)
+    refitted, _ = _registered_member(study, alpha=2.0)
+    assert refitted != priced
+    plan = OfficialPopulation.create(
+        study,
+        name=f"etfs-baseline-fwd_ret_5d-{predictions_identity({priced})}",
+        member_kind="backtest",
+        members=[backtest],
     )
+    attest_sweep(study, plan, open_sweep_attempt(study, plan))
 
     unfinished = unfinished_sweep_plans(
         study,
         case_study="etfs",
         labels=["fwd_ret_5d"],
-        stages=["allocation"],
-        prediction_hashes={prediction_hash},
+        stages=["signal"],
+        prediction_hashes={refitted},
     )
 
     assert len(unfinished) == 1
-    assert predictions_identity({prediction_hash}) in unfinished[0]
+    assert refitted in unfinished[0]
+
+
+def test_a_plan_whose_pool_only_lost_a_member_is_not_reported(study: Study) -> None:
+    """The half the frozen digest could not tell from a refit, and the commoner half.
+
+    A prediction leaving the pool - retired, or dropped by a correction to the cross-sectional
+    screen - leaves every prediction still in force priced by this plan. Nothing about the
+    sweep, its rows or its grid has changed and there is nothing to re-run. Under the digest
+    lookup this was indistinguishable from a refit: both moved the digest, both made the plan
+    unfindable, and `sp500_equity_option_analytics` lost all fifteen of its plans to it twice
+    in six days.
+    """
+    kept, kept_backtest = _registered_member(study, alpha=1.0)
+    dropped, dropped_backtest = _registered_member(study, alpha=2.0)
+    plan = OfficialPopulation.create(
+        study,
+        name=f"etfs-baseline-fwd_ret_5d-{predictions_identity({kept, dropped})}",
+        member_kind="backtest",
+        members=sorted({kept_backtest, dropped_backtest}),
+    )
+    attest_sweep(study, plan, open_sweep_attempt(study, plan))
+
+    unfinished = unfinished_sweep_plans(
+        study,
+        case_study="etfs",
+        labels=["fwd_ret_5d"],
+        stages=["signal"],
+        # The screen dropped one member. Everything still in force was priced by this plan.
+        prediction_hashes={kept},
+    )
+
+    assert unfinished == []
 
 
 def test_a_sweep_planned_against_the_predictions_in_force_is_not_reported(study: Study) -> None:
@@ -277,6 +365,37 @@ def test_a_sweep_planned_against_the_predictions_in_force_is_not_reported(study:
     )
 
 
+def test_a_plan_is_charged_for_its_own_label_and_not_for_the_others(study: Study) -> None:
+    """The pool a notebook hands down spans every declared label; a plan is per label.
+
+    ``prediction_members_in_force`` asks the registry what is published and screens it, and
+    neither step knows which label the sweep about to run is for. Charging a plan against the
+    whole pool charges the ``fwd_ret_5d`` sweep for four labels it was never asked to run: on
+    ``sp500_equity_option_analytics`` that reads as 579 uncovered members where one is.
+    """
+    mine, my_backtest = _registered_member(study, alpha=1.0, label="fwd_ret_5d")
+    other, _ = _registered_member(study, alpha=1.0, label="fwd_ret_21d")
+    assert other != mine
+    plan = OfficialPopulation.create(
+        study,
+        name=f"etfs-baseline-fwd_ret_5d-{predictions_identity({mine})}",
+        member_kind="backtest",
+        members=[my_backtest],
+    )
+    attest_sweep(study, plan, open_sweep_attempt(study, plan))
+
+    assert (
+        unfinished_sweep_plans(
+            study,
+            case_study="etfs",
+            labels=["fwd_ret_5d"],
+            stages=["signal"],
+            prediction_hashes={mine, other},
+        )
+        == []
+    )
+
+
 def test_a_refit_that_only_adds_a_prediction_is_still_reported(study: Study) -> None:
     """The direction every inference over a plan's members missed.
 
@@ -288,14 +407,14 @@ def test_a_refit_that_only_adds_a_prediction_is_still_reported(study: Study) -> 
     """
     kept = "p-kept"
     _complete_plan(
-        study, name=f"etfs-allocation-fwd_ret_5d-{predictions_identity({kept})}", alpha=1.0
+        study, name=f"etfs-baseline-fwd_ret_5d-{predictions_identity({kept})}", alpha=1.0
     )
 
     unfinished = unfinished_sweep_plans(
         study,
         case_study="etfs",
         labels=["fwd_ret_5d"],
-        stages=["allocation"],
+        stages=["signal"],
         prediction_hashes={kept, "p-added-by-the-refit"},
     )
 

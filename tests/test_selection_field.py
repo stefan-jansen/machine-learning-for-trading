@@ -577,8 +577,13 @@ def test_a_live_rebuild_refuses_when_the_predictions_moved_past_the_plans(tmp_pa
         ],
     )
     # The plans the previous prediction generation implied. Nothing supersedes them - a plan
-    # supersedes only when its own sweep re-runs - so they are still the plans on record.
-    for key, stage in (("allocation", "allocation"), ("risk", "risk_overlay")):
+    # supersedes only when its own sweep re-runs - so they are still the plans on record. Every
+    # stage carries one, so what refuses below is the covering check rather than an absence.
+    for key, stage in (
+        ("baseline", "signal"),
+        ("allocation", "allocation"),
+        ("risk", "risk_overlay"),
+    ):
         _record_plan(
             study,
             name=f"fixture-{key}-fwd_ret_5d-{predictions_identity({'p-before-the-refit'})}",
@@ -588,7 +593,7 @@ def test_a_live_rebuild_refuses_when_the_predictions_moved_past_the_plans(tmp_pa
     def resolver(case_study, label, *, split, stage, top_n, prediction_hashes):
         return _rows(label, stage, configs=("c1", "c2"))
 
-    with pytest.raises(RuntimeError, match="has not been run against them"):
+    with pytest.raises(RuntimeError, match="p-after-the-refit"):
         open_selection_field(
             study,
             case_study="fixture",
