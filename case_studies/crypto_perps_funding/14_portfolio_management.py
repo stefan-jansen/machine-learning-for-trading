@@ -118,10 +118,17 @@ labels = list(LABELS) if LABELS else list(ALL_LABELS)
 # both tiers, so a preview that reads it is reading somebody else's registry.
 STORAGE_ROOT = study.storage_root(study.execution_tier)
 n_assets = int(setup["universe"]["n_assets"])
-# A canonical run publishes the funnel's named pools; a preview run against a private
-# workspace reads and writes only its own results and names none of them. Both are the same
-# sweep - the tier decides what is declared, never what is computed.
-CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
+# A canonical run publishes the funnel's named pools; a preview run reads and writes only its
+# own results and names none of them. Both are the same sweep - the tier decides what is
+# declared, never what is computed.
+#
+# The condition is the tier alone. It used to carry `and not WORKSPACE`, which read a canonical
+# run into an isolated registry as a preview and sent it down the branch below that rebuilds the
+# signal members from preview backtests this workspace has never held. A workspace is where the
+# results go, not what they are: a candidate set is canonical either way, `CandidateSet.create`
+# refuses a preview member, and a workspace seeded from the canonical registry carries exactly
+# the frozen pools the canonical branch opens.
+CANONICAL_RUN = EXECUTION_TIER == "canonical"
 
 # %% [markdown]
 # ## 1. Which baselines advance

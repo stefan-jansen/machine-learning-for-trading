@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -22,6 +22,7 @@ from case_studies.research import (
     Result,
     StateTransitionPolicy,
     Study,
+    candidate_set_supersedes,
     plan_backtests,
     require_resolved_requests_cover_the_catalog,
     run_backtests,
@@ -1009,14 +1010,36 @@ def _require_agreeing_feature_artifacts(members: Iterable[Result]) -> None:
             raise ValueError(f"candidate set members read different feature artifacts: {differing}")
 
 
-def _create_comparable_set(study: Study, name: str, members: list[Result]) -> CandidateSet:
-    """Create one set whose members are checked to share their feature artifacts."""
+def _create_comparable_set(
+    study: Study,
+    name: str,
+    members: list[Result],
+    *,
+    supersedes_by_set: Mapping[str, str] | None = None,
+) -> CandidateSet:
+    """Create one set whose members are checked to share their feature artifacts.
+
+    ``supersedes_by_set`` maps a set name to the generation this run retires, keyed by name
+    rather than passed as one value because a notebook freezes several sets and the checker in
+    ``scripts/check_supersedes_literals.py`` places a declaration by the name it states. The
+    declaration is resolved through :func:`case_studies.research.candidate_set_supersedes` rather
+    than offered straight, so a reader's clean clone - which has no generation to replace, and
+    often no ``candidate_sets`` table at all - publishes generation one instead of being refused.
+
+    Nothing reached this argument before, and a candidate set is immutable under its name, so any
+    run whose membership moved stopped here with ``a changed candidate set named '...' must
+    explicitly supersedes <hash>`` and no parameter could answer it. Widening the sweep changes
+    the members by construction, which made every wider run unreachable.
+    """
     _require_agreeing_feature_artifacts(members)
     return CandidateSet.create(
         study,
         name,
         members,
         comparison_contract=dict(_NORMALIZED_FEATURE_ARTIFACT_CONTRACT),
+        supersedes=candidate_set_supersedes(
+            study, name=name, declared=(supersedes_by_set or {}).get(name)
+        ),
     )
 
 
@@ -1025,8 +1048,13 @@ def create_label_candidate_sets(
     execution: FuturesBacktestExecution,
     *,
     stage: str,
+    supersedes_by_set: Mapping[str, str] | None = None,
 ) -> dict[str, CandidateSet]:
-    """Create one immutable comparable backtest set per label."""
+    """Create one immutable comparable backtest set per label.
+
+    ``supersedes_by_set`` is keyed by the set's own name, so one declaration covers every label
+    this stage freezes.
+    """
     labels = execution.catalog_rows.get_column("label").unique().sort().to_list()
     output = {}
     for label in labels:
@@ -1037,6 +1065,7 @@ def create_label_candidate_sets(
             study,
             candidate_set_name(stage, label),
             members,
+            supersedes_by_set=supersedes_by_set,
         )
     return output
 
@@ -1216,23 +1245,39 @@ def _union_members(study: Study, *pools: Iterable[str]) -> list[Result]:
     return [Result.open(study, value) for value in seen]
 
 
-def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
+def pre_overlay_candidate_set(
+    study: Study, *, label: str, supersedes_by_set: Mapping[str, str] | None = None
+) -> CandidateSet:
     """Return the immutable union of signal and allocation validation results."""
     signal = CandidateSet.one(study, name=candidate_set_name("signal", label))
     allocation = CandidateSet.one(study, name=candidate_set_name("allocation", label))
     members = _union_members(study, signal.members, allocation.members)
-    return _create_comparable_set(study, candidate_set_name("pre-overlay", label), members)
+    return _create_comparable_set(
+        study,
+        candidate_set_name("pre-overlay", label),
+        members,
+        supersedes_by_set=supersedes_by_set,
+    )
 
 
-def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
+def final_validation_candidate_set(
+    study: Study, *, label: str, supersedes_by_set: Mapping[str, str] | None = None
+) -> CandidateSet:
     """Return the selection pool across signal, allocation, and risk-overlay stages."""
-    pre_overlay = pre_overlay_candidate_set(study, label=label)
+    pre_overlay = pre_overlay_candidate_set(study, label=label, supersedes_by_set=supersedes_by_set)
     risk = CandidateSet.one(study, name=candidate_set_name("risk", label))
     members = _union_members(study, pre_overlay.members, risk.members)
-    return _create_comparable_set(study, candidate_set_name("final-validation", label), members)
+    return _create_comparable_set(
+        study,
+        candidate_set_name("final-validation", label),
+        members,
+        supersedes_by_set=supersedes_by_set,
+    )
 
 
-def final_selection_candidate_set(study: Study) -> CandidateSet:
+def final_selection_candidate_set(
+    study: Study, *, supersedes_by_set: Mapping[str, str] | None = None
+) -> CandidateSet:
     """Return the one immutable pool the case-study configuration is selected from.
 
     The funnel runs per label through the risk overlay. The object of selection is one
@@ -1246,13 +1291,19 @@ def final_selection_candidate_set(study: Study) -> CandidateSet:
     """
     members = []
     for label in ALL_LABELS:
-        pool = final_validation_candidate_set(study, label=label)
+        pool = final_validation_candidate_set(
+            study, label=label, supersedes_by_set=supersedes_by_set
+        )
         members.extend(Result.open(study, value) for value in pool.members)
+    name = "cme_futures-final-selection-v1"
     return CandidateSet.create(
         study,
-        "cme_futures-final-selection-v1",
+        name,
         members,
         comparison_contract={"comparable_fields": list(HORIZON_DEPENDENT_PROTOCOL_FIELDS)},
+        supersedes=candidate_set_supersedes(
+            study, name=name, declared=(supersedes_by_set or {}).get(name)
+        ),
     )
 
 

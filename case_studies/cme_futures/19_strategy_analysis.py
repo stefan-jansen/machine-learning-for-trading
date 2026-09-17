@@ -68,6 +68,27 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
 PREVIEW_LABELS: list[str] = []
 
+# The per-label candidate sets this notebook freezes are immutable under their names too, and
+# for the same reason as the population above: `CandidateSet.create` refuses a changed member
+# list under a name that already exists. Nothing reached that argument before, so any run whose
+# membership moved - which a wider sweep does by construction - stopped at the freeze after the
+# fit, with no parameter able to answer it.
+#
+# Each name maps to the generation this run retires. `"live"` names the lineage and looks the
+# generation up, which is the form that does not decay: naming the head instead is correct only
+# until the next publish, because `create` accepts the head and nothing else. The declaration is
+# resolved through `candidate_set_supersedes` rather than offered straight, so a reader's clean
+# clone - which has no generation to replace, and often no `candidate_sets` table at all -
+# publishes generation one instead of being refused. An unchanged re-run never reads it: a set's
+# hash is computed from its members and its contract, so the existing name binding answers.
+SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
+    "cme_futures-pre-overlay-fwd_ret_5d-v1": "live",
+    "cme_futures-pre-overlay-fwd_ret_21d-v1": "live",
+    "cme_futures-final-validation-fwd_ret_5d-v1": "live",
+    "cme_futures-final-validation-fwd_ret_21d-v1": "live",
+    "cme_futures-final-selection-v1": "live",
+}
+
 # %% [markdown]
 # ## The pool the configuration is selected from
 #
@@ -102,12 +123,17 @@ universe
 
 # %%
 if EXECUTION_TIER == "canonical":
-    per_label = {label: final_validation_candidate_set(study, label=label) for label in labels}
+    per_label = {
+        label: final_validation_candidate_set(
+            study, label=label, supersedes_by_set=SUPERSEDES_CANDIDATE_SETS
+        )
+        for label in labels
+    }
     per_label_results = {
         label: tuple(Result.open(study, value) for value in pool_set.members)
         for label, pool_set in per_label.items()
     }
-    candidates = final_selection_candidate_set(study)
+    candidates = final_selection_candidate_set(study, supersedes_by_set=SUPERSEDES_CANDIDATE_SETS)
     pool_results = tuple(Result.open(study, value) for value in candidates.members)
     pool_identity = candidates.hash
     per_label_identity = {label: pool_set.hash for label, pool_set in per_label.items()}
