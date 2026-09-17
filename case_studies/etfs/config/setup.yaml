@@ -229,9 +229,14 @@ backtest:
     # 5 / 10 / 20 is 5% / 10% / 20% of that: a genuinely concentrated low end and a
     # diversified high end that still selects. The grid was [10, 20] and had no 5%
     # end, which is where every comparable case study starts.
+    # EVIDENCE RUN, DO NOT MERGE: refined between 20 and 50 after the 2026-09-17
+    # sweep found the best allocation-stage Sharpe at the grid's top (0.991 at 50,
+    # against 0.877 at the declared top of 20). Against a 99-name cross-section,
+    # steps of 5 up to 30 and then 40 / 50 resolve where the curve turns; the
+    # earlier 20 -> 30 -> 50 spacing cannot tell a peak from a plateau.
     top_k_grid:
-      fwd_ret_21d: [2, 3, 5, 10, 20, 30, 50]
-      fwd_ret_5d:  [2, 3, 5, 10, 20, 30, 50]
+      fwd_ret_21d: [2, 3, 5, 10, 15, 20, 25, 30, 40, 50]
+      fwd_ret_5d:  [2, 3, 5, 10, 15, 20, 25, 30, 40, 50]
     # percentile_grid:
     #   fwd_ret_21d: [80, 90, 95]
     # quantile_grid:
