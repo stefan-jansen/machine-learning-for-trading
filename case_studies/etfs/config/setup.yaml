@@ -230,8 +230,8 @@ backtest:
     # diversified high end that still selects. The grid was [10, 20] and had no 5%
     # end, which is where every comparable case study starts.
     top_k_grid:
-      fwd_ret_21d: [5, 10, 20]
-      fwd_ret_5d:  [5, 10, 20]
+      fwd_ret_21d: [2, 3, 5, 10, 20, 30, 50]
+      fwd_ret_5d:  [2, 3, 5, 10, 20, 30, 50]
     # percentile_grid:
     #   fwd_ret_21d: [80, 90, 95]
     # quantile_grid:
