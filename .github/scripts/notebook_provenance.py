@@ -1949,6 +1949,103 @@ def sync_imports(nb_path: Path) -> str:
     return stamp["source_py_blob"]
 
 
+def sync_inert(nb_path: Path, reason: str) -> str:
+    """Fold a code edit that cannot change what the executed run computed, without re-running.
+
+    The last resort of the ``sync-*`` family, and the only one that is not decidable from
+    the source alone. ``sync-prose``, ``sync-alt``, ``sync-paths`` and ``sync-imports`` each
+    recognise their edit mechanically and refuse anything else. Some inert edits are not
+    recognisable that way: removing a conjunct from a guard that the executed run's own
+    parameters already made true, or threading an argument that does not enter any stored
+    identity. Rule 6 says such a fix does not owe a re-run, and for a notebook whose case
+    study froze its populations a re-run is not merely expensive - the freeze refuses it, so
+    the alternatives are shipping the notebook with no outputs or not fixing it at all.
+
+    What is checked mechanically is everything except the claim itself. The outputs on disk
+    must still be byte-for-byte the ones the recorded run produced, so no edited, re-rendered
+    or hand-written output can enter under this command; the ``.py`` must actually have moved;
+    and the ``.ipynb`` source is rebuilt from the ``.py`` so the pair cannot disagree.
+
+    What is not checked is why the edit is inert, which is why ``reason`` is required and is
+    written into the stamp. ``executed_at``, ``executor``, ``parameters`` and
+    ``outputs_digest`` are kept: the outputs are still that run's, and a fabricated execution
+    time would be the one part of the record nobody could later correct.
+    """
+    py = paired_py(nb_path)
+    rel = nb_path.relative_to(REPO_ROOT)
+    if py is None:
+        raise SystemExit(f"no paired .py for {rel}")
+    if len(reason.split()) < 5:
+        raise SystemExit(
+            f"{rel}: --reason must say why the edit cannot change what the run computed. "
+            "It is the only record of an assertion this command cannot check."
+        )
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    stamp = nb.get("metadata", {}).get(STAMP_KEY)
+    if not stamp:
+        raise SystemExit(
+            f"{rel} carries no provenance stamp, so there is no executed state to preserve. Run it."
+        )
+    recorded = stamp.get("outputs_digest")
+    if recorded is None:
+        raise SystemExit(
+            f"{rel}: the stamp records no outputs_digest, so nothing pins its outputs."
+        )
+    if recorded != outputs_digest(nb):
+        raise SystemExit(
+            f"{rel}: the outputs on disk are not the ones the stamp records, so this is not an "
+            "edit that left the run's results alone. Re-run the notebook, or use the sync-* "
+            "command that matches what actually changed."
+        )
+    stamped_blob = stamp["source_py_blob"]
+    if stamped_blob == git_blob(py):
+        raise SystemExit(
+            f"{rel}: the .py has not moved since the stamp, so there is nothing to fold in."
+        )
+
+    before_counts = _output_counts(nb)
+    result = subprocess.run(
+        [sys.executable, "-m", "jupytext", "--to", "ipynb", "--update", str(py)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if "No module named jupytext" in result.stderr:
+            raise SystemExit(
+                f"{rel}: jupytext is not installed in {sys.executable}. Run this command through "
+                "the repository environment with `uv run python`."
+            )
+        raise SystemExit(f"{rel}: jupytext --update failed:\n{result.stderr}")
+
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    if _output_counts(nb) != before_counts:
+        raise SystemExit(
+            f"{rel}: the update changed the outputs, which is the one thing it exists to avoid. "
+            "The file has been left as jupytext wrote it; restore it with `git checkout`."
+        )
+    if outputs_digest(nb) != recorded:
+        raise SystemExit(
+            f"{rel}: the update changed outputs_digest, so the .py and the executed notebook "
+            "disagree about more than the source. Restore it with `git checkout`."
+        )
+
+    stamp = dict(stamp)
+    previous_library = stamp.get("library_digest")
+    stamp["source_py_blob"] = git_blob(py, write=True)
+    stamp["library_digest"] = library_digest(py)
+    stamp["inert_edit"] = {
+        "reason": reason,
+        "folded_at": datetime.now(UTC).isoformat(),
+        "previous_source_py_blob": stamped_blob,
+        "previous_library_digest": previous_library,
+    }
+    nb.setdefault("metadata", {})[STAMP_KEY] = stamp
+    nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    return stamp["source_py_blob"]
+
+
 def sync_paths(nb_path: Path) -> str:
     """Re-stamp a notebook whose only change is the path sanitizer's rewrite.
 
@@ -2341,6 +2438,16 @@ def _cmd_sync_imports(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sync_inert(args: argparse.Namespace) -> int:
+    for name in args.notebooks:
+        path = Path(name).resolve()
+        if path.suffix == ".py":
+            path = path.with_suffix(".ipynb")
+        blob = sync_inert(path, args.reason)
+        print(f"inert edit synced {path.relative_to(REPO_ROOT)}: source_py_blob={blob[:12]}")
+    return 0
+
+
 def _cmd_sync_paths(args: argparse.Namespace) -> int:
     for name in args.notebooks:
         path = Path(name).resolve()
@@ -2709,6 +2816,26 @@ def main() -> int:
     )
     ap_imp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
     ap_imp.set_defaults(func=_cmd_sync_imports)
+
+    ap_inert = sub.add_parser(
+        "sync-inert",
+        help="fold a code edit that cannot change what the executed run computed",
+        description=(
+            "The last resort of the sync-* family, for an inert edit none of the others "
+            "recognises - a guard the run's own parameters already decided, an argument that "
+            "enters no stored identity. It checks everything but the claim: the outputs must "
+            "still be byte-identical to the recorded run's, the .py must have moved, and the "
+            ".ipynb source is rebuilt from the .py. The claim itself goes in --reason and is "
+            "written into the stamp, which keeps executed_at, executor and outputs_digest."
+        ),
+    )
+    ap_inert.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
+    ap_inert.add_argument(
+        "--reason",
+        required=True,
+        help="why this edit cannot change what the run computed",
+    )
+    ap_inert.set_defaults(func=_cmd_sync_inert)
 
     args = ap.parse_args()
     return args.func(args)

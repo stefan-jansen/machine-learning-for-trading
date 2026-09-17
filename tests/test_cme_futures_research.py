@@ -806,7 +806,7 @@ def test_final_selection_pool_spans_both_return_horizons(
     study = _study(tmp_path)
     by_label = _labelled_execution(study, monkeypatch)
 
-    def fake_pool(_study, *, label):
+    def fake_pool(_study, *, label, supersedes_by_set=None):
         from case_studies.research import CandidateSet, Result
 
         return CandidateSet.create(

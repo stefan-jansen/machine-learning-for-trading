@@ -89,6 +89,24 @@ PREVIEW_MAX_PREDICTIONS = 0
 BASELINE_POPULATION = "cme_futures-signal-validation-v1"
 SUPERSEDES_BASELINE_POPULATION: str = ""
 
+# The per-label candidate sets this notebook freezes are immutable under their names too, and
+# for the same reason as the population above: `CandidateSet.create` refuses a changed member
+# list under a name that already exists. Nothing reached that argument before, so any run whose
+# membership moved - which a wider sweep does by construction - stopped at the freeze after the
+# fit, with no parameter able to answer it.
+#
+# Each name maps to the generation this run retires. `"live"` names the lineage and looks the
+# generation up, which is the form that does not decay: naming the head instead is correct only
+# until the next publish, because `create` accepts the head and nothing else. The declaration is
+# resolved through `candidate_set_supersedes` rather than offered straight, so a reader's clean
+# clone - which has no generation to replace, and often no `candidate_sets` table at all -
+# publishes generation one instead of being refused. An unchanged re-run never reads it: a set's
+# hash is computed from its members and its contract, so the existing name binding answers.
+SUPERSEDES_CANDIDATE_SETS: dict[str, str] = {
+    "cme_futures-signal-fwd_ret_5d-v1": "live",
+    "cme_futures-signal-fwd_ret_21d-v1": "live",
+}
+
 # %% [markdown]
 # ## Futures data used by the strategy
 #
@@ -253,7 +271,9 @@ execution = run_official_backtest_requests(
 # (research/comparison.py:50-51) - so a preview run leaves the funnel's named pools alone and
 # the notebooks downstream read its backtest catalog directly instead.
 candidate_sets = (
-    create_label_candidate_sets(study, execution, stage="signal")
+    create_label_candidate_sets(
+        study, execution, stage="signal", supersedes_by_set=SUPERSEDES_CANDIDATE_SETS
+    )
     if EXECUTION_TIER == "canonical"
     else {}
 )
