@@ -519,24 +519,34 @@ def _plan_in_force(
     :func:`sweep_attestation_name`: a member that failed against a registered artifact from a
     different prediction window leaves the plan complete, and only the run knows it failed.
 
-    **And it has to cover the prediction sets in force, which is asked of the plan's contents
-    rather than of its name.** The name used to carry :func:`predictions_identity` and the
-    lookup used to be an equality on it, because the member-side inference that was tried -
-    does every planned member still ride a prediction in force - catches a prediction the pool
-    lost and cannot see one it gained, "because the backtests that would ride a new prediction
-    do not exist until the sweep runs". That is true of that direction and the other direction
-    is readable: ``in_force - planned`` is exactly the members that have no backtest in this
-    grid, and it names them. So the two questions separate:
+    **And it has to describe the pool in force, which is asked of the plan's contents rather
+    than of its name.** The name used to carry :func:`predictions_identity` and the lookup used
+    to be an equality on it, because the member-side inference that was tried - does every
+    planned member still ride a prediction in force - catches a prediction the pool lost and
+    cannot see one it gained, "because the backtests that would ride a new prediction do not
+    exist until the sweep runs". That is true of that direction, and the other direction is
+    readable off the same two sets. Both are asked here, and each names what it found:
 
-    * a prediction **added** to the pool has no planned backtest and no sweep has priced it, so
-      the grid really is short and this raises, naming the members;
-    * a prediction **removed** from the pool leaves planned members that ride it, which is not
-      a reason to refuse. They are dropped from what is handed back, and the publication filter
-      every ranking already applies drops them again.
+    * ``in_force - planned`` is the predictions that have **no** planned backtest. Nothing has
+      priced them, so the grid really is short. Asked of the baseline only: it is the one stage
+      whose grid is drawn from the pool, while allocation and risk price the configurations
+      their upstream advanced - ten of sixty on ``sp500_equity_option_analytics``'s direction
+      labels - and charging those against the pool reports fifty uncovered on a chain doing
+      exactly what it declares.
+    * ``planned - in_force`` is the predictions this grid priced that the pool has since lost.
+      Asked of every stage, because a removal moves the ranking the stage after it advances
+      from: drop one of ten advancing configurations and the eleventh should now advance, while
+      the allocation plan is still complete, still attested against an unchanged baseline plan
+      hash, and prices nine. Narrowing the members and ranking the nine would publish a grid
+      the rule no longer specifies.
 
-    Keying the lookup on the frozen digest answered both with "refuse", which is why a
-    correction to the coverage rule that moved three members retired all fifteen of one case
-    study's plans at once - see :func:`sweep_plan_name`.
+    So what the plan is held to is the rule - does it price exactly the predictions this label's
+    pool admits today - rather than an equality against the digest that rule produced on some
+    earlier day. The difference is not cosmetic: the digest is computed from
+    ``prediction_members_in_force``, whose screen is repo code, so it moves when that code is
+    corrected and nothing else has changed at all. That is what retired all fifteen of one case
+    study's plans in one afternoon - see :func:`sweep_plan_name` - and it is also why the two
+    findings are reported separately: one is a sweep to run and the other is a stage to re-derive.
     """
     name = _plan_name_in_force(study, case_study, label, stage)
     if name is None:
@@ -553,28 +563,44 @@ def _plan_in_force(
             "describes, so the run that filled it either reported failures, did not finish, "
             "or ran against an upstream grid that has since been superseded; re-run that sweep"
         )
-    # Only a stage whose grid is drawn from the pool is charged against the pool. The baseline
-    # prices every prediction in force; allocation and risk price the configurations their
-    # upstream advanced - ten of sixty on `sp500_equity_option_analytics`'s direction labels -
-    # so asking them to cover the pool would report 50 uncovered members on a chain that is
-    # exactly as its declaration says. What binds those stages to the current pool is the
-    # attestation above, whose name folds in the upstream plan identities
-    # (:func:`sweep_generation`), so a baseline that re-sweeps leaves them unattested.
-    if in_force is not None and not UPSTREAM_STAGES.get(stage, ()):
+    if in_force is not None:
         wanted = _in_force_for_label(study, in_force, label)
-        uncovered = sorted(wanted - _plan_predictions(study, plan.members))
-        if uncovered:
-            listed = ", ".join(uncovered[:5])
-            more = f" (+{len(uncovered) - 5} more)" if len(uncovered) > 5 else ""
-            raise RuntimeError(
+        planned = _plan_predictions(study, plan.members)
+        # A stage whose grid is drawn from the pool has to price all of it. The baseline is the
+        # only such stage; the two after it price what their upstream advanced.
+        if not UPSTREAM_STAGES.get(stage, ()):
+            _refuse(
+                sorted(wanted - planned),
                 f"sweep plan {name} prices {len(plan.members)} backtests and none of them "
-                f"rides {len(uncovered)} of the {len(wanted)} {label} prediction sets in "
-                f"force: {listed}{more}. Those members entered the pool after this sweep "
-                f"planned its grid, so the {stage!r} stage has never been run against them "
-                "and ranking what it does hold would rank a grid that was never asked to "
-                f"include them. Run the {stage!r} sweep for {label}."
+                f"rides {{count}} of the {len(wanted)} {label} prediction sets in force: "
+                "{listed}. Those members entered the pool after this sweep planned its grid, "
+                f"so the {stage!r} stage has never been run against them and ranking what it "
+                "does hold would rank a grid that was never asked to include them. Run the "
+                f"{stage!r} sweep for {label}.",
             )
+        # Every stage, including the ones above it in the chain. A prediction leaving the pool
+        # moves the ranking the next stage advances from - drop one of ten advancing
+        # configurations and the eleventh should now advance - while the downstream plan stays
+        # complete and stays attested, because the upstream plan's identity did not change.
+        _refuse(
+            sorted(planned - wanted),
+            f"sweep plan {name} prices {{count}} {label} prediction sets the pool no longer "
+            "admits: {listed}. What the rule selects from has changed under this grid, so "
+            f"ranking the members that are left would publish a {stage!r} grid the rule no "
+            f"longer specifies - and any stage derived from it advanced from a ranking that "
+            f"has moved. Re-run the {stage!r} sweep for {label}.",
+        )
     return plan
+
+
+def _refuse(missing: Sequence[str], template: str) -> None:
+    """Raise ``template`` naming up to five of ``missing``, or return where there are none."""
+    if not missing:
+        return
+    listed = ", ".join(missing[:5])
+    if len(missing) > 5:
+        listed += f" (+{len(missing) - 5} more)"
+    raise RuntimeError(template.format(count=len(missing), listed=listed))
 
 
 def _plan_members(
@@ -582,31 +608,14 @@ def _plan_members(
 ) -> set[str] | None:
     """The backtests the plan in force admits, or ``None`` where no plan is recorded.
 
-    Narrowed to the members riding a prediction still in force. A plan is published once and
-    the pool moves under it, so a plan that covers the pool can still carry members a later
-    retirement took out, and handing those back would put another generation's rows into a
-    ranking. The narrowing is the same rule the coverage screen applies, read off the same
-    set, rather than a second list to maintain.
+    The members are handed back whole. :func:`_plan_in_force` has already required that every
+    prediction this plan priced is still in the pool, so there is nothing to narrow: a plan
+    carrying a member the pool dropped raises there rather than being quietly trimmed here.
+    Trimming was the first shape of this and it is the wrong one - it hands a caller a grid the
+    rule no longer specifies while reporting nothing.
     """
     plan = _plan_in_force(study, case_study, label, stage, in_force)
-    if plan is None:
-        return None
-    members = set(plan.members)
-    if in_force is None:
-        return members
-    db_path = study.root / "run_log" / "registry.db"
-    wanted = sorted(members)
-    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=120.0) as db:
-        db.execute("PRAGMA busy_timeout = 60000")
-        placeholders = ",".join("?" * len(wanted))
-        rides = dict(
-            db.execute(
-                f"SELECT backtest_hash, prediction_hash FROM backtest_runs "  # noqa: S608
-                f"WHERE backtest_hash IN ({placeholders})",
-                wanted,
-            )
-        )
-    return {member for member in members if rides.get(member) in in_force}
+    return None if plan is None else set(plan.members)
 
 
 def upstream_plan_hashes(

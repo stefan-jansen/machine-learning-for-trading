@@ -308,15 +308,19 @@ def test_a_sweep_that_never_priced_a_prediction_in_force_is_reported(study: Stud
     assert refitted in unfinished[0]
 
 
-def test_a_plan_whose_pool_only_lost_a_member_is_not_reported(study: Study) -> None:
-    """The half the frozen digest could not tell from a refit, and the commoner half.
+def test_a_plan_that_priced_a_member_the_pool_dropped_names_that_member(study: Study) -> None:
+    """The other direction, and it is a different finding from a sweep that is short.
 
     A prediction leaving the pool - retired, or dropped by a correction to the cross-sectional
-    screen - leaves every prediction still in force priced by this plan. Nothing about the
-    sweep, its rows or its grid has changed and there is nothing to re-run. Under the digest
-    lookup this was indistinguishable from a refit: both moved the digest, both made the plan
-    unfindable, and `sp500_equity_option_analytics` lost all fifteen of its plans to it twice
-    in six days.
+    screen - does not leave this grid short of anything. It moves the ranking the stage after
+    it advances from: drop one of ten advancing configurations and the eleventh should now
+    advance, while the downstream plan is still complete and still attested, because the
+    upstream plan's identity never changed. So the grid has to be re-derived, and ranking the
+    members that are left would publish one the rule no longer specifies.
+
+    The digest lookup refused this too, and refused it as "no plan is recorded" - the same
+    sentence a sweep that never ran gets. The two need different work and are now reported
+    apart, each naming the members it found.
     """
     kept, kept_backtest = _registered_member(study, alpha=1.0)
     dropped, dropped_backtest = _registered_member(study, alpha=2.0)
@@ -333,11 +337,14 @@ def test_a_plan_whose_pool_only_lost_a_member_is_not_reported(study: Study) -> N
         case_study="etfs",
         labels=["fwd_ret_5d"],
         stages=["signal"],
-        # The screen dropped one member. Everything still in force was priced by this plan.
+        # The screen dropped one member this plan priced.
         prediction_hashes={kept},
     )
 
-    assert unfinished == []
+    assert len(unfinished) == 1
+    assert dropped in unfinished[0]
+    assert "no longer admits" in unfinished[0]
+    assert kept not in unfinished[0]
 
 
 def test_a_sweep_planned_against_the_predictions_in_force_is_not_reported(study: Study) -> None:
