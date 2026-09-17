@@ -85,6 +85,11 @@ jobs:
       - name: Run ALL chapter notebooks
         env:
           PYTHONPATH: ${{ github.workspace }}
+          # Six chapter notebooks download HuggingFace checkpoints while they run, and an
+          # anonymous download is rate limited per IP across a shared runner pool. The
+          # token is free and buys a per-account limit. test.yml has passed it since
+          # 2026-09-12 and this workflow and weekly-external.yml were both missed.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -m pytest tests/test_chapter_notebooks.py \
             -v --tb=short

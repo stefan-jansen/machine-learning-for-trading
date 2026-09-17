@@ -94,6 +94,15 @@ jobs:
           # so any notebook needing them skips rather than incurs a charge.
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
+          # A HuggingFace token is free and buys a per-account rate limit instead of
+          # the per-IP one a shared runner pool exhausts, so it is inside the policy
+          # above. test.yml started passing it on 2026-09-12 and this workflow was
+          # missed; 22_rag_financial_research/02_domain_embeddings_comparison then
+          # failed here on 2026-09-14 with "couldn't connect to huggingface.co",
+          # which is what transformers raises for a 429 as well as for a real network
+          # failure. An unset secret leaves downloads anonymous, which is the state
+          # this job was already in, so the change cannot make it worse.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set +e
           # Build -k via positional params so a multi-word filter (e.g.
