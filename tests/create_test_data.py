@@ -31,11 +31,11 @@ a regeneration; use a real regeneration when the data has to move.
 Usage:
     # Every dataset declared below, over an existing test-data checkout
     uv run python tests/create_test_data.py \
-        --source ~/ml4t/code/data --output ~/ml4t/test-data/data
+        --source ~/Dropbox/ml4t/data --output ~/ml4t/test-data/data
 
     # One dataset, which is the common case when a schema gate goes red
     uv run python tests/create_test_data.py \
-        --source ~/ml4t/code/data --output ~/ml4t/test-data/data \
+        --source ~/Dropbox/ml4t/data --output ~/ml4t/test-data/data \
         --dataset firm_characteristics
 
     # Show what would be written, touching nothing
@@ -2514,7 +2514,7 @@ def main() -> int:
     parser.add_argument(
         "--source",
         type=Path,
-        help="Production data root to subsample from (e.g. ~/ml4t/code/data). "
+        help="Production data root to subsample from (e.g. ~/Dropbox/ml4t/data). "
         "Required unless --reconcile-manifest, which reads no production data.",
     )
     parser.add_argument(

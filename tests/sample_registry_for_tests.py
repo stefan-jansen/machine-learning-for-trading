@@ -179,7 +179,7 @@ def rejected_output_root(intermediates_dir: Path) -> str | None:
 
     Two rules. The root may not be, or sit inside, any directory named
     ``case_studies``: in a worktree ``CODE_CS_DIR`` is the worktree's own tree while
-    the canonical registries are the ones in ~/ml4t/code, so path equality alone
+    the canonical registries are the ones in ~/ml4t/artifacts, so path equality alone
     would let a run write over them. And no destination may land on a production
     registry once every symlink along it is followed - the per-agent worktree setup
     symlinks each case study's ``run_log`` to the canonical one precisely so the
