@@ -1,0 +1,65 @@
+"""The GReaT TSTR verdict must not read a majority-class collapse as high utility.
+
+`05_synthetic_data/06_llm_tabular_great` divided two accuracies on a task whose positive
+base rate is about 10%, so a synthetic-trained classifier that answered "no" for every row
+scored 0.952 against the baseline's 0.953 and the notebook printed "HIGH utility" - while
+printing, two lines above, a TSTR AUC of 0.297. The verdict now divides AUC.
+"""
+
+import ast
+from pathlib import Path
+
+NOTEBOOK = Path(__file__).parents[1] / "05_synthetic_data" / "06_llm_tabular_great.py"
+
+# The two executions recorded in the issue, as (auc_trtr, auc_tstr, acc_trtr, acc_tstr).
+RELEASE_RUN = (0.759, 0.697, 0.940, 0.872)
+COLLAPSED_RUN = (0.750, 0.297, 0.953, 0.952)
+
+
+def _load_verdict():
+    """Lift ``tstr_utility_verdict`` out of the notebook without executing the notebook."""
+    tree = ast.parse(NOTEBOOK.read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "tstr_utility_verdict"
+    )
+    namespace: dict = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(NOTEBOOK), "exec"), namespace)
+    return namespace["tstr_utility_verdict"]
+
+
+def test_a_below_chance_tstr_auc_is_refused_rather_than_scored():
+    auc_trtr, auc_tstr, _, _ = COLLAPSED_RUN
+    verdict = _load_verdict()(auc_trtr, auc_tstr)
+    assert "NO usable signal" in verdict
+    assert "HIGH" not in verdict and "MODERATE" not in verdict
+
+
+def test_the_collapse_the_accuracy_ratio_called_high_utility():
+    """Accuracy divides to 99.8% on the run whose ranking is anti-predictive."""
+    _, _, acc_trtr, acc_tstr = COLLAPSED_RUN
+    assert acc_tstr / acc_trtr > 0.95, "the old gate's own arithmetic"
+    auc_trtr, auc_tstr, _, _ = COLLAPSED_RUN
+    assert "NO usable signal" in _load_verdict()(auc_trtr, auc_tstr)
+
+
+def test_the_release_run_still_reads_as_moderate():
+    """The 2026-07-14 render's verdict is unchanged: 0.697 / 0.759 is 91.8%."""
+    auc_trtr, auc_tstr, _, _ = RELEASE_RUN
+    assert "MODERATE utility" in _load_verdict()(auc_trtr, auc_tstr)
+
+
+def test_a_preserved_ranking_reads_as_high():
+    assert "HIGH utility" in _load_verdict()(0.750, 0.740)
+
+
+def test_a_degraded_ranking_reads_as_limited():
+    assert "LIMITED utility" in _load_verdict()(0.750, 0.560)
+
+
+def test_a_baseline_that_ranks_nothing_has_no_utility_to_preserve():
+    """Dividing by a chance baseline would score a chance model at 100%."""
+    verdict = _load_verdict()(0.500, 0.500)
+    assert "no utility for the synthetic data to preserve" in verdict
+    assert "HIGH" not in verdict

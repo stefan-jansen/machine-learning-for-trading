@@ -614,8 +614,46 @@ print(f"Test samples: {len(X_test)}")
 # ### Train and Compare Models
 #
 # We train two identical gradient boosting classifiers -- one on real data (TRTR
-# baseline) and one on synthetic data (TSTR). The TSTR accuracy ratio measures
-# how much predictive utility the synthetic data preserves.
+# baseline) and one on synthetic data (TSTR), and compare how well each ranks the
+# real test rows. The label is "extreme move", `|fwd_ret_5d|` above its 90th
+# percentile, so roughly one test row in ten is positive: answering "no" for every
+# row scores about 0.90 accuracy while ranking nothing at all. Accuracy is reported
+# because it is what the two models were fit to, and the verdict divides AUC, which
+# has no majority-class floor.
+
+
+# %%
+def tstr_utility_verdict(auc_trtr: float, auc_tstr: float) -> str:
+    """Score synthetic-data utility on ranking ability rather than on accuracy.
+
+    Two accuracies on a 10% base rate divide to something near 1.0 most reliably when
+    the synthetic-trained model has collapsed onto the majority class, which is the
+    failure the verdict exists to catch. AUC measures the ranking the strategy would
+    actually use, and 0.5 is chance whatever the base rate.
+    """
+    if auc_tstr < 0.5:
+        return (
+            f"TSTR AUC {auc_tstr:.3f} is below chance: a classifier trained on the synthetic "
+            "data ranks real test rows worse than a coin flip, so the synthetic data carries "
+            "NO usable signal for model training."
+        )
+    if auc_trtr <= 0.5:
+        return (
+            f"TRTR AUC {auc_trtr:.3f} is at or below chance, so the real-data baseline ranks "
+            "nothing and there is no utility for the synthetic data to preserve."
+        )
+    ratio = auc_tstr / auc_trtr
+    if ratio > 0.95:
+        level = "HIGH"
+    elif ratio > 0.85:
+        level = "MODERATE"
+    else:
+        level = "LIMITED"
+    return (
+        f"TSTR AUC ratio: {ratio:.1%} - GReaT synthetic data has {level} utility "
+        "for model training."
+    )
+
 
 # %%
 # Check we have enough samples AND both classes in synthetic data
@@ -645,20 +683,17 @@ if len(X_synth) > 10 and has_both_classes:
     acc_tstr = accuracy_score(y_test, y_pred_tstr)
     print(f"{'Accuracy':<20} {acc_trtr:<15.3f} {acc_tstr:<15.3f}")
 
+    # The share of the test set that is positive, printed so the accuracies above can be
+    # read against what answering "no" everywhere would score.
+    base_rate = float(np.mean(y_test))
+    print(f"{'(positive base rate)':<20} {base_rate:<15.3f} {base_rate:<15.3f}")
+
     try:
         auc_trtr = roc_auc_score(y_test, y_prob_trtr)
         auc_tstr = roc_auc_score(y_test, y_prob_tstr)
         print(f"{'AUC-ROC':<20} {auc_trtr:<15.3f} {auc_tstr:<15.3f}")
 
-        utility_ratio = acc_tstr / acc_trtr
-        print(f"\nTSTR Ratio: {utility_ratio:.1%}")
-
-        if utility_ratio > 0.95:
-            print("GReaT synthetic data has HIGH utility for model training.")
-        elif utility_ratio > 0.85:
-            print("GReaT synthetic data has MODERATE utility for model training.")
-        else:
-            print("GReaT synthetic data has LIMITED utility - may need more training.")
+        print(f"\n{tstr_utility_verdict(auc_trtr, auc_tstr)}")
     except ValueError as e:
         print(f"AUC calculation error: {e}")
 else:
