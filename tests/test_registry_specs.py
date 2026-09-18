@@ -10,15 +10,19 @@ canonical_json or compute_hash cannot change the addresses of existing runs.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
 from case_studies.utils.registry import registration
 from case_studies.utils.registry.specs import (
+    _DEFAULT_ELIDED_CONFIG_KEYS,
     DEFAULT_SEED,
     HASH_LENGTH,
+    _is_engine_default,
     _validate_spec,
     backtest_hash_from_parts,
     build_training_spec,
@@ -246,6 +250,150 @@ def test_backtest_hash_normalizes_default_long_only_direction() -> None:
     }
     assert backtest_hash_from_parts("p", implicit) == backtest_hash_from_parts("p", explicit)
     assert backtest_hash_from_parts("p", implicit) != backtest_hash_from_parts("p", short)
+
+
+# -----------------------------------------------------------------------------
+# A config key written at its engine default is the absence of the key
+# (ml4t/agent-workspace#1205)
+# -----------------------------------------------------------------------------
+
+_CORPUS_SPEC = Path(__file__).parent / "data" / "backtest_spec_post_0_1_6.json"
+
+# The row this spec was read from, and the hash the same configuration carried
+# before the engine's serializer started writing the three keys down. Both sides
+# are registered in sp500_equity_option_analytics with identical sha256 on all
+# six artifacts; `metadata.preset_path` is the only other difference and is
+# stripped by _HASH_EXCLUDED_METADATA.
+_CORPUS_PREDICTION_HASH = "8fff36062ce7"
+_CORPUS_HASH_BEFORE_SERIALIZER_CHANGE = "c8212eda3bca"
+_CORPUS_HASH_AS_REGISTERED_AFTER = "a25e075fd6c1"
+
+
+def _corpus_spec() -> dict:
+    return json.loads(_CORPUS_SPEC.read_text())
+
+
+def _without_elided_keys(spec: dict) -> dict:
+    """The same spec as the pre-0.1.6 serializer wrote it: keys simply absent."""
+    stripped = copy.deepcopy(spec)
+    for (section, key), _default in _DEFAULT_ELIDED_CONFIG_KEYS:
+        stripped["backtest_config"][section].pop(key, None)
+    return stripped
+
+
+class TestAConfigKeyAtItsEngineDefaultDoesNotReKeyTheCorpus:
+    """ml4t-backtest 0.1.6 began writing three defaults down, and that re-keyed the corpus.
+
+    `to_dict` emits `account.lock_notional_update_mode`, `feed.vwap_col` and
+    `position_sizing.share_rounding` unconditionally from their dataclass defaults, and
+    `from_dict` reads them back with those same defaults, so a spec omitting the key and a
+    spec carrying the default build the same engine config. All three are hashed, so the
+    next sweep of an already-registered case study wrote a second `backtest_hash` for work
+    the registry already held - 2,491 twin groups in `sp500_equity_option_analytics`, with
+    identical sha256 on all six artifacts on both sides.
+
+    The fixture is a real registered spec, so the first test below is the regression: it
+    fails on any change that moves a registered address.
+    """
+
+    def test_a_post_change_spec_hashes_to_the_address_it_already_has(self) -> None:
+        assert (
+            backtest_hash_from_parts(_CORPUS_PREDICTION_HASH, _corpus_spec())
+            == _CORPUS_HASH_BEFORE_SERIALIZER_CHANGE
+        )
+
+    def test_the_two_spellings_are_one_identity(self) -> None:
+        spec = _corpus_spec()
+        assert backtest_hash_from_parts(_CORPUS_PREDICTION_HASH, spec) == backtest_hash_from_parts(
+            _CORPUS_PREDICTION_HASH, _without_elided_keys(spec)
+        )
+
+    @pytest.mark.parametrize(
+        ("section", "key", "value"),
+        [
+            ("account", "lock_notional_update_mode", "portfolio"),
+            ("feed", "vwap_col", "vwap"),
+            ("position_sizing", "share_rounding", "floor"),
+        ],
+    )
+    def test_a_non_default_value_keeps_its_own_identity(
+        self, section: str, key: str, value: str
+    ) -> None:
+        """Without this half the elision is indistinguishable from dropping the key."""
+        changed = _corpus_spec()
+        changed["backtest_config"][section][key] = value
+
+        assert (section, key) in {path for path, _ in _DEFAULT_ELIDED_CONFIG_KEYS}
+        assert (
+            backtest_hash_from_parts(_CORPUS_PREDICTION_HASH, changed)
+            != _CORPUS_HASH_BEFORE_SERIALIZER_CHANGE
+        )
+        assert backtest_hash_from_parts(
+            _CORPUS_PREDICTION_HASH, changed
+        ) != backtest_hash_from_parts(_CORPUS_PREDICTION_HASH, _without_elided_keys(changed))
+
+    def test_an_unlisted_key_is_hashed_even_at_its_default(self) -> None:
+        """The rule is an enumeration, not "drop every key that holds a default".
+
+        Measured 2026-09-18 over all 27,152 registered backtests in the nine canonical
+        registries: eliding every key equal to an engine default reproduces **zero** of
+        them, because the stored specs are full serializations and most keys hold defaults.
+        A generalization of this normalization re-keys the whole corpus.
+        """
+        spec = _corpus_spec()
+        assert spec["backtest_config"]["account"]["allow_leverage"] is False
+        without = copy.deepcopy(spec)
+        without["backtest_config"]["account"].pop("allow_leverage")
+
+        assert backtest_hash_from_parts(_CORPUS_PREDICTION_HASH, spec) != backtest_hash_from_parts(
+            _CORPUS_PREDICTION_HASH, without
+        )
+
+    def test_the_registered_post_change_address_is_not_recomputable(self) -> None:
+        """The rows written under the new spelling no longer recompute - by design.
+
+        Restoring the pre-change identity is what stops the next sweep from doubling a
+        registry again, and the price is that 11,036 rows across seven registries carry a
+        hash nothing recomputes. 4,410 of them have a twin under the restored identity;
+        the rest need a registry-side remap, which ml4t/agent-workspace#1205 carries.
+        """
+        assert (
+            backtest_hash_from_parts(_CORPUS_PREDICTION_HASH, _corpus_spec())
+            != _CORPUS_HASH_AS_REGISTERED_AFTER
+        )
+
+
+class TestTheElidedDefaultsAreTheEnginesOwn:
+    def test_each_recorded_default_is_what_the_engine_writes(self) -> None:
+        """A default that moves in the engine must fail here, not merge two configs silently.
+
+        The values live in this repo rather than being read from the engine at hash time so
+        the address of a registered run depends only on the spec and this source. If
+        ml4t-backtest changes one of these defaults, an old spec's absent key no longer means
+        this value, and the entry has to be reconsidered rather than followed.
+        """
+        from ml4t.backtest.config import BacktestConfig
+
+        written = BacktestConfig().to_dict()
+        for (section, key), default in _DEFAULT_ELIDED_CONFIG_KEYS:
+            assert written[section][key] == default, f"{section}.{key} moved in ml4t-backtest"
+
+    @pytest.mark.parametrize(
+        ("value", "default", "expected"),
+        [
+            (None, None, True),
+            ("x", None, False),
+            (False, False, True),
+            (0, False, False),
+            (1, True, False),
+            ("nearest", "nearest", True),
+            ("floor", "nearest", False),
+            (1, 1.0, False),
+        ],
+    )
+    def test_default_comparison_does_not_coerce(self, value, default, expected: bool) -> None:
+        """`False == 0` in Python, so a spec carrying 0 must not read as the default False."""
+        assert _is_engine_default(value, default) is expected
 
 
 # -----------------------------------------------------------------------------
