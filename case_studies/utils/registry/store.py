@@ -324,21 +324,23 @@ CREATE INDEX IF NOT EXISTS idx_cohort_leader ON cohort_metrics(leader_hash);
 -- `n_expected` values (125,119 / 126,458 / 126,478) are exactly the narrowed numerators here
 -- against `n_declared` of 246,641 / 248,460 / 249,373. Both are true of the same predictions,
 -- and only one of them answers "did this cover the cross-section its peers ranked".
+-- The five counts, in the order they narrow: `n_declared` is the (entity, session) pairs the
+-- label declares for the split; `n_delivered` is how many of those this prediction set
+-- carries; `n_offered` is how many of `n_declared` the input feature panel reached, so a
+-- family is charged for what it lost rather than for what it was never given, and is NULL
+-- when no panel was supplied; `n_delivered_offered` is how many of `n_offered` the set
+-- carries, and that over `n_offered` is the ratio the admissibility threshold applies to.
+-- `n_entities_declared` is the width of the declared cross-section. All five are NULL on a
+-- member no sweep has measured, because zero of zero is a measurement and absence is not.
 CREATE TABLE IF NOT EXISTS prediction_admissibility (
     prediction_hash      TEXT PRIMARY KEY,
     admitted             INTEGER NOT NULL,
     reason               TEXT,
     recorded_at          TEXT NOT NULL,
     git_commit           TEXT,
-    -- (entity, session) pairs the label declares for this split.
     n_declared           INTEGER,
-    -- of those, the ones this prediction set actually carries.
     n_delivered          INTEGER,
-    -- of `n_declared`, the ones the input feature panel reached, so a family is charged for
-    -- what it lost rather than for what it was never given. NULL when no panel was supplied.
     n_offered            INTEGER,
-    -- of `n_offered`, the ones this prediction set carries. This over `n_offered` is the
-    -- ratio the admissibility threshold is applied to.
     n_delivered_offered  INTEGER,
     n_entities_declared  INTEGER
 );
