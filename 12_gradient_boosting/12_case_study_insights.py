@@ -80,6 +80,7 @@ from case_studies.utils.insight_chapter import (
     collect_grid_per_cs,
     collect_multi_label_per_cs,
     collect_rank1_per_cs,
+    discover_symmetry_pairs,
     load_gbm_feature_importance,
     parse_gbm_config,
     plot_cross_cs_forest,
@@ -1135,19 +1136,24 @@ display(
 #   score is also a useful *binary classifier*. Computed on the fly here
 #   from raw OOF predictions.
 #
-# Restricted to the registered binary-label pairs below. Ternary direction
-# labels (including NASDAQ-100 `fwd_dir_15m`, Crypto `fwd_dir_8h_3c`, and US
-# Firms `fwd_class_1m`) need a multiclass score and remain out of scope. This
-# mirrors Ch11 §6b for the linear family.
+# The pairs are discovered from the registry rather than listed here. A case study
+# qualifies when this family has registered validation predictions for a
+# `fwd_ret_<horizon>` label and for a `fwd_dir_<horizon>` or `fwd_class_<horizon>`
+# label at the same horizon, and the direction label's own surface is binary. A
+# ternary label needs a multiclass score and is out of scope, so it is skipped by
+# measuring its domain and naming it, not by being absent from a list: the previous
+# hand-written literal had lost `us_firm_characteristics` and reported a full count
+# of itself, and the comment that stood here called `fwd_class_1m` ternary when its
+# domain is {0, 1}. This mirrors Ch11 §6b for the linear family.
 
 # %%
-SYMMETRY_PAIRS: dict[str, list[tuple[str, str]]] = {
-    "crypto_perps_funding": [("fwd_ret_8h", "fwd_dir_8h")],
-    "sp500_equity_option_analytics": [
-        ("fwd_ret_5d", "fwd_dir_5d"),
-        ("fwd_ret_10d", "fwd_dir_10d"),
-    ],
-}
+SYMMETRY_PAIRS, SYMMETRY_SKIPS = discover_symmetry_pairs(CASE_STUDY_IDS, FAMILY)
+for line in SYMMETRY_SKIPS:
+    print(f"  skipped {line}")
+print(
+    f"{sum(len(pairs) for pairs in SYMMETRY_PAIRS.values())} matched label pairs across "
+    f"{len(SYMMETRY_PAIRS)} case studies"
+)
 
 
 # %% [markdown]
@@ -1227,6 +1233,7 @@ sym_rows = []
 for cs, pairs in SYMMETRY_PAIRS.items():
     for reg_lbl, dir_lbl in pairs:
         cls_ic = cls_lo = cls_hi = cls_t = cls_cfg = None
+        cls_auc = cls_auc_lo = cls_auc_hi = None
         cls_selected = direction_rank1.filter(
             (pl.col("case_study") == cs) & (pl.col("label") == dir_lbl)
         )
@@ -1237,6 +1244,13 @@ for cs, pairs in SYMMETRY_PAIRS.items():
             cls_hi = top.get("ic_ci_hi")
             cls_t = top.get("ic_t_hac")
             cls_cfg = top["config_name"]
+            # The classifier's AUC against its own direction label. It is the third
+            # column of the book's Table 12.4 and sits in the same prediction_metrics
+            # row as the IC above; until 2026-09-18 the selector did not read it, so
+            # this notebook published a table it could not reproduce from its own output.
+            cls_auc = top.get("auc_mean_daily")
+            cls_auc_lo = top.get("auc_ci_lo")
+            cls_auc_hi = top.get("auc_ci_hi")
         reg_selected = gbm_horizon.filter(
             (pl.col("case_study") == cs) & (pl.col("label") == reg_lbl)
         )
@@ -1255,6 +1269,9 @@ for cs, pairs in SYMMETRY_PAIRS.items():
                 "cls_score_ic_lo": cls_lo,
                 "cls_score_ic_hi": cls_hi,
                 "cls_score_ic_t": cls_t,
+                "cls_score_auc": cls_auc,
+                "cls_score_auc_lo": cls_auc_lo,
+                "cls_score_auc_hi": cls_auc_hi,
                 "reg_config": (b or {}).get("reg_config"),
                 "reg_score_auc": (b or {}).get("reg_score_auc"),
                 "n_b": (b or {}).get("n"),
@@ -1272,11 +1289,17 @@ sym_df = pl.DataFrame(
         "cls_score_ic_lo": pl.Float64,
         "cls_score_ic_hi": pl.Float64,
         "cls_score_ic_t": pl.Float64,
+        "cls_score_auc": pl.Float64,
+        "cls_score_auc_lo": pl.Float64,
+        "cls_score_auc_hi": pl.Float64,
         "reg_score_auc": pl.Float64,
         "n_b": pl.Int64,
     },
 )
-print("Direction A (GBM classification score → IC) and Direction B (GBM regression score → AUC):")
+print(
+    "Direction A (GBM classification score → IC), the classifier's own AUC, "
+    "and Direction B (GBM regression score → AUC):"
+)
 sym_df.select(
     "short_name",
     "reg_label",
@@ -1285,6 +1308,9 @@ sym_df.select(
     pl.col("cls_score_ic_lo").round(4).alias("A_lo"),
     pl.col("cls_score_ic_hi").round(4).alias("A_hi"),
     pl.col("cls_score_ic_t").round(2).alias("A_t"),
+    pl.col("cls_score_auc").round(4).alias("native_auc"),
+    pl.col("cls_score_auc_lo").round(4).alias("native_lo"),
+    pl.col("cls_score_auc_hi").round(4).alias("native_hi"),
     pl.col("reg_score_auc").round(4).alias("B_auc"),
 )
 
@@ -1334,6 +1360,15 @@ show_with_alt(
 # %%
 direction_a_positive = sym_df.filter(pl.col("cls_score_ic") > 0).height
 direction_b_valid = sym_df.filter(pl.col("reg_score_auc").is_not_null())
+native_valid = sym_df.filter(pl.col("cls_score_auc").is_not_null())
+native_clears = native_valid.filter(pl.col("cls_score_auc_lo") > 0.5).height
+# A count over the pairs that happen to be present is not a count over the corpus, so the
+# skipped candidates are named in the same sentence rather than left to the log above.
+skip_note = (
+    f", with {len(SYMMETRY_SKIPS)} candidate pair(s) skipped ({'; '.join(SYMMETRY_SKIPS)})"
+    if SYMMETRY_SKIPS
+    else ", with no candidate pair skipped"
+)
 max_auc_distance = (
     float((direction_b_valid["reg_score_auc"] - 0.5).abs().max())
     if not direction_b_valid.is_empty()
@@ -1342,8 +1377,11 @@ max_auc_distance = (
 display(
     Markdown(
         f"**Computed metric symmetry.** Direction A is positive in {direction_a_positive} of "
-        f"{sym_df.height} matched cells. Direction B is available in {direction_b_valid.height} "
-        f"cells, with maximum absolute distance from chance of {max_auc_distance:.4f}."
+        f"{sym_df.height} matched cells, discovered from the registry rather than declared"
+        f"{skip_note}. The classifier's own AUC clears one half on "
+        f"{native_clears} of {native_valid.height} cells. Direction B is available in "
+        f"{direction_b_valid.height} cells, with maximum absolute distance from chance of "
+        f"{max_auc_distance:.4f}."
     )
 )
 

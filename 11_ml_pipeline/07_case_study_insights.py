@@ -69,6 +69,7 @@ from case_studies.utils.analytics import (
     SHORT_NAMES,
 )
 from case_studies.utils.insight_chapter import (
+    discover_symmetry_pairs,
     plot_cross_cs_forest,
     plot_rolling_daily_ic,
 )
@@ -97,6 +98,8 @@ METRICS_QUERY = """
            pm.ic_mean, pm.ic_std, pm.ic_mean_daily, pm.ic_se_hac,
            pm.ic_ci_lo, pm.ic_ci_hi, pm.ic_t_hac, pm.ic_p_hac,
            pm.ic_n_days, pm.ic_hac_lag,
+           pm.auc_mean_daily, pm.auc_se_hac, pm.auc_ci_lo, pm.auc_ci_hi,
+           pm.auc_n_days,
            (SELECT COUNT(*) FROM fold_metrics fm
             WHERE fm.prediction_hash = p.prediction_hash AND fm.ic IS NULL) AS n_null_folds
     FROM training_runs t
@@ -1054,15 +1057,18 @@ display(
 # AUC and are out of scope for this brief subsection.
 
 # %% tags=[]
-SYMMETRY_PAIRS: dict[str, list[tuple[str, str]]] = {
-    # cs -> [(regression_label, binary_direction_label), ...]
-    "crypto_perps_funding": [("fwd_ret_8h", "fwd_dir_8h")],
-    "sp500_equity_option_analytics": [
-        ("fwd_ret_5d", "fwd_dir_5d"),
-        ("fwd_ret_10d", "fwd_dir_10d"),
-    ],
-    "us_firm_characteristics": [("fwd_ret_1m", "fwd_class_1m")],
-}
+# Discovered from the registry, not listed. A hand-written list cannot report what has
+# gone missing from it: Chapter 12 carried the same literal, lost its
+# `us_firm_characteristics` entry in a 2026-07-31 chapter-tree restore, and went on
+# reporting a full count of itself. A ternary direction label is excluded by measuring
+# its domain and naming it, which is also how the skip becomes visible here.
+SYMMETRY_PAIRS, SYMMETRY_SKIPS = discover_symmetry_pairs(CASE_STUDY_IDS, FAMILY)
+for line in SYMMETRY_SKIPS:
+    print(f"  skipped {line}")
+print(
+    f"{sum(len(pairs) for pairs in SYMMETRY_PAIRS.values())} matched label pairs across "
+    f"{len(SYMMETRY_PAIRS)} case studies"
+)
 
 
 # %% tags=[]
@@ -1156,6 +1162,7 @@ for cs, pairs in SYMMETRY_PAIRS.items():
         cls_metrics = load_complete_metrics(cs, label=dir_lbl)
         cls_ic = cls_ic_lo = cls_ic_hi = cls_t = None
         cls_config = None
+        cls_auc = cls_auc_lo = cls_auc_hi = None
         if not cls_metrics.is_empty():
             cls_metrics = cls_metrics.filter(pl.col("ic_mean_daily").is_not_null())
             if not cls_metrics.is_empty():
@@ -1170,6 +1177,13 @@ for cs, pairs in SYMMETRY_PAIRS.items():
                 cls_ic_hi = top.get("ic_ci_hi")
                 cls_t = top.get("ic_t_hac")
                 cls_config = top["config_name"]
+                # The classifier's AUC against its own direction label - the book's
+                # "Native AUC" column. It is in the same prediction_metrics row as the
+                # IC above; until 2026-09-18 METRICS_QUERY did not select it, so this
+                # notebook published a table it could not reproduce from its own output.
+                cls_auc = top.get("auc_mean_daily")
+                cls_auc_lo = top.get("auc_ci_lo")
+                cls_auc_hi = top.get("auc_ci_hi")
         # Direction B: regression model score to AUC vs binary direction
         b = _direction_b_auc(cs, reg_lbl, dir_lbl)
         sym_rows.append(
@@ -1182,6 +1196,9 @@ for cs, pairs in SYMMETRY_PAIRS.items():
                 "cls_score_ic_lo": cls_ic_lo,
                 "cls_score_ic_hi": cls_ic_hi,
                 "cls_score_ic_t": cls_t,
+                "cls_score_auc": cls_auc,
+                "cls_score_auc_lo": cls_auc_lo,
+                "cls_score_auc_hi": cls_auc_hi,
                 "reg_config": (b or {}).get("reg_config"),
                 "reg_score_auc": (b or {}).get("reg_score_auc"),
                 "n_b": (b or {}).get("n"),
@@ -1198,16 +1215,25 @@ sym_df = pl.DataFrame(
         "cls_score_ic_lo": pl.Float64,
         "cls_score_ic_hi": pl.Float64,
         "cls_score_ic_t": pl.Float64,
+        "cls_score_auc": pl.Float64,
+        "cls_score_auc_lo": pl.Float64,
+        "cls_score_auc_hi": pl.Float64,
         "reg_score_auc": pl.Float64,
         "n_b": pl.Int64,
         "n_b_days": pl.Int64,
     },
 )
-print("Direction A (classification score to IC) and Direction B (regression score to AUC):")
+print(
+    "Native AUC (classification score on its own label), Direction A (classification "
+    "score to IC) and Direction B (regression score to AUC):"
+)
 sym_df.select(
     "short_name",
     "reg_label",
     "dir_label",
+    pl.col("cls_score_auc").round(4).alias("native_auc"),
+    pl.col("cls_score_auc_lo").round(4).alias("native_lo"),
+    pl.col("cls_score_auc_hi").round(4).alias("native_hi"),
     pl.col("cls_score_ic").round(4).alias("A_ic"),
     pl.col("cls_score_ic_lo").round(4).alias("A_lo"),
     pl.col("cls_score_ic_hi").round(4).alias("A_hi"),

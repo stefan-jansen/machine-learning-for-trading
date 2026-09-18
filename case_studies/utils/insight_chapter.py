@@ -43,6 +43,7 @@ import polars as pl
 # runtime wins. Same pattern as case_studies/utils/model_analysis.py.
 import torch  # noqa: F401
 
+from case_studies.research.population import retired_prediction_hashes
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
 from case_studies.utils.booster_paths import booster_dir
 from case_studies.utils.conformal import (
@@ -177,6 +178,26 @@ def select_rank1(
 def _raw_primary_candidates(
     case_study: str, family: str, label: str
 ) -> tuple[pl.DataFrame, pl.DataFrame, int]:
+    """Candidate rows for one (case study, family, label), retired generations removed.
+
+    Two things about this query are load-bearing and were both absent until 2026-09-18.
+
+    It selects the ``auc_*`` columns beside the ``ic_*`` ones. They sit in the same
+    ``prediction_metrics`` row and the chapters print them: Chapter 11's Table 11.6 has a
+    "Native AUC" column and Chapter 12's Table 12.4 a "Classifier -> AUC" column, and
+    neither notebook could reproduce its own published table because the query named the
+    seven IC columns and none of the five AUC ones.
+
+    It drops the generations a refit has retired. A registry keeps every generation - the
+    record of what was superseded is evidence - and supersession is recorded one layer up,
+    in ``official_populations``, so a reader that joins ``training_runs`` to
+    ``prediction_metrics`` directly ranks history along with the present. That is not a
+    neutral error: a superseded generation is often the one that was refitted *because* it
+    was short or narrow, and a shorter or narrower sample is an easier one, so the stale
+    rows run toward the top of the ranking. Measured on ``cme_futures`` 2026-09-18, the
+    retired deep-learning generation covers 27,326 of 38,262 declared (entity, session)
+    pairs, 71.4%, and outranked the complete refit that replaced it.
+    """
     db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
     if not db_path.exists():
         return pl.DataFrame(), pl.DataFrame(), 0
@@ -190,7 +211,9 @@ def _raw_primary_candidates(
                    t.created_at AS training_created_at, pm.computed_at,
                    pm.ic_mean, pm.ic_std, pm.ic_mean_daily, pm.ic_n_days,
                    pm.ic_se_hac, pm.ic_ci_lo, pm.ic_ci_hi, pm.ic_t_hac,
-                   pm.ic_p_hac, pm.ic_hac_lag
+                   pm.ic_p_hac, pm.ic_hac_lag,
+                   pm.auc_mean_daily, pm.auc_se_hac, pm.auc_ci_lo, pm.auc_ci_hi,
+                   pm.auc_n_days
             FROM training_runs t
             JOIN prediction_sets p ON p.training_hash = t.training_hash
             JOIN prediction_metrics pm ON pm.prediction_hash = p.prediction_hash
@@ -208,6 +231,9 @@ def _raw_primary_candidates(
             """,
             (family, label),
         ).fetchall()
+        retired = retired_prediction_hashes(db)
+    rows = [row for row in rows if row["prediction_hash"] not in retired]
+    fold_rows = [row for row in fold_rows if row["prediction_hash"] not in retired]
     if not rows:
         return pl.DataFrame(), pl.DataFrame(), 0
     metrics = pl.DataFrame([dict(row) for row in rows], infer_schema_length=None)
@@ -987,3 +1013,75 @@ def parse_gbm_config(config: str) -> dict:
         with contextlib.suppress(ValueError, IndexError):
             out["leaves"] = int(out["profile"].split("_")[1])
     return out
+
+
+# The pairing of a regression label with the binary direction label at the same horizon
+# used to be a hand-written literal in each chapter that draws the cross-evaluation. It
+# shrank without saying so: `us_firm_characteristics: [("fwd_ret_1m", "fwd_class_1m")]`
+# was dropped from Chapter 12's copy by the 2026-07-31 chapter-tree restore and kept in
+# Chapter 11's, so one chapter published four rows and the other three while both
+# reported a full count of their own literal. A literal cannot report what is missing
+# from it, so the pairs are discovered instead and the skips are named.
+DIRECTION_PREFIXES = ("fwd_dir_", "fwd_class_")
+
+
+def _binary_label_domain(case_study: str, label: str) -> set[int] | None:
+    """Distinct values of one label surface, or None when the file is absent."""
+    path = get_case_study_dir(case_study) / "labels" / f"{label}.parquet"
+    if not path.is_file():
+        return None
+    values = pl.scan_parquet(path).select(pl.col(label)).unique().collect().to_series().drop_nulls()
+    return {int(value) for value in values.to_list()}
+
+
+def discover_symmetry_pairs(
+    case_studies: Iterable[str], family: str
+) -> tuple[dict[str, list[tuple[str, str]]], list[str]]:
+    """Regression and binary-direction label pairs at matched horizons, per case study.
+
+    A pair qualifies when the family has registered validation predictions for both a
+    ``fwd_ret_<horizon>`` label and a ``fwd_dir_<horizon>`` or ``fwd_class_<horizon>``
+    label, and the direction label's own surface is binary. A ternary direction label
+    would need a multi-class AUC and is out of scope for this comparison, so it is
+    skipped by measuring its domain rather than by being left out of a list.
+
+    Returns ``(pairs, skipped)``. Every candidate that does not qualify appears in
+    ``skipped`` with its reason, so a comparison that covers fewer case studies than the
+    corpus says which ones and why instead of reporting a full count of itself.
+    """
+    pairs: dict[str, list[tuple[str, str]]] = {}
+    skipped: list[str] = []
+    for case_study in case_studies:
+        db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+        if not db_path.is_file():
+            continue
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+            registered = {
+                row[0]
+                for row in db.execute(
+                    "SELECT DISTINCT t.label FROM training_runs t "
+                    "JOIN prediction_sets p ON p.training_hash = t.training_hash "
+                    "WHERE t.family = ? AND p.split = 'validation'",
+                    (family,),
+                )
+            }
+        found: list[tuple[str, str]] = []
+        for regression in sorted(label for label in registered if label.startswith("fwd_ret_")):
+            horizon = regression.removeprefix("fwd_ret_")
+            for prefix in DIRECTION_PREFIXES:
+                direction = f"{prefix}{horizon}"
+                if direction not in registered:
+                    continue
+                domain = _binary_label_domain(case_study, direction)
+                if domain is None:
+                    skipped.append(f"{case_study}/{direction}: no label surface on disk")
+                elif not domain.issubset({0, 1}):
+                    skipped.append(
+                        f"{case_study}/{direction}: domain {sorted(domain)} is not binary, "
+                        "a multi-class AUC is out of scope here"
+                    )
+                else:
+                    found.append((regression, direction))
+        if found:
+            pairs[case_study] = found
+    return pairs, skipped
