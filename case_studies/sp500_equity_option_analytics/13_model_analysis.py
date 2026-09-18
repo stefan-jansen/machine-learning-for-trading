@@ -149,11 +149,16 @@ POPULATIONS = {model: f"{CASE_STUDY}-{model}-validation-v1" for model in POPULAT
 # in every clean clone and every CI run. So canonical opens `Study.at`: the read-only form, one
 # root, no activation.
 #
-# A preview run is the case where that rewrite is the point. It reads and reports on the rows a
-# smoke chain registered in its own workspace, which live under `.preview/<case>` and nowhere
-# else, so the analysis has to follow `ML4T_OUTPUT_DIR` there rather than answer from the
-# canonical directory. `activate()` links `config`, `labels` and `features` into that directory,
-# and `CASE_DIR` below is whichever of the two roots the tier resolved.
+# A run given a workspace is the case where that rewrite is the point. It reads and reports on
+# the rows registered in that workspace and nowhere else, so the analysis has to follow
+# `ML4T_OUTPUT_DIR` there rather than answer from the released directory. `activate()` links
+# `config`, `labels` and `features` into that directory, and `CASE_DIR` below is whichever root
+# the tier and the workspace resolved.
+#
+# `WORKSPACE` is read at both tiers. Read on the preview branch only, it left a canonical run
+# that passed one reporting on the published registry while its caller believed it was reading
+# the workspace it asked for - the read-side half of #1100. A preview still requires a
+# workspace, because a preview has nowhere else of its own.
 #
 # What a preview cannot have is a published population: `_refuse_preview_activation` stops a
 # reduced run from creating one, by design. The resolution below already distinguishes that from
@@ -161,13 +166,13 @@ POPULATIONS = {model: f"{CASE_STUDY}-{model}-validation-v1" for model in POPULAT
 # needs no branch of its own here - it takes the same path as a fixture or a clean clone.
 
 # %%
-if EXECUTION_TIER == "preview":
-    if not WORKSPACE:
-        raise ValueError("preview execution requires WORKSPACE")
+if EXECUTION_TIER == "preview" and not WORKSPACE:
+    raise ValueError("preview execution requires WORKSPACE")
+if WORKSPACE or EXECUTION_TIER == "preview":
     study = open_study(
         CASE_STUDY,
-        execution_tier="preview",
-        workspace=WORKSPACE,
+        execution_tier=EXECUTION_TIER,
+        workspace=WORKSPACE or None,
         entry_point="13_model_analysis",
     )
     CASE_DIR = get_case_study_dir(CASE_STUDY)

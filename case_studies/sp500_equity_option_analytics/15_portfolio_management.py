@@ -102,18 +102,27 @@ TOP_N_PREDICTIONS = None
 # injected parameter wins; otherwise the case study's own declaration does.
 
 # %%
-# A preview run reads and registers in a smoke chain's own workspace, under `.preview/<case>`,
-# and `open_study` is what activates that root. Activation rewrites `ML4T_OUTPUT_DIR` for the
-# rest of the process, so it has to happen before the first `get_case_study_dir` rather than
-# beside the registry read further down: `CASE_DIR` has to already answer for the workspace.
-_preview_study = None
-if EXECUTION_TIER == "preview":
-    if not WORKSPACE:
-        raise ValueError("preview execution requires WORKSPACE")
-    _preview_study = open_study(
+# A run given a workspace reads and registers there rather than in the released case
+# directory, and `open_study` is what activates that root. Activation rewrites
+# `ML4T_OUTPUT_DIR` for the rest of the process, so it has to happen before the first
+# `get_case_study_dir` rather than beside the registry read further down: `CASE_DIR` has to
+# already answer for the workspace.
+#
+# `WORKSPACE` is read at both tiers. It used to be read on the preview branch only, so a
+# canonical run that passed one was answered with `Study.regenerate` and registered its
+# backtests in the published store while its caller read from the workspace it asked for -
+# no exception, no warning, and an exit status that said the run had refused (#1100). A
+# canonical run with a workspace is the same full-fidelity sweep writing to that root, which
+# is what a rehearsal against a private registry needs. A preview still requires one, because
+# a preview with no workspace has nowhere of its own to write.
+_workspace_study = None
+if EXECUTION_TIER == "preview" and not WORKSPACE:
+    raise ValueError("preview execution requires WORKSPACE")
+if WORKSPACE or EXECUTION_TIER == "preview":
+    _workspace_study = open_study(
         CASE_STUDY_ID,
-        execution_tier="preview",
-        workspace=WORKSPACE,
+        execution_tier=EXECUTION_TIER,
+        workspace=WORKSPACE or None,
         entry_point="15_portfolio_management",
     )
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -133,14 +142,16 @@ print(
 
 # `Study.at` is the read-only form: one root, no activation. These notebooks only read the
 # populations - their backtests reach the registry by their own paths - and every other way in
-# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` with the
-# canonical tier routes to `Study.regenerate`, which refuses unless `features`, `labels` and
-# `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
-# `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
+# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` at the
+# canonical tier with no workspace routes to `Study.regenerate`, which refuses unless
+# `features`, `labels` and `run_log` are symlinks: true in a maintainer worktree, false in
+# every clean clone and CI run. Given a workspace it routes to `Study.open` instead, which is
+# why the branch above opens one whenever `WORKSPACE` is set rather than only for a preview.
+# `CASE_DIR` is already the directory this notebook resolved, including under a workspace, so
 # asking it directly answers for the registry the rest of the notebook reads.
 _study = (
-    _preview_study
-    if _preview_study is not None
+    _workspace_study
+    if _workspace_study is not None
     else Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="15_portfolio_management")
 )
 _members, _population_notes = prediction_members_in_force(_study, CASE_DIR)
@@ -352,16 +363,18 @@ SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {}
 _plan = None
 try:
     _writable = (
-        _preview_study
-        if _preview_study is not None
+        _workspace_study
+        if _workspace_study is not None
         else open_study(CASE_STUDY_ID, entry_point="15_portfolio_management")
     )
 except PermissionError as exc:
     print(f"Not recording the allocation plan here: {exc}")
 else:
-    # A preview's `root` stays the case directory while its writes go to the workspace, so
-    # the registry this run writes is `storage_root` for its tier. At canonical the two are
-    # identical and the guard is exactly as strict as before.
+    # `storage_root` is the registry this run writes, which is not always `root`: a preview's
+    # `root` stays the case directory while its writes go to `<workspace>/.preview/<case>`. A
+    # canonical run, with or without a workspace, writes its own root. Either way the guard
+    # compares it against the directory the sweep above read, so a run that reads one registry
+    # and records its plan in another is refused rather than recorded.
     if _writable.storage_root(EXECUTION_TIER) != CASE_DIR:
         raise RuntimeError(
             f"15 ran its sweep against {CASE_DIR} but opened a study writing to {_writable.storage_root(EXECUTION_TIER)}. "
