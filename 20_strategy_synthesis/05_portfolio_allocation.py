@@ -600,30 +600,19 @@ else:
 #   concentration; in narrow ones, top-$k$ selection dominates.
 #
 # The scatter below tests this hypothesis, wherever enough case studies have both an
-# allocation uplift and an equal-weight baseline registered to place a point. When they do not,
-# the cell says which ones qualified instead of drawing it.
+# allocation uplift and a signal-stage equal-weight baseline on the spine prediction to place a
+# point. When they do not, the cell says which ones qualified instead of drawing it.
 
 # %% [markdown]
 # The structural features for the "when MVO helps" question come next. The equal-weight
-# baseline they measure uplift against is Chapter 16's baseline stage, not one of the Chapter 17
-# allocators, so the uplift is over doing no allocation work at all.
+# baseline they measure uplift against is the signal stage on the spine prediction - the same
+# `ew_sharpes` the comparison above uses - so the uplift is over doing no allocation work at
+# all on the configuration the case study reports. Taking the best baseline across every
+# prediction instead would let the uplift absorb a change of model or label, because
+# `best_alloc` below is pinned to the spine and the difference of the two would no longer be
+# the allocator's contribution.
 
 # %%
-ch16_raw = load_chapter_backtests("ch16", case_studies=CS_LIST, metrics=["sharpe"])
-ch16_ew = (
-    # `is_unallocated`, not `allocator == "equal_weight"`: a signal-stage row carries no
-    # allocation block, which `extract_allocator` reports as "unknown". Filtering on the
-    # allocator name here matched only the 30 rows in `nasdaq100_microstructure` that spell
-    # the baseline out, and dropped the other eight case studies' baselines entirely.
-    ch16_raw.filter(
-        pl.col("sharpe").is_not_null()
-        & pl.col("spec_json").map_elements(is_unallocated, return_dtype=pl.Boolean)
-    )
-    .sort("sharpe", descending=True, nulls_last=True)
-    .unique(subset=["case_study"], keep="first")
-    .select("case_study", ew_sharpe=pl.col("sharpe"))
-)
-
 UNIVERSE_SIZES = dict(
     pl.read_parquet(get_chapter_dir(20) / "output" / "overview.parquet")
     .select("cs_id", "universe")
@@ -639,7 +628,7 @@ best_alloc = (
     .select("case_study", best_sharpe=pl.col("sharpe"))
 )
 
-mvo_data = best_alloc.join(ch16_ew, on="case_study", how="inner").with_columns(
+mvo_data = best_alloc.join(ew_sharpes, on="case_study", how="inner").with_columns(
     display_name=pl.col("case_study").replace(SHORT_NAMES),
     uplift=pl.col("best_sharpe") - pl.col("ew_sharpe"),
 )
@@ -753,44 +742,52 @@ if mvo_df.height >= 3:
 else:
     print(
         f"The uplift-against-baseline scatter needs at least three case studies with both an "
-        f"allocation uplift and a registered equal-weight baseline; {mvo_df.height} qualified "
-        f"({', '.join(mvo_df['display_name'].to_list()) or 'none'}). The registries the "
-        f"missing case studies would supply are still being rebuilt, so this is an absent "
+        f"allocation uplift and a signal-stage equal-weight baseline on the spine prediction; "
+        f"{mvo_df.height} qualified "
+        f"({', '.join(mvo_df['display_name'].to_list()) or 'none'}). That is an absent "
         f"measurement rather than a negative result."
     )
 
 # %% [markdown]
 #
 # %% tags=["results"]
-_qualified = (
-    "Their baselines run from "
-    f"{mvo_df['ew_sharpe'].min():+.2f} to {mvo_df['ew_sharpe'].max():+.2f} "
-    f"Sharpe and their uplifts from {mvo_df['uplift'].min():+.2f} to "
-    f"{mvo_df['uplift'].max():+.2f}.\n\n"
-    "Every point sits in the same region of the plane, so the quadrant "
-    "labels describe where a case study could fall rather than where any of "
-    "these do. Nothing here separates a weak-signal regime from a "
-    "strong-signal one, because no weak-signal case study reached this "
-    "comparison."
-    if mvo_df.height
-    else "None qualified, so there is no range to report and the plane is empty."
-)
+# Every sentence below is read off `mvo_df` rather than asserted. An earlier version said the
+# points all sat in one region and the chart was a template awaiting a rebuild, which was true
+# of the one case study that used to qualify and is not true of the field now.
+if mvo_df.height:
+    _helped = mvo_df.filter(pl.col("uplift") > 0)
+    _hurt = mvo_df.filter(pl.col("uplift") < 0)
+    _quadrants = {(row["ew_sharpe"] > 0, row["uplift"] > 0) for row in mvo_df.iter_rows(named=True)}
+    _worst = mvo_df.sort("uplift").row(0, named=True)
+    _best = mvo_df.sort("uplift", descending=True).row(0, named=True)
+    _qualified = (
+        f"Their baselines run from {mvo_df['ew_sharpe'].min():+.2f} to "
+        f"{mvo_df['ew_sharpe'].max():+.2f} Sharpe and their uplifts from "
+        f"{mvo_df['uplift'].min():+.2f} to {mvo_df['uplift'].max():+.2f}, "
+        f"occupying {len(_quadrants)} of the four quadrants.\n\n"
+        f"Allocation helps in {_helped.height} of them and hurts in {_hurt.height}. "
+        f"The largest gain is {_best['display_name']} at {_best['uplift']:+.2f} on a "
+        f"{_best['ew_sharpe']:+.2f} baseline; the largest loss is {_worst['display_name']} at "
+        f"{_worst['uplift']:+.2f} on a {_worst['ew_sharpe']:+.2f} baseline. So the sign of the "
+        "uplift is not decided by the strength of the baseline alone, which is what the "
+        "hypothesis below would need."
+    )
+else:
+    _qualified = "None qualified, so there is no range to report and the plane is empty."
 display(
     Markdown(
         f"The scatter carries {mvo_df.height} case studies: only those with both "
-        "a Ch16 equal-weight baseline and Ch17 allocation backtests on the spine "
-        f"prediction qualify. {_qualified} The chart is a template waiting for the "
-        "registries still being rebuilt."
+        "a signal-stage equal-weight baseline and Ch17 allocation backtests on the spine "
+        f"prediction qualify. {_qualified}"
     )
 )
 
 # %% [markdown]
-# The mechanism the chart is meant to test is still worth stating, as a thing to
-# check rather than a thing shown: an allocator can only redistribute capital
-# across whatever the signal ranked, so when the ranking carries little
-# information the allocator is redistributing noise, and a method with more free
-# parameters has more ways to fit that noise. Whether that holds here needs
-# case studies on both sides of the line, which this registry does not have.
+# The mechanism the chart is meant to test: an allocator can only redistribute capital across
+# whatever the signal ranked, so when the ranking carries little information the allocator is
+# redistributing noise, and a method with more free parameters has more ways to fit that
+# noise. The scatter above is the evidence for it, and the cell before this one reads off
+# whether the points support it rather than asserting that they do.
 
 # %% [markdown]
 # ## Key Takeaways

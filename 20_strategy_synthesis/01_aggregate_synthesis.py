@@ -303,15 +303,17 @@ from case_studies.utils.strategy_analysis import (  # noqa: E402
 def _canonical_carrier(cs: str) -> dict | None:
     """The configuration this case study reports, from the resolver that decides it.
 
-    This notebook built the same cross-stage rank-1 by hand in three places - concatenating
+    This notebook built the same cross-stage rank-1 by hand in four places - concatenating
     `explorer.best` over signal, allocation and risk_overlay, dropping benchmark families,
-    applying `LABEL_RESTRICTIONS` and `RUNG_PINS`, and taking the highest Sharpe. That is not
-    the ranking the case studies report. `resolve_canonical_rank1_lineage` re-ranks the field
+    applying `LABEL_RESTRICTIONS` and `RUNG_PINS`, and taking the highest Sharpe. Three of
+    them wanted the winner and read it from here; the fourth, `_val_rank1_carrier`, walks the
+    whole field and takes it from `selectable_validation_candidates`, which is the same
+    ranking one step earlier. That is not the ranking the case studies report. `resolve_canonical_rank1_lineage` re-ranks the field
     on exact common timestamp support whenever a conformal candidate is in it, because a
     conformal allocator abstains until it is calibrated and books zeros over the abstention,
     and it applies `UNIVERSE_RESTRICTIONS` and `CARRIER_PINS` besides. Measured 2026-09-18
     against the nine canonical registries, the two rankings named different configurations on
-    two case studies: `fx_pairs` (linear/ols-family `ridge_a1000000.0` at Sharpe 0.4121
+    two case studies: `fx_pairs` (`linear/ridge_a1000000.0` at Sharpe 0.4121
     against `deep_learning/lstm_h64` at comparison Sharpe 0.3091) and
     `nasdaq100_microstructure` (`deep_learning/nlinear` on fwd_ret_15m at 2.3001 against
     `gbm/default_multiclass` on fwd_dir_15m at 2.4159). `spine_prediction_hash` is what
@@ -1200,8 +1202,13 @@ def _val_rank1_carrier(cs: str) -> dict | None:
     # retrain but a same-prediction lower-Sharpe variant (a different allocator or risk
     # overlay) does, a dedup would jump to a different prediction instead of accepting the
     # same-prediction variant as the apples-to-apples match.
-    candidates = selectable_validation_candidates(cs)
-    if not candidates:
+    try:
+        candidates = selectable_validation_candidates(cs)
+    except NoSelectableCandidates:
+        # The helper raises on an empty pool rather than returning one, and this walk's
+        # callers read `None` as "no holdout pair for this case study" - the state the
+        # hand-built ranking reported as an empty frame. A pool with nothing eligible in it
+        # is that state, not a reason to stop aggregating the other eight.
         return None
     label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
 
