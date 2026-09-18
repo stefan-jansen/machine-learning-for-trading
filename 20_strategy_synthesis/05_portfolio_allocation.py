@@ -759,24 +759,33 @@ def uplift_interpretation(mvo_df: pl.DataFrame) -> str:
     reached the comparison, and that the chart was a template awaiting a rebuild. That
     described the single point the broken equal-weight filter used to leave, and the cell went
     on printing it once there were eight. Each sentence here is therefore conditioned on the
-    frame that produced it: the extremes come from the helped and hurt subsets separately and
-    are reported only where that subset is non-empty, and the closing claim about the
-    hypothesis is made only when the two subsets' baselines overlap - one observation, or a
-    set whose uplifts all share a sign, cannot establish it. `MAX_CASE_STUDIES` makes both of
-    those reachable, not hypothetical.
+    frame that produced it, and `MAX_CASE_STUDIES` makes the awkward frames reachable rather
+    than hypothetical:
+
+    * the extremes come from the helped and hurt subsets separately, so one observation is
+      never both the largest gain and the largest loss;
+    * an uplift of exactly zero is in neither subset, so it is counted and named rather than
+      folded into one of them, and "every" is used only where a subset covers the whole frame;
+    * the closing claim needs both signs present, and where the two subsets' baselines are
+      disjoint it reports which way round the separation runs, because the hypothesis below
+      predicts one direction and the reverse would contradict it.
     """
     if not mvo_df.height:
         return "None qualified, so there is no range to report and the plane is empty."
 
     helped = mvo_df.filter(pl.col("uplift") > 0)
     hurt = mvo_df.filter(pl.col("uplift") < 0)
+    unchanged = mvo_df.height - helped.height - hurt.height
     quadrants = {(row["ew_sharpe"] > 0, row["uplift"] > 0) for row in mvo_df.iter_rows(named=True)}
+
+    tally = f"Allocation helps in {helped.height} of them and hurts in {hurt.height}"
+    tally += f", and changes nothing in {unchanged}." if unchanged else "."
     lines = [
         f"Their baselines run from {mvo_df['ew_sharpe'].min():+.2f} to "
         f"{mvo_df['ew_sharpe'].max():+.2f} Sharpe and their uplifts from "
         f"{mvo_df['uplift'].min():+.2f} to {mvo_df['uplift'].max():+.2f}, "
         f"occupying {len(quadrants)} of the four quadrants.",
-        f"Allocation helps in {helped.height} of them and hurts in {hurt.height}.",
+        tally,
     ]
     if helped.height:
         best = helped.sort("uplift", descending=True).row(0, named=True)
@@ -790,25 +799,43 @@ def uplift_interpretation(mvo_df: pl.DataFrame) -> str:
             f"The largest loss is {worst['display_name']} at {worst['uplift']:+.2f} on a "
             f"{worst['ew_sharpe']:+.2f} baseline."
         )
+
     if helped.height and hurt.height:
-        overlaps = (
+        if (
             helped["ew_sharpe"].min() <= hurt["ew_sharpe"].max()
             and hurt["ew_sharpe"].min() <= helped["ew_sharpe"].max()
-        )
-        lines.append(
-            "The two groups' baselines overlap, so baseline strength does not separate them "
-            "and the sign of the uplift is not decided by it alone - which is what the "
-            "hypothesis below would need."
-            if overlaps
-            else "Every case study allocation helps has a baseline outside the range of those "
-            "it hurts, which is the separation the hypothesis below predicts; whether it is "
-            "the mechanism or the small number of points is not decidable from these."
-        )
+        ):
+            lines.append(
+                "The two groups' baselines overlap, so baseline strength does not separate "
+                "them and the sign of the uplift is not decided by it alone - which is what "
+                "the hypothesis below would need."
+            )
+        elif helped["ew_sharpe"].max() < hurt["ew_sharpe"].min():
+            lines.append(
+                "Every case study allocation helps has a weaker baseline than every one it "
+                "hurts, which is the direction the hypothesis below predicts; whether that is "
+                "the mechanism or the small number of points is not decidable from these."
+            )
+        else:
+            lines.append(
+                "Every case study allocation helps has a stronger baseline than every one it "
+                "hurts, which is the opposite of what the hypothesis below predicts; these "
+                "points are too few to weigh against it, but they do not support it."
+            )
     else:
-        seen = "helps" if helped.height else "hurts"
+        if helped.height == mvo_df.height:
+            seen = "helps in every case study here"
+        elif hurt.height == mvo_df.height:
+            seen = "hurts in every case study here"
+        elif unchanged == mvo_df.height:
+            seen = "changes nothing in any case study here"
+        elif helped.height:
+            seen = "never hurts here"
+        else:
+            seen = "never helps here"
         lines.append(
-            f"Allocation {seen} in every case study here, so these points cannot say whether "
-            "the sign of the uplift depends on the strength of the baseline."
+            f"Allocation {seen}, so these points cannot say whether the sign of the uplift "
+            "depends on the strength of the baseline."
         )
     return f"{lines[0]}\n\n" + " ".join(lines[1:])
 

@@ -149,13 +149,38 @@ def test_overlapping_baselines_support_the_conclusion():
     assert "not decided by it alone" in text
 
 
-def test_separated_baselines_do_not_claim_the_opposite():
-    """When the two groups do not overlap, the cell says so without claiming the mechanism."""
+def test_a_separation_in_the_predicted_direction_says_so():
+    """Helped baselines all below hurt baselines is what the hypothesis predicts."""
     text = _load_interpretation()(
         _frame([("ETFs", 0.20, 0.23), ("SP500", 0.30, 0.26), ("Crypto", 3.00, -0.73)])
     )
-    assert "outside the range" in text
+    assert "weaker baseline than every one it hurts" in text
+    assert "the direction the hypothesis below predicts" in text
     assert "not decidable from these" in text
+
+
+def test_a_separation_in_the_reverse_direction_is_not_called_support():
+    """The same disjointness the other way round contradicts the hypothesis."""
+    text = _load_interpretation()(
+        _frame([("ETFs", 3.00, 0.23), ("SP500", 2.80, 0.26), ("Crypto", 0.20, -0.73)])
+    )
+    assert "stronger baseline than every one it hurts" in text
+    assert "opposite of what the hypothesis below predicts" in text
+    assert "the direction the hypothesis below predicts" not in text
+
+
+def test_a_zero_uplift_is_counted_as_neither_helped_nor_hurt():
+    text = _load_interpretation()(_frame([("ETFs", 0.65, 0.23), ("FX", 0.20, 0.0)]))
+    assert "helps in 1 of them and hurts in 0, and changes nothing in 1." in text
+    assert "helps in every case study here" not in text
+    assert "never hurts here" in text
+
+
+def test_an_all_zero_frame_does_not_claim_allocation_hurts_everywhere():
+    text = _load_interpretation()(_frame([("ETFs", 0.65, 0.0), ("FX", 0.20, 0.0)]))
+    assert "changes nothing in any case study here" in text
+    assert "hurts in every case study here" not in text
+    assert "largest gain" not in text and "largest loss" not in text
 
 
 def test_an_empty_frame_reports_an_empty_plane():
