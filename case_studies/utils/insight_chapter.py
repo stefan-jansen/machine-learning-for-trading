@@ -175,6 +175,51 @@ def select_rank1(
     return max(comparable, key=lambda row: float(row["ic_mean_daily"]))
 
 
+def resolve_expected_fold_ids(folds: pl.DataFrame, n_folds: int) -> tuple[int, ...]:
+    """The fold ids a comparable candidate has to report, read off the candidates.
+
+    Neither live spec shape declares *which* folds a run used. Identity v3 nests a fold
+    count under ``computation.expected_prediction_keys`` and the v2 shape carries
+    ``n_folds`` at the top level; `declared_fold_count` reads both and there is no
+    fold-id list in either. Every caller used to substitute ``range(n_folds)``, which is
+    right only for a run whose folds are numbered contiguously from zero.
+    ``us_equities_panel/deep_learning/fwd_ret_5d`` declares four folds and all 30 of its
+    prediction sets report 0, 5, 10 and 15 - a stride-5 sample of a wider geometry - so
+    every candidate failed the comparison and `select_rank1` raised on a case study it
+    had selected from before those rows existed.
+
+    The ids therefore come from the candidates that cover the declared count: the
+    candidates reporting exactly ``n_folds`` distinct folds must agree on which ones, and
+    that agreed set is what the gate compares against. A candidate reporting fewer folds
+    is still refused, which is the whole point of the gate - a shorter evaluation is an
+    easier one. Two disagreeing full-length geometries in one group are not comparable to
+    each other either, so that raises rather than letting the more numerous one define
+    the standard.
+    """
+    if n_folds <= 0:
+        raise RegistrySelectionError("n_folds is not declared")
+    if folds.is_empty() or "fold_id" not in folds.columns:
+        raise RegistrySelectionError("no fold rows to resolve the declared fold ids from")
+    per_candidate = (
+        folds.select("prediction_hash", "fold_id")
+        .unique()
+        .group_by("prediction_hash")
+        .agg(pl.col("fold_id").sort())
+    )
+    full_length = {
+        tuple(int(fold_id) for fold_id in ids)
+        for ids in per_candidate["fold_id"].to_list()
+        if len(ids) == n_folds
+    }
+    if not full_length:
+        raise RegistrySelectionError(f"no candidate reports all {n_folds} declared folds")
+    if len(full_length) > 1:
+        raise RegistrySelectionError(
+            f"candidates disagree on which {n_folds} folds they cover: {sorted(full_length)}"
+        )
+    return next(iter(full_length))
+
+
 def _raw_primary_candidates(
     case_study: str, family: str, label: str
 ) -> tuple[pl.DataFrame, pl.DataFrame, int]:
@@ -267,7 +312,8 @@ def collect_rank1_per_cs(
         if n_folds <= 0:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: n_folds is not declared")
         try:
-            row = select_rank1(metrics, folds, expected_fold_ids=range(n_folds))
+            expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
+            row = select_rank1(metrics, folds, expected_fold_ids=expected_fold_ids)
         except RegistrySelectionError as exc:
             raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
         row.update(
@@ -337,7 +383,7 @@ def collect_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
             raise RegistrySelectionError(
                 f"{selected['case_study']}/{selected['training_hash']}: no checkpoint folds"
             )
-        expected_folds = set(range(n_folds))
+        expected_folds = set(resolve_expected_fold_ids(checkpoints, n_folds))
         for checkpoint in checkpoints["checkpoint_value"].unique().sort().to_list():
             current = checkpoints.filter(pl.col("checkpoint_value") == checkpoint)
             fold_ids = current["fold_id"].to_list()
@@ -429,11 +475,17 @@ def conformal_coverage_for_selected_prediction(
     usable = predictions.drop_nulls(required_columns)
     for column in ("y_true", "y_score"):
         usable = usable.filter(pl.col(column).cast(pl.Float64, strict=False).is_finite())
+    # The artifact has to carry every fold the spec declared. It is compared by count
+    # rather than against ``range(n_folds)`` because a run may number its folds any way
+    # it likes and one live sweep does: ``us_equities_panel/deep_learning/fwd_ret_5d``
+    # declares four folds and writes 0, 5, 10 and 15. There are no sibling artifacts to
+    # read the geometry off here, the way `resolve_expected_fold_ids` does for a
+    # registry group, so what is checkable is that the folds are distinct and all there.
     fold_ids = sorted(usable["fold_id"].unique().to_list())
-    if fold_ids != list(range(n_folds)):
+    if len(fold_ids) != n_folds:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
-            f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
+            f"expected {n_folds} declared folds, observed {fold_ids}"
         )
     if embargo_steps is None:
         label = selected.get("label") or spec.get("label")
@@ -482,12 +534,18 @@ def collect_grid_per_cs(
         metrics, folds, n_folds = _raw_primary_candidates(case_study, family, label)
         if metrics.is_empty() or n_folds <= 0:
             continue
+        # Resolved once over the whole group: a configuration whose candidates are all
+        # short would otherwise define its own standard and rank against complete ones.
+        try:
+            expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
+        except RegistrySelectionError:
+            continue
         selected = []
         for config_name in metrics["config_name"].unique().to_list():
             config_metrics = metrics.filter(pl.col("config_name") == config_name)
             try:
                 selected.append(
-                    select_rank1(config_metrics, folds, expected_fold_ids=range(n_folds))
+                    select_rank1(config_metrics, folds, expected_fold_ids=expected_fold_ids)
                 )
             except RegistrySelectionError:
                 continue
@@ -530,7 +588,8 @@ def collect_multi_label_per_cs(
                     f"{case_study}/{family}/{label}: n_folds is not declared"
                 )
             try:
-                selected = select_rank1(metrics, folds, expected_fold_ids=range(n_folds))
+                expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
+                selected = select_rank1(metrics, folds, expected_fold_ids=expected_fold_ids)
             except RegistrySelectionError as exc:
                 raise RegistrySelectionError(f"{case_study}/{family}/{label}: {exc}") from exc
             selected.update(
