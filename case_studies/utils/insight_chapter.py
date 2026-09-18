@@ -1015,14 +1015,13 @@ def parse_gbm_config(config: str) -> dict:
     return out
 
 
-# The pairing of a regression label with the binary direction label at the same horizon
+# The pairing of a regression label with the binary direction label it is scored against
 # used to be a hand-written literal in each chapter that draws the cross-evaluation. It
 # shrank without saying so: `us_firm_characteristics: [("fwd_ret_1m", "fwd_class_1m")]`
 # was dropped from Chapter 12's copy by the 2026-07-31 chapter-tree restore and kept in
 # Chapter 11's, so one chapter published four rows and the other three while both
 # reported a full count of their own literal. A literal cannot report what is missing
-# from it, so the pairs are discovered instead and the skips are named.
-DIRECTION_PREFIXES = ("fwd_dir_", "fwd_class_")
+# from it, so the pairs are discovered and the skips are named.
 
 
 def _binary_label_domain(case_study: str, label: str) -> set[int] | None:
@@ -1034,24 +1033,48 @@ def _binary_label_domain(case_study: str, label: str) -> set[int] | None:
     return {int(value) for value in values.to_list()}
 
 
+def _declared_classification_pairs(case_study: str) -> dict[str, str]:
+    """``{direction_label: regression_label}`` as ``setup.yaml`` declares it.
+
+    Read from ``labels.classification_eval_label`` rather than inferred from the label
+    names. Two of the nine case studies would be got wrong by a naming rule: crypto maps
+    both ``fwd_dir_8h`` and ``fwd_dir_8h_3c`` onto ``fwd_ret_8h``, so a rule that builds
+    the direction name from the regression suffix never sees the ternary one and cannot
+    report skipping it, which is the failure this whole function exists to avoid.
+    """
+    import yaml
+
+    setup_path = get_case_study_dir(case_study) / "config" / "setup.yaml"
+    if not setup_path.is_file():
+        return {}
+    with setup_path.open() as handle:
+        setup = yaml.safe_load(handle)
+    labels = (setup or {}).get("labels") or {}
+    declared = labels.get("classification_eval_label") or {}
+    return {str(k): str(v) for k, v in declared.items()}
+
+
 def discover_symmetry_pairs(
     case_studies: Iterable[str], family: str
 ) -> tuple[dict[str, list[tuple[str, str]]], list[str]]:
-    """Regression and binary-direction label pairs at matched horizons, per case study.
+    """Regression and binary-direction label pairs, per case study, from the declaration.
 
-    A pair qualifies when the family has registered validation predictions for both a
-    ``fwd_ret_<horizon>`` label and a ``fwd_dir_<horizon>`` or ``fwd_class_<horizon>``
-    label, and the direction label's own surface is binary. A ternary direction label
-    would need a multi-class AUC and is out of scope for this comparison, so it is
+    A pair qualifies when ``setup.yaml`` declares the direction label's
+    ``classification_eval_label``, this family has registered validation predictions for
+    both labels, and the direction label's own surface is binary. A ternary direction
+    label would need a multi-class AUC and is out of scope for this comparison, so it is
     skipped by measuring its domain rather than by being left out of a list.
 
-    Returns ``(pairs, skipped)``. Every candidate that does not qualify appears in
-    ``skipped`` with its reason, so a comparison that covers fewer case studies than the
-    corpus says which ones and why instead of reporting a full count of itself.
+    Returns ``(pairs, skipped)``. Every declared candidate that does not qualify appears
+    in ``skipped`` with its reason, so a comparison that covers fewer case studies than
+    the corpus says which ones and why instead of reporting a full count of itself.
     """
     pairs: dict[str, list[tuple[str, str]]] = {}
     skipped: list[str] = []
     for case_study in case_studies:
+        declared = _declared_classification_pairs(case_study)
+        if not declared:
+            continue
         db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
         if not db_path.is_file():
             continue
@@ -1066,22 +1089,22 @@ def discover_symmetry_pairs(
                 )
             }
         found: list[tuple[str, str]] = []
-        for regression in sorted(label for label in registered if label.startswith("fwd_ret_")):
-            horizon = regression.removeprefix("fwd_ret_")
-            for prefix in DIRECTION_PREFIXES:
-                direction = f"{prefix}{horizon}"
-                if direction not in registered:
-                    continue
-                domain = _binary_label_domain(case_study, direction)
-                if domain is None:
-                    skipped.append(f"{case_study}/{direction}: no label surface on disk")
-                elif not domain.issubset({0, 1}):
-                    skipped.append(
-                        f"{case_study}/{direction}: domain {sorted(domain)} is not binary, "
-                        "a multi-class AUC is out of scope here"
-                    )
-                else:
-                    found.append((regression, direction))
+        for direction, regression in sorted(declared.items()):
+            if direction not in registered or regression not in registered:
+                # Not a defect and not worth a line: this family simply did not run one
+                # of the two labels here. Only a declared pair the family DID run, and
+                # that still does not qualify, is a skip worth naming.
+                continue
+            domain = _binary_label_domain(case_study, direction)
+            if domain is None:
+                skipped.append(f"{case_study}/{direction}: no label surface on disk")
+            elif not domain.issubset({0, 1}):
+                skipped.append(
+                    f"{case_study}/{direction}: domain {sorted(domain)} is not binary, "
+                    "a multi-class AUC is out of scope here"
+                )
+            else:
+                found.append((regression, direction))
         if found:
             pairs[case_study] = found
     return pairs, skipped

@@ -24,6 +24,7 @@ import sqlite3
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from case_studies.utils.insight_chapter import collect_rank1_per_cs, discover_symmetry_pairs
 from case_studies.utils.model_analysis import load_metrics_from_registry
@@ -167,6 +168,16 @@ def test_the_rank1_selector_carries_the_auc_columns_the_book_tables_print(
     assert selected["auc_mean_daily"].to_list() == [0.5 + LIVE_IC]
 
 
+def _declare(case_dir: Path, mapping: dict[str, str]) -> None:
+    """Write the `labels.classification_eval_label` block the discovery reads."""
+    config = case_dir / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "setup.yaml").write_text(
+        "labels:\n  classification_eval_label:\n"
+        + "".join(f"    {direction}: {regression}\n" for direction, regression in mapping.items())
+    )
+
+
 def _register_pair(case_dir: Path, regression: str, direction: str, domain: list[int]) -> None:
     for label in (regression, direction):
         training_hash = register_training_run(
@@ -197,6 +208,7 @@ def test_symmetry_pairs_are_discovered_and_a_skip_is_named(tmp_path, monkeypatch
     """
     _register_pair(tmp_path, "fwd_ret_1m", "fwd_class_1m", [0, 1])
     _register_pair(tmp_path, "fwd_ret_15m", "fwd_dir_15m", [-1, 0, 1])
+    _declare(tmp_path, {"fwd_class_1m": "fwd_ret_1m", "fwd_dir_15m": "fwd_ret_15m"})
     monkeypatch.setattr("case_studies.utils.insight_chapter.get_case_study_dir", lambda _: tmp_path)
 
     pairs, skipped = discover_symmetry_pairs(["test"], "gbm")
@@ -207,10 +219,33 @@ def test_symmetry_pairs_are_discovered_and_a_skip_is_named(tmp_path, monkeypatch
     assert "[-1, 0, 1]" in skipped[0]
 
 
+def test_two_direction_labels_on_one_regression_label_are_both_examined(
+    tmp_path, monkeypatch
+) -> None:
+    """Crypto's shape, and the reason discovery reads the declaration and not the names.
+
+    ``crypto_perps_funding`` maps both ``fwd_dir_8h`` and ``fwd_dir_8h_3c`` onto
+    ``fwd_ret_8h``. A rule that builds the direction name from the regression suffix
+    finds the binary one and never sees the ternary one, so it cannot report skipping
+    it - the exact silence this function exists to remove.
+    """
+    _register_pair(tmp_path, "fwd_ret_8h", "fwd_dir_8h", [0, 1])
+    _register_pair(tmp_path, "fwd_ret_8h", "fwd_dir_8h_3c", [-1, 0, 1])
+    _declare(tmp_path, {"fwd_dir_8h": "fwd_ret_8h", "fwd_dir_8h_3c": "fwd_ret_8h"})
+    monkeypatch.setattr("case_studies.utils.insight_chapter.get_case_study_dir", lambda _: tmp_path)
+
+    pairs, skipped = discover_symmetry_pairs(["test"], "gbm")
+
+    assert pairs == {"test": [("fwd_ret_8h", "fwd_dir_8h")]}
+    assert len(skipped) == 1
+    assert "fwd_dir_8h_3c" in skipped[0]
+
+
 def test_a_direction_label_with_no_surface_on_disk_is_named_not_dropped(
     tmp_path, monkeypatch
 ) -> None:
     _register_pair(tmp_path, "fwd_ret_1m", "fwd_class_1m", [0, 1])
+    _declare(tmp_path, {"fwd_class_1m": "fwd_ret_1m"})
     (tmp_path / "labels" / "fwd_class_1m.parquet").unlink()
     monkeypatch.setattr("case_studies.utils.insight_chapter.get_case_study_dir", lambda _: tmp_path)
 
@@ -218,3 +253,36 @@ def test_a_direction_label_with_no_surface_on_disk_is_named_not_dropped(
 
     assert pairs == {}
     assert skipped == ["test/fwd_class_1m: no label surface on disk"]
+
+
+def test_discovery_can_return_nothing_and_the_notebook_frame_still_has_its_columns(
+    tmp_path, monkeypatch
+) -> None:
+    """An empty result must render, not raise.
+
+    Both notebooks build their symmetry table from the discovered pairs. Built from an
+    empty list with only numeric ``schema_overrides``, the frame has no string columns
+    and selecting ``short_name`` raises ``ColumnNotFoundError`` - so the run dies on the
+    one path where the skip reasons are the whole output. A declared full schema makes an
+    empty result an empty table.
+    """
+    _register_pair(tmp_path, "fwd_ret_1m", "fwd_class_1m", [-1, 0, 1])
+    _declare(tmp_path, {"fwd_class_1m": "fwd_ret_1m"})
+    monkeypatch.setattr("case_studies.utils.insight_chapter.get_case_study_dir", lambda _: tmp_path)
+
+    pairs, skipped = discover_symmetry_pairs(["test"], "gbm")
+    assert pairs == {}
+    assert len(skipped) == 1
+
+    schema = {
+        "short_name": pl.Utf8,
+        "reg_label": pl.Utf8,
+        "dir_label": pl.Utf8,
+        "cls_score_ic": pl.Float64,
+        "cls_score_auc": pl.Float64,
+        "reg_score_auc": pl.Float64,
+    }
+    empty = pl.DataFrame([], schema=schema)
+    assert empty.select("short_name", "reg_label", "dir_label").is_empty()
+    with pytest.raises(pl.exceptions.ColumnNotFoundError):
+        pl.DataFrame([], schema_overrides={"cls_score_ic": pl.Float64}).select("short_name")

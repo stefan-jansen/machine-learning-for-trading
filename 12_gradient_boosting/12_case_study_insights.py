@@ -1282,20 +1282,30 @@ for cs, pairs in SYMMETRY_PAIRS.items():
 # The combined table keeps both metric directions and their selected identities visible.
 
 # %%
-sym_df = pl.DataFrame(
-    sym_rows,
-    schema_overrides={
-        "cls_score_ic": pl.Float64,
-        "cls_score_ic_lo": pl.Float64,
-        "cls_score_ic_hi": pl.Float64,
-        "cls_score_ic_t": pl.Float64,
-        "cls_score_auc": pl.Float64,
-        "cls_score_auc_lo": pl.Float64,
-        "cls_score_auc_hi": pl.Float64,
-        "reg_score_auc": pl.Float64,
-        "n_b": pl.Int64,
-    },
-)
+SYMMETRY_SCHEMA = {
+    "short_name": pl.Utf8,
+    "reg_label": pl.Utf8,
+    "dir_label": pl.Utf8,
+    "cls_config": pl.Utf8,
+    "cls_score_ic": pl.Float64,
+    "cls_score_ic_lo": pl.Float64,
+    "cls_score_ic_hi": pl.Float64,
+    "cls_score_ic_t": pl.Float64,
+    "cls_score_auc": pl.Float64,
+    "cls_score_auc_lo": pl.Float64,
+    "cls_score_auc_hi": pl.Float64,
+    "reg_config": pl.Utf8,
+    "reg_score_auc": pl.Float64,
+    "n_b": pl.Int64,
+}
+
+# A full schema, not schema_overrides. Discovery can legitimately return nothing - every
+# declared pair skipped, or a registry with no classification runs for this family - and a
+# frame built from an empty list with partial overrides has no string columns at all, so
+# the selection below raises ColumnNotFoundError and the skip reasons this section exists
+# to print never reach the reader. An empty frame with the right columns renders as an
+# empty table, which is the correct answer.
+sym_df = pl.DataFrame(sym_rows, schema=SYMMETRY_SCHEMA)
 print(
     "Direction A (GBM classification score → IC), the classifier's own AUC, "
     "and Direction B (GBM regression score → AUC):"
@@ -1315,6 +1325,12 @@ sym_df.select(
 )
 
 # %%
+if sym_df.is_empty():
+    raise RuntimeError(
+        "no declared regression/direction pair qualified, so there is nothing to compare. "
+        f"Skipped: {'; '.join(SYMMETRY_SKIPS) or 'nothing'}"
+    )
+
 fig, axes = plt.subplots(1, 2, figsize=(13, 4.0))
 labels_y = [f"{r['short_name']} · {r['dir_label']}" for r in sym_df.iter_rows(named=True)]
 y = np.arange(sym_df.height)
