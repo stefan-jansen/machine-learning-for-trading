@@ -188,17 +188,22 @@ def _is_plan_name(name: str, prefix: str) -> bool:
     return name.startswith(prefix) and "-" not in name[len(prefix) :]
 
 
-def _plan_name_in_force(study: Study, case_study: str, label: str, stage: str) -> str | None:
-    """The most recently published plan for this stage of this label, under any generation.
+def _plan_names_in_force(study: Study, case_study: str, label: str, stage: str) -> list[str]:
+    """Every plan recorded for this stage of this label, most recently published first.
 
     The predictions component of the name is not matched on. Which generation of the
     prediction pool a plan was built for is a question about that plan's contents, answered by
     :func:`_plan_in_force` against the pool in force now; matching it into the lookup instead
     is what made a plan unfindable the moment the pool moved for any reason at all.
 
-    Ordered by ``created_at``, so a re-swept grid replaces the previous one rather than sitting
-    beside it. A superseded generation of one name is still resolved by
-    ``OfficialPopulation.one``, which is a different question and is left to it.
+    **All of them are returned, not the most recent.** Recency looks like the right tiebreak
+    and is not, because ``create`` is idempotent on membership: a pool that moves from A to B
+    and back to A is answered with A's *existing* population, which keeps its original
+    ``created_at``. The most recent name is then B's, whose grid does not price the pool, and
+    the sweep that actually covers the pool in force is rejected as missing predictions - by a
+    re-run that cannot help, because running it again reuses A's snapshot and its timestamp
+    again. So the caller asks each in turn and takes the first that answers, and recency
+    decides only which failure is reported when none does.
     """
     db_path = study.root / "run_log" / "registry.db"
     prefix = f"{case_study}-{PLAN_STAGE_KEYS[stage]}-{label}-"
@@ -212,12 +217,9 @@ def _plan_name_in_force(study: Study, case_study: str, label: str, stage: str) -
             ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
-            return None
+            return []
         raise
-    for name, _created_at in rows:
-        if _is_plan_name(name, prefix):
-            return name
-    return None
+    return [name for name, _created_at in rows if _is_plan_name(name, prefix)]
 
 
 def _in_force_for_label(study: Study, in_force: Collection[str], label: str) -> set[str]:
@@ -548,9 +550,29 @@ def _plan_in_force(
     study's plans in one afternoon - see :func:`sweep_plan_name` - and it is also why the two
     findings are reported separately: one is a sweep to run and the other is a stage to re-derive.
     """
-    name = _plan_name_in_force(study, case_study, label, stage)
-    if name is None:
+    recorded = _plan_names_in_force(study, case_study, label, stage)
+    if not recorded:
         return None
+    first_failure: Exception | None = None
+    for name in recorded:
+        try:
+            return _plan_under_name(study, name, case_study, label, stage, in_force)
+        except (ValueError, RuntimeError) as exc:
+            if first_failure is None:
+                first_failure = exc
+    assert first_failure is not None
+    raise first_failure
+
+
+def _plan_under_name(
+    study: Study,
+    name: str,
+    case_study: str,
+    label: str,
+    stage: str,
+    in_force: frozenset[str] | None,
+) -> OfficialPopulation | None:
+    """One recorded plan, held to every condition :func:`_plan_in_force` documents."""
     names = _population_names(study)
     if names is None:
         return None
@@ -573,10 +595,10 @@ def _plan_in_force(
                 sorted(wanted - planned),
                 f"sweep plan {name} prices {len(plan.members)} backtests and none of them "
                 f"rides {{count}} of the {len(wanted)} {label} prediction sets in force: "
-                "{listed}. Those members entered the pool after this sweep planned its grid, "
-                f"so the {stage!r} stage has never been run against them and ranking what it "
-                "does hold would rank a grid that was never asked to include them. Run the "
-                f"{stage!r} sweep for {label}.",
+                "{listed}. This grid was not asked to include them, so ranking what it does "
+                "hold would rank a grid the pool no longer describes. Whether some earlier run "
+                f"priced them is a separate question - what is missing is a {stage!r} plan "
+                f"covering the pool in force. Run the {stage!r} sweep for {label}.",
             )
         # Every stage, including the ones above it in the chain. A prediction leaving the pool
         # moves the ranking the next stage advances from - drop one of ten advancing
@@ -723,8 +745,9 @@ def unfinished_sweep_plans(
         for stage in stages:
             # The name a sweep run now would publish under, so an absent plan is still reported
             # against something addressable rather than against `None`.
-            name = _plan_name_in_force(study, case_study, label, stage) or sweep_plan_name(
-                case_study, label, stage, predictions
+            recorded = _plan_names_in_force(study, case_study, label, stage)
+            name = (
+                recorded[0] if recorded else sweep_plan_name(case_study, label, stage, predictions)
             )
             try:
                 if _plan_in_force(study, case_study, label, stage, in_force) is None:

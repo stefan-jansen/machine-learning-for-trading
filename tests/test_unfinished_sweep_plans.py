@@ -562,3 +562,91 @@ def test_a_plan_superseded_by_a_wider_grid_does_not_inherit_the_old_grid_s_attes
 
     assert len(unfinished) == 1
     assert "no attestation" in unfinished[0]
+
+
+def test_a_pool_that_returns_to_an_earlier_generation_finds_its_own_plan(study: Study) -> None:
+    """A -> B -> A. The plan that covers the pool in force is not the most recent one.
+
+    ``OfficialPopulation.create`` is idempotent on membership, so re-publishing A's grid
+    answers with A's existing population and its original ``created_at``. Taking the most
+    recently published plan for the stage therefore hands back B's, whose grid prices a
+    prediction A's pool does not admit, and the sweep that does cover the pool is reported
+    missing. Re-running it cannot clear that: the re-run reuses A's snapshot and its timestamp
+    again, so the report survives every remedy it suggests.
+
+    Both plans stay recorded here and the pool is A's. What closes it is asking each recorded
+    plan in turn rather than only the newest.
+    """
+    first, first_backtest = _registered_member(study, alpha=1.0)
+    second, second_backtest = _registered_member(study, alpha=2.0)
+
+    pool_a = {first}
+    pool_b = {first, second}
+    for pool, members in (
+        (pool_a, [first_backtest]),
+        (pool_b, sorted({first_backtest, second_backtest})),
+    ):
+        plan = OfficialPopulation.create(
+            study,
+            name=f"etfs-baseline-fwd_ret_5d-{predictions_identity(pool)}",
+            member_kind="backtest",
+            members=members,
+        )
+        attest_sweep(study, plan, open_sweep_attempt(study, plan))
+
+    # B is the most recently published plan, and it prices a prediction A's pool has dropped.
+    assert (
+        unfinished_sweep_plans(
+            study,
+            case_study="etfs",
+            labels=["fwd_ret_5d"],
+            stages=["signal"],
+            prediction_hashes=pool_b,
+        )
+        == []
+    )
+    assert (
+        unfinished_sweep_plans(
+            study,
+            case_study="etfs",
+            labels=["fwd_ret_5d"],
+            stages=["signal"],
+            prediction_hashes=pool_a,
+        )
+        == []
+    ), "the pool is back on A, whose plan is recorded, complete and attested"
+
+
+def test_when_no_recorded_plan_covers_the_pool_the_most_recent_one_is_reported(
+    study: Study,
+) -> None:
+    """Trying every recorded plan must not turn a real gap into silence.
+
+    Two plans, neither covering the pool in force, and the report names the most recently
+    published one - so the caller is told about the grid it would actually re-run.
+    """
+    first, first_backtest = _registered_member(study, alpha=1.0)
+    second, second_backtest = _registered_member(study, alpha=2.0)
+    third, _third_backtest = _registered_member(study, alpha=3.0)
+
+    for pool, members in (
+        ({first}, [first_backtest]),
+        ({second}, [second_backtest]),
+    ):
+        plan = OfficialPopulation.create(
+            study,
+            name=f"etfs-baseline-fwd_ret_5d-{predictions_identity(pool)}",
+            member_kind="backtest",
+            members=members,
+        )
+        attest_sweep(study, plan, open_sweep_attempt(study, plan))
+
+    unfinished = unfinished_sweep_plans(
+        study,
+        case_study="etfs",
+        labels=["fwd_ret_5d"],
+        stages=["signal"],
+        prediction_hashes={first, second, third},
+    )
+    assert len(unfinished) == 1
+    assert third in unfinished[0], unfinished[0]
