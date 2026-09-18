@@ -41,6 +41,7 @@ import polars as pl
 import torch  # noqa: F401
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
+from case_studies.research.population import retired_prediction_hashes
 from utils.paths import get_case_study_dir
 
 from .booster_paths import booster_dir
@@ -55,14 +56,27 @@ def load_metrics_from_registry(
     case_study_id: str,
     label: str | None = None,
     families: list[str] | None = None,
+    *,
+    include_retired: bool = False,
 ) -> pl.DataFrame:
     """Load pre-computed IC metrics directly from the registry.
 
     Much faster than loading raw predictions - queries prediction_metrics
     table which stores ic_mean/ic_std computed during training runs.
 
-    Returns one row per prediction set, including its exact training and
-    prediction hashes alongside the model identity and metrics.
+    Returns one row per prediction set of the live generation, including its exact
+    training and prediction hashes alongside the model identity and metrics.
+
+    A registry keeps every generation, and supersession is recorded one layer up in
+    ``official_populations``, so a query that joins ``training_runs`` to
+    ``prediction_metrics`` sees the retired generations too. That is not a neutral
+    error for a caller that ranks what comes back: a generation is usually refitted
+    because it was short or narrow, a narrower sample is an easier one, and the stale
+    rows therefore run toward the top. Measured 2026-09-18, ``cme_futures`` holds a
+    retired deep-learning generation covering 71.4% of its declared (entity, session)
+    pairs that outranked the complete refit which replaced it, and two cells of the
+    book's Table 14.3 were drawn from retired rows. Retired generations are dropped
+    here by default; pass ``include_retired=True`` to look at history deliberately.
     """
     case_dir = get_case_study_dir(case_study_id)
     db_path = case_dir / "run_log" / "registry.db"
@@ -142,8 +156,11 @@ def load_metrics_from_registry(
         params.extend(families)
 
     rows = db.execute(query, params).fetchall()
+    retired = set() if include_retired else retired_prediction_hashes(db)
     db.close()
 
+    if retired:
+        rows = [row for row in rows if row[1] not in retired]
     if not rows:
         return pl.DataFrame()
 
