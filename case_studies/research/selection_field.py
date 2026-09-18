@@ -553,11 +553,18 @@ def _plan_in_force(
     recorded = _plan_names_in_force(study, case_study, label, stage)
     if not recorded:
         return None
-    first_failure: Exception | None = None
+    first_failure: _PlanDoesNotCover | None = None
     for name in recorded:
         try:
             return _plan_under_name(study, name, case_study, label, stage, in_force)
-        except (ValueError, RuntimeError) as exc:
+        except _PlanDoesNotCover as exc:
+            # Only this one. An incomplete or unattested plan is not a plan for a different
+            # pool, it is a sweep that has to be reported, and falling past it would let an
+            # older plan answer for it. That is reachable rather than theoretical: a plan name
+            # hashes the whole pool while coverage is checked per label, so changing one
+            # label's predictions mints a new plan name for every *other* label whose
+            # predictions did not move. If one of those new sweeps is interrupted, its
+            # predecessor covers the same predictions exactly - and would be accepted.
             if first_failure is None:
                 first_failure = exc
     assert first_failure is not None
@@ -615,6 +622,18 @@ def _plan_under_name(
     return plan
 
 
+class _PlanDoesNotCover(RuntimeError):
+    """This plan's grid and the pool in force do not describe the same predictions.
+
+    Its own type, because it is the one failure that says something about *which* plan was
+    asked rather than about the sweep behind it: another recorded plan may cover the pool, and
+    :func:`_plan_in_force` goes on to ask. Completeness and attestation are not like that - a
+    plan failing either is a sweep to re-run, and it has to be reported rather than fallen
+    past. A ``RuntimeError`` so that :func:`unfinished_sweep_plans`, which catches that, keeps
+    reporting it unchanged.
+    """
+
+
 def _refuse(missing: Sequence[str], template: str) -> None:
     """Raise ``template`` naming up to five of ``missing``, or return where there are none."""
     if not missing:
@@ -622,7 +641,7 @@ def _refuse(missing: Sequence[str], template: str) -> None:
     listed = ", ".join(missing[:5])
     if len(missing) > 5:
         listed += f" (+{len(missing) - 5} more)"
-    raise RuntimeError(template.format(count=len(missing), listed=listed))
+    raise _PlanDoesNotCover(template.format(count=len(missing), listed=listed))
 
 
 def _plan_members(

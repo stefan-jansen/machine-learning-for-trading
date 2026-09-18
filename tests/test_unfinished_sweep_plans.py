@@ -650,3 +650,48 @@ def test_when_no_recorded_plan_covers_the_pool_the_most_recent_one_is_reported(
     )
     assert len(unfinished) == 1
     assert third in unfinished[0], unfinished[0]
+
+
+def test_an_unfinished_latest_sweep_is_not_answered_by_its_predecessor(study: Study) -> None:
+    """The reachable path, and the reason the fallback is narrowed to one failure.
+
+    A plan name hashes the whole prediction pool while coverage is checked per label, so
+    changing one label's predictions mints a new plan name for every *other* label whose
+    predictions did not move. Here `fwd_ret_5d` is untouched and `fwd_ret_21d` gains a
+    prediction, which renames `fwd_ret_5d`'s plan. The sweep under the new name is then
+    interrupted - it publishes its grid before executing it, which is what the plan is for -
+    and its predecessor covers exactly the same predictions.
+
+    Falling past an incomplete plan to that predecessor reports an interrupted sweep as
+    finished, which is the one thing this module exists to prevent.
+    """
+    kept, kept_backtest = _registered_member(study, alpha=1.0)
+    other, other_backtest = _registered_member(study, alpha=2.0, label="fwd_ret_21d")
+    later, _later_backtest = _registered_member(study, alpha=3.0, label="fwd_ret_21d")
+
+    finished = OfficialPopulation.create(
+        study,
+        name=f"etfs-baseline-fwd_ret_5d-{predictions_identity({kept, other})}",
+        member_kind="backtest",
+        members=[kept_backtest],
+    )
+    attest_sweep(study, finished, open_sweep_attempt(study, finished))
+
+    # The same label, the same predictions, a new name because another label's pool moved -
+    # and this sweep publishes its grid and then does not finish it.
+    OfficialPopulation.create(
+        study,
+        name=f"etfs-baseline-fwd_ret_5d-{predictions_identity({kept, other, later})}",
+        member_kind="backtest",
+        members=sorted({kept_backtest, "cccc55556666"}),
+    )
+
+    unfinished = unfinished_sweep_plans(
+        study,
+        case_study="etfs",
+        labels=["fwd_ret_5d"],
+        stages=["signal"],
+        prediction_hashes={kept, other, later},
+    )
+    assert len(unfinished) == 1, unfinished
+    assert "cccc55556666" in unfinished[0], unfinished[0]
