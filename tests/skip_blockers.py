@@ -26,7 +26,10 @@ records at ``case_studies/sp500_options/11_model_analysis`` why that is the wron
 for a skip about the CI fixture - a condition over the maintainer's registry reads as satisfied
 on any workstation that has run the models while the fixture the job runs against still holds
 nothing. Everything here is measured against the fixture: ``ML4T_DATA_PATH`` for files and the
-seeded ``ML4T_OUTPUT_DIR`` for registries.
+seeded ``ML4T_OUTPUT_DIR`` for registries. ``ML4T_DATA_PATH`` is only the fixture where it
+resolves to a checkout of ``ml4t/third-edition-test-data``; it is the maintainer's full dataset
+on this workstation, which carries the raw captures three declarations say the fixture lacks, so
+a root that is not that checkout raises ``NotTheFixture`` rather than answering for it.
 
 **A condition has to be a property of the FIXTURE, not of the workspace the job is building.**
 The blocker is evaluated at the moment the notebook's test runs, and a ``cs-*`` job runs a case
@@ -51,6 +54,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
@@ -70,6 +74,16 @@ class UndecidableHere(Exception):
     """The blocker is real but cannot be evaluated in this process."""
 
 
+class NotTheFixture(UndecidableHere):
+    """A data root resolved, but it is not the CI fixture the declaration is about.
+
+    Distinct from the rest of ``UndecidableHere`` because the two want different
+    handling: "the fixture is here and the seeding produced no registry" is a silent
+    failure of the thing the guard measures against and should be loud, while "this
+    machine holds a different dataset" is not a fault at all and should report.
+    """
+
+
 def declared_kind(declaration: dict) -> str:
     """The single kind a declaration names, or raise."""
     named = [kind for kind in KINDS if kind in declaration]
@@ -80,10 +94,61 @@ def declared_kind(declaration: dict) -> str:
     return named[0]
 
 
+#: The repository the CI fixture is a checkout of. Every site that mounts it does so
+#: with ``actions/checkout`` at ``ref: ci`` (``.github/workflows/*.yml``, pinned by
+#: ``tests/test_ci_records_the_fixture_it_read.py``), and ``ML4T_DATA_PATH`` points at
+#: that checkout's ``data/``. Nothing else a data root can be is a checkout of it.
+_FIXTURE_REPO = "third-edition-test-data"
+
+
+def _checkout_remote(directory: Path) -> str | None:
+    """``origin``'s URL for the checkout *directory* is inside, or None for neither.
+
+    ``git config`` walks up from *directory*, so this answers for the data root as well
+    as for the checkout root above it.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(directory), "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
+def is_ci_fixture(root: Path) -> bool:
+    """Whether *root* is the CI fixture's data tree rather than some other data root."""
+    return _FIXTURE_REPO in (_checkout_remote(root) or "")
+
+
 def _fixture_root() -> Path | None:
+    """The CI fixture's data tree, or None when this process resolved no data root.
+
+    Raises ``NotTheFixture`` when a data root resolves and is not the fixture. A
+    condition has to be a property of the fixture, and ``_resolve_data_path`` returns
+    whatever this machine has: on the maintainer's workstation it is the full dataset,
+    which carries the raw captures and contract definitions the fixture deliberately
+    does not, so measuring against it called three live declarations expired. That is
+    the same failure ``ML4T_ARTIFACT_ROOT`` is rejected for in this module's docstring,
+    one instrument down.
+    """
     from tests.conftest import _resolve_data_path
 
-    return _resolve_data_path()
+    root = _resolve_data_path()
+    if root is None:
+        return None
+    if not is_ci_fixture(root):
+        raise NotTheFixture(
+            f"{root} is a data root but not a checkout of {_FIXTURE_REPO}, so a file "
+            "under it says nothing about what the CI fixture ships"
+        )
+    return root
 
 
 def _fixture_registry(case_study: str) -> Path | None:
