@@ -150,23 +150,28 @@ def test_overlapping_baselines_support_the_conclusion():
 
 
 def test_a_separation_in_the_predicted_direction_says_so():
-    """Helped baselines all below hurt baselines is what the hypothesis predicts."""
+    """The mechanism predicts allocation is harmful where the ranking is weak.
+
+    So the separation it predicts has the hurt group's baselines BELOW the helped group's -
+    weak signal, allocator redistributing noise. Here the loss sits at 0.20 and the gains at
+    2.80 and 3.00.
+    """
     text = _load_interpretation()(
-        _frame([("ETFs", 0.20, 0.23), ("SP500", 0.30, 0.26), ("Crypto", 3.00, -0.73)])
+        _frame([("ETFs", 3.00, 0.23), ("SP500", 2.80, 0.26), ("Crypto", 0.20, -0.73)])
     )
-    assert "weaker baseline than every one it hurts" in text
-    assert "the direction the hypothesis below predicts" in text
+    assert "hurts has a weaker baseline than every one it helps" in text
+    assert "the direction the mechanism below predicts" in text
     assert "not decidable from these" in text
 
 
 def test_a_separation_in_the_reverse_direction_is_not_called_support():
-    """The same disjointness the other way round contradicts the hypothesis."""
+    """Losses at the strong end and gains at the weak end contradict the mechanism."""
     text = _load_interpretation()(
-        _frame([("ETFs", 3.00, 0.23), ("SP500", 2.80, 0.26), ("Crypto", 0.20, -0.73)])
+        _frame([("ETFs", 0.20, 0.23), ("SP500", 0.30, 0.26), ("Crypto", 3.00, -0.73)])
     )
-    assert "stronger baseline than every one it hurts" in text
-    assert "opposite of what the hypothesis below predicts" in text
-    assert "the direction the hypothesis below predicts" not in text
+    assert "hurts has a stronger baseline than every one it helps" in text
+    assert "opposite of what the mechanism below predicts" in text
+    assert "the direction the mechanism below predicts" not in text
 
 
 def test_a_zero_uplift_is_counted_as_neither_helped_nor_hurt():

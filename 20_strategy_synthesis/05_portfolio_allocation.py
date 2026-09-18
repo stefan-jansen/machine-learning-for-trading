@@ -767,8 +767,9 @@ def uplift_interpretation(mvo_df: pl.DataFrame) -> str:
     * an uplift of exactly zero is in neither subset, so it is counted and named rather than
       folded into one of them, and "every" is used only where a subset covers the whole frame;
     * the closing claim needs both signs present, and where the two subsets' baselines are
-      disjoint it reports which way round the separation runs, because the hypothesis below
-      predicts one direction and the reverse would contradict it.
+      disjoint it reports which way round the separation runs, because the mechanism below
+      predicts one direction - allocation harmful where the ranking is weak - and the reverse
+      would contradict it.
     """
     if not mvo_df.height:
         return "None qualified, so there is no range to report and the plane is empty."
@@ -810,16 +811,17 @@ def uplift_interpretation(mvo_df: pl.DataFrame) -> str:
                 "them and the sign of the uplift is not decided by it alone - which is what "
                 "the hypothesis below would need."
             )
-        elif helped["ew_sharpe"].max() < hurt["ew_sharpe"].min():
+        elif hurt["ew_sharpe"].max() < helped["ew_sharpe"].min():
             lines.append(
-                "Every case study allocation helps has a weaker baseline than every one it "
-                "hurts, which is the direction the hypothesis below predicts; whether that is "
+                "Every case study allocation hurts has a weaker baseline than every one it "
+                "helps, which is the direction the mechanism below predicts - a weak ranking "
+                "is the one an allocator can only redistribute noise across; whether that is "
                 "the mechanism or the small number of points is not decidable from these."
             )
         else:
             lines.append(
-                "Every case study allocation helps has a stronger baseline than every one it "
-                "hurts, which is the opposite of what the hypothesis below predicts; these "
+                "Every case study allocation hurts has a stronger baseline than every one it "
+                "helps, which is the opposite of what the mechanism below predicts; these "
                 "points are too few to weigh against it, but they do not support it."
             )
     else:
