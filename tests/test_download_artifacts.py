@@ -7,6 +7,7 @@ import importlib.util
 import sqlite3
 import stat
 import tarfile
+import urllib.error
 from contextlib import closing
 from pathlib import Path
 
@@ -262,32 +263,40 @@ def test_every_published_checksum_names_a_release_that_serves_it(tmp_path: Path)
         assert cs_id in download_artifacts.CASE_STUDIES
 
 
-def test_the_gh_fallback_asks_the_release_the_url_named(
+def test_a_refused_fetch_falls_back_to_gh_against_the_release_that_holds_the_asset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The fallback runs when the direct fetch is refused, and it must not change release."""
+    """An anonymous fetch of a private asset is refused, and the retry must not switch release."""
+    cs_id = "crypto_perps_funding"
+    dest = tmp_path / f"{cs_id}.tar.gz"
     calls: list[list[str]] = []
+
+    def refuse(request, *args, **kwargs):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
-        (tmp_path / "crypto_perps_funding.tar.gz").write_bytes(b"payload")
+        dest.write_bytes(b"payload")
         return None
 
+    monkeypatch.setattr(download_artifacts, "_get_github_token", lambda: None)
+    monkeypatch.setattr(download_artifacts.urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(download_artifacts.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(download_artifacts.subprocess, "run", fake_run)
-    url = download_artifacts._base_url("crypto_perps_funding") + "/crypto_perps_funding.tar.gz"
 
-    assert download_artifacts._download_with_gh(
-        url, tmp_path / "crypto_perps_funding.tar.gz", "cpf"
-    )
+    url = f"{download_artifacts._base_url(cs_id)}/{cs_id}.tar.gz"
+    assert download_artifacts.download_file(url, dest, cs_id)
 
     argv = calls[0]
     assert argv[:3] == ["gh", "release", "download"]
-    assert argv[3] == download_artifacts.ARTIFACT_RELEASE["crypto_perps_funding"]
+    assert argv[3] == download_artifacts.ARTIFACT_RELEASE[cs_id]
     assert argv[3] != download_artifacts.RELEASE_TAG
 
 
 def test_the_failure_hint_names_the_releases_that_were_read() -> None:
     held = download_artifacts.ARTIFACT_RELEASE["crypto_perps_funding"]
+    one = download_artifacts.release_hint(download_artifacts.RELEASE_TAG)
     both = download_artifacts.release_hint(download_artifacts.RELEASE_TAG, held)
     assert download_artifacts.RELEASE_TAG in both and held in both
-    assert held not in download_artifacts.release_hint(download_artifacts.RELEASE_TAG)
+    assert held not in one
+    assert "artifacts release (" in one and "artifacts releases (" in both

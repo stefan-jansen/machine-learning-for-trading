@@ -85,9 +85,11 @@ ARTIFACT_SHA256 = {
 
 def release_hint(*tags: str) -> str:
     """The failure hint has to name the releases the caller was actually reading."""
-    names = ", ".join(sorted(set(tags) or {RELEASE_TAG}))
+    unique = sorted(set(tags) or {RELEASE_TAG})
+    names = ", ".join(unique)
+    noun = "release" if len(unique) == 1 else "releases"
     return (
-        f"The pre-computed artifacts release ({names}) may not be published yet.\n"
+        f"The pre-computed artifacts {noun} ({names}) may not be published yet.\n"
         "The artifacts are added as the case-study chapters roll out; until then every\n"
         "notebook still runs end to end from scratch - the artifacts only skip retraining.\n"
         f"Check the latest releases at https://github.com/{GITHUB_REPO}/releases"
