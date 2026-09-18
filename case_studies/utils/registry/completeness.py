@@ -65,7 +65,23 @@ from .store import (
 
 @dataclass(frozen=True)
 class PredictionCoverage:
-    """Exact expected-versus-actual prediction coverage evidence."""
+    """Exact expected-versus-actual prediction coverage evidence.
+
+    ``expected`` is the family's own target. ``_prepare_expected_keys`` builds it from the
+    fold inputs the adapter prepared, after the model's own eligibility filtering, so
+    ``complete`` here means "this run produced what it set out to produce". It does not and
+    cannot mean "this run covered the declared universe": the declared universe never enters
+    the comparison. A sequence model that narrows its own target scores ``complete`` here and
+    50.9% on :func:`notebook_contracts.measure_prediction_cross_sections`, from the same
+    predictions - measured on ``sp500_equity_option_analytics``, where all 140 members ruled
+    inadmissible carry a row here reading ``complete`` with ``n_missing = 0``.
+
+    ``status`` is stored, but a stored row can only ever read ``complete``: registration
+    raises on a partial evaluation and ``allow_partial`` defaults to False everywhere in
+    production, so the non-complete evaluations are refused before the row is written.
+    Readers that need to discriminate should test the counts, which is what
+    :func:`notebook_contracts.incompletely_registered_predictions` does.
+    """
 
     expected_key_digest: str
     actual_key_digest: str
