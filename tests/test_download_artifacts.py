@@ -260,3 +260,34 @@ def test_every_published_checksum_names_a_release_that_serves_it(tmp_path: Path)
         assert cs_id in download_artifacts.ARTIFACT_SHA256
     for cs_id in download_artifacts.ARTIFACT_SHA256:
         assert cs_id in download_artifacts.CASE_STUDIES
+
+
+def test_the_gh_fallback_asks_the_release_the_url_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback runs when the direct fetch is refused, and it must not change release."""
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        (tmp_path / "crypto_perps_funding.tar.gz").write_bytes(b"payload")
+        return None
+
+    monkeypatch.setattr(download_artifacts.subprocess, "run", fake_run)
+    url = download_artifacts._base_url("crypto_perps_funding") + "/crypto_perps_funding.tar.gz"
+
+    assert download_artifacts._download_with_gh(
+        url, tmp_path / "crypto_perps_funding.tar.gz", "cpf"
+    )
+
+    argv = calls[0]
+    assert argv[:3] == ["gh", "release", "download"]
+    assert argv[3] == download_artifacts.ARTIFACT_RELEASE["crypto_perps_funding"]
+    assert argv[3] != download_artifacts.RELEASE_TAG
+
+
+def test_the_failure_hint_names_the_releases_that_were_read() -> None:
+    held = download_artifacts.ARTIFACT_RELEASE["crypto_perps_funding"]
+    both = download_artifacts.release_hint(download_artifacts.RELEASE_TAG, held)
+    assert download_artifacts.RELEASE_TAG in both and held in both
+    assert held not in download_artifacts.release_hint(download_artifacts.RELEASE_TAG)

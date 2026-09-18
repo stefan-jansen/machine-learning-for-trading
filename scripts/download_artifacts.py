@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
@@ -82,12 +83,15 @@ ARTIFACT_SHA256 = {
 }
 
 
-RELEASE_HINT = (
-    f"The pre-computed artifacts release ({RELEASE_TAG}) may not be published yet.\n"
-    "The artifacts are added as the case-study chapters roll out; until then every\n"
-    "notebook still runs end to end from scratch - the artifacts only skip retraining.\n"
-    f"Check the latest releases at https://github.com/{GITHUB_REPO}/releases"
-)
+def release_hint(*tags: str) -> str:
+    """The failure hint has to name the releases the caller was actually reading."""
+    names = ", ".join(sorted(set(tags) or {RELEASE_TAG}))
+    return (
+        f"The pre-computed artifacts release ({names}) may not be published yet.\n"
+        "The artifacts are added as the case-study chapters roll out; until then every\n"
+        "notebook still runs end to end from scratch - the artifacts only skip retraining.\n"
+        f"Check the latest releases at https://github.com/{GITHUB_REPO}/releases"
+    )
 
 
 def _get_github_token() -> str | None:
@@ -102,8 +106,19 @@ def _get_github_token() -> str | None:
         return None
 
 
-def _download_with_gh(asset_name: str, dest: Path, desc: str) -> bool:
+def _tag_from_url(url: str) -> str:
+    """The release a download URL points at. Not every asset comes from the latest one."""
+    parts = PurePosixPath(urllib.parse.urlsplit(url).path).parts
+    if "download" in parts:
+        index = parts.index("download")
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return RELEASE_TAG
+
+
+def _download_with_gh(url: str, dest: Path, desc: str) -> bool:
     """Download using gh CLI (handles auth automatically)."""
+    asset_name = PurePosixPath(urllib.parse.urlsplit(url).path).name
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
@@ -111,7 +126,7 @@ def _download_with_gh(asset_name: str, dest: Path, desc: str) -> bool:
                 "gh",
                 "release",
                 "download",
-                RELEASE_TAG,
+                _tag_from_url(url),
                 "--repo",
                 GITHUB_REPO,
                 "--pattern",
@@ -168,7 +183,7 @@ def download_file(url: str, dest: Path, desc: str) -> bool:
         return True
     except urllib.error.HTTPError as e:
         if e.code in (401, 403, 404) and shutil.which("gh"):
-            return _download_with_gh(Path(url).name, dest, desc)
+            return _download_with_gh(url, dest, desc)
         if e.code in (401, 403, 404):
             print(f"\r  {desc}: FAILED ({e.code} {e.reason}) - likely missing authentication")
         else:
@@ -406,15 +421,20 @@ def main():
             sys.exit(1)
 
     print(f"Downloading artifacts for {len(cs_list)} case study(ies)")
-    print(f"Source: {BASE_URL}\n")
+    for tag in sorted({_release_tag(cs) for cs in cs_list}):
+        print(f"Source: https://github.com/{GITHUB_REPO}/releases/download/{tag}")
+    print()
 
     # Ensure cache dir
     (REPO_ROOT / ".cache").mkdir(exist_ok=True)
 
     success = 0
+    failed: list[str] = []
     for cs_id in cs_list:
         if download_case_study(cs_id, force=args.force):
             success += 1
+        else:
+            failed.append(cs_id)
 
     # Clean up cache dir
     cache = REPO_ROOT / ".cache"
@@ -424,7 +444,7 @@ def main():
     print(f"\nDone: {success}/{len(cs_list)} case studies ready.")
     if success < len(cs_list):
         print()
-        print(RELEASE_HINT)
+        print(release_hint(*(_release_tag(cs) for cs in failed)))
         sys.exit(1)
 
 
