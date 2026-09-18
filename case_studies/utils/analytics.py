@@ -726,6 +726,18 @@ class CarrierCostCurves:
     curves: pl.DataFrame
     exclusions: pl.DataFrame
 
+    def exclusion_lines(self) -> list[str]:
+        """One line per case study that drew no curve, ready to print or to raise with.
+
+        A caller that has no curves at all still has these, and they are the diagnosis: a
+        clean clone with no registries excludes every case study, and reporting only that
+        nothing was found hands the reader back the question the loader already answered.
+        """
+        return [
+            f"  no curve for {row['display_name']}: {row['reason']} - {row['detail']}"
+            for row in self.exclusions.iter_rows(named=True)
+        ]
+
 
 _EXCLUSION_SCHEMA = {
     "case_study": pl.Utf8,
