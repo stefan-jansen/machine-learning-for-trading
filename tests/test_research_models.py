@@ -3161,3 +3161,85 @@ def test_peak_rss_is_read_in_the_unit_the_platform_reports(monkeypatch) -> None:
     on_macos = runtime.peak_rss_bytes()
 
     assert on_linux == on_macos * 1024
+
+
+def _trained_tabm_request(study, monkeypatch, calls: list[str]):
+    """Fit one tabm request and hand back the request plus its run."""
+
+    def counted_train(*, model, X_val, val_dates, state_callback=None, **kwargs):
+        calls.append(str(val_dates[0])[:10])
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", counted_train)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+    return request, request.run()
+
+
+def _cached_run_verdicts(monkeypatch) -> list[bool]:
+    """Record what `_cached_research_run` decides on each request it is asked about."""
+    verdicts: list[bool] = []
+    original = tabular_dl._cached_research_run
+
+    def spy(study, spec, context):
+        run = original(study, spec, context)
+        verdicts.append(run is not None)
+        return run
+
+    monkeypatch.setattr(tabular_dl, "_cached_research_run", spy)
+    return verdicts
+
+
+def test_a_cached_tabm_run_survives_the_loss_of_its_epoch_dump(tmp_path, monkeypatch) -> None:
+    """The reader bundles ship without all_predictions.parquet, so its absence must not refit.
+
+    Nothing reads that file: `_cached_research_run` uses only best_epoch_predictions.parquet
+    and result.json, and required the dump for its readability alone.
+    """
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    calls: list[str] = []
+    request, first = _trained_tabm_request(study, monkeypatch, calls)
+    fitted = list(calls)
+    assert fitted, "the first run must actually fit"
+
+    diagnostics = first.training.root / "run_log" / "training" / first.training.hash / "diagnostics"
+    dump = diagnostics / "all_predictions.parquet"
+    assert dump.is_file(), "the writer still produces the dump; only the bundle drops it"
+    dump.unlink()
+
+    verdicts = _cached_run_verdicts(monkeypatch)
+    reused = request.run()
+
+    assert verdicts == [True], "the run must be taken from cache, not re-executed"
+    assert calls == fitted, "a missing epoch dump must not trigger a refit"
+    assert reused.training.hash == first.training.hash
+    assert reused.predictions[0].hash == first.predictions[0].hash
+
+
+def test_a_cached_tabm_run_is_rejected_without_its_learning_curves(tmp_path, monkeypatch) -> None:
+    """The negative control: a file the reuse path reads is still required.
+
+    Without it the cache must be refused. Fold-level fitted state may still spare the
+    fit, which is why this asserts on the cache verdict and not on the training calls.
+    """
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    calls: list[str] = []
+    request, first = _trained_tabm_request(study, monkeypatch, calls)
+
+    diagnostics = first.training.root / "run_log" / "training" / first.training.hash / "diagnostics"
+    (diagnostics / "learning_curves.parquet").unlink()
+
+    verdicts = _cached_run_verdicts(monkeypatch)
+    request.run()
+
+    # The run re-executes and rewrites the diagnostics, so the post-execution
+    # verification asks again and gets a yes. The first verdict is the one under test.
+    assert verdicts[0] is False, "losing a file the reuse path reads must refuse the cache"
+    assert verdicts[1:] == [True], "the re-executed run must verify afterwards"
