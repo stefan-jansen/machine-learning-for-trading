@@ -61,6 +61,7 @@ from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     SHORT_NAMES,
     extract_allocator,
+    is_unallocated,
     load_chapter_backtests,
 )
 from utils.paths import get_chapter_dir
@@ -203,7 +204,13 @@ comparison = (
 # Collapse to one row per (case_study, allocator) — keep the configuration
 # (rebalance / top_k / overlay) that posts the highest Sharpe. Table 20.6
 # entries are the "best for that allocator" within the spine configuration.
-comparison = comparison.sort("sharpe", descending=True).unique(
+#
+# A backtest with no Sharpe is dropped rather than ranked. It is not a worse result, it is an
+# unmeasured one, and polars sorts nulls FIRST under `descending=True` unless told otherwise -
+# so `keep="first"` would hand every table below the row that has no number. `nulls_last=True`
+# on each ranking says the same thing a second time, for a column this filter does not cover.
+comparison = comparison.filter(pl.col("sharpe").is_not_null())
+comparison = comparison.sort("sharpe", descending=True, nulls_last=True).unique(
     subset=["case_study", "allocator"], keep="first"
 )
 
@@ -220,7 +227,7 @@ comparison.head(10)
 
 # %%
 best_per_cs = (
-    comparison.sort("sharpe", descending=True)
+    comparison.sort("sharpe", descending=True, nulls_last=True)
     .unique(subset=["case_study"], keep="first")
     .select(
         "display_name",
@@ -232,7 +239,7 @@ best_per_cs = (
         "total_return",
         "max_drawdown",
     )
-    .sort("sharpe", descending=True)
+    .sort("sharpe", descending=True, nulls_last=True)
 )
 print("Best allocator per case study (sorted by Sharpe):\n")
 best_per_cs
@@ -289,16 +296,31 @@ show_with_alt(
 # ## Equal-Weight Baseline vs Best Allocator
 #
 # How much does allocation choice improve over the simplest baseline?
+#
+# The baseline is read from the **signal** stage, not from an `equal_weight` allocator.
+# `equal_weight` left every case study's allocator menu on the ruling that equal weight IS the
+# baseline and listing it as an alternative re-runs the baseline as its own competitor
+# (`reference/CASE_STUDY_PIPELINE.md` section 4). Measured 2026-09-18, all nine registries hold
+# zero `equal_weight` rows at `stage='allocation'`, so the filter this section used to apply
+# matched nothing and every case study's `ew_sharpe`, `sharpe_diff` and `pct_improvement` came
+# out null - the section reported no number at all. Doing no allocation work is recorded one
+# stage earlier, on the same spine prediction, which is what `is_unallocated` selects.
 
 # %%
+_signal_spine = load_chapter_backtests("ch16", case_studies=CS_LIST, metrics=["sharpe"]).filter(
+    spine_filter
+)
 ew_sharpes = (
-    comparison.filter(pl.col("allocator") == "equal_weight")
+    _signal_spine.filter(
+        pl.col("sharpe").is_not_null()
+        & pl.col("spec_json").map_elements(is_unallocated, return_dtype=pl.Boolean)
+    )
     .group_by("case_study")
     .agg(ew_sharpe=pl.col("sharpe").max())
 )
 
 best_sharpes = (
-    comparison.sort("sharpe", descending=True)
+    comparison.sort("sharpe", descending=True, nulls_last=True)
     .unique(subset=["case_study"], keep="first")
     .select("case_study", best_sharpe=pl.col("sharpe"), best_allocator=pl.col("allocator"))
 )
@@ -330,8 +352,8 @@ _without = improvement.filter(pl.col("ew_sharpe").is_null())
 display(
     Markdown(
         f"{_with_ew.height} of {improvement.height} case studies in this "
-        "comparison ran an equal-weight allocator on the spine prediction, so "
-        "only those can be measured against the baseline"
+        "comparison carry a signal-stage equal-weight baseline on the spine "
+        "prediction, so only those can be measured against it"
         + (
             f". The rest ({', '.join(_without['display_name'].to_list())}) have "
             "a highest-Sharpe allocator but nothing to compare it with, and are "
@@ -487,13 +509,15 @@ print("- No single allocator has the highest Sharpe in every case study")
 
 # %%
 breadth_rows = []
+_EW_BY_CS = dict(zip(ew_sharpes["case_study"], ew_sharpes["ew_sharpe"], strict=True))
 for cs_id in comparison["case_study"].unique().sort().to_list():
-    cs_data = comparison.filter(pl.col("case_study") == cs_id)
-    ew_row = cs_data.filter(pl.col("allocator") == "equal_weight")
-    if ew_row.is_empty():
+    # The baseline comes from `ew_sharpes` (signal stage) for the same reason as above: no
+    # case study runs `equal_weight` as an allocator, so reading it out of `comparison` left
+    # every case study skipped and the breadth table empty.
+    ew_sr = _EW_BY_CS.get(cs_id)
+    if ew_sr is None:
         continue
-    ew_sr = ew_row["sharpe"].max()
-    non_ew = cs_data.filter(pl.col("allocator") != "equal_weight")
+    non_ew = comparison.filter(pl.col("case_study") == cs_id)
     if non_ew.is_empty():
         continue
     n_better = non_ew.filter(pl.col("sharpe") > ew_sr).height
@@ -587,11 +611,15 @@ else:
 # %%
 ch16_raw = load_chapter_backtests("ch16", case_studies=CS_LIST, metrics=["sharpe"])
 ch16_ew = (
-    ch16_raw.with_columns(
-        allocator=pl.col("spec_json").map_elements(extract_allocator, return_dtype=pl.Utf8),
+    # `is_unallocated`, not `allocator == "equal_weight"`: a signal-stage row carries no
+    # allocation block, which `extract_allocator` reports as "unknown". Filtering on the
+    # allocator name here matched only the 30 rows in `nasdaq100_microstructure` that spell
+    # the baseline out, and dropped the other eight case studies' baselines entirely.
+    ch16_raw.filter(
+        pl.col("sharpe").is_not_null()
+        & pl.col("spec_json").map_elements(is_unallocated, return_dtype=pl.Boolean)
     )
-    .filter(pl.col("allocator") == "equal_weight")
-    .sort("sharpe", descending=True)
+    .sort("sharpe", descending=True, nulls_last=True)
     .unique(subset=["case_study"], keep="first")
     .select("case_study", ew_sharpe=pl.col("sharpe"))
 )
@@ -606,7 +634,7 @@ UNIVERSE_SIZES = dict(
 # %%
 # Best allocator Sharpe per CS from Ch17
 best_alloc = (
-    comparison.sort("sharpe", descending=True)
+    comparison.sort("sharpe", descending=True, nulls_last=True)
     .unique(subset=["case_study"], keep="first")
     .select("case_study", best_sharpe=pl.col("sharpe"))
 )

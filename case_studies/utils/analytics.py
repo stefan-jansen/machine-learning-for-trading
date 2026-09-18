@@ -695,6 +695,27 @@ def extract_allocator(spec_json: str) -> str:
     return allocation.get("method", "unknown")
 
 
+def is_unallocated(spec_json: str) -> bool:
+    """Whether a backtest did no allocation work, so its weights are the signal's own.
+
+    This is the equal-weight baseline, and it is recorded at the signal stage rather than as
+    an allocator. ``equal_weight`` left every case study's allocator menu on the ruling that
+    equal weight IS the baseline and listing it as an alternative re-runs the baseline as its
+    own competitor (``reference/CASE_STUDY_PIPELINE.md`` section 4), so a filter for an
+    ``equal_weight`` allocator matches nothing: measured 2026-09-18, all nine registries hold
+    zero such rows at ``stage='allocation'``.
+
+    Two spellings mean the same thing and both count. Signal-stage rows written today carry
+    ``signal.method = 'equal_weight_top_k'`` and no allocation block at all, and
+    ``extract_allocator`` reports those as ``"unknown"`` because it cannot tell an absent
+    block from an unrecognized one. Older rows - 30 of them in
+    ``nasdaq100_microstructure`` - spell the same strategy out as
+    ``allocation.method = 'equal_weight'``.
+    """
+    allocation = strategy_view(parse_backtest_spec(spec_json)).get("allocation") or {}
+    return allocation.get("method") in (None, "equal_weight")
+
+
 def _strategy_signature(spec_json: str) -> str:
     """Identity of a backtest's signal + allocation config, ignoring cost.
 
