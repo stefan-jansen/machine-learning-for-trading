@@ -25,10 +25,14 @@ import json
 import sqlite3
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from case_studies.utils.insight_chapter import (
+    IncomparableFoldGeometryError,
     RegistrySelectionError,
+    collect_checkpoint_fold_trajectories,
+    collect_grid_per_cs,
     collect_rank1_per_cs,
     resolve_expected_fold_ids,
 )
@@ -188,8 +192,79 @@ def test_no_candidate_reaching_the_declared_count_is_named_as_such(tmp_path, sel
 
 
 def test_the_resolver_refuses_an_undeclared_fold_count() -> None:
-    import polars as pl
-
     folds = pl.DataFrame({"prediction_hash": ["a", "a"], "fold_id": [0, 5]})
     with pytest.raises(RegistrySelectionError, match="n_folds is not declared"):
         resolve_expected_fold_ids(folds, 0)
+
+
+def test_the_grid_refuses_a_disagreement_rather_than_shortening_itself(
+    tmp_path, selects_from
+) -> None:
+    """The whole-grid collector skips a case study it cannot rank, which hides the reason.
+
+    Nothing reaching the declared count is a case study without a complete candidate and
+    is a reason to leave it out. Two disagreeing full-length geometries are a registry
+    that cannot be ranked, and a table that silently loses a case study over that says
+    nothing a reader could act on.
+    """
+    selects_from(tmp_path, [("nlinear", 0.02, STRIDE_FIVE), ("lstm_h64", 0.05, (0, 1, 2, 3))])
+
+    with pytest.raises(IncomparableFoldGeometryError, match="disagree on which 4 folds"):
+        collect_grid_per_cs(["test"], "deep_learning")
+
+
+def test_the_grid_still_skips_a_case_study_with_no_complete_candidate(
+    tmp_path, selects_from
+) -> None:
+    selects_from(tmp_path, [("nlinear", 0.02, (0, 5)), ("lstm_h64", 0.05, (0, 5, 10))])
+
+    assert collect_grid_per_cs(["test"], "deep_learning").is_empty()
+
+
+def test_a_checkpoint_geometry_failure_names_the_case_study_and_run(tmp_path, monkeypatch) -> None:
+    """`collect_checkpoint_fold_trajectories` loops over nine case studies."""
+    training_hash = register_training_run(
+        "test",
+        {
+            "family": "deep_learning",
+            "label": LABEL,
+            "config_name": "nlinear",
+            "params": {},
+            "seed": 42,
+            "n_folds": 4,
+        },
+        case_dir=tmp_path,
+    )
+    for checkpoint, fold_ids in ((5, STRIDE_FIVE), (10, (0, 1, 2, 3))):
+        prediction_hash = register_prediction_set(
+            "test",
+            training_hash,
+            checkpoint_value=checkpoint,
+            checkpoint_kind="epoch",
+            split="validation",
+            metrics={"ic_mean": 0.02, "ic_mean_daily": 0.02, "ic_std": 0.01},
+            case_dir=tmp_path,
+        )
+        register_fold_metrics(
+            "test",
+            prediction_hash,
+            {fold_id: {"ic": 0.02} for fold_id in fold_ids},
+            case_dir=tmp_path,
+        )
+    monkeypatch.setattr("case_studies.utils.insight_chapter.get_case_study_dir", lambda _: tmp_path)
+    rank1 = pl.DataFrame(
+        [
+            {
+                "case_study": "test",
+                "short_name": "Test",
+                "family": "deep_learning",
+                "config_name": "nlinear",
+                "label": LABEL,
+                "training_hash": training_hash,
+                "spec_json": json.dumps({"n_folds": 4}),
+            }
+        ]
+    )
+
+    with pytest.raises(RegistrySelectionError, match=f"test/{training_hash}: "):
+        collect_checkpoint_fold_trajectories(rank1)

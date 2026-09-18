@@ -60,6 +60,16 @@ class RegistrySelectionError(ValueError):
     """Raised when registry candidates cannot support a comparable rank-one selection."""
 
 
+class IncomparableFoldGeometryError(RegistrySelectionError):
+    """Raised when two candidates each cover the declared fold count, but different folds.
+
+    Distinct from "nothing reaches the declared count", which is a case study with no
+    complete candidate and is a reason to leave it out of a table. Two disagreeing
+    full-length geometries are a registry that cannot be ranked at all, so every caller
+    surfaces it rather than skipping the case study.
+    """
+
+
 def compare_ic_on_shared_timestamps(
     left: pl.DataFrame,
     right: pl.DataFrame,
@@ -214,7 +224,7 @@ def resolve_expected_fold_ids(folds: pl.DataFrame, n_folds: int) -> tuple[int, .
     if not full_length:
         raise RegistrySelectionError(f"no candidate reports all {n_folds} declared folds")
     if len(full_length) > 1:
-        raise RegistrySelectionError(
+        raise IncomparableFoldGeometryError(
             f"candidates disagree on which {n_folds} folds they cover: {sorted(full_length)}"
         )
     return next(iter(full_length))
@@ -383,7 +393,12 @@ def collect_checkpoint_fold_trajectories(rank1: pl.DataFrame) -> pl.DataFrame:
             raise RegistrySelectionError(
                 f"{selected['case_study']}/{selected['training_hash']}: no checkpoint folds"
             )
-        expected_folds = set(resolve_expected_fold_ids(checkpoints, n_folds))
+        try:
+            expected_folds = set(resolve_expected_fold_ids(checkpoints, n_folds))
+        except RegistrySelectionError as exc:
+            raise RegistrySelectionError(
+                f"{selected['case_study']}/{selected['training_hash']}: {exc}"
+            ) from exc
         for checkpoint in checkpoints["checkpoint_value"].unique().sort().to_list():
             current = checkpoints.filter(pl.col("checkpoint_value") == checkpoint)
             fold_ids = current["fold_id"].to_list()
@@ -538,6 +553,8 @@ def collect_grid_per_cs(
         # short would otherwise define its own standard and rank against complete ones.
         try:
             expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
+        except IncomparableFoldGeometryError:
+            raise
         except RegistrySelectionError:
             continue
         selected = []
