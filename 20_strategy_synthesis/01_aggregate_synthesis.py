@@ -292,6 +292,43 @@ from case_studies.utils.paired_metrics import RUNG_PINS as _CLUSTER_RUNG_RESTRIC
 from case_studies.utils.strategy_analysis import (  # noqa: E402
     LABEL_RESTRICTIONS as _CLUSTER_LABEL_RESTRICTIONS,
 )
+from case_studies.utils.strategy_analysis import (  # noqa: E402
+    NoSelectableCandidates,
+    resolve_solvent_carrier,
+    selectable_validation_candidates,
+)
+
+
+@cache
+def _canonical_carrier(cs: str) -> dict | None:
+    """The configuration this case study reports, from the resolver that decides it.
+
+    This notebook built the same cross-stage rank-1 by hand in four places - concatenating
+    `explorer.best` over signal, allocation and risk_overlay, dropping benchmark families,
+    applying `LABEL_RESTRICTIONS` and `RUNG_PINS`, and taking the highest Sharpe. Three of
+    them wanted the winner and read it from here; the fourth, `_val_rank1_carrier`, walks the
+    whole field and takes it from `selectable_validation_candidates`, which is the same
+    ranking one step earlier. That is not the ranking the case studies report. `resolve_canonical_rank1_lineage` re-ranks the field
+    on exact common timestamp support whenever a conformal candidate is in it, because a
+    conformal allocator abstains until it is calibrated and books zeros over the abstention,
+    and it applies `UNIVERSE_RESTRICTIONS` and `CARRIER_PINS` besides. Measured 2026-09-18
+    against the nine canonical registries, the two rankings named different configurations on
+    two case studies: `fx_pairs` (`linear/ridge_a1000000.0` at Sharpe 0.4121
+    against `deep_learning/lstm_h64` at comparison Sharpe 0.3091) and
+    `nasdaq100_microstructure` (`deep_learning/nlinear` on fwd_ret_15m at 2.3001 against
+    `gbm/default_multiclass` on fwd_dir_15m at 2.4159). `spine_prediction_hash` is what
+    `05_portfolio_allocation` and Figure 20.7 pin their allocator comparison to, so on
+    `fx_pairs` the chapter compared allocators on a configuration the case study does not
+    report.
+
+    Returns None where the resolver finds nothing selectable, which is the state the
+    hand-built rankings reported as an empty frame. An insolvent or mis-calibrated carrier
+    still raises: it is a sweep to fix, not a case study to skip.
+    """
+    try:
+        return resolve_solvent_carrier(cs)
+    except NoSelectableCandidates:
+        return None
 
 
 def _retired(cs: str) -> frozenset[str]:
@@ -751,30 +788,12 @@ def build_backtest_rows():
                 best_overlay = best_risk_row["risk_name"][0]
                 managed_sharpe = best_risk_row["sharpe"][0]
 
-        # Spine rank-1 prediction_hash — cross-stage rank-1 across
-        # signal/allocation/risk_overlay, matching the paired-bootstrap
-        # cross-stage leader logic below (and Ch20 prose Tables 20.5–20.7).
-        # Without this, Figure 20.7 can read off a different prediction than
-        # the prose tables.
-        cross_stage = pl.concat(
-            [_best_pinned(explorer, cs, s, 2000) for s in ("signal", "allocation", "risk_overlay")],
-            how="diagonal_relaxed",
-        )
-        if not cross_stage.is_empty() and "family" in cross_stage.columns:
-            cross_stage = cross_stage.filter(pl.col("family") != "benchmark")
-        if label_restriction and "label" in cross_stage.columns and not cross_stage.is_empty():
-            cross_stage = cross_stage.filter(pl.col("label").is_in(list(label_restriction)))
-        cross_stage = _apply_rung_restriction(cross_stage, cs)
-        if not cross_stage.is_empty():
-            # `prediction_hash` as the second sort key for the same reason as the overlay
-            # ranking above: `keep="first"` and the positional read below both take whatever
-            # the concat happened to order first when two predictions share a Sharpe. It is
-            # also the subset key, so it decides the row completely. No registry holds a tie
-            # at this maximum today, so nothing moves.
-            cross_stage = cross_stage.sort(
-                ["sharpe", "prediction_hash"], descending=[True, False], nulls_last=True
-            ).unique(subset=["prediction_hash"], keep="first", maintain_order=True)
-        spine_pred_hash = cross_stage["prediction_hash"][0] if not cross_stage.is_empty() else None
+        # Spine rank-1 prediction_hash - the configuration the case study reports, taken
+        # from `_canonical_carrier` rather than ranked a second time here. Figure 20.7 and
+        # `05_portfolio_allocation` both read this value, and Ch20 prose Tables 20.5-20.7
+        # quote the resolver, so the two have to be one answer.
+        _carrier = _canonical_carrier(cs)
+        spine_pred_hash = _carrier["val_prediction_hash"] if _carrier else None
 
         bt_rows.append(
             {
@@ -958,35 +977,14 @@ paired_rows: list[dict] = []
 paired_skips: list[dict] = []
 
 for cs, explorer in explorers.items():
-    label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    # Cross-stage rank-1 (signal/allocation/risk_overlay), mirroring
-    # strategy_analysis.SELECTION_STAGES. Dedup by prediction_hash so the
-    # leader corresponds to a distinct trained model.
-    cand = pl.concat(
-        [_best_live(explorer, cs, s, 2000) for s in ("signal", "allocation", "risk_overlay")],
-        how="diagonal_relaxed",
-    )
-    if cand.is_empty() or "backtest_hash" not in cand.columns:
-        paired_skips.append({"case_study": cs, "reason": "no_signal_stage_candidates"})
+    # The leader is the configuration the case study reports, not a ranking rebuilt here.
+    # `_canonical_carrier` documents why the two are not the same ordering.
+    carrier = _canonical_carrier(cs)
+    if carrier is None:
+        paired_skips.append({"case_study": cs, "reason": "no_selectable_candidates"})
         continue
-    if "family" in cand.columns:
-        cand = cand.filter(pl.col("family") != "benchmark")
-    if label_restriction and "label" in cand.columns:
-        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
-    cand = _apply_rung_restriction(cand, cs)
-    if cand.is_empty():
-        paired_skips.append({"case_study": cs, "reason": "no_candidates_after_restriction"})
-        continue
-    # Two sort keys, for the reason `rank_one` exists: `keep="first"` after a one-key sort
-    # hands an exact Sharpe tie to whatever order the concat produced, and the row it keeps
-    # supplies `leader_hash` and `leader_label` - both published below. `rank_one` does not
-    # fit here because this dedups per prediction rather than taking one row.
-    cand = cand.sort(["sharpe", "backtest_hash"], descending=[True, False]).unique(
-        subset=["prediction_hash"], keep="first", maintain_order=True
-    )
-
-    leader_hash = cand["backtest_hash"][0]
-    leader_label = cand["label"][0] if "label" in cand.columns else None
+    leader_hash = carrier["val_backtest_hash"]
+    leader_label = carrier["label"]
     if not leader_label:
         paired_skips.append({"case_study": cs, "reason": "no_label_on_leader"})
         continue
@@ -1197,35 +1195,30 @@ def _val_rank1_carrier(cs: str) -> dict | None:
     explorer = explorers.get(cs)
     if explorer is None:
         return None
-    cand = pl.concat(
-        [_best_live(explorer, cs, s, 2000) for s in ("signal", "allocation", "risk_overlay")],
-        how="diagonal_relaxed",
-    )
-    if cand.is_empty() or "backtest_hash" not in cand.columns:
+    # The field the resolver ranks, in the resolver's order, rather than a concat of
+    # `explorer.best` re-filtered here: the walk starts at the carrier `_canonical_carrier`
+    # names and falls through in the same order the resolver would. Every row is kept - no
+    # dedup by prediction_hash - because when the rank-1 configuration has no matching holdout
+    # retrain but a same-prediction lower-Sharpe variant (a different allocator or risk
+    # overlay) does, a dedup would jump to a different prediction instead of accepting the
+    # same-prediction variant as the apples-to-apples match.
+    try:
+        candidates = selectable_validation_candidates(cs)
+    except NoSelectableCandidates:
+        # The helper raises on an empty pool rather than returning one, and this walk's
+        # callers read `None` as "no holdout pair for this case study" - the state the
+        # hand-built ranking reported as an empty frame. A pool with nothing eligible in it
+        # is that state, not a reason to stop aggregating the other eight.
         return None
-    if "family" in cand.columns:
-        cand = cand.filter(pl.col("family") != "benchmark")
     label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    if label_restriction and "label" in cand.columns:
-        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
-    cand = _apply_rung_restriction(cand, cs)
-    if cand.is_empty():
-        return None
-    # Do NOT dedup by prediction_hash here. The walk needs to surface every
-    # registered (signal, allocation, risk_overlay) tuple — when the val
-    # rank-1 configuration has no matching holdout retrain but a same-prediction
-    # lower-sharpe variant (different allocator or risk overlay) does, the
-    # dedup would silently jump to a *different* prediction instead of
-    # accepting the same-prediction variant as the apples-to-apples match.
-    cand = cand.sort("sharpe", descending=True)
 
     case_dir = get_case_study_dir(cs)
     db_path = case_dir / "run_log" / "registry.db"
     rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
     db = sqlite3.connect(str(db_path))
     try:
-        for i in range(min(cand.height, 200)):
-            bt_hash = cand["backtest_hash"][i]
+        for candidate in candidates[:200]:
+            bt_hash = candidate["backtest_hash"]
             spec = _full_strategy_spec_from_backtest(db, bt_hash)
             if spec is None:
                 continue
@@ -1246,7 +1239,7 @@ def _val_rank1_carrier(cs: str) -> dict | None:
                 JOIN training_runs t ON t.training_hash = p.training_hash
                 WHERE p.prediction_hash = ?
                 """,
-                (cand["prediction_hash"][i],),
+                (candidate["prediction_hash"],),
             ).fetchone()
             if carrier_row is None:
                 continue
@@ -1304,7 +1297,7 @@ def _val_rank1_carrier(cs: str) -> dict | None:
             ).fetchall()
             row = any(training_run_fitted_for_the_holdout(probe[0]) for probe in probe_rows)
             if row:
-                return {"spec": spec, "prediction_hash": cand["prediction_hash"][i]}
+                return {"spec": spec, "prediction_hash": candidate["prediction_hash"]}
     finally:
         db.close()
     return None
@@ -1610,42 +1603,17 @@ def _populate_pair(
 extra_paired_rows: list[dict] = []
 _PAIRED_STAGES = ("signal", "allocation", "risk_overlay")
 for cs, explorer in explorers.items():
-    label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    # Pool validation backtests across the same stages the holdout selection
-    # uses for cross-stage rank-1 (`strategy_analysis.SELECTION_STAGES`). When the val
-    # rank-1 is an allocation- or risk_overlay-stage strategy, the holdout
-    # retrain uses THAT strategy_spec; pulling only signal-stage candidates
-    # here surfaces a leader whose signal.method differs from the holdout's,
-    # so `_val_rank1_signal_spec` can't find a matching holdout (e.g.,
-    # crypto signal-stage rank-1 = quintile_long_short but cross-stage
-    # rank-1 = score_weighted/equal_weight_top_k). Carrier-selection rule:
-    # val rank-1 is the highest-Sharpe validation backtest across the three
-    # stages; see `_val_rank1_carrier`.
-    cand = pl.concat(
-        [_best_live(explorer, cs, s, 2000) for s in _PAIRED_STAGES],
-        how="diagonal_relaxed",
-    )
-    if cand.is_empty() or "backtest_hash" not in cand.columns:
+    # The same carrier the spine and the paired-bootstrap leader above take. The holdout
+    # retrain replays the rank-1's whole strategy spec, which is why this reads the
+    # cross-stage carrier rather than a signal-stage rank-1: on crypto the signal-stage
+    # rank-1 is `quintile_long_short` while the carrier is `score_weighted` over
+    # `equal_weight_top_k`, and `_val_rank1_signal_spec` would find no matching holdout.
+    carrier = _canonical_carrier(cs)
+    if carrier is None:
         continue
-    if "family" in cand.columns:
-        cand = cand.filter(pl.col("family") != "benchmark")
-    if label_restriction and "label" in cand.columns:
-        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
-    cand = _apply_rung_restriction(cand, cs)
-    if cand.is_empty():
-        continue
-    # Two sort keys, for the reason `rank_one` exists: `keep="first"` after a one-key sort
-    # hands an exact Sharpe tie to whatever order the concat produced, and the row it keeps
-    # supplies `leader_hash` and `leader_label` - both published below. `rank_one` does not
-    # fit here because this dedups per prediction rather than taking one row.
-    cand = cand.sort(["sharpe", "backtest_hash"], descending=[True, False]).unique(
-        subset=["prediction_hash"], keep="first", maintain_order=True
-    )
-
-    leader = cand.row(0, named=True)
-    leader_hash = leader["backtest_hash"]
-    leader_phash = leader["prediction_hash"]
-    leader_label = leader.get("label")
+    leader_hash = carrier["val_backtest_hash"]
+    leader_phash = carrier["val_prediction_hash"]
+    leader_label = carrier["label"]
     if not leader_label:
         continue
     ppy = {"daily": 252, "weekly": 52, "monthly": 12, "8h": 1095}.get(
@@ -1753,8 +1721,8 @@ for cs, explorer in explorers.items():
         ho_family = ho_lineage["family"]
         ho_config = ho_lineage["config_name"]
         same_lineage = (
-            ho_family == leader["family"]
-            and ho_config == leader["config_name"]
+            ho_family == carrier["family"]
+            and ho_config == carrier["config_name"]
             and ho_label == leader_label
         )
         if same_lineage:

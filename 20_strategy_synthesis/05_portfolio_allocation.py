@@ -61,6 +61,7 @@ from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     SHORT_NAMES,
     extract_allocator,
+    is_unallocated,
     load_chapter_backtests,
 )
 from utils.paths import get_chapter_dir
@@ -203,7 +204,13 @@ comparison = (
 # Collapse to one row per (case_study, allocator) — keep the configuration
 # (rebalance / top_k / overlay) that posts the highest Sharpe. Table 20.6
 # entries are the "best for that allocator" within the spine configuration.
-comparison = comparison.sort("sharpe", descending=True).unique(
+#
+# A backtest with no Sharpe is dropped rather than ranked. It is not a worse result, it is an
+# unmeasured one, and polars sorts nulls FIRST under `descending=True` unless told otherwise -
+# so `keep="first"` would hand every table below the row that has no number. `nulls_last=True`
+# on each ranking says the same thing a second time, for a column this filter does not cover.
+comparison = comparison.filter(pl.col("sharpe").is_not_null())
+comparison = comparison.sort("sharpe", descending=True, nulls_last=True).unique(
     subset=["case_study", "allocator"], keep="first"
 )
 
@@ -220,7 +227,7 @@ comparison.head(10)
 
 # %%
 best_per_cs = (
-    comparison.sort("sharpe", descending=True)
+    comparison.sort("sharpe", descending=True, nulls_last=True)
     .unique(subset=["case_study"], keep="first")
     .select(
         "display_name",
@@ -232,7 +239,7 @@ best_per_cs = (
         "total_return",
         "max_drawdown",
     )
-    .sort("sharpe", descending=True)
+    .sort("sharpe", descending=True, nulls_last=True)
 )
 print("Best allocator per case study (sorted by Sharpe):\n")
 best_per_cs
@@ -289,16 +296,31 @@ show_with_alt(
 # ## Equal-Weight Baseline vs Best Allocator
 #
 # How much does allocation choice improve over the simplest baseline?
+#
+# The baseline is read from the **signal** stage, not from an `equal_weight` allocator.
+# `equal_weight` left every case study's allocator menu on the ruling that equal weight IS the
+# baseline and listing it as an alternative re-runs the baseline as its own competitor
+# (`reference/CASE_STUDY_PIPELINE.md` section 4). Measured 2026-09-18, all nine registries hold
+# zero `equal_weight` rows at `stage='allocation'`, so the filter this section used to apply
+# matched nothing and every case study's `ew_sharpe`, `sharpe_diff` and `pct_improvement` came
+# out null - the section reported no number at all. Doing no allocation work is recorded one
+# stage earlier, on the same spine prediction, which is what `is_unallocated` selects.
 
 # %%
+_signal_spine = load_chapter_backtests("ch16", case_studies=CS_LIST, metrics=["sharpe"]).filter(
+    spine_filter
+)
 ew_sharpes = (
-    comparison.filter(pl.col("allocator") == "equal_weight")
+    _signal_spine.filter(
+        pl.col("sharpe").is_not_null()
+        & pl.col("spec_json").map_elements(is_unallocated, return_dtype=pl.Boolean)
+    )
     .group_by("case_study")
     .agg(ew_sharpe=pl.col("sharpe").max())
 )
 
 best_sharpes = (
-    comparison.sort("sharpe", descending=True)
+    comparison.sort("sharpe", descending=True, nulls_last=True)
     .unique(subset=["case_study"], keep="first")
     .select("case_study", best_sharpe=pl.col("sharpe"), best_allocator=pl.col("allocator"))
 )
@@ -330,8 +352,8 @@ _without = improvement.filter(pl.col("ew_sharpe").is_null())
 display(
     Markdown(
         f"{_with_ew.height} of {improvement.height} case studies in this "
-        "comparison ran an equal-weight allocator on the spine prediction, so "
-        "only those can be measured against the baseline"
+        "comparison carry a signal-stage equal-weight baseline on the spine "
+        "prediction, so only those can be measured against it"
         + (
             f". The rest ({', '.join(_without['display_name'].to_list())}) have "
             "a highest-Sharpe allocator but nothing to compare it with, and are "
@@ -487,13 +509,15 @@ print("- No single allocator has the highest Sharpe in every case study")
 
 # %%
 breadth_rows = []
+_EW_BY_CS = dict(zip(ew_sharpes["case_study"], ew_sharpes["ew_sharpe"], strict=True))
 for cs_id in comparison["case_study"].unique().sort().to_list():
-    cs_data = comparison.filter(pl.col("case_study") == cs_id)
-    ew_row = cs_data.filter(pl.col("allocator") == "equal_weight")
-    if ew_row.is_empty():
+    # The baseline comes from `ew_sharpes` (signal stage) for the same reason as above: no
+    # case study runs `equal_weight` as an allocator, so reading it out of `comparison` left
+    # every case study skipped and the breadth table empty.
+    ew_sr = _EW_BY_CS.get(cs_id)
+    if ew_sr is None:
         continue
-    ew_sr = ew_row["sharpe"].max()
-    non_ew = cs_data.filter(pl.col("allocator") != "equal_weight")
+    non_ew = comparison.filter(pl.col("case_study") == cs_id)
     if non_ew.is_empty():
         continue
     n_better = non_ew.filter(pl.col("sharpe") > ew_sr).height
@@ -576,26 +600,19 @@ else:
 #   concentration; in narrow ones, top-$k$ selection dominates.
 #
 # The scatter below tests this hypothesis, wherever enough case studies have both an
-# allocation uplift and an equal-weight baseline registered to place a point. When they do not,
-# the cell says which ones qualified instead of drawing it.
+# allocation uplift and a signal-stage equal-weight baseline on the spine prediction to place a
+# point. When they do not, the cell says which ones qualified instead of drawing it.
 
 # %% [markdown]
 # The structural features for the "when MVO helps" question come next. The equal-weight
-# baseline they measure uplift against is Chapter 16's baseline stage, not one of the Chapter 17
-# allocators, so the uplift is over doing no allocation work at all.
+# baseline they measure uplift against is the signal stage on the spine prediction - the same
+# `ew_sharpes` the comparison above uses - so the uplift is over doing no allocation work at
+# all on the configuration the case study reports. Taking the best baseline across every
+# prediction instead would let the uplift absorb a change of model or label, because
+# `best_alloc` below is pinned to the spine and the difference of the two would no longer be
+# the allocator's contribution.
 
 # %%
-ch16_raw = load_chapter_backtests("ch16", case_studies=CS_LIST, metrics=["sharpe"])
-ch16_ew = (
-    ch16_raw.with_columns(
-        allocator=pl.col("spec_json").map_elements(extract_allocator, return_dtype=pl.Utf8),
-    )
-    .filter(pl.col("allocator") == "equal_weight")
-    .sort("sharpe", descending=True)
-    .unique(subset=["case_study"], keep="first")
-    .select("case_study", ew_sharpe=pl.col("sharpe"))
-)
-
 UNIVERSE_SIZES = dict(
     pl.read_parquet(get_chapter_dir(20) / "output" / "overview.parquet")
     .select("cs_id", "universe")
@@ -606,12 +623,12 @@ UNIVERSE_SIZES = dict(
 # %%
 # Best allocator Sharpe per CS from Ch17
 best_alloc = (
-    comparison.sort("sharpe", descending=True)
+    comparison.sort("sharpe", descending=True, nulls_last=True)
     .unique(subset=["case_study"], keep="first")
     .select("case_study", best_sharpe=pl.col("sharpe"))
 )
 
-mvo_data = best_alloc.join(ch16_ew, on="case_study", how="inner").with_columns(
+mvo_data = best_alloc.join(ew_sharpes, on="case_study", how="inner").with_columns(
     display_name=pl.col("case_study").replace(SHORT_NAMES),
     uplift=pl.col("best_sharpe") - pl.col("ew_sharpe"),
 )
@@ -725,44 +742,121 @@ if mvo_df.height >= 3:
 else:
     print(
         f"The uplift-against-baseline scatter needs at least three case studies with both an "
-        f"allocation uplift and a registered equal-weight baseline; {mvo_df.height} qualified "
-        f"({', '.join(mvo_df['display_name'].to_list()) or 'none'}). The registries the "
-        f"missing case studies would supply are still being rebuilt, so this is an absent "
+        f"allocation uplift and a signal-stage equal-weight baseline on the spine prediction; "
+        f"{mvo_df.height} qualified "
+        f"({', '.join(mvo_df['display_name'].to_list()) or 'none'}). That is an absent "
         f"measurement rather than a negative result."
     )
 
+
 # %% [markdown]
 #
+# %%
+def uplift_interpretation(mvo_df: pl.DataFrame) -> str:
+    """What the scatter shows, read off the frame rather than asserted.
+
+    An earlier version said every point sat in one region, that no weak-signal case study
+    reached the comparison, and that the chart was a template awaiting a rebuild. That
+    described the single point the broken equal-weight filter used to leave, and the cell went
+    on printing it once there were eight. Each sentence here is therefore conditioned on the
+    frame that produced it, and `MAX_CASE_STUDIES` makes the awkward frames reachable rather
+    than hypothetical:
+
+    * the extremes come from the helped and hurt subsets separately, so one observation is
+      never both the largest gain and the largest loss;
+    * an uplift of exactly zero is in neither subset, so it is counted and named rather than
+      folded into one of them, and "every" is used only where a subset covers the whole frame;
+    * the closing claim needs both signs present, and where the two subsets' baselines are
+      disjoint it reports which way round the separation runs, because the mechanism below
+      predicts one direction - allocation harmful where the ranking is weak - and the reverse
+      would contradict it.
+    """
+    if not mvo_df.height:
+        return "None qualified, so there is no range to report and the plane is empty."
+
+    helped = mvo_df.filter(pl.col("uplift") > 0)
+    hurt = mvo_df.filter(pl.col("uplift") < 0)
+    unchanged = mvo_df.height - helped.height - hurt.height
+    quadrants = {(row["ew_sharpe"] > 0, row["uplift"] > 0) for row in mvo_df.iter_rows(named=True)}
+
+    tally = f"Allocation helps in {helped.height} of them and hurts in {hurt.height}"
+    tally += f", and changes nothing in {unchanged}." if unchanged else "."
+    lines = [
+        f"Their baselines run from {mvo_df['ew_sharpe'].min():+.2f} to "
+        f"{mvo_df['ew_sharpe'].max():+.2f} Sharpe and their uplifts from "
+        f"{mvo_df['uplift'].min():+.2f} to {mvo_df['uplift'].max():+.2f}, "
+        f"occupying {len(quadrants)} of the four quadrants.",
+        tally,
+    ]
+    if helped.height:
+        best = helped.sort("uplift", descending=True).row(0, named=True)
+        lines.append(
+            f"The largest gain is {best['display_name']} at {best['uplift']:+.2f} on a "
+            f"{best['ew_sharpe']:+.2f} baseline."
+        )
+    if hurt.height:
+        worst = hurt.sort("uplift").row(0, named=True)
+        lines.append(
+            f"The largest loss is {worst['display_name']} at {worst['uplift']:+.2f} on a "
+            f"{worst['ew_sharpe']:+.2f} baseline."
+        )
+
+    if helped.height and hurt.height:
+        if (
+            helped["ew_sharpe"].min() <= hurt["ew_sharpe"].max()
+            and hurt["ew_sharpe"].min() <= helped["ew_sharpe"].max()
+        ):
+            lines.append(
+                "The two groups' baselines overlap, so baseline strength does not separate "
+                "them and the sign of the uplift is not decided by it alone - which is what "
+                "the hypothesis below would need."
+            )
+        elif hurt["ew_sharpe"].max() < helped["ew_sharpe"].min():
+            lines.append(
+                "Every case study allocation hurts has a weaker baseline than every one it "
+                "helps, which is the direction the mechanism below predicts - a weak ranking "
+                "is the one an allocator can only redistribute noise across; whether that is "
+                "the mechanism or the small number of points is not decidable from these."
+            )
+        else:
+            lines.append(
+                "Every case study allocation hurts has a stronger baseline than every one it "
+                "helps, which is the opposite of what the mechanism below predicts; these "
+                "points are too few to weigh against it, but they do not support it."
+            )
+    else:
+        if helped.height == mvo_df.height:
+            seen = "helps in every case study here"
+        elif hurt.height == mvo_df.height:
+            seen = "hurts in every case study here"
+        elif unchanged == mvo_df.height:
+            seen = "changes nothing in any case study here"
+        elif helped.height:
+            seen = "never hurts here"
+        else:
+            seen = "never helps here"
+        lines.append(
+            f"Allocation {seen}, so these points cannot say whether the sign of the uplift "
+            "depends on the strength of the baseline."
+        )
+    return f"{lines[0]}\n\n" + " ".join(lines[1:])
+
+
 # %% tags=["results"]
-_qualified = (
-    "Their baselines run from "
-    f"{mvo_df['ew_sharpe'].min():+.2f} to {mvo_df['ew_sharpe'].max():+.2f} "
-    f"Sharpe and their uplifts from {mvo_df['uplift'].min():+.2f} to "
-    f"{mvo_df['uplift'].max():+.2f}.\n\n"
-    "Every point sits in the same region of the plane, so the quadrant "
-    "labels describe where a case study could fall rather than where any of "
-    "these do. Nothing here separates a weak-signal regime from a "
-    "strong-signal one, because no weak-signal case study reached this "
-    "comparison."
-    if mvo_df.height
-    else "None qualified, so there is no range to report and the plane is empty."
-)
 display(
     Markdown(
         f"The scatter carries {mvo_df.height} case studies: only those with both "
-        "a Ch16 equal-weight baseline and Ch17 allocation backtests on the spine "
-        f"prediction qualify. {_qualified} The chart is a template waiting for the "
-        "registries still being rebuilt."
+        "a signal-stage equal-weight baseline and Ch17 allocation backtests on the spine "
+        f"prediction qualify. {uplift_interpretation(mvo_df)}"
     )
 )
 
 # %% [markdown]
-# The mechanism the chart is meant to test is still worth stating, as a thing to
-# check rather than a thing shown: an allocator can only redistribute capital
-# across whatever the signal ranked, so when the ranking carries little
-# information the allocator is redistributing noise, and a method with more free
-# parameters has more ways to fit that noise. Whether that holds here needs
-# case studies on both sides of the line, which this registry does not have.
+# The mechanism the chart is meant to test: an allocator can only redistribute capital across
+# whatever the signal ranked, so when the ranking carries little information the allocator is
+# redistributing noise, and a method with more free parameters has more ways to fit that
+# noise. The scatter above is the evidence for it, and `uplift_interpretation` reads off what
+# these points can and cannot say about it rather than asserting either.
 
 # %% [markdown]
 # ## Key Takeaways

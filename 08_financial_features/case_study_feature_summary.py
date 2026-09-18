@@ -44,10 +44,15 @@
 # ## Prerequisites
 #
 # - Case study feature notebooks must have produced `data/features/financial.parquet`
-# - If feature data is missing for some case studies, they show as "no features"
+# - A case study whose `features/` directory holds no panel yet shows as "awaiting".
+#   A checkout that is not wired to a case study at all cannot tell that apart from
+#   an empty one, so it refuses rather than reporting a range over what it could see.
 
 # %%
 """Cross-case-study feature evaluation summary."""
+
+import os
+from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
@@ -55,7 +60,7 @@ import polars as pl
 from IPython.display import display
 from plotly.subplots import make_subplots
 
-from utils.paths import get_case_study_dir
+from utils.paths import display_path, get_case_study_dir
 from utils.style import (  # importing utils.style registers the ml4t Plotly template
     COLORS,
     show_plotly_with_alt,
@@ -101,16 +106,57 @@ DISPLAY_NAMES = {
 _ID_COLS = {"timestamp", "symbol", "product", "stock_id", "instrument_id", "date", "asset"}
 
 
-def load_feature_info(case_study_id: str) -> dict | None:
-    """Load feature summary by introspecting financial.parquet schema."""
-    case_dir = get_case_study_dir(case_study_id)
-    # Case studies materialize features under <case_dir>/features/ (the
-    # naming-conventions doc lists this under data/features/, but the
-    # current case-study layout writes directly under features/).
-    features_path = case_dir / "features" / "financial.parquet"
-    if not features_path.exists():
-        return None
+def resolve_feature_panel(case_study_id: str) -> tuple[str, Path]:
+    """Locate a case study's engineered feature panel and say what state it is in.
 
+    Case studies materialize features under ``<case_dir>/features/`` (the
+    naming-conventions doc lists this under ``data/features/``, but the current
+    case-study layout writes directly under ``features/``). A worktree wires that
+    directory in by symlink, so its absence and an empty one are different facts:
+
+    ``readable``     the panel is on disk and can be scanned.
+    ``awaiting``     ``features/`` is there and holds no ``financial.parquet`` yet,
+                     so this case study has published no feature panel.
+    ``unreachable``  ``features/`` itself is absent, so this checkout is not wired
+                     to the case study and cannot report on it either way.
+    """
+    case_dir = get_case_study_dir(case_study_id)
+    features_dir = case_dir / "features"
+    panel_path = features_dir / "financial.parquet"
+    if panel_path.exists():
+        return "readable", panel_path
+    if features_dir.exists():
+        return "awaiting", panel_path
+    return "unreachable", panel_path
+
+
+def refuse_a_partial_view(unreachable: list[tuple[str, Path]], n_case_studies: int) -> None:
+    """Raise when a case study is invisible to this checkout rather than empty.
+
+    ML4T_OUTPUT_DIR redirects every case study to a scratch root, which pytest sets and
+    which legitimately holds nothing. Without it the case studies resolve to the canonical
+    store, every one of them is wired in, and a missing ``features/`` is this checkout's
+    limitation rather than the case study's state. Every number this notebook reports - the
+    count, the range, and which family prefixes look universal - is taken over whichever
+    case studies were visible, so publishing them under a partial view states the wrong
+    denominator without saying so.
+    """
+    if not unreachable or os.environ.get("ML4T_OUTPUT_DIR"):
+        return
+    missing = "\n".join(
+        f"  {DISPLAY_NAMES.get(cs, cs)}: no features/ at {display_path(path.parent)}"
+        for cs, path in unreachable
+    )
+    raise RuntimeError(
+        f"{len(unreachable)} of {n_case_studies} case studies are not wired into this "
+        f"checkout, so their feature panels cannot be read and cannot be distinguished "
+        f"from case studies that engineered none:\n{missing}\n"
+        "Re-run from a checkout that links every case study's features/ directory."
+    )
+
+
+def load_feature_info(features_path: Path) -> dict:
+    """Load feature summary by introspecting financial.parquet schema."""
     schema = pl.scan_parquet(features_path).collect_schema()
     feature_names = [c for c in schema.names() if c not in _ID_COLS]
     n_features = len(feature_names)
@@ -134,20 +180,31 @@ def load_feature_info(case_study_id: str) -> dict | None:
 all_results: dict[str, dict] = {}
 evaluated: dict[str, dict] = {}
 awaiting: list[str] = []
+unreachable: list[tuple[str, Path]] = []
 
 for cs in CASE_STUDIES:
-    result = load_feature_info(cs)
-    if result is None:
+    state, panel_path = resolve_feature_panel(cs)
+    if state == "readable":
+        result = load_feature_info(panel_path)
+        all_results[cs] = result
+        evaluated[cs] = result
+    elif state == "awaiting":
         awaiting.append(cs)
-        continue
-    all_results[cs] = result
-    evaluated[cs] = result
+    else:
+        unreachable.append((cs, panel_path))
+
+refuse_a_partial_view(unreachable, len(CASE_STUDIES))
 
 print(f"Case studies with features: {len(evaluated)}/{len(CASE_STUDIES)}")
 if evaluated:
     print(f"  Available: {', '.join(DISPLAY_NAMES[cs] for cs in evaluated)}")
 if awaiting:
-    print(f"  No features: {', '.join(DISPLAY_NAMES.get(cs, cs) for cs in awaiting)}")
+    print(f"  Awaiting features: {', '.join(DISPLAY_NAMES.get(cs, cs) for cs in awaiting)}")
+if unreachable:
+    print(
+        "  Not visible in this checkout: "
+        f"{', '.join(DISPLAY_NAMES.get(cs, cs) for cs, _ in unreachable)}"
+    )
 
 # %% [markdown]
 # ## Feature Inventory Summary
@@ -207,7 +264,7 @@ if evaluated:
     )
     print(
         f"feature counts range from {min(n_features)} to {max(n_features)} "
-        f"across {len(n_features)} case studies"
+        f"across {len(n_features)} of {len(CASE_STUDIES)} case studies"
     )
     show_plotly_with_alt(
         fig,
@@ -420,10 +477,28 @@ for _label, _ic, _br in LAW_EXAMPLES:
 
 # %%
 from case_studies.utils.analytics import DATASET_META, load_best_ic_per_family
+from case_studies.utils.paired_metrics import _retired_prediction_hashes
 
 if evaluated:
-    # Load best IC per family from registry to combine with universe metadata
-    best_ic_df = load_best_ic_per_family()
+    # `exclude_prediction_hashes`, which this call omitted. `load_best_ic_per_family`'s own
+    # docstring says retirement is the usual reason to pass it and that "a retired generation
+    # is exactly the kind of row that holds high coverage" - the coverage bar it ranks inside
+    # is a maximum over the population, so a superseded generation that scored every decision
+    # day clears the bar and then wins on IC. Measured 2026-09-18, three of the nine case
+    # studies were topped by a retired prediction set: cme_futures (0.0443 against the live
+    # 0.0430), fx_pairs (0.0150 against 0.0149) and us_equities_panel, where it also changed
+    # the configuration reported, gbm/leaves_63_huber at 0.0343 against gbm/leaves_63_mae at
+    # 0.0311. The estimated information ratios below are computed from these, so all three
+    # were wrong by the same amount.
+    #
+    # Retirement is expanded along (training run, checkpoint) rather than taken as the
+    # recorded hashes, because a prediction identity carries its split and the retirement is
+    # recorded on the validation population; `_retired_prediction_hashes` is the helper
+    # `populate_paired_metrics` and `20_strategy_synthesis/01_aggregate_synthesis` both use,
+    # so the three agree by construction rather than by inspection.
+    _retired = frozenset().union(*(_retired_prediction_hashes(cs) for cs in CASE_STUDIES))
+    print(f"Excluding {len(_retired):,} retired prediction identities from the IC comparison")
+    best_ic_df = load_best_ic_per_family(exclude_prediction_hashes=_retired)
 
     if not best_ic_df.is_empty():
         # Get best IC per case study (across all families)

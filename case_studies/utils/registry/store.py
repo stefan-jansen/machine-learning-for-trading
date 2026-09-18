@@ -314,12 +314,35 @@ CREATE INDEX IF NOT EXISTS idx_cohort_leader ON cohort_metrics(leader_hash);
 -- Recording the measurement makes them one object rather than two implementations that agree
 -- by inspection. Only members a sweep actually measured appear here; a member nothing has
 -- measured is absent, which is not the same as admitted and is what the readers treat it as.
+--
+-- The counts are stored beside the verdict because nothing else in the registry holds the
+-- declared denominator. `prediction_coverage.n_expected` is built by the model family's own
+-- adapter from its own prepared fold inputs, so it says the model produced what it set out to
+-- produce and cannot say how much of the declared universe that was. Measured on
+-- sp500_equity_option_analytics: all 140 predictions this table rules `admitted = 0` carry a
+-- `prediction_coverage` row reading `status = 'complete'` and `n_missing = 0`, whose
+-- `n_expected` values (125,119 / 126,458 / 126,478) are exactly the narrowed numerators here
+-- against `n_declared` of 246,641 / 248,460 / 249,373. Both are true of the same predictions,
+-- and only one of them answers "did this cover the cross-section its peers ranked".
+-- The five counts, in the order they narrow: `n_declared` is the (entity, session) pairs the
+-- label declares for the split; `n_delivered` is how many of those this prediction set
+-- carries; `n_offered` is how many of `n_declared` the input feature panel reached, so a
+-- family is charged for what it lost rather than for what it was never given, and is NULL
+-- when no panel was supplied; `n_delivered_offered` is how many of `n_offered` the set
+-- carries, and that over `n_offered` is the ratio the admissibility threshold applies to.
+-- `n_entities_declared` is the width of the declared cross-section. All five are NULL on a
+-- member no sweep has measured, because zero of zero is a measurement and absence is not.
 CREATE TABLE IF NOT EXISTS prediction_admissibility (
-    prediction_hash TEXT PRIMARY KEY,
-    admitted        INTEGER NOT NULL,
-    reason          TEXT,
-    recorded_at     TEXT NOT NULL,
-    git_commit      TEXT
+    prediction_hash      TEXT PRIMARY KEY,
+    admitted             INTEGER NOT NULL,
+    reason               TEXT,
+    recorded_at          TEXT NOT NULL,
+    git_commit           TEXT,
+    n_declared           INTEGER,
+    n_delivered          INTEGER,
+    n_offered            INTEGER,
+    n_delivered_offered  INTEGER,
+    n_entities_declared  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_prediction_admissibility_admitted
@@ -876,6 +899,21 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
             db.execute("ALTER TABLE prediction_coverage ADD COLUMN schema_json TEXT")
         if "artifact_digest" not in coverage_cols:
             db.execute("ALTER TABLE prediction_coverage ADD COLUMN artifact_digest TEXT")
+
+    if "prediction_admissibility" in tables:
+        admissibility_columns = {
+            "n_declared": "INTEGER",
+            "n_delivered": "INTEGER",
+            "n_offered": "INTEGER",
+            "n_delivered_offered": "INTEGER",
+            "n_entities_declared": "INTEGER",
+        }
+        existing_admissibility = {
+            row[1] for row in db.execute("PRAGMA table_info(prediction_admissibility)").fetchall()
+        }
+        for column, sql_type in admissibility_columns.items():
+            if column not in existing_admissibility:
+                db.execute(f"ALTER TABLE prediction_admissibility ADD COLUMN {column} {sql_type}")
 
     # Migration 2b: add runtime columns to backtest_runs
     if "backtest_runs" in tables:

@@ -6,8 +6,12 @@ from collections.abc import Iterable, Mapping
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from case_studies.utils.coverage import CrossSectionReport
 
 # Families excluded from ALL backtest sweeps — predictions lack y_score column
 _BACKTEST_EXCLUDED_FAMILIES: set[str] = {"causal_dml"}
@@ -192,10 +196,27 @@ def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -
         }
         if not {"prediction_coverage", "fold_metrics"} <= tables:
             return {}
+        # The counts, not only `status`. `status` is a stored verdict that no stored row can
+        # contradict: registration raises when coverage is partial and `allow_partial`
+        # defaults to False everywhere in production, so the refused evaluations are never
+        # written and the column reads `complete` in all 6,480 rows across all nine
+        # registries. Reading it alone therefore repeats what the row's existence already
+        # said, while the counts are the evidence it was drawn from and a row can carry them
+        # in contradiction to it.
+        #
+        # On today's corpus it cannot, and this is not the change that fixes that. Measured
+        # 2026-09-18, all five signals below are clean on all 6,480 rows - `n_missing`,
+        # `n_extra` and `n_duplicates` zero and the two digests equal and non-null - including
+        # the 140 in `sp500_equity_option_analytics` that `prediction_admissibility` rules
+        # inadmissible. They are all computed against the same `expected_keys`, the frame the
+        # family's own adapter prepared, so a prediction that narrowed its own declared
+        # universe agrees with itself on every one of them. The declared-universe comparison
+        # is `prediction_admissibility`'s, and its columns are where it is now recorded.
         coverage = {
-            row[0]: (row[1], row[2])
+            row[0]: row[1:]
             for row in db.execute(
-                "SELECT prediction_hash, status, n_folds_expected FROM prediction_coverage"
+                "SELECT prediction_hash, status, n_folds_expected, n_missing, n_extra, "
+                "n_duplicates, expected_key_digest, actual_key_digest FROM prediction_coverage"
             )
         }
         folds = dict(
@@ -211,10 +232,25 @@ def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -
             # had their `prediction_sets` row and their parquet. `predictions_without_coverage`
             # reports them separately, as a gap in the evidence rather than a partial run.
             continue
-        status, expected = coverage[member]
+        status, expected, n_missing, n_extra, n_duplicates, want_digest, got_digest = coverage[
+            member
+        ]
         actual = folds.get(member, 0)
         artifact = predictions_dir / member / "predictions.parquet"
-        if status != "complete":
+        gaps = [
+            f"{count} {name}"
+            for count, name in (
+                (n_missing, "missing"),
+                (n_extra, "extra"),
+                (n_duplicates, "duplicate"),
+            )
+            if count
+        ]
+        if gaps:
+            short[member] = "coverage " + ", ".join(gaps) + " key(s)"
+        elif want_digest != got_digest:
+            short[member] = "coverage key set differs from the expected one"
+        elif status != "complete":
             short[member] = f"coverage {status}"
         elif expected is not None and actual != expected:
             short[member] = f"{actual} of {expected} folds scored"
@@ -344,9 +380,11 @@ def prediction_members_in_force(
     uncovered = predictions_without_coverage(study.root, members)
     notes = (
         [
-            f"{len(uncovered):,} of {len(members):,} members carry no prediction_coverage row, "
-            "so their completeness is unevidenced rather than established. They are ranked; "
-            "the gap is in the registry, not in the run."
+            f"{len(uncovered):,} of {len(members):,} members carry no prediction_coverage row. "
+            "They are ranked; the gap is in the registry, not in the run. A member that does "
+            "carry one is not thereby shown to cover the cross-section its peers ranked - that "
+            "row compares a prediction against the keys its own family's adapter prepared, and "
+            "the declared-universe comparison is the one recorded in prediction_admissibility."
         ]
         if uncovered
         else []
@@ -369,9 +407,17 @@ def prediction_members_in_force(
             f"{len(reduced):,} of {len(members):,} members were not measured for "
             f"cross-sectional coverage: {sorted(reduced.values())[0]}. They are ranked."
         )
-    short = undercovered_prediction_members(
+    from case_studies.utils.coverage import BACKTEST_COVERAGE_MINIMUM
+
+    measured, unevaluable = measure_prediction_cross_sections(
         root, [member for member in members if member not in reduced], case_study=study.case_study
     )
+    short = {
+        phash: report.summary()
+        for phash, report in measured.items()
+        if report.accountable_coverage < BACKTEST_COVERAGE_MINIMUM
+    }
+    short.update(unevaluable)
     if short:
         members = frozenset(members - short.keys())
         listed = "; ".join(
@@ -382,7 +428,9 @@ def prediction_members_in_force(
             f"{len(short):,} member(s) were dropped from the candidate pool for covering less "
             f"than the cross-section their feature panels offered them: {listed}{more}"
         )
-    notes.extend(record_prediction_admissibility(root, admitted=members, short=short))
+    notes.extend(
+        record_prediction_admissibility(root, admitted=members, short=short, measured=measured)
+    )
     if not members:
         raise RuntimeError(
             f"every member of the populations in force at {root} was dropped for incomplete "
@@ -394,7 +442,11 @@ def prediction_members_in_force(
 
 
 def record_prediction_admissibility(
-    root: Path | str, *, admitted: Iterable[str], short: Mapping[str, str]
+    root: Path | str,
+    *,
+    admitted: Iterable[str],
+    short: Mapping[str, str],
+    measured: Mapping[str, CrossSectionReport] | None = None,
 ) -> list[str]:
     """Write down what this measurement found, so the resolver reads it instead of guessing.
 
@@ -419,7 +471,7 @@ def record_prediction_admissibility(
     """
     from datetime import UTC, datetime
 
-    from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
+    from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL, _migrate_registry
 
     admitted = sorted(set(admitted))
     if not admitted and not short:
@@ -429,18 +481,47 @@ def record_prediction_admissibility(
         return []
     recorded_at = datetime.now(UTC).isoformat()
     commit = _git_commit_or_none()
-    rows = [(member, 1, None, recorded_at, commit) for member in admitted]
-    rows += [(member, 0, reason, recorded_at, commit) for member, reason in sorted(short.items())]
+    measured = measured or {}
+
+    def counts(member: str) -> tuple[int | None, ...]:
+        """The declared denominator beside the delivered numerator, or nulls if unmeasured.
+
+        A member with no report - one whose coverage could not be evaluated at all - stores
+        nulls rather than zeros: zero delivered out of zero declared is a measurement, and
+        "this was never measured" is not.
+        """
+        report = measured.get(member)
+        if report is None:
+            return (None, None, None, None, None)
+        return (
+            report.expected,
+            report.delivered,
+            report.achievable,
+            report.delivered_achievable,
+            report.entities_declared,
+        )
+
+    rows = [(member, 1, None, recorded_at, commit, *counts(member)) for member in admitted]
+    rows += [
+        (member, 0, reason, recorded_at, commit, *counts(member))
+        for member, reason in sorted(short.items())
+    ]
     try:
         with closing(sqlite3.connect(str(db_path))) as db:
             db.executescript(REGISTRY_SCHEMA_SQL)
+            _migrate_registry(db)
             db.executemany(
                 "INSERT INTO prediction_admissibility "
-                "(prediction_hash, admitted, reason, recorded_at, git_commit) "
-                "VALUES (?,?,?,?,?) "
+                "(prediction_hash, admitted, reason, recorded_at, git_commit, "
+                " n_declared, n_delivered, n_offered, n_delivered_offered, n_entities_declared) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(prediction_hash) DO UPDATE SET "
                 "admitted=excluded.admitted, reason=excluded.reason, "
-                "recorded_at=excluded.recorded_at, git_commit=excluded.git_commit",
+                "recorded_at=excluded.recorded_at, git_commit=excluded.git_commit, "
+                "n_declared=excluded.n_declared, n_delivered=excluded.n_delivered, "
+                "n_offered=excluded.n_offered, "
+                "n_delivered_offered=excluded.n_delivered_offered, "
+                "n_entities_declared=excluded.n_entities_declared",
                 rows,
             )
             db.commit()
@@ -649,6 +730,10 @@ def undercovered_prediction_members(
 ) -> dict[str, str]:
     """Which in-force members cover too little of the cross-section they were offered.
 
+    The filter over :func:`measure_prediction_cross_sections`, which is where the numbers
+    are. Kept as its own function because the threshold is the thing most callers want and
+    because the reason strings it returns are what the refusal prints.
+
     ``full_coverage_prediction_sql`` above asks the same kind of question and asks it
     relatively: keep the rows whose ``ic_n_days`` ties the maximum for their family and
     label. A shortfall that moves every candidate the same way is invisible to it, and a
@@ -667,19 +752,54 @@ def undercovered_prediction_members(
     """
     # Imported here, not at module scope: `coverage` imports `_first_present` and
     # `_is_finite` from this module, so a top-level import closes the cycle.
+    from case_studies.utils.coverage import BACKTEST_COVERAGE_MINIMUM
+
+    threshold = BACKTEST_COVERAGE_MINIMUM if minimum is None else minimum
+    measured, unevaluable = measure_prediction_cross_sections(root, members, case_study=case_study)
+    short = {
+        phash: report.summary()
+        for phash, report in measured.items()
+        if report.accountable_coverage < threshold
+    }
+    short.update(unevaluable)
+    return short
+
+
+def measure_prediction_cross_sections(
+    root: Path,
+    members: Iterable[str],
+    *,
+    case_study: str,
+) -> tuple[dict[str, CrossSectionReport], dict[str, str]]:
+    """Every member's delivered cross-section against the one its label declares.
+
+    Returns the reports for the members it could measure, and the reasons for the ones it
+    could not. Separated from the threshold so the numbers reach
+    :func:`record_prediction_admissibility`, which is the only place in the registry that
+    holds the declared denominator. ``prediction_coverage.n_expected`` is not it: that column
+    is built by the model family's own adapter from its own prepared fold inputs, so it says
+    the model produced what it set out to produce. The two are true of the same predictions
+    and disagree hard - on ``sp500_equity_option_analytics`` all 140 members this measurement
+    rules inadmissible carry a ``prediction_coverage`` row reading ``complete`` with
+    ``n_missing = 0``, whose ``n_expected`` is exactly the narrowed numerator here.
+
+    Admitted members are measured too, and their reports are returned: a reader comparing
+    126,458 against 248,460 needs the row for a member that passed as much as for one that
+    did not.
+    """
+    # Imported here, not at module scope: `coverage` imports `_first_present` and
+    # `_is_finite` from this module, so a top-level import closes the cycle.
     from case_studies.utils.coverage import (
-        BACKTEST_COVERAGE_MINIMUM,
         CoverageError,
         check_prediction_cross_section,
         feature_panel_keys,
     )
 
-    threshold = BACKTEST_COVERAGE_MINIMUM if minimum is None else minimum
     root = Path(root)
     db_path = root / "run_log" / "registry.db"
     wanted = list(members)
     if not wanted or not db_path.is_file():
-        return {}
+        return {}, {}
 
     with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
         placeholders = ",".join("?" * len(wanted))
@@ -732,7 +852,8 @@ def undercovered_prediction_members(
     # fire is `splits[:MAX_FOLDS]`, which appears in three case studies. The symbol axis stays on the panel, so a family that lost names inside the
     # folds it ran is still charged for them.
     panel = feature_panel_keys(root)
-    short: dict[str, str] = {}
+    measured: dict[str, CrossSectionReport] = {}
+    unevaluable: dict[str, str] = {}
     for phash, split, label, family, config, spec_json in rows:
         path = root / "run_log" / "predictions" / phash / "predictions.parquet"
         if not path.is_file():
@@ -763,11 +884,10 @@ def undercovered_prediction_members(
                 source=f"{family}/{config}",
             )
         except CoverageError as exc:
-            short[phash] = f"coverage could not be evaluated: {exc}"
+            unevaluable[phash] = f"coverage could not be evaluated: {exc}"
             continue
-        if report.accountable_coverage < threshold:
-            short[phash] = report.summary()
-    return short
+        measured[phash] = report
+    return measured, unevaluable
 
 
 def full_coverage_prediction_sql(
