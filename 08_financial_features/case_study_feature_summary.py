@@ -477,10 +477,28 @@ for _label, _ic, _br in LAW_EXAMPLES:
 
 # %%
 from case_studies.utils.analytics import DATASET_META, load_best_ic_per_family
+from case_studies.utils.paired_metrics import _retired_prediction_hashes
 
 if evaluated:
-    # Load best IC per family from registry to combine with universe metadata
-    best_ic_df = load_best_ic_per_family()
+    # `exclude_prediction_hashes`, which this call omitted. `load_best_ic_per_family`'s own
+    # docstring says retirement is the usual reason to pass it and that "a retired generation
+    # is exactly the kind of row that holds high coverage" - the coverage bar it ranks inside
+    # is a maximum over the population, so a superseded generation that scored every decision
+    # day clears the bar and then wins on IC. Measured 2026-09-18, three of the nine case
+    # studies were topped by a retired prediction set: cme_futures (0.0443 against the live
+    # 0.0430), fx_pairs (0.0150 against 0.0149) and us_equities_panel, where it also changed
+    # the configuration reported, gbm/leaves_63_huber at 0.0343 against gbm/leaves_63_mae at
+    # 0.0311. The estimated information ratios below are computed from these, so all three
+    # were wrong by the same amount.
+    #
+    # Retirement is expanded along (training run, checkpoint) rather than taken as the
+    # recorded hashes, because a prediction identity carries its split and the retirement is
+    # recorded on the validation population; `_retired_prediction_hashes` is the helper
+    # `populate_paired_metrics` and `20_strategy_synthesis/01_aggregate_synthesis` both use,
+    # so the three agree by construction rather than by inspection.
+    _retired = frozenset().union(*(_retired_prediction_hashes(cs) for cs in CASE_STUDIES))
+    print(f"Excluding {len(_retired):,} retired prediction identities from the IC comparison")
+    best_ic_df = load_best_ic_per_family(exclude_prediction_hashes=_retired)
 
     if not best_ic_df.is_empty():
         # Get best IC per case study (across all families)
