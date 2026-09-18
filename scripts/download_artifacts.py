@@ -34,8 +34,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # GitHub release configuration
 GITHUB_REPO = "stefan-jansen/machine-learning-for-trading"
-RELEASE_TAG = "v3.0.0-artifacts"
+RELEASE_TAG = "v3.1.0-artifacts"
 BASE_URL = f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}"
+
+# Case studies that still ship from an earlier release. A re-sweep registered a second
+# backtest identity for work these two registries already held, so they were left out of
+# the v3.1 rebuild; their v3.0 bundles stay downloadable until the duplicates are retired.
+ARTIFACT_RELEASE = {
+    "crypto_perps_funding": "v3.0.0-artifacts",
+    "sp500_equity_option_analytics": "v3.0.0-artifacts",
+}
 
 CASE_STUDIES = [
     "etfs",
@@ -53,20 +61,24 @@ CASE_STUDIES = [
 # They are uploaded as `<cs>.tar.gz.part00`, `.part01`, ... and concatenated back
 # into the tarball before anything is verified, so the whole-file checksum in
 # ARTIFACT_SHA256 still decides whether the download is good.
-ARTIFACT_PARTS: dict[str, int] = {}
+ARTIFACT_PARTS: dict[str, int] = {
+    "nasdaq100_microstructure": 2,
+    "us_equities_panel": 2,
+}
 
 ARTIFACT_SHA256 = {
-    "cme_futures": "ab1c97276cdf74aa95d894cc0b0f3ea909c3ed8356f41f217e008c971e34b4f8",
+    "cme_futures": "d0d0d762ba10272a2cab45a04d96573cdd0e2d82f03108743e361f75be81517a",
+    "etfs": "a3736d2c03d5fa7e268605fb7c34089abc15a6a2f0ec5bc2a378609122f41411",
+    "fx_pairs": "132503d469fea1efb1d717f21227694ce4257557d6562d4a8b73a653f870e1c2",
+    "nasdaq100_microstructure": "c9876aed63b2048416a4b807ef9cf4acf2ee29efbbebe7c5a2c4562a71784fc0",
+    "sp500_options": "816b3810ae65422e49ca9b11eb840d31efde2d274991bcf41fc4454036b73464",
+    "us_equities_panel": "762ddc705ae1ef6aa21df30899fa2c4d8508d79daac9cf2b2727c2f8a40722e5",
+    "us_firm_characteristics": "ebb2f9f458724be7589fe4de722950e450dcf340561b6a8f3beba6ddab54c887",
+    # Served from v3.0.0-artifacts, see ARTIFACT_RELEASE above.
     "crypto_perps_funding": "517030f3def6d0264984c2b545032741100df4ee3d159e44ef4c348a314c4c7f",
-    "etfs": "93d3e24dcb4872b965f355a6931f163e0871a58729c1bd1ea6d99f369f2baf39",
-    "fx_pairs": "0555a5b2788576ba9eeb8fd874f5375a651d5094b2952eb42aa01aac4bee38e6",
-    "nasdaq100_microstructure": "a688081f30f97b2ab9f7f926e0608734ed4145ecfd1bf189624709d694c2167f",
-    "us_equities_panel": "ebf5b0b846da310e2611126b0059e5c51f116e185f82d47248f81cf088f32e27",
     "sp500_equity_option_analytics": (
         "4eba2aadcc1fc5af322f0cfb0a8d4dcfb036391141adff59a0358c2a8401ca49"
     ),
-    "sp500_options": "55333f313d3a2180a468e326030aa80d713b271c85d41d55989532f9567fccb2",
-    "us_firm_characteristics": ("2ec2087a054e1a075f7baa51546a2453c0d7db6108211e9cfbb80f95d894cffb"),
 }
 
 
@@ -167,6 +179,19 @@ def download_file(url: str, dest: Path, desc: str) -> bool:
         return False
 
 
+def _release_tag(cs_id: str) -> str:
+    """The release this case study's bundle comes from, which is not always the latest."""
+    return ARTIFACT_RELEASE.get(cs_id, RELEASE_TAG)
+
+
+def _base_url(cs_id: str) -> str:
+    """Where this case study's assets live, which is not always the current release."""
+    tag = ARTIFACT_RELEASE.get(cs_id)
+    if tag is None:
+        return BASE_URL
+    return f"https://github.com/{GITHUB_REPO}/releases/download/{tag}"
+
+
 def _fetch_parts(cs_id: str, count: int, dest: Path) -> bool:
     """Download a split bundle and concatenate it back into one tarball."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -175,7 +200,8 @@ def _fetch_parts(cs_id: str, count: int, dest: Path) -> bool:
         for index in range(count):
             name = f"{cs_id}.tar.gz.part{index:02d}"
             part = dest.parent / name
-            if not download_file(f"{BASE_URL}/{name}", part, f"{cs_id} part {index + 1}/{count}"):
+            url = f"{_base_url(cs_id)}/{name}"
+            if not download_file(url, part, f"{cs_id} part {index + 1}/{count}"):
                 return False
             parts.append(part)
         with dest.open("wb") as combined:
@@ -317,7 +343,7 @@ def download_case_study(cs_id: str, force: bool = False) -> bool:
 
     expected_sha256 = ARTIFACT_SHA256.get(cs_id)
     if expected_sha256 is None:
-        print(f"  {cs_id}: artifact bundle is not published in {RELEASE_TAG}")
+        print(f"  {cs_id}: artifact bundle is not published in {_release_tag(cs_id)}")
         return False
 
     tarball_name = f"{cs_id}.tar.gz"
@@ -327,7 +353,7 @@ def download_case_study(cs_id: str, force: bool = False) -> bool:
     if parts:
         ok = _fetch_parts(cs_id, parts, tmp_path)
     else:
-        ok = download_file(f"{BASE_URL}/{tarball_name}", tmp_path, cs_id)
+        ok = download_file(f"{_base_url(cs_id)}/{tarball_name}", tmp_path, cs_id)
     if not ok:
         tmp_path.unlink(missing_ok=True)
         return False

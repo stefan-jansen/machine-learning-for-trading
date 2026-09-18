@@ -228,3 +228,35 @@ def test_a_missing_part_fails_the_download_and_leaves_no_partial_tarball(
     assert not download_artifacts._fetch_parts("etfs", len(parts), combined)
     assert not combined.exists()
     assert not list(combined.parent.iterdir())
+
+
+def test_a_held_back_case_study_is_fetched_from_the_release_that_still_has_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not every bundle is rebuilt in every release, and the URL has to follow the bundle."""
+    seen: list[str] = []
+
+    def record(url: str, dest: Path, desc: str) -> bool:
+        seen.append(url)
+        return False
+
+    monkeypatch.setattr(download_artifacts, "download_file", record)
+    monkeypatch.setattr(download_artifacts, "REPO_ROOT", tmp_path)
+
+    assert not download_artifacts.download_case_study("etfs")
+    assert not download_artifacts.download_case_study("crypto_perps_funding")
+
+    assert seen[0].endswith(f"/{download_artifacts.RELEASE_TAG}/etfs.tar.gz")
+    held = download_artifacts.ARTIFACT_RELEASE["crypto_perps_funding"]
+    assert held != download_artifacts.RELEASE_TAG
+    assert seen[1].endswith(f"/{held}/crypto_perps_funding.tar.gz")
+
+
+def test_every_published_checksum_names_a_release_that_serves_it(tmp_path: Path) -> None:
+    """A part count or a checksum for a case study nobody can reach is a dead entry."""
+    for cs_id in download_artifacts.ARTIFACT_PARTS:
+        assert cs_id in download_artifacts.ARTIFACT_SHA256
+    for cs_id in download_artifacts.ARTIFACT_RELEASE:
+        assert cs_id in download_artifacts.ARTIFACT_SHA256
+    for cs_id in download_artifacts.ARTIFACT_SHA256:
+        assert cs_id in download_artifacts.CASE_STUDIES
