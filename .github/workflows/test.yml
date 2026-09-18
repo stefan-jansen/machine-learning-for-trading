@@ -1404,6 +1404,7 @@ jobs:
             tests/test_gbm_identity.py \
             tests/test_gbm_runtime.py \
             tests/test_insight_chapter.py \
+            tests/test_insight_selection_reads_the_live_generation.py \
             tests/test_latent_epoch_ic_over_dates.py \
             tests/test_latent_factors_identity.py \
             tests/test_latent_factors_no_leak.py \
