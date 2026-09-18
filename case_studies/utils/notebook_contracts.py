@@ -201,8 +201,17 @@ def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -
         # defaults to False everywhere in production, so the refused evaluations are never
         # written and the column reads `complete` in all 6,480 rows across all nine
         # registries. Reading it alone therefore repeats what the row's existence already
-        # said. The counts are the evidence the verdict was drawn from, so a row that claims
-        # `complete` while carrying a shortfall is visible here.
+        # said, while the counts are the evidence it was drawn from and a row can carry them
+        # in contradiction to it.
+        #
+        # On today's corpus it cannot, and this is not the change that fixes that. Measured
+        # 2026-09-18, all five signals below are clean on all 6,480 rows - `n_missing`,
+        # `n_extra` and `n_duplicates` zero and the two digests equal and non-null - including
+        # the 140 in `sp500_equity_option_analytics` that `prediction_admissibility` rules
+        # inadmissible. They are all computed against the same `expected_keys`, the frame the
+        # family's own adapter prepared, so a prediction that narrowed its own declared
+        # universe agrees with itself on every one of them. The declared-universe comparison
+        # is `prediction_admissibility`'s, and its columns are where it is now recorded.
         coverage = {
             row[0]: row[1:]
             for row in db.execute(

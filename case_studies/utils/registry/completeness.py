@@ -79,8 +79,12 @@ class PredictionCoverage:
     ``status`` is stored, but a stored row can only ever read ``complete``: registration
     raises on a partial evaluation and ``allow_partial`` defaults to False everywhere in
     production, so the non-complete evaluations are refused before the row is written.
-    Readers that need to discriminate should test the counts, which is what
-    :func:`notebook_contracts.incompletely_registered_predictions` does.
+    Readers should test the counts rather than the verdict, which is what
+    :func:`notebook_contracts.incompletely_registered_predictions` does - though on the
+    corpus as it stands that is a change of what is read and not of what can be seen. Every
+    count and digest here is computed against the same ``expected_keys``, so they agree with
+    ``status`` on all 6,480 rows today; they can disagree with it only on a row written by
+    something that stores a shortfall instead of refusing it.
     """
 
     expected_key_digest: str
