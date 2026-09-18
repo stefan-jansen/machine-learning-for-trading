@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+from case_studies.utils.backtest_presets import EngineBacktestConfig
+
 NOTEBOOK = Path("case_studies/fx_pairs/14_portfolio_management.py")
 
 
@@ -61,6 +63,7 @@ def _selection_functions() -> dict[str, Any]:
         "Iterable": list,
         "BacktestResult": _Result,
         "deepcopy": copy.deepcopy,
+        "EngineBacktestConfig": EngineBacktestConfig,
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(NOTEBOOK), "exec"), namespace)
     return namespace
@@ -135,6 +138,55 @@ def test_the_projection_still_sees_a_real_strategy_change() -> None:
         }
 
     assert project(spec(5), drop_prices=False) != project(spec(10), drop_prices=False)
+
+
+@pytest.mark.skipif(EngineBacktestConfig is None, reason="ml4t.backtest is not installed")
+def test_an_engine_version_does_not_make_an_allocation_differ_from_its_baseline() -> None:
+    """A field the schema made explicit must not read as a strategy change.
+
+    `ml4t-backtest` 0.1.3 to 0.1.6 added `account.lock_notional_update_mode` and
+    `position_sizing.share_rounding`, both previously implicit defaults. Every fx_pairs
+    signal row predates them, so without the round-trip every allocation row computed
+    after 2026-09-12 refused its own baseline with a message naming those two fields.
+    """
+    project = _selection_functions()["_non_allocation_projection"]
+
+    baseline = {
+        "strategy": {"signal": {"top_k": 5}},
+        "backtest_config": {"metadata": {"chapter": 19, "preset_path": "/a/base.yaml"}},
+    }
+    allocation = {
+        "strategy": {"signal": {"top_k": 5}, "allocation": {"method": "inverse_vol"}},
+        "backtest_config": {
+            "metadata": {"chapter": 19, "preset_path": "/b/base.yaml"},
+            "account": {"lock_notional_update_mode": "position_legs"},
+            "position_sizing": {"share_rounding": "nearest"},
+        },
+    }
+
+    assert project(allocation, drop_prices=False) == project(baseline, drop_prices=False)
+
+
+@pytest.mark.skipif(EngineBacktestConfig is None, reason="ml4t.backtest is not installed")
+def test_the_projection_still_sees_a_moved_account_setting() -> None:
+    """Stating both sides in one vocabulary must not make the account unreadable.
+
+    The round-trip forgives a field that is absent on one side. A field that is present
+    on both and disagrees is the case the check exists for, and it is in the same block
+    as the two fields being forgiven.
+    """
+    project = _selection_functions()["_non_allocation_projection"]
+
+    def spec(allow_short: bool) -> dict[str, Any]:
+        return {
+            "strategy": {"signal": {"top_k": 5}, "allocation": {"method": "inverse_vol"}},
+            "backtest_config": {
+                "metadata": {"chapter": 19, "preset_path": "/a/base.yaml"},
+                "account": {"allow_short_selling": allow_short},
+            },
+        }
+
+    assert project(spec(True), drop_prices=False) != project(spec(False), drop_prices=False)
 
 
 def test_selection_keeps_the_best_checkpoint_and_mapping_per_configuration() -> None:

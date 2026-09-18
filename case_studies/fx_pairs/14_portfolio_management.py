@@ -72,6 +72,7 @@ from case_studies.research import (
     strategy_warmup_periods,
     superseded_members,
 )
+from case_studies.utils.backtest_presets import EngineBacktestConfig
 from case_studies.utils.sweep_config import (
     get_allocators,
     get_top_n_predictions,
@@ -621,6 +622,31 @@ def _non_allocation_projection(spec: dict[str, Any], *, drop_prices: bool) -> di
         metadata.pop("preset_path", None)
     if drop_prices:
         projected.get("input_identity", {}).pop("prices", None)
+    # The baseline was serialized by whatever engine version registered it and the allocation
+    # by the installed one, so a field `BacktestConfig` has since gained is present on one side
+    # and absent on the other while both describe the same strategy. `ml4t-backtest` 0.1.3 to
+    # 0.1.6 added `account.lock_notional_update_mode` and `position_sizing.share_rounding`, both
+    # previously implicit defaults the schema made explicit - measured 2026-09-14 across the nine
+    # registries, where the one leaderboard pair that differed differed in exactly these two and
+    # agreed on Sharpe. Every fx_pairs signal row predates them, so every allocation row computed
+    # after 2026-09-12 failed this check with a message saying a strategy field moved.
+    #
+    # Round-tripping both sides through the installed schema states the comparison in one
+    # vocabulary, so it answers what this notebook built rather than which engine wrote the row
+    # it is compared against, and it covers the next added field without naming it.
+    # `16_costs.py` and `19_strategy_analysis.py` already do this for the same two fields; this
+    # projection is the one that was missed. `ensure_backtest_spec` deliberately does NOT
+    # round-trip, because there the result is hashed and a dropped unknown key would move an
+    # identity; here it is compared and discarded. Metadata is merged back over the serialized
+    # view because the dataclass pins a schema and drops keys it does not know.
+    config = projected.get("backtest_config", {})
+    if EngineBacktestConfig is not None and config:
+        original_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        rebuilt = EngineBacktestConfig.from_dict(config).to_dict()
+        rebuilt_metadata = dict(rebuilt.get("metadata") or {})
+        rebuilt_metadata.update(original_metadata)
+        rebuilt["metadata"] = rebuilt_metadata
+        projected["backtest_config"] = rebuilt
     return projected
 
 
