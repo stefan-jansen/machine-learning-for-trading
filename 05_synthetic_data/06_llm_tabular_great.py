@@ -616,26 +616,33 @@ print(f"Test samples: {len(X_test)}")
 # We train two identical gradient boosting classifiers -- one on real data (TRTR
 # baseline) and one on synthetic data (TSTR), and compare how well each ranks the
 # real test rows. The label is "extreme move", `|fwd_ret_5d|` above its 90th
-# percentile, so roughly one test row in ten is positive: answering "no" for every
-# row scores about 0.90 accuracy while ranking nothing at all. Accuracy is reported
-# because it is what the two models were fit to, and the verdict divides AUC, which
-# has no majority-class floor.
+# percentile **of the full sample**, so the minority class is small but the test
+# split has its own prevalence and it is not 10% - the run below measures 5%.
+# Answering "no" for every row therefore scores `1 - base_rate` accuracy, 0.95 here,
+# while ranking nothing at all. The positive base rate is printed beside the
+# accuracies for that reason, and the verdict divides AUC, which has no
+# majority-class floor whatever the prevalence turns out to be.
 
 
 # %%
 def tstr_utility_verdict(auc_trtr: float, auc_tstr: float) -> str:
     """Score synthetic-data utility on ranking ability rather than on accuracy.
 
-    Two accuracies on a 10% base rate divide to something near 1.0 most reliably when
-    the synthetic-trained model has collapsed onto the majority class, which is the
+    Two accuracies on a small minority class divide to something near 1.0 most reliably
+    when the synthetic-trained model has collapsed onto the majority class, which is the
     failure the verdict exists to catch. AUC measures the ranking the strategy would
-    actually use, and 0.5 is chance whatever the base rate.
+    actually use, and 0.5 is chance whatever the prevalence.
+
+    The refusal is at or below 0.5, not below it. A model that emits one constant
+    probability for every row scores exactly 0.5 - that is the collapse itself, not a
+    borderline case - and against a baseline barely above chance it would otherwise
+    divide to a "HIGH utility" verdict.
     """
-    if auc_tstr < 0.5:
+    if auc_tstr <= 0.5:
         return (
-            f"TSTR AUC {auc_tstr:.3f} is below chance: a classifier trained on the synthetic "
-            "data ranks real test rows worse than a coin flip, so the synthetic data carries "
-            "NO usable signal for model training."
+            f"TSTR AUC {auc_tstr:.3f} is at or below chance: a classifier trained on the "
+            "synthetic data ranks real test rows no better than a coin flip, so the synthetic "
+            "data carries NO usable signal for model training."
         )
     if auc_trtr <= 0.5:
         return (

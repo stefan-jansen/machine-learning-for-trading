@@ -58,8 +58,19 @@ def test_a_degraded_ranking_reads_as_limited():
     assert "LIMITED utility" in _load_verdict()(0.750, 0.560)
 
 
+def test_a_constant_scoring_model_is_refused_not_scored():
+    """A model emitting one probability for every row scores exactly 0.5.
+
+    That is the collapse itself, and against a baseline barely above chance the ratio
+    would read 96.2% and print HIGH. The refusal is therefore at 0.5, not below it.
+    """
+    verdict = _load_verdict()(0.520, 0.500)
+    assert "NO usable signal" in verdict
+    assert "HIGH" not in verdict and "MODERATE" not in verdict
+
+
 def test_a_baseline_that_ranks_nothing_has_no_utility_to_preserve():
-    """Dividing by a chance baseline would score a chance model at 100%."""
-    verdict = _load_verdict()(0.500, 0.500)
+    """Dividing by a chance baseline would score an above-chance model against nothing."""
+    verdict = _load_verdict()(0.500, 0.600)
     assert "no utility for the synthetic data to preserve" in verdict
     assert "HIGH" not in verdict
