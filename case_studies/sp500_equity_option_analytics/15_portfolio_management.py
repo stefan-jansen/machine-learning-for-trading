@@ -93,6 +93,7 @@ LABEL = ""
 MAX_SYMBOLS = 0
 SKIP_EXPENSIVE_ALLOC = False
 TOP_N_PREDICTIONS = None
+SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] | None = None
 
 # %% [markdown]
 # ### What is asked for, and what it resolves to
@@ -358,7 +359,21 @@ ALLOCATION_POPULATION = sweep_plan_name(
 # change that name's membership without saying so, and the refusal it pre-empts is the one
 # thing that makes a changed grid visible. Add an entry when a run is actually refused, with
 # the hash the refusal prints.
-SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {}
+_DECLARED_SUPERSEDES_ALLOCATION_POPULATIONS: dict[str, str] = {}
+
+# Resolved under a different name, per the convention stated at the parameters cell: an
+# injected parameter wins, otherwise the case study's own declaration does. Until 2026-09-18
+# the committed map above *was* the parameter name, and because it is assigned here rather
+# than in the parameters cell it overwrote whatever papermill injected, before the
+# `population_supersedes` call below ever read it. A run that declared the supersedes it was
+# asked for was refused as though it had declared nothing. The two sibling notebooks guarded by the same freeze already take this
+# as a parameter: cme_futures as SUPERSEDES_ALLOCATION_POPULATION, crypto_perps_funding as
+# SUPERSEDES_ALLOCATION.
+_supersedes_allocation_populations = (
+    _DECLARED_SUPERSEDES_ALLOCATION_POPULATIONS
+    if SUPERSEDES_ALLOCATION_POPULATIONS is None
+    else SUPERSEDES_ALLOCATION_POPULATIONS
+)
 
 _plan = None
 try:
@@ -398,7 +413,7 @@ else:
             supersedes=population_supersedes(
                 _writable,
                 name=ALLOCATION_POPULATION,
-                declared=SUPERSEDES_ALLOCATION_POPULATIONS.get(ALLOCATION_POPULATION),
+                declared=_supersedes_allocation_populations.get(ALLOCATION_POPULATION),
             ),
         )
         # Before any member executes; see `sweep_attestation_name`.
