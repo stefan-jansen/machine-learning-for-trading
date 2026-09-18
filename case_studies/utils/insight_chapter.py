@@ -493,9 +493,14 @@ def conformal_coverage_for_selected_prediction(
     # The artifact has to carry every fold the spec declared. It is compared by count
     # rather than against ``range(n_folds)`` because a run may number its folds any way
     # it likes and one live sweep does: ``us_equities_panel/deep_learning/fwd_ret_5d``
-    # declares four folds and writes 0, 5, 10 and 15. There are no sibling artifacts to
-    # read the geometry off here, the way `resolve_expected_fold_ids` does for a
-    # registry group, so what is checkable is that the folds are distinct and all there.
+    # declares four folds and writes 0, 5, 10 and 15.
+    #
+    # The exact geometry is available - ``fold_metrics`` is keyed by ``prediction_hash``
+    # and records the ids this run scored - and the count is used instead because nothing
+    # downstream reads an id as a label. `walk_forward_conformal_coverage` calibrates on
+    # timestamps and only ever sorts fold ids to decide which folds precede the one being
+    # sized, so relabelling them changes no width. What would break the calibration is a
+    # fold that is missing, and that is what the count catches.
     fold_ids = sorted(usable["fold_id"].unique().to_list())
     if len(fold_ids) != n_folds:
         raise RegistrySelectionError(
@@ -553,8 +558,8 @@ def collect_grid_per_cs(
         # short would otherwise define its own standard and rank against complete ones.
         try:
             expected_fold_ids = resolve_expected_fold_ids(folds, n_folds)
-        except IncomparableFoldGeometryError:
-            raise
+        except IncomparableFoldGeometryError as exc:
+            raise IncomparableFoldGeometryError(f"{case_study}/{family}/{label}: {exc}") from exc
         except RegistrySelectionError:
             continue
         selected = []

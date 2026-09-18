@@ -209,8 +209,12 @@ def test_the_grid_refuses_a_disagreement_rather_than_shortening_itself(
     """
     selects_from(tmp_path, [("nlinear", 0.02, STRIDE_FIVE), ("lstm_h64", 0.05, (0, 1, 2, 3))])
 
-    with pytest.raises(IncomparableFoldGeometryError, match="disagree on which 4 folds"):
+    with pytest.raises(IncomparableFoldGeometryError) as raised:
         collect_grid_per_cs(["test"], "deep_learning")
+
+    # The grid loops over nine case studies, so the error has to say which one.
+    assert str(raised.value).startswith(f"test/deep_learning/{LABEL}: ")
+    assert "disagree on which 4 folds" in str(raised.value)
 
 
 def test_the_grid_still_skips_a_case_study_with_no_complete_candidate(
