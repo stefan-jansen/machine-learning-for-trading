@@ -26,7 +26,11 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.utils.insight_chapter import collect_rank1_per_cs, discover_symmetry_pairs
+from case_studies.utils.insight_chapter import (
+    SYMMETRY_TABLE_SCHEMA,
+    collect_rank1_per_cs,
+    discover_symmetry_pairs,
+)
 from case_studies.utils.model_analysis import load_metrics_from_registry
 from case_studies.utils.registry import (
     register_fold_metrics,
@@ -255,16 +259,20 @@ def test_a_direction_label_with_no_surface_on_disk_is_named_not_dropped(
     assert skipped == ["test/fwd_class_1m: no label surface on disk"]
 
 
-def test_discovery_can_return_nothing_and_the_notebook_frame_still_has_its_columns(
+def test_discovery_can_return_nothing_and_the_shared_table_schema_still_renders(
     tmp_path, monkeypatch
 ) -> None:
-    """An empty result must render, not raise.
+    """An empty result must render, not raise, and this pins the notebooks' own schema.
 
-    Both notebooks build their symmetry table from the discovered pairs. Built from an
-    empty list with only numeric ``schema_overrides``, the frame has no string columns
-    and selecting ``short_name`` raises ``ColumnNotFoundError`` - so the run dies on the
-    one path where the skip reasons are the whole output. A declared full schema makes an
-    empty result an empty table.
+    Both notebooks build their symmetry table as
+    ``pl.DataFrame(sym_rows, schema=SYMMETRY_TABLE_SCHEMA)`` and then select
+    ``short_name``, ``reg_label`` and ``dir_label``. Built from an empty list with only
+    numeric ``schema_overrides`` - what they did before 2026-09-18 - the frame has no
+    string columns and that selection raises ``ColumnNotFoundError``, so the run dies on
+    the one path where the skip reasons are the whole output.
+
+    This asserts against the shared constant the notebooks import, not against a copy, so
+    dropping a string column from it fails here rather than in a render.
     """
     _register_pair(tmp_path, "fwd_ret_1m", "fwd_class_1m", [-1, 0, 1])
     _declare(tmp_path, {"fwd_class_1m": "fwd_ret_1m"})
@@ -274,15 +282,45 @@ def test_discovery_can_return_nothing_and_the_notebook_frame_still_has_its_colum
     assert pairs == {}
     assert len(skipped) == 1
 
-    schema = {
-        "short_name": pl.Utf8,
-        "reg_label": pl.Utf8,
-        "dir_label": pl.Utf8,
-        "cls_score_ic": pl.Float64,
-        "cls_score_auc": pl.Float64,
-        "reg_score_auc": pl.Float64,
-    }
-    empty = pl.DataFrame([], schema=schema)
-    assert empty.select("short_name", "reg_label", "dir_label").is_empty()
+    # The notebooks' construction, verbatim, on the empty result discovery just returned.
+    sym_df = pl.DataFrame([], schema=SYMMETRY_TABLE_SCHEMA)
+    rendered = sym_df.select(
+        "short_name",
+        "reg_label",
+        "dir_label",
+        pl.col("cls_score_ic").round(4).alias("A_ic"),
+        pl.col("cls_score_auc").round(4).alias("native_auc"),
+        pl.col("reg_score_auc").round(4).alias("B_auc"),
+    )
+    assert rendered.is_empty()
+    assert sym_df.is_empty()
+    assert [f"{r['short_name']} · {r['dir_label']}" for r in sym_df.iter_rows(named=True)] == []
+
+    # The construction it replaced, as the negative control.
     with pytest.raises(pl.exceptions.ColumnNotFoundError):
         pl.DataFrame([], schema_overrides={"cls_score_ic": pl.Float64}).select("short_name")
+
+
+def test_the_shared_table_schema_covers_every_column_both_notebooks_select() -> None:
+    """A column either notebook renders has to be in the schema, or an empty run dies.
+
+    Read from the notebook sources rather than listed here: a list would be a third copy
+    of the column set and would go stale the first time a column is added.
+    """
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    for notebook in (
+        "11_ml_pipeline/07_case_study_insights.py",
+        "12_gradient_boosting/12_case_study_insights.py",
+    ):
+        source = (repo / notebook).read_text()
+        block = source[source.index("sym_df = pl.DataFrame(sym_rows") :]
+        block = block[: block.index("\n# %%", block.index("sym_df.select("))]
+        selected = set(re.findall(r'pl\.col\("(\w+)"\)', block)) | set(
+            re.findall(r'^\s+"(\w+)",$', block, re.M)
+        )
+        missing = {c for c in selected if c.startswith(("cls_", "reg_", "short_", "dir_", "n_b"))}
+        missing -= set(SYMMETRY_TABLE_SCHEMA)
+        assert not missing, f"{notebook} renders columns absent from the schema: {sorted(missing)}"

@@ -75,6 +75,7 @@ from case_studies.utils.analytics import (
     SHORT_NAMES,
 )
 from case_studies.utils.insight_chapter import (
+    SYMMETRY_TABLE_SCHEMA,
     collect_fold_ic_per_cs,
     collect_gbm_checkpoint_trajectories,
     collect_grid_per_cs,
@@ -1282,22 +1283,6 @@ for cs, pairs in SYMMETRY_PAIRS.items():
 # The combined table keeps both metric directions and their selected identities visible.
 
 # %%
-SYMMETRY_SCHEMA = {
-    "short_name": pl.Utf8,
-    "reg_label": pl.Utf8,
-    "dir_label": pl.Utf8,
-    "cls_config": pl.Utf8,
-    "cls_score_ic": pl.Float64,
-    "cls_score_ic_lo": pl.Float64,
-    "cls_score_ic_hi": pl.Float64,
-    "cls_score_ic_t": pl.Float64,
-    "cls_score_auc": pl.Float64,
-    "cls_score_auc_lo": pl.Float64,
-    "cls_score_auc_hi": pl.Float64,
-    "reg_config": pl.Utf8,
-    "reg_score_auc": pl.Float64,
-    "n_b": pl.Int64,
-}
 
 # A full schema, not schema_overrides. Discovery can legitimately return nothing - every
 # declared pair skipped, or a registry with no classification runs for this family - and a
@@ -1305,7 +1290,7 @@ SYMMETRY_SCHEMA = {
 # the selection below raises ColumnNotFoundError and the skip reasons this section exists
 # to print never reach the reader. An empty frame with the right columns renders as an
 # empty table, which is the correct answer.
-sym_df = pl.DataFrame(sym_rows, schema=SYMMETRY_SCHEMA)
+sym_df = pl.DataFrame(sym_rows, schema=SYMMETRY_TABLE_SCHEMA)
 print(
     "Direction A (GBM classification score → IC), the classifier's own AUC, "
     "and Direction B (GBM regression score → AUC):"

@@ -1015,6 +1015,38 @@ def parse_gbm_config(config: str) -> dict:
     return out
 
 
+SYMMETRY_TABLE_SCHEMA: dict[str, pl.DataType] = {
+    "short_name": pl.Utf8,
+    "reg_label": pl.Utf8,
+    "dir_label": pl.Utf8,
+    "cls_config": pl.Utf8,
+    "cls_score_ic": pl.Float64,
+    "cls_score_ic_lo": pl.Float64,
+    "cls_score_ic_hi": pl.Float64,
+    "cls_score_ic_t": pl.Float64,
+    "cls_score_auc": pl.Float64,
+    "cls_score_auc_lo": pl.Float64,
+    "cls_score_auc_hi": pl.Float64,
+    "reg_config": pl.Utf8,
+    "reg_score_auc": pl.Float64,
+    "n_b": pl.Int64,
+    "n_b_days": pl.Int64,
+}
+"""The columns of the Chapter 11 and 12 symmetry tables, declared once.
+
+A full schema and not ``schema_overrides``: `discover_symmetry_pairs` can legitimately
+return nothing - every declared pair skipped, or a registry with no classification runs
+for this family - and a frame built from an empty list with partial overrides has no
+string columns at all, so selecting ``short_name`` raises ``ColumnNotFoundError`` and the
+skip reasons, which on that path are the entire output, never reach the reader.
+
+Shared rather than written out in each notebook because two copies of a column list drift,
+and because a test can only pin the contract if there is one thing to pin. Chapter 11
+carries ``n_b_days`` and Chapter 12 does not; both tolerate the extra column in an empty
+frame, which is cheaper than two schemas.
+"""
+
+
 # The pairing of a regression label with the binary direction label it is scored against
 # used to be a hand-written literal in each chapter that draws the cross-evaluation. It
 # shrank without saying so: `us_firm_characteristics: [("fwd_ret_1m", "fwd_class_1m")]`
