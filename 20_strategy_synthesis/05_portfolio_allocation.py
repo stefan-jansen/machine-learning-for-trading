@@ -748,37 +748,77 @@ else:
         f"measurement rather than a negative result."
     )
 
+
 # %% [markdown]
 #
-# %% tags=["results"]
-# Every sentence below is read off `mvo_df` rather than asserted. An earlier version said the
-# points all sat in one region and the chart was a template awaiting a rebuild, which was true
-# of the one case study that used to qualify and is not true of the field now.
-if mvo_df.height:
-    _helped = mvo_df.filter(pl.col("uplift") > 0)
-    _hurt = mvo_df.filter(pl.col("uplift") < 0)
-    _quadrants = {(row["ew_sharpe"] > 0, row["uplift"] > 0) for row in mvo_df.iter_rows(named=True)}
-    _worst = mvo_df.sort("uplift").row(0, named=True)
-    _best = mvo_df.sort("uplift", descending=True).row(0, named=True)
-    _qualified = (
+# %%
+def uplift_interpretation(mvo_df: pl.DataFrame) -> str:
+    """What the scatter shows, read off the frame rather than asserted.
+
+    An earlier version said every point sat in one region, that no weak-signal case study
+    reached the comparison, and that the chart was a template awaiting a rebuild. That
+    described the single point the broken equal-weight filter used to leave, and the cell went
+    on printing it once there were eight. Each sentence here is therefore conditioned on the
+    frame that produced it: the extremes come from the helped and hurt subsets separately and
+    are reported only where that subset is non-empty, and the closing claim about the
+    hypothesis is made only when the two subsets' baselines overlap - one observation, or a
+    set whose uplifts all share a sign, cannot establish it. `MAX_CASE_STUDIES` makes both of
+    those reachable, not hypothetical.
+    """
+    if not mvo_df.height:
+        return "None qualified, so there is no range to report and the plane is empty."
+
+    helped = mvo_df.filter(pl.col("uplift") > 0)
+    hurt = mvo_df.filter(pl.col("uplift") < 0)
+    quadrants = {(row["ew_sharpe"] > 0, row["uplift"] > 0) for row in mvo_df.iter_rows(named=True)}
+    lines = [
         f"Their baselines run from {mvo_df['ew_sharpe'].min():+.2f} to "
         f"{mvo_df['ew_sharpe'].max():+.2f} Sharpe and their uplifts from "
         f"{mvo_df['uplift'].min():+.2f} to {mvo_df['uplift'].max():+.2f}, "
-        f"occupying {len(_quadrants)} of the four quadrants.\n\n"
-        f"Allocation helps in {_helped.height} of them and hurts in {_hurt.height}. "
-        f"The largest gain is {_best['display_name']} at {_best['uplift']:+.2f} on a "
-        f"{_best['ew_sharpe']:+.2f} baseline; the largest loss is {_worst['display_name']} at "
-        f"{_worst['uplift']:+.2f} on a {_worst['ew_sharpe']:+.2f} baseline. So the sign of the "
-        "uplift is not decided by the strength of the baseline alone, which is what the "
-        "hypothesis below would need."
-    )
-else:
-    _qualified = "None qualified, so there is no range to report and the plane is empty."
+        f"occupying {len(quadrants)} of the four quadrants.",
+        f"Allocation helps in {helped.height} of them and hurts in {hurt.height}.",
+    ]
+    if helped.height:
+        best = helped.sort("uplift", descending=True).row(0, named=True)
+        lines.append(
+            f"The largest gain is {best['display_name']} at {best['uplift']:+.2f} on a "
+            f"{best['ew_sharpe']:+.2f} baseline."
+        )
+    if hurt.height:
+        worst = hurt.sort("uplift").row(0, named=True)
+        lines.append(
+            f"The largest loss is {worst['display_name']} at {worst['uplift']:+.2f} on a "
+            f"{worst['ew_sharpe']:+.2f} baseline."
+        )
+    if helped.height and hurt.height:
+        overlaps = (
+            helped["ew_sharpe"].min() <= hurt["ew_sharpe"].max()
+            and hurt["ew_sharpe"].min() <= helped["ew_sharpe"].max()
+        )
+        lines.append(
+            "The two groups' baselines overlap, so baseline strength does not separate them "
+            "and the sign of the uplift is not decided by it alone - which is what the "
+            "hypothesis below would need."
+            if overlaps
+            else "Every case study allocation helps has a baseline outside the range of those "
+            "it hurts, which is the separation the hypothesis below predicts; whether it is "
+            "the mechanism or the small number of points is not decidable from these."
+        )
+    else:
+        seen = "helps" if helped.height else "hurts"
+        lines.append(
+            f"Allocation {seen} in every case study here, so these points cannot say whether "
+            "the sign of the uplift depends on the strength of the baseline."
+        )
+    return f"{lines[0]}\n\n" + " ".join(lines[1:])
+
+
+# %% tags=["results"]
 display(
     Markdown(
         f"The scatter carries {mvo_df.height} case studies: only those with both "
         "a signal-stage equal-weight baseline and Ch17 allocation backtests on the spine "
-        f"prediction qualify. {_qualified}"
+        f"prediction qualify. {uplift_interpretation(mvo_df)}"
     )
 )
 
@@ -786,8 +826,8 @@ display(
 # The mechanism the chart is meant to test: an allocator can only redistribute capital across
 # whatever the signal ranked, so when the ranking carries little information the allocator is
 # redistributing noise, and a method with more free parameters has more ways to fit that
-# noise. The scatter above is the evidence for it, and the cell before this one reads off
-# whether the points support it rather than asserting that they do.
+# noise. The scatter above is the evidence for it, and `uplift_interpretation` reads off what
+# these points can and cannot say about it rather than asserting either.
 
 # %% [markdown]
 # ## Key Takeaways

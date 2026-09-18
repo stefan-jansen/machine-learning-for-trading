@@ -7,8 +7,11 @@ nothing and the section named "Equal-Weight Baseline vs Best Allocator" reported
 any case study.
 """
 
+import ast
 import json
+from pathlib import Path
 
+import polars as pl
 import pytest
 
 from case_studies.utils.analytics import extract_allocator, is_unallocated
@@ -76,3 +79,84 @@ def test_the_allocator_name_cannot_find_the_baseline():
     """Why the filter had to change: `extract_allocator` cannot see an absent block."""
     assert extract_allocator(_spec(SIGNAL_STAGE)) == "unknown"
     assert extract_allocator(_spec(SIGNAL_STAGE)) != "equal_weight"
+
+
+# --- The scatter interpretation must not outrun the points it describes -------------------
+#
+# An earlier version asserted that every point sat in one region and that no weak-signal case
+# study had reached the comparison. That was true of the single point the broken equal-weight
+# filter left behind, and the cell kept printing it once there were eight. `MAX_CASE_STUDIES`
+# makes a one-row and a single-sign frame reachable, so both are tested here.
+
+NOTEBOOK_ALLOC = Path(__file__).parents[1] / "20_strategy_synthesis" / "05_portfolio_allocation.py"
+
+
+def _load_interpretation():
+    tree = ast.parse(NOTEBOOK_ALLOC.read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "uplift_interpretation"
+    )
+    namespace: dict = {"pl": pl}
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), str(NOTEBOOK_ALLOC), "exec"),
+        namespace,
+    )
+    return namespace["uplift_interpretation"]
+
+
+def _frame(rows: list[tuple[str, float, float]]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "display_name": [r[0] for r in rows],
+            "ew_sharpe": [r[1] for r in rows],
+            "uplift": [r[2] for r in rows],
+        }
+    )
+
+
+def test_one_case_study_is_not_both_the_largest_gain_and_the_largest_loss():
+    text = _load_interpretation()(_frame([("ETFs", 0.65, 0.23)]))
+    assert "largest gain is ETFs" in text
+    assert "largest loss" not in text
+
+
+def test_all_positive_uplifts_do_not_get_a_loss_sentence():
+    text = _load_interpretation()(_frame([("ETFs", 0.65, 0.23), ("FX", 0.20, 0.11)]))
+    assert "largest loss" not in text
+    assert "helps in every case study here" in text
+
+
+def test_all_negative_uplifts_do_not_get_a_gain_sentence():
+    text = _load_interpretation()(_frame([("Crypto", 1.56, -0.73), ("US Equities", 1.05, -1.11)]))
+    assert "largest gain" not in text
+    assert "hurts in every case study here" in text
+
+
+def test_a_single_sign_result_withholds_the_conclusion_about_baseline_strength():
+    text = _load_interpretation()(_frame([("ETFs", 0.65, 0.23)]))
+    assert "cannot say whether" in text
+    assert "not decided by it alone" not in text
+
+
+def test_overlapping_baselines_support_the_conclusion():
+    """Helped and hurt span the same baseline range, so strength does not separate them."""
+    text = _load_interpretation()(
+        _frame([("ETFs", 0.65, 0.23), ("SP500", 1.60, 0.26), ("Crypto", 1.56, -0.73)])
+    )
+    assert "baselines overlap" in text
+    assert "not decided by it alone" in text
+
+
+def test_separated_baselines_do_not_claim_the_opposite():
+    """When the two groups do not overlap, the cell says so without claiming the mechanism."""
+    text = _load_interpretation()(
+        _frame([("ETFs", 0.20, 0.23), ("SP500", 0.30, 0.26), ("Crypto", 3.00, -0.73)])
+    )
+    assert "outside the range" in text
+    assert "not decidable from these" in text
+
+
+def test_an_empty_frame_reports_an_empty_plane():
+    assert "plane is empty" in _load_interpretation()(_frame([]))
