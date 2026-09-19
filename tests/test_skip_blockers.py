@@ -7,7 +7,9 @@ it means the notebook could run and the skip is now hiding it.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import date
+from pathlib import Path
 
 import pytest
 import yaml
@@ -16,8 +18,11 @@ from tests.pm_helpers import OVERRIDES_PATH
 from tests.skip_blockers import (
     DECIDABLE_KINDS,
     UNDECIDABLE_KINDS,
+    NotTheFixture,
     blocker_unmet_reason,
     declared_kind,
+    honoured_skip_reason,
+    is_ci_fixture,
     per_commit_tier,
     skip_declarations,
     unknown_keys,
@@ -121,9 +126,17 @@ def test_declaration_has_not_outlived_its_reason(key, populated_data_dir, seeded
     the whole file when there is no fixture, so reaching it means the fixture is present and
     the seeding produced no registry - a silent failure of the thing this check measures
     against, which should be loud rather than another skip.
+
+    ``NotTheFixture`` is the one exception, and it is not that state: the machine holds a
+    dataset that is not the fixture, so it cannot answer what the fixture ships either way.
+    In `test-unit-data`, where the fixture is checked out, this skip is a job failure, so a
+    discriminator that stopped recognising the fixture cannot pass quietly.
     """
     declaration = _decidable_skips()[key]["skip_blocker"]
-    reason = blocker_unmet_reason(declaration)
+    try:
+        reason = blocker_unmet_reason(declaration)
+    except NotTheFixture as why:
+        pytest.skip(f"{key}: {why}")
     assert reason is not None, (
         f"{key}: the condition this skip rests on no longer holds. Un-skip the notebook and "
         "run it: either the skip goes, or skip_reason and skip_blocker are rewritten to what "
@@ -146,8 +159,16 @@ def test_declaration_has_not_outlived_its_reason(key, populated_data_dir, seeded
 def test_fixture_path_evaluator_reports_both_outcomes(
     declaration, still_blocked, populated_data_dir
 ):
-    """A checker that can only say "still blocked" would pass on every stale declaration."""
-    assert (blocker_unmet_reason(declaration) is not None) is still_blocked
+    """A checker that can only say "still blocked" would pass on every stale declaration.
+
+    The blocked half names a real fixture path, so it is a claim about the fixture and not
+    about whatever this machine happens to hold: on the maintainer's workstation the IEX
+    captures are present and the case asserted the opposite of what the run could see.
+    """
+    try:
+        assert (blocker_unmet_reason(declaration) is not None) is still_blocked
+    except NotTheFixture as why:
+        pytest.skip(str(why))
 
 
 @pytest.mark.parametrize(
@@ -292,4 +313,110 @@ def test_the_docker_runner_still_executes_once_the_blocker_expires(monkeypatch, 
     assert outcome == "executed", (
         "the blocker names a file the fixture now carries, so the skip has expired and the "
         "notebook must run again with no edit to overrides.yaml"
+    )
+
+
+# --- the discriminator itself, pinned against a checkout rather than against this machine ---
+
+
+def _checkout(path: Path, remote: str) -> Path:
+    """A git checkout at *path* with *remote* as origin, holding a ``data/`` tree."""
+    data = path / "data"
+    data.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "remote", "add", "origin", remote], check=True)
+    return data
+
+
+def test_the_fixture_checkout_is_recognised(tmp_path):
+    """Both transports CI uses: `actions/checkout` writes one or the other as origin."""
+    for remote in (
+        "https://github.com/ml4t/third-edition-test-data",
+        "git@github.com:ml4t/third-edition-test-data.git",
+    ):
+        data = _checkout(tmp_path / remote[-12:].replace("/", "_").replace(":", "_"), remote)
+        assert is_ci_fixture(data), f"{remote} is the fixture and was not recognised"
+
+
+def test_another_repository_and_a_plain_directory_are_not_the_fixture(tmp_path):
+    """Without this half the discriminator could answer True and nothing would notice."""
+    other = _checkout(
+        tmp_path / "book", "git@github.com:stefan-jansen/machine-learning-for-trading.git"
+    )
+    assert not is_ci_fixture(other)
+
+    plain = tmp_path / "loose" / "data"
+    plain.mkdir(parents=True)
+    assert not is_ci_fixture(plain)
+
+
+def test_a_root_that_is_not_the_fixture_is_refused(monkeypatch, tmp_path):
+    """`_fixture_root` is where the refusal has to live, so delete it and this fails.
+
+    Both new tests above pass against a discriminator nothing consults; this is the one
+    that fails when the `NotTheFixture` raise goes.
+    """
+    from tests import skip_blockers
+
+    root = tmp_path / "full-dataset" / "data"
+    root.mkdir(parents=True)
+    monkeypatch.setattr("tests.conftest._resolve_data_path", lambda: root)
+
+    with pytest.raises(NotTheFixture, match="third-edition-test-data"):
+        skip_blockers._fixture_root()
+
+
+def test_no_data_root_at_all_is_still_the_other_undecidable(monkeypatch):
+    """ "Nothing to measure" and "a different dataset" are separate states."""
+    from tests import skip_blockers
+
+    monkeypatch.setattr("tests.conftest._resolve_data_path", lambda: None)
+    assert skip_blockers._fixture_root() is None
+
+
+def test_a_skip_is_honoured_on_a_machine_holding_the_file(monkeypatch, tmp_path):
+    """The workstation case: the file is here, and that says nothing about the fixture.
+
+    The full dataset carries the raw captures three live declarations rest on. Measuring
+    against it retired their skips and told the reader to un-skip notebooks that red CI,
+    so a root that is not the fixture has to leave the skip standing.
+    """
+    root = tmp_path / "full-dataset" / "data"
+    (root / "equities" / "market" / "microstructure" / "iex" / "deep").mkdir(parents=True)
+    (root / "equities/market/microstructure/iex/deep/20180908_IEXTP1_DEEP1.0.pcap.gz").touch()
+    monkeypatch.setattr("tests.conftest._resolve_data_path", lambda: root)
+
+    reason = honoured_skip_reason(
+        {
+            "skip": True,
+            "skip_reason": "the fixture ships only the already-parsed output",
+            "skip_blocker": {
+                "absent_fixture_path": "equities/market/microstructure/iex/deep/*.pcap.gz"
+            },
+        }
+    )
+    assert reason == "the fixture ships only the already-parsed output"
+
+
+def test_the_same_skip_expires_against_a_fixture_that_grew_the_file(monkeypatch, tmp_path):
+    """And the refusal must not swallow a real expiry: inside a fixture checkout it reports.
+
+    Without this half, honouring the skip unconditionally would pass the test above.
+    """
+    root = _checkout(tmp_path / "fixture", "git@github.com:ml4t/third-edition-test-data.git")
+    (root / "equities" / "market" / "microstructure" / "iex" / "deep").mkdir(parents=True)
+    (root / "equities/market/microstructure/iex/deep/20180908_IEXTP1_DEEP1.0.pcap.gz").touch()
+    monkeypatch.setattr("tests.conftest._resolve_data_path", lambda: root)
+
+    assert (
+        honoured_skip_reason(
+            {
+                "skip": True,
+                "skip_reason": "the fixture ships only the already-parsed output",
+                "skip_blocker": {
+                    "absent_fixture_path": "equities/market/microstructure/iex/deep/*.pcap.gz"
+                },
+            }
+        )
+        is None
     )

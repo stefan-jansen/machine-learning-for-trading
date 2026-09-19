@@ -290,3 +290,41 @@ def test_the_loader_resolves_every_carrier_and_names_none_of_them() -> None:
         f"load_carrier_cost_curves special-cases {named}; every case study resolves "
         "its carrier through the same rule"
     )
+
+
+def test_a_load_that_draws_nothing_still_carries_the_reasons(case_study: str) -> None:
+    """The all-excluded case, which is what a clean clone with no registries reaches.
+
+    `06_cost_survival` refuses when no curve loads, and the refusal used to carry only that
+    nothing was found - the reasons were printed on the line after it and never ran. They are
+    the diagnosis, and the loader has already established each one, so they belong in the
+    message. `exclusion_lines` is what the notebook raises with.
+    """
+    loaded = load_carrier_cost_curves([case_study])
+    assert loaded.curves.is_empty()
+    lines = loaded.exclusion_lines()
+    assert len(lines) == 1
+    assert lines[0].startswith("  no curve for ")
+    assert "no registry" in lines[0]
+
+    # The shape the notebook builds. A refusal that named the failure and dropped the reasons
+    # is the defect; this asserts they survive into it.
+    refusal = "\n".join(
+        ["No Ch18 cost-sensitivity backtests found for any deployed carrier", *lines]
+    )
+    assert "no registry" in refusal
+    assert refusal.count("\n") == 1
+
+
+def test_exclusion_lines_is_empty_when_every_case_study_drew_a_curve(
+    case_study: str, tmp_path: Path
+) -> None:
+    """Negative control: nothing excluded, nothing to say, and no line invented for it."""
+    _registry(
+        tmp_path / case_study / "run_log" / "registry.db",
+        carrier_method="slot_persistent_signal_exit",
+        sweep_method="slot_persistent_signal_exit",
+    )
+    loaded = load_carrier_cost_curves([case_study])
+    assert loaded.curves.height == 3
+    assert loaded.exclusion_lines() == []

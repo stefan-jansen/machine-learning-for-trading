@@ -165,3 +165,66 @@ def test_a_bundle_shipping_an_uncheckpointed_log_is_refused(tmp_path: Path) -> N
         )
 
     assert (existing / "sentinel").read_text() == "keep"
+
+
+def _split(path: Path, size: int) -> list[Path]:
+    """Split a file the way the release upload does, into .part00, .part01, ..."""
+    data = path.read_bytes()
+    parts = []
+    for index in range(0, len(data), size):
+        part = path.with_name(f"{path.name}.part{index // size:02d}")
+        part.write_bytes(data[index : index + size])
+        parts.append(part)
+    return parts
+
+
+def test_a_split_bundle_reassembles_into_the_byte_identical_tarball(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bundle over GitHub's 2 GB asset limit ships in parts, and must survive the trip."""
+    archive = _build_bundle(tmp_path)
+    expected = archive.read_bytes()
+    parts = _split(archive, max(1, archive.stat().st_size // 3))
+    assert len(parts) > 2, "the fixture must actually split to test reassembly"
+
+    def fake_download(url: str, dest: Path, desc: str) -> bool:
+        source = archive.parent / Path(url).name
+        if not source.is_file():
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.read_bytes())
+        return True
+
+    monkeypatch.setattr(download_artifacts, "download_file", fake_download)
+    monkeypatch.setattr(download_artifacts, "BASE_URL", str(archive.parent))
+
+    combined = tmp_path / "out" / "etfs.tar.gz"
+    assert download_artifacts._fetch_parts("etfs", len(parts), combined)
+    assert combined.read_bytes() == expected
+    assert _sha256(combined) == _sha256(archive)
+    # The parts are scratch and must not be left behind next to the tarball.
+    assert list(combined.parent.iterdir()) == [combined]
+
+
+def test_a_missing_part_fails_the_download_and_leaves_no_partial_tarball(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _build_bundle(tmp_path)
+    parts = _split(archive, max(1, archive.stat().st_size // 3))
+    parts[-1].unlink()
+
+    def fake_download(url: str, dest: Path, desc: str) -> bool:
+        source = archive.parent / Path(url).name
+        if not source.is_file():
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(source.read_bytes())
+        return True
+
+    monkeypatch.setattr(download_artifacts, "download_file", fake_download)
+    monkeypatch.setattr(download_artifacts, "BASE_URL", str(archive.parent))
+
+    combined = tmp_path / "out" / "etfs.tar.gz"
+    assert not download_artifacts._fetch_parts("etfs", len(parts), combined)
+    assert not combined.exists()
+    assert not list(combined.parent.iterdir())

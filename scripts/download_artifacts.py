@@ -49,6 +49,12 @@ CASE_STUDIES = [
     "us_equities_panel",
 ]
 
+# Bundles too large for a single GitHub release asset, which is capped at 2 GB.
+# They are uploaded as `<cs>.tar.gz.part00`, `.part01`, ... and concatenated back
+# into the tarball before anything is verified, so the whole-file checksum in
+# ARTIFACT_SHA256 still decides whether the download is good.
+ARTIFACT_PARTS: dict[str, int] = {}
+
 ARTIFACT_SHA256 = {
     "cme_futures": "ab1c97276cdf74aa95d894cc0b0f3ea909c3ed8356f41f217e008c971e34b4f8",
     "crypto_perps_funding": "517030f3def6d0264984c2b545032741100df4ee3d159e44ef4c348a314c4c7f",
@@ -159,6 +165,27 @@ def download_file(url: str, dest: Path, desc: str) -> bool:
     except Exception as e:
         print(f"\r  {desc}: FAILED ({e})")
         return False
+
+
+def _fetch_parts(cs_id: str, count: int, dest: Path) -> bool:
+    """Download a split bundle and concatenate it back into one tarball."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    parts: list[Path] = []
+    try:
+        for index in range(count):
+            name = f"{cs_id}.tar.gz.part{index:02d}"
+            part = dest.parent / name
+            if not download_file(f"{BASE_URL}/{name}", part, f"{cs_id} part {index + 1}/{count}"):
+                return False
+            parts.append(part)
+        with dest.open("wb") as combined:
+            for part in parts:
+                with part.open("rb") as chunk:
+                    shutil.copyfileobj(chunk, combined, 1024 * 1024)
+        return True
+    finally:
+        for part in parts:
+            part.unlink(missing_ok=True)
 
 
 def _sha256(path: Path) -> str:
@@ -294,10 +321,15 @@ def download_case_study(cs_id: str, force: bool = False) -> bool:
         return False
 
     tarball_name = f"{cs_id}.tar.gz"
-    url = f"{BASE_URL}/{tarball_name}"
     tmp_path = REPO_ROOT / ".cache" / tarball_name
 
-    if not download_file(url, tmp_path, cs_id):
+    parts = ARTIFACT_PARTS.get(cs_id)
+    if parts:
+        ok = _fetch_parts(cs_id, parts, tmp_path)
+    else:
+        ok = download_file(f"{BASE_URL}/{tarball_name}", tmp_path, cs_id)
+    if not ok:
+        tmp_path.unlink(missing_ok=True)
         return False
 
     print("  Verifying and installing...", end=" ", flush=True)

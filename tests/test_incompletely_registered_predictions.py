@@ -31,17 +31,29 @@ def _registry(tmp_path: Path) -> Path:
     with sqlite3.connect(db_path) as db:
         db.execute(
             "CREATE TABLE prediction_coverage "
-            "(prediction_hash TEXT PRIMARY KEY, status TEXT, n_folds_expected INTEGER)"
+            "(prediction_hash TEXT PRIMARY KEY, status TEXT, n_folds_expected INTEGER, "
+            " n_missing INTEGER, n_extra INTEGER, n_duplicates INTEGER, "
+            " expected_key_digest TEXT, actual_key_digest TEXT)"
         )
         db.execute("CREATE TABLE fold_metrics (prediction_hash TEXT, fold_id INTEGER, ic REAL)")
     return case_dir
 
 
 def _register(
-    case_dir: Path, member: str, *, status: str, expected: int, scored: int, artifact: bool = True
+    case_dir: Path,
+    member: str,
+    *,
+    status: str,
+    expected: int,
+    scored: int,
+    artifact: bool = True,
+    n_missing: int = 0,
 ) -> None:
     with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
-        db.execute("INSERT INTO prediction_coverage VALUES (?, ?, ?)", (member, status, expected))
+        db.execute(
+            "INSERT INTO prediction_coverage VALUES (?, ?, ?, ?, 0, 0, 'd', 'd')",
+            (member, status, expected, n_missing),
+        )
         db.executemany(
             "INSERT INTO fold_metrics VALUES (?, ?, ?)",
             [(member, fold, 0.01) for fold in range(scored)],

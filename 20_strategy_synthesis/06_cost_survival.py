@@ -82,15 +82,19 @@ CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_
 # %%
 loaded = load_carrier_cost_curves(CS_LIST)
 costs_df = loaded.curves
+_exclusions = loaded.exclusion_lines()
 
 if costs_df.is_empty():
+    # The reasons go into the refusal rather than after it. Every case study being excluded is
+    # the state that most needs them - a clean clone with no registries reaches it - and the
+    # loader has already established each one.
     msg = "No Ch18 cost-sensitivity backtests found for any deployed carrier"
-    raise RuntimeError(msg)
+    raise RuntimeError("\n".join([msg, *_exclusions]) if _exclusions else msg)
 
 n_cs = costs_df["case_study"].n_unique()
 print(f"Loaded {len(costs_df)} carrier cost-sweep entries across {n_cs} case studies")
-for _row in loaded.exclusions.iter_rows(named=True):
-    print(f"  no curve for {_row['display_name']}: {_row['reason']} - {_row['detail']}")
+for _line in _exclusions:
+    print(_line)
 costs_df.head(5)
 
 # %% [markdown]
