@@ -1045,6 +1045,15 @@ HORIZON_DAYS = {
 
 # %% [markdown]
 # Only panels with at least two mapped horizons enter the log-scale comparison.
+#
+# The sibling figure in Chapter 13 also drops cells whose scored folds cover only part of
+# the case study's modelling grid, because joining a partial-grid point to a full-grid one
+# on a shared IC axis reads as one quantity moving with horizon. `gbm_horizon` carries the
+# same `covers_fold_grid` column and this cell does not filter on it, because no gbm or
+# linear run can be partial: `us_equities_panel/12_dl_weekly` is the only notebook in the
+# corpus with a non-zero `MAX_FOLDS`, and it is a deep-learning notebook. Give any gbm or
+# linear notebook a fold reduction and this cell needs Chapter 13's retain-and-report
+# split before it is read again.
 
 # %%
 plot_horizon = gbm_horizon.with_columns(

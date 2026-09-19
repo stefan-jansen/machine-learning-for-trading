@@ -1071,9 +1071,19 @@ def regression_labels(cs: str) -> list[str]:
 # that case study's sixteen modelling folds on a Friday-resampled panel, so its
 # `fwd_ret_5d` point is a weekly IC over a quarter of the grid. Drawn on this figure it
 # would join the daily `fwd_ret_1d` point on a shared "average daily IC" axis and read
-# as one quantity moving with horizon. A cell whose grid could not be derived - the two
-# intraday case studies, whose fold boundaries carry a time of day - is kept, because
-# "not measured" is not "measured and short".
+# as one quantity moving with horizon. A cell whose grid could not be derived is kept,
+# because "not measured" is not "measured and short", and the cell below prints how many
+# of the retained cells that covers.
+#
+# The grid fails to derive for two different reasons, and the printed count does not
+# separate them. On this worktree it is the two intraday case studies, whose fold
+# boundaries carry a time of day that `fold_boundary_date` refuses. The second reason
+# reaches a reader rather than us: `case_studies/*/labels` is gitignored and the release
+# bundle ships `run_log/` alone, so running this chapter from a downloaded bundle derives
+# no grid for any case study. That prints "not derivable" for every retained cell and
+# excludes nothing - including the `us_equities_panel` weekly point this filter exists to
+# exclude. A census reading "17 of 17" means the label surfaces are absent, not that
+# seventeen grids were checked and found underivable.
 
 # %%
 dl_horizon_all = collect_multi_label_per_cs(
