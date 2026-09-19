@@ -48,6 +48,17 @@ def _to_date(x) -> date:
     return datetime.fromisoformat(str(x)[:19]).date()
 
 
+class IntradayFoldBoundaryError(ValueError):
+    """A fold boundary carries a time of day, so it has no daily calendar date.
+
+    A `ValueError` subclass, so anything already catching `ValueError` around
+    :func:`modeling_fold_boundaries` is unchanged. It exists so a caller can tell this
+    apart from the other `ValueError` that path raises: `_derive_modeling_splits`
+    refuses a label that has a parquet but no declared buffer, and that one is
+    misconfiguration a caller must not swallow.
+    """
+
+
 def fold_boundary_date(boundary: Any) -> date:
     """One fold boundary as the calendar date a daily span is written in.
 
@@ -70,7 +81,7 @@ def fold_boundary_date(boundary: Any) -> date:
     else:
         clock = datetime.fromisoformat(str(boundary)).time()
     if clock != time.min:
-        raise ValueError(
+        raise IntradayFoldBoundaryError(
             f"fold boundary {boundary!r} carries a time of day; the spans that read it are "
             "daily, so truncating it would move the fold"
         )

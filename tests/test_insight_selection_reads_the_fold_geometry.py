@@ -28,11 +28,14 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from case_studies.utils.cv_window import IntradayFoldBoundaryError
 from case_studies.utils.insight_chapter import (
     IncomparableFoldGeometryError,
     RegistrySelectionError,
+    canonical_fold_ids,
     collect_checkpoint_fold_trajectories,
     collect_grid_per_cs,
+    collect_multi_label_per_cs,
     collect_rank1_per_cs,
     resolve_expected_fold_ids,
 )
@@ -279,10 +282,14 @@ def _grid(monkeypatch, fold_ids):
 
     def _boundaries(_case_study, _label):
         if fold_ids is None:
-            raise ValueError("fold boundary carries a time of day")
+            raise IntradayFoldBoundaryError("fold boundary carries a time of day")
         return [{"fold": fold_id} for fold_id in fold_ids]
 
     monkeypatch.setattr("case_studies.utils.insight_chapter.modeling_fold_boundaries", _boundaries)
+    # `canonical_fold_ids` is lru_cached on (case study, label). That is stable within a
+    # run and is not stable across tests, each of which declares a different grid for the
+    # same "test"/fwd_ret_5d key - and the tests above it cache a None for that key.
+    canonical_fold_ids.cache_clear()
 
 
 def test_a_subsampled_grid_is_selected_and_says_so(tmp_path, selects_from, monkeypatch) -> None:
@@ -292,15 +299,26 @@ def test_a_subsampled_grid_is_selected_and_says_so(tmp_path, selects_from, monke
     the selection stands. What must not happen is the row passing as complete: the ids
     are canonical and the run declared the size of the subsample it chose, so a count
     comparison is self-referential and only the grid can answer it.
+
+    Asserted on all three collectors. The consumer the columns exist for -
+    `13_dl_time_series/12_case_study_insights`'s horizon census - reads them off
+    `collect_multi_label_per_cs`, so pinning only `collect_rank1_per_cs` would leave the
+    suite green while the notebook lost its exclusion.
     """
     _grid(monkeypatch, range(16))
     selects_from(tmp_path, [("nlinear", 0.02, STRIDE_FIVE), ("lstm_h64", 0.05, STRIDE_FIVE)])
 
-    row = collect_rank1_per_cs(["test"], "deep_learning").row(0, named=True)
-
-    assert row["n_folds_scored"] == 4
-    assert row["n_folds_canonical"] == 16
-    assert row["covers_fold_grid"] is False
+    collected = {
+        "rank1": collect_rank1_per_cs(["test"], "deep_learning"),
+        "multi_label": collect_multi_label_per_cs(["test"], "deep_learning", [LABEL]),
+        "grid": collect_grid_per_cs(["test"], "deep_learning"),
+    }
+    for name, frame in collected.items():
+        assert not frame.is_empty(), name
+        for row in frame.iter_rows(named=True):
+            assert row["n_folds_scored"] == 4, name
+            assert row["n_folds_canonical"] == 16, name
+            assert row["covers_fold_grid"] is False, name
 
 
 def test_a_full_grid_is_marked_covered(tmp_path, selects_from, monkeypatch) -> None:

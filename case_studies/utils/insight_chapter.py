@@ -36,6 +36,7 @@ import json
 import math
 import sqlite3
 from collections.abc import Callable, Iterable
+from functools import lru_cache
 
 import polars as pl
 
@@ -50,7 +51,10 @@ from case_studies.utils.conformal import (
     sizing_conformal_lag,
     walk_forward_conformal_coverage,
 )
-from case_studies.utils.cv_window import modeling_fold_boundaries
+from case_studies.utils.cv_window import (
+    IntradayFoldBoundaryError,
+    modeling_fold_boundaries,
+)
 from case_studies.utils.registry.specs import declared_fold_count
 from utils.paths import get_case_study_dir
 
@@ -241,11 +245,12 @@ def resolve_expected_fold_ids(folds: pl.DataFrame, n_folds: int) -> tuple[int, .
     return next(iter(full_length))
 
 
+@lru_cache(maxsize=256)
 def canonical_fold_ids(case_study: str, label: str) -> tuple[int, ...] | None:
     """The case study's whole modelling fold grid for one label, or ``None``.
 
-    ``None`` where the grid cannot be derived, which today means the two intraday case
-    studies: `modeling_fold_boundaries` runs its boundaries through `fold_boundary_date`,
+    ``None`` only where the boundaries carry a time of day, which today means the two
+    intraday case studies: `modeling_fold_boundaries` runs its boundaries through `fold_boundary_date`,
     which refuses a timestamp carrying a time of day - "the spans that read it are daily,
     so truncating it would move the fold". That is 28 of the corpus's 105 (case study,
     family, label) groups, all of them `crypto_perps_funding` at eight-hourly and
@@ -253,10 +258,17 @@ def canonical_fold_ids(case_study: str, label: str) -> tuple[int, ...] | None:
     ``None`` learns that completeness was not measured, which is not the same as a group
     measured and found complete, and the selected rows keep the two apart by carrying
     ``n_folds_canonical`` as null rather than as a number.
+
+    Nothing else is swallowed. `_derive_modeling_splits` raises `ValueError` deliberately
+    for config drift - a label with a parquet but no declared buffer, or one whose parquet
+    carries neither ``timestamp`` nor ``date`` - and `cv_window` states that as a loud-fail
+    contract. Caught here it would return ``None``, the caller would read "completeness not
+    measured", and the cell would stay in a census under the rule written for the intraday
+    case studies with nothing printed.
     """
     try:
         boundaries = modeling_fold_boundaries(case_study, label)
-    except (ValueError, KeyError, FileNotFoundError):
+    except IntradayFoldBoundaryError:
         return None
     if not boundaries:
         return None
@@ -559,10 +571,10 @@ def conformal_coverage_for_selected_prediction(
     #
     # The exact geometry is available - ``fold_metrics`` is keyed by ``prediction_hash``
     # and records the ids this run scored - and the count is used instead because nothing
-    # downstream reads an id as a label. `walk_forward_conformal_coverage` calibrates on
-    # timestamps and only ever sorts fold ids to decide which folds precede the one being
-    # sized, so relabelling them changes no width. What would break the calibration is a
-    # fold that is missing, and that is what the count catches.
+    # downstream reads an id at all. `walk_forward_widths` selects ``fold_id`` and carries
+    # it to the output untouched; precedence comes from the ``step`` index built off the
+    # unique timestamps, so relabelling every fold changes no width. What would break the
+    # calibration is a fold that is missing, and that is what the count catches.
     fold_ids = sorted(usable["fold_id"].unique().to_list())
     if len(fold_ids) != n_folds:
         raise RegistrySelectionError(
@@ -636,6 +648,8 @@ def collect_grid_per_cs(
         if not selected:
             continue
         full_days = max(float(row["ic_n_days"]) for row in selected)
+        # Loop-invariant, and not free: it reads the label parquet's time column.
+        grid_columns = _fold_grid_columns(case_study, label, expected_fold_ids)
         for selected_row in selected:
             if float(selected_row["ic_n_days"]) != full_days:
                 continue
@@ -643,7 +657,7 @@ def collect_grid_per_cs(
                 **selected_row,
                 "case_study": case_study,
                 "short_name": SHORT_NAMES.get(case_study, case_study),
-                **_fold_grid_columns(case_study, label, expected_fold_ids),
+                **grid_columns,
             }
             if config_parser is not None:
                 row.update(config_parser(row["config_name"]))
